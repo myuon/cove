@@ -36,7 +36,8 @@ use crate::abi::{
 };
 use crate::subset::{
     by_zero_of, byte_push, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset,
-    supported, word_finish, word_push, BytePush, ByteStore, Reserve, WordFinish, WordPush,
+    supported, windows, word_finish, word_push, BufferWindow, BytePush, ByteStore, Reserve,
+    WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -400,6 +401,11 @@ struct Emit<'a> {
     /// code, and how long the block is.
     blocks: Vec<Option<u32>>,
     block_at: Vec<Option<usize>>,
+    /// Per IR instruction: the [ADR 0062] window whose head it is, if one is.
+    /// See [`BufferWindow`].
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    windows: Vec<Option<BufferWindow>>,
     /// Whether [`FRAME`] currently holds the frame pointer.
     ///
     /// False at the start of every block and after every call: `NativeCtx`'s
@@ -410,6 +416,7 @@ struct Emit<'a> {
 impl<'a> Emit<'a> {
     fn new(program: &'a Program, function: &'a Function, helpers: &Helpers, direct: bool) -> Self {
         let blocks = leaders(program, function);
+        let windows = windows(program, function, &blocks);
         Emit {
             program,
             function,
@@ -431,13 +438,15 @@ impl<'a> Emit<'a> {
             labels: Vec::new(),
             block_at: vec![None; blocks.len()],
             blocks,
+            windows,
             frame_live: false,
         }
     }
 
     fn run(mut self) -> Vec<u8> {
         self.prologue();
-        for pc in 0..self.function.code.len() {
+        let mut pc = 0;
+        while pc < self.function.code.len() {
             if let Some(length) = self.blocks[pc] {
                 self.block_at[pc] = Some(self.code.len());
                 // A block is entered from anywhere, so nothing a predecessor
@@ -446,7 +455,15 @@ impl<'a> Emit<'a> {
                 self.charge(length);
             }
             self.pc = pc;
+            // A window's rows after its head begin no block, so skipping them
+            // skips no charge: the block around the window was charged for them.
+            if let Some(window) = self.windows[pc] {
+                self.window(window);
+                pc += window.window.rows;
+                continue;
+            }
             self.inst(pc);
+            pc += 1;
         }
         self.patch();
         self.code
@@ -1497,6 +1514,264 @@ impl<'a> Emit<'a> {
         self.growable_op(GrowableOp::StoreBytes, run, index);
         self.bind(done);
         self.frame_live = false;
+    }
+
+    /// An [ADR 0062] push or append window, as one fast path: the composite
+    /// push's questions asked once, the frame writes of every row made, and the
+    /// rows themselves as the cold half.
+    ///
+    /// See [`BufferWindow`] for which failure goes where and why the cold half
+    /// rejoins at the store row. The shape:
+    ///
+    /// ```text
+    ///   rax = the owner                  -- refused if null, at the head
+    ///   the header's layout is `layout`, or cold_family
+    ///   rdx = payload(owner, 0)          -- the length word; the rows' writes before the ensure
+    /// retry:                             -- rax the owner, rdx the length word
+    ///   rcx = payload(owner, 1)          -- nought is consumed, cold_room
+    ///   rdx < len(store), or cold_room   -- an append: len <= cap and count <= cap - len
+    ///   the rows' writes up to the write -- the store slot among them
+    ///   push:   the unit's words, or a byte blend after its two checks (cold_store)
+    ///           the rows' writes after it; payload(owner, 0) = rdx + 1
+    ///   append: the run-copy helper; the rows' writes after it; the commit row
+    /// cold_family: the head's load-field by the field helper; any constant row
+    /// cold_room:   the ensure helper; rax and rdx read again; jmp retry
+    /// cold_store:  the run-store helper; rdx read again; jmp to the push's tail
+    /// ```
+    ///
+    /// **Every jump to a cold path is emitted before the first `push`**, for
+    /// [`Emit::vector_push`]'s reason, and each cold path re-derives the frame
+    /// pointer before it jumps back, so the path that never went cold keeps the
+    /// one it had.
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    fn window(&mut self, held: BufferWindow) {
+        use cove_ir::legalize::Pattern;
+        let BufferWindow {
+            window,
+            layout,
+            bytes,
+            words,
+            args,
+        } = held;
+        let cold_family = self.label();
+        let cold_room = self.label();
+        let cold_store = self.label();
+        let retry = self.label();
+        let tail = self.label();
+        let done = self.label();
+
+        // The head: `load-field at <- owner +0`, with the push's own checks.
+        self.pc = window.head;
+        self.load_slot(RAX, window.owner);
+        self.refuse_null(RAX);
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, layout.0 as i32);
+        self.jcc(CC_NE, Target::Label(cold_family));
+        self.mov_rr(RDX, RAX);
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+        for write in window
+            .frame_writes()
+            .filter(|write| write.pc < window.ensure)
+        {
+            self.frame_write(write.slot, write.written, RCX);
+        }
+
+        // The store row, rejoined from the cold ensure.
+        self.bind(retry);
+        self.pc = window.load_store;
+        self.mov_rr(RCX, RAX);
+        self.add_imm32(RCX, 2);
+        self.heap_word(RCX);
+        self.test_rr(RCX, RCX);
+        self.jcc(CC_E, Target::Label(cold_room));
+        if words {
+            // `vector_run`'s `len as u32`, which is also what makes the second
+            // turn through here after a returned ensure answer yes.
+            self.mov_rr32(RDX, RDX);
+        }
+        self.mov_rr(RAX, RCX);
+        self.heap_word(RAX);
+        match window.pattern {
+            Pattern::PushWords | Pattern::PushByte => {
+                // The store's family, for a byte push's own question below; the
+                // heap scratch is free until the next address is formed.
+                self.mov_rr(HEAP_INDEX, RAX);
+                self.shr_imm8(HEAP_INDEX, 32);
+                self.mov_rr32(RAX, RAX);
+                self.cmp_rr(RDX, RAX);
+                self.jcc(CC_AE, Target::Label(cold_room));
+            }
+            Pattern::AppendBytes | Pattern::AppendWords => {
+                self.mov_rr32(RAX, RAX);
+                self.cmp_rr(RAX, RDX);
+                self.jcc(CC_B, Target::Label(cold_room));
+                self.sub_rr(RAX, RDX);
+                self.load_slot(RDX, window.count);
+                self.cmp_rr(RAX, RDX);
+                self.jcc(CC_B, Target::Label(cold_room));
+            }
+        }
+        let between = |pc: usize| window.ensure < pc && pc < window.write;
+        for write in window.frame_writes().filter(|write| between(write.pc)) {
+            // `RAX` is spent: a push's capacity and an append's room are not
+            // read again.
+            self.frame_write(write.slot, write.written, RAX);
+        }
+
+        self.pc = window.write;
+        match window.pattern {
+            Pattern::PushWords => {
+                // `store + 1 + len * stride`, as `vector_push` forms it.
+                self.mov_imm64(RAX, i64::from(window.stride));
+                self.imul_rr(RAX, RDX);
+                self.add_rr(RCX, RAX);
+                self.add_imm32(RCX, 1);
+                if window.stride > 0 {
+                    self.push(RDX);
+                    for word in 0..window.stride {
+                        self.load_slot(RAX, window.src + word);
+                        self.push(RAX);
+                    }
+                    for word in (0..window.stride).rev() {
+                        self.pop(RAX);
+                        self.mov_rr(RDX, RCX);
+                        self.add_imm32(RDX, word as i32);
+                        self.heap_ptr(RDX);
+                        self.store(HEAP_TABLE, 0, RAX);
+                    }
+                    self.pop(RDX);
+                }
+                self.push_tail(window, done);
+            }
+            Pattern::PushByte => {
+                // `RUN_STORE_BYTES`' two questions a live store with room leaves:
+                // the store is a byte run, and the value is a byte.
+                self.cmp_imm32(HEAP_INDEX, bytes.0 as i32);
+                self.jcc(CC_NE, Target::Label(cold_store));
+                // The payload word holding byte `len`: `store + 1 + len / 8`.
+                self.add_imm32(RCX, 1);
+                self.mov_rr(RAX, RDX);
+                self.shr_imm8(RAX, 3);
+                self.add_rr(RCX, RAX);
+                self.heap_ptr(RCX);
+                self.load_slot(RAX, window.src);
+                self.cmp_imm32(RAX, 256);
+                self.jcc(CC_AE, Target::Label(cold_store));
+                // `blend(store, len / 8, len % 8, 1, value)`, `byte_push`'s.
+                self.mov_rr(RCX, RDX);
+                self.and_imm32(RCX, 7);
+                self.shl_imm8(RCX, 3);
+                self.shl_cl(RAX);
+                self.mov_imm32(HEAP_SPARE, 0xFF);
+                self.shl_cl(HEAP_SPARE);
+                self.not_r(HEAP_SPARE);
+                self.load(HEAP_INDEX, HEAP_TABLE, 0);
+                self.and_rr(HEAP_INDEX, HEAP_SPARE);
+                self.or_rr(HEAP_INDEX, RAX);
+                self.store(HEAP_TABLE, 0, HEAP_INDEX);
+                self.bind(tail);
+                self.push_tail(window, done);
+            }
+            Pattern::AppendBytes | Pattern::AppendWords => {
+                let (kind, elem) = match window.storage {
+                    Storage::PackedBytes => (RunOp::CopyBytes, 0),
+                    Storage::Words(elem) => (RunOp::CopyWords, elem.0),
+                };
+                self.run_copy(args, kind, elem);
+                for write in window
+                    .frame_writes()
+                    .filter(|write| write.pc > window.write)
+                {
+                    self.frame_write(write.slot, write.written, RAX);
+                }
+                self.pc = window.commit;
+                self.inst(window.commit);
+                self.jmp(Target::Label(done));
+            }
+        }
+
+        // A header of another family: the head as the field helper answers it —
+        // `RAX` still holds the owner — and the constant rows before the ensure,
+        // which refuses the owner.
+        self.bind(cold_family);
+        self.frame_live = false;
+        self.pc = window.head;
+        self.field_call(self.field_load, 0, 1, window.at);
+        for pc in window.head + 1..window.ensure {
+            self.pc = pc;
+            self.inst(pc);
+        }
+
+        // No room, or no store: the ensure row's cold half, and the store row
+        // again.
+        self.bind(cold_room);
+        self.frame_live = false;
+        self.pc = window.ensure;
+        let op = match words {
+            true => GrowableOp::EnsureWords,
+            false => GrowableOp::EnsureBytes,
+        };
+        self.growable_op(op, window.owner, window.count);
+        self.load_slot(RAX, window.owner);
+        self.load_slot(RDX, window.at);
+        self.jmp(Target::Label(retry));
+
+        if window.pattern == Pattern::PushByte {
+            // The byte store row's cold half, which refuses; its store slot was
+            // written before either jump here.
+            self.bind(cold_store);
+            self.frame_live = false;
+            self.pc = window.write;
+            self.growable_op(GrowableOp::StoreBytes, window.store, window.at);
+            self.load_slot(RDX, window.at);
+            self.jmp(Target::Label(tail));
+        }
+
+        self.bind(done);
+        // Every predecessor but the fast one came through a helper.
+        self.frame_live = false;
+    }
+
+    /// One frame write a window's row makes: the length the head read, which is
+    /// in `RDX`; the store, in `RCX`; a constant or the nought a clear leaves,
+    /// formed in `scratch`.
+    fn frame_write(&mut self, slot: Slot, written: cove_ir::legalize::Written, scratch: u8) {
+        use cove_ir::legalize::Written;
+        match written {
+            Written::Length => self.store_slot(slot, RDX),
+            Written::Store => self.store_slot(slot, RCX),
+            Written::Constant(value) => {
+                self.mov_imm64(scratch, value);
+                self.store_slot(slot, scratch);
+            }
+            Written::Cleared => {
+                self.xor_rr(scratch, scratch);
+                self.store_slot(slot, scratch);
+            }
+        }
+    }
+
+    /// A push window's rows after its write — a clear of the store slot and a
+    /// second constant, where the window has them — and its commit, which the
+    /// room the fast path found makes one store of `RDX + 1`.
+    fn push_tail(&mut self, window: cove_ir::legalize::Window, done: usize) {
+        for write in window
+            .frame_writes()
+            .filter(|write| write.pc > window.write)
+        {
+            self.frame_write(write.slot, write.written, RAX);
+        }
+        self.pc = window.commit;
+        self.add_imm32(RDX, 1);
+        self.load_slot(RAX, window.owner);
+        self.add_imm32(RAX, 1);
+        self.heap_ptr(RAX);
+        self.store(HEAP_TABLE, 0, RDX);
+        self.jmp(Target::Label(done));
     }
 
     /// A word `run-finish` — `Vector.freeze()` — as `Memory::relabel` turning

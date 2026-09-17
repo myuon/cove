@@ -53,7 +53,8 @@ use crate::abi::{
 };
 use crate::subset::{
     by_zero_of, byte_push, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset,
-    supported, word_finish, word_push, BytePush, ByteStore, Reserve, WordFinish, WordPush,
+    supported, windows, word_finish, word_push, BufferWindow, BytePush, ByteStore, Reserve,
+    WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -563,6 +564,11 @@ struct Lower<'a, 'f> {
     /// Per instruction: the block that begins there and its length, or `None`
     /// if no block begins there.
     blocks: Vec<Option<(Block, u32)>>,
+    /// Per instruction: the [ADR 0062] window whose head it is, if one is. See
+    /// [`BufferWindow`].
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    windows: Vec<Option<BufferWindow>>,
 }
 
 impl<'a, 'f> Lower<'a, 'f> {
@@ -573,7 +579,9 @@ impl<'a, 'f> Lower<'a, 'f> {
         bound: Bound,
     ) -> Self {
         let pointer = b.func.signature.params[0].value_type;
-        let blocks: Vec<Option<(Block, u32)>> = leaders(program, function)
+        let lengths = leaders(program, function);
+        let windows = windows(program, function, &lengths);
+        let blocks: Vec<Option<(Block, u32)>> = lengths
             .into_iter()
             .map(|length| length.map(|length| (b.create_block(), length)))
             .collect();
@@ -610,6 +618,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             literals: None,
             pc: 0,
             blocks,
+            windows,
         }
     }
 
@@ -618,7 +627,8 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.charge(length);
 
         let mut terminated = false;
-        for pc in 0..self.function.code.len() {
+        let mut pc = 0;
+        while pc < self.function.code.len() {
             if pc > 0 {
                 if let Some((block, length)) = self.blocks[pc] {
                     if !terminated {
@@ -630,7 +640,16 @@ impl<'a, 'f> Lower<'a, 'f> {
                 }
             }
             self.pc = pc;
+            // A window's rows after its head begin no block, so skipping them
+            // skips no charge: the block around the window was charged for them.
+            if let Some(window) = self.windows[pc] {
+                self.window(window);
+                terminated = false;
+                pc += window.window.rows;
+                continue;
+            }
             terminated = self.inst(pc);
+            pc += 1;
         }
         debug_assert!(
             terminated,
@@ -1771,6 +1790,309 @@ impl<'a, 'f> Lower<'a, 'f> {
 
         self.b.switch_to_block(join);
         self.forget();
+    }
+
+    /// An [ADR 0062] push or append window, as one fast path: the composite
+    /// push's questions asked once, the frame writes of every row made, and the
+    /// rows themselves as the cold half.
+    ///
+    /// See [`BufferWindow`] for which failure goes where and why the cold half
+    /// rejoins at the store row. The shape, in blocks:
+    ///
+    /// ```text
+    ///   head:   owner, refused if null; the header is `layout`, or cold_family
+    ///           held = the length word; the rows' writes before the ensure
+    ///   retry(header, held):
+    ///           store live, and room for the count, or cold_room
+    ///           the rows' writes between the ensure and the write
+    ///           push:   the unit, stride words or a checked byte blend
+    ///                   the rows' writes after it; length + 1
+    ///           append: the run-copy helper; the rows' writes after it; the commit row
+    ///   cold_family: the head's load-field by the field helper; any constant row
+    ///   cold_room:   the ensure helper; the owner and the length read again; retry
+    ///   cold_store:  (a byte push) the run-store helper; the push's tail, carried
+    /// ```
+    ///
+    /// `retry` and a push's tail carry the frame and chunk-table pointers as
+    /// block parameters rather than forgetting them, so the path that never went
+    /// cold loads neither again: each cold predecessor, which did call a helper,
+    /// derives both afresh before it jumps.
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    fn window(&mut self, held: BufferWindow) {
+        use cove_ir::legalize::Pattern;
+        let BufferWindow {
+            window,
+            layout,
+            bytes,
+            words,
+            args,
+        } = held;
+        let cold_family = self.b.create_block();
+        let cold_room = self.b.create_block();
+        let retry = self.carrying(2);
+        let done = self.b.create_block();
+
+        // The head: `load-field at <- owner +0`, with the push's own checks.
+        self.pc = window.head;
+        let owner = self.load_slot(window.owner);
+        self.refuse_null(owner);
+        let word = self.heap_word(owner);
+        let named = self.b.ins().ushr_imm_u(word, 32);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(layout.0));
+        let known = self.b.create_block();
+        self.b.ins().brif(wrong, cold_family, &[], known, &[]);
+        self.b.switch_to_block(known);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let length = self.payload(owner, zero);
+        for write in window
+            .frame_writes()
+            .filter(|write| write.pc < window.ensure)
+        {
+            self.frame_write(write.slot, write.written, length, zero);
+        }
+        self.carry(retry, &[owner, length]);
+
+        // The store row, rejoined from the cold ensure.
+        let carried = self.carried(retry);
+        let (header, length) = (carried[0], carried[1]);
+        self.pc = window.load_store;
+        let one = self.b.ins().iconst(types::I64, 1);
+        let store = self.payload(header, one);
+        let consumed = self.b.ins().icmp_imm_s(IntCC::Equal, store, 0);
+        self.brif_cold(consumed, cold_room);
+        // `vector_run`'s `len as u32`, which is also what makes the second turn
+        // through here after a returned ensure answer yes.
+        let len = match words {
+            true => self.b.ins().band_imm_u(length, LEN_MASK),
+            false => length,
+        };
+        let store_header = self.heap_word(store);
+        let capacity = self.b.ins().band_imm_u(store_header, LEN_MASK);
+        match window.pattern {
+            Pattern::PushWords | Pattern::PushByte => {
+                let full = self
+                    .b
+                    .ins()
+                    .icmp(IntCC::UnsignedGreaterThanOrEqual, len, capacity);
+                self.brif_cold(full, cold_room);
+            }
+            Pattern::AppendBytes | Pattern::AppendWords => {
+                let past = self.b.ins().icmp(IntCC::UnsignedLessThan, capacity, len);
+                self.brif_cold(past, cold_room);
+                let room = self.b.ins().isub(capacity, len);
+                let asked = match window.constant {
+                    Some(value) => self.b.ins().iconst(types::I64, value),
+                    None => self.load_slot(window.count),
+                };
+                let short = self.b.ins().icmp(IntCC::UnsignedLessThan, room, asked);
+                self.brif_cold(short, cold_room);
+            }
+        }
+        let between = |pc: usize| window.ensure < pc && pc < window.write;
+        for write in window.frame_writes().filter(|write| between(write.pc)) {
+            self.frame_write(write.slot, write.written, length, store);
+        }
+
+        let mut cold_store = None;
+        match window.pattern {
+            Pattern::PushWords => {
+                self.pc = window.write;
+                let at = self.b.ins().imul_imm_s(len, i64::from(window.stride));
+                for word in 0..window.stride {
+                    let held = self.load_slot(window.src + word);
+                    let into = self.b.ins().iadd_imm_s(at, i64::from(word));
+                    self.set_payload(store, into, held);
+                }
+                self.push_tail(window, header, len, done);
+            }
+            Pattern::PushByte => {
+                self.pc = window.write;
+                let cold = self.b.create_block();
+                let tail = self.carrying(2);
+                cold_store = Some((cold, tail));
+                // `RUN_STORE_BYTES`' two questions a live store with room leaves:
+                // the store is a byte run, and the value is a byte.
+                let family = self.b.ins().ushr_imm_u(store_header, 32);
+                let other = self
+                    .b
+                    .ins()
+                    .icmp_imm_u(IntCC::NotEqual, family, i64::from(bytes.0));
+                self.brif_cold(other, cold);
+                let value = self.load_slot(window.src);
+                let wide = self
+                    .b
+                    .ins()
+                    .icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, value, 256);
+                self.brif_cold(wide, cold);
+                // `blend(store, len / 8, len % 8, 1, value)`.
+                let which = self.b.ins().ushr_imm_u(len, 3);
+                let word = self.payload(store, which);
+                let inside = self.b.ins().band_imm_u(len, 7);
+                let shift = self.b.ins().ishl_imm_u(inside, 3);
+                let ones = self.b.ins().iconst(types::I64, 0xFF);
+                let mask = self.b.ins().ishl(ones, shift);
+                let keep = self.b.ins().bnot(mask);
+                let cleared = self.b.ins().band(word, keep);
+                let placed = self.b.ins().ishl(value, shift);
+                let blended = self.b.ins().bor(cleared, placed);
+                self.set_payload(store, which, blended);
+                self.carry(tail, &[header, len]);
+                let carried = self.carried(tail);
+                self.push_tail(window, carried[0], carried[1], done);
+            }
+            Pattern::AppendBytes | Pattern::AppendWords => {
+                self.pc = window.write;
+                let (kind, elem) = match window.storage {
+                    Storage::PackedBytes => (RunOp::CopyBytes, 0),
+                    Storage::Words(elem) => (RunOp::CopyWords, elem.0),
+                };
+                self.run_copy(args, kind, elem);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                for write in window
+                    .frame_writes()
+                    .filter(|write| write.pc > window.write)
+                {
+                    self.frame_write(write.slot, write.written, zero, zero);
+                }
+                self.pc = window.commit;
+                self.inst(window.commit);
+                self.b.ins().jump(done, &[]);
+            }
+        }
+
+        // A header of another family: the head as the field helper answers it,
+        // and the constant rows before the ensure, which refuses the owner.
+        self.b.switch_to_block(cold_family);
+        self.forget();
+        self.pc = window.head;
+        let frame_addr = self.frame_addr();
+        let into = self.b.ins().iadd_imm_s(frame_addr, i64::from(window.at));
+        self.field_call(self.bound.field_load, owner, 0, 1, into);
+        for pc in window.head + 1..window.ensure {
+            self.pc = pc;
+            self.inst(pc);
+        }
+        self.b.ins().jump(cold_room, &[]);
+
+        // No room, or no store: the ensure row's cold half, and the store row
+        // again.
+        self.b.switch_to_block(cold_room);
+        self.forget();
+        self.pc = window.ensure;
+        let op = match words {
+            true => GrowableOp::EnsureWords,
+            false => GrowableOp::EnsureBytes,
+        };
+        self.growable_op(op, window.owner, window.count);
+        let header = self.load_slot(window.owner);
+        let length = self.load_slot(window.at);
+        self.carry(retry, &[header, length]);
+
+        if let Some((cold, tail)) = cold_store {
+            // The byte store row's cold half, which refuses; its store slot was
+            // written before either jump here.
+            self.b.switch_to_block(cold);
+            self.forget();
+            self.pc = window.write;
+            self.growable_op(GrowableOp::StoreBytes, window.store, window.at);
+            let header = self.load_slot(window.owner);
+            let len = self.load_slot(window.at);
+            self.carry(tail, &[header, len]);
+        }
+
+        self.b.switch_to_block(done);
+        // Every predecessor but the fast one came through a helper.
+        self.forget();
+    }
+
+    /// A block that is entered carrying `values` words, and the frame and
+    /// chunk-table pointers after them. See [`Lower::window`].
+    fn carrying(&mut self, values: usize) -> Block {
+        let block = self.b.create_block();
+        for _ in 0..values {
+            self.b.append_block_param(block, types::I64);
+        }
+        self.b.append_block_param(block, self.pointer);
+        self.b.append_block_param(block, self.pointer);
+        block
+    }
+
+    /// Jumps to a [`Lower::carrying`] block with `values` and this block's
+    /// two pointers, deriving either that is not yet derived.
+    fn carry(&mut self, block: Block, values: &[Value]) {
+        let frame = self.frame();
+        let chunks = self.heap_chunks();
+        let args: Vec<_> = values
+            .iter()
+            .chain([&frame, &chunks])
+            .map(|value| (*value).into())
+            .collect();
+        self.b.ins().jump(block, &args);
+    }
+
+    /// Switches to a [`Lower::carrying`] block, trusting the two pointers every
+    /// predecessor derived, and answers the values it carries.
+    fn carried(&mut self, block: Block) -> Vec<Value> {
+        self.b.switch_to_block(block);
+        let params = self.b.block_params(block).to_vec();
+        let (values, pointers) = params.split_at(params.len() - 2);
+        self.forget();
+        self.frame = Some(pointers[0]);
+        self.chunks = Some(pointers[1]);
+        values.to_vec()
+    }
+
+    /// Branches to `cold` on `flag`, and carries on in a block of its own.
+    fn brif_cold(&mut self, flag: Value, cold: Block) {
+        let on = self.b.create_block();
+        self.b.ins().brif(flag, cold, &[], on, &[]);
+        self.b.switch_to_block(on);
+    }
+
+    /// One frame write a window's row makes: the length the head read, a
+    /// constant, the store, or the nought a clear leaves.
+    fn frame_write(
+        &mut self,
+        slot: Slot,
+        written: cove_ir::legalize::Written,
+        length: Value,
+        store: Value,
+    ) {
+        use cove_ir::legalize::Written;
+        let word = match written {
+            Written::Length => length,
+            Written::Store => store,
+            Written::Constant(value) => self.b.ins().iconst(types::I64, value),
+            Written::Cleared => self.b.ins().iconst(types::I64, 0),
+        };
+        self.store_slot(slot, word);
+    }
+
+    /// A push window's rows after its write — a clear of the store slot and a
+    /// second constant, where the window has them — and its commit, which the
+    /// room the fast path found makes one add: `set_payload(owner, 0, len + 1)`.
+    fn push_tail(
+        &mut self,
+        window: cove_ir::legalize::Window,
+        header: Value,
+        len: Value,
+        done: Block,
+    ) {
+        for write in window
+            .frame_writes()
+            .filter(|write| write.pc > window.write)
+        {
+            self.frame_write(write.slot, write.written, len, len);
+        }
+        self.pc = window.commit;
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let grown = self.b.ins().iadd_imm_s(len, 1);
+        self.set_payload(header, zero, grown);
+        self.b.ins().jump(done, &[]);
     }
 
     /// A word `run-finish` — `Vector.freeze()` — as `Memory::relabel` turning

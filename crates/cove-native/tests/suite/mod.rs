@@ -423,6 +423,9 @@ thread_local! {
     pub static BUILT: RefCell<Vec<Built>> = const { RefCell::new(Vec::new()) };
     /// What the next one answers, taken from the front.
     pub static BUILT_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// The capacity the next ensure that answers `Returned` leaves its owner's
+    /// store with, if a case asked for one. See [`room_on_ensure`].
+    pub static ROOM_ON_ENSURE: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
 /// The runtime's growable-buffer helper, as a test double.
@@ -469,6 +472,16 @@ unsafe extern "C" fn growable(
     match answer {
         Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
         _ => {
+            let ensure = op == GrowableOp::EnsureBytes.abi() || op == GrowableOp::EnsureWords.abi();
+            let room = ROOM_ON_ENSURE.with(|room| if ensure { room.take() } else { None });
+            if let Some(capacity) = room {
+                // The store's header length is its capacity: rewritten in place,
+                // over test heap words a case has left free behind it.
+                let owner = (*ctx).words.add((base + u64::from(a)) as usize).read();
+                let store = heap_word_ptr(ctx, owner + 2).read();
+                let header = heap_word_ptr(ctx, store);
+                header.write((header.read() >> 32 << 32) | u64::from(capacity));
+            }
             if op == GrowableOp::Alloc.abi()
                 || op == GrowableOp::Finish.abi()
                 || op == GrowableOp::FinishWords.abi()
@@ -490,6 +503,14 @@ pub fn built() -> Vec<Built> {
 pub fn forget_built() {
     BUILT.with(|held| held.borrow_mut().clear());
     BUILT_ANSWERS.with(|held| held.borrow_mut().clear());
+    ROOM_ON_ENSURE.with(|room| room.set(None));
+}
+
+/// Makes the next ensure the double answers `Returned` leave its owner's store
+/// with `capacity` units of room, as a growth would: the one thing a case needs
+/// of the runtime to see a window rejoin its store row after a cold ensure.
+pub fn room_on_ensure(capacity: u32) {
+    ROOM_ON_ENSURE.with(|room| room.set(Some(capacity)));
 }
 
 /// Scripts what the next buffer operations answer.
@@ -828,13 +849,16 @@ pub fn watched() -> Vec<u64> {
 /// and nothing in the suite names a concrete one.
 pub trait Arm {
     /// What this arm's `compile` answers. Both arms' are `Copy` and carry the
-    /// `FunctionId` and the code size; the suite needs neither.
+    /// `FunctionId` and the code size; the suite reads only the size.
     type Handle: Copy;
 
     fn new(helpers: NativeHelpers) -> Self;
     fn compile(&mut self, program: &Program, id: FunctionId) -> Option<Self::Handle>;
     fn finalize(&mut self);
     fn entry(&self, handle: Self::Handle) -> Entry;
+    /// How many bytes of machine code a compiled function is, which both arms'
+    /// handles carry: what a case comparing the code two shapes cost reads.
+    fn code_bytes(handle: Self::Handle) -> u32;
 }
 
 // --- building a program by hand ----------------------------------------------
@@ -4884,6 +4908,461 @@ pub fn a_push_window_with_room_writes_the_unit_and_commits_it<A: Arm>() {
         assert_eq!(frame[3], 0, "{what}: the store slot was cleared");
     }
     forget_built();
+}
+
+// --- ADR 0062's windows, as one fast path ------------------------------------
+
+/// [`a_push_window`] with its first constant moved in front of the head: the same
+/// instructions doing the same thing, which `cove_ir::legalize` does not recognise
+/// — a push's count is written just before its ensure — so each arm emits it one
+/// row at a time. What a case compares a recognised window with.
+pub fn a_push_window_unrecognised(storage: Storage) -> Program {
+    let mut held = a_push_window(storage);
+    let code = &mut held.functions[0].code;
+    let constant = code.remove(1);
+    code.insert(0, constant);
+    assert!(
+        cove_ir::legalize::windows(&held, &held.functions[0]).is_empty(),
+        "the rows are no window"
+    );
+    held
+}
+
+/// A whole append window over `storage`: the length, the ensure of a count the
+/// frame holds, the store read, a nought offset, one `run-copy` at the length, a
+/// clear of the store, and the commit of the same count.
+///
+/// Slot 0 is the owner, slot 1 the length, slot 2 the count, slot 3 the store,
+/// slot 4 the run copied from, slot 5 the offset in it and slot 6 the answer; the
+/// copy's operands are `ArgsId(1)`.
+pub fn an_append_window(storage: Storage) -> Program {
+    let arg = |slot, layout| Arg { slot, layout };
+    let held = program_with_args(
+        function(
+            vec![
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Unit,
+            ],
+            UNIT,
+            vec![
+                Inst::LoadField {
+                    dst: 1,
+                    obj: 0,
+                    at: 0,
+                    layout: INT,
+                },
+                Inst::GrowableEnsure {
+                    owner: 0,
+                    additional: 2,
+                    storage,
+                },
+                Inst::LoadField {
+                    dst: 3,
+                    obj: 0,
+                    at: 1,
+                    layout: REF,
+                },
+                Inst::Int { dst: 5, value: 0 },
+                Inst::RunCopy {
+                    args: ArgsId(1),
+                    storage,
+                },
+                Inst::Clear {
+                    slot: 3,
+                    layout: REF,
+                },
+                Inst::GrowableCommit {
+                    owner: 0,
+                    count: 2,
+                    storage,
+                },
+                Inst::Unit { dst: 6 },
+                Inst::Return { src: 6 },
+            ],
+        ),
+        vec![
+            arg(3, REF),
+            arg(1, INT),
+            arg(4, REF),
+            arg(5, INT),
+            arg(2, INT),
+        ],
+    );
+    assert_eq!(
+        cove_ir::legalize::windows(&held, &held.functions[0]).len(),
+        1,
+        "the rows are one window"
+    );
+    held
+}
+
+/// The frame [`a_push_window`] is entered with: the owner, three unwritten slots,
+/// the unit's `stride` words, and an unwritten second count and answer.
+fn push_window_frame(owner: u64, stride: u64, unit: u64) -> Vec<u64> {
+    let mut frame = vec![owner, UNWRITTEN, UNWRITTEN, UNWRITTEN];
+    frame.extend((0..stride).map(|word| unit + word));
+    frame.push(UNWRITTEN);
+    frame.push(UNWRITTEN);
+    frame
+}
+
+/// The owner a push window over `storage` is tested on: a byte buffer, or the
+/// vector of the element, of `len` units in a store of `capacity`.
+fn push_window_owner(heap: &mut Heap, at: u64, storage: Storage, len: u32, capacity: u32) -> u64 {
+    match storage {
+        Storage::PackedBytes => a_byte_buffer(heap, at, u64::from(len), capacity),
+        Storage::Words(elem) => {
+            let vector = if elem == PAIR { PAIR_VECTOR } else { VECTOR };
+            a_vector(heap, at, vector, len, capacity)
+        }
+    }
+}
+
+/// **Every way a push window leaves its fast path is one of its rows**: the
+/// ensure's cold half at the ensure's pc with the owner's slot and the count's,
+/// the head's field read at the head's pc, and a byte store's cold half at the
+/// write's pc with the store slot and the length slot. Nothing is ever handed
+/// over as a whole push, and the frame holds exactly what the rows before the
+/// hand-over wrote.
+///
+/// The one-block function charges its ten rows at entry, so the first hand-over
+/// publishes ten.
+pub fn every_cold_path_of_a_push_window_is_one_of_its_rows<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    for (storage, stride) in [
+        (Storage::PackedBytes, 1u64),
+        (Storage::Words(INT), 1),
+        (Storage::Words(PAIR), 2),
+    ] {
+        let ensure = match storage {
+            Storage::PackedBytes => GrowableOp::EnsureBytes,
+            Storage::Words(_) => GrowableOp::EnsureWords,
+        };
+        let handed = |work| Built {
+            base: 0,
+            pc: 2,
+            op: ensure.abi(),
+            a: 0,
+            b: 2,
+            work,
+        };
+        let held = a_push_window(storage);
+        let value = if storage == Storage::PackedBytes {
+            0x41
+        } else {
+            0x41_0000
+        };
+
+        // No room, and the ensure refuses: nothing past the count was written.
+        for consumed in [false, true] {
+            forget_built();
+            forget_fielded();
+            built_answers(&[Outcome::Raised]);
+            let what = format!("{storage:?}, consumed {consumed}");
+            let mut heap = Heap::new(2);
+            let owner = push_window_owner(&mut heap, at, storage, 8, 8);
+            if consumed {
+                heap.set(at + 2, 0);
+            }
+            let before: Vec<u64> = (0..48).map(|word| heap.get(at + word)).collect();
+            let mut frame = push_window_frame(owner, stride, value);
+            let answer = run_with_fields::<A>(&held, &mut frame, 0, &heap);
+            assert_eq!(answer.outcome, Outcome::Raised, "{what}");
+            assert_eq!(built(), vec![handed(10)], "{what}");
+            assert!(fielded().is_empty(), "{what}: the head was emitted");
+            assert_eq!(frame[1], 8, "{what}: the length the head read");
+            assert_eq!(frame[2], 1, "{what}: the count");
+            assert_eq!(frame[3], UNWRITTEN, "{what}: the store row was not reached");
+            let after: Vec<u64> = (0..48).map(|word| heap.get(at + word)).collect();
+            assert_eq!(before, after, "{what}: nothing was written into the heap");
+        }
+
+        // An ensure that returns having made room: the store row is rejoined,
+        // and the unit lands at the length with no second hand-over.
+        forget_built();
+        let what = format!("{storage:?}, grown by the ensure");
+        let mut heap = Heap::new(2);
+        let owner = push_window_owner(&mut heap, at, storage, 8, 8);
+        room_on_ensure(16);
+        let mut frame = push_window_frame(owner, stride, value);
+        let answer = run_with_fields::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+        assert_eq!(built(), vec![handed(10)], "{what}");
+        assert_eq!(heap.get(at + 1), 9, "{what}: the length");
+        match storage {
+            Storage::PackedBytes => {
+                assert_eq!(heap.get(at + 8 + 2) & 0xFF, 0x41, "{what}: byte 8");
+            }
+            Storage::Words(_) => {
+                for word in 0..stride {
+                    let into = at + 8 + 1 + 8 * stride + word;
+                    assert_eq!(heap.get(into), value + word, "{what}: word {word}");
+                }
+            }
+        }
+        let count = 4 + stride as usize;
+        assert_eq!(
+            (frame[1], frame[2], frame[3], frame[count]),
+            (8, 1, 0, 1),
+            "{what}: the length, the count, the cleared store and the second count"
+        );
+
+        // An ensure that returns having made no room is asked again, through its
+        // own helper, which is a safepoint every time.
+        forget_built();
+        built_answers(&[Outcome::Returned, Outcome::Raised]);
+        let mut heap = Heap::new(2);
+        let owner = push_window_owner(&mut heap, at, storage, 8, 8);
+        heap.set(at + 2, 0);
+        let mut frame = push_window_frame(owner, stride, value);
+        let answer = run_with_fields::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised, "{storage:?}, asked again");
+        assert_eq!(
+            built(),
+            vec![handed(10), handed(0)],
+            "{storage:?}, asked again"
+        );
+
+        // An owner of another family: the head is the field helper's, and the
+        // ensure is what refuses it.
+        forget_built();
+        forget_fielded();
+        built_answers(&[Outcome::Raised]);
+        let what = format!("{storage:?}, another family");
+        let mut heap = Heap::new(2);
+        let other = match storage {
+            Storage::Words(elem) if elem == INT => Storage::Words(PAIR),
+            _ => Storage::Words(INT),
+        };
+        let owner = push_window_owner(&mut heap, at, other, 3, 8);
+        let mut frame = push_window_frame(owner, stride, value);
+        let answer = run_with_fields::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised, "{what}");
+        assert_eq!(
+            fielded(),
+            vec![Fielded {
+                pc: 0,
+                addr: owner,
+                at: 0,
+                width: 1,
+                other: SEGMENT_ORIGIN + 1,
+            }],
+            "{what}: the head, whole"
+        );
+        assert_eq!(built(), vec![handed(10)], "{what}");
+        assert_eq!(frame[1], owner * 1000, "{what}: what the field helper read");
+        assert_eq!(frame[2], 1, "{what}: the count");
+
+        // A null owner, refused at the head as its `load-field` refuses it.
+        forget_built();
+        forget_fielded();
+        let heap = Heap::new(2);
+        let mut frame = push_window_frame(0, stride, value);
+        let answer = run_with_fields::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised, "{storage:?}, null");
+        assert_eq!(answer.raise, Some(Raise::NullObject), "{storage:?}, null");
+        assert_eq!(answer.raise_pc, 0, "{storage:?}, null");
+        assert!(
+            built().is_empty() && fielded().is_empty(),
+            "{storage:?}, null"
+        );
+        assert_eq!(frame[1], UNWRITTEN, "{storage:?}, null");
+    }
+
+    // A byte push's own two questions, each the byte store row's cold half with
+    // the store already in its slot: a value that is not a byte, and a store
+    // that is not a byte run.
+    let held = a_push_window(Storage::PackedBytes);
+    for (why, value, other_store, answers) in [
+        ("256, refused", 256u64, false, vec![Outcome::Raised]),
+        ("-1, answered", u64::MAX, false, vec![]),
+        (
+            "a store of another family",
+            0x41,
+            true,
+            vec![Outcome::Raised],
+        ),
+    ] {
+        forget_built();
+        built_answers(&answers);
+        let mut heap = Heap::new(2);
+        let owner = a_byte_buffer(&mut heap, at, 3, 16);
+        if other_store {
+            heap.object(at + 8, STORE, 16);
+        }
+        let store = heap.get(at + 2);
+        let mut frame = push_window_frame(owner, 1, value);
+        let answer = run_with_fields::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(
+            built(),
+            vec![Built {
+                base: 0,
+                pc: 4,
+                op: GrowableOp::StoreBytes.abi(),
+                a: 3,
+                b: 1,
+                work: 10,
+            }],
+            "{why}"
+        );
+        assert_eq!(frame[1], 3, "{why}: the length");
+        match answers.is_empty() {
+            false => {
+                assert_eq!(answer.outcome, Outcome::Raised, "{why}");
+                assert_eq!(frame[3], store, "{why}: the store row ran");
+                assert_eq!(heap.get(at + 1), 3, "{why}: nothing committed");
+            }
+            // The double wrote nothing and answered: the rows after the store
+            // ran, as they would have.
+            true => {
+                assert_eq!(answer.outcome, Outcome::Returned, "{why}");
+                assert_eq!((frame[3], frame[5]), (0, 1), "{why}: the rows after it");
+                assert_eq!(heap.get(at + 1), 4, "{why}: committed");
+            }
+        }
+    }
+    forget_built();
+    forget_fielded();
+}
+
+/// **An append window is its ensure, its copy and its commit**: with room, the
+/// copy is the one hand-over — at the write's pc, with the row's operands — and
+/// the length is the commit's; without it, the ensure's cold half comes first,
+/// and a returned one that made room is followed by the same copy.
+pub fn an_append_window_is_an_ensure_a_copy_and_a_commit<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    for storage in [Storage::PackedBytes, Storage::Words(INT)] {
+        let (ensure, kind, elem) = match storage {
+            Storage::PackedBytes => (GrowableOp::EnsureBytes, RunOp::CopyBytes, 0),
+            Storage::Words(elem) => (GrowableOp::EnsureWords, RunOp::CopyWords, elem.0),
+        };
+        let copy = |work| Copied {
+            base: 0,
+            pc: 4,
+            args: 1,
+            kind: kind.abi(),
+            elem,
+            work,
+        };
+        let handed = Built {
+            base: 0,
+            pc: 1,
+            op: ensure.abi(),
+            a: 0,
+            b: 2,
+            work: 9,
+        };
+        let held = an_append_window(storage);
+        let owner = |heap: &mut Heap, len, capacity| match storage {
+            Storage::PackedBytes => a_byte_buffer(heap, at, u64::from(len), capacity),
+            Storage::Words(_) => a_vector(heap, at, VECTOR, len, capacity),
+        };
+        for (why, len, count, room, answers) in [
+            ("with room", 3u32, 4u64, None, vec![]),
+            ("of nothing", 8, 0, None, vec![]),
+            ("past the room, refused", 6, 4, None, vec![Outcome::Raised]),
+            (
+                "of a negative count",
+                3,
+                u64::MAX,
+                None,
+                vec![Outcome::Raised],
+            ),
+            ("past the room, grown", 6, 4, Some(16), vec![]),
+        ] {
+            forget_built();
+            forget_copied();
+            built_answers(&answers);
+            if let Some(capacity) = room {
+                room_on_ensure(capacity);
+            }
+            let what = format!("{storage:?} {why}");
+            let mut heap = Heap::new(2);
+            let owner = owner(&mut heap, len, 8);
+            let mut frame = vec![
+                owner, UNWRITTEN, count, UNWRITTEN, 0x77, UNWRITTEN, UNWRITTEN,
+            ];
+            let answer = run_over::<A>(&held, &mut frame, 0, &heap);
+            assert_eq!(frame[1], u64::from(len), "{what}: the length the head read");
+            let fits = count <= u64::from(8 - len);
+            match (fits, room, answers.is_empty()) {
+                (true, _, _) => {
+                    assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+                    assert!(built().is_empty(), "{what}: {:?}", built());
+                    assert_eq!(copied(), vec![copy(9)], "{what}");
+                    assert_eq!(heap.get(at + 1), u64::from(len) + count, "{what}");
+                    assert_eq!((frame[3], frame[5]), (0, 0), "{what}: the store and z");
+                }
+                (false, Some(_), _) => {
+                    assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+                    assert_eq!(built(), vec![handed], "{what}");
+                    assert_eq!(copied(), vec![copy(0)], "{what}");
+                    assert_eq!(heap.get(at + 1), u64::from(len) + count, "{what}");
+                }
+                (false, None, _) => {
+                    assert_eq!(answer.outcome, Outcome::Raised, "{what}");
+                    assert_eq!(built(), vec![handed], "{what}");
+                    assert!(copied().is_empty(), "{what}");
+                    assert_eq!(frame[3], UNWRITTEN, "{what}: the store row was not reached");
+                    assert_eq!(heap.get(at + 1), u64::from(len), "{what}");
+                }
+            }
+        }
+        forget_built();
+        forget_copied();
+        let heap = Heap::new(2);
+        let mut frame = vec![0, UNWRITTEN, 1, UNWRITTEN, 0x77, UNWRITTEN, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(answer.raise, Some(Raise::NullObject), "{storage:?}, null");
+        assert_eq!(answer.raise_pc, 0, "{storage:?}, null");
+        assert!(
+            built().is_empty() && copied().is_empty(),
+            "{storage:?}, null"
+        );
+    }
+    forget_built();
+    forget_copied();
+}
+
+/// **A window is about the code a composite push was**, and less than its rows.
+///
+/// Three compilations of the same push — `GrowablePush` as it lowers today, the
+/// window as ADR 0062 lowers it, and the window's rows unrecognised — measured in
+/// bytes of machine code and printed, so that a change to either fast path shows
+/// its cost here. What is held is the ordering that makes the window worth having:
+/// fewer bytes than its rows emitted one at a time, and no more than twice the
+/// composite — whose cold half is one call where a window's is three.
+pub fn a_window_is_about_the_code_a_composite_push_was<A: Arm>() {
+    let size = |program: &Program| {
+        let mut jit = A::new(helpers());
+        let compiled = jit
+            .compile(program, FunctionId(0))
+            .expect("the function is inside the slice");
+        A::code_bytes(compiled)
+    };
+    for (what, composite, storage) in [
+        ("Vector<Int>.push", pushing(1), Storage::Words(INT)),
+        ("Vector<Pair>.push", pushing(2), Storage::Words(PAIR)),
+        ("appendByte", pushing_a_byte(), Storage::PackedBytes),
+    ] {
+        let composite = size(&composite);
+        let window = size(&a_push_window(storage));
+        let rows = size(&a_push_window_unrecognised(storage));
+        println!("{what}: composite {composite} bytes, window {window} bytes, rows {rows} bytes");
+        assert!(
+            window < rows,
+            "{what}: {window} against {rows} for the rows"
+        );
+        assert!(
+            window <= 2 * composite,
+            "{what}: {window} against {composite} for the composite"
+        );
+    }
 }
 
 // --- Vector.freeze ---------------------------------------------------------

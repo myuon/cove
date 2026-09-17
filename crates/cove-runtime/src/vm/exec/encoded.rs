@@ -7898,5 +7898,588 @@ mod tests {
                 }
             }
         }
+
+        /// The framed windows with the template code generator's table
+        /// installed: **a window compiled as one fast path is the rows the
+        /// dispatch loop runs**, fused and unfused — the same frame answered or
+        /// the same refusal in the same words at the same span, the same heap,
+        /// the same fuel and the same collections. Each case is reached through a
+        /// `call`, which is the crossing, and asserts it crossed.
+        #[cfg(feature = "template")]
+        mod tiered {
+            use super::*;
+            use crate::native::NativeProgram;
+            use crate::vm::exec::native::Tiered;
+
+            /// `outer(params) = inner(params)`, answering what `inner` answers:
+            /// the one `call` is what consults the table.
+            fn calling(build: &mut Build, inner: FunctionId) -> FunctionId {
+                let held = build.program.function(inner);
+                let (params, returns) = (held.params.clone(), held.returns);
+                let mut reprs = Vec::new();
+                let mut row = Vec::new();
+                for layout in &params {
+                    row.push((reprs.len() as Slot, *layout));
+                    reprs.extend(build.program.layout(*layout).words.iter().copied());
+                }
+                let args = build.args(&row);
+                let dst = reprs.len() as Slot;
+                reprs.extend(build.program.layout(returns).words.iter().copied());
+                build.function(
+                    "outer",
+                    &params,
+                    &reprs,
+                    returns,
+                    vec![
+                        Inst::Call {
+                            dst,
+                            callee: inner,
+                            args,
+                        },
+                        Inst::Return { src: dst },
+                    ],
+                )
+            }
+
+            /// Everything one run left that a compiled window could get wrong.
+            #[derive(Debug, PartialEq)]
+            struct Left<T> {
+                /// The answer's words, or the refusal's sentence, span and
+                /// outcome.
+                said: String,
+                heap: T,
+                fuel: u64,
+                collections: u64,
+            }
+
+            /// One run of `entry` on a fresh machine: on the dispatch loop,
+            /// fused or not, or with `native` installed. Answers what it left and
+            /// how many times the run crossed into compiled code.
+            fn left<T>(
+                program: &Program,
+                native: Option<&NativeProgram>,
+                fused: bool,
+                entry: FunctionId,
+                heap: usize,
+                prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
+                inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
+            ) -> (Left<T>, u64) {
+                let budget = crate::budget::Budget::new(crate::budget::Limits::default());
+                let mut machine = Machine::new(program, heap);
+                if !fused {
+                    unfused(&mut machine);
+                }
+                if let Some(native) = native {
+                    // Safety: `native` outlives this machine.
+                    unsafe { machine.install_native(native) };
+                }
+                let args = prepare(&mut machine);
+                let said = machine
+                    .run(entry, &args, &budget.meter())
+                    .map_err(|error| (error.message, error.span, error.outcome));
+                let left = Left {
+                    said: format!("{said:?}"),
+                    heap: inspect(&machine, &args),
+                    fuel: budget.fuel_spent(),
+                    collections: machine.collected().collections,
+                };
+                (left, machine.tiers().vm_to_native)
+            }
+
+            /// [`left`] three times — compiled, fused and unfused — asserting
+            /// all three are one run and that the compiled one crossed.
+            fn compiled_as_rows<T: PartialEq + std::fmt::Debug>(
+                what: &str,
+                program: &Program,
+                native: &NativeProgram,
+                entry: FunctionId,
+                heap: usize,
+                prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
+                inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
+            ) -> Left<T> {
+                let (compiled, crossed) =
+                    left(program, Some(native), true, entry, heap, prepare, inspect);
+                let (fused, _) = left(program, None, true, entry, heap, prepare, inspect);
+                let (mut rows, _) = left(program, None, false, entry, heap, prepare, inspect);
+                assert_eq!(fused, rows, "{what}: fused and unfused");
+                // Compiled code charges a block's rows when it enters the block,
+                // so a run refused part way through one has paid for rows the
+                // dispatch loop never reached — every row, not only a window's.
+                // A run that finished has paid for exactly what ran.
+                if !compiled.said.starts_with("Ok(") {
+                    assert!(compiled.fuel >= rows.fuel, "{what}: {compiled:?}");
+                    rows.fuel = compiled.fuel;
+                }
+                assert_eq!(compiled, rows, "{what}: compiled and the rows");
+                assert!(crossed >= 1, "{what}: the window ran in compiled code");
+                compiled
+            }
+
+            /// Every framed fixture, each behind a caller, and compiled.
+            fn tiered() -> (Framed, [FunctionId; 5], NativeProgram) {
+                let f = framed();
+                let mut build = Build {
+                    program: f.program.clone(),
+                };
+                let outers = [
+                    f.push_int,
+                    f.push_pair,
+                    f.push_byte,
+                    f.append_text,
+                    f.append_pairs,
+                ]
+                .map(|inner| calling(&mut build, inner));
+                let f = Framed {
+                    program: build.done(),
+                    ..f
+                };
+                let native = crate::native::compile(&f.program).expect("this host compiles");
+                for inner in [
+                    f.push_int,
+                    f.push_pair,
+                    f.push_byte,
+                    f.append_text,
+                    f.append_pairs,
+                ] {
+                    assert!(native.entry(inner).is_some(), "{:?}", native.refusals());
+                }
+                (f, outers, native)
+            }
+
+            /// **A word push, compiled**: into room, through a growth, onto a
+            /// consumed vector, onto null and onto a `String`; and a two-word
+            /// element into room and through a growth.
+            #[test]
+            fn a_compiled_word_push_is_its_rows() {
+                let (f, [push_int, push_pair, ..], native) = tiered();
+                for (len, capacity, consumed) in [(1u64, 4i64, false), (1, 1, false), (0, 4, true)]
+                {
+                    let what = format!("an Int push at {len} of {capacity}, consumed: {consumed}");
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let owner =
+                            vector_of(machine, f.int_vector, f.int_store, len, capacity, consumed);
+                        vec![owner, 42]
+                    };
+                    let inspect =
+                        |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        push_int,
+                        1 << 16,
+                        &prepare,
+                        &inspect,
+                    );
+                    match consumed {
+                        true => assert!(left.said.contains("consumed"), "{what}: {}", left.said),
+                        false => assert_eq!(left.heap.0, len + 1, "{what}"),
+                    }
+                }
+                for owner in [None, Some(())] {
+                    let what = format!("an Int push onto {owner:?}");
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let owner = match owner {
+                            None => 0,
+                            Some(()) => machine.new_string("not a vector at all").unwrap(),
+                        };
+                        vec![owner, 42]
+                    };
+                    let inspect = |_: &Machine<'_>, _: &[u64]| ();
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        push_int,
+                        1 << 16,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(left.said.starts_with("Err("), "{what}: {}", left.said);
+                }
+                for capacity in [4i64, 1] {
+                    let what = format!("a Pair push into {capacity}");
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let owner =
+                            vector_of(machine, f.pair_vector, f.pair_store, 1, capacity, false);
+                        vec![owner, 7, 8]
+                    };
+                    let inspect =
+                        |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 2);
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        push_pair,
+                        1 << 16,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert_eq!(left.heap.0, 2, "{what}");
+                    assert_eq!(&left.heap.1[2..4], &[7, 8], "{what}");
+                }
+            }
+
+            /// **A byte push, compiled**: into room, into a full store, of 256
+            /// and of -1 — refused at the store's span — and onto a consumed
+            /// buffer, refused at the ensure's.
+            #[test]
+            fn a_compiled_byte_push_is_its_rows() {
+                let (f, [_, _, push_byte, ..], native) = tiered();
+                for (len, capacity, value, consumed) in [
+                    (3u64, 16i64, 0x41u64, false),
+                    (16, 16, 0x42, false),
+                    (0, 16, 256, false),
+                    (16, 16, (-1i64) as u64, false),
+                    (0, 16, 0x43, true),
+                ] {
+                    let what =
+                        format!("a byte {value} at {len} of {capacity}, consumed: {consumed}");
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let owner = machine.alloc_buffer(capacity).unwrap();
+                        let store = machine.payload(owner, runs::GROWABLE_STORE);
+                        machine.write_bytes(store, &vec![b'.'; len as usize]);
+                        machine.set_payload(owner, runs::GROWABLE_LEN, len);
+                        if consumed {
+                            machine.set_payload(owner, runs::GROWABLE_STORE, 0);
+                        }
+                        vec![owner, value]
+                    };
+                    let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                        let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                        let bytes = match store {
+                            0 => Vec::new(),
+                            _ => machine.string_bytes(store),
+                        };
+                        (machine.payload(args[0], runs::GROWABLE_LEN), bytes)
+                    };
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        push_byte,
+                        1 << 16,
+                        &prepare,
+                        &inspect,
+                    );
+                    match (value <= 255, consumed) {
+                        (true, false) => assert_eq!(left.heap.0, len + 1, "{what}"),
+                        (false, _) => {
+                            assert!(left.said.contains("a byte is 0 to 255"), "{}", left.said);
+                            assert!(left.said.contains("start: 4"), "{what}: at the store");
+                        }
+                        (true, true) => {
+                            assert!(left.said.contains("already consumed"), "{}", left.said);
+                            assert!(left.said.contains("start: 2"), "{what}: at the ensure");
+                        }
+                    }
+                }
+            }
+
+            /// **An append, compiled**: bytes that fit, grow, are empty, are
+            /// longer than a bulk chunk, and go onto a consumed buffer; and pairs
+            /// into room and through a growth.
+            #[test]
+            fn a_compiled_append_is_its_rows() {
+                let (f, [_, _, _, append_text, append_pairs], native) = tiered();
+                let long = "0123456789abcdef".repeat(2_000);
+                for (text, consumed) in [
+                    ("hi", false),
+                    ("a piece longer than the sixteen bytes of room", false),
+                    ("", false),
+                    (long.as_str(), false),
+                    ("x", true),
+                ] {
+                    let what = format!("an append of {} byte(s), consumed: {consumed}", text.len());
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let owner = machine.alloc_buffer(16).unwrap();
+                        machine.push_temp(owner);
+                        if consumed {
+                            machine.set_payload(owner, runs::GROWABLE_STORE, 0);
+                        }
+                        let text = machine.new_string(text).unwrap();
+                        vec![owner, text]
+                    };
+                    let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                        let len = machine.payload(args[0], runs::GROWABLE_LEN);
+                        let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                        match store {
+                            0 => (len, Vec::new()),
+                            _ => (len, machine.string_bytes(store)[..len as usize].to_vec()),
+                        }
+                    };
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        append_text,
+                        1 << 16,
+                        &prepare,
+                        &inspect,
+                    );
+                    match consumed {
+                        true => assert!(left.said.contains("already consumed"), "{}", left.said),
+                        false => assert_eq!(left.heap.1, text.as_bytes(), "{what}"),
+                    }
+                }
+                for capacity in [4i64, 1] {
+                    let what = format!("an append of pairs into {capacity}");
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let run = machine.allocate(f.pairs, 3).unwrap();
+                        for at in 0..6u32 {
+                            machine.set_payload(run, at, 100 + u64::from(at));
+                        }
+                        machine.push_temp(run);
+                        let owner =
+                            vector_of(machine, f.pair_vector, f.pair_store, 1, capacity, false);
+                        vec![owner, run]
+                    };
+                    let inspect =
+                        |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 2);
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        append_pairs,
+                        1 << 16,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert_eq!(left.heap.0, 4, "{what}");
+                    assert_eq!(&left.heap.1[2..8], &[100, 101, 102, 103, 104, 105]);
+                }
+            }
+
+            /// **Pushes of an element that holds a fresh `String`, grown under
+            /// collection, compiled.** One function builds each string by a byte
+            /// push window and a finish, drops it from its slot, pushes it with
+            /// its index through a word push window, and leaves a garbage buffer
+            /// behind — on a heap small enough that growing either store collects.
+            /// The only thing naming a string is the vector's store, so a growth
+            /// that lost a reference, or a collection that did not see the
+            /// element, reads back as the wrong bytes.
+            #[test]
+            fn a_compiled_push_of_a_reference_grows_under_collection_as_its_rows_do() {
+                const PUSHES: u64 = 200;
+                let mut build = Build::default();
+                let int = build.scalar(Repr::Int);
+                let str_layout = build.string_layout();
+                let bytes = build.bytes_layout();
+                let buffer = build.buffer_layout();
+                let named = build.structure("Named", &[("n", int), ("s", str_layout)]);
+                let named_store = build.layout(
+                    "Store<Named>",
+                    Shape::Elements {
+                        elem: named,
+                        growable: true,
+                    },
+                );
+                let named_vector = build.layout("Vector<Named>", Shape::Vector { elem: named });
+                let packed = Storage::PackedBytes;
+                let words = Storage::Words(named);
+                // s0 owner, s1 count, s2 k, s3 k < count, s4 capacity, s5 buffer,
+                // s6 its length, s7 one, s8 its store, s9 the byte, s10 one,
+                // s11..s12 the element, s13 the vector's length, s14 one, s15 its
+                // store, s16 one, s17 garbage.
+                let code = vec![
+                    Inst::Int { dst: 2, value: 0 },
+                    Inst::Int { dst: 4, value: 4 },
+                    Inst::Int {
+                        dst: 9,
+                        value: 0x61,
+                    },
+                    Inst::Cmp {
+                        on: Compare::Int,
+                        op: CmpOp::Lt,
+                        dst: 3,
+                        a: 2,
+                        b: 1,
+                    },
+                    Inst::BranchFalse { cond: 3, to: 30 },
+                    Inst::GrowableAlloc {
+                        dst: 5,
+                        capacity: 4,
+                        storage: packed,
+                    },
+                    Inst::LoadField {
+                        dst: 6,
+                        obj: 5,
+                        at: 0,
+                        layout: int,
+                    },
+                    Inst::Int { dst: 7, value: 1 },
+                    Inst::GrowableEnsure {
+                        owner: 5,
+                        additional: 7,
+                        storage: packed,
+                    },
+                    Inst::LoadField {
+                        dst: 8,
+                        obj: 5,
+                        at: 1,
+                        layout: bytes,
+                    },
+                    Inst::RunStore {
+                        run: 8,
+                        index: 6,
+                        src: 9,
+                        storage: packed,
+                    },
+                    Inst::Clear {
+                        slot: 8,
+                        layout: bytes,
+                    },
+                    Inst::Int { dst: 10, value: 1 },
+                    Inst::GrowableCommit {
+                        owner: 5,
+                        count: 10,
+                        storage: packed,
+                    },
+                    Inst::RunFinish {
+                        dst: 12,
+                        owner: 5,
+                        target: str_layout,
+                        validation: Validation::Utf8,
+                        storage: packed,
+                    },
+                    Inst::Clear {
+                        slot: 5,
+                        layout: buffer,
+                    },
+                    Inst::Copy {
+                        dst: 11,
+                        src: 2,
+                        layout: int,
+                    },
+                    Inst::LoadField {
+                        dst: 13,
+                        obj: 0,
+                        at: 0,
+                        layout: int,
+                    },
+                    Inst::Int { dst: 14, value: 1 },
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 14,
+                        storage: words,
+                    },
+                    Inst::LoadField {
+                        dst: 15,
+                        obj: 0,
+                        at: 1,
+                        layout: named_store,
+                    },
+                    Inst::StoreElem {
+                        obj: 15,
+                        index: 13,
+                        src: 11,
+                        layout: named,
+                    },
+                    Inst::Clear {
+                        slot: 15,
+                        layout: named_store,
+                    },
+                    Inst::Int { dst: 16, value: 1 },
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 16,
+                        storage: words,
+                    },
+                    Inst::Clear {
+                        slot: 12,
+                        layout: str_layout,
+                    },
+                    Inst::GrowableAlloc {
+                        dst: 17,
+                        capacity: 4,
+                        storage: packed,
+                    },
+                    Inst::Clear {
+                        slot: 17,
+                        layout: buffer,
+                    },
+                    Inst::ArithImm {
+                        op: ArithOp::Add,
+                        dst: 2,
+                        a: 2,
+                        value: 1,
+                    },
+                    Inst::Jump { to: 3 },
+                    Inst::Return { src: 0 },
+                ];
+                let spans = code.len();
+                let mut reprs = vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Bool, Repr::Int];
+                reprs.extend([
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                ]);
+                reprs.extend([
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                ]);
+                reprs.push(Repr::Ref);
+                let fill = build.function("fill", &[named_vector, int], &reprs, named_vector, code);
+                build.program.functions[fill.index()].spans = (0..spans)
+                    .map(|pc| Span::new(cove_diag::FileId(0), pc as _, pc as _))
+                    .collect();
+                let entry = calling(&mut build, fill);
+                let program = build.done();
+                let found: Vec<_> = cove_ir::legalize::windows(&program, program.function(fill))
+                    .iter()
+                    .map(|window| window.pattern)
+                    .collect();
+                assert_eq!(
+                    found,
+                    [
+                        cove_ir::legalize::Pattern::PushByte,
+                        cove_ir::legalize::Pattern::PushWords
+                    ]
+                );
+                let native = crate::native::compile(&program).expect("this host compiles");
+                assert!(native.entry(fill).is_some(), "{:?}", native.refusals());
+
+                let prepare = |machine: &mut Machine<'_>| {
+                    let owner = vector_of(machine, named_vector, named_store, 0, 1, false);
+                    vec![owner, PUSHES]
+                };
+                let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                    let len = machine.payload(args[0], runs::GROWABLE_LEN);
+                    let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                    (0..len as u32)
+                        .map(|at| {
+                            let text = machine.payload(store, 2 * at + 1);
+                            (machine.payload(store, 2 * at), machine.string_bytes(text))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let left = compiled_as_rows(
+                    "pushes of fresh strings",
+                    &program,
+                    &native,
+                    entry,
+                    3_072,
+                    &prepare,
+                    &inspect,
+                );
+                assert!(
+                    left.said.starts_with("Ok("),
+                    "{}",
+                    left.said.lines().next().unwrap_or_default()
+                );
+                assert!(left.collections > 0, "a growth collected");
+                assert_eq!(left.heap.len() as u64, PUSHES);
+                for (at, (n, text)) in left.heap.iter().enumerate() {
+                    assert_eq!((*n, text.as_slice()), (at as u64, b"a".as_slice()));
+                }
+            }
+        }
     }
 }
