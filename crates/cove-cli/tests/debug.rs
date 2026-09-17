@@ -440,9 +440,14 @@ fn disassemble_marks_the_current_instruction_and_words_reports_the_unnamed_ones(
 /// out of `words`, and the second follows exactly that word. The same
 /// program run twice is the same run, so the address the first found is the
 /// address the second sees.
+///
+/// The `stepi` enters `std.int.renderInto`, which appends the `Int` piece of
+/// `"answer {raise(total)}"` (#403), and the `finish` after it comes back out
+/// to `main`, where the buffer being assembled is a live reference no name
+/// covers.
 #[test]
 fn object_follows_a_frame_word_into_the_heap_and_names_what_is_there() {
-    let prefix = "break debug_session/main.cove:6\ncontinue\nfinish\nfinish\nstepi\nstepi\n";
+    let prefix = "break debug_session/main.cove:6\ncontinue\nfinish\nfinish\nstepi\nfinish\n";
     let looked = debug(&format!("{prefix}words\nquit\n"));
     let word = looked
         .out

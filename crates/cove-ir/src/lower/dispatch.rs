@@ -174,6 +174,88 @@ impl Body<'_> {
         dst
     }
 
+    /// A call the lowering makes on its own account to a non-generic function
+    /// of the standard library, over values it already holds.
+    ///
+    /// [`Body::call_target`] is a call the program *wrote*: it has argument
+    /// expressions to evaluate, labels to line up and a checked type to read
+    /// an instantiation off. A call like this one has none of those. The
+    /// lowering chose it — an `Int` piece of an interpolation is rendered by
+    /// `std.int.renderInto` (#403) — so its operands are locations it already
+    /// holds, in the declaration's own order, and nothing is left to decide
+    /// but whether the declaration is there and whether they fit it.
+    ///
+    /// The function is found by module and name, as
+    /// [`Body::call_std_binding`] finds a builtin method's, and the name need
+    /// not be exported: nothing in a program names it, so it is the standard
+    /// library's own business. What makes such a call reach a lowered body
+    /// is the same correction every call makes — [`Body::reached`] — because
+    /// the checker's call graph has no edge for a call nothing wrote. A slice
+    /// that left the function out is lowered again with it, which is one more
+    /// round of [`super::lower_roots`] and never a stub called.
+    ///
+    /// `None` is that round, or a gap already reported: the caller emits
+    /// nothing naming the answer. Otherwise the answer is a fresh temporary
+    /// of the declaration's return layout, and the operands are borrowed:
+    /// each is the caller's to release.
+    pub(super) fn call_library(
+        &mut self,
+        module: &str,
+        function: &str,
+        operands: &[&Val],
+        span: Span,
+    ) -> Option<Val> {
+        let Some(id) = self.plan.resolve(self.checked, module, function) else {
+            // `cove_sema::Compiler::compile` refuses a package without the
+            // standard library before it reaches this crate; see
+            // `Body::call_std_binding` for the same arm.
+            self.errors.push(gap::gap(
+                &format!(
+                    "`{module}.{function}` names no function — the package is missing the \
+                     standard library module `cove_sema::stdlib::attach` adds"
+                ),
+                span,
+            ));
+            return None;
+        };
+        if !self.reached(id) {
+            return None;
+        }
+        let shape = self.shape(id)?;
+        let fits = !shape.receiver
+            && !shape.variadic
+            && !shape.is_async
+            && shape.params.len() == operands.len()
+            && shape
+                .params
+                .iter()
+                .zip(operands)
+                .all(|(param, operand)| *param == operand.layout);
+        if !fits {
+            self.errors.push(gap::gap(
+                &format!(
+                    "a call to `{module}.{function}` over operands its declaration does not take"
+                ),
+                span,
+            ));
+            return None;
+        }
+        let list = self
+            .pool
+            .args
+            .intern(operands.iter().map(|operand| operand.arg()).collect());
+        let dst = self.temp(shape.returns);
+        self.emit(
+            Inst::Call {
+                dst: dst.slot,
+                callee: id,
+                args: list,
+            },
+            span,
+        );
+        Some(dst)
+    }
+
     /// Which argument fills each written parameter.
     ///
     /// This is `interp::assign_labels` and the head of `interp::bind_params`,

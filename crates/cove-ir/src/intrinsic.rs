@@ -41,7 +41,6 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
     ValueRenderInto,
-    IntRenderInto,
     StringLength,
     StringWords,
     StringChars,
@@ -80,7 +79,6 @@ pub enum Intrinsic {
 /// written list like this one goes wrong.
 pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRenderInto,
-    Intrinsic::IntRenderInto,
     Intrinsic::StringLength,
     Intrinsic::StringWords,
     Intrinsic::StringChars,
@@ -126,7 +124,6 @@ impl Intrinsic {
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "Value",
-            Intrinsic::IntRenderInto => "Int",
             Intrinsic::StringLength => "String",
             Intrinsic::StringWords => "String",
             Intrinsic::StringChars => "String",
@@ -163,7 +160,6 @@ impl Intrinsic {
     pub const fn operation(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "renderInto",
-            Intrinsic::IntRenderInto => "renderInto",
             Intrinsic::StringLength => "length",
             Intrinsic::StringWords => "words",
             Intrinsic::StringChars => "chars",
@@ -243,8 +239,7 @@ impl Intrinsic {
             | Intrinsic::FloatMin
             | Intrinsic::FloatMax
             | Intrinsic::FloatFormat
-            | Intrinsic::FloatParse
-            | Intrinsic::IntRenderInto => Category::Scalar,
+            | Intrinsic::FloatParse => Category::Scalar,
             // Rendering is a walk directed by whatever layout the piece has,
             // which is what makes it a value rule rather than a text one: a
             // `"{items}"` renders an `Array` through it.
@@ -274,7 +269,6 @@ impl Intrinsic {
             // The piece first, then the buffer it is appended to: the value
             // is the receiver, as it is of every other operation here.
             Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
-            Intrinsic::IntRenderInto => fixed(&[C::Int, C::Buffer], C::Unit),
             Intrinsic::StringLength => fixed(&[C::Str], C::Int),
             Intrinsic::StringWords | Intrinsic::StringChars => fixed(&[C::Str], C::Strings),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
@@ -343,9 +337,6 @@ impl Intrinsic {
                 .union(E::READS_MEMORY)
                 .union(E::WRITES_MEMORY)
                 .union(E::BULK_WORK),
-            // At most twenty digits and a sign, so bounded work; the rest is
-            // the same append, which may grow the buffer's store.
-            Intrinsic::IntRenderInto => allocate.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
 
             // `length()` decodes every byte to count characters, and nothing
             // about a valid `String` can make that fail.
@@ -644,7 +635,6 @@ mod tests {
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
                 Intrinsic::ValueRenderInto
-                | Intrinsic::IntRenderInto
                 | Intrinsic::StringLength
                 | Intrinsic::StringWords
                 | Intrinsic::StringChars
