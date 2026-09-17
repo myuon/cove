@@ -67,12 +67,12 @@ export fn inserted<T>(items: Set<T>, element: T) -> Set<T> {
   let gap = -at - 1
   let length = items.length()
   let out: Vector<T> = core.vectorWithCapacity(length + 1)
-  core.extendFromSet(out, items, 0, gap)
+  copyFromSet(out, items, 0, gap)
   let end = core.vectorLength(out)
   core.vectorEnsure(out, 1)
   core.vectorStore(out, end, element)
   core.vectorCommit(out, 1)
-  core.extendFromSet(out, items, gap, length - gap)
+  copyFromSet(out, items, gap, length - gap)
   return core.setFinish(out)
 }
 
@@ -89,8 +89,8 @@ export fn removed<T>(items: Set<T>, element: T) -> Set<T> {
   }
   let length = items.length()
   let out: Vector<T> = core.vectorWithCapacity(length - 1)
-  core.extendFromSet(out, items, 0, at)
-  core.extendFromSet(out, items, at + 1, length - at - 1)
+  copyFromSet(out, items, 0, at)
+  copyFromSet(out, items, at + 1, length - at - 1)
   return core.setFinish(out)
 }
 
@@ -122,6 +122,23 @@ fn seekPlaced<T>(run: Vector<T>, element: T) -> Int {
     }
   }
   return -low - 1
+}
+
+/// `count` members of `items` from `from`, appended to `run`, whose store
+/// already has room for them.
+///
+/// [ADR 0062]'s append of a run, over a set's members rather than a string's
+/// bytes: the length, room for `count` more, the copy into the room, and the
+/// length raised over it. `std.map`'s `copyFromMap` is the same body over a
+/// map's entries, and says why this shape rather than the field store
+/// `core.extendFromSet` ended with.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+fn copyFromSet<T>(run: Vector<T>, items: Set<T>, from: Int, count: Int) {
+  let at = core.vectorLength(run)
+  core.vectorEnsure(run, count)
+  core.vectorCopyFromSet(run, at, items, from, count)
+  core.vectorCommit(run, count)
 }
 
 /// `element` placed at `gap` of `run`, whose store has room for one more: the

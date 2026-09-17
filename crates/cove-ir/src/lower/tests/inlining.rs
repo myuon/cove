@@ -463,6 +463,103 @@ fn every_append_the_standard_library_writes_is_a_window() {
     assert!(windows >= writers.len(), "{windows} window(s)");
 }
 
+/// Nothing publishes a growable owner's length with a field store.
+///
+/// ADR 0062's safety contract, as a property of the lowered program: "the
+/// destination is not visible before initialization. Length changes only at
+/// commit." A `StoreField` is the instruction every struct write uses, so the
+/// verifier cannot be given a rule about it — it would have to decide which
+/// field store is a commit by the offset it writes, a nominal exception inside
+/// a general instruction, which is the alternative the ADR rejects. What is
+/// left is this: a lowering test, over every function a program that reaches
+/// each appending body lowers.
+///
+/// The rule is that **a field store at a growable owner's length offset may
+/// only write a constant `0`**, and that is the distinction that matters.
+/// Writing `0` into an owner an `Alloc` has just made publishes nothing —
+/// there is nothing above the length to publish. Writing `length + count`
+/// publishes units the store may not hold, which is what `core.extendFromSet`
+/// and `core.extendFromMap` did until this stage replaced them with an ensure,
+/// a copy and a commit.
+///
+/// The constructions that remain are `core.vectorWithCapacity`'s, and they are
+/// counted rather than merely tolerated, so that this cannot pass by finding
+/// nothing. Removing them is admitting `GrowableAlloc{Words}`, which ADR 0062
+/// leaves as separate and measured work.
+///
+/// Both approximations here fail rather than pass. A slot is taken for an
+/// owner if it is *ever* one in the function, and a slot is taken for a
+/// constant `0` only within the block that wrote it.
+#[test]
+fn no_field_store_publishes_a_growable_owner_s_length() {
+    let (program, _) = program(
+        "use std.stringbuilder.StringBuilder\n\
+         fn main() -> Int {\n  \
+           var xs: Vector<Int> = Vector.of()\n  xs.push(1)\n  \
+           let m = Map.of(MapEntry(key: \"b\", value: 2), MapEntry(key: \"a\", value: 1))\n  \
+           let more = m.inserted(\"c\", 3)\n  let fewer = more.removed(\"a\")\n  \
+           let s = Set.of(3, 1, 2)\n  let bigger = s.inserted(4)\n  \
+           let smaller = bigger.removed(1)\n  \
+           var out = StringBuilder.withCapacity(4)\n  out.append(\"ab\")\n  \
+           out.appendSlice(\"cde\", 1, 3)\n  out.appendByte(99)\n  \
+           fewer.keys().length() + smaller.length() + xs.length() +\n    \
+             out.finish().byteLength()\n}",
+    );
+    let owned = |layout| {
+        matches!(
+            program.layout(layout).shape,
+            crate::layout::Shape::Vector { .. } | crate::layout::Shape::ByteBuffer
+        )
+    };
+    let mut constructions = 0;
+    for f in &program.functions {
+        let mut owner = vec![false; f.reprs.len()];
+        for inst in &f.code {
+            match inst {
+                Inst::Alloc { dst, layout, .. } if owned(*layout) => owner[*dst as usize] = true,
+                Inst::GrowableAlloc { dst, .. } => owner[*dst as usize] = true,
+                Inst::GrowableEnsure { owner: at, .. }
+                | Inst::GrowableCommit { owner: at, .. }
+                | Inst::GrowableTruncate { owner: at, .. }
+                | Inst::RunFinish { owner: at, .. } => owner[*at as usize] = true,
+                _ => {}
+            }
+        }
+        let leaders = crate::flow::leaders(&program, f);
+        let mut zero = vec![false; f.reprs.len()];
+        for (pc, inst) in f.code.iter().enumerate() {
+            if leaders[pc] {
+                zero.iter_mut().for_each(|held| *held = false);
+            }
+            if let Inst::StoreField { obj, at, src, .. } = inst {
+                if *at == crate::legalize::LENGTH && owner[*obj as usize] {
+                    assert!(
+                        zero[*src as usize],
+                        "{} +{pc} publishes a growable owner's length with a field store:\n{}",
+                        f.qualified(),
+                        crate::print::function(&program, program_id(&program, f))
+                    );
+                    constructions += 1;
+                }
+            }
+            inst.writes(&program, &mut |slot, width| {
+                for at in slot..slot + width {
+                    if let Some(held) = zero.get_mut(at as usize) {
+                        *held = false;
+                    }
+                }
+            });
+            if let Inst::Int { dst, value } = inst {
+                zero[*dst as usize] = *value == 0;
+            }
+        }
+    }
+    assert!(
+        constructions > 0,
+        "`core.vectorWithCapacity`'s zero is still written somewhere"
+    );
+}
+
 fn program_id(program: &Program, f: &Function) -> FunctionId {
     let at = program
         .functions

@@ -899,35 +899,40 @@ pub fn call_core(
             };
             Ok(host.allocate_vector(Vec::with_capacity(capacity)))
         }
-        // A range of a sorted run appended to that vector: a member as the value
-        // it is, an entry as the `MapEntry` `core.entryAt` answers. The body
-        // held the range inside the run, so the refusal is the machine's
-        // `run-copy` bound.
-        "extendFromSet" | "extendFromMap" => {
+        // A range of a sorted run written into the room a `vectorEnsure` made:
+        // a member as the value it is, an entry as the `MapEntry`
+        // `core.entryAt` answers. The body held the range inside the run, so
+        // the refusal is the machine's `run-copy` bound.
+        //
+        // It stages what it copies rather than publishing it, as `bytesCopy`
+        // does and for ADR 0062's reason: the length moves at `vectorCommit`
+        // and nowhere else. The oracle has no capacity, so the one destination
+        // it can vouch for is the end of what is already staged.
+        "vectorCopyFromSet" | "vectorCopyFromMap" => {
             let Value(Repr::Vector(storage)) = &args[0] else {
                 return Err(type_error(&shown, "out", "Vector", &args[0], span));
             };
             check_consumed(storage, span)?;
-            let appended: Vec<Value> = match &args[1] {
-                Value(Repr::Set(items)) if name == "extendFromSet" => {
+            let copied: Vec<Value> = match &args[2] {
+                Value(Repr::Set(items)) if name == "vectorCopyFromSet" => {
                     let range = core_range(
                         &shown,
                         "runCopy",
                         "element(s)",
-                        &args[2],
                         &args[3],
+                        &args[4],
                         items.len(),
                         span,
                     )?;
                     items[range].iter().map(MapKey::to_value).collect()
                 }
-                Value(Repr::Map(entries)) if name == "extendFromMap" => {
+                Value(Repr::Map(entries)) if name == "vectorCopyFromMap" => {
                     let range = core_range(
                         &shown,
                         "runCopy",
                         "element(s)",
-                        &args[2],
                         &args[3],
+                        &args[4],
                         entries.len(),
                         span,
                     )?;
@@ -938,13 +943,26 @@ pub fn call_core(
                 }
                 other => {
                     let (role, family) = match name {
-                        "extendFromSet" => ("items", "Set"),
+                        "vectorCopyFromSet" => ("items", "Set"),
                         _ => ("entries", "Map"),
                     };
                     return Err(type_error(&shown, role, family, other, span));
                 }
             };
-            storage.elements.borrow_mut().extend(appended);
+            let len = storage.elements.borrow().len();
+            let mut staged = storage.staged.borrow_mut();
+            let Value(Repr::Int(at)) = &args[1] else {
+                return Err(type_error(&shown, "at", "Int", &args[1], span));
+            };
+            let end = len + staged.len();
+            if usize::try_from(*at) != Ok(end) {
+                return Err(RuntimeError::new(format!(
+                    "`runCopy` writes {} element(s) to {at} of a store whose room begins at {end}",
+                    copied.len()
+                ))
+                .at(span));
+            }
+            staged.extend(copied);
             Ok(Value(Repr::Unit))
         }
         // The keyed finish: the vector's elements taken out as the sorted run of
