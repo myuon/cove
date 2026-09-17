@@ -2413,7 +2413,9 @@ fn build(given: Vector<Int>) -> Array<Int> {
 fn build(upTo: Int) -> String {
   var out = core.bytesAllocate(16)
   for n in 1..upTo {
-    core.bytesExtend(out, \"A\", 0, 1)
+    core.bytesEnsure(out, 1)
+    core.bytesCopy(out, core.bytesLength(out), \"A\", 0, 1)
+    core.bytesCommit(out, 1)
   }
   core.bytesFinish(out)
 }
@@ -2430,7 +2432,9 @@ fn build(upTo: Int) -> String {
         proves_in_library(
             "\
 fn fill(var out: ByteBuffer, depth: Int) {
-  core.bytesExtend(out, \"A\", 0, 1)
+  core.bytesEnsure(out, 1)
+  core.bytesCopy(out, core.bytesLength(out), \"A\", 0, 1)
+  core.bytesCommit(out, 1)
   if depth > 0 {
     fill(var out, depth - 1)
   }
@@ -2463,7 +2467,10 @@ struct Builder {
 
 impl Builder {
   fn add(var self, text: String) {
-    core.bytesExtend(self.buffer, text, 0, core.byteLength(text))
+    let count = core.byteLength(text)
+    core.bytesEnsure(self.buffer, count)
+    core.bytesCopy(self.buffer, core.bytesLength(self.buffer), text, 0, count)
+    core.bytesCommit(self.buffer, count)
   }
 
   fn finish(var self) -> String {
@@ -2490,7 +2497,9 @@ fn build() -> String {
 fn build() -> String {
   var out = core.bytesAllocate(8)
   var alias = out
-  core.bytesExtend(alias, \"A\", 0, 1)
+  core.bytesEnsure(alias, 1)
+  core.bytesCopy(alias, core.bytesLength(alias), \"A\", 0, 1)
+  core.bytesCommit(alias, 1)
   core.bytesFinish(out)
 }
 ",

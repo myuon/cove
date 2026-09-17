@@ -10,8 +10,14 @@ fn copy(var out: StringBuilder, text: String, from: Int, to: Int) {
 /// `StringBuilder.appendSlice` refuses inside `std/stringbuilder.cove` in
 /// `String.sliceBytes`'s words. The range before it is a legal one, so the
 /// builder already holds bytes when the refusal comes: the diagnostic blames
-/// the line in `copy` that called the library, keeps the library's own line as
+/// the line in `copy` that called the library, keeps the library's own lines as
 /// context, and still says that `main` called `copy`. ADR 0058.
+///
+/// The sentence is the one a bulk `core.bytesExtend` said. What ADR 0062
+/// changed is where it is decided: `appendRange` asks `sliceBytes`' five
+/// questions in Cove and raises through `core.refuseByteRange`, so the library
+/// context is two lines — the raise, and the `appendSlice` that called it —
+/// where it used to be the one instruction that both checked and copied.
 export fn main() -> Result<Unit, Error> {
   var out = StringBuilder.withCapacity(4)
   copy(var out, "héllo", 0, 1)

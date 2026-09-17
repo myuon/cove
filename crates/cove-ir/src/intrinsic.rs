@@ -56,6 +56,7 @@ pub enum Intrinsic {
     StringToUpper,
     StringToLower,
     StringFromCodePoint,
+    StringRefuseByteRange,
     IntParse,
     IntParseRadix,
     FloatToInt,
@@ -94,6 +95,7 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
+    Intrinsic::StringRefuseByteRange,
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
@@ -139,6 +141,7 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
+            Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
@@ -175,6 +178,7 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
+            Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
@@ -229,7 +233,8 @@ impl Intrinsic {
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower
-            | Intrinsic::StringFromCodePoint => Category::Text,
+            | Intrinsic::StringFromCodePoint
+            | Intrinsic::StringRefuseByteRange => Category::Text,
             Intrinsic::IntParse
             | Intrinsic::IntParseRadix
             | Intrinsic::FloatToInt
@@ -283,6 +288,9 @@ impl Intrinsic {
             Intrinsic::StringIndexOf => fixed(&[C::Str, C::Str], C::OptionOf(K::Int)),
             Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
             Intrinsic::StringFromCodePoint => fixed(&[C::Int], C::ResultOf(K::Str)),
+            // The text and the two offsets a refusal is worded with, in the
+            // order `String.sliceBytes` names them.
+            Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
             Intrinsic::IntParse => fixed(&[C::Str], C::ResultOf(K::Int)),
             Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
@@ -369,6 +377,12 @@ impl Intrinsic {
             // answers, or the message an out-of-range code point fails
             // with.
             Intrinsic::StringFromCodePoint => allocate,
+            // The byte-range refusal always raises and allocates nothing: it
+            // reads the receiver's bytes to say which end is inside a
+            // character, and the message is the machine's rather than an
+            // object on the heap. It reads at most two bytes, so it is not
+            // bulk work.
+            Intrinsic::StringRefuseByteRange => raise.union(E::READS_MEMORY),
 
             // No `Array` or `Vector` operation is here. `contains` and
             // `indexOf` are `std.array` and `std.vector` loops over `==`;
@@ -650,6 +664,7 @@ mod tests {
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
+                | Intrinsic::StringRefuseByteRange
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt

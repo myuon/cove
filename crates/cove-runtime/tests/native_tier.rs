@@ -669,6 +669,25 @@ export fn callsBuilds(a: String, b: String) -> String {
   builds(a, b)
 }
 
+/// A byte range of a string appended, in a compiled frame.
+///
+/// ADR 0062 put `appendSlice`'s range policy in Cove, so what a compiled frame
+/// runs here is five comparisons, two byte loads, an append window, and an
+/// `IntrinsicCall` on the path that refuses. The `é` makes the boundary rule
+/// reachable: `2` is inside it.
+export fn buildsASlice(from: Int, to: Int) -> String {
+  var out = StringBuilder.withCapacity(2 + counts(0))
+  out.append(\"<\")
+  out.appendSlice(\"héllo\", from, to)
+  out.finish()
+}
+
+/// A refused caller, so the refusal crosses the boundary.
+export fn callsBuildsASlice(from: Int, to: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  buildsASlice(from, to)
+}
+
 /// One byte appended and the run finished, in a compiled frame.
 ///
 /// `appendByte` can put anything a byte can hold into the run, so `finish` is
@@ -2208,6 +2227,67 @@ fn a_finish_of_invalid_utf8_is_the_vm_s_sentence() {
         let named = both("callsBuildsAByte", vec![Value::int(n)]);
         assert_eq!(named.vm, said, "the encoded tier's own words for {n}");
         assert_eq!(named.native, named.vm);
+    }
+}
+
+/// A byte range `appendSlice` refuses raises the VM's own sentence from a
+/// compiled frame.
+///
+/// The other half of ADR 0062's move of `appendSlice`'s range policy into Cove.
+/// The five questions are now *emitted code* on this tier rather than a
+/// runtime helper's, so a comparison assembled wrongly would refuse a legal
+/// range or copy an illegal one, and the raise is an `IntrinsicCall` whose
+/// sentence `cove-native` names and never builds. Every way a range can be
+/// wrong is here, and one that is not.
+#[test]
+fn an_append_slice_refuses_a_range_from_a_compiled_frame_in_the_vm_s_words() {
+    on_each_tier(&["buildsASlice"], &["callsBuildsASlice"]);
+    // `héllo` is h é l l o, so the boundaries are 0, 1, 3, 4, 5 and 6, and 2 is
+    // inside the `é`.
+    for (from, to, said) in [
+        (1i64, 3i64, Ok("<é".to_string())),
+        (1, 1, Ok("<".to_string())),
+        (
+            -1,
+            1,
+            Err("`from` is `-1`, and a byte offset into this string is 0 to 6".to_string()),
+        ),
+        (
+            0,
+            7,
+            Err("`to` is `7`, and a byte offset into this string is 0 to 6".to_string()),
+        ),
+        (
+            4,
+            3,
+            Err("`from` is `4` and `to` is `3`, so this range runs backwards".to_string()),
+        ),
+        (
+            2,
+            3,
+            Err(
+                "`from` is `2`, which is inside a character rather than at the start of one"
+                    .to_string(),
+            ),
+        ),
+        (
+            1,
+            2,
+            Err(
+                "`to` is `2`, which is inside a character rather than at the start of one"
+                    .to_string(),
+            ),
+        ),
+    ] {
+        let both = both("callsBuildsASlice", vec![Value::int(from), Value::int(to)]);
+        assert_eq!(
+            both.vm, said,
+            "the encoded tier's own words for {from}..{to}"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "the two tiers answer the same thing for {from}..{to}"
+        );
     }
 }
 

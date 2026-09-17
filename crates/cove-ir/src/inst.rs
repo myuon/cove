@@ -974,6 +974,22 @@ pub enum Inst {
     /// to be text. That this is String policy inside a run instruction is
     /// #378's Q6, unchanged in Phase 2.
     ///
+    /// # No lowering emits it
+    ///
+    /// The paragraph above is why. `StringBuilder.appendSlice` lowered to this
+    /// until ADR 0062, which moved the range policy into
+    /// `std.stringbuilder`'s `appendRange` — five questions in Cove, in
+    /// `String.sliceBytes`' own shape, raising through
+    /// `Intrinsic::StringRefuseByteRange` — so that what is left underneath is
+    /// a `core.bytesCopy` that validates nothing and can therefore be the write
+    /// half of a reservation window. A copy that also decides a policy cannot
+    /// be: the window a backend fuses has to be a write already known to be
+    /// legal.
+    ///
+    /// It stays, with its encoding, its VM arm and its native emission, until
+    /// the stage of that ADR which deletes the composite instructions together
+    /// — as [`Inst::GrowablePush`] does, and for the same reason.
+    ///
     /// # What it costs, and what it is charged
     ///
     /// [`Inst::RunCopy`]'s answer, unchanged: one unit of work per payload

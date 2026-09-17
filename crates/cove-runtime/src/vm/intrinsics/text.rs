@@ -193,6 +193,45 @@ pub(super) fn slice(
     Ok(())
 }
 
+/// `core.refuseByteRange(text, from, to)`: what is wrong with a byte range of
+/// `text` that `std.stringbuilder`'s `appendRange` has already found to be
+/// wrong, as the run stops.
+///
+/// [ADR 0062](../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+/// takes the range policy out of the copy, so this decides nothing about
+/// whether a range is legal: `appendRange` asks `String.sliceBytes`' five
+/// questions in Cove, and reaches this only when one of them has failed. What
+/// is left here is the sentence, and it is `sliceBytes`' sentence — the one
+/// `std.string`'s `refuseRange` writes out in Cove and
+/// [`crate::builtins`]' `wrong_byte_range` writes out for the oracle, in the
+/// same order and with the same final `else`, so that the three agree about
+/// which sentence a range gets by having one shape rather than by each
+/// deciding.
+///
+/// It never answers, so it takes no [`Dest`].
+pub(super) fn refuse_byte_range(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let from = operand::int(machine, frame, 1);
+    let to = operand::int(machine, frame, 2);
+    let len = text.len() as i64;
+    let boundary = |at: i64| at < len && !text.is_char_boundary(at as usize);
+    let message = if from < 0 || from > len {
+        format!("`from` is `{from}`, and a byte offset into this string is 0 to {len}")
+    } else if to < 0 || to > len {
+        format!("`to` is `{to}`, and a byte offset into this string is 0 to {len}")
+    } else if from > to {
+        format!("`from` is `{from}` and `to` is `{to}`, so this range runs backwards")
+    } else if boundary(from) {
+        format!("`from` is `{from}`, which is inside a character rather than at the start of one")
+    } else {
+        format!("`to` is `{to}`, which is inside a character rather than at the start of one")
+    };
+    Err(RuntimeError::new(message))
+}
+
 /// `String.trim() -> String`.
 pub(super) fn trim(
     machine: &mut Machine,

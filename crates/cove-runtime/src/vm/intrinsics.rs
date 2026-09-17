@@ -165,6 +165,11 @@ pub(crate) fn call(
         Intrinsic::StringToUpper => text::to_upper(machine, frame, dest),
         Intrinsic::StringToLower => text::to_lower(machine, frame, dest),
         Intrinsic::StringFromCodePoint => text::from_code_point(machine, frame, dest),
+        // Not a method of `String` a program can call: the refusal
+        // `std.stringbuilder`'s `appendRange` reaches once its own range check
+        // has failed. It never answers, so there is nothing to write into
+        // `dest` — `ValueRefuseDuplicate` below is the same shape.
+        Intrinsic::StringRefuseByteRange => text::refuse_byte_range(machine, frame),
         // No byte-counted operation is here any more. All three are
         // `std.string`: `byteLength` over the core intrinsic that is an
         // `Inst::Len`, `sliceBytes` over the one that is a byte

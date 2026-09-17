@@ -1477,11 +1477,13 @@ impl CoreIntrinsicSchema {
 /// `String.sliceBytes` decides its range in Cove and copies it with
 /// [`CORE_STRING_SLICE`], the byte member of the same run slice. And
 /// `std.stringbuilder`'s `StringBuilder` is Cove over the `bytes*` entries —
-/// [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_EXTEND`], [`CORE_BYTES_FINISH`] and
-/// [`CORE_BYTES_LENGTH`], and ADR 0062's append of a byte or a whole string,
-/// [`CORE_BYTES_ENSURE`], [`CORE_BYTES_STORE`] or [`CORE_BYTES_COPY`], and
-/// [`CORE_BYTES_COMMIT`] — which are ADR 0052's growable byte run with no
-/// method of its own left.
+/// [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_FINISH`] and
+/// [`CORE_BYTES_LENGTH`], and ADR 0062's append of a byte, a whole string or a
+/// range of one, [`CORE_BYTES_ENSURE`], [`CORE_BYTES_STORE`] or
+/// [`CORE_BYTES_COPY`], and [`CORE_BYTES_COMMIT`], with
+/// [`CORE_REFUSE_BYTE_RANGE`] for the range the builder decides in Cove and
+/// refuses — which are ADR 0052's growable byte run with no method of its own
+/// left.
 /// `length` of both sequences is [`CORE_ARRAY_LENGTH`] or
 /// [`CORE_VECTOR_LENGTH`].
 ///
@@ -1514,7 +1516,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTES_STORE,
     CORE_BYTES_COPY,
     CORE_BYTES_COMMIT,
-    CORE_BYTES_EXTEND,
+    CORE_REFUSE_BYTE_RANGE,
     CORE_BYTES_FINISH,
     CORE_BYTES_LENGTH,
     CORE_ARRAY_LENGTH,
@@ -1973,8 +1975,8 @@ pub const CORE_BYTES_COPY: CoreIntrinsicSchema = CoreIntrinsicSchema {
 ///
 /// ADR 0062's `Inst::GrowableCommit` over `Storage::PackedBytes`, and
 /// [`CORE_VECTOR_COMMIT`] for a byte run: the one way a buffer's length rises
-/// outside [`CORE_BYTES_EXTEND`], held to the verifier's reservation rule and to
-/// the instruction's own runtime bound.
+/// at all, held to the verifier's reservation rule and to the instruction's own
+/// runtime bound.
 pub const CORE_BYTES_COMMIT: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "bytesCommit",
     generics: &[],
@@ -1992,22 +1994,27 @@ pub const CORE_BYTES_COMMIT: CoreIntrinsicSchema = CoreIntrinsicSchema {
     fresh: false,
 };
 
-/// `core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) ->
-/// Unit`: the bytes of `text` from `from` up to `to`, appended.
+/// `core.refuseByteRange(text: String, from: Int, to: Int) -> Unit`: always the
+/// refusal of a byte range of `text` that `std.stringbuilder`'s `appendRange`
+/// has already found to be wrong.
 ///
-/// One `Inst::GrowableExtend` over `Storage::PackedBytes`. The range is
-/// checked by the instruction — bounds, direction and character boundaries, in
-/// `String.sliceBytes`'s words — and a range that fails stops the run. The
-/// character-boundary rule is String policy inside a run instruction, which
-/// #378's Phase 2 Q6 left there and this entry does not move.
-pub const CORE_BYTES_EXTEND: CoreIntrinsicSchema = CoreIntrinsicSchema {
-    name: "bytesExtend",
+/// One `Inst::IntrinsicCall` of `Intrinsic::StringRefuseByteRange`, which never
+/// answers — [`CORE_REFUSE_DUPLICATE`]'s shape, for the same reason. It says
+/// which of the five things is wrong in `String.sliceBytes`'s words, the words
+/// `core.bytesExtend` said them in before
+/// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md) took
+/// the range policy out of the copy: a bulk instruction that both decides a
+/// range and copies it cannot be the write half of a reservation, because the
+/// window a backend fuses has to be a write that is already known to be legal.
+///
+/// The questions themselves are Cove, in `appendRange`; this is only the
+/// sentence, so the path that succeeds — which is every range a formatter asks
+/// about — reaches nothing here. An intrinsic rather than a standard-library
+/// function so that `appendRange` stays a leaf the lowering may expand.
+pub const CORE_REFUSE_BYTE_RANGE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "refuseByteRange",
     generics: &[],
     params: &[
-        ParamSchema {
-            name: "buffer",
-            ty: BuiltinType::ByteBuffer,
-        },
         ParamSchema {
             name: "text",
             ty: BuiltinType::String,

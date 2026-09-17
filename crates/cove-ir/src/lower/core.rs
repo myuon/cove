@@ -35,9 +35,14 @@
 //! [`Inst::IntrinsicCall`] of `Intrinsic::ValueOrder` otherwise;
 //! `core.admitKey` is nothing at all where the key's layout cannot hold a
 //! refused part, and `Intrinsic::ValueAdmitKey` where it can; and
-//! `core.refuseDuplicate` is always `Intrinsic::ValueRefuseDuplicate`. Those
-//! three are the only calls this file emits, and each is a static identity
-//! rather than a name.
+//! `core.refuseDuplicate` is always `Intrinsic::ValueRefuseDuplicate`.
+//!
+//! `core.refuseByteRange` is a fourth of the same kind, and for the same
+//! reason: `std.stringbuilder`'s `appendRange` decides a byte range in Cove and
+//! has nothing to raise with, so ADR 0062 gives it
+//! `Intrinsic::StringRefuseByteRange`, which never answers. Those four are the
+//! only calls this file emits, and each is a static identity rather than a
+//! name.
 //!
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
@@ -129,12 +134,9 @@ impl Body<'_> {
                 self.core_string_slice(expr, &text.value, &from.value, &count.value, want)
             }
             ("bytesAllocate", [capacity]) => self.core_bytes_allocate(expr, &capacity.value, want),
-            ("bytesExtend", [buffer, text, from, to]) => self.core_bytes_extend(
-                expr,
-                &buffer.value,
-                [&text.value, &from.value, &to.value],
-                want,
-            ),
+            ("refuseByteRange", [text, from, to]) => {
+                self.core_refuse_byte_range(expr, &text.value, [&from.value, &to.value], want)
+            }
             ("bytesFinish", [buffer]) => self.core_bytes_finish(expr, &buffer.value, want),
             ("bytesLength", [buffer]) => self.core_bytes_length(expr, &buffer.value, want),
             ("arrayLength", [items]) => self.core_array_length(expr, &items.value, want),
@@ -984,45 +986,37 @@ impl Body<'_> {
         store
     }
 
-    /// `core.bytesExtend(buffer, text, from, to)`: one byte
-    /// [`Inst::GrowableExtend`], then the `()`.
+    /// `core.refuseByteRange(text, from, to)`: one [`Inst::IntrinsicCall`] of
+    /// [`Intrinsic::StringRefuseByteRange`], which always raises.
     ///
-    /// Four operands and an encoded instruction with room for three, so the row
-    /// goes in the argument pool the way a call's does — `[owner, src, from,
-    /// to]`, in that order, each carrying its own layout so the bytecode
-    /// verifier checks them by the rule it checks a call's arguments by.
-    ///
-    /// The range is checked by the machine, in `String.sliceBytes`'s words, and a
-    /// range that fails stops the run. Nothing is checked here: the machine is
-    /// already holding the header the bounds are read from, and ADR 0052
-    /// requires the refusal to be the same refusal in the same sentence.
-    fn core_bytes_extend(
+    /// [`Body::keyed_refusal`]'s shape over a receiver and two offsets instead
+    /// of a key and two names. ADR 0062 takes the range policy out of the copy:
+    /// `std.stringbuilder`'s `appendRange` asks `String.sliceBytes`' five
+    /// questions in Cove and reaches this only when one of them has already
+    /// failed, so the sentence is written once, here, and the copy beneath it
+    /// validates nothing and can be the write half of a reservation window.
+    fn core_refuse_byte_range(
         &mut self,
         expr: &Expr,
-        buffer: &Expr,
-        [text, from, to]: [&Expr; 3],
+        text: &Expr,
+        [from, to]: [&Expr; 2],
         want: Option<Dest>,
     ) -> Val {
-        let owner = self.expr(buffer);
         let src = self.expr(text);
         let start = self.expr(from);
         let end = self.expr(to);
-        let row = self
-            .pool
-            .args
-            .intern(vec![owner.arg(), src.arg(), start.arg(), end.arg()]);
-        self.emit(
-            Inst::GrowableExtend {
-                args: row,
-                storage: Storage::PackedBytes,
-            },
+        let dst = self.answer_at(want, shapes::UNIT);
+        self.intrinsic_call(
+            Intrinsic::StringRefuseByteRange,
+            shapes::UNIT,
+            dst.slot,
+            &[&src, &start, &end],
             expr.span,
         );
         self.release(end, expr.span);
         self.release(start, expr.span);
         self.release(src, expr.span);
-        self.release(owner, expr.span);
-        self.unit_answer(expr, want)
+        dst
     }
 
     /// `core.bytesFinish(buffer)`: a byte [`Inst::RunFinish`] into `String`,

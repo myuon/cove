@@ -64,7 +64,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `bytesStore` | `core.bytesStore(buffer: ByteBuffer, at: Int, byte: Int) -> Unit` |
 | `bytesCopy` | `core.bytesCopy(buffer: ByteBuffer, at: Int, text: String, from: Int, count: Int) -> Unit` |
 | `bytesCommit` | `core.bytesCommit(buffer: ByteBuffer, count: Int) -> Unit` |
-| `bytesExtend` | `core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) -> Unit` |
+| `refuseByteRange` | `core.refuseByteRange(text: String, from: Int, to: Int) -> Unit` |
 | `bytesFinish` | `core.bytesFinish(buffer: ByteBuffer) -> String` |
 | `bytesLength` | `core.bytesLength(buffer: ByteBuffer) -> Int` |
 | `arrayLength` | `core.arrayLength(items: Array<T>) -> Int` |
