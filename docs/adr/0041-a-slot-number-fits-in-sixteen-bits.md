@@ -3,7 +3,11 @@
 - Status: Accepted. Superseded in part by
   [ADR 0049](0049-a-closure-call-answers-a-layout-the-program-knows.md), which
   encodes `CallClosure`'s answer layout in the payload half this ADR left
-  unused
+  unused; and by [ADR 0062](0062-an-append-is-ensure-store-commit.md), which
+  replaces "One instruction in, one instruction out" and the canonical
+  `encode(decode(b)) == b` for the head of a fused append window only: that
+  row's opcode depends on the rows after it and a window's interior is not a
+  branch target, while bytecode pc stays IR pc
 - Date: 2026-09-05
 - Decides: the width and field layout of the fixed-width instruction
   [issue #245](https://github.com/myuon/cove/issues/245) asks for, an encoding
