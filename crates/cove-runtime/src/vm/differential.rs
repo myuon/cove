@@ -2511,6 +2511,120 @@ export fn main() -> Int {
     }
 }
 
+/// ADR 0062's append — `core.vectorEnsure`, `core.vectorStore` at the length,
+/// `core.vectorCommit` — answers alike on both evaluators, through growths and
+/// for an ensure the machine refuses; and the oracle's staged suffix is what
+/// makes it a model of the protocol rather than of a push: an element written
+/// and not committed is in no length, and a commit of what was never written
+/// is refused.
+#[test]
+fn the_append_protocol_agrees_and_the_oracle_publishes_only_what_was_written() {
+    let probe = "\
+/// Five pushes onto a vector with room for one, then an element replaced.
+export fn probePushes() -> String {
+  let xs: Vector<Int> = core.vectorWithCapacity(1)
+  var n = 1
+  while n <= 5 {
+    let at = core.vectorLength(xs)
+    core.vectorEnsure(xs, 1)
+    core.vectorStore(xs, at, n * 10)
+    core.vectorCommit(xs, 1)
+    n = n + 1
+  }
+  core.vectorStore(xs, 0, 7)
+  \"{core.vectorLength(xs)} {core.vectorFinish(xs)}\"
+}
+
+/// An ensure of a negative room.
+export fn probeNegative() -> Int {
+  let xs: Vector<Int> = core.vectorWithCapacity(1)
+  core.vectorEnsure(xs, -1)
+  core.vectorLength(xs)
+}
+";
+    let source = "\
+use std.set
+
+export fn main() -> Int {
+  1
+}
+";
+    let wanted = [
+        (
+            "probePushes",
+            Answer::Value("5 [7, 20, 30, 40, 50]".to_string()),
+        ),
+        (
+            "probeNegative",
+            Answer::Failed(
+                "`growableEnsure` was asked for room for -1 unit(s), and room is never negative"
+                    .to_string(),
+            ),
+        ),
+    ];
+    for (name, want) in wanted {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", probe);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("std.set", name, vec![]))
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", probe);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke("std.set", name, vec![]))
+        });
+        assert_eq!(oracle, want, "`{name}` on the oracle");
+        assert_eq!(machine, oracle, "`{name}` answers alike");
+    }
+
+    // What no verified lowering can express, so the oracle alone: the
+    // reservation rule refuses a read of the length between the write and
+    // the commit, and a commit with no write.
+    let unlowerable = "\
+/// The length before and after the commit of a written element.
+export fn probeInvisible() -> String {
+  let xs: Vector<Int> = core.vectorWithCapacity(2)
+  let at = core.vectorLength(xs)
+  core.vectorEnsure(xs, 1)
+  core.vectorStore(xs, at, 9)
+  let before = core.vectorLength(xs)
+  core.vectorCommit(xs, 1)
+  \"{before} {core.vectorLength(xs)} {core.vectorFinish(xs)}\"
+}
+
+/// A commit of an element nobody wrote.
+export fn probeUnwritten() -> Int {
+  let xs: Vector<Int> = core.vectorWithCapacity(2)
+  core.vectorEnsure(xs, 1)
+  core.vectorCommit(xs, 1)
+  core.vectorLength(xs)
+}
+";
+    let wanted = [
+        ("probeInvisible", Answer::Value("0 1 [9]".to_string())),
+        (
+            "probeUnwritten",
+            Answer::Failed(
+                "`growableCommit` would publish 1 unit(s) onto a length of 0 with 0 written \
+                 above it, and a commit publishes only units its window wrote"
+                    .to_string(),
+            ),
+        ),
+    ];
+    for (name, want) in wanted {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", unlowerable);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("std.set", name, vec![]))
+        });
+        assert_eq!(oracle, want, "`{name}` on the oracle");
+    }
+}
+
 /// #378 P4-5's keyed construction intrinsics answer alike on both evaluators:
 /// a vector with exact room, ranges of an old set or map copied onto it around
 /// a pushed unit, and the keyed finish into the new run — over one-word
@@ -2525,12 +2639,21 @@ struct ProbeSpot {
   y: Int
 }
 
+/// One unit appended, as `std.vector.push` writes it: ADR 0062's ensure, store
+/// and commit.
+fn probePush<T>(items: Vector<T>, value: T) {
+  let at = core.vectorLength(items)
+  core.vectorEnsure(items, 1)
+  core.vectorStore(items, at, value)
+  core.vectorCommit(items, 1)
+}
+
 /// `Set<Int>`: a member pushed between two ranges of the old run.
 export fn probeSetInts() -> String {
   let old = Set.of(1, 3, 4)
   let out: Vector<Int> = core.vectorWithCapacity(4)
   core.extendFromSet(out, old, 0, 1)
-  core.vectorPush(out, 2)
+  probePush(out, 2)
   core.extendFromSet(out, old, 1, 2)
   let built = core.setFinish(out)
   \"{built} {built.length()} {old}\"
@@ -2540,11 +2663,11 @@ export fn probeSetInts() -> String {
 export fn probeSetStrings() -> String {
   let old = Set.of(\"b\", \"c\")
   let low: Vector<String> = core.vectorWithCapacity(3)
-  core.vectorPush(low, \"a\")
+  probePush(low, \"a\")
   core.extendFromSet(low, old, 0, 2)
   let high: Vector<String> = core.vectorWithCapacity(3)
   core.extendFromSet(high, old, 0, 2)
-  core.vectorPush(high, \"d\")
+  probePush(high, \"d\")
   core.extendFromSet(high, old, 2, 0)
   let empty: Vector<String> = core.vectorWithCapacity(0)
   \"{core.setFinish(low)} {core.setFinish(high)} {core.setFinish(empty)}\"
@@ -2559,7 +2682,7 @@ export fn probeMap() -> String {
   )
   let out: Vector<MapEntry<String, ProbeSpot>> = core.vectorWithCapacity(3)
   core.extendFromMap(out, old, 0, 1)
-  core.vectorPush(out, MapEntry(key: \"b\", value: ProbeSpot(x: 9, y: 9)))
+  probePush(out, MapEntry(key: \"b\", value: ProbeSpot(x: 9, y: 9)))
   core.extendFromMap(out, old, 2, 1)
   let built = core.mapFinish(out)
   \"{built} {built.length()} {old}\"

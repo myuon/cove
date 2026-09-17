@@ -83,7 +83,11 @@ export fn inserted<K, V>(entries: Map<K, V>, key: K, value: V) -> Map<K, V> {
     gap + 1 + length - above,
   )
   core.extendFromMap(out, entries, 0, gap)
-  core.vectorPush(out, MapEntry(key: key, value: value))
+  let entry = MapEntry(key: key, value: value)
+  let end = core.vectorLength(out)
+  core.vectorEnsure(out, 1)
+  core.vectorStore(out, end, entry)
+  core.vectorCommit(out, 1)
   core.extendFromMap(out, entries, above, length - above)
   return core.mapFinish(out)
 }
@@ -116,7 +120,10 @@ export fn removed<K, V>(entries: Map<K, V>, key: K) -> Map<K, V> {
 export fn keys<K, V>(entries: Map<K, V>) -> Array<K> {
   let out: Vector<K> = core.vectorWithCapacity(entries.length())
   for entry in entries {
-    core.vectorPush(out, entry.key)
+    let at = core.vectorLength(out)
+    core.vectorEnsure(out, 1)
+    core.vectorStore(out, at, entry.key)
+    core.vectorCommit(out, 1)
   }
   core.vectorFinish(out)
 }
@@ -127,7 +134,10 @@ export fn keys<K, V>(entries: Map<K, V>) -> Array<K> {
 export fn values<K, V>(entries: Map<K, V>) -> Array<V> {
   let out: Vector<V> = core.vectorWithCapacity(entries.length())
   for entry in entries {
-    core.vectorPush(out, entry.value)
+    let at = core.vectorLength(out)
+    core.vectorEnsure(out, 1)
+    core.vectorStore(out, at, entry.value)
+    core.vectorCommit(out, 1)
   }
   core.vectorFinish(out)
 }
@@ -155,7 +165,9 @@ fn seekPlaced<K, V>(run: Vector<MapEntry<K, V>>, key: K) -> Int {
 /// `entry` placed at `gap` of `run`, whose store has room for one more.
 fn placeAt<K, V>(run: Vector<MapEntry<K, V>>, gap: Int, entry: MapEntry<K, V>) {
   let length = core.vectorLength(run)
-  core.vectorPush(run, entry)
+  core.vectorEnsure(run, 1)
+  core.vectorStore(run, length, entry)
+  core.vectorCommit(run, 1)
   core.vectorMove(run, gap + 1, gap, length - gap)
   core.vectorStore(run, gap, entry)
 }

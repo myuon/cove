@@ -11,7 +11,8 @@
   ],
   "coreIntrinsics": [
     {"name": "byteLength", "signature": "core.byteLength(text: String) -> Int", "generics": [], "params": [{"name": "text", "type": "String"}], "result": "Int", "libraryOnly": true},
-    {"name": "vectorPush", "signature": "core.vectorPush(items: Vector<T>, value: T) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "value", "type": "T"}], "result": "Unit", "libraryOnly": true},
+    {"name": "vectorEnsure", "signature": "core.vectorEnsure(items: Vector<T>, additional: Int) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "additional", "type": "Int"}], "result": "Unit", "libraryOnly": true},
+    {"name": "vectorCommit", "signature": "core.vectorCommit(items: Vector<T>, count: Int) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "count", "type": "Int"}], "result": "Unit", "libraryOnly": true},
     {"name": "vectorLoad", "signature": "core.vectorLoad(items: Vector<T>, index: Int) -> T", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "index", "type": "Int"}], "result": "T", "libraryOnly": true},
     {"name": "vectorStore", "signature": "core.vectorStore(items: Vector<T>, index: Int, value: T) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "index", "type": "Int"}, {"name": "value", "type": "T"}], "result": "Unit", "libraryOnly": true},
     {"name": "vectorFinish", "signature": "core.vectorFinish(items: Vector<T>) -> Array<T>", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Array<T>", "libraryOnly": true},

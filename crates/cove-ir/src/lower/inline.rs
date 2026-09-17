@@ -173,7 +173,11 @@ pub(super) fn expand_small_leaf_calls(program: &mut Program) {
         let wide: Vec<bool> = (0..program.functions.len())
             .map(|at| is_expandable(&program.functions[at], HOT_LIMIT))
             .collect();
-        let thin: Vec<bool> = program.functions.iter().map(is_thin_library).collect();
+        let thin: Vec<bool> = program
+            .functions
+            .iter()
+            .map(|f| is_thin_library(program, f))
+            .collect();
         if !wide.iter().chain(&thin).any(|held| *held) {
             return;
         }
@@ -350,7 +354,7 @@ const THIN: usize = 4;
 
 /// Whether every call to `f` is expanded, whatever the caller has spent.
 ///
-/// A standard-library function of at most [`THIN`] instructions besides its
+/// A standard-library function of at most [`THIN`] steps besides its
 /// returns that [`is_expandable`] admits with no size limit. It takes no share
 /// of [`FRAME_BUDGET`]: the words it appends are its parameters' copies and
 /// its answer, which is what the call it replaces would have pushed as a frame
@@ -359,14 +363,41 @@ const THIN: usize = 4;
 ///
 /// [`MAX_FRAME_WORDS`](crate::MAX_FRAME_WORDS) still stands, because that
 /// limit is a fact about the encoding rather than a policy.
-pub(super) fn is_thin_library(f: &Function) -> bool {
-    f.is_library()
-        && is_expandable(f, usize::MAX)
-        && f.code
-            .iter()
-            .filter(|inst| !matches!(inst, Inst::Return { .. }))
-            .count()
-            <= THIN
+///
+/// # A window is one step
+///
+/// The count is of what a backend runs as a step, which is an instruction
+/// everywhere except where [`crate::legalize`] recognises an append window:
+/// that is one fused dispatch on the encoded VM and one fast path in native
+/// code, so it is one here. [ADR 0062] says why this is not a detail —
+/// `std.vector.push` is a length read, an ensure, a store read, a write, a
+/// clear, a constant and a commit, eight rows that were one
+/// `growable-push` — and without it `push` would stop being a mandatory
+/// expansion the moment its body moved into Cove.
+///
+/// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+pub(super) fn is_thin_library(program: &Program, f: &Function) -> bool {
+    f.is_library() && is_expandable(f, usize::MAX) && steps(program, f) <= THIN
+}
+
+/// How many steps `f` is besides its returns: [`is_thin_library`]'s count, with
+/// a recognised window counted once.
+fn steps(program: &Program, f: &Function) -> usize {
+    let leaders = crate::flow::leaders(program, f);
+    let mut pc = 0;
+    let mut steps = 0;
+    while pc < f.code.len() {
+        if let Some(rows) = crate::legalize::window_len_at(program, &f.code, &leaders, pc) {
+            steps += 1;
+            pc += rows;
+            continue;
+        }
+        if !matches!(f.code[pc], Inst::Return { .. }) {
+            steps += 1;
+        }
+        pc += 1;
+    }
+    steps
 }
 
 /// Which callees a site may expand, by `FunctionId`: [`LIMIT`] at a cold site,
@@ -672,6 +703,72 @@ fn single_return(f: &Function) -> Option<Slot> {
     held
 }
 
+/// Which words of a leaf's frame hold null at every `Return`, because the last
+/// thing written to them on the way there is a [`Inst::Clear`].
+///
+/// An expansion clears each reference word of its run after the body — see
+/// [`Region::refs`] — and a word the body has already cleared on every way out
+/// would be cleared twice. [`super::frees`] declines to count a clear as a
+/// write of null, for its own reason, so nothing after this pass removes the
+/// second one, and it is a dispatch per expansion: `std.vector.push` clears
+/// the store it read inside ADR 0062's window, and an expansion that cleared it
+/// again would make every push one instruction longer than the composite
+/// instruction it replaced.
+///
+/// Answered only for a body that cannot be walked any other way than in
+/// order: no branch, so each `Return` is reached along the instructions above
+/// it, and no [`Inst::AddrOfSlot`], so no word is written where
+/// [`Inst::writes`] cannot see it. Anything else answers "no word", which
+/// keeps every clear the expansion used to emit.
+///
+/// That the body's own clear may later be dropped does not make this wrong:
+/// `super::tails` drops one only where a `return` follows, which an expansion
+/// has replaced, and `super::frees` only where the word is already null or an
+/// interned literal's address — both of which the expansion's clear would have
+/// been dropped for too.
+fn cleared_at_every_return(program: &Program, f: &Function) -> Vec<bool> {
+    let words = f.reprs.len();
+    let linear = f.code.iter().all(|inst| {
+        !matches!(inst, Inst::AddrOfSlot { .. })
+            && (matches!(inst, Inst::Return { .. } | Inst::Trap { .. }) || !inst.ends_a_block())
+    });
+    if !linear {
+        return vec![false; words];
+    }
+    let mut now = vec![false; words];
+    let mut every = vec![true; words];
+    let mut returned = false;
+    for inst in &f.code {
+        match *inst {
+            Inst::Return { .. } => {
+                returned = true;
+                for (held, cleared) in every.iter_mut().zip(&now) {
+                    *held &= *cleared;
+                }
+            }
+            Inst::Clear { slot, layout } => {
+                let width = program.layout(layout).width();
+                for at in slot..slot.saturating_add(width) {
+                    if let Some(word) = now.get_mut(at as usize) {
+                        *word = true;
+                    }
+                }
+            }
+            _ => inst.writes(program, &mut |slot, width| {
+                for at in slot..slot.saturating_add(width) {
+                    if let Some(word) = now.get_mut(at as usize) {
+                        *word = false;
+                    }
+                }
+            }),
+        }
+    }
+    if !returned {
+        return vec![false; words];
+    }
+    every
+}
+
 /// Which words of a function's frame something writes.
 ///
 /// The destination of every instruction, as the verifier's `fits` reads one:
@@ -775,7 +872,9 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
 /// Where one callee's run begins in a caller's frame, and what it holds.
 struct Region {
     base: Slot,
-    /// The reference words of the run, which the expansion clears after it.
+    /// The reference words of the run, which the expansion clears after it —
+    /// less those the body has already cleared at every `Return`, which
+    /// [`cleared_at_every_return`] finds.
     refs: Vec<Slot>,
     /// How many of the callee's leading slots are parameters it never writes.
     ///
@@ -804,7 +903,11 @@ pub(super) fn expand_cold(program: &mut Program, id: FunctionId) {
     let small: Vec<bool> = (0..program.functions.len())
         .map(|at| is_expandable(&program.functions[at], LIMIT))
         .collect();
-    let thin: Vec<bool> = program.functions.iter().map(is_thin_library).collect();
+    let thin: Vec<bool> = program
+        .functions
+        .iter()
+        .map(|f| is_thin_library(program, f))
+        .collect();
     let eligible = Eligible {
         small: &small,
         wide: &small,
@@ -914,6 +1017,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
             let renamed = renamed_words(program, &leaf, ordered.contains(callee));
             let base = reprs.len() as Slot;
             reprs.extend(leaf.reprs.iter().skip(renamed as usize).copied());
+            let cleared = cleared_at_every_return(program, &leaf);
             Region {
                 base,
                 refs: leaf
@@ -921,7 +1025,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
                     .iter()
                     .enumerate()
                     .skip(renamed as usize)
-                    .filter(|(_, repr)| repr.is_ref())
+                    .filter(|(at, repr)| repr.is_ref() && !cleared[*at])
                     .map(|(at, _)| base + at as Slot - renamed)
                     .collect(),
                 renamed,

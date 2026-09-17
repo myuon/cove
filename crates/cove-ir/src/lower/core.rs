@@ -39,7 +39,8 @@
 //!
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
-//! — a `len`, a word `growable-push`, a `load-elem` or `store-elem` of a store, a
+//! — a `len`, a word `growable-ensure` and `growable-commit` around a
+//! `store-elem`, a `load-elem` or `store-elem` of a store, a
 //! word `run-finish` into an `Array`, a `Set` or a `Map`, a word or byte
 //! `run-slice`, a word `run-copy` out of a sorted run, a word `growable-truncate` — and never the
 //! name of the method above
@@ -48,7 +49,7 @@
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
-use cove_syntax::ast::{Arg, Expr};
+use cove_syntax::ast::{Arg, Expr, ExprKind};
 
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, VECTOR_LEN, VECTOR_STORE};
@@ -67,6 +68,13 @@ use crate::repr::Repr;
 /// has no value the admission would stop for its depth.
 const ADMITTED_DEPTH: usize = 48;
 
+/// Which half of ADR 0062's reservation [`Body::core_vector_reserve`] emits.
+#[derive(Clone, Copy)]
+enum Reserve {
+    Ensure,
+    Commit,
+}
+
 impl Body<'_> {
     /// `core.name(args)`, written in a standard-library module.
     ///
@@ -84,14 +92,15 @@ impl Body<'_> {
     ) -> Val {
         match (name, args) {
             ("byteLength", [text]) => self.core_byte_length(expr, &text.value, want),
-            ("vectorPush", [items, value]) => {
-                self.core_vector_push(expr, &items.value, &value.value, want)
+            ("vectorEnsure" | "vectorStore" | "vectorCommit", _) => {
+                if self.core_statement(expr, name, args) {
+                    self.unit_answer(expr, want)
+                } else {
+                    self.dead(expr)
+                }
             }
             ("vectorLoad", [items, index]) => {
                 self.core_vector_load(expr, &items.value, &index.value, want)
-            }
-            ("vectorStore", [items, index, value]) => {
-                self.core_vector_store(expr, &items.value, &index.value, &value.value, want)
             }
             ("vectorFinish", [items]) => self.core_vector_finish(expr, &items.value, want),
             ("arraySlice", [items, from, count]) => {
@@ -175,37 +184,116 @@ impl Body<'_> {
         self.layout(&elem, items.span)
     }
 
-    /// `core.vectorPush(items, value)`: one element onto the end of the
-    /// vector's growable run.
+    /// Whether `expr` is a call of one of ADR 0062's protocol statements —
+    /// `core.vectorEnsure`, `core.vectorStore`, `core.vectorCommit` — written
+    /// where nothing reads its answer, and if it is, its instructions.
     ///
-    /// One [`Inst::GrowablePush`] over [`Storage::Words`] of the element's
-    /// layout, and then the `()` the call answers. The instruction writes no
-    /// destination, so the unit is written separately into the location the
-    /// surrounding form asked for, which is `Body::unit_answer`'s reason: a
-    /// unit built in a temporary and copied out is a copy per push.
-    fn core_vector_push(
+    /// Asked by [`Body::discard`], so that a statement costs no `()`. That is
+    /// not only a dispatch saved: [`crate::legalize`]'s windows admit nothing
+    /// between the ensure and the store read, or between the write and the
+    /// commit, that is not a constant or a clear, so a `unit` after either of
+    /// the first two would leave `std.vector.push` a run of primitives that no
+    /// backend treats as one step. The questions are
+    /// [`Body::call_qualified`]'s, in its order, over the source's shape: the
+    /// call is `core.<name>(...)`, in a standard-library module, with `core`
+    /// no local's name.
+    pub(super) fn discarded_core_statement(&mut self, expr: &Expr) -> bool {
+        let ExprKind::Call {
+            callee,
+            args,
+            trailing: None,
+            ..
+        } = &expr.kind
+        else {
+            return false;
+        };
+        let ExprKind::Field { base, name } = &callee.kind else {
+            return false;
+        };
+        let ExprKind::Ident(head) = &base.kind else {
+            return false;
+        };
+        if head != cove_schema::builtins::CORE_NAMESPACE
+            || !cove_sema::stdlib::is_library_module(self.module)
+            || self.frame.lookup(head).is_some()
+            || !matches!(
+                name.node.as_str(),
+                "vectorEnsure" | "vectorStore" | "vectorCommit"
+            )
+        {
+            return false;
+        }
+        self.core_statement(expr, &name.node, args);
+        true
+    }
+
+    /// A protocol statement's instructions, and nothing for its `()`: whoever
+    /// reads the answer writes it. `false` where the call could not be lowered,
+    /// which has already been reported.
+    fn core_statement(&mut self, expr: &Expr, name: &str, args: &[Arg]) -> bool {
+        match (name, args) {
+            ("vectorEnsure", [items, additional]) => {
+                self.core_vector_reserve(expr, &items.value, &additional.value, Reserve::Ensure)
+            }
+            ("vectorCommit", [items, count]) => {
+                self.core_vector_reserve(expr, &items.value, &count.value, Reserve::Commit)
+            }
+            ("vectorStore", [items, index, value]) => {
+                self.core_vector_store(expr, &items.value, &index.value, &value.value)
+            }
+            _ => {
+                self.gap(&format!("`core.{name}`"), expr);
+                false
+            }
+        }
+    }
+
+    /// `core.vectorEnsure(items, additional)` or `core.vectorCommit(items,
+    /// count)`: one [`Inst::GrowableEnsure`] or [`Inst::GrowableCommit`] over
+    /// [`Storage::Words`] of the element's layout.
+    ///
+    /// [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+    /// two halves of an append. Neither writes a slot. `std.vector.push` is
+    /// `let at = core.vectorLength(items)`, an ensure of one, the
+    /// [`Body::core_vector_store`] at `at`, and a commit of one, and the
+    /// constants are lowered as they are written — an `int` into a temporary
+    /// just before each — which is the shape [`crate::legalize`] recognises.
+    fn core_vector_reserve(
         &mut self,
         expr: &Expr,
         items: &Expr,
-        value: &Expr,
-        want: Option<Dest>,
-    ) -> Val {
+        count: &Expr,
+        which: Reserve,
+    ) -> bool {
         let Some(elem) = self.vector_element(items) else {
-            return self.dead(expr);
+            return false;
         };
         let owner = self.expr(items);
-        let src = self.expr(value);
-        self.emit(
-            Inst::GrowablePush {
+        let many = self.expr(count);
+        let storage = Storage::Words(elem);
+        let inst = match which {
+            Reserve::Ensure => Inst::GrowableEnsure {
                 owner: owner.slot,
-                src: src.slot,
-                storage: Storage::Words(elem),
+                additional: many.slot,
+                storage,
             },
-            expr.span,
-        );
-        self.release(src, expr.span);
+            Reserve::Commit => Inst::GrowableCommit {
+                owner: owner.slot,
+                count: many.slot,
+                storage,
+            },
+        };
+        self.emit(inst, expr.span);
+        // An ensure's count is not given back. `crate::verify`'s reservation
+        // rule refuses a write to it before the commit, and the commit's own
+        // constant is the next `Int` temporary asked for — which, handed the
+        // same slot, would be exactly that write. An `Int` holds nothing to
+        // clear, so keeping it is one frame word per written ensure.
+        if !matches!(which, Reserve::Ensure) {
+            self.release(many, expr.span);
+        }
         self.release(owner, expr.span);
-        self.unit_answer(expr, want)
+        true
     }
 
     /// The store a vector's elements are in: payload word 1 of the owner, in a
@@ -270,20 +358,14 @@ impl Body<'_> {
     /// `core.vectorStore(items, index, value)`: `value` written over the element
     /// at `index` of the vector's store.
     ///
-    /// [`Inst::LoadField`] of the store and [`Inst::StoreElem`] into it, then the
-    /// `()` the call answers. Bounded as [`Body::core_vector_load`] is, by the
-    /// capacity, and so a vector write only where the caller held `index` below
-    /// the length first.
-    fn core_vector_store(
-        &mut self,
-        expr: &Expr,
-        items: &Expr,
-        index: &Expr,
-        value: &Expr,
-        want: Option<Dest>,
-    ) -> Val {
+    /// [`Inst::LoadField`] of the store and [`Inst::StoreElem`] into it, and no
+    /// `()`: [`Body::core_statement`] writes one only where it is read. Bounded
+    /// as [`Body::core_vector_load`] is, by the capacity, and so a vector write
+    /// only where the caller held `index` below the length first — or, in a
+    /// push, at the length itself, into the room an ensure made.
+    fn core_vector_store(&mut self, expr: &Expr, items: &Expr, index: &Expr, value: &Expr) -> bool {
         let Some(elem) = self.vector_element(items) else {
-            return self.dead(expr);
+            return false;
         };
         let owner = self.expr(items);
         let at = self.expr(index);
@@ -302,7 +384,7 @@ impl Body<'_> {
         self.release(src, expr.span);
         self.release(at, expr.span);
         self.release(owner, expr.span);
-        self.unit_answer(expr, want)
+        true
     }
 
     /// `core.vectorFinish(items)`: the vector's store, relabelled to the `Array`
@@ -348,8 +430,8 @@ impl Body<'_> {
     ///
     /// One [`Inst::GrowableTruncate`] over [`Storage::Words`] of the element,
     /// then the `()` the call answers, written where the surrounding form asked
-    /// for it as [`Body::core_vector_push`]'s is. `len` is the body's to have
-    /// computed from the length it read; a `len` above it is refused.
+    /// for it. `len` is the body's to have computed from the length it read; a
+    /// `len` above it is refused.
     fn core_vector_truncate(
         &mut self,
         expr: &Expr,

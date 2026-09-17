@@ -327,6 +327,18 @@ pub struct VectorStorage {
     pub elements: RefCell<Vec<Value>>,
     /// Set by `freeze()`, which consumes uniquely owned storage.
     pub frozen: RefCell<bool>,
+    /// Elements written above the length and not yet committed:
+    /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+    /// window, as the oracle models it.
+    ///
+    /// The evaluator has no capacity, so it models the protocol rather than the
+    /// memory. `core.vectorStore` at `length + staged.len()` stages an element;
+    /// `core.vectorCommit(n)` moves exactly `n` staged elements into
+    /// [`VectorStorage::elements`], and refuses to publish one that was never
+    /// written. Nothing else reads this: a staged element is not in the
+    /// vector's length, its iteration, its equality or its finish, which is
+    /// what spare capacity is on the machine.
+    pub staged: RefCell<Vec<Value>>,
 }
 
 /// The bytes of one `ByteBuffer`, and whether `finish()` has taken them.
@@ -380,6 +392,7 @@ impl VectorStorage {
         Rc::new(VectorStorage {
             elements: RefCell::new(elements),
             frozen: RefCell::new(false),
+            staged: RefCell::new(Vec::new()),
         })
     }
 

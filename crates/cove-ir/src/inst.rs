@@ -890,9 +890,14 @@ pub enum Inst {
     ///
     /// # For [`Storage::Words`]
     ///
-    /// `Vector.push`: `std.vector.push` is `core.vectorPush(items, value)`, and
-    /// this is what that lowers to. `owner` names a `Vector<T>` whose element
-    /// layout is the storage's, and `src` is the **head of a run** of that
+    /// What `Vector.push` lowered to until
+    /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+    /// made `std.vector.push` an ensure, a `store-elem` and a commit. No
+    /// lowering emits it any more; it stays until the stage of that ADR which
+    /// deletes the composite instructions together.
+    ///
+    /// `owner` names a `Vector<T>` whose element layout is the storage's, and
+    /// `src` is the **head of a run** of that
     /// layout's width in this frame — a `Point` element is two words, and both
     /// are written at `length * stride` in the store. Nothing about the value
     /// is checked, because a run of words of the right layout is every value

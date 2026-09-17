@@ -140,9 +140,12 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
 /// static facts its fast path is emitted from.
 ///
 /// [ADR 0058] moved `Vector.push` into the standard library as
-/// `core.vectorPush(items, value)`, which lowers to this instruction, so this is
-/// no longer a builtin this crate recognises by name: it is a run instruction,
-/// decoded here once for both arms.
+/// `core.vectorPush(items, value)`, which lowered to this instruction, so this
+/// was no longer a builtin this crate recognised by name: it is a run
+/// instruction, decoded here once for both arms. ADR 0062 has since made
+/// `std.vector.push` an ensure, a store and a commit, which `windows`
+/// decodes; nothing lowers to a word `GrowablePush` now, and this goes with the
+/// instruction.
 ///
 /// `Machine::push_words` is three steps: read the owner, ensure room for one
 /// more element, and write the element's words and the new length. **Only the
