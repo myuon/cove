@@ -68,7 +68,10 @@ export fn inserted<T>(items: Set<T>, element: T) -> Set<T> {
   let length = items.length()
   let out: Vector<T> = core.vectorWithCapacity(length + 1)
   core.extendFromSet(out, items, 0, gap)
-  core.vectorPush(out, element)
+  let end = core.vectorLength(out)
+  core.vectorEnsure(out, 1)
+  core.vectorStore(out, end, element)
+  core.vectorCommit(out, 1)
   core.extendFromSet(out, items, gap, length - gap)
   return core.setFinish(out)
 }
@@ -125,7 +128,9 @@ fn seekPlaced<T>(run: Vector<T>, element: T) -> Int {
 /// members from `gap` moved up by one, then the new one written into the hole.
 fn placeAt<T>(run: Vector<T>, gap: Int, element: T) {
   let length = core.vectorLength(run)
-  core.vectorPush(run, element)
+  core.vectorEnsure(run, 1)
+  core.vectorStore(run, length, element)
+  core.vectorCommit(run, 1)
   core.vectorMove(run, gap + 1, gap, length - gap)
   core.vectorStore(run, gap, element)
 }

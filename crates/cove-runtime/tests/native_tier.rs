@@ -3061,8 +3061,8 @@ fn counted_run(
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
 ///   no library call left for either tier to make;
 /// - `Vector.push`: not an intrinsic either. It is `std.vector` over
-///   `core.vectorPush`, expanded into `measuresAndPushes` as a word
-///   `growable-push`, so it has no site and no mediated call on either tier —
+///   ADR 0062's ensure, store and commit, expanded into `measuresAndPushes` as a
+///   push window, so it has no site and no mediated call on either tier —
 ///   and from native code only its growths reach the runtime, through the
 ///   `growable` helper. The vector starts as `Vector.of(7)`, one element in a
 ///   store of exactly one, and a growth doubles from a minimum of four, so forty
@@ -3188,11 +3188,11 @@ fn the_boundary_report_counts_each_quantity_apart() {
         helpers.growable, 5,
         "one `growable` helper call per growth, and none for a push with room: {helpers:?}"
     );
-    // And every one of them was the cold path of an emitted word push, which is
+    // And every one of them was the cold ensure of an emitted push window, which is
     // what a count by operation is for: the total alone could not say so.
     for (op, calls) in helpers.growable_rows() {
         let expected = match op {
-            cove_native::GrowableOp::PushWords => 5,
+            cove_native::GrowableOp::EnsureWords => 5,
             _ => 0,
         };
         assert_eq!(calls, expected, "{op:?}: {helpers:?}");

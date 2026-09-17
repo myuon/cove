@@ -48,7 +48,8 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | name | signature |
 | --- | --- |
 | `byteLength` | `core.byteLength(text: String) -> Int` |
-| `vectorPush` | `core.vectorPush(items: Vector<T>, value: T) -> Unit` |
+| `vectorEnsure` | `core.vectorEnsure(items: Vector<T>, additional: Int) -> Unit` |
+| `vectorCommit` | `core.vectorCommit(items: Vector<T>, count: Int) -> Unit` |
 | `vectorLoad` | `core.vectorLoad(items: Vector<T>, index: Int) -> T` |
 | `vectorStore` | `core.vectorStore(items: Vector<T>, index: Int, value: T) -> Unit` |
 | `vectorFinish` | `core.vectorFinish(items: Vector<T>) -> Array<T>` |

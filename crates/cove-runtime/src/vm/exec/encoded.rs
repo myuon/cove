@@ -85,6 +85,7 @@
 //! a remapping, and the debugger's `Local` ranges, `Call::pc` and marked
 //! line all mean what they meant when an `Inst` was what ran.
 
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::thread::{Scope, ScopedJoinHandle};
 
@@ -99,7 +100,7 @@ use cove_ir::{
 use crate::budget::Meter;
 use crate::error::RuntimeError;
 use crate::vm::cell;
-use crate::vm::mem::Overflow;
+use crate::vm::mem::{header_layout, header_len, Overflow};
 
 use super::{
     compare, float_arith, int_arith, native, null_object, overflowed, reentrant_lock, runs,
@@ -1175,11 +1176,10 @@ const WINDOW_TAIL: u64 = (cove_ir::legalize::MAX_ROWS - 1) as u64;
 /// A fused head at `head`: [ADR 0062]'s window, run in one dispatch where it may
 /// be. Answers how many rows after the head ran, which the loop steps over.
 ///
-/// **The head is the length read it decodes to.** A push into spare capacity
-/// is [`fused_push`], head and all, because the owner it checks is one whose
-/// length word `Machine::checked` would have let the head read. Anything else
-/// runs the head as `LOAD_FIELD` runs it, so a refusal there is that arm's, in
-/// its words, at this pc.
+/// **The head is the length read it decodes to.** A push is [`fused_push`]
+/// first, head and all, which the arm asks before this; what reaches here is an
+/// append, or a push that declined. The head runs as `LOAD_FIELD` runs it, so a
+/// refusal there is that arm's, in its words, at this pc.
 ///
 /// **Then the rest, only when no question can fall inside.** The loop asks its
 /// one question — a safepoint, and before every instruction a debugger's or a
@@ -1187,9 +1187,8 @@ const WINDOW_TAIL: u64 = (cove_ir::legalize::MAX_ROWS - 1) as u64;
 /// longest window's tail would reach it, nothing more runs here: the answer is
 /// `0`, and the tail rows dispatch as the primitives they are still encoded as.
 /// So a breakpoint on a tail row stops there, `--profile` counts every row, and
-/// a safepoint happens at the instruction it always did. Otherwise a push into
-/// spare capacity is [`fused_push`], and everything else — a growth, an append,
-/// a refusal — is [`fused_tail`].
+/// a safepoint happens at the instruction it always did. Otherwise everything
+/// else — an append, a push a refusal is coming for — is [`fused_tail`].
 ///
 /// # One call, and why the fast path is not in the loop
 ///
@@ -1199,7 +1198,9 @@ const WINDOW_TAIL: u64 = (cove_ir::legalize::MAX_ROWS - 1) as u64;
 /// enough that `native_tier`'s
 /// `a_var_survives_a_reallocation_under_an_alternating_chain` overflowed its
 /// stack. A direct call per window is still one dispatch where the rows are
-/// seven or eight.
+/// seven or eight. A push's arm makes two calls in sequence — [`fused_push`],
+/// and this only when that declined — which measured *below* one call of this
+/// on that test's stack: see [`fused_push`].
 ///
 /// # Why it takes `encoded` and not `code`
 ///
@@ -1226,12 +1227,6 @@ fn fused_window(
     let held = code[head];
     let base_at = machine.mem.stack_index(base);
     let open = machine.instructions + WINDOW_TAIL < machine.next_check;
-    if open && matches!(held.opcode(), FUSED_PUSH_WORDS | FUSED_PUSH_BYTE) {
-        let rows = fused_push(machine, program, code, head, base, base_at);
-        if rows > 0 {
-            return Ok(rows);
-        }
-    }
     let addr = machine.mem.word_at(base_at + held.b() as usize);
     let field = held.lo();
     let width = machine.width(LayoutId(held.hi()));
@@ -1247,135 +1242,226 @@ fn fused_window(
     fused_tail(machine, program, budget, code, id, base, head)
 }
 
-/// A push window into spare capacity, run whole, head included: [ADR 0062]'s
-/// fast path, and the part of [`fused_window`] that neither calls nor
-/// allocates.
-///
-/// On a hand-built loop of two million byte pushes (the `checked` profile) the
-/// window runs in about 83 ms fused this way, against 245 ms as rows and 54 ms
-/// as the composite `GROWABLE_PUSH_BYTE` it is to replace: most of what is left
-/// is the call, which `fused_window` says why the loop cannot do without.
+/// A push window run whole, head included, in the one call the fused arm makes
+/// for it: [ADR 0062]'s fast path.
 ///
 /// # What it asks, and why the answers are the rows'
 ///
-/// The window is `cove_ir::legalize`'s push — `int n <- 1`, the ensure, the store
-/// read, the write, an optional clear, an optional second `int`, the commit —
-/// and `bytecode::verify` has re-matched it, so the rows are where this reads
-/// them. Each primitive refuses exactly one way the common case can be absent,
-/// and this asks each of those questions once, up front, of the words the rows
-/// would read:
+/// The window is `cove_ir::legalize`'s push — `int n <- 1`, the ensure, the
+/// store read, the write, an optional clear, an optional second `int`, the
+/// commit — and `bytecode::verify` has re-matched it, so the rows are where this
+/// reads them. Each primitive refuses exactly one way the common case can be
+/// absent, and this asks each of those questions once, up front, of the words
+/// the rows would read:
 ///
 /// - the owner is its storage's run — a `Vector` of the ensure's element, as
 ///   `Machine::vector_run` asks, or `Program::buffer_layout`, as
 ///   `GROWABLE_PUSH_BYTE` asks — so both family readers would answer;
-/// - its store is live and its length is below the store's capacity, so the
-///   ensure has nothing to grow, the write's index is in bounds and the commit
-///   of one fits;
+/// - its store is live, so the ensure would not refuse it;
 /// - for a byte, the unit is a byte and the store is `Program::bytes_layout`,
 ///   so `store_run_byte` would store it.
 ///
-/// Any other answer writes nothing and answers `0`: the head then runs as its
-/// own row and `fused_tail` runs the rest one by one, in their own words. The
-/// head writes the length read here, so the write's index is that length; the
-/// owner and the unit are slots no row before the write may overwrite, which
-/// `legalize::recognize` checks.
+/// Any other answer writes nothing and answers `0`: [`fused_window`] then runs
+/// the head as its own row and [`fused_tail`] the rest one by one, in their own
+/// words.
+///
+/// # A growth is the ensure's own
+///
+/// A store with no room is grown here, by the call the ensure's arm makes and
+/// after the rows before it have written the frame and been counted, synced to
+/// the ensure's pc — so a collection inside the growth sees the frame, the pc
+/// and the count the rows would have shown it, and a refusal is the ensure's,
+/// at its span. A growth is one push in eleven on covefmt (504,049 of
+/// 5,395,970), and leaving it to [`fused_tail`] — the head through `checked`,
+/// then each row through its own arm's code — cost the whole of the saving:
+/// covefmt's VM run measured about 5.00 s that way and 4.70 s this way, against
+/// 4.76 s for the composite push (interleaved runs of the two builds).
 ///
 /// # What it writes
 ///
 /// Every frame word the rows write, in their order and with their values — the
-/// count, the store, the clear, the second count — as well as the unit and the
-/// length. So a frame, a heap and a debugger reading either after the window
-/// cannot tell whether it was fused.
+/// length, the count, the store, the clear, the second count — as well as the
+/// unit and the length. So a frame, a heap and a debugger reading either after
+/// the window cannot tell whether it was fused. The owner's words and the
+/// store's are found through `Space::run_at`
+/// once each rather than a chunk lookup per word, which with the call itself is
+/// the whole of the difference between this and the rows the composite
+/// `GrowablePush` arm used to run; a unit that a chunk boundary cuts in two is
+/// written the ordinary way.
 ///
 /// # What it counts
 ///
 /// `Machine::instructions` rises by the rows it ran, so fuel counts semantic
 /// instructions whichever way a window ran. That is sound only because no
-/// question fell inside: [`fused_window`] runs this only when
-/// `instructions + WINDOW_TAIL` is short of `next_check`, and the longest tail
-/// rather than this window's is the bound so that nothing need find the commit
-/// before it may ask. A window that is shorter is fused a few instructions less
-/// often near a safepoint, which changes nothing a run can see.
+/// question falls inside: this runs only when `instructions + WINDOW_TAIL` is
+/// short of `next_check`, and the longest tail rather than this window's is the
+/// bound so that nothing need find the commit before it may ask. A growth does
+/// not bring the question nearer: `next_check` moves only at a question.
 ///
-/// `#[inline(always)]` into [`fused_window`], and a function of its own only so
-/// that it can be read.
+/// # Why its own call
+///
+/// [`fused_window`]'s frame is the slow path's — the head's `checked`, the
+/// tail's copies and refusals — and a push paid for it on every window when
+/// this was inlined there. Out of line and alone, it saves and restores only
+/// what it uses, and it takes `encoded` and `id` for the reason
+/// [`fused_window`] does.
+///
+/// Measured on a loop of two million `Int` pushes onto vectors of a thousand
+/// (the `checked` profile, medians of nine interleaved runs): 99 ms as the
+/// composite `GROWABLE_PUSH_WORDS` this replaced, 118 ms with this inlined into
+/// [`fused_window`] and reading through `Memory::read`, and 94 ms as it is. The
+/// arm's second call did not cost the loop's frame: `native_tier`'s alternating
+/// chain, bisected with `RUST_MIN_STACK`, overflows at 2,065,000 bytes before
+/// this change and at 2,038,000 after it.
 ///
 /// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
-#[inline(always)]
+#[inline(never)]
 fn fused_push(
     machine: &mut Machine<'_>,
-    program: &Program,
-    code: &[EncodedInst],
-    head: usize,
+    encoded: &Encoded,
+    id: FunctionId,
     base: u64,
     base_at: usize,
-) -> usize {
-    let row = |at: usize| code.get(head + at).copied();
-    let Some(&[first, count, ensure, read, write, after]) = code.get(head..head + 6) else {
-        return 0;
+    head: usize,
+) -> Result<usize, RuntimeError> {
+    if machine.instructions + WINDOW_TAIL >= machine.next_check {
+        return Ok(0);
+    }
+    let program = machine.program;
+    let code = encoded.function(id);
+    // Seven rows are always there: the shortest push is six, and a function's
+    // last row is a terminator, which no window's commit is.
+    let Some(&[first, count, ensure, read, write, after, next]) = code.get(head..head + 7) else {
+        return Ok(0);
     };
     let byte = first.opcode() == FUSED_PUSH_BYTE;
-    let owner = machine.mem.word_at(base_at + first.b() as usize);
-    if owner == 0 {
-        return 0;
-    }
-    let family = machine.mem.object_layout(owner);
+    let width = if byte {
+        1
+    } else {
+        machine.width(LayoutId(ensure.lo())) as usize
+    };
+    let at = base_at + first.a() as usize;
+    let src = base_at + write.c() as usize;
+    let (clear, second) = match after.opcode() {
+        CLEAR => (Some(after), (next.opcode() == CONST_INT).then_some(next)),
+        CONST_INT => (None, Some(after)),
+        _ => (None, None),
+    };
+    let rows = 5 + usize::from(clear.is_some()) + usize::from(second.is_some());
+    debug_assert!(
+        matches!(
+            code.get(head + rows).map(|held| held.opcode()),
+            Some(GROWABLE_COMMIT_BYTES | GROWABLE_COMMIT_WORDS)
+        ),
+        "a verified push window ends in its commit"
+    );
+
+    // The owner's header and both payload words, and the store's header, found
+    // once each: a null owner, a consumed store, or an owner a chunk boundary
+    // cuts short of its payload is left to the rows.
+    let (frame, heap) = machine.mem.stack_and_heap();
+    let owner = frame[base_at + first.b() as usize];
+    let Some([header, length, stored]) = heap.run_at(owner).and_then(|run| run.get(..3)) else {
+        return Ok(0);
+    };
+    let family = header_layout(header.load(Relaxed));
     let owned = if byte {
         family == program.buffer_layout
     } else {
         matches!(program.layout(family).shape, Shape::Vector { elem } if elem.0 == ensure.lo())
     };
     if !owned {
-        return 0;
+        return Ok(0);
+    }
+    let len = length.load(Relaxed);
+    let store = stored.load(Relaxed);
+    let Some(run) = heap.run_at(store) else {
+        return Ok(0);
+    };
+    let store_header = run[0].load(Relaxed);
+    if byte {
+        // The unit as the write would read it, after the head has written `at`.
+        let value = if src == at { len } else { frame[src] };
+        if value > 0xFF || header_layout(store_header) != program.bytes_layout {
+            return Ok(0);
+        }
+    }
+
+    // The rows before the ensure: the head's length read — an owner of either
+    // family has its two payload words, so `Machine::checked` would have
+    // answered yes — and the count.
+    frame[at] = len;
+    frame[base_at + count.a() as usize] = count.payload();
+    let into = if byte {
+        1 + len as usize / 8
+    } else {
+        1 + len as usize * width
+    };
+    let room = len < u64::from(header_len(store_header));
+    if let Some(into) = run.get(into..into + width).filter(|_| room) {
+        frame[base_at + read.a() as usize] = store;
+        if byte {
+            // `GROWABLE_PUSH_BYTE`'s blend of one byte into its word.
+            let shift = (len % 8) * 8;
+            let held = into[0].load(Relaxed);
+            into[0].store((held & !(0xFF << shift)) | (frame[src] << shift), Relaxed);
+        } else {
+            for (word, unit) in into.iter().zip(&frame[src..src + width]) {
+                word.store(*unit, Relaxed);
+            }
+        }
+        // One word: `legalize::recognize` admits only a clear of the store
+        // slot, whose layout is one word wide.
+        if let Some(clear) = clear {
+            frame[base_at + clear.a() as usize] = 0;
+        }
+        if let Some(second) = second {
+            frame[base_at + second.a() as usize] = second.payload();
+        }
+        length.store(len + 1, Relaxed);
+        machine.instructions += rows as u64;
+        if machine.counting.is_some() {
+            machine.count_fusion(first.opcode(), rows, true);
+        }
+        return Ok(rows);
+    }
+
+    // A growth, or a unit a chunk boundary cuts in two: the same rows, the
+    // ordinary way.
+    if room {
+        machine.instructions += rows as u64;
+    } else {
+        machine.instructions += 2;
+        machine.sync(head + 2);
+        let storage = match byte {
+            true => Storage::PackedBytes,
+            false => Storage::Words(LayoutId(ensure.lo())),
+        };
+        if let Err(error) = machine.ensure_growable(owner, storage, 1) {
+            if machine.counting.is_some() {
+                machine.count_fusion(first.opcode(), 2, false);
+            }
+            return Err(error.at(machine.span(id, head + 2)));
+        }
+        machine.instructions += rows as u64 - 2;
     }
     let store = machine.mem.payload(owner, runs::GROWABLE_STORE);
-    let len = machine.mem.payload(owner, runs::GROWABLE_LEN);
-    if store == 0 || len >= u64::from(machine.mem.object_len(store)) {
-        return 0;
-    }
-    let value = machine.mem.word_at(base_at + write.c() as usize);
-    if byte && (value > 0xFF || machine.mem.object_layout(store) != program.bytes_layout) {
-        return 0;
-    }
-    let (clear, next) = match after.opcode() {
-        CLEAR => (Some(after), row(6)),
-        _ => (None, Some(after)),
-    };
-    let Some(next) = next else {
-        return 0;
-    };
-    let second = (next.opcode() == CONST_INT).then_some(next);
-    let rows = 5 + usize::from(clear.is_some()) + usize::from(second.is_some());
-    debug_assert!(
-        matches!(
-            row(rows).map(|held| held.opcode()),
-            Some(GROWABLE_COMMIT_BYTES | GROWABLE_COMMIT_WORDS)
-        ),
-        "a verified push window ends in its commit"
-    );
-
-    // The head's length read: an owner of either family has its two payload
-    // words, so `Machine::checked` would have answered yes.
-    machine.mem.set_word_at(base_at + first.a() as usize, len);
-    machine
-        .mem
-        .set_word_at(base_at + count.a() as usize, count.payload());
     machine.mem.set_word_at(base_at + read.a() as usize, store);
     if byte {
-        // `GROWABLE_PUSH_BYTE`'s blend of one byte into its word.
-        let at = len as u32;
-        let shift = (at % 8) * 8;
-        let held = machine.mem.payload(store, at / 8);
+        let shift = (len % 8) * 8;
+        let value = machine.mem.word_at(src);
+        let held = machine.mem.payload(store, len as u32 / 8);
+        machine.mem.set_payload(
+            store,
+            len as u32 / 8,
+            (held & !(0xFF << shift)) | (value << shift),
+        );
+    } else {
+        let into = machine.mem.payload_addr(store, len as u32 * width as u32);
         machine
             .mem
-            .set_payload(store, at / 8, (held & !(0xFF << shift)) | (value << shift));
-    } else {
-        let width = machine.width(LayoutId(write.lo()));
-        let into = machine.mem.payload_addr(store, len as u32 * width);
-        machine.mem.copy_words(into, base + write.c() as u64, width);
+            .copy_words(into, base + write.c() as u64, width as u32);
     }
-    // One word: `legalize::recognize` admits only a clear of the store slot,
-    // whose layout is one word wide.
     if let Some(clear) = clear {
         machine.mem.set_word_at(base_at + clear.a() as usize, 0);
     }
@@ -1385,16 +1471,15 @@ fn fused_push(
             .set_word_at(base_at + second.a() as usize, second.payload());
     }
     machine.mem.set_payload(owner, runs::GROWABLE_LEN, len + 1);
-    machine.instructions += rows as u64;
     if machine.counting.is_some() {
         machine.count_fusion(first.opcode(), rows, true);
     }
-    rows
+    Ok(rows)
 }
 
 /// The rows of a window after its head, run one by one without a dispatch
-/// each: [ADR 0062]'s fused arm for everything [`fused_push`] declines — a
-/// growth, an append, a refusal.
+/// each: [ADR 0062]'s fused arm for everything [`fused_push`] declines — an
+/// append, a push onto an owner it cannot vouch for, a refusal.
 ///
 /// Each row is run by the same code its own arm runs, and in that arm's order:
 /// the row is counted first, a refusal is synced to the row's pc and reported
@@ -2617,7 +2702,13 @@ pub(super) fn dispatch<'s, 'a>(
             // ADR 0062's fused heads: one call, which runs the head and as much
             // of the window after it as may run without a dispatch, and answers
             // how many rows that was. See `fused_window`.
-            FUSED_PUSH_WORDS | FUSED_PUSH_BYTE | FUSED_APPEND_BYTES | FUSED_APPEND_WORDS => {
+            FUSED_PUSH_WORDS | FUSED_PUSH_BYTE => {
+                pc += match fused_push(machine, encoded, id, base, base_at, pc - 1)? {
+                    0 => fused_window(machine, encoded, budget, id, base, pc - 1)?,
+                    rows => rows,
+                };
+            }
+            FUSED_APPEND_BYTES | FUSED_APPEND_WORDS => {
                 pc += fused_window(machine, encoded, budget, id, base, pc - 1)?;
             }
             LEN => {
@@ -7404,6 +7495,64 @@ mod tests {
                 assert_eq!(report.fusions[PUSH_WORDS], 1, "{what}");
                 assert_eq!(report.encoded_dispatches, 2, "{what}");
             }
+        }
+
+        /// **A push that has to grow is grown by the fused arm itself**, and a
+        /// growth is where a push allocates: so one whose allocation collects
+        /// first, and one the heap has no room for at all, must still be the
+        /// rows — the same collections, and the same refusal at the ensure's
+        /// span with the same instructions and fuel spent.
+        #[test]
+        fn a_fused_push_that_grows_collects_and_refuses_as_the_rows_do() {
+            let f = framed();
+            // A heap of 256 words: a full `Vector<Int>` of 32, and garbage enough
+            // beside it that the growth to 64 has to collect before it fits.
+            let collects = |machine: &mut Machine<'_>| {
+                let owner = vector_of(machine, f.int_vector, f.int_store, 32, 32, false);
+                machine.push_temp(owner);
+                while machine.new_string("garbage, and nothing holds it").is_ok()
+                    && machine.mem.heap_words() < 200
+                {}
+                vec![owner, 42]
+            };
+            // A heap of 128 words, and a full vector of 64 that cannot double.
+            let refuses = |machine: &mut Machine<'_>| {
+                let owner = vector_of(machine, f.int_vector, f.int_store, 64, 64, false);
+                vec![owner, 42]
+            };
+            let inspect = |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
+            let (fused, report) = fuses_as_unfused(
+                "a growth that collects",
+                &f.program,
+                f.push_int,
+                256,
+                None,
+                &collects,
+                &inspect,
+            );
+            assert!(fused.collections > 0, "the growth collected: {fused:?}");
+            assert_eq!(fused.heap.0, 33);
+            assert_eq!(fused.heap.1[32], 42);
+            assert_eq!(report.fusions[PUSH_WORDS], 1);
+            assert_eq!(report.encoded_dispatches, 2);
+
+            let (fused, report) = fuses_as_unfused(
+                "a growth with no room anywhere",
+                &f.program,
+                f.push_int,
+                128,
+                None,
+                &refuses,
+                &inspect,
+            );
+            assert!(fused.said.contains("no memory left"), "{}", fused.said);
+            assert!(
+                fused.said.contains("start: 2"),
+                "at the ensure: {}",
+                fused.said
+            );
+            assert_eq!(fused.heap.0, 64, "nothing was published");
+            assert_eq!(report.fusions, [0; 4]);
         }
 
         /// **A byte push**: into room, into a full store, of a value that is not a

@@ -659,6 +659,23 @@ impl Space {
         self.words.at(addr - STACK_WORDS).load(Ordering::Relaxed)
     }
 
+    /// The heap words from `addr` to the end of the chunk it is in, where
+    /// `addr` is a heap address; `None` for a stack one, null included.
+    ///
+    /// For a reader that asks several questions of one object and must not pay
+    /// a chunk lookup for each: [`Memory::read`] decodes the region and finds
+    /// the chunk again for every word, which is right for a word nobody knew
+    /// anything about and a waste for a header and the payload words after it.
+    /// An object may cross a chunk boundary, so the slice can end inside one,
+    /// and a caller that wants a word past its end asks the ordinary way.
+    #[inline(always)]
+    pub(crate) fn run_at(&self, addr: u64) -> Option<&[AtomicU64]> {
+        if is_stack(addr) {
+            return None;
+        }
+        Some(self.words.run(addr - STACK_WORDS))
+    }
+
     /// See [`Words::bases`].
     fn chunk_bases(&self, into: &mut Vec<*mut u64>) {
         self.words.bases(into);
@@ -2046,6 +2063,14 @@ impl Memory {
     #[inline]
     pub(crate) fn payload(&self, addr: u64, at: u32) -> u64 {
         self.read(addr + 1 + at as u64)
+    }
+
+    /// This task's stack words and the run's heap, borrowed apart, for a
+    /// reader that writes the one while it holds words of the other — see
+    /// [`Space::run_at`].
+    #[inline(always)]
+    pub(crate) fn stack_and_heap(&mut self) -> (&mut [u64], &Space) {
+        (&mut self.stack.words, &self.space)
     }
 
     /// Writes payload word `at` of the object whose header is at `addr`.

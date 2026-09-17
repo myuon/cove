@@ -344,18 +344,57 @@ pub fn call_core(
             };
             Ok(Value(Repr::Int(text.len() as i64)))
         }
-        // `std.vector.push`'s whole body. The write goes through the storage
-        // handle, so every alias observes it, exactly as the `Vector` arm of
-        // `call_method` wrote it before `push` moved; the liveness check is that
-        // arm's too, in the same words.
-        "vectorPush" => {
-            let value = args.remove(1);
+        // ADR 0062's append, beneath `std.vector.push`: an ensure, a store at the
+        // length, and a commit. The oracle has no capacity, so an ensure asks
+        // only what the machine's `growableEnsure` refuses before it would grow
+        // — a consumed vector, a negative room — and starts a reservation with
+        // nothing staged: an earlier window's uncommitted elements are spare
+        // room again, as they are above the machine's length. The store stages
+        // (`vectorStore` below), and the commit publishes exactly what was
+        // staged, so a lowering that commits an element it did not write
+        // disagrees with this loudly rather than answering a zero.
+        "vectorEnsure" => {
             let Value(Repr::Vector(storage)) = &args[0] else {
                 return Err(type_error(&shown, "items", "Vector", &args[0], span));
             };
             check_consumed(storage, span)?;
-            storage.elements.borrow_mut().push(value);
+            let Value(Repr::Int(additional)) = &args[1] else {
+                return Err(type_error(&shown, "additional", "Int", &args[1], span));
+            };
+            if *additional < 0 {
+                return Err(RuntimeError::new(format!(
+                    "`growableEnsure` was asked for room for {additional} unit(s), and room is \
+                     never negative"
+                ))
+                .at(span));
+            }
+            storage.staged.borrow_mut().clear();
             Ok(Value(Repr::Unit))
+        }
+        "vectorCommit" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let Value(Repr::Int(count)) = &args[1] else {
+                return Err(type_error(&shown, "count", "Int", &args[1], span));
+            };
+            let mut staged = storage.staged.borrow_mut();
+            let mut elements = storage.elements.borrow_mut();
+            match usize::try_from(*count) {
+                Ok(count) if count <= staged.len() => {
+                    elements.extend(staged.drain(..count));
+                    staged.clear();
+                    Ok(Value(Repr::Unit))
+                }
+                _ => Err(RuntimeError::new(format!(
+                    "`growableCommit` would publish {count} unit(s) onto a length of {} with {} \
+                     written above it, and a commit publishes only units its window wrote",
+                    elements.len(),
+                    staged.len()
+                ))
+                .at(span)),
+            }
         }
         // The element read and write beneath `std.vector.set`. The body holds the
         // index below `items.length()` before either is asked, so the refusal
@@ -370,6 +409,13 @@ pub fn call_core(
             let at = core_index(&shown, &args[1], elements.len(), span)?;
             Ok(elements[at].clone())
         }
+        //
+        // A store at or above the length is a push's write, into the room an
+        // ensure made: at `length + staged` it stages one more element, and
+        // below that it replaces one already staged. Only an index past the
+        // staged suffix is refused, which on the machine is a write past the
+        // room — `vectorEnsure` above says why the oracle cannot be exact about
+        // where the machine's capacity ends.
         "vectorStore" => {
             let value = args.remove(2);
             let Value(Repr::Vector(storage)) = &args[0] else {
@@ -377,8 +423,16 @@ pub fn call_core(
             };
             check_consumed(storage, span)?;
             let mut elements = storage.elements.borrow_mut();
-            let at = core_index(&shown, &args[1], elements.len(), span)?;
-            elements[at] = value;
+            let mut staged = storage.staged.borrow_mut();
+            let len = elements.len();
+            let at = core_index(&shown, &args[1], len + staged.len() + 1, span)?;
+            if at < len {
+                elements[at] = value;
+            } else if at - len < staged.len() {
+                staged[at - len] = value;
+            } else {
+                staged.push(value);
+            }
             Ok(Value(Repr::Unit))
         }
         // `std.vector.freeze`'s whole body: the elements taken out of the
@@ -1111,7 +1165,7 @@ pub fn call_method(
             check_live(storage, name, span)?;
             match name {
                 // `push` is not here: it is `std.vector.push`, over
-                // `call_core`'s `vectorPush`.
+                // `call_core`'s `vectorEnsure`, `vectorStore` and `vectorCommit`.
                 // `set` is not here either: it is `std.vector.set`, whose
                 // range decision and `Option` are Cove over `call_core`'s
                 // `vectorLoad` and `vectorStore`.

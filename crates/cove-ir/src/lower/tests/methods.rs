@@ -275,13 +275,18 @@ fn @m.Point.bump(<addr>) -> Unit
     );
 }
 
-/// `Vector.push` is `std.vector.push`, whose body is ADR 0058's
-/// `core.vectorPush`: a word `growable-push` of the element's layout and the
-/// `()` the call answers. The wrapper is thin, so it is expanded wherever it is
-/// called, and neither a `call` nor an `intrinsic-call` is left — at a one-word
-/// element and at a two-word one, whose source is the whole run.
+/// `Vector.push` is `std.vector.push`, whose body is ADR 0062's append over the
+/// element's words: the length, `growable-ensure` of one, the store read after
+/// it, a `store-elem` at the length, and `growable-commit` of one — and then
+/// the `()` the call answers. No statement of the body writes a `()` of its
+/// own, and the expansion does not clear the store slot the body already
+/// cleared, so each push is exactly `crate::legalize`'s window and one `unit`,
+/// the two rows the composite `growable-push` and its `unit` were. The body is
+/// expanded wherever it is called, and neither a `call` nor an `intrinsic-call`
+/// is left — at a one-word element and at a two-word one, whose source is the
+/// whole run.
 #[test]
-fn a_push_is_a_word_growable_push_where_it_is_written() {
+fn a_push_is_ensure_store_commit_where_it_is_written() {
     assert_eq!(
         listing(
             "struct Point { x: Int, y: Int }\n\
@@ -291,21 +296,35 @@ fn a_push_is_a_word_growable_push_where_it_is_written() {
         ),
         "\
 fn @m.f(Vector Vector m.Point) -> Int
-  frame 11: s0!:ref s1!:ref s2!:int s3!:int s4:int s5:ref s6:ref s7:int s8:unit s9:unit s10:unit
-  local xs -> s0:Vector [0, 9)
-  local ps -> s1:Vector [0, 9)
-  local p -> s2..s3:m.Point [0, 9)
-  local ints -> s5:Vector [1, 8)
-  local points -> s6:Vector [2, 8)
+  frame 19: s0!:ref s1!:ref s2!:int s3!:int s4:int s5:ref s6:ref s7:int s8:unit s9:unit s10:int s11:int s12:ref s13:int s14:unit s15:int s16:int s17:ref s18:int
+  local xs -> s0:Vector [0, 23)
+  local ps -> s1:Vector [0, 23)
+  local p -> s2..s3:m.Point [0, 23)
+  local ints -> s5:Vector [1, 22)
+  local points -> s6:Vector [2, 22)
      0  copy s5:Vector s0:Vector
      1  copy s6:Vector s1:Vector
      2  int s7:int 7
-     3  growable-push.words Int s5:ref s7:Int
-     4  unit s8:unit
-     5  growable-push.words m.Point s6:ref s2..s3:m.Point
-     6  unit s8:unit
-     7  int s4:int 0
-     8  return s4:Int
+     3  load-field s10:Int s5:ref +0
+     4  int s11:int 1
+     5  growable-ensure.words Int s5:ref s11:int
+     6  load-field s12:<ref> s5:ref +1
+     7  store-elem s12:ref s10:int s7:Int
+     8  clear s12:<ref>
+     9  int s13:int 1
+    10  growable-commit.words Int s5:ref s13:int
+    11  unit s8:unit
+    12  load-field s15:Int s6:ref +0
+    13  int s16:int 1
+    14  growable-ensure.words m.Point s6:ref s16:int
+    15  load-field s17:<ref> s6:ref +1
+    16  store-elem s17:ref s15:int s2..s3:m.Point
+    17  clear s17:<ref>
+    18  int s18:int 1
+    19  growable-commit.words m.Point s6:ref s18:int
+    20  unit s8:unit
+    21  int s4:int 0
+    22  return s4:Int
 "
     );
 }
@@ -350,19 +369,26 @@ fn a_freeze_is_a_word_run_finish_where_it_is_written() {
         ),
         "\
 fn @m.f(Int) -> Array
-  frame 8: s0!:int s1:ref s2:ref s3:int s4:ref s5:unit s6:unit s7:ref
-  local n -> s0:Int [0, 10)
-  local building -> s4:Vector [6, 9)
+  frame 12: s0!:int s1:ref s2:ref s3:int s4:ref s5:unit s6:unit s7:int s8:int s9:ref s10:int s11:ref
+  local n -> s0:Int [0, 17)
+  local building -> s4:Vector [6, 16)
      0  alloc s2:ref Vector<store> x0
      1  alloc s4:ref Vector<vector>
      2  int s3:int 0
      3  store-field s4:ref +0 s3:Int
      4  store-field s4:ref +1 s2:<ref>
      5  clear s2:<ref>
-     6  growable-push.words Int s4:ref s0:Int
-     7  unit s5:unit
-     8  run-finish.words Int s1:ref s4:ref Array unchecked
-     9  return s1:Array
+     6  load-field s7:Int s4:ref +0
+     7  int s8:int 1
+     8  growable-ensure.words Int s4:ref s8:int
+     9  load-field s9:<ref> s4:ref +1
+    10  store-elem s9:ref s7:int s0:Int
+    11  clear s9:<ref>
+    12  int s10:int 1
+    13  growable-commit.words Int s4:ref s10:int
+    14  unit s5:unit
+    15  run-finish.words Int s1:ref s4:ref Array unchecked
+    16  return s1:Array
 "
     );
 }

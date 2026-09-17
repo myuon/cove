@@ -303,7 +303,11 @@ fn a_thin_library_wrapper_is_expanded_past_the_budget() {
         .iter()
         .find(|f| f.qualified() == "std.duration.millis")
         .expect("`std.duration.millis` was lowered");
-    assert!(inline::is_thin_library(library), "{:?}", library.code);
+    assert!(
+        inline::is_thin_library(&program, library),
+        "{:?}",
+        library.code
+    );
 
     let wide = inline::FRAME_BUDGET + 8;
     let thin = caller_of(&mut program, "std.duration.millis", wide);
@@ -319,12 +323,140 @@ fn a_thin_library_wrapper_is_expanded_past_the_budget() {
         .iter()
         .find(|f| f.qualified() == "m.millisOf")
         .expect("`millisOf` was lowered");
-    assert!(!inline::is_thin_library(mine));
+    assert!(!inline::is_thin_library(&program, mine));
     inline::expand_cold(&mut program, own);
     assert!(
         still_calls(&program, own),
         "the program's own body of the same shape is left a call"
     );
+}
+
+/// `Vector.push` is still a thin wrapper now that its body is ADR 0062's
+/// window, because `is_thin_library` counts a recognised window as one step.
+///
+/// The body is eight instructions and a `unit` — past `THIN` by any count of
+/// instructions — so without that rule a caller that had spent its budget
+/// would leave every push a call, and a push that was one dispatch would be a
+/// frame. The caller here is over the budget, and the push is expanded.
+#[test]
+fn a_push_window_is_one_step_of_a_thin_wrapper() {
+    let (mut program, _) = program(
+        "fn main() -> Int {\n  var xs: Vector<Int> = Vector.of()\n  xs.push(1)\n  xs.length()\n}",
+    );
+    let push = program
+        .functions
+        .iter()
+        .find(|f| f.qualified() == "std.vector.push<Int>")
+        .expect("`std.vector.push<Int>` was lowered");
+    assert!(
+        push.code.len() > 5,
+        "the body is more instructions than THIN: {:?}",
+        push.code
+    );
+    assert_eq!(
+        crate::legalize::windows(&program, push).len(),
+        1,
+        "the body is one window: {:?}",
+        push.code
+    );
+    assert!(inline::is_thin_library(&program, push), "{:?}", push.code);
+
+    let wide = inline::FRAME_BUDGET + 8;
+    let caller = caller_of(&mut program, "std.vector.push<Int>", wide);
+    inline::expand_cold(&mut program, caller);
+    assert!(!still_calls(&program, caller), "the push is expanded");
+    assert_eq!(
+        crate::legalize::windows(&program, program.function(caller)).len(),
+        1,
+        "and is still one window where it was expanded"
+    );
+}
+
+/// Every ensure and every commit the standard library writes is inside a window
+/// `crate::legalize` recognises, in the body that writes it and wherever that
+/// body is expanded.
+///
+/// ADR 0062 asks for this pin by name: a window that stops matching is still
+/// correct primitive IR, so a body edit that put one more row inside it — a
+/// `unit` a statement wrote, a constant into the wrong slot — would pass every
+/// other test and cost each push its fused dispatch in silence. The program
+/// reaches every standard-library function that appends one element:
+/// `Vector.push` at a one-word and a two-word element, `Map.of`, `Map.inserted`,
+/// `Map.keys`, `Map.values`, `Set.of` and `Set.inserted`.
+#[test]
+fn every_append_the_standard_library_writes_is_a_window() {
+    let (program, _) = program(
+        "struct Point { x: Int, y: Int }\n\
+         fn main() -> Int {\n  \
+           var xs: Vector<Int> = Vector.of()\n  xs.push(1)\n  \
+           var ps: Vector<Point> = Vector.of()\n  ps.push(Point(x: 1, y: 2))\n  \
+           let m = Map.of(MapEntry(key: \"b\", value: 2), MapEntry(key: \"a\", value: 1))\n  \
+           let more = m.inserted(\"c\", 3)\n  \
+           let s = Set.of(3, 1, 2)\n  let bigger = s.inserted(4)\n  \
+           more.keys().length() + more.values().length() + bigger.length() + xs.length() + ps.length()\n}",
+    );
+    let mut writers = std::collections::BTreeSet::new();
+    let mut windows = 0;
+    for f in &program.functions {
+        let found = crate::legalize::windows(&program, f);
+        let inside = |pc: usize| {
+            found
+                .iter()
+                .any(|window| (window.head..window.head + window.rows).contains(&pc))
+        };
+        for (pc, inst) in f.code.iter().enumerate() {
+            if matches!(
+                inst,
+                Inst::GrowableEnsure { .. } | Inst::GrowableCommit { .. }
+            ) {
+                assert!(
+                    inside(pc),
+                    "{} +{pc} is not inside a window:\n{}",
+                    f.qualified(),
+                    crate::print::function(&program, program_id(&program, f))
+                );
+                let name = f.qualified();
+                writers.insert(name.split('<').next().unwrap_or(&name).to_string());
+            }
+            assert!(
+                !matches!(
+                    inst,
+                    Inst::GrowablePush {
+                        storage: crate::Storage::Words(_),
+                        ..
+                    }
+                ),
+                "{} +{pc} is a word `growable-push`, which nothing lowers to any more",
+                f.qualified()
+            );
+        }
+        windows += found.len();
+    }
+    for writer in [
+        "m.main",
+        "std.vector.push",
+        "std.map.inserted",
+        "std.map.keys",
+        "std.map.values",
+        "std.map.placeAt",
+        "std.set.inserted",
+        "std.set.placeAt",
+    ] {
+        assert!(
+            writers.contains(writer),
+            "`{writer}` holds an append: {writers:?}"
+        );
+    }
+    assert!(windows >= writers.len(), "{windows} window(s)");
+}
+
+fn program_id(program: &Program, f: &Function) -> FunctionId {
+    let at = program
+        .functions
+        .iter()
+        .position(|held| std::ptr::eq(held, f))
+        .expect("the function is the program's");
+    FunctionId(at as u32)
 }
 
 /// A standard-library method that takes `var self` is expanded where it is

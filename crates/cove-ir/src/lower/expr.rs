@@ -379,6 +379,7 @@ impl Body<'_> {
             ExprKind::Match { scrutinee, arms } => {
                 self.match_expr(scrutinee, arms, expr.span, None)
             }
+            _ if self.discarded_core_statement(expr) => {}
             _ => {
                 let value = self.expr(expr);
                 self.release(value, expr.span);

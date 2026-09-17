@@ -803,8 +803,9 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         function: "length",
     },
     // The first `var self` method to move, and the first binding over a core
-    // intrinsic that writes: `std.vector.push` is `core.vectorPush(items,
-    // value)`. A `Vector` is a handle, so the function takes it by value and
+    // intrinsic that writes: `std.vector.push` is ADR 0062's `core.vectorEnsure`,
+    // `core.vectorStore` and `core.vectorCommit`. A `Vector` is a handle, so the
+    // function takes it by value and
     // writes through it exactly as the runtime arm did; the checker still holds
     // the call site to a writable place, from the schema's `mutating`.
     StdBinding {
@@ -1461,9 +1462,10 @@ impl CoreIntrinsicSchema {
 ///
 /// The first was the smallest: a `String`'s length in bytes is the header word
 /// of the object that holds it, and `String.byteLength` was the first public
-/// method written in Cove over one of these. The second is the first that
-/// writes: `Vector.push` is `std.vector` over [`CORE_VECTOR_PUSH`], which is
-/// ADR 0058's growable push over a run of element words. `Vector.set` is the
+/// method written in Cove over one of these. `Vector.push` is `std.vector`'s
+/// ADR 0062 append over a run of element words: its length,
+/// [`CORE_VECTOR_ENSURE`], [`CORE_VECTOR_STORE`] at that length and
+/// [`CORE_VECTOR_COMMIT`]. `Vector.set` is the
 /// first with policy around it: its range decision and its `Option` are Cove,
 /// and [`CORE_VECTOR_LOAD`] and [`CORE_VECTOR_STORE`] are the element read and
 /// write beneath them. `Vector.freeze` is [`CORE_VECTOR_FINISH`], the word run
@@ -1494,7 +1496,8 @@ impl CoreIntrinsicSchema {
 /// [`CORE_SET_SLICE`], a run slice out of a set (P4-7).
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
-    CORE_VECTOR_PUSH,
+    CORE_VECTOR_ENSURE,
+    CORE_VECTOR_COMMIT,
     CORE_VECTOR_LOAD,
     CORE_VECTOR_STORE,
     CORE_VECTOR_FINISH,
@@ -1551,17 +1554,17 @@ pub const CORE_BYTE_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
     fresh: false,
 };
 
-/// `core.vectorPush<T>(items: Vector<T>, value: T) -> Unit`: one element onto
-/// the end of a vector's growable run.
+/// `core.vectorEnsure<T>(items: Vector<T>, additional: Int) -> Unit`: room in
+/// the vector's store for `additional` more elements above its length.
 ///
-/// ADR 0058's `growable-ensure items, 1` → `run-store` → `growable-commit
-/// items, 1`, which the lowering emits as one `Inst::GrowablePush` over
-/// `Storage::Words` of the element's layout. A push has no index and no answer,
-/// so there is no policy for the standard library to write around it:
-/// `std.vector.push` is this call and nothing else, and it is a function only
-/// so that the lowering never names the public method.
-pub const CORE_VECTOR_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
-    name: "vectorPush",
+/// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+/// `Inst::GrowableEnsure` over `Storage::Words` of the element. It may grow the
+/// store, replacing the store reference beneath the owner — which is why a body
+/// reads the store only after it — and it publishes nothing: the length is
+/// unchanged. `std.vector.push` is the length, this of one,
+/// [`CORE_VECTOR_STORE`] at that length, and [`CORE_VECTOR_COMMIT`] of one.
+pub const CORE_VECTOR_ENSURE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorEnsure",
     generics: &["T"],
     params: &[
         ParamSchema {
@@ -1569,8 +1572,34 @@ pub const CORE_VECTOR_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
             ty: BuiltinType::Vector(&BuiltinType::Param("T")),
         },
         ParamSchema {
-            name: "value",
-            ty: BuiltinType::Param("T"),
+            name: "additional",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.vectorCommit<T>(items: Vector<T>, count: Int) -> Unit`: the vector's
+/// length raised over the `count` elements the body has just written above it.
+///
+/// ADR 0062's `Inst::GrowableCommit` over `Storage::Words` of the element, and
+/// the one way a vector's length rises. That the elements were written is the
+/// verifier's reservation rule — an ensure of `count`, the write at the length
+/// read before it, then this, with nothing between that calls, allocates or
+/// branches — and the instruction still refuses a count that is negative or
+/// past the store's capacity.
+pub const CORE_VECTOR_COMMIT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorCommit",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
         },
     ],
     result: BuiltinType::Unit,

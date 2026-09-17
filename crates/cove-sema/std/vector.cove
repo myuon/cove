@@ -59,12 +59,16 @@ export fn indexOf<T>(items: Vector<T>, element: T) -> Option<Int> {
 /// the vector without moving the vector itself, so no alias is left behind.
 /// Amortised O(1).
 ///
-/// A push has no index to check and nothing to answer, so there is no policy
-/// here to write in Cove: the body is one core intrinsic, ADR 0058's growable
-/// push over the element's words, and the lowering expands it wherever it is
-/// called.
+/// ADR 0062's append of one: room for one more element, the element written
+/// at the length read before it, and the length raised over it. Nothing is
+/// published until the commit, so a growth that fails leaves the vector as it
+/// was. The four statements are one window to every backend, and the lowering
+/// expands them wherever `push` is called.
 export fn push<T>(items: Vector<T>, value: T) {
-  core.vectorPush(items, value)
+  let at = core.vectorLength(items)
+  core.vectorEnsure(items, 1)
+  core.vectorStore(items, at, value)
+  core.vectorCommit(items, 1)
 }
 
 /// Replaces the element at `index` with `value`, answering what was there.
