@@ -19,10 +19,14 @@ fn @m.hello() -> String
 
 /// An interpolation is a byte buffer, one append per part, and a finish
 /// (#403). The buffer is sized for the literal bytes and a small allowance
-/// per piece (3 + 1 + 16 = 20). A literal run of several bytes is extended
-/// from the string pool, a `String` piece is extended whole — with no
-/// rendering call and no temporary string — and a one-byte run is a push of
-/// its byte. An empty run is left out.
+/// per piece (3 + 1 + 16 = 20). A literal run of several bytes is copied in
+/// from the string pool and a `String` piece whole — with no rendering call and
+/// no temporary string — by `std.stringbuilder.appendText`, and a one-byte run
+/// is its byte, by `appendByteInto`. Both are expanded where they are called,
+/// so each append is ADR 0062's window in the listing — the text's length, then
+/// the buffer's length, ensure, store read, `run-copy` or `run-store`, clear
+/// and commit — and neither leaves the `()` its call answers, which `frees`
+/// drops. An empty run is left out.
 #[test]
 fn an_interpolation_appends_each_part_to_one_buffer() {
     assert_eq!(
@@ -32,20 +36,38 @@ fn an_interpolation_appends_each_part_to_one_buffer() {
         ),
         "\
 fn @m.greet(String) -> String
-  frame 6: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int
-  local name -> s0:String [0, 12)
+  frame 16: s0!:ref s1:ref s2:int s3:ref s4:ref s5:unit s6:unit s7:int s8:int s9:int s10:ref s11:unit s12:int s13:int s14:ref s15:int
+  local name -> s0:String [0, 30)
      0  int s2:int 20
      1  growable-alloc.bytes s3:ref s2:int
      2  str s4:ref \"hi \"
-     3  int s2:int 3
-     4  int s5:int 0
-     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     6  len s2:int s0:ref
-     7  growable-extend.bytes (s3:ByteBuffer s0:String s5:Int s2:Int)
-     8  int s2:int 33
-     9  growable-push.bytes s3:ref s2:int
-    10  run-finish.bytes s1:ref s3:ref String utf8
-    11  return s1:String
+     3  len s7:int s4:ref
+     4  load-field s8:Int s3:ref +0
+     5  growable-ensure.bytes s3:ref s7:int
+     6  int s9:int 0
+     7  load-field s10:<ref> s3:ref +1
+     8  run-copy.bytes (s10:<ref> s8:Int s4:String s9:Int s7:Int)
+     9  clear s10:<ref>
+    10  growable-commit.bytes s3:ref s7:int
+    11  len s7:int s0:ref
+    12  load-field s8:Int s3:ref +0
+    13  growable-ensure.bytes s3:ref s7:int
+    14  int s9:int 0
+    15  load-field s10:<ref> s3:ref +1
+    16  run-copy.bytes (s10:<ref> s8:Int s0:String s9:Int s7:Int)
+    17  clear s10:<ref>
+    18  growable-commit.bytes s3:ref s7:int
+    19  int s2:int 33
+    20  load-field s12:Int s3:ref +0
+    21  int s13:int 1
+    22  growable-ensure.bytes s3:ref s13:int
+    23  load-field s14:<ref> s3:ref +1
+    24  run-store.bytes s14:ref s12:int s2:int
+    25  clear s14:<ref>
+    26  int s15:int 1
+    27  growable-commit.bytes s3:ref s15:int
+    28  run-finish.bytes s1:ref s3:ref String utf8
+    29  return s1:String
 "
     );
 }
@@ -68,17 +90,22 @@ fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
         ),
         "\
 fn @m.show(m.Point) -> String
-  frame 8: s0!:int s1!:int s2:ref s3:int s4:ref s5:ref s6:int s7:unit
-  local p -> s0..s1:m.Point [0, 9)
+  frame 12: s0!:int s1!:int s2:ref s3:int s4:ref s5:ref s6:unit s7:unit s8:int s9:int s10:int s11:ref
+  local p -> s0..s1:m.Point [0, 14)
      0  int s3:int 18
      1  growable-alloc.bytes s4:ref s3:int
      2  str s5:ref \"p=\"
-     3  int s3:int 2
-     4  int s6:int 0
-     5  growable-extend.bytes (s4:ByteBuffer s5:String s6:Int s3:Int)
-     6  intrinsic-call s7:Unit Value.renderInto (s0..s1:m.Point s4:ByteBuffer)
-     7  run-finish.bytes s2:ref s4:ref String utf8
-     8  return s2:String
+     3  len s8:int s5:ref
+     4  load-field s9:Int s4:ref +0
+     5  growable-ensure.bytes s4:ref s8:int
+     6  int s10:int 0
+     7  load-field s11:<ref> s4:ref +1
+     8  run-copy.bytes (s11:<ref> s9:Int s5:String s10:Int s8:Int)
+     9  clear s11:<ref>
+    10  growable-commit.bytes s4:ref s8:int
+    11  intrinsic-call s6:Unit Value.renderInto (s0..s1:m.Point s4:ByteBuffer)
+    12  run-finish.bytes s2:ref s4:ref String utf8
+    13  return s2:String
 "
     );
 }
@@ -167,9 +194,10 @@ fn a_literal_no_instruction_loads_is_still_in_the_pool() {
 /// the buffer as its two operands.
 ///
 /// It is an ordinary call, and the body it reaches is a leaf that renders
-/// through byte pushes alone: no intrinsic, no string, and nothing it calls. So
-/// the inliner decides it as it decides any leaf: a site that runs once keeps
-/// the call, and a piece inside a loop is expanded where it stands.
+/// through ADR 0062's byte appends alone — a `run-store` window per byte — with
+/// no intrinsic, no string, and nothing it calls. So the inliner decides it as
+/// it decides any leaf: a site that runs once keeps the call, and a piece inside
+/// a loop is expanded where it stands.
 #[test]
 fn an_int_piece_is_rendered_by_the_standard_library() {
     let cold = listing("fn show(n: Int) -> String { \"{n}\" }", "show");
@@ -183,7 +211,7 @@ fn an_int_piece_is_rendered_by_the_standard_library() {
         "count",
     );
     assert!(!hot.contains("call "), "{hot}");
-    assert!(hot.contains("growable-push.bytes"), "{hot}");
+    assert!(hot.contains("run-store.bytes"), "{hot}");
 
     let (sources, checked) = super::checked("fn show(n: Int) -> String { \"{n}\" }");
     let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
@@ -195,5 +223,18 @@ fn an_int_piece_is_rendered_by_the_standard_library() {
     assert!(!body.contains("call"), "{body}");
     assert!(!body.contains("str "), "{body}");
     assert!(!body.contains("growable-extend"), "{body}");
-    assert!(body.contains("growable-push.bytes"), "{body}");
+    assert!(!body.contains("growable-push"), "{body}");
+    let function = program.function(id);
+    let windows = crate::legalize::windows(&program, function);
+    assert_eq!(
+        windows.len(),
+        2,
+        "the sign and each digit are one byte push window apiece: {body}"
+    );
+    assert!(
+        windows
+            .iter()
+            .all(|window| window.pattern == crate::legalize::Pattern::PushByte),
+        "{body}"
+    );
 }

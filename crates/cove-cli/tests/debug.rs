@@ -364,6 +364,12 @@ fn finish_runs_the_frame_to_its_return_and_stops_in_the_caller() {
 /// frame deeper than the one it was asked from — measured where it shows:
 /// stepping at the call in `main`.
 ///
+/// The call is the first piece of `main`'s interpolation, and that is not
+/// incidental: a piece of literal text before it is appended by
+/// `std.stringbuilder.appendText`, expanded where it is written (ADR 0062), and
+/// a `step` from the line would stop inside that body before it reached the
+/// call.
+///
 /// It is `main`'s call to `raise` and not `raise`'s call to `twice`, because
 /// the latter is not a call any more: `lower::inline` expanded `twice`, and
 /// a line whose call was expanded stops *inside* the body — there is no
@@ -442,7 +448,7 @@ fn disassemble_marks_the_current_instruction_and_words_reports_the_unnamed_ones(
 /// address the second sees.
 ///
 /// The `stepi` enters `std.int.renderInto`, which appends the `Int` piece of
-/// `"answer {raise(total)}"` (#403), and the `finish` after it comes back out
+/// `"{raise(total)} is the answer"` (#403), and the `finish` after it comes back out
 /// to `main`, where the buffer being assembled is a live reference no name
 /// covers.
 #[test]
@@ -498,7 +504,7 @@ fn an_end_of_input_halts_the_run_the_way_quit_does() {
 fn continuing_to_the_end_runs_the_program_it_always_was() {
     let session = debug("continue\n");
     session.wrote("before");
-    session.wrote("answer 42");
+    session.wrote("42 is the answer");
     session.wrote("after");
     session.says("the run finished after");
     assert_eq!(session.code, Some(0), "stderr:\n{}", session.err);
@@ -679,12 +685,19 @@ fn disassemble_shows_the_selected_frame_and_not_only_the_innermost() {
 /// most used: `print items` rendered a vector and nothing could then ask
 /// what the object was. `print` now hands the word over and `object` takes
 /// the name, which are the two halves of the same answer.
+///
+/// The line broken on is `println("literal {items}")?`, whose first append is
+/// `std.stringbuilder.appendText` expanded in `main` (ADR 0062). The stop is
+/// still `main`'s, before the buffer is made, because an instruction the
+/// caller wrote on the line comes before the expanded body — otherwise it
+/// would be inside `appendText`, where `items` is no name at all.
 #[test]
 fn a_reference_a_local_holds_is_followed_by_the_name_that_holds_it() {
     let session = run(
         &["debug", "coll_array"],
         "break coll_array/main.cove:7\ncontinue\nprint items\nobject items\nquit\n",
     );
+    session.says("breakpoint 1, coll_array.main at coll_array/main.cove:7:");
     // The word is printed beside the rendering, so a person can see it, copy
     // it, and compare it with what `words` says.
     // The line `print` wrote, and not the source line the listing quoted

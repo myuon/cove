@@ -216,6 +216,11 @@ pub(super) const VECTOR_STORE: u32 = 1;
 /// `length()` reads this and never the object it points at.
 pub(super) const BUFFER_LEN: u32 = 0;
 
+/// Payload word 1 of a [`Shape::ByteBuffer`] owner: the [`Shape::Bytes`] store
+/// its bytes are in, whose header length is the capacity — [`VECTOR_STORE`]'s
+/// word, for [`BUFFER_LEN`]'s reason.
+pub(super) const BUFFER_STORE: u32 = 1;
+
 /// The word a `Range` holds its first value in.
 pub(super) const RANGE_START: u32 = 0;
 

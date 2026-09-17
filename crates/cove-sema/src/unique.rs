@@ -2413,7 +2413,7 @@ fn build(given: Vector<Int>) -> Array<Int> {
 fn build(upTo: Int) -> String {
   var out = core.bytesAllocate(16)
   for n in 1..upTo {
-    core.bytesPush(out, 65)
+    core.bytesExtend(out, \"A\", 0, 1)
   }
   core.bytesFinish(out)
 }
@@ -2430,7 +2430,7 @@ fn build(upTo: Int) -> String {
         proves_in_library(
             "\
 fn fill(var out: ByteBuffer, depth: Int) {
-  core.bytesPush(out, 65)
+  core.bytesExtend(out, \"A\", 0, 1)
   if depth > 0 {
     fill(var out, depth - 1)
   }
@@ -2490,7 +2490,7 @@ fn build() -> String {
 fn build() -> String {
   var out = core.bytesAllocate(8)
   var alias = out
-  core.bytesPush(alias, 65)
+  core.bytesExtend(alias, \"A\", 0, 1)
   core.bytesFinish(out)
 }
 ",

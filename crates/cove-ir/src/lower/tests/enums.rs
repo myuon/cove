@@ -79,26 +79,38 @@ fn a_reference_word_of_another_case_reads_null() {
         ),
         "\
 fn @m.f(String) -> m.Msg
-  frame 9: s0!:ref s1:tag s2:ref s3:int s4:ref s5:int s6:ref s7:tag s8:ref
-  local what -> s0:String [0, 17)
-  local said -> s7..s8:m.Msg [12, 12)
+  frame 19: s0!:ref s1:tag s2:ref s3:int s4:ref s5:unit s6:ref s7:tag s8:ref s9:unit s10:int s11:int s12:int s13:ref s14:unit s15:int s16:int s17:ref s18:int
+  local what -> s0:String [0, 29)
+  local said -> s7..s8:m.Msg [24, 24)
      0  int s3:int 17
      1  growable-alloc.bytes s4:ref s3:int
-     2  len s3:int s0:ref
-     3  int s5:int 0
-     4  growable-extend.bytes (s4:ByteBuffer s0:String s5:Int s3:Int)
-     5  int s3:int 33
-     6  growable-push.bytes s4:ref s3:int
-     7  run-finish.bytes s6:ref s4:ref String utf8
-     8  clear s4:ByteBuffer
-     9  tag s7:tag m.Msg.Text
-    10  copy s8:String s6:String
-    11  clear s6:String
-    12  clear s7..s8:m.Msg
-    13  tag s7:tag m.Msg.Ping
-    14  clear s8:<ref>
-    15  copy s1..s2:m.Msg s7..s8:m.Msg
-    16  return s1..s2:m.Msg
+     2  len s10:int s0:ref
+     3  load-field s11:Int s4:ref +0
+     4  growable-ensure.bytes s4:ref s10:int
+     5  int s12:int 0
+     6  load-field s13:<ref> s4:ref +1
+     7  run-copy.bytes (s13:<ref> s11:Int s0:String s12:Int s10:Int)
+     8  clear s13:<ref>
+     9  growable-commit.bytes s4:ref s10:int
+    10  int s3:int 33
+    11  load-field s15:Int s4:ref +0
+    12  int s16:int 1
+    13  growable-ensure.bytes s4:ref s16:int
+    14  load-field s17:<ref> s4:ref +1
+    15  run-store.bytes s17:ref s15:int s3:int
+    16  clear s17:<ref>
+    17  int s18:int 1
+    18  growable-commit.bytes s4:ref s18:int
+    19  run-finish.bytes s6:ref s4:ref String utf8
+    20  clear s4:ByteBuffer
+    21  tag s7:tag m.Msg.Text
+    22  copy s8:String s6:String
+    23  clear s6:String
+    24  clear s7..s8:m.Msg
+    25  tag s7:tag m.Msg.Ping
+    26  clear s8:<ref>
+    27  copy s1..s2:m.Msg s7..s8:m.Msg
+    28  return s1..s2:m.Msg
 "
     );
 }

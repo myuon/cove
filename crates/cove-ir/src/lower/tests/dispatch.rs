@@ -169,39 +169,61 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         listing(source, "Booking.line"),
         "\
 fn @m.Booking.line(m.Booking) -> String
-  frame 6: s0!:int s1:ref s2:int s3:ref s4:ref s5:int
-  local self -> s0:m.Booking [0, 12)
+  frame 11: s0!:int s1:ref s2:int s3:ref s4:ref s5:unit s6:unit s7:int s8:int s9:int s10:ref
+  local self -> s0:m.Booking [0, 23)
      0  int s2:int 18
      1  growable-alloc.bytes s3:ref s2:int
      2  str s4:ref \"- \"
-     3  int s2:int 2
-     4  int s5:int 0
-     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     6  call s4:String m.Booking.summarize (s0:m.Booking)
-     7  len s2:int s4:ref
-     8  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     9  clear s4:String
-    10  run-finish.bytes s1:ref s3:ref String utf8
-    11  return s1:String
+     3  len s7:int s4:ref
+     4  load-field s8:Int s3:ref +0
+     5  growable-ensure.bytes s3:ref s7:int
+     6  int s9:int 0
+     7  load-field s10:<ref> s3:ref +1
+     8  run-copy.bytes (s10:<ref> s8:Int s4:String s9:Int s7:Int)
+     9  clear s10:<ref>
+    10  growable-commit.bytes s3:ref s7:int
+    11  call s4:String m.Booking.summarize (s0:m.Booking)
+    12  len s7:int s4:ref
+    13  load-field s8:Int s3:ref +0
+    14  growable-ensure.bytes s3:ref s7:int
+    15  int s9:int 0
+    16  load-field s10:<ref> s3:ref +1
+    17  run-copy.bytes (s10:<ref> s8:Int s4:String s9:Int s7:Int)
+    18  clear s10:<ref>
+    19  growable-commit.bytes s3:ref s7:int
+    20  clear s4:String
+    21  run-finish.bytes s1:ref s3:ref String utf8
+    22  return s1:String
 "
     );
     assert_eq!(
         listing(source, "Receipt.line"),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 7: s0!:int s1:ref s2:int s3:ref s4:ref s5:int s6:ref
-  local self -> s0:m.Receipt [0, 11)
+  frame 12: s0!:int s1:ref s2:int s3:ref s4:ref s5:unit s6:unit s7:int s8:int s9:int s10:ref s11:ref
+  local self -> s0:m.Receipt [0, 22)
      0  int s2:int 18
      1  growable-alloc.bytes s3:ref s2:int
      2  str s4:ref \"- \"
-     3  int s2:int 2
-     4  int s5:int 0
-     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     6  str s4:ref \"receipt\"
-     7  len s2:int s4:ref
-     8  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     9  run-finish.bytes s1:ref s3:ref String utf8
-    10  return s1:String
+     3  len s7:int s4:ref
+     4  load-field s8:Int s3:ref +0
+     5  growable-ensure.bytes s3:ref s7:int
+     6  int s9:int 0
+     7  load-field s10:<ref> s3:ref +1
+     8  run-copy.bytes (s10:<ref> s8:Int s4:String s9:Int s7:Int)
+     9  clear s10:<ref>
+    10  growable-commit.bytes s3:ref s7:int
+    11  str s4:ref \"receipt\"
+    12  len s7:int s4:ref
+    13  load-field s8:Int s3:ref +0
+    14  growable-ensure.bytes s3:ref s7:int
+    15  int s9:int 0
+    16  load-field s10:<ref> s3:ref +1
+    17  run-copy.bytes (s10:<ref> s8:Int s4:String s9:Int s7:Int)
+    18  clear s10:<ref>
+    19  growable-commit.bytes s3:ref s7:int
+    20  run-finish.bytes s1:ref s3:ref String utf8
+    21  return s1:String
 "
     );
 }
@@ -222,19 +244,30 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
         ),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 7: s0!:int s1:ref s2:int s3:ref s4:ref s5:int s6:ref
-  local self -> s0:m.Receipt [0, 11)
+  frame 12: s0!:int s1:ref s2:int s3:ref s4:ref s5:unit s6:unit s7:int s8:int s9:int s10:ref s11:ref
+  local self -> s0:m.Receipt [0, 22)
      0  int s2:int 20
      1  growable-alloc.bytes s3:ref s2:int
      2  str s4:ref \"  $ \"
-     3  int s2:int 4
-     4  int s5:int 0
-     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     6  str s4:ref \"receipt\"
-     7  len s2:int s4:ref
-     8  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     9  run-finish.bytes s1:ref s3:ref String utf8
-    10  return s1:String
+     3  len s7:int s4:ref
+     4  load-field s8:Int s3:ref +0
+     5  growable-ensure.bytes s3:ref s7:int
+     6  int s9:int 0
+     7  load-field s10:<ref> s3:ref +1
+     8  run-copy.bytes (s10:<ref> s8:Int s4:String s9:Int s7:Int)
+     9  clear s10:<ref>
+    10  growable-commit.bytes s3:ref s7:int
+    11  str s4:ref \"receipt\"
+    12  len s7:int s4:ref
+    13  load-field s8:Int s3:ref +0
+    14  growable-ensure.bytes s3:ref s7:int
+    15  int s9:int 0
+    16  load-field s10:<ref> s3:ref +1
+    17  run-copy.bytes (s10:<ref> s8:Int s4:String s9:Int s7:Int)
+    18  clear s10:<ref>
+    19  growable-commit.bytes s3:ref s7:int
+    20  run-finish.bytes s1:ref s3:ref String utf8
+    21  return s1:String
 "
     );
 }

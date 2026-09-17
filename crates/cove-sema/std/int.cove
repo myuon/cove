@@ -43,9 +43,16 @@ export fn abs(value: Int) -> Int {
 /// The buffer only appends, so the leading digit has to be known before any is
 /// written: `power` is found as the largest power of ten the magnitude reaches,
 /// and each digit is the quotient by it as it is divided back down to one.
-/// Each digit is one `core.bytesPush`, which both tiers answer in place when
-/// the buffer has room — the interpolation sized it for a whole `Int` — so a
-/// digit costs a division, a multiplication and a store, and no call.
+/// Each digit is one byte append — ADR 0062's length read, ensure of one, byte
+/// store at that length and commit of one, which both tiers run as one step and
+/// answer in place when the buffer has room (the interpolation sized it for a
+/// whole `Int`) — so a digit costs a division, a multiplication and a store,
+/// and no call.
+///
+/// The append is written out rather than called as `std.stringbuilder`'s
+/// `appendByteInto`, which is the same four statements: one standard-library
+/// module cannot name another's private function. The byte is bound first, so
+/// that its arithmetic is not inside the window.
 ///
 /// # Nothing here can overflow
 ///
@@ -65,7 +72,11 @@ export fn abs(value: Int) -> Int {
 fn renderInto(value: Int, buffer: ByteBuffer) {
   var rest = value
   if value < 0 {
-    core.bytesPush(buffer, '-')
+    let minus = '-'
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, minus)
+    core.bytesCommit(buffer, 1)
   } else {
     rest = -value
   }
@@ -76,7 +87,11 @@ fn renderInto(value: Int, buffer: ByteBuffer) {
   }
   while power < 0 {
     let digit = rest / power
-    core.bytesPush(buffer, '0' + digit)
+    let byte = '0' + digit
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, byte)
+    core.bytesCommit(buffer, 1)
     rest = rest - digit * power
     power = power / 10
   }

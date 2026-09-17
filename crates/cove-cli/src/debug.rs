@@ -401,22 +401,27 @@ impl Sites {
             // `if` and its `else` — keeps only the earlier, which is the
             // limitation `help limits` names.
             let mut seen: BTreeMap<(FileId, usize), (Site, String)> = BTreeMap::new();
-            // The lines whose call is gone, first, so that they win the
-            // lowest-pc rule below.
+            // The lines whose call is gone.
             //
             // `lower::inline` expands a small leaf where it is called, and the
             // `Inst::Call` written on the caller's line is then not there. The
             // line does not stop being a place to break — it is where a person
-            // reading the source would put one — but nothing on it is the
+            // reading the source would put one — but nothing on it may be the
             // caller's any more, so without this the lowest pc on the line is
             // whatever the *lowering* left there, which for a one-expression
             // body is the `return` **after** the callee has already run.
             //
             // What the line means now is "the first instruction of the body
-            // that was called", and that is `Inlined::from`.
+            // that was called", which is `Inlined::from` — unless the caller
+            // still has an instruction of its own on the line before it, which
+            // the loop below finds and keeps. An interpolation is that case:
+            // its buffer is allocated on the line before the first append,
+            // which is `std.stringbuilder`'s `appendText` expanded (ADR 0062),
+            // and a breakpoint there stops in the caller, before any piece.
+            let mut expanded: BTreeMap<(FileId, usize), (Site, String)> = BTreeMap::new();
             for held in &function.inlined {
                 let line = sources.get(held.site.file).line_col(held.site.start).0;
-                seen.entry((held.site.file, line)).or_insert((
+                expanded.entry((held.site.file, line)).or_insert((
                     Site {
                         pc: held.from,
                         span: function.span_at(held.from as usize),
@@ -451,6 +456,14 @@ impl Sites {
                     },
                     named,
                 ));
+            }
+            for (key, found) in expanded {
+                match seen.get(&key) {
+                    Some((own, _)) if own.pc < found.0.pc => {}
+                    _ => {
+                        seen.insert(key, found);
+                    }
+                }
             }
             for (key, found) in seen {
                 by_line.entry(key).or_default().push(found);

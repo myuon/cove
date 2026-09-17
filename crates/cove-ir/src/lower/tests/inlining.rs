@@ -382,18 +382,26 @@ fn a_push_window_is_one_step_of_a_thin_wrapper() {
 /// other test and cost each push its fused dispatch in silence. The program
 /// reaches every standard-library function that appends one element:
 /// `Vector.push` at a one-word and a two-word element, `Map.of`, `Map.inserted`,
-/// `Map.keys`, `Map.values`, `Set.of` and `Set.inserted`.
+/// `Map.keys`, `Map.values`, `Set.of` and `Set.inserted`. And every one that
+/// appends bytes: `StringBuilder.append` and `appendByte`, the `appendText` and
+/// `appendByteInto` they call, an interpolation's literal of one byte and of
+/// several, its `String` piece, and `std.int.renderInto` for its `Int` pieces,
+/// both where it is written and expanded into a loop.
 #[test]
 fn every_append_the_standard_library_writes_is_a_window() {
     let (program, _) = program(
-        "struct Point { x: Int, y: Int }\n\
+        "use std.stringbuilder.StringBuilder\n\
+         struct Point { x: Int, y: Int }\n\
          fn main() -> Int {\n  \
            var xs: Vector<Int> = Vector.of()\n  xs.push(1)\n  \
            var ps: Vector<Point> = Vector.of()\n  ps.push(Point(x: 1, y: 2))\n  \
            let m = Map.of(MapEntry(key: \"b\", value: 2), MapEntry(key: \"a\", value: 1))\n  \
            let more = m.inserted(\"c\", 3)\n  \
            let s = Set.of(3, 1, 2)\n  let bigger = s.inserted(4)\n  \
-           more.keys().length() + more.values().length() + bigger.length() + xs.length() + ps.length()\n}",
+           var out = StringBuilder.withCapacity(4)\n  out.append(\"ab\")\n  out.appendByte(99)\n  \
+           let size = out.length()\n  var bytes = out.finish().byteLength()\n  var i = 0\n  \
+           while i < 3 {\n    bytes = bytes + \"<{s.length()}>, {size} and {\"x\"}\".byteLength()\n    i = i + 1\n  }\n  \
+           more.keys().length() + more.values().length() + bigger.length() + xs.length() + ps.length() + bytes\n}",
     );
     let mut writers = std::collections::BTreeSet::new();
     let mut windows = 0;
@@ -419,14 +427,8 @@ fn every_append_the_standard_library_writes_is_a_window() {
                 writers.insert(name.split('<').next().unwrap_or(&name).to_string());
             }
             assert!(
-                !matches!(
-                    inst,
-                    Inst::GrowablePush {
-                        storage: crate::Storage::Words(_),
-                        ..
-                    }
-                ),
-                "{} +{pc} is a word `growable-push`, which nothing lowers to any more",
+                !matches!(inst, Inst::GrowablePush { .. }),
+                "{} +{pc} is a `growable-push`, which nothing lowers to any more",
                 f.qualified()
             );
         }
@@ -441,6 +443,11 @@ fn every_append_the_standard_library_writes_is_a_window() {
         "std.map.placeAt",
         "std.set.inserted",
         "std.set.placeAt",
+        "std.stringbuilder.appendText",
+        "std.stringbuilder.appendByteInto",
+        "std.stringbuilder.StringBuilder.append",
+        "std.stringbuilder.StringBuilder.appendByte",
+        "std.int.renderInto",
     ] {
         assert!(
             writers.contains(writer),
@@ -463,10 +470,13 @@ fn program_id(program: &Program, f: &Function) -> FunctionId {
 /// called, and a program's own function with a `var` parameter is not.
 ///
 /// The builder's four `var self` methods are a load of the owner through the
-/// address and one byte run instruction each, which is what `examples/covefmt`
-/// made half a million calls a run to (#378, Phase 3 Q7). What is expanded is
-/// the body *with* its address: the owner is still read through it, so an
-/// append in the caller's frame reaches the builder the caller named.
+/// address and what the owner is handed to — one byte run instruction for
+/// `appendSlice` and `finish`, and for `append` and `appendByte` a call of
+/// `appendText` or `appendByteInto`, which is ADR 0062's window and is
+/// expanded in its turn — which is what `examples/covefmt` made half a million
+/// calls a run to (#378, Phase 3 Q7). What is expanded is the body *with* its
+/// address: the owner is still read through it, so an append in the caller's
+/// frame reaches the builder the caller named.
 #[test]
 fn a_library_method_that_takes_var_self_is_expanded() {
     let (program, main) = program(
@@ -500,8 +510,19 @@ fn a_library_method_that_takes_var_self_is_expanded() {
     }
     let has = |wanted: fn(&Inst) -> bool| main.code.iter().any(wanted);
     assert!(has(|inst| matches!(inst, Inst::GrowableExtend { .. })));
-    assert!(has(|inst| matches!(inst, Inst::GrowablePush { .. })));
     assert!(has(|inst| matches!(inst, Inst::RunFinish { .. })));
+    let patterns: Vec<crate::legalize::Pattern> = crate::legalize::windows(&program, &main)
+        .iter()
+        .map(|window| window.pattern)
+        .collect();
+    assert_eq!(
+        patterns,
+        [
+            crate::legalize::Pattern::AppendBytes,
+            crate::legalize::Pattern::PushByte
+        ],
+        "`append` and `appendByte` are each one window where they were called"
+    );
     assert!(
         has(|inst| matches!(inst, Inst::Load { .. })),
         "the owner is read through the address the caller formed"

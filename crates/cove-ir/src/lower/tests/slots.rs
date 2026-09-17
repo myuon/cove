@@ -95,20 +95,31 @@ fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
         ),
         "\
 fn @m.shout(String String) -> Int
-  frame 7: s0!:ref s1!:ref s2:int s3:int s4:ref s5:int s6:ref
-  local a -> s0:String [0, 11)
-  local b -> s1:String [0, 11)
+  frame 12: s0!:ref s1!:ref s2:int s3:int s4:ref s5:unit s6:ref s7:unit s8:int s9:int s10:int s11:ref
+  local a -> s0:String [0, 22)
+  local b -> s1:String [0, 22)
      0  int s3:int 32
      1  growable-alloc.bytes s4:ref s3:int
-     2  len s3:int s0:ref
-     3  int s5:int 0
-     4  growable-extend.bytes (s4:ByteBuffer s0:String s5:Int s3:Int)
-     5  len s3:int s1:ref
-     6  growable-extend.bytes (s4:ByteBuffer s1:String s5:Int s3:Int)
-     7  run-finish.bytes s6:ref s4:ref String utf8
-     8  clear s4:ByteBuffer
-     9  intrinsic-call s2:Int String.length (s6:String)
-    10  return s2:Int
+     2  len s8:int s0:ref
+     3  load-field s9:Int s4:ref +0
+     4  growable-ensure.bytes s4:ref s8:int
+     5  int s10:int 0
+     6  load-field s11:<ref> s4:ref +1
+     7  run-copy.bytes (s11:<ref> s9:Int s0:String s10:Int s8:Int)
+     8  clear s11:<ref>
+     9  growable-commit.bytes s4:ref s8:int
+    10  len s8:int s1:ref
+    11  load-field s9:Int s4:ref +0
+    12  growable-ensure.bytes s4:ref s8:int
+    13  int s10:int 0
+    14  load-field s11:<ref> s4:ref +1
+    15  run-copy.bytes (s11:<ref> s9:Int s1:String s10:Int s8:Int)
+    16  clear s11:<ref>
+    17  growable-commit.bytes s4:ref s8:int
+    18  run-finish.bytes s6:ref s4:ref String utf8
+    19  clear s4:ByteBuffer
+    20  intrinsic-call s2:Int String.length (s6:String)
+    21  return s2:Int
 "
     );
 }
@@ -129,24 +140,36 @@ fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
         ),
         "\
 fn @m.f(String) -> Int
-  frame 7: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:ref
-  local what -> s0:String [0, 14)
-  local n -> s2:Int [1, 13)
-  local s -> s6:String [10, 11)
+  frame 17: s0!:ref s1:int s2:int s3:int s4:ref s5:unit s6:ref s7:unit s8:int s9:int s10:int s11:ref s12:unit s13:int s14:int s15:ref s16:int
+  local what -> s0:String [0, 26)
+  local n -> s2:Int [1, 25)
+  local s -> s6:String [22, 23)
      0  int s2:int 0
      1  int s3:int 17
      2  growable-alloc.bytes s4:ref s3:int
-     3  len s3:int s0:ref
-     4  int s5:int 0
-     5  growable-extend.bytes (s4:ByteBuffer s0:String s5:Int s3:Int)
-     6  int s3:int 33
-     7  growable-push.bytes s4:ref s3:int
-     8  run-finish.bytes s6:ref s4:ref String utf8
-     9  clear s4:ByteBuffer
-    10  intrinsic-call s2:Int String.length (s6:String)
-    11  clear s6:String
-    12  copy s1:Int s2:Int
-    13  return s1:Int
+     3  len s8:int s0:ref
+     4  load-field s9:Int s4:ref +0
+     5  growable-ensure.bytes s4:ref s8:int
+     6  int s10:int 0
+     7  load-field s11:<ref> s4:ref +1
+     8  run-copy.bytes (s11:<ref> s9:Int s0:String s10:Int s8:Int)
+     9  clear s11:<ref>
+    10  growable-commit.bytes s4:ref s8:int
+    11  int s3:int 33
+    12  load-field s13:Int s4:ref +0
+    13  int s14:int 1
+    14  growable-ensure.bytes s4:ref s14:int
+    15  load-field s15:<ref> s4:ref +1
+    16  run-store.bytes s15:ref s13:int s3:int
+    17  clear s15:<ref>
+    18  int s16:int 1
+    19  growable-commit.bytes s4:ref s16:int
+    20  run-finish.bytes s6:ref s4:ref String utf8
+    21  clear s4:ByteBuffer
+    22  intrinsic-call s2:Int String.length (s6:String)
+    23  clear s6:String
+    24  copy s1:Int s2:Int
+    25  return s1:Int
 "
     );
 }

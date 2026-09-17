@@ -20,19 +20,18 @@ fn an_assertion_is_a_branch_over_the_two_cases_it_answers() {
         "\
 fn @m.f(Int) -> Result
   frame 11: s0!:int s1:tag s2:unit s3:ref s4:tag s5:unit s6:ref s7:bool s8:unit s9:ref s10:ref
-  local n -> s0:Int [0, 12)
-     0  gt.int.imm.branch s7:bool s0:int 0 5
-     1  unit s8:unit
-     2  tag s4:tag Result.Ok
-     3  copy s5:Unit s8:Unit
-     4  jump 10
-     5  str s9:ref \"assertion failed: `n > 0`\"
-     6  assert.failed s9:ref
-     7  copy s10:String s9:String
-     8  tag s4:tag Result.Err
-     9  copy s6:Error s10:Error
-    10  copy s1..s3:Result s4..s6:Result
-    11  return s1..s3:Result
+  local n -> s0:Int [0, 11)
+     0  gt.int.imm.branch s7:bool s0:int 0 4
+     1  tag s4:tag Result.Ok
+     2  copy s5:Unit s8:Unit
+     3  jump 9
+     4  str s9:ref \"assertion failed: `n > 0`\"
+     5  assert.failed s9:ref
+     6  copy s10:String s9:String
+     7  tag s4:tag Result.Err
+     8  copy s6:Error s10:Error
+     9  copy s1..s3:Result s4..s6:Result
+    10  return s1..s3:Result
 "
     );
 }

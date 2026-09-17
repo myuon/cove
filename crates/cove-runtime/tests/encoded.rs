@@ -108,7 +108,13 @@ fn one_encoded_instruction_is_one_unit_of_fuel() {
     // a 28% fall in what this program executes, against the 18.8% the ADR
     // measured on a formatter, because a benchmark of a tight loop is the best
     // case for the fusion and a formatter is the honest one.
-    assert_eq!(ran.instructions, 10_285_734);
+    //
+    // And two below that, on a path taken once: the `()` of the assertion's
+    // `Ok` and of the body's own were each a `unit` into a word nothing had
+    // written, which is zero already, and `lower::frees` drops such a `unit`
+    // as it drops a clear of one — since ADR 0062, which made every expanded
+    // `Vector.push` and builder append answer a `()` that way.
+    assert_eq!(ran.instructions, 10_285_732);
 }
 
 /// Source spans: a failing program points where the oracle points.

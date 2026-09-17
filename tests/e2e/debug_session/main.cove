@@ -30,7 +30,7 @@ export fn main() -> Result<Unit, Error> {
   println("before")?
   let total = 0
   let total = total + 20
-  println("answer {raise(total)}")?
+  println("{raise(total)} is the answer")?
   println("after")?
   Ok(())
 }

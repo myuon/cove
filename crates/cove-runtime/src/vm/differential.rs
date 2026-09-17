@@ -2625,6 +2625,166 @@ export fn probeUnwritten() -> Int {
     }
 }
 
+/// ADR 0062's append over a byte buffer — `core.bytesEnsure`, `core.bytesStore`
+/// or `core.bytesCopy` at the length, `core.bytesCommit` — answers alike on
+/// both evaluators: whole strings and single bytes through growths, a
+/// character of several bytes appended a byte at a time, and the refusals the
+/// machine words for a byte that is not one, a negative room and a run that is
+/// not text at its finish. The oracle's staged suffix is what makes it a model
+/// of the protocol: bytes written and not committed are in no length, a commit
+/// of what was never written is refused, and so is a copy anywhere but the end
+/// of what is staged.
+#[test]
+fn the_byte_append_protocol_agrees_and_the_oracle_publishes_only_what_was_written() {
+    let probe = "\
+/// Text and bytes onto a buffer with room for one, through `appendText`,
+/// `appendByteInto` and the builder, and an interpolation of both.
+export fn probeAppends() -> String {
+  let buffer = core.bytesAllocate(1)
+  var n = 0
+  while n < 4 {
+    appendText(buffer, \"hé\")
+    appendByteInto(buffer, 108 + n)
+    n = n + 1
+  }
+  // `ö` a byte at a time.
+  appendByteInto(buffer, 195)
+  appendByteInto(buffer, 182)
+  appendText(buffer, \"\")
+  let length = core.bytesLength(buffer)
+  var out = StringBuilder.withCapacity(0)
+  out.append(\"<\")
+  out.appendByte(33)
+  out.append(core.bytesFinish(buffer))
+  \"{out.length()} {length} {out.finish()}!\"
+}
+
+/// A value that is not a byte.
+export fn probeNotAByte() -> Int {
+  let buffer = core.bytesAllocate(4)
+  appendByteInto(buffer, 256)
+  core.bytesLength(buffer)
+}
+
+/// An ensure of a negative room.
+export fn probeNegative() -> Int {
+  let buffer = core.bytesAllocate(4)
+  core.bytesEnsure(buffer, -1)
+  core.bytesLength(buffer)
+}
+
+/// Half a character, which is caught at the finish and not at the append.
+export fn probeHalf() -> String {
+  let buffer = core.bytesAllocate(4)
+  appendText(buffer, \"a\")
+  appendByteInto(buffer, 195)
+  core.bytesFinish(buffer)
+}
+";
+    let source = "\
+use std.stringbuilder
+
+export fn main() -> Int {
+  1
+}
+";
+    let wanted = [
+        (
+            "probeAppends",
+            Answer::Value("20 18 <!h\u{e9}lh\u{e9}mh\u{e9}nh\u{e9}o\u{f6}!".to_string()),
+        ),
+        (
+            "probeNotAByte",
+            Answer::Failed("`runStore`'s value is `256`, and a byte is 0 to 255".to_string()),
+        ),
+        (
+            "probeNegative",
+            Answer::Failed(
+                "`growableEnsure` was asked for room for -1 unit(s), and room is never negative"
+                    .to_string(),
+            ),
+        ),
+        (
+            "probeHalf",
+            Answer::Failed("this string's bytes are not valid UTF-8".to_string()),
+        ),
+    ];
+    for (name, want) in wanted {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.stringbuilder", probe);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("std.stringbuilder", name, vec![]))
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.stringbuilder", probe);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke("std.stringbuilder", name, vec![]))
+        });
+        assert_eq!(oracle, want, "`{name}` on the oracle");
+        assert_eq!(machine, oracle, "`{name}` answers alike");
+    }
+
+    // What no verified lowering can express, so the oracle alone.
+    let unlowerable = "\
+/// The length before and after the commit of written bytes.
+export fn probeInvisible() -> String {
+  let buffer = core.bytesAllocate(2)
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 2)
+  core.bytesStore(buffer, at, 104)
+  core.bytesCopy(buffer, at + 1, \"i\", 0, 1)
+  let before = core.bytesLength(buffer)
+  core.bytesCommit(buffer, 2)
+  \"{before} {core.bytesLength(buffer)} {core.bytesFinish(buffer)}\"
+}
+
+/// A commit of bytes nobody wrote.
+export fn probeUnwritten() -> Int {
+  let buffer = core.bytesAllocate(2)
+  core.bytesEnsure(buffer, 1)
+  core.bytesCommit(buffer, 1)
+  core.bytesLength(buffer)
+}
+
+/// A copy past the end of what is staged.
+export fn probeGap() -> Int {
+  let buffer = core.bytesAllocate(2)
+  core.bytesEnsure(buffer, 2)
+  core.bytesCopy(buffer, 1, \"i\", 0, 1)
+  core.bytesLength(buffer)
+}
+";
+    let wanted = [
+        ("probeInvisible", Answer::Value("0 2 hi".to_string())),
+        (
+            "probeUnwritten",
+            Answer::Failed(
+                "`growableCommit` would publish 1 unit(s) onto a length of 0 with 0 written \
+                 above it, and a commit publishes only units its window wrote"
+                    .to_string(),
+            ),
+        ),
+        (
+            "probeGap",
+            Answer::Failed(
+                "`runCopy` writes 1 byte(s) to 1 of a buffer whose room begins at 0".to_string(),
+            ),
+        ),
+    ];
+    for (name, want) in wanted {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.stringbuilder", unlowerable);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("std.stringbuilder", name, vec![]))
+        });
+        assert_eq!(oracle, want, "`{name}` on the oracle");
+    }
+}
+
 /// #378 P4-5's keyed construction intrinsics answer alike on both evaluators:
 /// a vector with exact room, ranges of an old set or map copied onto it around
 /// a pushed unit, and the keyed finish into the new run — over one-word

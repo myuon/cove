@@ -223,9 +223,11 @@ pub(crate) fn word_push(
     })
 }
 
-/// An [`Inst::GrowablePush`] over [`Storage::PackedBytes`] — `appendByte`, and
-/// the one-byte literal run of an interpolation — with the static facts its fast
-/// path is emitted from.
+/// An [`Inst::GrowablePush`] over [`Storage::PackedBytes`] — what `appendByte`
+/// and the one-byte literal run of an interpolation were, before ADR 0062 made
+/// each a byte push window that `windows` decodes — with the static facts its
+/// fast path is emitted from. Nothing lowers to one now, and this goes with the
+/// instruction.
 ///
 /// `Machine::append_byte` is [`WordPush`]'s three steps over a packed run: read
 /// the owner, ensure room for one more byte, and write the byte and the new
