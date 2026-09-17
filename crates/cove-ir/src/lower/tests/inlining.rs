@@ -428,14 +428,6 @@ fn every_append_the_standard_library_writes_is_a_window() {
                 let name = f.qualified();
                 writers.insert(name.split('<').next().unwrap_or(&name).to_string());
             }
-            assert!(
-                !matches!(
-                    inst,
-                    Inst::GrowablePush { .. } | Inst::GrowableExtend { .. }
-                ),
-                "{} +{pc} is a composite growable write, which nothing lowers to any more",
-                f.qualified()
-            );
         }
         windows += found.len();
     }
@@ -622,14 +614,6 @@ fn a_library_method_that_takes_var_self_is_expanded() {
         );
     }
     let has = |wanted: fn(&Inst) -> bool| main.code.iter().any(wanted);
-    assert!(
-        !program
-            .functions
-            .iter()
-            .flat_map(|f| f.code.iter())
-            .any(|inst| matches!(inst, Inst::GrowableExtend { .. })),
-        "no lowering produces a `growable-extend` any more"
-    );
     assert!(has(|inst| matches!(inst, Inst::RunFinish { .. })));
     let patterns: Vec<crate::legalize::Pattern> = crate::legalize::windows(&program, &main)
         .iter()

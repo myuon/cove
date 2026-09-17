@@ -328,9 +328,6 @@ impl Check<'_> {
                         poison(&mut funcs, dst.slot, 1);
                     }
                 }
-                // Nor do the growable appends: what each changes is the store
-                // the owner in `owner` names, and the owner's own length word.
-                Inst::GrowablePush { .. } | Inst::GrowableExtend { .. } => {}
                 // Nor does a truncate: it lowers the owner's length word and
                 // clears units of its store.
                 Inst::GrowableTruncate { .. } => {}
@@ -941,28 +938,6 @@ impl Check<'_> {
                 self.admit_storage(at, "allocates", storage);
                 self.expect(at, dst, &[Repr::Ref]);
                 self.expect(at, capacity, &[Repr::Int]);
-            }
-            // The first member admitted over both storages: a byte is one `Int`
-            // word, and an element is a run of its layout's width, checked the
-            // way an `Inst::StoreElem`'s source is.
-            Inst::GrowablePush {
-                owner,
-                src,
-                storage,
-            } => {
-                self.expect(at, owner, &[Repr::Ref]);
-                match storage {
-                    crate::Storage::PackedBytes => self.expect(at, src, &[Repr::Int]),
-                    crate::Storage::Words(elem) => {
-                        if self.layout_exists(at, elem) {
-                            self.fits(at, src, elem, "what a growable run is pushed from");
-                        }
-                    }
-                }
-            }
-            Inst::GrowableExtend { args, storage } => {
-                self.admit_storage(at, "extends", storage);
-                self.check_growable_extend_args(at, args);
             }
             // ADR 0062's window, admitted over both storages from the start: the
             // protocol is one for a vector and a byte buffer. What makes a window
@@ -1806,38 +1781,6 @@ impl Check<'_> {
         }
     }
 
-    /// [`Inst::GrowableExtend`]'s four arguments: `owner`, `src`, `from`, `to`,
-    /// in that order.
-    ///
-    /// Checked by `Repr` rather than by declared [`LayoutId`], for
-    /// [`Self::check_run_copy`]'s reason: `src` may be a `String` or a
-    /// [`crate::Shape::Bytes`] run and which of the two is a run-time fact. So
-    /// is whether `owner` names a real owner; what is static is that both are
-    /// references and both offsets are integers.
-    fn check_growable_extend_args(&mut self, at: Option<usize>, args: crate::ArgsId) {
-        if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
-            return;
-        }
-        const NAMES: [&str; 4] = ["owner", "src", "from", "to"];
-        const WANTS: [Repr; 4] = [Repr::Ref, Repr::Ref, Repr::Int, Repr::Int];
-        let passed = self.program.arg_list(args).to_vec();
-        if passed.len() != NAMES.len() {
-            self.fault(
-                at,
-                format!(
-                    "extends a growable run with {} argument(s), and this needs {} ({})",
-                    passed.len(),
-                    NAMES.len(),
-                    NAMES.join(", ")
-                ),
-            );
-            return;
-        }
-        for (arg, want) in passed.iter().zip(WANTS) {
-            self.expect(at, arg.slot, &[want]);
-        }
-    }
-
     /// [ADR 0062]'s reservation rule: every [`Inst::GrowableEnsure`] opens a
     /// window, and a window that is written into is committed, block-locally,
     /// by the one write the room was made for.
@@ -1849,8 +1792,8 @@ impl Check<'_> {
     /// or a `0`, and for a byte buffer it is a NUL. So what the runtime checks
     /// of a commit is only that it stays inside the capacity, and what makes
     /// the published units the ones the program wrote is this. It is the
-    /// provisional rule `Inst::GrowableExtend`'s documentation wrote down for
-    /// the day the instruction split, made precise:
+    /// provisional rule the composite `growable-extend`'s documentation wrote
+    /// down for the day the instruction split, made precise:
     ///
     /// 1. **Facts.** `load-field a <- o +0` says `a` holds `o`'s length, an
     ///    `int n` that `n` holds a constant, and — only after an ensure on `o`
@@ -3495,18 +3438,9 @@ mod tests {
             capacity: 1,
             storage,
         };
-        let push = |storage| Inst::GrowablePush {
-            owner: 0,
-            src: 1,
-            storage,
-        };
         let truncate = |storage| Inst::GrowableTruncate {
             owner: 0,
             len: 1,
-            storage,
-        };
-        let extend = |storage| Inst::GrowableExtend {
-            args: ArgsId(0),
             storage,
         };
         let finish = |target, validation, storage| Inst::RunFinish {
@@ -3518,8 +3452,6 @@ mod tests {
         };
         let none: Vec<String> = Vec::new();
         assert_eq!(one(alloc(bytes)), none);
-        assert_eq!(one(push(bytes)), none);
-        assert_eq!(one(extend(bytes)), none);
         assert_eq!(one(finish(STR, Validation::Utf8, bytes)), none);
 
         let refused = |what: &str| {
@@ -3528,17 +3460,6 @@ mod tests {
             )]
         };
         assert_eq!(one(alloc(words)), refused("allocates"));
-        // A word push is admitted, and its source is a run of the element's
-        // width: an `Int` element at `s1` fits, and a two-word `Point` there
-        // runs into the `Ref` at `s2`.
-        assert_eq!(one(push(words)), none);
-        let wide = one(push(Storage::Words(POINT)));
-        assert_eq!(wide.len(), 1, "{wide:?}");
-        assert!(
-            wide[0].starts_with("what a growable run is pushed from is `Point`"),
-            "{wide:?}"
-        );
-        assert_eq!(one(extend(words)), refused("extends"));
         // A truncate is the other way round: words and not bytes.
         assert_eq!(one(truncate(words)), none);
         assert_eq!(

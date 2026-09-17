@@ -927,13 +927,14 @@ unsafe fn intrinsic_at_safepoint(
     }
 }
 
-/// The growable-run helper: one of [ADR 0052]'s four, handed over whole.
+/// The growable-run helper: one growable-run operation, handed over whole.
 ///
-/// See [`cove_native::GrowableFn`] for why each of the four is the helper rather
-/// than a fast path and a cold one — the short of it is one rooting discipline
-/// that is not the frame's, one chunked safepoint contract, and one UTF-8 walk.
-/// What happens here is `encoded.rs`'s `GROWABLE_ALLOC_BYTES`, `GROWABLE_PUSH_BYTE`,
-/// `GROWABLE_EXTEND_BYTES` and `RUN_FINISH_BYTES` arms, and *is* those arms: each one reads
+/// See [`cove_native::GrowableFn`] for which are the helper rather than a fast
+/// path and a cold one — the short of it is one rooting discipline that is not
+/// the frame's and one UTF-8 walk — and which are an emitted fast path's cold
+/// half.
+/// What happens here is `encoded.rs`'s `GROWABLE_ALLOC_BYTES`, `RUN_FINISH_BYTES`,
+/// `GROWABLE_TRUNCATE_WORDS` and window arms, and *is* those arms: each one reads
 /// its operands out of the frame and calls the same `Machine` method the
 /// dispatch loop calls, so there is no second copy of ADR 0052's capacity
 /// arithmetic, growth policy, chunking or relabel anywhere.
@@ -944,10 +945,10 @@ unsafe fn intrinsic_at_safepoint(
 ///
 /// # The span is attached the way `fail!` attaches it
 ///
-/// `append_bytes` builds its own refusals with a span already on them, and the
-/// rest answer a bare `RuntimeError`. `RuntimeError::at` is `get_or_insert`, so
-/// one `map_err` here is what the encoded arms' `fail!` is: the instruction's
-/// span where the error has none, and the error's own where it has one.
+/// Every one of these answers a bare `RuntimeError`, and `RuntimeError::at` is
+/// `get_or_insert`, so one `map_err` here is what the encoded arms' `fail!` is:
+/// the instruction's span where the error has none, and the error's own where it
+/// has one.
 ///
 /// # Safety
 ///
@@ -995,17 +996,6 @@ unsafe extern "C" fn growable(
                         machine.mem.set_slot(base, a as Slot, owner);
                         Ok(())
                     }
-                    GrowableOp::Push => {
-                        let owner = machine.mem.slot(base, a as Slot);
-                        let value = machine.mem.slot(base, b as Slot) as i64;
-                        machine.append_byte(owner, value)
-                    }
-                    // A word push's cold path: the whole push, through the same
-                    // `Machine::push_words` the `GROWABLE_PUSH_WORDS` arm calls,
-                    // so a growth, a consumed owner and a wrong family answer
-                    // exactly what the encoded tier answers. The element layout
-                    // is the instruction's, read out of the IR at `pc` for
-                    // `Finish`'s reason.
                     // A word finish's cold path, through the same
                     // `Machine::finish_words` the `RUN_FINISH_WORDS` arm calls.
                     // The target and the element layout are the instruction's.
@@ -1072,36 +1062,6 @@ unsafe extern "C" fn growable(
                         };
                         let value = machine.mem.slot(base, src) as i64;
                         machine.store_run_byte(run, at, value)
-                    }
-                    GrowableOp::PushWords => {
-                        let owner = machine.mem.slot(base, a as Slot);
-                        let code = &machine.program.function(frame.function).code;
-                        let Inst::GrowablePush {
-                            storage: Storage::Words(elem),
-                            ..
-                        } = code[pc as usize]
-                        else {
-                            unreachable!("a word push was handed over for a pc that is not one")
-                        };
-                        machine.push_words(owner, elem, base + u64::from(b))
-                    }
-                    // The one that is not a `Machine` method, because its four
-                    // operands, its eight refusals and its chunk loop are a page of
-                    // code `encoded.rs` already keeps out of its dispatch loop.
-                    // Called rather than copied, for that whole page's worth of
-                    // reasons.
-                    GrowableOp::Extend => {
-                        let program = machine.program;
-                        let args = program.arg_list(ArgsId(a));
-                        super::encoded::append_bytes(
-                            machine,
-                            program,
-                            budget,
-                            base,
-                            args,
-                            frame.function,
-                            pc as usize,
-                        )
                     }
                     // The target and the validation are the instruction's, read
                     // out of the IR at `pc` as the encoded arm reads them out of

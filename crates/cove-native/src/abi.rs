@@ -861,18 +861,20 @@ pub type FieldStoreFn = unsafe extern "C" fn(
 /// generated code materialises them as integer constants and the runtime matches
 /// on them, and [`GrowableOp::abi`] is the one place that conversion is spelled.
 ///
-/// They are one helper and one enum rather than four helpers because every
-/// property the boundary cares about is the same for all four — each is a
+/// They are one helper and one enum rather than one helper each because every
+/// property the boundary cares about is the same for all of them — each is a
 /// safepoint, each may collect, each may grow the stack and commit a chunk, each
 /// writes whatever it answers into the frame itself, and each answers an
-/// [`Outcome`]. Four typedefs differing in one pair of `u32`s would be four
-/// relocations, four emitters and four places for the safepoint discipline to
-/// drift. They are also ADR 0052's four: a build that had three of them would be
-/// a build that could allocate a builder it could not finish.
+/// [`Outcome`]. Typedefs differing in one pair of `u32`s would be as many
+/// relocations, as many emitters and as many places for the safepoint discipline
+/// to drift.
 ///
-/// Only the [`Storage::PackedBytes`](cove_ir::Storage::PackedBytes) member of
-/// each is admitted by `crate::subset`, and the values are the ones the four had
-/// as `BufferOp`, so the ABI did not change when the names did.
+/// The values are consecutive from nought and mean nothing outside a build:
+/// generated code and the runtime that serves it are compiled together, so the
+/// numbering is renumbered whenever a member arrives or leaves — as ADR 0062's
+/// last stage did, deleting the composite push and extend once the window's
+/// primitives had replaced them. `crate::vm::report`'s `GROWABLE_OPS` is the
+/// count, and a test there holds the two to each other.
 ///
 /// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
 /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
@@ -882,31 +884,10 @@ pub enum GrowableOp {
     /// [`Inst::GrowableAlloc`](cove_ir::Inst::GrowableAlloc). `a` is `dst` and `b`
     /// the slot holding the capacity.
     Alloc = 0,
-    /// [`Inst::GrowablePush`](cove_ir::Inst::GrowablePush). `a` is the owner's
-    /// slot and `b` the unit's; there is no destination.
-    Push = 1,
-    /// [`Inst::GrowableExtend`](cove_ir::Inst::GrowableExtend). `a` is the
-    /// `ArgsId` whose four entries are `owner`, `src`, `from` and `to`; `b` is
-    /// unused.
-    ///
-    /// The operands are behind an argument list rather than in `a` and `b`
-    /// because the instruction has four of them — see `Inst::GrowableExtend`'s
-    /// own note — and the helper resolves the list out of the program, exactly
-    /// as `encoded.rs`'s arm does.
-    Extend = 2,
     /// [`Inst::RunFinish`](cove_ir::Inst::RunFinish). `a` is `dst` and `b` the
     /// owner's slot. The target layout and the validation are not operands: the
     /// helper reads them off the instruction at the pc it is handed.
-    Finish = 3,
-    /// [`Inst::GrowablePush`](cove_ir::Inst::GrowablePush) over
-    /// [`Storage::Words`](cove_ir::Storage::Words) — `Vector.push` — reached
-    /// only as the **cold path** of an emitted fast path: a store that is full,
-    /// a store word of nought, or an owner whose header is not the vector the
-    /// element layout implies. `a` is the owner's slot and `b` the head of the
-    /// element's run in this frame. The element layout is not an operand: the
-    /// helper reads it off the instruction at the pc it is handed, as
-    /// [`GrowableOp::Finish`] reads its target.
-    PushWords = 4,
+    Finish = 1,
     /// [`Inst::RunFinish`](cove_ir::Inst::RunFinish) over
     /// [`Storage::Words`](cove_ir::Storage::Words) — `Vector.freeze()` —
     /// reached only as the cold path of an emitted relabel: a store word of
@@ -914,13 +895,13 @@ pub enum GrowableOp {
     /// implies. `a` is `dst` and `b` the owner's slot; the target and the
     /// element layout are read off the instruction at the pc, as for
     /// [`GrowableOp::Finish`].
-    FinishWords = 5,
+    FinishWords = 2,
     /// [`Inst::GrowableTruncate`](cove_ir::Inst::GrowableTruncate) over
     /// [`Storage::Words`](cove_ir::Storage::Words) — `Vector.pop` and
     /// `Vector.remove` — handed over whole. `a` is the owner's slot and `b` the
     /// new length's; the element layout is read off the instruction at the pc,
-    /// as for [`GrowableOp::PushWords`].
-    TruncateWords = 6,
+    /// as for [`GrowableOp::FinishWords`].
+    TruncateWords = 3,
     /// [`Inst::GrowableEnsure`](cove_ir::Inst::GrowableEnsure) over packed
     /// bytes, reached only as the cold path of an emitted room test: a room the
     /// store does not have, a negative count, a consumed owner, or an owner that
@@ -929,27 +910,27 @@ pub enum GrowableOp {
     /// rejoins after it. [ADR 0062]'s window.
     ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
-    EnsureBytes = 7,
+    EnsureBytes = 4,
     /// [`GrowableOp::EnsureBytes`] over words: `a` and `b` the same two slots,
     /// and the element layout read off the instruction at the pc, as for
-    /// [`GrowableOp::PushWords`].
-    EnsureWords = 8,
+    /// [`GrowableOp::FinishWords`].
+    EnsureWords = 5,
     /// [`Inst::GrowableCommit`](cove_ir::Inst::GrowableCommit) over packed
     /// bytes, reached only as the cold path of an emitted bound test and add: a
     /// count outside the room, a consumed owner, or an owner that is not a byte
     /// buffer. `a` is the owner's slot and `b` the count's. Every one of those is
     /// refused by the runtime in its own words; the helper runs the whole commit
     /// anyway, so a cold path that turns out to hold commits rather than lies.
-    CommitBytes = 9,
+    CommitBytes = 6,
     /// [`GrowableOp::CommitBytes`] over words, the element layout read off the
     /// instruction at the pc.
-    CommitWords = 10,
+    CommitWords = 7,
     /// [`Inst::RunStore`](cove_ir::Inst::RunStore) over packed bytes, reached
     /// only as the cold path of an emitted blend: an object that is not a byte
     /// run, an offset outside it, or a value that is not a byte. `a` is the run's
     /// slot and `b` the offset's; the source slot is read off the instruction at
     /// the pc, because the ABI carries two operands.
-    StoreBytes = 11,
+    StoreBytes = 8,
 }
 
 impl GrowableOp {
@@ -962,31 +943,28 @@ impl GrowableOp {
     pub const fn from_abi(code: u32) -> Option<Self> {
         match code {
             0 => Some(GrowableOp::Alloc),
-            1 => Some(GrowableOp::Push),
-            2 => Some(GrowableOp::Extend),
-            3 => Some(GrowableOp::Finish),
-            4 => Some(GrowableOp::PushWords),
-            5 => Some(GrowableOp::FinishWords),
-            6 => Some(GrowableOp::TruncateWords),
-            7 => Some(GrowableOp::EnsureBytes),
-            8 => Some(GrowableOp::EnsureWords),
-            9 => Some(GrowableOp::CommitBytes),
-            10 => Some(GrowableOp::CommitWords),
-            11 => Some(GrowableOp::StoreBytes),
+            1 => Some(GrowableOp::Finish),
+            2 => Some(GrowableOp::FinishWords),
+            3 => Some(GrowableOp::TruncateWords),
+            4 => Some(GrowableOp::EnsureBytes),
+            5 => Some(GrowableOp::EnsureWords),
+            6 => Some(GrowableOp::CommitBytes),
+            7 => Some(GrowableOp::CommitWords),
+            8 => Some(GrowableOp::StoreBytes),
             _ => None,
         }
     }
 }
 
-/// What a growable-run helper is: one of [ADR 0052]'s four instructions — ADR
-/// 0058's `growable-alloc`, `growable-push`, `growable-extend` and
-/// `run-finish` over packed bytes — handed to the runtime whole.
+/// What a growable-run helper is: one of ADR 0058's growable-run instructions —
+/// `growable-alloc`, `run-finish`, `growable-truncate`, and [ADR 0062]'s window
+/// primitives' cold halves — handed to the runtime whole.
 ///
 /// [`AllocFn`]'s relationship to `Inst::Alloc`, for the builder. ADR 0055's
 /// "Runtime operations whose correctness already lives in Rust … remain runtime
 /// helpers initially" with allocation as the archetype — and this family is that
-/// sentence's next four cases, each for a reason of its own rather than by
-/// analogy. They were measured against emitting a fast path, and each one lost:
+/// sentence's next cases, each for a reason of its own rather than by
+/// analogy. They were measured against emitting a fast path, and these lost:
 ///
 /// - **`GrowableAlloc` allocates twice, and nothing in a frame can name what the
 ///   first one answered.** `Machine::alloc_buffer` allocates the store, holds it
@@ -999,27 +977,19 @@ impl GrowableOp {
 ///   of this tier's collector discipline and it is exactly what splitting this
 ///   would break. The temporary root exists because a Rust local is not a root;
 ///   a register in a compiled frame is not one either;
-/// - **`GrowableExtend` copies in bounded chunks with a safepoint between them**,
-///   which is ADR 0052's "bulk work remains proportionally charged" and ADR
-///   0040's stop bound. A generated fast path must not skip that. It could not
-///   honour it either without emitting `Machine::copy_string_bytes` — a
-///   byte-blending copy over the two-region address decode — around a poll, and
-///   in front of all of it the eight refusals whose sentences name offsets and
-///   lengths the runtime formats. So it is mediated, and the chunking stays where
-///   it already works;
 /// - **`RunFinish` validates and then relabels, and only the second half is
 ///   small.** The relabel is a header write and a free block, which is emittable;
 ///   the validation walks the live prefix through `std::str::from_utf8`, which is
 ///   not. Emitting the tail of an operation whose head is a helper call buys
-///   nothing, because the call is already made;
-/// - **`GrowablePush` was three lines and was here anyway**, because the corpus
-///   appended ranges and not bytes, and a subset without it would refuse a
-///   function for one scalar append. **It is the one of the four that is now
-///   emitted, and this helper is its cold half.** An interpolation's `Int` piece
-///   rendered in standard-library Cove pushes a byte per digit (#403), and a push
-///   into spare capacity meets none of the three reasons above: it allocates
-///   nothing, moves one byte, and validates nothing. `subset::BytePush` is where
-///   the split is decided.
+///   nothing, because the call is already made.
+///
+/// ADR 0062's `growable-ensure`, `growable-commit` and byte `run-store` are here
+/// for the opposite reason: each one *is* emitted, and what stands here is the
+/// cold half its fast path branches to — a store with no room, a count outside
+/// it, a consumed owner, an object of the wrong family. `crate::legalize`'s
+/// windows are what the fast paths are emitted from, and the composite
+/// `growable-push` and `growable-extend` those windows replaced are gone, along
+/// with the two helper members that served them.
 ///
 /// # It is a lowering, and what it buys is the function around it
 ///
@@ -1541,22 +1511,19 @@ mod tests {
 
         for (code, op) in [
             (0, GrowableOp::Alloc),
-            (1, GrowableOp::Push),
-            (2, GrowableOp::Extend),
-            (3, GrowableOp::Finish),
-            (4, GrowableOp::PushWords),
-            (5, GrowableOp::FinishWords),
-            (6, GrowableOp::TruncateWords),
-            (7, GrowableOp::EnsureBytes),
-            (8, GrowableOp::EnsureWords),
-            (9, GrowableOp::CommitBytes),
-            (10, GrowableOp::CommitWords),
-            (11, GrowableOp::StoreBytes),
+            (1, GrowableOp::Finish),
+            (2, GrowableOp::FinishWords),
+            (3, GrowableOp::TruncateWords),
+            (4, GrowableOp::EnsureBytes),
+            (5, GrowableOp::EnsureWords),
+            (6, GrowableOp::CommitBytes),
+            (7, GrowableOp::CommitWords),
+            (8, GrowableOp::StoreBytes),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(GrowableOp::from_abi(12), None);
+        assert_eq!(GrowableOp::from_abi(9), None);
 
         for (code, op) in [
             (0, RunOp::CopyBytes),

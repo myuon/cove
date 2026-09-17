@@ -18,8 +18,7 @@
 #![cfg(all(feature = "cranelift", feature = "template"))]
 
 use cove_ir::{
-    Arg, ArgsId, ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, Storage, StrId,
-    Validation,
+    ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, Storage, StrId, Validation,
 };
 use cove_native::{Entry, NativeHelpers, Outcome, HEAP_CHUNK_WORDS};
 
@@ -518,42 +517,6 @@ fn both_arms_answer_the_same_thing() {
         );
     }
 
-    // A byte push: the fast path at each offset inside a word and at the push
-    // that fills the store, and each cold path — a full store, a finished one,
-    // another object, a length word past the capacity and a value that is not
-    // a byte. The store is in chunk zero and inside the words compared, so every
-    // byte either arm blends is compared.
-    for (what, len, capacity, value, finished, other) in [
-        ("at byte 0", 0u64, 16u32, 0x5Cu64, false, false),
-        ("at byte 7", 7, 16, 255, false, false),
-        ("at byte 8", 8, 16, 0, false, false),
-        ("that fills the store", 15, 16, 0x41, false, false),
-        ("that would grow the store", 16, 16, 0x41, false, false),
-        ("to a finished buffer", 0, 16, 0x41, true, false),
-        ("to another object", 0, 16, 0x41, false, true),
-        ("past the capacity", 1 << 40, 16, 0x41, false, false),
-        ("of 256", 0, 16, 256, false, false),
-        ("of -1", 0, 16, u64::MAX, false, false),
-    ] {
-        agree_over(
-            &format!("a byte push {what}"),
-            &suite::pushing_a_byte(),
-            &[cove_native::HEAP_ORIGIN_WORDS + 20, value, 0],
-            0,
-            move || {
-                let mut heap = Heap::new(2);
-                suite::a_byte_buffer(&mut heap, 20, len, capacity);
-                if finished {
-                    heap.set(22, 0);
-                }
-                if other {
-                    heap.object(20, suite::VECTOR, 0);
-                }
-                heap
-            },
-        );
-    }
-
     // ADR 0062's window, one instruction at a time: an ensure and a commit over
     // each storage with room, at exactly the room, past it, negative, onto a
     // consumed owner, another family and a length past the capacity; and a byte
@@ -995,39 +958,6 @@ fn both_arms_answer_the_same_thing() {
         }
     }
 
-    // `Vector.push`: the emitted fast path and each of the three cold paths, which
-    // is where the two arms differ most — a compare chain and a `movabs` against a
-    // `brif` on an `icmp`, three times over.
-    for (what, layout, len, capacity, store) in [
-        ("into spare capacity", suite::VECTOR, 1u32, 4u32, true),
-        ("that would grow the store", suite::VECTOR, 4, 4, true),
-        ("of a frozen vector", suite::VECTOR, 0, 4, false),
-        (
-            "whose object is another layout",
-            suite::PAIR_VECTOR,
-            0,
-            4,
-            true,
-        ),
-    ] {
-        agree_over(
-            &format!("a push {what}"),
-            &suite::pushing(1),
-            &[cove_native::HEAP_ORIGIN_WORDS + 20, 70, 0],
-            0,
-            move || {
-                let mut heap = Heap::new(2);
-                // In chunk zero, and inside the run `agree_over` compares, so that
-                // every word either arm writes is compared.
-                suite::a_vector(&mut heap, 20, layout, len, capacity);
-                if !store {
-                    heap.set(22, 0);
-                }
-                heap
-            },
-        );
-    }
-
     for op in [
         CmpOp::Eq,
         CmpOp::Ne,
@@ -1139,56 +1069,33 @@ fn literals() -> Program {
     )
 }
 
-/// Three of ADR 0052's four in one body, in the order a builder is used.
+/// The byte buffer's mediated pair in one body, in the order a builder is used.
 ///
-/// Neither arm emits a fast path for any of them, so what has to agree is what
-/// each hands over and in what order — and `agree` already compares
-/// `suite::built()` between the two arms for exactly that. The fourth, a byte
-/// push, has a fast path, and the cases above compare it.
+/// Neither arm emits a fast path for either of them, so what has to agree is
+/// what each hands over and in what order — and `agree` already compares
+/// `suite::built()` between the two arms for exactly that. What fills a buffer
+/// between them is ADR 0062's window, whose rows both arms emit, and the cases
+/// above compare those.
 fn buffers() -> Program {
-    suite::program_with_args(
-        suite::function(
-            vec![Repr::Ref, Repr::Int, Repr::Ref],
-            suite::REF,
-            vec![
-                Inst::GrowableAlloc {
-                    dst: 0,
-                    capacity: 1,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::GrowableExtend {
-                    args: ArgsId(1),
-                    storage: Storage::PackedBytes,
-                },
-                Inst::RunFinish {
-                    dst: 2,
-                    owner: 0,
-                    target: suite::REF,
-                    validation: Validation::Utf8,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::Return { src: 2 },
-            ],
-        ),
+    suite::program(suite::function(
+        vec![Repr::Ref, Repr::Int, Repr::Ref],
+        suite::REF,
         vec![
-            Arg {
-                slot: 0,
-                layout: suite::REF,
+            Inst::GrowableAlloc {
+                dst: 0,
+                capacity: 1,
+                storage: Storage::PackedBytes,
             },
-            Arg {
-                slot: 2,
-                layout: suite::REF,
+            Inst::RunFinish {
+                dst: 2,
+                owner: 0,
+                target: suite::REF,
+                validation: Validation::Utf8,
+                storage: Storage::PackedBytes,
             },
-            Arg {
-                slot: 1,
-                layout: INT,
-            },
-            Arg {
-                slot: 1,
-                layout: INT,
-            },
+            Inst::Return { src: 2 },
         ],
-    )
+    ))
 }
 
 /// `dst = obj[index]`, at a two-word stride.

@@ -450,24 +450,6 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             }
             Storage::Words(_) => return Err(TooWide::Storage { storage }),
         },
-        Inst::GrowablePush {
-            owner,
-            src,
-            storage,
-        } => match storage {
-            Storage::PackedBytes => build(Op::GrowablePushByte, slot(owner)?, slot(src)?, 0, 0),
-            Storage::Words(elem) => build(
-                Op::GrowablePushWords,
-                slot(owner)?,
-                slot(src)?,
-                0,
-                halves(elem.0, 0),
-            ),
-        },
-        Inst::GrowableExtend { args, storage } => match storage {
-            Storage::PackedBytes => build(Op::GrowableExtendBytes, 0, 0, 0, halves(args.0, 0)),
-            Storage::Words(_) => return Err(TooWide::Storage { storage }),
-        },
         // The opcode *is* the storage and the validation: a byte finish
         // validates UTF-8 and a word finish validates nothing, so the other
         // pairing of each has no opcode. The target is the payload's low half,
@@ -1060,29 +1042,6 @@ mod tests {
             ),
             (
                 0,
-                Inst::GrowablePush {
-                    owner: 1,
-                    src: 2,
-                    storage: Storage::PackedBytes,
-                },
-            ),
-            (
-                0,
-                Inst::GrowablePush {
-                    owner: 1,
-                    src: 2,
-                    storage: Storage::Words(L),
-                },
-            ),
-            (
-                0,
-                Inst::GrowableExtend {
-                    args: ArgsId(1),
-                    storage: Storage::PackedBytes,
-                },
-            ),
-            (
-                0,
                 Inst::RunFinish {
                     dst: 1,
                     owner: 2,
@@ -1501,10 +1460,6 @@ mod tests {
             Inst::GrowableAlloc {
                 dst: 0,
                 capacity: 1,
-                storage: words,
-            },
-            Inst::GrowableExtend {
-                args: ArgsId(0),
                 storage: words,
             },
             Inst::RunStore {

@@ -121,8 +121,6 @@ impl Inst {
             | Inst::StoreElem { .. }
             | Inst::RunCopy { .. }
             | Inst::RunStore { .. }
-            | Inst::GrowablePush { .. }
-            | Inst::GrowableExtend { .. }
             | Inst::GrowableEnsure { .. }
             | Inst::GrowableCommit { .. }
             | Inst::GrowableTruncate { .. }

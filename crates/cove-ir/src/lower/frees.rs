@@ -431,8 +431,6 @@ impl<'p> Flow<'p> {
             | Inst::StoreField { .. }
             | Inst::StoreElem { .. }
             | Inst::RunCopy { .. }
-            | Inst::GrowablePush { .. }
-            | Inst::GrowableExtend { .. }
             | Inst::GrowableTruncate { .. }
             | Inst::GrowableEnsure { .. }
             | Inst::GrowableCommit { .. }
@@ -529,10 +527,6 @@ impl<'p> Flow<'p> {
                 }
             }
             Inst::GrowableAlloc { capacity, .. } => f(capacity, 1),
-            Inst::GrowablePush { owner, src, .. } => {
-                f(owner, 1);
-                f(src, 1);
-            }
             Inst::GrowableTruncate { owner, len, .. } => {
                 f(owner, 1);
                 f(len, 1);
@@ -556,9 +550,6 @@ impl<'p> Flow<'p> {
                 f(index, 1);
                 f(src, 1);
             }
-            // All four operands live in the args row, exactly as
-            // `Inst::RunCopy`'s five do.
-            Inst::GrowableExtend { args: list, .. } => args(list, f),
             Inst::RunFinish { owner, .. } => f(owner, 1),
             Inst::StoreField {
                 obj, src, layout, ..

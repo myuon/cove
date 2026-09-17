@@ -405,7 +405,7 @@ pub fn mediated_answers(outcomes: &[Outcome]) {
 
 // --- the growable-buffer helper -----------------------------------------------
 
-/// One of ADR 0052's four instructions compiled code handed back through
+/// One growable-run operation compiled code handed back through
 /// [`GrowableFn`](cove_native::GrowableFn).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Built {
@@ -430,18 +430,18 @@ thread_local! {
 
 /// The runtime's growable-buffer helper, as a test double.
 ///
-/// A real one is `Machine::alloc_buffer`, `Machine::append_byte`,
-/// `encoded::append_bytes` or `Machine::finish_buffer`, whole. This one records
+/// A real one is `Machine::alloc_buffer`, `Machine::finish_buffer`,
+/// `Machine::ensure_growable` or `Machine::commit_growable`, whole. This one
+/// records
 /// the hand-over and writes one word — `op * 1000 + a`, a number no other part of
 /// a frame holds — into the destination *of the two operations that have one*.
 ///
 /// That last clause is the part worth stating. `a` is `dst` for
 /// [`GrowableOp::Alloc`], [`GrowableOp::Finish`] and [`GrowableOp::FinishWords`];
-/// it is the owner's slot for
-/// [`GrowableOp::Push`] and [`GrowableOp::PushWords`], which the real helper
-/// reads and never writes; and it is an `ArgsId` for [`GrowableOp::Extend`],
-/// which is not a slot at all. A double that wrote through it in every case
-/// would be asserting a store the runtime does not make.
+/// it is the owner's slot for every other member — [`GrowableOp::EnsureBytes`],
+/// [`GrowableOp::CommitBytes`] and the rest — which the real helper reads and
+/// never writes. A double that wrote through it in every case would be asserting
+/// a store the runtime does not make.
 ///
 /// # Safety
 ///
@@ -3033,72 +3033,50 @@ pub fn a_literal_past_the_table_refuses_the_function<A: Arm>() {
     );
 }
 
-/// Three of ADR 0052's four, each handed to the runtime whole with its operands.
+/// The byte buffer's two mediated instructions, each handed to the runtime whole
+/// with its operands.
 ///
 /// There is no fast path to check here and that is the design — see
-/// [`cove_native::GrowableFn`] for why each of the three is the helper and not
+/// [`cove_native::GrowableFn`] for why each of the two is the helper and not
 /// half of one. So what a case can say is the three things that *are* emitted
 /// code: the operation and its two operands reach the helper unchanged; the
-/// unpaid work is published and the accumulator cleared, because every one of
-/// them is a safepoint; and the answer the helper wrote is in the frame
-/// afterwards.
+/// unpaid work is published and the accumulator cleared, because both are
+/// safepoints; and the answer the helper wrote is in the frame afterwards.
 ///
-/// The fourth, a byte push, is a memory store with the helper as its cold half,
-/// and [`a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length`]
-/// and the cases after it are where it is held.
+/// What fills a buffer between them is ADR 0062's window, whose rows are emitted
+/// fast paths with this helper as their cold half:
+/// [`a_push_window_with_room_writes_the_unit_and_commits_it`] and the cases
+/// around it are where those are held.
 ///
-/// The three run in **one body**, in the order a builder is used, so the pcs are
-/// three different numbers and an emitter that dropped `self.pc` is a wrong pc
-/// rather than a coincidence. `growable-alloc` and `run-finish` write a
-/// destination and the extend does not, which is the double's own note.
+/// The two run in **one body**, in the order a builder is used, with an
+/// instruction between them, so the pcs are two different numbers neither of
+/// which is one — an emitter that dropped `self.pc` is a wrong pc rather than a
+/// coincidence.
 pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
     forget_built();
-    // `s0` is the owner, `s1` the capacity and the byte, `s2` the answer.
-    let held = program_with_args(
-        function(
-            vec![Repr::Ref, Repr::Int, Repr::Ref],
-            REF,
-            vec![
-                Inst::GrowableAlloc {
-                    dst: 0,
-                    capacity: 1,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::GrowableExtend {
-                    args: ArgsId(1),
-                    storage: Storage::PackedBytes,
-                },
-                Inst::RunFinish {
-                    dst: 2,
-                    owner: 0,
-                    target: REF,
-                    validation: Validation::Utf8,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::Return { src: 2 },
-            ],
-        ),
-        // `owner`, `src`, `from`, `to` — the row `Inst::GrowableExtend` is defined
-        // to hold, each one word.
+    // `s0` is the owner, `s1` the capacity and `s2` the answer.
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Ref],
+        REF,
         vec![
-            Arg {
-                slot: 0,
-                layout: REF,
+            Inst::GrowableAlloc {
+                dst: 0,
+                capacity: 1,
+                storage: Storage::PackedBytes,
             },
-            Arg {
-                slot: 2,
-                layout: REF,
+            // Between the two, so that neither pc is one and a dropped `self.pc`
+            // cannot pass by coincidence.
+            Inst::Unit { dst: 2 },
+            Inst::RunFinish {
+                dst: 2,
+                owner: 0,
+                target: REF,
+                validation: Validation::Utf8,
+                storage: Storage::PackedBytes,
             },
-            Arg {
-                slot: 1,
-                layout: INT,
-            },
-            Arg {
-                slot: 1,
-                layout: INT,
-            },
+            Inst::Return { src: 2 },
         ],
-    );
+    ));
 
     let heap = Heap::new(1);
     let mut words = vec![0u64, 3, 0];
@@ -3120,16 +3098,6 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
             },
             Built {
                 base: 0,
-                pc: 1,
-                op: GrowableOp::Extend.abi(),
-                // The `ArgsId`, not a slot: the four operands are behind it and the
-                // helper resolves them out of the program.
-                a: 1,
-                b: 0,
-                work: 0,
-            },
-            Built {
-                base: 0,
                 pc: 2,
                 op: GrowableOp::Finish.abi(),
                 a: 2,
@@ -3137,7 +3105,7 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
                 work: 0,
             },
         ],
-        "the three operations, in order, with their operands"
+        "the two operations, in order, with their operands"
     );
     // What the double wrote, in the two slots that have a destination.
     assert_eq!(words[0], u64::from(GrowableOp::Alloc.abi()) * 1000);
@@ -3157,7 +3125,7 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
     assert_eq!(answer.outcome, Outcome::Returned);
     assert_eq!(
         built().iter().map(|row| row.base).collect::<Vec<_>>(),
-        vec![4, 4, 4],
+        vec![4, 4],
         "the frame the operands are read out of"
     );
     assert_eq!(words[4], u64::from(GrowableOp::Alloc.abi()) * 1000);
@@ -3201,12 +3169,8 @@ pub fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome<A: Arm>() {
     }
 }
 
-/// The four are admitted together, and an `growable-extend` whose row is not four
-/// one-word operands is not one.
-///
-/// `cove_ir::verify` holds the row to that shape too, so the second half of this
-/// is unreachable for a lowered program — and it is bounded here anyway, because
-/// what the helper does with a short row is index past the end of it.
+/// The byte buffer's mediated pair is admitted together, and each is refused at
+/// a slot the frame does not have.
 pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
     let one = |inst: Inst| {
         program(function(
@@ -3219,11 +3183,6 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
         Inst::GrowableAlloc {
             dst: 0,
             capacity: 1,
-            storage: Storage::PackedBytes,
-        },
-        Inst::GrowablePush {
-            owner: 0,
-            src: 1,
             storage: Storage::PackedBytes,
         },
         Inst::RunFinish {
@@ -3243,11 +3202,6 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
                 capacity: 1,
                 storage: Storage::PackedBytes,
             },
-            Inst::GrowablePush { .. } => Inst::GrowablePush {
-                owner: 9,
-                src: 1,
-                storage: Storage::PackedBytes,
-            },
             _ => Inst::RunFinish {
                 dst: 0,
                 owner: 9,
@@ -3263,11 +3217,10 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
     }
 
     // A word allocation is not the byte buffer's helper, and is refused rather
-    // than handed to it. A word push and a word finish are admitted, but as
-    // emitted fast paths of their own — `every_cold_path_of_a_push_goes_to_the_runtime`
-    // and `every_cold_path_of_a_freeze_goes_to_the_runtime` are where that is
-    // asserted — and a word finish into anything but the fixed run of its
-    // element is refused.
+    // than handed to it. A word finish is admitted, but as an emitted fast path
+    // of its own — `every_cold_path_of_a_freeze_goes_to_the_runtime` is where
+    // that is asserted — and a word finish into anything but the fixed run of
+    // its element is refused.
     let words = Storage::Words(INT);
     for inst in [
         Inst::GrowableAlloc {
@@ -3285,114 +3238,6 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
     ] {
         assert!(!compiles::<A>(&one(inst.clone())), "{inst:?}");
     }
-    assert!(
-        !compiles::<A>(&program_with_args(
-            function(
-                vec![Repr::Ref, Repr::Int],
-                REF,
-                vec![
-                    Inst::GrowableExtend {
-                        args: ArgsId(1),
-                        storage: words,
-                    },
-                    Inst::Return { src: 0 },
-                ],
-            ),
-            vec![
-                Arg {
-                    slot: 0,
-                    layout: REF
-                },
-                Arg {
-                    slot: 0,
-                    layout: REF
-                },
-                Arg {
-                    slot: 1,
-                    layout: INT
-                },
-                Arg {
-                    slot: 1,
-                    layout: INT
-                },
-            ],
-        )),
-        "a word extend"
-    );
-
-    let row = |args: Vec<Arg>| {
-        program_with_args(
-            function(
-                vec![Repr::Ref, Repr::Int],
-                REF,
-                vec![
-                    Inst::GrowableExtend {
-                        args: ArgsId(1),
-                        storage: Storage::PackedBytes,
-                    },
-                    Inst::Return { src: 0 },
-                ],
-            ),
-            args,
-        )
-    };
-    let word = |slot: Slot| Arg { slot, layout: INT };
-    assert!(compiles::<A>(&row(vec![
-        Arg {
-            slot: 0,
-            layout: REF
-        },
-        Arg {
-            slot: 0,
-            layout: REF
-        },
-        word(1),
-        word(1),
-    ])));
-    assert!(
-        !compiles::<A>(&row(vec![
-            Arg {
-                slot: 0,
-                layout: REF
-            },
-            word(1),
-            word(1),
-        ])),
-        "three operands is not an `growable-extend` row"
-    );
-    assert!(
-        !compiles::<A>(&row(vec![
-            Arg {
-                slot: 0,
-                layout: REF
-            },
-            Arg {
-                slot: 0,
-                layout: REF
-            },
-            word(1),
-            word(9),
-        ])),
-        "an operand at a slot the frame does not have"
-    );
-    assert!(
-        !compiles::<A>(&row(vec![
-            Arg {
-                slot: 0,
-                layout: REF
-            },
-            Arg {
-                slot: 0,
-                layout: REF
-            },
-            word(1),
-            Arg {
-                slot: 0,
-                layout: PAIR
-            },
-        ])),
-        "an operand that is two words is not one of these four"
-    );
 }
 
 /// A run copy's five operands, as `ArgsId(1)`: `dst` in slot 0, `dst_at` in 1,
@@ -4102,234 +3947,21 @@ pub fn a_reference_is_in_its_slot_across_an_allocation<A: Arm>() {
     forget_allocations();
 }
 
-// --- Vector.push --------------------------------------------------------------
+// --- growable owners ----------------------------------------------------------
 
-/// One `Vector.push(value)` of a `stride`-wide element, answering `Unit` at
-/// `dst`: what `std.vector.push` is once the lowering has expanded it — a word
-/// `growable-push` of the element's layout, and the `()` it answers.
-///
-/// Slot 0 is the owner and slots 1.. are the element, so a case writes the
-/// header address and the element words into `words` and reads the `Unit` back.
-pub fn pushing(stride: u32) -> Program {
-    let mut reprs = vec![Repr::Ref];
-    reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
-    // The answer, one `Unit` word past the element.
-    let dst = 1 + stride;
-    reprs.push(Repr::Unit);
-    let elem = if stride == 2 { PAIR } else { INT };
-    program(function(
-        reprs,
-        UNIT,
-        vec![
-            Inst::GrowablePush {
-                owner: 0,
-                src: 1,
-                storage: Storage::Words(elem),
-            },
-            Inst::Unit { dst },
-            Inst::Return { src: dst },
-        ],
-    ))
-}
-
-/// A `Vector` header and its store, in the shape `vector()` reads them.
-///
-/// Two payload words: the element count and the store's address, which is
-/// `Shape::Vector`'s layout. The store is an ordinary object whose header length
-/// is the capacity *in elements*.
-pub fn a_vector(heap: &mut Heap, at: u64, layout: LayoutId, len: u32, capacity: u32) -> u64 {
-    let header = heap.object(at, layout, 0);
-    let store = heap.object(at + 8, STORE, capacity);
-    heap.set(at + 1, u64::from(len));
-    heap.set(at + 2, store);
-    header
-}
-
-/// `Machine::push_words`, where the store has room.
-///
-/// The element's words into `store[len]` and the length bumped, and **nothing
-/// handed to the runtime** — which is the half a coverage number cannot say. The
-/// two-word element is the stride case: `set_payload_run` writes at `len * stride`,
-/// so a lowering that forgot the multiply lands the second push on top of the
-/// first.
-pub fn a_push_into_spare_capacity_writes_the_element_and_the_length<A: Arm>() {
-    for (vector, stride) in [(VECTOR, 1), (PAIR_VECTOR, 2)] {
-        forget_built();
-        let held = pushing(stride);
-        let at = HEAP_CHUNK_WORDS + 33;
-        let mut heap = Heap::new(2);
-        // One element already there, room for four.
-        let header = a_vector(&mut heap, at, vector, 1, 4);
-        let mut words = vec![header];
-        words.extend((0..stride).map(|word| 70 + u64::from(word)));
-        words.push(UNWRITTEN);
-        let answer = run_over::<A>(&held, &mut words, 0, &heap);
-        assert_eq!(answer.outcome, Outcome::Returned, "stride {stride}");
-        assert!(
-            built().is_empty(),
-            "the fast path took it, so nothing went to the runtime: {:?}",
-            built()
-        );
-        // `store + 1 + len * stride`, which for `len == 1` is the second element.
-        for word in 0..stride {
-            assert_eq!(
-                heap.get(at + 8 + 1 + u64::from(stride) + u64::from(word)),
-                70 + u64::from(word),
-                "element word {word} at stride {stride}"
-            );
-        }
-        // And the first element was not touched, which is what says the offset was
-        // `len * stride` and not nought.
-        for word in 0..stride {
-            assert_eq!(heap.get(at + 8 + 1 + u64::from(word)), 0);
-        }
-        assert_eq!(heap.get(at + 1), 2, "the length was bumped, once");
-        assert_eq!(
-            words[1 + stride as usize],
-            0,
-            "the `unit` after it: one word of nought"
-        );
-    }
-}
-
-/// How a case builds the receiver a cold push is given: a [`Heap`] and where in it,
+/// How a case builds the owner a cold path is given: a [`Heap`] and where in it,
 /// answering the header's address.
 ///
-/// A named type rather than the signature written in place, because the three rows
-/// below are an array of them and `clippy::type_complexity` is right that the
+/// A named type rather than the signature written in place, because the rows
+/// below are arrays of them and `clippy::type_complexity` is right that the
 /// written-out form is unreadable there.
 type Build = fn(&mut Heap, u64) -> u64;
-
-/// The three cold paths of `Vector.push`, each handed to the runtime whole.
-///
-/// No room, a store word of nought, and an owner whose object is not the vector
-/// the element layout implies — `cove_native`'s `WordPush`. Each one's sentence is
-/// the runtime's, which this crate cannot build, so the assertion is that emitted
-/// code **did not try**: the push went over as
-/// [`GrowableOp::PushWords`], at the right pc with the owner and the element's
-/// slots, and the instruction after it ran once the runtime answered.
-pub fn every_cold_path_of_a_push_goes_to_the_runtime<A: Arm>() {
-    let at = HEAP_CHUNK_WORDS + 33;
-    // The three, by what makes them cold.
-    let rows: [(&str, Build); 3] = [
-        (
-            "the store is full, so the push would grow it",
-            |heap, at| a_vector(heap, at, VECTOR, 4, 4),
-        ),
-        ("`freeze()` consumed the store", |heap, at| {
-            let header = a_vector(heap, at, VECTOR, 0, 4);
-            heap.set(at + 2, 0);
-            header
-        }),
-        (
-            "the object is not the layout the call site declared",
-            |heap, at| a_vector(heap, at, PAIR_VECTOR, 0, 4),
-        ),
-    ];
-    for (why, build) in rows {
-        forget_built();
-        let held = pushing(1);
-        let mut heap = Heap::new(2);
-        let header = build(&mut heap, at);
-        let mut words = vec![header, 70, UNWRITTEN];
-        let answer = run_over::<A>(&held, &mut words, 0, &heap);
-        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
-        assert_eq!(
-            built(),
-            vec![Built {
-                base: 0,
-                pc: 0,
-                op: GrowableOp::PushWords.abi(),
-                a: 0,
-                b: 1,
-                // The helper is a safepoint, so the block's static work — three
-                // instructions — went over with the hand-over.
-                work: 3,
-            }],
-            "{why}: the runtime was handed the push, whole"
-        );
-        // The `unit` after the push, which says compiled code carried on from
-        // the cold path rather than leaving the function there.
-        assert_eq!(words[2], 0, "{why}: the instruction after the push ran");
-    }
-    forget_built();
-}
-
-/// A cold push whose helper *raised* leaves with that outcome.
-///
-/// The other half of the mediated shape, and it is [`Emit::callee_mediated`]'s:
-/// anything but `Returned` is returned from the compiled function unchanged, so a
-/// refusal eight frames down leaves through one `ret` per frame.
-pub fn a_cold_push_that_raised_leaves_with_that_outcome<A: Arm>() {
-    for outcome in [Outcome::Raised, Outcome::Stopped] {
-        forget_built();
-        built_answers(&[outcome]);
-        let held = pushing(1);
-        let at = HEAP_CHUNK_WORDS + 33;
-        let mut heap = Heap::new(2);
-        // Full, so the push is cold.
-        let header = a_vector(&mut heap, at, VECTOR, 4, 4);
-        let mut words = vec![header, 70, UNWRITTEN];
-        let answer = run_over::<A>(&held, &mut words, 0, &heap);
-        assert_eq!(answer.outcome, outcome);
-        assert_eq!(built().len(), 1);
-        assert_eq!(
-            words[2], UNWRITTEN,
-            "and nothing after the push ran, because the function left"
-        );
-    }
-    forget_built();
-}
-
-/// A `push` to a null owner is refused where it is read.
-///
-/// `Machine::vector_run`'s `if owner == 0 { null_object() }` — the one refusal of
-/// a push this crate can name, so it is emitted rather than mediated, and nothing
-/// goes to the runtime.
-pub fn a_push_refuses_a_null_receiver<A: Arm>() {
-    forget_built();
-    let held = pushing(1);
-    let heap = Heap::new(2);
-    let mut words = vec![0u64, 70, UNWRITTEN];
-    let answer = run_over::<A>(&held, &mut words, 0, &heap);
-    assert_eq!(answer.outcome, Outcome::Raised);
-    assert_eq!(answer.raise, Some(Raise::NullObject));
-    assert_eq!(answer.raise_pc, 0);
-    assert!(
-        built().is_empty(),
-        "the null was refused here, not handed over"
-    );
-    forget_built();
-}
-
-// --- a byte push ---------------------------------------------------------------
-
-/// One `appendByte(value)`, answering `Unit`: what `StringBuilder.appendByte` is
-/// once the lowering has expanded it — a byte `growable-push` and the `()` it
-/// answers.
-///
-/// Slot 0 is the owner, slot 1 the value and slot 2 the answer.
-pub fn pushing_a_byte() -> Program {
-    program(function(
-        vec![Repr::Ref, Repr::Int, Repr::Unit],
-        UNIT,
-        vec![
-            Inst::GrowablePush {
-                owner: 0,
-                src: 1,
-                storage: Storage::PackedBytes,
-            },
-            Inst::Unit { dst: 2 },
-            Inst::Return { src: 2 },
-        ],
-    ))
-}
 
 /// A `ByteBuffer` owner and its packed store, in the shape `Machine::buffer`
 /// reads them: payload word 0 the length in bytes, payload word 1 the store, and
 /// the store's header length its capacity in bytes.
 ///
-/// The store's payload is filled with `0xAA` bytes, so a push that cleared or
+/// The store's payload is filled with `0xAA` bytes, so a write that cleared or
 /// shifted the wrong bits shows as a changed neighbour rather than a nought that
 /// happened to be there already.
 pub fn a_byte_buffer(heap: &mut Heap, at: u64, len: u64, capacity: u32) -> u64 {
@@ -4343,160 +3975,17 @@ pub fn a_byte_buffer(heap: &mut Heap, at: u64, len: u64, capacity: u32) -> u64 {
     owner
 }
 
-/// `Machine::append_byte`, where the store has room: the byte blended into its
-/// word at its offset, every other byte of that word left as it was, the length
-/// bumped, and **nothing handed to the runtime**.
+/// A `Vector` header and its store, in the shape `vector()` reads them.
 ///
-/// The lengths are the offsets inside a word that are easiest to get wrong — the
-/// first byte of the first word, the last byte of it, the first byte of the
-/// second — and the one push that exactly fills the store. Two values, `0` and
-/// `255`, so that both a byte that clears bits and one that sets all of them are
-/// written.
-pub fn a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length<A: Arm>() {
-    for (len, capacity) in [(0u64, 16u32), (7, 16), (8, 16), (15, 16), (23, 24)] {
-        for value in [0u64, 0x5C, 255] {
-            forget_built();
-            let held = pushing_a_byte();
-            let at = HEAP_CHUNK_WORDS + 33;
-            let mut heap = Heap::new(2);
-            let owner = a_byte_buffer(&mut heap, at, len, capacity);
-            let mut words = vec![owner, value, UNWRITTEN];
-            let answer = run_over::<A>(&held, &mut words, 0, &heap);
-            let what = format!("{value} at byte {len} of {capacity}");
-            assert_eq!(answer.outcome, Outcome::Returned, "{what}");
-            assert!(
-                built().is_empty(),
-                "{what}: the fast path took it, so nothing went to the runtime: {:?}",
-                built()
-            );
-            let word = heap.get(at + 8 + 1 + len / 8);
-            let shift = (len % 8) * 8;
-            let expected = (0xAAAA_AAAA_AAAA_AAAAu64 & !(0xFF << shift)) | (value << shift);
-            assert_eq!(word, expected, "{what}: the word the byte went into");
-            for other in 0..u64::from(capacity).div_ceil(8) {
-                if other != len / 8 {
-                    assert_eq!(
-                        heap.get(at + 8 + 1 + other),
-                        0xAAAA_AAAA_AAAA_AAAA,
-                        "{what}: payload word {other} was not touched"
-                    );
-                }
-            }
-            assert_eq!(heap.get(at + 1), len + 1, "{what}: the length, bumped once");
-            assert_eq!(heap.get(at + 2), heap.addr(at + 8), "{what}: the store");
-            assert_eq!(words[2], 0, "{what}: the `unit` after it ran");
-        }
-    }
-    forget_built();
-}
-
-/// The cold paths of a byte push, each handed to the runtime whole.
-///
-/// A full store — the push after the one that filled it, which grows — a store
-/// word of nought, an object that is not a byte buffer, a length word past the
-/// capacity, and a value that is not a byte: `256`, and `-1`, which an unsigned
-/// comparison has to catch as well. Each one's sentence, and each growth, is
-/// the runtime's, so the assertion is that emitted code **did not try**: the push
-/// went over as [`GrowableOp::Push`] at the right pc with the owner and the value's
-/// slot, nothing in the heap was written, and the instruction after it ran once
-/// the runtime answered.
-pub fn every_cold_path_of_a_byte_push_goes_to_the_runtime<A: Arm>() {
-    let at = HEAP_CHUNK_WORDS + 33;
-    let rows: [(&str, u64, Build); 6] = [
-        (
-            "the store is exactly full, so the push would grow it",
-            7,
-            |heap, at| a_byte_buffer(heap, at, 16, 16),
-        ),
-        ("`finish()` consumed the store", 7, |heap, at| {
-            let owner = a_byte_buffer(heap, at, 0, 16);
-            heap.set(at + 2, 0);
-            owner
-        }),
-        ("the object is not a byte buffer", 7, |heap, at| {
-            let owner = a_byte_buffer(heap, at, 0, 16);
-            heap.object(at, VECTOR, 0);
-            owner
-        }),
-        ("the length word is past the capacity", 7, |heap, at| {
-            a_byte_buffer(heap, at, 1 << 40, 16)
-        }),
-        ("the value is 256", 256, |heap, at| {
-            a_byte_buffer(heap, at, 0, 16)
-        }),
-        ("the value is negative", u64::MAX, |heap, at| {
-            a_byte_buffer(heap, at, 0, 16)
-        }),
-    ];
-    for (why, value, build) in rows {
-        forget_built();
-        let held = pushing_a_byte();
-        let mut heap = Heap::new(2);
-        let owner = build(&mut heap, at);
-        let before: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
-        let mut words = vec![owner, value, UNWRITTEN];
-        let answer = run_over::<A>(&held, &mut words, 0, &heap);
-        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
-        assert_eq!(
-            built(),
-            vec![Built {
-                base: 0,
-                pc: 0,
-                op: GrowableOp::Push.abi(),
-                a: 0,
-                b: 1,
-                // The helper is a safepoint, so the block's static work — three
-                // instructions — went over with the hand-over.
-                work: 3,
-            }],
-            "{why}: the runtime was handed the push, whole"
-        );
-        let after: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
-        assert_eq!(before, after, "{why}: emitted code wrote nothing first");
-        assert_eq!(words[2], 0, "{why}: the instruction after the push ran");
-    }
-    forget_built();
-}
-
-/// A cold byte push whose helper *raised* or stopped leaves with that outcome —
-/// the shape every hand-over has.
-pub fn a_cold_byte_push_that_raised_leaves_with_that_outcome<A: Arm>() {
-    for outcome in [Outcome::Raised, Outcome::Stopped] {
-        forget_built();
-        built_answers(&[outcome]);
-        let held = pushing_a_byte();
-        let at = HEAP_CHUNK_WORDS + 33;
-        let mut heap = Heap::new(2);
-        let owner = a_byte_buffer(&mut heap, at, 0, 16);
-        // Not a byte, so the push is cold and the runtime refuses it.
-        let mut words = vec![owner, 300, UNWRITTEN];
-        let answer = run_over::<A>(&held, &mut words, 0, &heap);
-        assert_eq!(answer.outcome, outcome);
-        assert_eq!(built().len(), 1);
-        assert_eq!(
-            words[2], UNWRITTEN,
-            "and nothing after the push ran, because the function left"
-        );
-    }
-    forget_built();
-}
-
-/// A byte push to a null owner is refused where it is read, as
-/// `Machine::buffer`'s `null_object()`, and nothing goes to the runtime.
-pub fn a_byte_push_refuses_a_null_owner<A: Arm>() {
-    forget_built();
-    let held = pushing_a_byte();
-    let heap = Heap::new(2);
-    let mut words = vec![0u64, 7, UNWRITTEN];
-    let answer = run_over::<A>(&held, &mut words, 0, &heap);
-    assert_eq!(answer.outcome, Outcome::Raised);
-    assert_eq!(answer.raise, Some(Raise::NullObject));
-    assert_eq!(answer.raise_pc, 0);
-    assert!(
-        built().is_empty(),
-        "the null was refused here, not handed over"
-    );
-    forget_built();
+/// Two payload words: the element count and the store's address, which is
+/// `Shape::Vector`'s layout. The store is an ordinary object whose header length
+/// is the capacity *in elements*.
+pub fn a_vector(heap: &mut Heap, at: u64, layout: LayoutId, len: u32, capacity: u32) -> u64 {
+    let header = heap.object(at, layout, 0);
+    let store = heap.object(at + 8, STORE, capacity);
+    heap.set(at + 1, u64::from(len));
+    heap.set(at + 2, store);
+    header
 }
 
 // --- ADR 0062's buffer window -------------------------------------------------
@@ -5329,15 +4818,19 @@ pub fn an_append_window_is_an_ensure_a_copy_and_a_commit<A: Arm>() {
     forget_copied();
 }
 
-/// **A window is about the code a composite push was**, and less than its rows.
+/// **A window is less machine code than its rows.**
 ///
-/// Three compilations of the same push — `GrowablePush` as it lowers today, the
-/// window as ADR 0062 lowers it, and the window's rows unrecognised — measured in
-/// bytes of machine code and printed, so that a change to either fast path shows
-/// its cost here. What is held is the ordering that makes the window worth having:
-/// fewer bytes than its rows emitted one at a time, and no more than twice the
-/// composite — whose cold half is one call where a window's is three.
-pub fn a_window_is_about_the_code_a_composite_push_was<A: Arm>() {
+/// Two compilations of the same push — the window as ADR 0062 lowers it, and the
+/// window's rows unrecognised — measured in bytes of machine code and printed,
+/// so that a change to the fast path shows its cost here. What is held is the
+/// ordering that makes the window worth having: fewer bytes than its rows
+/// emitted one at a time.
+///
+/// There was a third compilation until ADR 0062's last stage, the composite
+/// `growable-push` this replaced, and the window was held to no more than twice
+/// it. That baseline went with the instruction; #417 and #418 are where the
+/// numbers it gave are recorded.
+pub fn a_window_is_less_code_than_its_rows<A: Arm>() {
     let size = |program: &Program| {
         let mut jit = A::new(helpers());
         let compiled = jit
@@ -5345,22 +4838,17 @@ pub fn a_window_is_about_the_code_a_composite_push_was<A: Arm>() {
             .expect("the function is inside the slice");
         A::code_bytes(compiled)
     };
-    for (what, composite, storage) in [
-        ("Vector<Int>.push", pushing(1), Storage::Words(INT)),
-        ("Vector<Pair>.push", pushing(2), Storage::Words(PAIR)),
-        ("appendByte", pushing_a_byte(), Storage::PackedBytes),
+    for (what, storage) in [
+        ("Vector<Int>.push", Storage::Words(INT)),
+        ("Vector<Pair>.push", Storage::Words(PAIR)),
+        ("appendByte", Storage::PackedBytes),
     ] {
-        let composite = size(&composite);
         let window = size(&a_push_window(storage));
         let rows = size(&a_push_window_unrecognised(storage));
-        println!("{what}: composite {composite} bytes, window {window} bytes, rows {rows} bytes");
+        println!("{what}: window {window} bytes, rows {rows} bytes");
         assert!(
             window < rows,
             "{what}: {window} against {rows} for the rows"
-        );
-        assert!(
-            window <= 2 * composite,
-            "{what}: {window} against {composite} for the composite"
         );
     }
 }

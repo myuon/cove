@@ -151,14 +151,9 @@ mod base {
     /// [`crate::Inst`] declares them and directly after the run copy they fill
     /// with.
     pub const GROWABLE_ALLOC_BYTES: u8 = RUN_SLICE_WORDS + 1;
-    pub const GROWABLE_PUSH_BYTE: u8 = GROWABLE_ALLOC_BYTES + 1;
-    /// The first word member of the growable family, beside its byte twin:
-    /// `Vector.push` since ADR 0058 moved it into the standard library.
-    pub const GROWABLE_PUSH_WORDS: u8 = GROWABLE_PUSH_BYTE + 1;
-    pub const GROWABLE_EXTEND_BYTES: u8 = GROWABLE_PUSH_WORDS + 1;
     /// A growable member with no byte twin: `Vector.pop` and `Vector.remove`
     /// since ADR 0058 moved them into the standard library.
-    pub const GROWABLE_TRUNCATE_WORDS: u8 = GROWABLE_EXTEND_BYTES + 1;
+    pub const GROWABLE_TRUNCATE_WORDS: u8 = GROWABLE_ALLOC_BYTES + 1;
     pub const RUN_FINISH_BYTES: u8 = GROWABLE_TRUNCATE_WORDS + 1;
     /// A word finish, beside its byte twin: `Vector.freeze()` since ADR 0058
     /// moved it into the standard library.
@@ -270,13 +265,6 @@ pub enum Op {
     RunSliceWords,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
     GrowableAllocBytes,
-    /// [`crate::Inst::GrowablePush`] over [`crate::Storage::PackedBytes`].
-    GrowablePushByte,
-    /// [`crate::Inst::GrowablePush`] over [`crate::Storage::Words`], whose
-    /// element layout is the payload's low half.
-    GrowablePushWords,
-    /// [`crate::Inst::GrowableExtend`] over [`crate::Storage::PackedBytes`].
-    GrowableExtendBytes,
     /// [`crate::Inst::GrowableTruncate`] over [`crate::Storage::Words`], whose
     /// element layout is the payload's low half.
     GrowableTruncateWords,
@@ -576,9 +564,6 @@ impl Op {
             Op::RunSliceBytes,
             Op::RunSliceWords,
             Op::GrowableAllocBytes,
-            Op::GrowablePushByte,
-            Op::GrowablePushWords,
-            Op::GrowableExtendBytes,
             Op::GrowableTruncateWords,
             Op::RunFinishBytes,
             Op::RunFinishWords,
@@ -680,9 +665,6 @@ impl Op {
             Op::RunSliceBytes => base::RUN_SLICE_BYTES,
             Op::RunSliceWords => base::RUN_SLICE_WORDS,
             Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
-            Op::GrowablePushByte => base::GROWABLE_PUSH_BYTE,
-            Op::GrowablePushWords => base::GROWABLE_PUSH_WORDS,
-            Op::GrowableExtendBytes => base::GROWABLE_EXTEND_BYTES,
             Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
             Op::RunFinishBytes => base::RUN_FINISH_BYTES,
             Op::RunFinishWords => base::RUN_FINISH_WORDS,
@@ -982,23 +964,6 @@ impl Op {
             Op::GrowableAllocBytes => {
                 fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty)
             }
-            Op::GrowablePushByte => {
-                fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty)
-            }
-            // The element is a value location at the layout the payload names,
-            // which is `Op::StoreElem`'s source and checked by the same uniform
-            // rule. The owner's own layout is not carried: a `Vector<T>` owner is
-            // whatever the lowering declared for `T`, and the machine reads its
-            // shape off the object's header as it always did.
-            Op::GrowablePushWords => {
-                fields(Operand::Word(REF), Operand::Value, NONE, one(Half::Layout))
-            }
-            // All four operands — `owner`, `src`, `from`, `to` — live behind
-            // the `ArgsId`, because a sixteen-byte instruction has room for
-            // three slot operands and this needs four. See
-            // `Inst::GrowableExtend`'s doc, and `Op::RunCopyBytes` above for the same
-            // arrangement at five.
-            Op::GrowableExtendBytes => fields(NONE, NONE, NONE, one(Half::Args)),
             // The owner and the new length, and the element layout the vacated
             // units are cleared at the stride of.
             Op::GrowableTruncateWords => fields(
@@ -1142,7 +1107,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and sixty-eight opcodes out of the 256 a byte
+    /// argued from: a hundred and seventy-six opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -1173,15 +1138,18 @@ mod tests {
     /// intrinsic, and a hundred and seventy-five once ADR 0062's buffer window
     /// brought an ensure and a commit per storage and a byte store, and a
     /// hundred and seventy-nine once the same ADR's fused heads brought one per
-    /// window pattern. What the
+    /// window pattern, and a hundred and seventy-six once that ADR's last stage
+    /// deleted the composite `GrowablePushByte`, `GrowablePushWords` and
+    /// `GrowableExtendBytes`, whose windows the fused heads had replaced. What
+    /// the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventy_nine_opcodes() {
-        assert_eq!(Op::all().len(), 179);
-        assert_eq!(OPCODES, 179);
+    fn there_are_a_hundred_and_seventy_six_opcodes() {
+        assert_eq!(Op::all().len(), 176);
+        assert_eq!(OPCODES, 176);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
