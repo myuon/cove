@@ -406,3 +406,33 @@ fn a_run_slice_is_admitted_with_four_one_word_operands() {
 fn a_unit_constant_is_a_zero_word() {
     suite::a_unit_constant_is_a_zero_word::<Cranelift>();
 }
+
+#[test]
+fn a_reservation_with_room_is_answered_in_emitted_code() {
+    suite::a_reservation_with_room_is_answered_in_emitted_code::<Cranelift>();
+}
+
+#[test]
+fn every_cold_path_of_a_reservation_goes_to_the_runtime() {
+    suite::every_cold_path_of_a_reservation_goes_to_the_runtime::<Cranelift>();
+}
+
+#[test]
+fn a_byte_store_blends_the_byte() {
+    suite::a_byte_store_blends_the_byte::<Cranelift>();
+}
+
+#[test]
+fn every_cold_path_of_a_byte_store_goes_to_the_runtime() {
+    suite::every_cold_path_of_a_byte_store_goes_to_the_runtime::<Cranelift>();
+}
+
+#[test]
+fn a_window_instruction_refuses_null_and_leaves_when_refused() {
+    suite::a_window_instruction_refuses_null_and_leaves_when_refused::<Cranelift>();
+}
+
+#[test]
+fn a_push_window_with_room_writes_the_unit_and_commits_it() {
+    suite::a_push_window_with_room_writes_the_unit_and_commits_it::<Cranelift>();
+}

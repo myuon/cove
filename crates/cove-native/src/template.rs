@@ -35,8 +35,8 @@ use crate::abi::{
     HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, byte_push, leaders, literal_offset, overflow_of, slot_offset, supported,
-    word_finish, word_push, BytePush, WordFinish, WordPush,
+    by_zero_of, byte_push, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset,
+    supported, word_finish, word_push, BytePush, ByteStore, Reserve, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -672,6 +672,38 @@ impl<'a> Emit<'a> {
                 len,
                 storage: Storage::Words(_),
             } => self.growable_op(GrowableOp::TruncateWords, *owner, *len),
+            // ADR 0062's window: a room test, a bound test and an add, and a
+            // byte blend, each with the helper as its cold half. See
+            // [`Reserve`](crate::subset::Reserve) and
+            // [`ByteStore`](crate::subset::ByteStore).
+            Inst::GrowableEnsure {
+                owner,
+                additional,
+                storage,
+            } => {
+                let reserve = reserve(self.program, *owner, *additional, *storage)
+                    .expect("`supported` admitted an ensure it could decode");
+                self.reserve(reserve, false)
+            }
+            Inst::GrowableCommit {
+                owner,
+                count,
+                storage,
+            } => {
+                let reserve = reserve(self.program, *owner, *count, *storage)
+                    .expect("`supported` admitted a commit it could decode");
+                self.reserve(reserve, true)
+            }
+            Inst::RunStore {
+                run,
+                index,
+                src,
+                storage: Storage::PackedBytes,
+            } => {
+                let store = byte_store(self.program, *run, *index, *src)
+                    .expect("`supported` admitted a byte store it could decode");
+                self.byte_store(store)
+            }
             Inst::RunFinish {
                 dst,
                 owner,
@@ -1320,6 +1352,150 @@ impl<'a> Emit<'a> {
         self.bind(done);
         // One predecessor of this join came through a helper, so the frame pointer
         // the other one derived is not to be trusted here.
+        self.frame_live = false;
+    }
+
+    /// A `growable-ensure` or, when `commit`, a `growable-commit`: the owner read
+    /// as [`Emit::byte_push`] reads it, the room `capacity - length` compared
+    /// unsigned with the count, and — for a commit — the new length written.
+    ///
+    /// See [`Reserve`](crate::subset::Reserve) for what is emitted and what goes
+    /// to [`GrowableFn`](crate::abi::GrowableFn). `RAX` holds the owner until the
+    /// room is known, `RCX` the store and then the count, and `RDX` the length;
+    /// every comparison is `jb`, so the capacity is compared with the length
+    /// before it is subtracted and a subtraction that would wrap is cold.
+    fn reserve(&mut self, reserve: Reserve, commit: bool) {
+        let Reserve {
+            owner,
+            count,
+            layout,
+            words,
+        } = reserve;
+        let cold = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, owner);
+        self.refuse_null(RAX);
+
+        // The owner layout, as the header's high half.
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, layout.0 as i32);
+        self.jcc(CC_NE, Target::Label(cold));
+
+        // `payload(owner, GROWABLE_STORE)`, which a finish leaves nought.
+        self.mov_rr(RCX, RAX);
+        self.add_imm32(RCX, 2);
+        self.heap_word(RCX);
+        self.test_rr(RCX, RCX);
+        self.jcc(CC_E, Target::Label(cold));
+
+        // `payload(owner, GROWABLE_LEN)`, the whole word.
+        self.mov_rr(RDX, RAX);
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+
+        // `object_len(store)`: the capacity. Below the length is cold.
+        self.mov_rr(RAX, RCX);
+        self.object_len(RAX);
+        self.cmp_rr(RAX, RDX);
+        self.jcc(CC_B, Target::Label(cold));
+
+        // The room, and the count against it, unsigned.
+        self.sub_rr(RAX, RDX);
+        self.load_slot(RCX, count);
+        self.cmp_rr(RAX, RCX);
+        self.jcc(CC_B, Target::Label(cold));
+
+        if commit {
+            // `growable_commit`: `set_payload(owner, GROWABLE_LEN, len + count)`.
+            self.add_rr(RDX, RCX);
+            self.load_slot(RAX, owner);
+            self.add_imm32(RAX, 1);
+            self.heap_ptr(RAX);
+            self.store(HEAP_TABLE, 0, RDX);
+        }
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        let op = match (commit, words) {
+            (false, false) => GrowableOp::EnsureBytes,
+            (false, true) => GrowableOp::EnsureWords,
+            (true, false) => GrowableOp::CommitBytes,
+            (true, true) => GrowableOp::CommitWords,
+        };
+        self.growable_op(op, owner, count);
+        self.bind(done);
+        // One predecessor of this join came through a helper.
+        self.frame_live = false;
+    }
+
+    /// A byte `run-store`: `RUN_STORE_BYTES`' checks and [`Emit::byte_push`]'s
+    /// blend, at the offset the instruction names rather than at a length.
+    ///
+    /// `RAX` holds the run and `RCX` the offset; the value waits on the machine
+    /// stack while the word's address is formed, for [`Emit::store_elem`]'s
+    /// reason — three scratch registers, and [`Emit::heap_ptr`] needs the other
+    /// three.
+    fn byte_store(&mut self, store: ByteStore) {
+        let ByteStore {
+            run,
+            index,
+            src,
+            bytes,
+        } = store;
+        let cold = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, run);
+        self.refuse_null(RAX);
+
+        // `Shape::Bytes`, as the header's high half.
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, bytes.0 as i32);
+        self.jcc(CC_NE, Target::Label(cold));
+
+        // The offset against the header length, unsigned.
+        self.load_slot(RCX, index);
+        self.mov_rr(RDX, RAX);
+        self.object_len(RDX);
+        self.cmp_rr(RCX, RDX);
+        self.jcc(CC_AE, Target::Label(cold));
+
+        // `(0..=255).contains(&value)`.
+        self.load_slot(RDX, src);
+        self.cmp_imm32(RDX, 256);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.push(RDX);
+
+        // The payload word holding byte `index`: `run + 1 + index / 8`.
+        self.mov_rr(RDX, RCX);
+        self.shr_imm8(RDX, 3);
+        self.add_rr(RAX, RDX);
+        self.add_imm32(RAX, 1);
+        self.heap_ptr(RAX);
+
+        // `blend(run, index / 8, index % 8, 1, value)`. `shl` by a variable
+        // amount reads `cl`.
+        self.pop(RAX);
+        self.and_imm32(RCX, 7);
+        self.shl_imm8(RCX, 3);
+        self.shl_cl(RAX);
+        self.mov_imm32(HEAP_SPARE, 0xFF);
+        self.shl_cl(HEAP_SPARE);
+        self.not_r(HEAP_SPARE);
+        self.load(HEAP_INDEX, HEAP_TABLE, 0);
+        self.and_rr(HEAP_INDEX, HEAP_SPARE);
+        self.or_rr(HEAP_INDEX, RAX);
+        self.store(HEAP_TABLE, 0, HEAP_INDEX);
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.growable_op(GrowableOp::StoreBytes, run, index);
+        self.bind(done);
         self.frame_live = false;
     }
 

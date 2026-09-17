@@ -52,8 +52,8 @@ use crate::abi::{
     HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, byte_push, leaders, literal_offset, overflow_of, slot_offset, supported,
-    word_finish, word_push, BytePush, WordFinish, WordPush,
+    by_zero_of, byte_push, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset,
+    supported, word_finish, word_push, BytePush, ByteStore, Reserve, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -871,6 +871,41 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.growable_op(GrowableOp::TruncateWords, *owner, *len);
                 false
             }
+            // ADR 0062's window: a room test, a bound test and an add, and a
+            // byte blend, each with the helper as its cold half. See
+            // [`Reserve`](crate::subset::Reserve) and
+            // [`ByteStore`](crate::subset::ByteStore).
+            Inst::GrowableEnsure {
+                owner,
+                additional,
+                storage,
+            } => {
+                let reserve = reserve(self.program, *owner, *additional, *storage)
+                    .expect("`supported` admitted an ensure it could decode");
+                self.reserve(reserve, false);
+                false
+            }
+            Inst::GrowableCommit {
+                owner,
+                count,
+                storage,
+            } => {
+                let reserve = reserve(self.program, *owner, *count, *storage)
+                    .expect("`supported` admitted a commit it could decode");
+                self.reserve(reserve, true);
+                false
+            }
+            Inst::RunStore {
+                run,
+                index,
+                src,
+                storage: Storage::PackedBytes,
+            } => {
+                let store = byte_store(self.program, *run, *index, *src)
+                    .expect("`supported` admitted a byte store it could decode");
+                self.byte_store(store);
+                false
+            }
             Inst::RunFinish {
                 dst,
                 owner,
@@ -1586,6 +1621,155 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.b.switch_to_block(join);
         // One predecessor of this join came through a helper, so neither pointer the
         // other one derived is to be trusted here.
+        self.forget();
+    }
+
+    /// A `growable-ensure` or, when `commit`, a `growable-commit`: the owner
+    /// read as [`Lower::byte_push`] reads it, the room `capacity - length`
+    /// compared unsigned with the count, and — for a commit — the new length
+    /// written.
+    ///
+    /// See [`Reserve`](crate::subset::Reserve) for what is emitted and what goes
+    /// to [`GrowableFn`](crate::abi::GrowableFn). A length past the capacity is
+    /// tested before the subtraction, so the room never wraps; a negative count
+    /// read unsigned is past any room.
+    fn reserve(&mut self, reserve: Reserve, commit: bool) {
+        let Reserve {
+            owner,
+            count,
+            layout,
+            words,
+        } = reserve;
+        let cold = self.b.create_block();
+        let join = self.b.create_block();
+
+        let header = self.load_slot(owner);
+        self.refuse_null(header);
+
+        // The owner layout, as the header's high half.
+        let word = self.heap_word(header);
+        let named = self.b.ins().ushr_imm_u(word, 32);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(layout.0));
+        let known = self.b.create_block();
+        self.b.ins().brif(wrong, cold, &[], known, &[]);
+        self.b.switch_to_block(known);
+
+        // `payload(owner, GROWABLE_STORE)`, which a finish leaves nought.
+        let one = self.b.ins().iconst(types::I64, 1);
+        let store = self.payload(header, one);
+        let finished = self.b.ins().icmp_imm_s(IntCC::Equal, store, 0);
+        let live = self.b.create_block();
+        self.b.ins().brif(finished, cold, &[], live, &[]);
+        self.b.switch_to_block(live);
+
+        // `payload(owner, GROWABLE_LEN)` against `object_len(store)`.
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let len = self.payload(header, zero);
+        let capacity = self.object_len(store);
+        let past = self.b.ins().icmp(IntCC::UnsignedLessThan, capacity, len);
+        let inside = self.b.create_block();
+        self.b.ins().brif(past, cold, &[], inside, &[]);
+        self.b.switch_to_block(inside);
+
+        // The room, and the count against it, unsigned.
+        let room = self.b.ins().isub(capacity, len);
+        let asked = self.load_slot(count);
+        let short = self.b.ins().icmp(IntCC::UnsignedLessThan, room, asked);
+        let fits = self.b.create_block();
+        self.b.ins().brif(short, cold, &[], fits, &[]);
+        self.b.switch_to_block(fits);
+
+        if commit {
+            // `growable_commit`: `set_payload(owner, GROWABLE_LEN, len + count)`.
+            let grown = self.b.ins().iadd(len, asked);
+            self.set_payload(header, zero, grown);
+        }
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        let op = match (commit, words) {
+            (false, false) => GrowableOp::EnsureBytes,
+            (false, true) => GrowableOp::EnsureWords,
+            (true, false) => GrowableOp::CommitBytes,
+            (true, true) => GrowableOp::CommitWords,
+        };
+        self.growable_op(op, owner, count);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        // One predecessor of this join came through a helper.
+        self.forget();
+    }
+
+    /// A byte `run-store`: `RUN_STORE_BYTES`' checks and [`Lower::byte_push`]'s
+    /// blend, at the offset the instruction names rather than at a length.
+    fn byte_store(&mut self, store: ByteStore) {
+        let ByteStore {
+            run,
+            index,
+            src,
+            bytes,
+        } = store;
+        let cold = self.b.create_block();
+        let join = self.b.create_block();
+
+        let addr = self.load_slot(run);
+        self.refuse_null(addr);
+
+        // `Shape::Bytes`, as the header's high half.
+        let word = self.heap_word(addr);
+        let named = self.b.ins().ushr_imm_u(word, 32);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(bytes.0));
+        let known = self.b.create_block();
+        self.b.ins().brif(wrong, cold, &[], known, &[]);
+        self.b.switch_to_block(known);
+
+        // The offset against the header length, unsigned.
+        let at = self.load_slot(index);
+        let len = self.object_len(addr);
+        let outside = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, at, len);
+        let inside = self.b.create_block();
+        self.b.ins().brif(outside, cold, &[], inside, &[]);
+        self.b.switch_to_block(inside);
+
+        // `(0..=255).contains(&value)`.
+        let value = self.load_slot(src);
+        let wide = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, value, 256);
+        let byte = self.b.create_block();
+        self.b.ins().brif(wide, cold, &[], byte, &[]);
+        self.b.switch_to_block(byte);
+
+        // `blend(run, at / 8, at % 8, 1, value)`.
+        let which = self.b.ins().ushr_imm_u(at, 3);
+        let held = self.payload(addr, which);
+        let offset = self.b.ins().band_imm_u(at, 7);
+        let shift = self.b.ins().ishl_imm_u(offset, 3);
+        let ones = self.b.ins().iconst(types::I64, 0xFF);
+        let mask = self.b.ins().ishl(ones, shift);
+        let keep = self.b.ins().bnot(mask);
+        let cleared = self.b.ins().band(held, keep);
+        let placed = self.b.ins().ishl(value, shift);
+        let blended = self.b.ins().bor(cleared, placed);
+        self.set_payload(addr, which, blended);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        self.growable_op(GrowableOp::StoreBytes, run, index);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
         self.forget();
     }
 

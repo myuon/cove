@@ -546,6 +546,120 @@ fn both_arms_answer_the_same_thing() {
         );
     }
 
+    // ADR 0062's window, one instruction at a time: an ensure and a commit over
+    // each storage with room, at exactly the room, past it, negative, onto a
+    // consumed owner, another family and a length past the capacity; and a byte
+    // store at each offset and each cold path. The heap is inside the words
+    // compared, so every length either arm writes is compared.
+    for storage in [Storage::PackedBytes, Storage::Words(INT)] {
+        for commit in [false, true] {
+            for (what, len, count, consumed, other) in [
+                ("with room", 10u64, 3u64, false, false),
+                ("of exactly the room", 10, 6, false, false),
+                ("of nothing", 10, 0, false, false),
+                ("past the room", 10, 7, false, false),
+                ("of a negative count", 10, u64::MAX, false, false),
+                ("onto a consumed owner", 0, 1, true, false),
+                ("onto another family", 0, 1, false, true),
+                ("past the capacity", 1 << 40, 0, false, false),
+            ] {
+                agree_over(
+                    &format!("{storage:?} commit {commit} {what}"),
+                    &suite::reserving(storage, commit),
+                    &[cove_native::HEAP_ORIGIN_WORDS + 20, count, 0],
+                    0,
+                    move || {
+                        let mut heap = Heap::new(2);
+                        match storage {
+                            Storage::PackedBytes => {
+                                suite::a_byte_buffer(&mut heap, 20, len, 16);
+                            }
+                            Storage::Words(_) => {
+                                suite::a_vector(&mut heap, 20, suite::VECTOR, 0, 16);
+                                heap.set(21, len);
+                            }
+                        }
+                        if consumed {
+                            heap.set(22, 0);
+                        }
+                        if other {
+                            heap.object(20, suite::PAIR_VECTOR, 0);
+                        }
+                        heap
+                    },
+                );
+            }
+        }
+    }
+    for (what, index, value, not_a_run) in [
+        ("at byte 0", 0u64, 0x5Cu64, false),
+        ("at byte 7", 7, 255, false),
+        ("at byte 8", 8, 0, false),
+        ("at the end of the run", 16, 1, false),
+        ("at a negative offset", u64::MAX, 1, false),
+        ("of 256", 0, 256, false),
+        ("of -1", 0, u64::MAX, false),
+        ("into a buffer rather than its run", 0, 1, true),
+    ] {
+        agree_over(
+            &format!("a byte store {what}"),
+            &suite::storing_a_byte(),
+            &[
+                cove_native::HEAP_ORIGIN_WORDS + if not_a_run { 20 } else { 28 },
+                index,
+                value,
+                0,
+            ],
+            0,
+            || {
+                let mut heap = Heap::new(2);
+                suite::a_byte_buffer(&mut heap, 20, 0, 16);
+                heap
+            },
+        );
+    }
+    // And a whole push window, with room and without.
+    for storage in [
+        Storage::PackedBytes,
+        Storage::Words(INT),
+        Storage::Words(PAIR),
+    ] {
+        for (len, capacity) in [(3u32, 8u32), (8, 8)] {
+            agree_over(
+                &format!("a push window over {storage:?} at {len} of {capacity}"),
+                &suite::a_push_window(storage),
+                &[
+                    cove_native::HEAP_ORIGIN_WORDS + 20,
+                    0,
+                    0,
+                    0,
+                    0x41,
+                    0x42,
+                    0,
+                    0,
+                ],
+                0,
+                move || {
+                    let mut heap = Heap::new(2);
+                    match storage {
+                        Storage::PackedBytes => {
+                            suite::a_byte_buffer(&mut heap, 20, u64::from(len), capacity);
+                        }
+                        Storage::Words(elem) => {
+                            let vector = if elem == PAIR {
+                                suite::PAIR_VECTOR
+                            } else {
+                                suite::VECTOR
+                            };
+                            suite::a_vector(&mut heap, 20, vector, len, capacity);
+                        }
+                    }
+                    heap
+                },
+            );
+        }
+    }
+
     // Three of ADR 0052's four, each handed to the runtime whole: what the two
     // arms have to agree on is the hand-over, its operands and its order, and on
     // what the helper's outcome does to the frame when it is not `Returned`.
