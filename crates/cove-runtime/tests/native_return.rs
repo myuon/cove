@@ -253,6 +253,22 @@ thread_local! {
     /// counter moving with no code behind it is the one failure a transition test
     /// must not pass through.
     static ENTERED: RefCell<Vec<FunctionId>> = const { RefCell::new(Vec::new()) };
+    /// Whether each entry allocates a block of its own before it runs, and the
+    /// blocks it has allocated.
+    ///
+    /// A case that needs the stack's `Vec` to *move* when it grows has to
+    /// construct that rather than hope for it. `Vec::resize` asks the allocator
+    /// to grow the block, and an allocator is free to answer either way: a
+    /// block nothing was allocated after can usually be extended where it is,
+    /// and then the words a native frame is handed never change and
+    /// [`SEGMENTS`] stays one. A live allocation between one frame and the next
+    /// is what takes that freedom away — the stack is no longer the last block
+    /// out — so the growth has to move it.
+    ///
+    /// Off by default: it is a malloc per frame, and only the two cases about a
+    /// reallocation want it.
+    static BALLASTED: Cell<bool> = const { Cell::new(false) };
+    static BALLAST: RefCell<Vec<Vec<u64>>> = const { RefCell::new(Vec::new()) };
     /// Whether a call is made the *direct* way: `open`, the callee's entry, and
     /// `close`, rather than the one mediated `call` helper.
     ///
@@ -479,6 +495,11 @@ unsafe fn interpret(
             seen.push(at);
         }
     });
+    if BALLASTED.with(Cell::get) {
+        // See [`BALLAST`]: a block allocated between two frames, and held, so
+        // that the stack's next growth cannot be an extension in place.
+        BALLAST.with(|held| held.borrow_mut().push(vec![0u64; 4]));
+    }
 
     // The unpaid work, as ADR 0055 states it: a count of IR instructions, held
     // in a register between safepoints and published at every exit.
@@ -976,6 +997,16 @@ fn segments() -> usize {
     SEGMENTS.with(|seen| seen.borrow().len())
 }
 
+/// Runs `body` with a block allocated per frame, and gives the blocks back
+/// after it. See [`BALLAST`] for what that buys and why a case has to ask.
+fn ballasted<T>(body: impl FnOnce() -> T) -> T {
+    BALLASTED.with(|held| held.set(true));
+    let answered = body();
+    BALLASTED.with(|held| held.set(false));
+    BALLAST.with(|held| *held.borrow_mut() = Vec::new());
+    answered
+}
+
 // --- the cases ---------------------------------------------------------------
 
 /// A two-word answer, into a destination the caller named, checked against the
@@ -1247,17 +1278,22 @@ fn a_return_finds_a_destination_a_reallocation_moved() {
             .native_session(MODULE, "counts", vec![Value::int(DEEP)])
             .expect("the session opens");
         // The hand tier goes *first* here, which is the opposite order to every
-        // other case and is the whole of what makes this one work: a `Vec` keeps
+        // other case and is half of what makes this one work: a `Vec` keeps
         // its capacity across `Vec::clear`, so a 300-frame run on the VM would
         // leave the stack large enough that the next run never reallocates — and
-        // the case would pass while testing nothing.
+        // the case would pass while testing nothing. [`ballasted`] is the other
+        // half: a growth the allocator can answer in place is not a move, and
+        // this case is about the move.
         let tier = hand(lowered, &["counts"]);
-        let answered = session
-            .call(&tier, &[DEEP as u64])
-            .expect("the hand tier answers");
-        let expected = session
-            .call(&NothingCompiled, &[DEEP as u64])
-            .expect("the vm answers");
+        let (answered, expected) = ballasted(|| {
+            let answered = session
+                .call(&tier, &[DEEP as u64])
+                .expect("the hand tier answers");
+            let expected = session
+                .call(&NothingCompiled, &[DEEP as u64])
+                .expect("the vm answers");
+            (answered, expected)
+        });
         assert_eq!(expected, vec![DEEP as u64]);
         assert_eq!(
             answered, expected,
@@ -1328,6 +1364,50 @@ fn every_component_done_twice_answers_the_same() {
     with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
         cove_runtime::census_reset();
         let mut made = 0u64;
+        // Three hundred frames, **before anything else on this `Vm`**, the hand
+        // tier before the VM, and under [`ballasted`]. Three conditions for one
+        // sentence: the stack's `Vec` has to *move* while native frames are
+        // live, which is the case indices exist for.
+        //
+        // A `Vec` keeps its capacity, so a run that went first would leave a
+        // stack the next one need not grow — that is the order
+        // `a_return_finds_a_destination_a_reallocation_moved` gives. And a
+        // growth is not a move: an allocator may extend a block where it is,
+        // and then the words a frame is handed never change. This case ran
+        // after the shapes below, on the stack they leave, and with no ballast;
+        // ADR 0062's appends changed what those shapes allocate, and it began
+        // passing on macOS and failing on CI's glibc, caught by its own
+        // self-check. That is the check doing its job, and the reason the three
+        // conditions are written down here rather than left to the allocator.
+        const DEEP: i64 = 300;
+        let mut deep = vm
+            .native_session(MODULE, "counts", vec![Value::int(DEEP)])
+            .expect("the session opens");
+        let twice = hand_with(
+            lowered,
+            &["counts"],
+            cove_runtime::native_helpers_ablated::<ALL>(),
+        );
+        let (again, expected) = ballasted(|| {
+            let again = deep
+                .call(&twice, &[DEEP as u64])
+                .expect("the ablated helper answers");
+            let expected = deep
+                .call(&NothingCompiled, &[DEEP as u64])
+                .expect("the vm answers");
+            (again, expected)
+        });
+        assert_eq!(expected, vec![DEEP as u64]);
+        assert_eq!(
+            again, expected,
+            "{DEEP} frames of recursion, every component of every call done twice"
+        );
+        assert!(
+            segments() > 1,
+            "the stack did not reallocate, so this case did not test the case indices exist for"
+        );
+        made += DEEP as u64;
+
         // `passesPair` is two words over a native callee; `passesEcho` is a
         // reference; `refThroughCollection` reaches a callee the subset refuses,
         // so it is the encoded floor and its owned `Vec`.
@@ -1375,35 +1455,6 @@ fn every_component_done_twice_answers_the_same() {
             assert_eq!(again, expected, "`{entry}` with every component done twice");
             made += 2;
         }
-
-        // Three hundred frames, and the hand tier first for the reason
-        // `a_return_finds_a_destination_a_reallocation_moved` gives: a `Vec` keeps
-        // its capacity, so the VM going first would leave nothing to reallocate.
-        const DEEP: i64 = 300;
-        let mut session = vm
-            .native_session(MODULE, "counts", vec![Value::int(DEEP)])
-            .expect("the session opens");
-        let twice = hand_with(
-            lowered,
-            &["counts"],
-            cove_runtime::native_helpers_ablated::<ALL>(),
-        );
-        let again = session
-            .call(&twice, &[DEEP as u64])
-            .expect("the ablated helper answers");
-        let expected = session
-            .call(&NothingCompiled, &[DEEP as u64])
-            .expect("the vm answers");
-        assert_eq!(expected, vec![DEEP as u64]);
-        assert_eq!(
-            again, expected,
-            "{DEEP} frames of recursion, every component of every call done twice"
-        );
-        assert!(
-            segments() > 1,
-            "the stack did not reallocate, so this case did not test the case indices exist for"
-        );
-        made += DEEP as u64;
 
         // The census counted what it saw. The counters are one per process rather
         // than one per case, so what is assertable here is that they moved and
