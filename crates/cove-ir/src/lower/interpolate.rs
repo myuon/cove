@@ -15,10 +15,9 @@
 //! The appends are emitted here as the run instructions `super::core` lowers
 //! the `core.bytes*` intrinsics to, rather than as calls to `StringBuilder`'s
 //! methods for `super::inline` to expand. The instructions are what those
-//! methods become anyway, and writing them directly needs no synthetic call,
-//! no resolution of a standard-library declaration from inside an expression
-//! the program wrote, and no uniqueness proof for `finish` — the buffer is a
-//! temporary nothing else can name (#403).
+//! methods become anyway, and writing them directly needs no synthetic call
+//! for them and no uniqueness proof for `finish` — the buffer is a temporary
+//! nothing else can name (#403).
 //!
 //! # One append per piece, chosen by the piece's type
 //!
@@ -26,7 +25,10 @@
 //!
 //! - a `String` is appended whole, as the byte `growable-extend` a
 //!   `StringBuilder.append` is — no rendering and no temporary string;
-//! - an `Int` is formatted straight into the buffer by `Int.renderInto`;
+//! - an `Int` is a call to `std.int.renderInto` over the value and the
+//!   buffer: standard-library Cove that pushes one digit at a time with
+//!   `core.bytesPush`, reached through [`Body::call_library`] and expanded
+//!   where the inliner finds it worth it, as any call is;
 //! - anything else is rendered into the buffer by `Value.renderInto`, which is
 //!   the runtime's one layout-directed rendering walk, so an `Error`, an
 //!   opaque value, a `Range`, a collection, a box and a closure all show
@@ -53,6 +55,14 @@ use crate::intrinsic::Intrinsic;
 /// when the buffer is finished. Sixteen is the runtime's own floor for a byte
 /// store, and it holds any `Int` and the short strings a message interpolates.
 const PIECE_ALLOWANCE: usize = 16;
+
+/// The standard-library function an `Int` piece is appended by: module, then
+/// name.
+///
+/// `crates/cove-sema/std/int.cove` writes it over `core.bytesPush`, and says
+/// why it cannot overflow. It is not exported, because nothing but this
+/// lowering calls it.
+const INT_RENDERING: (&str, &str) = ("std.int", "renderInto");
 
 /// A string under assembly: the buffer it is appended to, and the `0` every
 /// whole-string extend starts its range at.
@@ -166,7 +176,12 @@ impl Body<'_> {
                 self.release(len, span);
             }
             Some(Ty::Int) if value.layout == shapes::INT => {
-                self.render_into(Intrinsic::IntRenderInto, assembly, value, span);
+                let (module, function) = INT_RENDERING;
+                if let Some(unit) =
+                    self.call_library(module, function, &[value, &assembly.buffer], span)
+                {
+                    self.release(unit, span);
+                }
             }
             _ => self.render_into(Intrinsic::ValueRenderInto, assembly, value, span),
         }

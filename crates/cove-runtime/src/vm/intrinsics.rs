@@ -94,7 +94,6 @@ pub(crate) fn call(
         // piece is not here — it is a byte `Inst::GrowableExtend` — and neither
         // is the assembly around them, which is run instructions (#403).
         Intrinsic::ValueRenderInto => render_into(machine, frame, dest),
-        Intrinsic::IntRenderInto => int_render_into(machine, frame, dest),
 
         // ---- Array -------------------------------------------------------
         //
@@ -252,48 +251,6 @@ fn render_into(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<()
     machine.append_text(owner, text.as_bytes())?;
     dest.word(machine, 0);
     Ok(())
-}
-
-/// `Int.renderInto(buffer)`: an `Int` piece's decimal digits, appended to the
-/// byte buffer the interpolation is assembled in.
-///
-/// Formatted on the stack — twenty bytes hold `i64::MIN` and its sign — so
-/// the piece allocates nothing of its own, which is the whole difference from
-/// [`render_into`] over the same word.
-fn int_render_into(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let value = operand::int(machine, frame, 0);
-    let owner = frame.word(machine, 1);
-    let mut digits = [0u8; 20];
-    let text = decimal(value, &mut digits);
-    machine.append_text(owner, text)?;
-    dest.word(machine, 0);
-    Ok(())
-}
-
-/// The decimal text of `value`, written into the end of `out`.
-///
-/// What `write!(out, "{value}")` writes, without a formatter: the digits of
-/// the magnitude from the last byte back, then the sign.
-fn decimal(value: i64, out: &mut [u8; 20]) -> &[u8] {
-    let mut magnitude = value.unsigned_abs();
-    let mut at = out.len();
-    loop {
-        at -= 1;
-        out[at] = b'0' + (magnitude % 10) as u8;
-        magnitude /= 10;
-        if magnitude == 0 {
-            break;
-        }
-    }
-    if value < 0 {
-        at -= 1;
-        out[at] = b'-';
-    }
-    &out[at..]
 }
 
 /// The text of `word`, read as `repr`, appended to `out`.
@@ -1334,26 +1291,6 @@ mod tests {
         let _ = int;
     }
 
-    /// An `Int` piece is formatted on the stack, and says what the general
-    /// walk says about the same word — at both ends of the range and at zero.
-    #[test]
-    fn an_int_renders_into_the_buffer_as_the_walk_renders_it() {
-        for value in [0, 7, -7, 1_000_000, i64::MAX, i64::MIN] {
-            let mut build = Build::default();
-            build.string_layout();
-            let int = build.scalar(Repr::Int);
-            let code = vec![Inst::Int { dst: 0, value }];
-            let text = rendered(
-                build,
-                int,
-                vec![Repr::Int],
-                code,
-                &[Intrinsic::IntRenderInto, Intrinsic::ValueRenderInto],
-            );
-            assert_eq!(text, format!("{value}{value}"));
-        }
-    }
-
     /// Appends go on where the last one ended, and a buffer grows past the
     /// capacity it was allocated with rather than refusing: twenty renderings
     /// of `-1234567` are 160 bytes in a sixteen-byte store.
@@ -1371,7 +1308,7 @@ mod tests {
             int,
             vec![Repr::Int],
             code,
-            &[Intrinsic::IntRenderInto; 20],
+            &[Intrinsic::ValueRenderInto; 20],
         );
         assert_eq!(text, "-1234567".repeat(20));
     }

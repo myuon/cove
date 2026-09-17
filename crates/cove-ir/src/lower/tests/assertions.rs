@@ -69,16 +69,16 @@ fn an_equality_assertion_renders_both_values_into_its_message() {
         "{listed}"
     );
     assert!(listed.contains("\"`, expected `\""), "{listed}");
-    // Both values are `Int`s, so each is formatted straight into the message
-    // being assembled, in the order the message reads.
+    // Both values are `Int`s, so each is formatted into the message being
+    // assembled by `std.int.renderInto`, in the order the message reads.
     let found = listed
-        .find("Int.renderInto (s0:Int")
+        .find("std.int.renderInto (s0:Int")
         .unwrap_or_else(|| panic!("{listed}"));
     let expected = listed
         .find("\"`, expected `\"")
         .unwrap_or_else(|| panic!("{listed}"));
     let other = listed
-        .rfind("Int.renderInto")
+        .rfind("std.int.renderInto")
         .unwrap_or_else(|| panic!("{listed}"));
     assert!(found < expected && expected < other, "{listed}");
     assert!(listed.contains("run-finish.bytes"), "{listed}");

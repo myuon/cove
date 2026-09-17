@@ -97,7 +97,7 @@ fn a_piece_is_appended_before_the_next_piece_is_evaluated() {
         .unwrap_or_else(|| panic!("{listed}"));
     let summed = listed.find("add.int").unwrap_or_else(|| panic!("{listed}"));
     let formatted = listed
-        .find("Int.renderInto")
+        .find("call s6:Unit std.int.renderInto (s4:Int")
         .unwrap_or_else(|| panic!("{listed}"));
     assert!(rendered < summed && summed < formatted, "{listed}");
 }
@@ -160,4 +160,40 @@ fn a_literal_no_instruction_loads_is_still_in_the_pool() {
     // `flag: true` would never load, and the pool holds it anyway.
     assert!(program.strings.iter().any(|s| &**s == "used"));
     assert!(program.strings.iter().any(|s| &**s == "also used"));
+}
+
+/// An `Int` piece is appended by `std.int.renderInto`, a standard-library
+/// function the lowering calls on its own account (#403), with the value and
+/// the buffer as its two operands.
+///
+/// It is an ordinary call, and the body it reaches is a leaf that renders
+/// through byte pushes alone: no intrinsic, no string, and nothing it calls. So
+/// the inliner decides it as it decides any leaf: a site that runs once keeps
+/// the call, and a piece inside a loop is expanded where it stands.
+#[test]
+fn an_int_piece_is_rendered_by_the_standard_library() {
+    let cold = listing("fn show(n: Int) -> String { \"{n}\" }", "show");
+    assert!(
+        cold.contains("call s4:Unit std.int.renderInto (s0:Int s3:ByteBuffer)"),
+        "{cold}"
+    );
+    let hot = listing(
+        "fn count(n: Int) -> Int {\n  var bytes = 0\n  var i = 0\n  \
+         while i < 10 {\n    bytes = bytes + \"{n}\".byteLength()\n    i = i + 1\n  }\n  bytes\n}",
+        "count",
+    );
+    assert!(!hot.contains("call "), "{hot}");
+    assert!(hot.contains("growable-push.bytes"), "{hot}");
+
+    let (sources, checked) = super::checked("fn show(n: Int) -> String { \"{n}\" }");
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    let id = program
+        .function_named("std.int", "renderInto")
+        .expect("the renderer is lowered");
+    let body = crate::print::function(&program, id);
+    assert!(!body.contains("call"), "{body}");
+    assert!(!body.contains("str "), "{body}");
+    assert!(!body.contains("growable-extend"), "{body}");
+    assert!(body.contains("growable-push.bytes"), "{body}");
 }

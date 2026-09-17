@@ -31,3 +31,56 @@ export fn abs(value: Int) -> Int {
     value
   }
 }
+
+/// Appends the decimal text of `value` to `buffer`: what `"{value}"` shows.
+///
+/// Not exported, and nothing a program can name: the lowering calls it for
+/// every `Int` piece of an interpolation, into the buffer that string is being
+/// assembled in (#403). It replaced the Rust intrinsic `Int.renderInto`.
+///
+/// # One digit a push, most significant first
+///
+/// The buffer only appends, so the leading digit has to be known before any is
+/// written: `power` is found as the largest power of ten the magnitude reaches,
+/// and each digit is the quotient by it as it is divided back down to one.
+/// Each digit is one `core.bytesPush`, which both tiers answer in place when
+/// the buffer has room — the interpolation sized it for a whole `Int` — so a
+/// digit costs a division, a multiplication and a store, and no call.
+///
+/// # Nothing here can overflow
+///
+/// Everything happens on the non-positive side of zero, because every `Int`
+/// has a non-positive counterpart and the least `Int` has none above zero. So
+/// `rest` is `value` or its negation and never above zero, `power` is minus a
+/// power of ten, and a digit is the quotient of two non-positive numbers:
+///
+/// - `power` is multiplied by ten only while `rest / 10 <= power`. `rest / 10`
+///   truncates toward zero, so ten times it is at least `rest`, and so is ten
+///   times `power`: the product is never formed where it would not fit;
+/// - `digit * power` is at least `rest`, so the subtraction stays in range;
+/// - no divisor is zero, and `power` is `-1` only for the last digit, when
+///   `rest` is above `-10`, so no quotient overflows.
+///
+/// It must never interpolate an `Int` itself, which would call itself.
+fn renderInto(value: Int, buffer: ByteBuffer) {
+  var rest = value
+  if value < 0 {
+    core.bytesPush(buffer, '-')
+  } else {
+    rest = -value
+  }
+  let tenth = rest / 10
+  var power = -1
+  while tenth <= power {
+    power = power * 10
+  }
+  while power < 0 {
+    let digit = rest / power
+    core.bytesPush(buffer, '0' + digit)
+    rest = rest - digit * power
+    power = power / 10
+  }
+  // The answer, written where the call wants it. Left to the loop, it is a
+  // `()` made aside and copied, which every expanded call site would keep.
+  ()
+}

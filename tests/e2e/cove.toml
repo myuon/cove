@@ -387,3 +387,7 @@ allow = ["console", "clock"]
 [run.generic_struct_render]
 entry = "generic_struct_render.main"
 allow = ["console"]
+
+[run.values_int_rendering]
+entry = "values_int_rendering.main"
+allow = ["console"]

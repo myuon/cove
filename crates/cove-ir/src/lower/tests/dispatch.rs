@@ -151,9 +151,11 @@ fn @m.f() -> String
 /// checker recorded no target — which implementation it reaches is
 /// decided by the type — and this body is lowered for *one* type, so the
 /// bounded-call path finds `m.Booking.summarize` or `m.Receipt.summarize`
-/// by name. No dictionary, no vtable — and because each is a small leaf,
-/// `super::super::inline` expands it where `self.summarize()` was, so neither
-/// listing below still has a call for it.
+/// by name. No dictionary, no vtable. `Receipt.summarize` is a small leaf,
+/// so `super::super::inline` expands it where `self.summarize()` was.
+/// `Booking.summarize` is not a leaf: its `Int` piece is a call to
+/// `std.int.renderInto` (#403), which is too large to expand at a site that
+/// runs once, so `Booking.line` keeps its call.
 #[test]
 fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
     let source = "/// t\nexport trait Summary {\n  /// s\n  fn summarize(self) -> String\n\n  \
@@ -167,29 +169,20 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         listing(source, "Booking.line"),
         "\
 fn @m.Booking.line(m.Booking) -> String
-  frame 12: s0!:int s1:ref s2:int s3:ref s4:ref s5:int s6:ref s7:int s8:ref s9:ref s10:int s11:unit
-  local self -> s0:m.Booking [0, 21)
+  frame 6: s0!:int s1:ref s2:int s3:ref s4:ref s5:int
+  local self -> s0:m.Booking [0, 12)
      0  int s2:int 18
      1  growable-alloc.bytes s3:ref s2:int
      2  str s4:ref \"- \"
      3  int s2:int 2
      4  int s5:int 0
      5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-     6  int s7:int 24
-     7  growable-alloc.bytes s8:ref s7:int
-     8  str s9:ref \"booking \"
-     9  int s7:int 8
-    10  int s10:int 0
-    11  growable-extend.bytes (s8:ByteBuffer s9:String s10:Int s7:Int)
-    12  intrinsic-call s11:Unit Int.renderInto (s0:Int s8:ByteBuffer)
-    13  run-finish.bytes s4:ref s8:ref String utf8
-    14  clear s8:ByteBuffer
-    15  clear s8:<ref>
-    16  len s2:int s4:ref
-    17  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
-    18  clear s4:String
-    19  run-finish.bytes s1:ref s3:ref String utf8
-    20  return s1:String
+     6  call s4:String m.Booking.summarize (s0:m.Booking)
+     7  len s2:int s4:ref
+     8  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+     9  clear s4:String
+    10  run-finish.bytes s1:ref s3:ref String utf8
+    11  return s1:String
 "
     );
     assert_eq!(
