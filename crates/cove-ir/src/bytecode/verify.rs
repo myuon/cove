@@ -32,6 +32,7 @@
 
 use crate::inst::{Inst, Len};
 use crate::layout::{LayoutId, Shape};
+use crate::legalize::{recognize, Pattern};
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::Repr;
 use crate::Slot;
@@ -126,6 +127,7 @@ pub fn verify_function(program: &Program, id: FunctionId, code: &[EncodedInst]) 
     for pc in 0..code.len() {
         check.inst(pc);
     }
+    check.windows();
     check.faults
 }
 
@@ -400,6 +402,69 @@ impl Check<'_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Every fused head is the head of the window its opcode names.
+    ///
+    /// [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+    /// fused opcodes are the one place a row's meaning depends on the rows after
+    /// it: a VM arm that sees one reads its operands out of the next several rows
+    /// and skips them. So the bytes are held to the same definition the encoder
+    /// fused by — [`crate::legalize::recognize`] over the decoded rows — and a
+    /// head whose rows are not that window, or are that window with a branch or a
+    /// table target landing inside it, is refused. An interior row that is itself
+    /// fused is refused at its own pc: no row inside a window can head one.
+    ///
+    /// Each row was checked on its own above, so an arm running the tail as
+    /// primitives runs verified rows; what this adds is only that they are the
+    /// rows the arm expects.
+    fn windows(&mut self) {
+        let fused: Vec<(usize, Pattern)> = self
+            .code
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, held)| Some((pc, Op::from_number(held.opcode())?.pattern()?)))
+            .collect();
+        if fused.is_empty() {
+            return;
+        }
+        // A row that does not decode was a fault above. It stands in here as a
+        // row no window holds, so the window over it is refused as well.
+        let rows: Vec<Inst> = self
+            .code
+            .iter()
+            .enumerate()
+            .map(|(pc, held)| decode(*held, pc as u32).unwrap_or(Inst::Unit { dst: 0 }))
+            .collect();
+        let leaders = crate::flow::leaders_in(self.program, &rows);
+        for (pc, pattern) in fused {
+            let name = pattern.name();
+            match recognize(self.program, &rows, &leaders, pc) {
+                Some(window) if window.pattern == pattern => {}
+                Some(window) => {
+                    let found = window.pattern.name();
+                    self.fault(
+                        Some(pc),
+                        format!("is fused to head a window of `{name}`, and the rows from here are a window of `{found}`"),
+                    );
+                }
+                None => {
+                    // Asked again with no block boundaries, to say which of the
+                    // two it was.
+                    let entered = recognize(self.program, &rows, &vec![false; rows.len()], pc)
+                        .and_then(|window| window.tail().find(|at| leaders[*at]));
+                    let what = match entered {
+                        Some(at) => format!(
+                            "is fused to head a window of `{name}`, and a branch lands at {at}, inside it"
+                        ),
+                        None => format!(
+                            "is fused to head a window of `{name}`, and the rows from here are not one"
+                        ),
+                    };
+                    self.fault(Some(pc), what);
+                }
+            }
         }
     }
 
@@ -692,7 +757,7 @@ mod tests {
             },
             Inst::Return { src: 0 },
         ]);
-        let code = encode_function(&held.functions[0]).expect("it encodes");
+        let code = encode_function(&held, &held.functions[0]).expect("it encodes");
         assert_eq!(faults(&held, &code), Vec::<String>::new());
         assert_eq!(
             verify(&held, &encode_program(&held).expect("encodes")),
@@ -1035,6 +1100,140 @@ mod tests {
         assert_eq!(
             said,
             ["is 2 encoded instructions and the function has 1, so a pc means two things"]
+        );
+    }
+
+    /// A frame for ADR 0062's windows: `s0` an owner, `s1` its length, `s2` a
+    /// count, `s3` its store, `s4` the unit, `s5` a second count and `s6` a
+    /// `Bool`.
+    fn window_program(code: Vec<Inst>) -> Program {
+        let reprs = vec![
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Bool,
+        ];
+        let mut held = program(code);
+        held.functions[0].refs = RefMap::of(&reprs);
+        held.functions[0].reprs = reprs;
+        held
+    }
+
+    /// A push of an `Int`, as `crate::legalize` draws it, and its return.
+    fn push() -> Vec<Inst> {
+        let words = crate::Storage::Words(INT);
+        vec![
+            Inst::LoadField {
+                dst: 1,
+                obj: 0,
+                at: 0,
+                layout: INT,
+            },
+            Inst::Int { dst: 2, value: 1 },
+            Inst::GrowableEnsure {
+                owner: 0,
+                additional: 2,
+                storage: words,
+            },
+            Inst::LoadField {
+                dst: 3,
+                obj: 0,
+                at: 1,
+                layout: STR,
+            },
+            Inst::StoreElem {
+                obj: 3,
+                index: 1,
+                src: 4,
+                layout: INT,
+            },
+            Inst::Clear {
+                slot: 3,
+                layout: STR,
+            },
+            Inst::Int { dst: 5, value: 1 },
+            Inst::GrowableCommit {
+                owner: 0,
+                count: 5,
+                storage: words,
+            },
+            Inst::Return { src: 1 },
+        ]
+    }
+
+    /// **A recognised window's head is fused and nothing else changes**: the
+    /// head decodes to the length read it is, every other row is the
+    /// instruction's own encoding, and the bytes verify.
+    #[test]
+    fn a_fused_head_is_the_window_it_names() {
+        let held = window_program(push());
+        let code = encode_function(&held, &held.functions[0]).expect("it encodes");
+        assert_eq!(code[0].opcode(), Op::FusedPushWords.number());
+        for (pc, inst) in held.functions[0].code.iter().enumerate() {
+            assert_eq!(decode(code[pc], pc as u32).as_ref(), Ok(inst));
+            if pc > 0 {
+                assert_eq!(Ok(code[pc]), encode(inst, pc as u32));
+            }
+        }
+        assert_eq!(faults(&held, &code), Vec::<String>::new());
+    }
+
+    /// **A fused head is re-matched**: a tail that is not its window, a head
+    /// fused as another pattern, and a fused opcode on a row that heads nothing
+    /// are each refused at the head.
+    #[test]
+    fn a_fused_head_whose_rows_are_not_its_window_is_refused() {
+        let held = window_program(push());
+        let fused = encode_function(&held, &held.functions[0]).expect("it encodes");
+
+        let mut elsewhere = fused.clone();
+        elsewhere[4] = encode(
+            &Inst::StoreElem {
+                obj: 3,
+                index: 5,
+                src: 4,
+                layout: INT,
+            },
+            4,
+        )
+        .expect("it encodes");
+        assert_eq!(
+            faults(&held, &elsewhere),
+            ["is fused to head a window of `push.words`, and the rows from here are not one"]
+        );
+
+        let mut misnamed = fused.clone();
+        misnamed[0] = with(fused[0], 0, Op::FusedPushByte.number());
+        assert_eq!(
+            faults(&held, &misnamed),
+            ["is fused to head a window of `push.byte`, and the rows from here are a window of `push.words`"]
+        );
+
+        let mut interior = fused.clone();
+        interior[3] = with(fused[3], 0, Op::FusedAppendBytes.number());
+        // The outer window still decodes to its rows, so only the row that
+        // heads nothing is refused.
+        let said = verify_function(&held, FunctionId(0), &interior);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].pc, Some(3));
+    }
+
+    /// **A window may be entered only at its head.** The encoder does not fuse a
+    /// window a branch lands inside, and bytes that fuse one anyway are refused.
+    #[test]
+    fn a_branch_into_a_fused_window_is_refused() {
+        let mut code = vec![Inst::BranchFalse { cond: 6, to: 4 }];
+        code.extend(push());
+        let held = window_program(code);
+        let mut bytes = encode_function(&held, &held.functions[0]).expect("it encodes");
+        assert_eq!(bytes[1].opcode(), Op::LoadField.number(), "not fused");
+        bytes[1] = with(bytes[1], 0, Op::FusedPushWords.number());
+        assert_eq!(
+            faults(&held, &bytes),
+            ["is fused to head a window of `push.words`, and a branch lands at 4, inside it"]
         );
     }
 

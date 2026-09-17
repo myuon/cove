@@ -12,7 +12,11 @@
 //!   refuses, and no program's slots are wider than a sixteen-bit field;
 //! - **the encoding is lossless.** `decode(encode(inst)) == inst` at every
 //!   program counter of every function, so bytecode pc is IR pc and the
-//!   debugger's mapping between the two panes is the identity;
+//!   debugger's mapping between the two panes is the identity. Every row is
+//!   the instruction's own encoding except the head of a window
+//!   `cove_ir::legalize` recognises, which is that encoding under the fused
+//!   opcode of its pattern and nothing else
+//!   ([ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md));
 //! - **the two verifiers agree.** A lowering `cove_ir::verify` accepts —
 //!   which every one of these is, because `lower` panics otherwise — is one
 //!   `cove_ir::bytecode::verify` accepts too. They check different things,
@@ -30,7 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use cove_ir::bytecode::{decode, encode_program, verify, Op};
+use cove_ir::bytecode::{decode, encode, encode_program, verify, Op};
 use cove_ir::MAX_FRAME_WORDS;
 use cove_sema::HostSchemas;
 
@@ -68,6 +72,8 @@ struct Survey {
     widest_frame: usize,
     /// Which opcodes real programs reach, out of the hundred defined.
     reached: BTreeSet<u8>,
+    /// How many ADR 0062 windows the encoder fused.
+    windows: usize,
     /// Every way a program failed one of the three claims, named.
     faults: Vec<String>,
 }
@@ -108,13 +114,36 @@ fn survey() -> Survey {
             }
         };
         for (index, code) in encoded.functions.iter().enumerate() {
+            let function = &program.functions[index];
+            let name = function.qualified();
             found.reached.extend(code.iter().map(|held| held.opcode()));
+            let heads: BTreeMap<usize, Op> = cove_ir::legalize::windows(&program, function)
+                .into_iter()
+                .map(|window| (window.head, Op::fused(window.pattern)))
+                .collect();
+            found.windows += heads.len();
             for (pc, held) in code.iter().enumerate() {
+                let inst = &function.code[pc];
                 let read = decode(*held, pc as u32);
-                if read.as_ref() != Ok(&program.functions[index].code[pc]) {
-                    let name = program.functions[index].qualified();
+                if read.as_ref() != Ok(inst) {
                     found.faults.push(format!(
                         "{}: {name}+{pc} does not decode back to itself: {read:?}",
+                        case.name
+                    ));
+                }
+                // The bytes the row is: its own encoding, under the fused opcode
+                // where a window begins.
+                let own = encode(inst, pc as u32).map(|bytes| match heads.get(&pc) {
+                    Some(op) => {
+                        let mut raw = *bytes.bytes();
+                        raw[0] = op.number();
+                        cove_ir::EncodedInst::from_bytes(raw)
+                    }
+                    None => bytes,
+                });
+                if own != Ok(*held) {
+                    found.faults.push(format!(
+                        "{}: {name}+{pc} is not the encoding of what it decodes to: {held:?},                          against {own:?}",
                         case.name
                     ));
                 }
@@ -140,7 +169,8 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
         "the fixed-width encoding over {} corpus program(s):\n  \
            {} functions, {} instructions, {} bytes encoded\n  \
            widest frame {} words, against a limit of {MAX_FRAME_WORDS}\n  \
-           {} of the {} opcodes are reached",
+           {} of the {} opcodes are reached
+             {} window(s) fused",
         found.lowered,
         found.functions,
         found.instructions,
@@ -148,6 +178,7 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
         found.widest_frame,
         found.reached.len(),
         Op::all().len(),
+        found.windows,
     );
     // And which ones it does not, by name. The count alone says that most of
     // a third of the instruction set is untested by every harness that walks

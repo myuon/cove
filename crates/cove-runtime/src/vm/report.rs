@@ -19,8 +19,11 @@
 //!   call. A native fast path that answered in emitted code never reaches the
 //!   runtime and is *not* counted — which is the point: a mediated call is the
 //!   one that crossed;
-//! - **encoded instructions** are what the dispatch loop dispatched, which is
-//!   `Machine::instructions` and not a second counter beside it;
+//! - **encoded instructions** are what the dispatch loop ran, which is
+//!   `Machine::instructions` and not a second counter beside it. Since
+//!   [ADR 0062] fused a window's rows behind its head that is a count of
+//!   *semantic* instructions — fuel's — and the report says apart how many
+//!   dispatches they took and how many windows of each pattern ran fused;
 //! - **tier crossings** are [`Tiers`], unchanged;
 //! - **native-to-runtime calls** are one counter per [`NativeHelpers`] field.
 //!
@@ -39,13 +42,20 @@
 //!   `ablate::CENSUS`'s discipline — the production helpers are the same
 //!   function bodies they were, not a copy with a branch in them.
 //!
+//! A fused arm pays one `Option` test per window it runs, and only when it runs
+//! one: the count is taken out of line, as `Machine::count_intrinsic`'s is, and
+//! nothing on the path of an unfused instruction reads it.
+//!
 //! [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+//! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 //! [`NativeHelpers`]: cove_native::NativeHelpers
 //! [`helpers_counting`]: crate::native_helpers_counting
 
 use std::collections::HashMap;
 use std::fmt;
 
+use cove_ir::bytecode::Op;
+use cove_ir::legalize::Pattern;
 use cove_ir::{FunctionId, Inst, Intrinsic, Program, SiteId};
 use cove_native::{GrowableOp, RunOp};
 
@@ -284,8 +294,15 @@ pub struct BoundaryReport {
     /// Every intrinsic the program names, sorted by dynamic calls descending,
     /// then by sites descending, then by name.
     pub intrinsics: Vec<IntrinsicCalls>,
-    /// Instructions the encoded dispatch loop dispatched while counting.
+    /// Instructions the encoded dispatch loop ran while counting: semantic
+    /// instructions, a fused window's rows each counted, as fuel counts them.
     pub encoded_instructions: u64,
+    /// Turns of the dispatch loop those instructions took: fewer by every row a
+    /// fused head ran after itself.
+    pub encoded_dispatches: u64,
+    /// Windows a fused head ran through to their commit, by
+    /// [`Pattern::index`].
+    pub fusions: [u64; 4],
     /// The `Call`s into the standard library, by the tier that made them.
     pub library_calls: LibraryCalls,
     /// How the calls divided between the tiers, or `None` when no native tier was
@@ -337,6 +354,11 @@ pub(crate) struct Counting {
     /// `Machine::instructions` when counting began, so the report is of what
     /// happened since.
     instructions_at: u64,
+    /// Instructions a fused head ran after itself, with no dispatch of their
+    /// own.
+    folded: u64,
+    /// Windows run fused through their commit, by [`Pattern::index`].
+    fusions: [u64; 4],
     /// The tier counts when counting began, for the same reason.
     tiers_at: Tiers,
 }
@@ -355,7 +377,19 @@ impl Counting {
             library_native: 0,
             helpers: HelperCalls::default(),
             instructions_at: instructions,
+            folded: 0,
+            fusions: [0; 4],
             tiers_at: tiers,
+        }
+    }
+
+    /// `rows` instructions the fused head `head` ran after itself, and one
+    /// window of its pattern if they reached the commit.
+    pub(crate) fn fused(&mut self, head: u8, rows: usize, whole: bool) {
+        self.folded += rows as u64;
+        let pattern = Op::from_number(head).and_then(Op::pattern);
+        if let (true, Some(pattern)) = (whole, pattern) {
+            self.fusions[pattern.index()] += 1;
         }
     }
 
@@ -434,6 +468,10 @@ impl Counting {
             emitted,
             intrinsics,
             encoded_instructions: instructions.saturating_sub(self.instructions_at),
+            encoded_dispatches: instructions
+                .saturating_sub(self.instructions_at)
+                .saturating_sub(self.folded),
+            fusions: self.fusions,
             library_calls: LibraryCalls {
                 encoded: self.library_encoded,
                 native: native_counted.then_some(self.library_native),
@@ -475,10 +513,22 @@ impl fmt::Display for BoundaryReport {
             emitted.functions,
             thousands(emitted.intrinsic_sites)
         )?;
+        let fused: Vec<String> = Pattern::ALL
+            .iter()
+            .map(|pattern| {
+                format!(
+                    "{} {}",
+                    pattern.name(),
+                    thousands(self.fusions[pattern.index()])
+                )
+            })
+            .collect();
         writeln!(
             f,
-            "boundary: encoded VM, {} instruction(s) dispatched",
-            thousands(self.encoded_instructions)
+            "boundary: encoded VM, {} instruction(s) in {} dispatch(es); windows fused: {}",
+            thousands(self.encoded_instructions),
+            thousands(self.encoded_dispatches),
+            fused.join(", ")
         )?;
         let library = self.library_calls;
         writeln!(
@@ -640,6 +690,8 @@ mod tests {
                 },
             ],
             encoded_instructions: 1_234_567,
+            encoded_dispatches: 1_234_000,
+            fusions: [80, 0, 3, 0],
             library_calls: LibraryCalls {
                 encoded: 9,
                 native: Some(1_001),
@@ -658,7 +710,10 @@ mod tests {
         assert_eq!(report.mediated(), 1_007);
         let text = report.to_string();
         assert!(text.contains("emitted IR, 12,345 instruction(s) in 3 function(s), 4 of them"));
-        assert!(text.contains("encoded VM, 1,234,567 instruction(s) dispatched"));
+        assert!(text.contains(
+            "encoded VM, 1,234,567 instruction(s) in 1,234,000 dispatch(es); windows fused: \
+             push.words 80, push.byte 0, append.bytes 3, append.words 0"
+        ));
         assert!(text.contains(
             "standard library, 2 `Call` site(s) left unexpanded; 9 call(s) made from encoded, \
              1,001 from native"

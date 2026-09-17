@@ -1083,6 +1083,18 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// `rows` instructions a fused head ran after itself without a dispatch,
+    /// counted, and one window of the head's pattern if they reached its commit.
+    /// Out of line for [`Machine::count_intrinsic`]'s reason: what a fused arm
+    /// keeps inline is the `Option` test.
+    #[inline(never)]
+    #[cold]
+    pub(crate) fn count_fusion(&mut self, head: u8, rows: usize, whole: bool) {
+        if let Some(counting) = self.counting.as_deref_mut() {
+            counting.fused(head, rows, whole);
+        }
+    }
+
     /// Which task this machine is running.
     ///
     /// The same number a trace event carries, because there is only one

@@ -2,7 +2,11 @@
 //!
 //! ADR 0041 makes the encoding 1:1, so this is a genuine inverse and not a
 //! best effort: `decode(encode(i, pc), pc) == i` for every instruction, and
-//! `encode(decode(b, pc), pc) == b` for every byte pattern this accepts.
+//! `encode(decode(b, pc), pc) == b` for every byte pattern this accepts —
+//! except a fused window head, which
+//! [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+//! makes decode to the length read it is while its opcode depends on the rows
+//! after it. See [`super::encode::encode_function`].
 //!
 //! # It is strict, and that is what makes the encoding canonical
 //!
@@ -228,7 +232,14 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             layout,
             len: Len::Slot(b),
         },
-        Op::LoadField => Inst::LoadField {
+        // A fused head decodes to the length read it is: ADR 0062 keeps every
+        // row decoding to the `Inst` at its pc, and gives up only that this
+        // row is the one encoding of what it decodes to.
+        Op::LoadField
+        | Op::FusedPushWords
+        | Op::FusedPushByte
+        | Op::FusedAppendBytes
+        | Op::FusedAppendWords => Inst::LoadField {
             dst: a,
             obj: b,
             at: lo,
