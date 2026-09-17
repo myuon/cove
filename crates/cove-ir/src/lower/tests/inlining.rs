@@ -386,7 +386,8 @@ fn a_push_window_is_one_step_of_a_thin_wrapper() {
 /// appends bytes: `StringBuilder.append` and `appendByte`, the `appendText` and
 /// `appendByteInto` they call, an interpolation's literal of one byte and of
 /// several, its `String` piece, and `std.int.renderInto` for its `Int` pieces,
-/// both where it is written and expanded into a loop.
+/// both where it is written and expanded into a loop. And `appendSlice`, whose
+/// copy is the same window once `appendRange` has decided its range.
 #[test]
 fn every_append_the_standard_library_writes_is_a_window() {
     let (program, _) = program(
@@ -399,6 +400,7 @@ fn every_append_the_standard_library_writes_is_a_window() {
            let more = m.inserted(\"c\", 3)\n  \
            let s = Set.of(3, 1, 2)\n  let bigger = s.inserted(4)\n  \
            var out = StringBuilder.withCapacity(4)\n  out.append(\"ab\")\n  out.appendByte(99)\n  \
+           out.appendSlice(\"cde\", 1, 3)\n  \
            let size = out.length()\n  var bytes = out.finish().byteLength()\n  var i = 0\n  \
            while i < 3 {\n    bytes = bytes + \"<{s.length()}>, {size} and {\"x\"}\".byteLength()\n    i = i + 1\n  }\n  \
            more.keys().length() + more.values().length() + bigger.length() + xs.length() + ps.length() + bytes\n}",
@@ -427,8 +429,11 @@ fn every_append_the_standard_library_writes_is_a_window() {
                 writers.insert(name.split('<').next().unwrap_or(&name).to_string());
             }
             assert!(
-                !matches!(inst, Inst::GrowablePush { .. }),
-                "{} +{pc} is a `growable-push`, which nothing lowers to any more",
+                !matches!(
+                    inst,
+                    Inst::GrowablePush { .. } | Inst::GrowableExtend { .. }
+                ),
+                "{} +{pc} is a composite growable write, which nothing lowers to any more",
                 f.qualified()
             );
         }
@@ -444,6 +449,7 @@ fn every_append_the_standard_library_writes_is_a_window() {
         "std.set.inserted",
         "std.set.placeAt",
         "std.stringbuilder.appendText",
+        "std.stringbuilder.appendRange",
         "std.stringbuilder.appendByteInto",
         "std.stringbuilder.StringBuilder.append",
         "std.stringbuilder.StringBuilder.appendByte",
@@ -471,12 +477,21 @@ fn program_id(program: &Program, f: &Function) -> FunctionId {
 ///
 /// The builder's four `var self` methods are a load of the owner through the
 /// address and what the owner is handed to — one byte run instruction for
-/// `appendSlice` and `finish`, and for `append` and `appendByte` a call of
-/// `appendText` or `appendByteInto`, which is ADR 0062's window and is
-/// expanded in its turn — which is what `examples/covefmt` made half a million
-/// calls a run to (#378, Phase 3 Q7). What is expanded is the body *with* its
-/// address: the owner is still read through it, so an append in the caller's
-/// frame reaches the builder the caller named.
+/// `finish`, and for `append` and `appendByte` a call of `appendText` or
+/// `appendByteInto`, which is ADR 0062's window and is expanded in its turn —
+/// which is what `examples/covefmt` made half a million calls a run to (#378,
+/// Phase 3 Q7). What is expanded is the body *with* its address: the owner is
+/// still read through it, so an append in the caller's frame reaches the
+/// builder the caller named.
+///
+/// **`appendSlice` is the one that is not expanded here**, and that is
+/// `inline::LIMIT` rather than anything about its shape. ADR 0062 moved its
+/// range policy out of `core.bytesExtend` and into Cove, so its body is five
+/// questions and a window instead of one instruction, and a run of thirty rows
+/// is over the limit a *cold* site expands at. It is under `inline::HOT_LIMIT`,
+/// so the sites that run often — every `appendSlice` `examples/covefmt` makes —
+/// expand it, which `an_append_slice_inside_a_loop_is_expanded_as_one_window`
+/// pins and which `--boundary`'s unexpanded count is what actually measures.
 #[test]
 fn a_library_method_that_takes_var_self_is_expanded() {
     let (program, main) = program(
@@ -496,10 +511,11 @@ fn a_library_method_that_takes_var_self_is_expanded() {
         .collect();
     assert_eq!(
         calls,
-        ["m.bump"],
-        "only the program's own `var` function is still a call"
+        ["m.bump", "std.stringbuilder.StringBuilder.appendSlice"],
+        "the program's own `var` function, and the one library method a cold \
+         site is too small to take on"
     );
-    for method in ["append", "appendSlice", "appendByte", "finish"] {
+    for method in ["append", "appendByte", "finish"] {
         assert!(
             main.inlined.iter().any(|held| {
                 let name = named(held.callee);
@@ -509,7 +525,14 @@ fn a_library_method_that_takes_var_self_is_expanded() {
         );
     }
     let has = |wanted: fn(&Inst) -> bool| main.code.iter().any(wanted);
-    assert!(has(|inst| matches!(inst, Inst::GrowableExtend { .. })));
+    assert!(
+        !program
+            .functions
+            .iter()
+            .flat_map(|f| f.code.iter())
+            .any(|inst| matches!(inst, Inst::GrowableExtend { .. })),
+        "no lowering produces a `growable-extend` any more"
+    );
     assert!(has(|inst| matches!(inst, Inst::RunFinish { .. })));
     let patterns: Vec<crate::legalize::Pattern> = crate::legalize::windows(&program, &main)
         .iter()
@@ -526,6 +549,54 @@ fn a_library_method_that_takes_var_self_is_expanded() {
     assert!(
         has(|inst| matches!(inst, Inst::Load { .. })),
         "the owner is read through the address the caller formed"
+    );
+}
+
+/// An `appendSlice` at a site that runs often is expanded, and what lands there
+/// is one recognised append window.
+///
+/// The other half of the test above. `appendSlice` costs more rows than a cold
+/// site will take since ADR 0062 put its range policy in Cove, and the whole
+/// point of putting it there is that the copy beneath the five questions is a
+/// window a backend fuses — which is worth nothing if the method stays a call
+/// wherever it is hot. `examples/covefmt` calls it two hundred thousand times
+/// from inside its printer's walk, and that is this shape.
+#[test]
+fn an_append_slice_inside_a_loop_is_expanded_as_one_window() {
+    let (program, main) = program(
+        "use std.stringbuilder.StringBuilder\n\
+         fn main() -> String {\n  var out = StringBuilder.withCapacity(4)\n  \
+         var at = 0\n  while at < 3 {\n    out.appendSlice(\"bcd\", at, at + 1)\n    at = at + 1\n  }\n  \
+         out.finish()\n}",
+    );
+    assert!(
+        !main
+            .code
+            .iter()
+            .any(|inst| matches!(inst, Inst::Call { .. })),
+        "`appendSlice` is expanded at a site inside a loop"
+    );
+    let patterns: Vec<crate::legalize::Pattern> = crate::legalize::windows(&program, &main)
+        .iter()
+        .map(|window| window.pattern)
+        .collect();
+    assert_eq!(
+        patterns,
+        [crate::legalize::Pattern::AppendBytes],
+        "the copy the five questions guard is one window where it was called"
+    );
+    assert_eq!(
+        main.code
+            .iter()
+            .filter(|inst| matches!(
+                inst,
+                Inst::IntrinsicCall { site, .. }
+                    if program.intrinsic_site(*site).intrinsic
+                        == crate::Intrinsic::StringRefuseByteRange
+            ))
+            .count(),
+        5,
+        "the five refusals are intrinsic calls, so the body is still a leaf"
     );
 }
 

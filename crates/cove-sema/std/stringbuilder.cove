@@ -130,7 +130,7 @@ impl StringBuilder {
   /// Ask `String` about a range you are unsure of; a builder's job is to copy
   /// one that is already known to be a range.
   export fn appendSlice(var self, text: String, from: Int, to: Int) {
-    core.bytesExtend(self.buffer, text, from, to)
+    appendRange(self.buffer, text, from, to)
   }
 
   /// Appends one byte, `0` through `255`.
@@ -201,4 +201,67 @@ fn appendByteInto(buffer: ByteBuffer, value: Int) {
   core.bytesEnsure(buffer, 1)
   core.bytesStore(buffer, at, value)
   core.bytesCommit(buffer, 1)
+}
+
+/// Appends the bytes of `text` from `from` up to `to` to `buffer`: the range
+/// decided here, and then [ADR 0062]'s append of a run.
+///
+/// **The range is this body's question and not the copy's.** It was
+/// `core.bytesExtend`'s, a bulk instruction that checked bounds, direction and
+/// character boundaries and then copied — and a copy that also decides a policy
+/// cannot be the write half of a reservation, because the window a backend
+/// fuses has to be a write that has already been proved legal. So the five
+/// questions are asked here, in the order and in the shape
+/// [`std.string.sliceBytes`] asks them, and what is left is
+/// `core.bytesCopy`, which validates nothing.
+///
+/// Each question is an `if` of its own rather than one condition joined by
+/// `&&`, for `sliceBytes`' reason: a comparison that is all an `if` branches on
+/// is one instruction (ADR 0054), and the arms of `a || b` meet at a shared
+/// test that nothing can fuse. A range that succeeds — which is every range a
+/// formatter asks about — costs the five comparisons and two byte loads, and
+/// nothing else.
+///
+/// A refusal is `core.refuseByteRange`, which never answers: it says which of
+/// the five things is wrong in `String.sliceBytes`' words, the words
+/// `core.bytesExtend` said them in. It is an intrinsic rather than a Cove
+/// function so that this body stays a leaf the inliner expands — a call would
+/// make it one no backend may expand at all, and `examples/covefmt` calls it
+/// two hundred thousand times.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+fn appendRange(buffer: ByteBuffer, text: String, from: Int, to: Int) {
+  let length = core.byteLength(text)
+  if from < 0 {
+    core.refuseByteRange(text, from, to)
+  }
+  if from > to {
+    core.refuseByteRange(text, from, to)
+  }
+  if to > length {
+    core.refuseByteRange(text, from, to)
+  }
+  // A continuation byte is `10xxxxxx`, 128 through 191, and an ASCII byte is
+  // below both; the end of the string is a boundary and has no byte to look at.
+  if from < length {
+    let first = text.byteAt(from)
+    if first >= 128 {
+      if first < 192 {
+        core.refuseByteRange(text, from, to)
+      }
+    }
+  }
+  if to < length {
+    let last = text.byteAt(to)
+    if last >= 128 {
+      if last < 192 {
+        core.refuseByteRange(text, from, to)
+      }
+    }
+  }
+  let count = to - from
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, count)
+  core.bytesCopy(buffer, at, text, from, count)
+  core.bytesCommit(buffer, count)
 }

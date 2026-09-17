@@ -2785,6 +2785,140 @@ export fn probeGap() -> Int {
     }
 }
 
+/// `StringBuilder.appendSlice` decides its range in Cove and stops the run in
+/// `String.sliceBytes`' words — the same words, on both evaluators, and the
+/// same words `sliceBytes` itself answers.
+///
+/// ADR 0062 moved the range policy out of `core.bytesExtend`, which both
+/// checked and copied, into `std.stringbuilder`'s `appendRange`, so that the
+/// copy underneath is a write already known to be legal and can be the write
+/// half of a reservation window. The risk that move carries is not the copy: it
+/// is that a refusal changes. There are three copies of the rule now — the five
+/// questions in Cove, `crate::builtins`' `wrong_byte_range` for the oracle and
+/// `vm::intrinsics::text::refuse_byte_range` for the machine — and this is what
+/// holds them together.
+///
+/// Every way a range can be wrong is here, and `sliceBytes`' own `Err` message
+/// for the same range is compared against the sentence the builder stopped
+/// with, rather than a literal being written twice: a paraphrase in either
+/// copy fails here, and so does a reordering, because `"héllo"` at `(4, 3)` is
+/// wrong in one way and `(2, 3)` in another.
+#[test]
+fn an_append_slice_refuses_a_range_in_slice_bytes_words_on_both_evaluators() {
+    let probe = "\
+/// The range appended to a builder, which stops the run when it is not one.
+fn probeAppended(from: Int, to: Int) -> String {
+  var out = StringBuilder.withCapacity(2)
+  out.append(\"<\")
+  out.appendSlice(\"héllo\", from, to)
+  out.finish()
+}
+
+/// What `String.sliceBytes` says about the same range, which is what the
+/// builder has to have said.
+fn probeSaid(from: Int, to: Int) -> String {
+  match \"héllo\".sliceBytes(from, to) {
+    Ok(part) => part
+    Err(error) => error.message
+  }
+}
+
+/// A legal range: the copy runs and nothing is refused.
+export fn probeOk() -> String {
+  probeAppended(1, 3)
+}
+
+export fn probeFromBelow() -> String {
+  probeAppended(-1, 1)
+}
+
+export fn probeToPastTheEnd() -> String {
+  probeAppended(0, 7)
+}
+
+export fn probeBackwards() -> String {
+  probeAppended(4, 3)
+}
+
+export fn probeFromInsideACharacter() -> String {
+  probeAppended(2, 3)
+}
+
+export fn probeToInsideACharacter() -> String {
+  probeAppended(1, 2)
+}
+
+export fn probeSaidOk() -> String {
+  probeSaid(1, 3)
+}
+
+export fn probeSaidFromBelow() -> String {
+  probeSaid(-1, 1)
+}
+
+export fn probeSaidToPastTheEnd() -> String {
+  probeSaid(0, 7)
+}
+
+export fn probeSaidBackwards() -> String {
+  probeSaid(4, 3)
+}
+
+export fn probeSaidFromInsideACharacter() -> String {
+  probeSaid(2, 3)
+}
+
+export fn probeSaidToInsideACharacter() -> String {
+  probeSaid(1, 2)
+}
+";
+    let source = "\
+use std.stringbuilder
+
+export fn main() -> Int {
+  1
+}
+";
+    let answered = |name: &'static str| {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.stringbuilder", probe);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("std.stringbuilder", name, vec![]))
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.stringbuilder", probe);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke("std.stringbuilder", name, vec![]))
+        });
+        assert_eq!(machine, oracle, "`{name}` answers alike");
+        oracle
+    };
+
+    // A legal range copies, and `sliceBytes` answers the same bytes.
+    assert_eq!(answered("probeOk"), Answer::Value("<é".to_string()));
+    assert_eq!(answered("probeSaidOk"), Answer::Value("é".to_string()));
+
+    for (appended, sliced) in [
+        ("probeFromBelow", "probeSaidFromBelow"),
+        ("probeToPastTheEnd", "probeSaidToPastTheEnd"),
+        ("probeBackwards", "probeSaidBackwards"),
+        ("probeFromInsideACharacter", "probeSaidFromInsideACharacter"),
+        ("probeToInsideACharacter", "probeSaidToInsideACharacter"),
+    ] {
+        let Answer::Value(message) = answered(sliced) else {
+            panic!("`{sliced}` answers the message rather than raising");
+        };
+        assert_eq!(
+            answered(appended),
+            Answer::Failed(message),
+            "`{appended}` stops the run in `{sliced}`'s words"
+        );
+    }
+}
+
 /// #378 P4-5's keyed construction intrinsics answer alike on both evaluators:
 /// a vector with exact room, ranges of an old set or map copied onto it around
 /// a pushed unit, and the keyed finish into the new run — over one-word
