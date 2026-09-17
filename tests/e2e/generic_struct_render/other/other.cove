@@ -1,0 +1,8 @@
+/// A struct declared in a module other than `generic_struct_render`, so it
+/// can stand as a generic struct's type argument from outside the module
+/// that declares it — `Cell<generic_struct_render.other.Point>` rather than
+/// `Cell<Point>`.
+export struct Point {
+  x: Int
+  y: Int
+}

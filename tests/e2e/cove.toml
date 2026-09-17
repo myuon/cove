@@ -379,3 +379,11 @@ allow = ["console"]
 [run.values_interpolation_order]
 entry = "values_interpolation_order.main"
 allow = ["console"]
+
+[run.display_nested]
+entry = "display_nested.main"
+allow = ["console", "clock"]
+
+[run.generic_struct_render]
+entry = "generic_struct_render.main"
+allow = ["console"]

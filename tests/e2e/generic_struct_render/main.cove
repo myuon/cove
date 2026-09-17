@@ -1,0 +1,26 @@
+use console.println
+use generic_struct_render.other
+
+/// A one-field generic struct, instantiated below with a builtin argument
+/// and with a struct from another module.
+struct Cell<T> {
+  it: T
+}
+
+/// Pins [#407](https://github.com/myuon/cove/issues/407): interpolating a
+/// generic struct instance. ADR 0012 ranks `--backend ast` above the linear-
+/// memory VM, so `expected.out` is the oracle's answer — `Cell(it: 1)` and
+/// `Cell(it: Point(x: 1, y: 2))`, the declared name without the type
+/// arguments a monomorphised layout carries. Before the fix in this pull
+/// request, the VM instead prints the layout's own name: `Cell<Int>(it: 1)`
+/// for the first, and `Point>(it: Point(x: 1, y: 2))` for the second, where
+/// the qualified type argument's own `.` is what `short` cuts at.
+export fn main() -> Result<Unit, Error> {
+  let c = Cell(it: 1)
+  println("{c}")?
+
+  let p = other.Point(x: 1, y: 2)
+  let cp = Cell(it: p)
+  println("{cp}")?
+  Ok(())
+}

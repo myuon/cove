@@ -1,0 +1,6 @@
+float in option Some(1.5) None
+duration in option Some(1s) None
+string in map {a: hello}
+range in array [0..<3, 1..5]
+dyn summary in array [Booking(id: 41), Receipt(cents: 12500)]
+host any via timeout Booking(id: 7)

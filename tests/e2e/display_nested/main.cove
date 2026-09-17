@@ -1,0 +1,59 @@
+use clock.timeout
+use console.println
+
+/// A trait purely to give a `dyn` position something to erase; nothing here
+/// dispatches through it.
+export trait Summary {
+  fn summarize(self) -> String
+}
+
+/// One of two families an `Array<dyn Summary>` holds below.
+struct Booking {
+  id: Int
+}
+
+/// The other family, so the array is not one struct wearing a trait.
+struct Receipt {
+  cents: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+impl Summary for Receipt {
+  fn summarize(self) -> String {
+    "receipt {self.cents}c"
+  }
+}
+
+/// Pins today's rendering for a handful of rows ADR 0061's Phase 0 lists
+/// that no existing fixture reaches: a `Float` and a `Duration` nested in an
+/// `Option`, a `String` nested in a `Map`, a `Range` in an `Array`, a `dyn
+/// Summary` in an `Array`, and a host `Any` reached through `clock.timeout`.
+/// Every row here agrees between the two backends; the generic-struct row
+/// that does not is pinned separately, in `generic_struct_render`.
+export fn main() -> Result<Unit, Error> {
+  let float: Option<Float> = Some(1.5)
+  let noFloat: Option<Float> = None
+  println("float in option {float} {noFloat}")?
+
+  let duration: Option<Duration> = Some(1s)
+  let noDuration: Option<Duration> = None
+  println("duration in option {duration} {noDuration}")?
+
+  let strings = Map.of(MapEntry(key: "a", value: "hello"))
+  println("string in map {strings}")?
+
+  let ranges = [0..<3, 1..5]
+  println("range in array {ranges}")?
+
+  let entries: Array<dyn Summary> = [Booking(id: 41), Receipt(cents: 12500)]
+  println("dyn summary in array {entries}")?
+
+  let answered = timeout(10ms) { Booking(id: 7) }?
+  println("host any via timeout {answered}")?
+  Ok(())
+}

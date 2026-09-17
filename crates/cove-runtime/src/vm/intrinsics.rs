@@ -42,7 +42,7 @@ use std::fmt::Write as _;
 use cove_ir::{Intrinsic, LayoutId, Repr, Shape};
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
-use crate::vm::boundary::{is_range, short};
+use crate::vm::boundary::{declared, is_range, short};
 use crate::vm::intrinsics::operand::{Dest, Frame};
 
 use crate::error::RuntimeError;
@@ -378,7 +378,13 @@ fn render_value(
         // through `println` what the checker refuses to let a caller name.
         // That is ADR 0014's whole point, and it is why the layout carries
         // the flag rather than this deriving it.
-        Shape::Struct { opaque: true, .. } => out.push_str(short(&described.name)),
+        //
+        // `declared` first, `short` second: the layout's name carries the
+        // instantiation's type arguments (`m.Cell<m.Point>`), and `short`
+        // cuts at the *last* `.` — which, for a qualified argument, is
+        // inside the brackets. Stripping the arguments first leaves only
+        // the module-qualified declared name for `short` to cut at.
+        Shape::Struct { opaque: true, .. } => out.push_str(short(declared(&described.name))),
         // A `Range` renders as the operator it was written with: `1..3` and
         // `1..<4` cover the same values and are two different renderings,
         // because they are two different values — `==` on ranges compares the
@@ -391,9 +397,12 @@ fn render_value(
         }
         Shape::Struct { fields, .. } => {
             // The declared name without its module, which is what the
-            // public `Display` shows. The layout carries the qualified one
-            // because a layout is an identity.
-            write!(out, "{}(", short(&described.name))
+            // public `Display` shows. The layout carries the qualified
+            // *instantiation* — type arguments included — because a layout
+            // is an identity, so `declared` strips those before `short`
+            // strips the module: `short` alone would cut at a qualified
+            // argument's own `.` instead (#407).
+            write!(out, "{}(", short(declared(&described.name)))
                 .expect("a string never fails to be written to");
             for (nth, field) in fields.iter().enumerate() {
                 if nth > 0 {
