@@ -196,18 +196,29 @@ pub const DECLINES: usize = Decline::ALL.len();
 ///
 /// A count with no reason beside it cannot say whether the next window worth
 /// teaching is the one that came too near a safepoint, the one whose store had
-/// no room, or the one whose shape the decoder does not know; these eight are
+/// no room, or the one whose shape the decoder does not know; these nine are
 /// the answers the three fast paths actually distinguish, one per family of
 /// questions rather than one per `return`, because a reader asks what was
 /// wrong with the window and not which line said so.
 ///
+/// Nine and not eight because a reason is also a *price*, and the census was
+/// wrong about one of them: [`Decline::Safepoint`] and [`Decline::Charge`] are
+/// asked by neighbouring lines of the same arm and cost opposite amounts — the
+/// first loses the window's whole dispatch saving, the second loses nothing at
+/// all. Summed into one column they read as the same event. They are not.
+///
 /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decline {
-    /// The longest window's tail would reach `next_check`, so no window may run
-    /// without a question falling inside it and the rows must dispatch one by
-    /// one. An append's bulk-charge variant is this too: the work it has
-    /// charged plus the copy ahead of it would cross the safepoint stride.
+    /// The entry test, and only it: at the head, the longest window's tail
+    /// would reach `next_check`, so no window may run without a question
+    /// falling inside it and the rows must dispatch one by one.
+    ///
+    /// This is the expensive decline — the only one that costs the window's
+    /// whole dispatch saving, because nothing fuses after it. Every other
+    /// reason here refuses a *part* and the head still carries its rows to the
+    /// commit through `fused_tail`, which is why an append's bulk-charge
+    /// refusal, once counted in this column, is now [`Decline::Charge`]'s.
     Safepoint,
     /// The rows behind the head, or the argument list of a copy among them, are
     /// not the window's shape — a grammar the decoder does not know.
@@ -232,11 +243,26 @@ pub enum Decline {
     /// The copy is longer than one window may charge at once: `count` over
     /// `BULK_CHUNK_BYTES`, or over `BULK_CHUNK_WORDS` elements of its stride.
     Bulk,
+    /// An append's copy would carry the charged work across the safepoint
+    /// stride, so the copy is left to the row whose own poll falls where the
+    /// stride asks for one.
+    ///
+    /// It declines the copy and not the window: the head still runs the rows
+    /// through `fused_tail`, so this costs nothing in dispatches. That is the
+    /// whole reason it is a column rather than a share of
+    /// [`Decline::Safepoint`], whose every window costs the dispatch saving it
+    /// was fused for. The two were one row once and the measurement is what
+    /// settled it: on cq's `append.bytes` all 5,815 declines under that name
+    /// were this one and cost nothing, while covefmt's `push.words` 36,432
+    /// were the entry test and cost a window each. Reconciling a dispatch
+    /// count against that row meant going back to the source to find out which
+    /// kind it held.
+    Charge,
 }
 
 impl Decline {
     /// Every reason, in [`Decline::index`] order.
-    pub const ALL: [Decline; 8] = [
+    pub const ALL: [Decline; 9] = [
         Decline::Safepoint,
         Decline::Shape,
         Decline::Owner,
@@ -245,6 +271,7 @@ impl Decline {
         Decline::Range,
         Decline::Chunk,
         Decline::Bulk,
+        Decline::Charge,
     ];
 
     /// Where this reason is in [`Decline::ALL`], for a table of counts, as
@@ -259,6 +286,7 @@ impl Decline {
             Decline::Range => 5,
             Decline::Chunk => 6,
             Decline::Bulk => 7,
+            Decline::Charge => 8,
         }
     }
 
@@ -273,6 +301,7 @@ impl Decline {
             Decline::Range => "range",
             Decline::Chunk => "chunk",
             Decline::Bulk => "bulk",
+            Decline::Charge => "charge",
         }
     }
 }
@@ -318,7 +347,7 @@ pub enum Outcome {
 /// the growths an unfused ensure made, which no window here ever saw. Read the
 /// two together and neither as the other.
 ///
-/// # A declined window may still have fused
+/// # A declined window may still have fused, and one reason says which
 ///
 /// [`BoundaryReport::fusions`] counts a window whose rows reached their commit
 /// in the head's one dispatch, and a window the fast path declined does that
@@ -326,14 +355,24 @@ pub enum Outcome {
 /// `fusions` by every window that declined and fused anyway, and [`run`](Self::run)
 /// is *above* it by the windows that did not fuse at all.
 ///
-/// Those are the windows a safepoint reached before the head, and they are not
-/// the whole of the [`Decline::Safepoint`] row: an append also declines there
-/// when the copy's charge would cross the stride, which declines the *copy* and
-/// not the dispatch, so that window runs fused as rows. Covefmt's first
-/// counting run shows both halves of that — the push row is exact, 5,438,985
-/// heads less 36,432 safepoint declines being its 5,402,553 fusions, because a
-/// push has no bulk charge; and the byte-append row is 2,860 above the same
-/// arithmetic, which is that variant, counted.
+/// The windows that did not fuse at all are exactly one column:
+/// [`Decline::Safepoint`], the entry test, which refuses the window before it
+/// begins. Every other reason — [`Decline::Charge`], which refuses only an
+/// append's copy, as much as a shape or a store the fast path would not touch
+/// — leaves the head to run its rows to the commit. So the gap is not a gap
+/// but an identity, per pattern `p`:
+///
+/// ```text
+/// fusions[p] == run(p) - declined[p][Decline::Safepoint.index()]
+/// ```
+///
+/// It was hand-waved before the charge had a column of its own, because the
+/// safepoint row held both kinds and the arithmetic only came out for
+/// `push.words`, which has no copy to charge for: covefmt's counting run shows
+/// 5,438,985 push.words heads less 36,432 safepoint declines being its
+/// 5,402,553 fusions, while its byte-append row sat 2,860 above the same
+/// subtraction — 2,860 charge declines, read as safepoints. Split, the
+/// identity holds for all four patterns on both counting runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Windows {
     /// Windows the pattern's fast path ran whole, in its one call.
@@ -1038,9 +1077,9 @@ mod tests {
                 fast: [70, 0, 2, 0],
                 slow: [10, 0, 1, 0],
                 declined: [
-                    [5, 0, 0, 0, 0, 0, 0, 0],
+                    [5, 0, 0, 0, 0, 0, 0, 0, 0],
                     [0; DECLINES],
-                    [1, 0, 0, 0, 0, 0, 0, 2],
+                    [1, 0, 0, 0, 0, 0, 0, 2, 3],
                     [0; DECLINES],
                 ],
             },
@@ -1071,11 +1110,13 @@ mod tests {
             "standard library, 2 `Call` site(s) left unexpanded; 9 call(s) made from encoded, \
              1,001 from native"
         ));
-        assert!(text.contains("buffer windows, 91 head(s) a fused arm ran"));
+        assert!(text.contains("buffer windows, 94 head(s) a fused arm ran"));
         assert!(text.contains("\n              70             10              5  push.words\n"));
-        assert!(text.contains("\n               2              1              3  append.bytes\n"));
+        assert!(text.contains("\n               2              1              6  append.bytes\n"));
         assert!(text.contains("\n  declines, by reason: push.words safepoint 5\n"));
-        assert!(text.contains("\n  declines, by reason: append.bytes safepoint 1, bulk 2\n"));
+        assert!(
+            text.contains("\n  declines, by reason: append.bytes safepoint 1, bulk 2, charge 3\n")
+        );
         assert!(
             !text.contains("  push.byte\n"),
             "a pattern no head of which ran is left out of the census table"

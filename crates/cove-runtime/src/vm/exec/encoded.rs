@@ -1830,7 +1830,7 @@ fn fused_append_bytes(
             } else if machine.instructions + window as u64 + machine.bulk_work + words
                 >= machine.charged_work + SAFEPOINT_STRIDE
             {
-                Decline::Safepoint
+                Decline::Charge
             } else {
                 Decline::Chunk
             };
@@ -2144,7 +2144,7 @@ fn fused_append_words(
             } else if machine.instructions + window as u64 + machine.bulk_work + words
                 >= machine.charged_work + SAFEPOINT_STRIDE
             {
-                Decline::Safepoint
+                Decline::Charge
             } else {
                 Decline::Chunk
             };
