@@ -7,13 +7,22 @@
 # that stopped compiling, which is a documentation break rather than a
 # behaviour one. CI's `cargo test --workspace` step compiles them all.
 #
-# The `#[ignore]`d cases go with them. There is one, and it is the roadmap:
-# `crates/cove-cli/tests/vm_coverage.rs` runs every program in the repository
-# on the linear-memory backend and sorts the answers into agrees, disagrees,
-# and does not lower. It is ignored because it runs what it lowers, and the
-# benchmark rows are two million turns each. CI has a step of its own for it,
-# and `cargo ratchet` below is how to run it by hand — which is worth doing
-# after a change to the lowering or the machine.
+# The `#[ignore]`d cases go with them. There are two, and both are ignored for
+# the same reason — each does its work once per program in the repository.
+#
+# `crates/cove-cli/tests/vm_coverage.rs` is the roadmap: it runs every program
+# in the repository on the linear-memory backend and sorts the answers into
+# agrees, disagrees, and does not lower. It is ignored because it runs what it
+# lowers, and the benchmark rows are two million turns each.
+#
+# `format::tests::a_comment_inserted_at_any_line_of_any_repository_file_survives`
+# inserts a comment at every line of every `.cove` file and checks the
+# formatter still emits it. Every variant reparses a whole file, so the work is
+# quadratic in file size; it is 9s over the cores and 58s on one.
+#
+# CI has a step of its own for them, and `cargo ratchet` below is how to run
+# them by hand — which is worth doing after a change to the lowering, the
+# machine, or the formatter.
 #
 # # Do not run a bare `cargo test`
 #
