@@ -550,6 +550,30 @@ identical, no native refusal or tier crossing moved, and every VM wall time
 moved less than `benches/arith`, the layout control that executes no append at
 all.
 
+[ADR 0063](docs/adr/0063-a-buffer-window-is-measured-before-it-is-optimized.md)
+finishes the buffer substrate, and is mostly a record of what measurement
+refused to build. `--boundary` now says what became of every window a fused head
+ran — fast, slow, or declined under one of nine named reasons — with growths
+counted where the reallocation happens rather than inferred from capacity
+arithmetic afterwards. `core.vectorWithCapacity` becomes one typed
+`GrowableAlloc` over words where it was five instructions, which removes the
+last field store at a growable owner's length offset anywhere in the standard
+library; a word allocation deliberately does *not* floor a small capacity, which
+was measured at 666,740 wasted words on cq before it was undone. Truncation
+stays one trusted primitive, with the argument written out and the test matrix
+filled. Then three refusals, each with a number: a block-local
+dominating-reservation optimizer eliminates **zero** ensure executions on either
+program, because every ensure executed is already a window row and a fused
+window's ensure costs no dispatch; a window's primitive rows are *larger* than
+the window for every pattern, so outlining makes programs bigger and the current
+codegen is retained; and the two open backend items — dead frame writes and a
+specialized growth completion — are bounded at 0.2% and 0.39% and left alone.
+cq falls 0.371% in instructions and 1,798 bytes of machine code, covefmt does
+not move in any count, and no wall-clock effect is claimed, because covefmt VM
+moved 2% on identical counts and that is the rebuild's layout. Two of ADR 0062's
+measured statements are corrected rather than edited: its accounting for cq's
++39.8% machine code, and its figure for dead native frame writes.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
