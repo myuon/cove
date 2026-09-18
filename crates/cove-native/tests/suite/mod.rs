@@ -4513,6 +4513,47 @@ pub fn an_append_window(storage: Storage) -> Program {
     held
 }
 
+/// [`an_append_window`] with the run-copy's length operand handed a second slot
+/// holding the same value, and a `copy` in front of the head that writes it: the
+/// same semantics, which `cove_ir::legalize` does not recognise, so each arm
+/// emits it one row at a time. What a case compares a recognised append window
+/// with.
+///
+/// The refusal is `recognize`'s `n.slot != count` test, and nothing else. That
+/// test asks that a run-copy's length *be* the slot the ensure reserved and the
+/// commit publishes, not merely equal it at run time — a window's one capacity
+/// question is only sound if the three rows name one count. The assertion
+/// between the two edits below is what pins the reason: with the `copy` row
+/// added and the operand still slot 2 the window is recognised, because a row in
+/// front of the head is not a candidate window's.
+pub fn an_append_window_unrecognised(storage: Storage) -> Program {
+    let mut held = an_append_window(storage);
+    let function = &mut held.functions[0];
+    let doubled = function.reprs.len() as Slot;
+    function.reprs.push(Repr::Int);
+    function.refs = RefMap::of(&function.reprs);
+    function.code.insert(
+        0,
+        Inst::Copy {
+            dst: doubled,
+            src: 2,
+            layout: INT,
+        },
+    );
+    function.spans.insert(0, span());
+    assert_eq!(
+        cove_ir::legalize::windows(&held, &held.functions[0]).len(),
+        1,
+        "a row in front of the head is not the window's"
+    );
+    held.args[ArgsId(1).index()][4].slot = doubled;
+    assert!(
+        cove_ir::legalize::windows(&held, &held.functions[0]).is_empty(),
+        "the rows are no window"
+    );
+    held
+}
+
 /// The frame [`a_push_window`] is entered with: the owner, three unwritten slots,
 /// the unit's `stride` words, and an unwritten second count and answer.
 fn push_window_frame(owner: u64, stride: u64, unit: u64) -> Vec<u64> {
@@ -4843,17 +4884,44 @@ pub fn an_append_window_is_an_ensure_a_copy_and_a_commit<A: Arm>() {
 
 /// **A window is less machine code than its rows.**
 ///
-/// Two compilations of the same push — the window as ADR 0062 lowers it, and the
-/// window's rows unrecognised — measured in bytes of machine code and printed,
-/// so that a change to the fast path shows its cost here. What is held is the
-/// ordering that makes the window worth having: fewer bytes than its rows
+/// Two compilations of the same append or push — the window as ADR 0062 lowers
+/// it, and the same rows unrecognised — measured in bytes of machine code and
+/// printed, so that a change to the fast path shows its cost here. What is held
+/// is the ordering that makes the window worth having: fewer bytes than its rows
 /// emitted one at a time.
+///
+/// It is held as a *direction* and not as figures, so that it is not a tripwire
+/// every code-generator change has to re-baseline. But the size of the effect is
+/// half of what it says, and a direction does not carry it, so here it is —
+/// whole-function bytes on the template arm, both sides over the same prologue
+/// and epilogue:
+///
+/// | pattern | window | rows | difference |
+/// | --- | ---: | ---: | ---: |
+/// | `push.words`, `Vector<Int>` | 997 | 2,285 | +1,288 |
+/// | `push.words`, `Vector<Pair>` | 1,081 | 2,369 | +1,288 |
+/// | `push.byte` | 1,138 | 2,426 | +1,288 |
+/// | `append.bytes` | 1,424 | 2,036 | +612 |
+/// | `append.words` | 1,426 | 2,036 | +610 |
+///
+/// Sixteen bytes of each append's row figure are the `copy` row
+/// [`an_append_window_unrecognised`] adds, which is the price of having an
+/// unrecognised append to compare against at all: the same program with that row
+/// and the operand left alone is 1,440 B and still one window. The other 596 B
+/// and 594 B are the guards — an append's rows ask four capacity and family
+/// questions where the window asks one. `Emit::window` is where that is written down, and
+/// where it is the argument for keeping this code generator.
+///
+/// The five cases are why this is not three: an append is the pattern whose rows
+/// are *least* larger, so a push-only case would have said the effect was twice
+/// what it is on the shape that matters most to cq.
 ///
 /// There was a third compilation until ADR 0062's last stage, the composite
 /// `growable-push` this replaced, and the window was held to no more than twice
 /// it. That baseline went with the instruction; #417 and #418 are where the
 /// numbers it gave are recorded.
 pub fn a_window_is_less_code_than_its_rows<A: Arm>() {
+    use cove_ir::legalize::windows;
     let size = |program: &Program| {
         let mut jit = A::new(helpers());
         let compiled = jit
@@ -4861,13 +4929,34 @@ pub fn a_window_is_less_code_than_its_rows<A: Arm>() {
             .expect("the function is inside the slice");
         A::code_bytes(compiled)
     };
-    for (what, storage) in [
-        ("Vector<Int>.push", Storage::Words(INT)),
-        ("Vector<Pair>.push", Storage::Words(PAIR)),
-        ("appendByte", Storage::PackedBytes),
+    for (what, storage, appends) in [
+        ("Vector<Int>.push", Storage::Words(INT), false),
+        ("Vector<Pair>.push", Storage::Words(PAIR), false),
+        ("appendByte", Storage::PackedBytes, false),
+        ("appendSlice", Storage::PackedBytes, true),
+        ("keyed extend", Storage::Words(INT), true),
     ] {
-        let window = size(&a_push_window(storage));
-        let rows = size(&a_push_window_unrecognised(storage));
+        let (held, unrecognised) = match appends {
+            false => (a_push_window(storage), a_push_window_unrecognised(storage)),
+            true => (
+                an_append_window(storage),
+                an_append_window_unrecognised(storage),
+            ),
+        };
+        // Without these two the case could pass by comparing two compilations
+        // of the same thing: a perturbation that stopped unrecognising the rows
+        // would make both sides a window and both sides equal.
+        assert_eq!(
+            windows(&held, &held.functions[0]).len(),
+            1,
+            "{what}: the window is one window"
+        );
+        assert!(
+            windows(&unrecognised, &unrecognised.functions[0]).is_empty(),
+            "{what}: the rows are no window"
+        );
+        let window = size(&held);
+        let rows = size(&unrecognised);
         println!("{what}: window {window} bytes, rows {rows} bytes");
         assert!(
             window < rows,

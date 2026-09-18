@@ -1632,6 +1632,13 @@ impl<'a, 'f> Lower<'a, 'f> {
     /// cold loads neither again: each cold predecessor, which did call a helper,
     /// derives both afresh before it jumps.
     ///
+    /// Why a recognised window is inlined here at all, rather than demoted to
+    /// its helpers or declined above some size — issue #423's code-size policy,
+    /// with the measurement that a window's rows are the *larger* code — is
+    /// written once, on `Emit::window` in `template.rs`. That arm can attribute
+    /// bytes to a window and this one cannot, so the argument belongs there; it
+    /// is not repeated here, because two copies of it would drift.
+    ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     fn window(&mut self, held: BufferWindow) {
         use cove_ir::legalize::Pattern;
