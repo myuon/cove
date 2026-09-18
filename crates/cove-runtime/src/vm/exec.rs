@@ -634,21 +634,6 @@ pub(crate) struct Machine<'a> {
     /// an arm it read a slot it had already overwritten.
     #[cfg(debug_assertions)]
     answered: bool,
-    /// How many windows a fused head ran whole on its own fast path, rather
-    /// than declining to [`encoded::fused_tail`]'s row-by-row code.
-    ///
-    /// The only thing that tells the two apart, and it exists for the tests.
-    /// A fast path that is right and a fast path that always declines leave
-    /// the same frame, the same heap, the same instructions, the same fuel and
-    /// the same boundary counts — that is exactly what each one promises — so
-    /// a window test that asks only for agreement passes just as well over a
-    /// fast path nothing reaches. This is how `mod window`'s fixtures ask
-    /// whether the path under test ran at all.
-    ///
-    /// `#[cfg(test)]`, so the field is in this crate's own test binary and in
-    /// nothing a measurement is taken on.
-    #[cfg(test)]
-    pub(crate) fused_fast: u64,
     /// The last case index each enum wrapper resolved to, and for which
     /// layout.
     ///
@@ -818,8 +803,6 @@ impl<'a> Machine<'a> {
             encoded: encoded::prepare(program),
             #[cfg(debug_assertions)]
             answered: false,
-            #[cfg(test)]
-            fused_fast: 0,
             cases: [None; 4],
             widths: program
                 .layouts
@@ -902,8 +885,6 @@ impl<'a> Machine<'a> {
             encoded: Ok(encoded),
             #[cfg(debug_assertions)]
             answered: false,
-            #[cfg(test)]
-            fused_fast: 0,
             cases: [None; 4],
             // The parent's, for the reason `encoded` is: a table derived from
             // a program the whole run shares is the same table in every task.
@@ -1111,6 +1092,37 @@ impl<'a> Machine<'a> {
     pub(crate) fn count_fusion(&mut self, head: u8, rows: usize, whole: bool) {
         if let Some(counting) = self.counting.as_deref_mut() {
             counting.fused(head, rows, whole);
+        }
+    }
+
+    /// What became of one window a fused head named, counted. Out of line for
+    /// [`Machine::count_intrinsic`]'s reason: what a fused arm keeps inline is
+    /// the `Option` test, on a path that has already decided to return.
+    ///
+    /// This is [ADR 0062]'s census, which the ADR left open: `count_fusion`
+    /// says how many windows reached their commit and cannot tell a fast path
+    /// from `encoded::fused_tail`, and neither of them sees a window that
+    /// declined at all.
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    #[inline(never)]
+    #[cold]
+    pub(crate) fn count_window(&mut self, head: u8, outcome: crate::vm::report::Outcome) {
+        if let Some(counting) = self.counting.as_deref_mut() {
+            counting.window(head, outcome);
+        }
+    }
+
+    /// One growth that reallocated a store, counted, by the storage it grew.
+    ///
+    /// Out of line for [`Machine::count_window`]'s reason, and asked from
+    /// `runs::grow` — the one function that replaces a store — so that a
+    /// growth an ensure made outside any window is counted too.
+    #[inline(never)]
+    #[cold]
+    pub(crate) fn count_growth(&mut self, storage: cove_ir::Storage) {
+        if let Some(counting) = self.counting.as_deref_mut() {
+            counting.growth(storage);
         }
     }
 

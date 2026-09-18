@@ -42,9 +42,13 @@
 //!   `ablate::CENSUS`'s discipline — the production helpers are the same
 //!   function bodies they were, not a copy with a branch in them.
 //!
-//! A fused arm pays one `Option` test per window it runs, and only when it runs
-//! one: the count is taken out of line, as `Machine::count_intrinsic`'s is, and
-//! nothing on the path of an unfused instruction reads it.
+//! A fused arm pays one `Option` test per window it runs or declines, and only
+//! where it already stands: the count is taken out of line, as
+//! `Machine::count_intrinsic`'s is, and nothing on the path of an unfused
+//! instruction reads it. [`Windows`]' census adds no test the fast paths did
+//! not already have a branch for — a decline is a `return` that was there — and
+//! [`BoundaryReport::growths`] adds one to the runtime's `grow`, which is out of
+//! line and is entered once per reallocation.
 //!
 //! [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
 //! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
@@ -175,6 +179,181 @@ pub const GROWABLE_OPS: usize = 9;
 /// How many [`RunOp`]s there are, for [`GROWABLE_OPS`]' reason.
 pub const RUN_OPS: usize = 4;
 
+/// How many [`Decline`]s there are, for [`GROWABLE_OPS`]' reason: the length of
+/// [`Decline::ALL`], so that a reason added to the enum without a column here
+/// fails a test rather than being recorded nowhere.
+pub const DECLINES: usize = Decline::ALL.len();
+
+/// Why a fused arm handed a window back to the rows it is still encoded as.
+///
+/// [ADR 0062]'s three fast paths each ask, up front and before they write
+/// anything, every question a row of the window would refuse on; any answer but
+/// the common one writes nothing, answers `0`, and the window runs as the
+/// primitives it never stopped being. That is correct whatever the answer was,
+/// which is why nothing had to say which answer it had been — and the ADR left
+/// "nothing counts how often a fast path declines in a real run" open for
+/// exactly that reason.
+///
+/// A count with no reason beside it cannot say whether the next window worth
+/// teaching is the one that came too near a safepoint, the one whose store had
+/// no room, or the one whose shape the decoder does not know; these eight are
+/// the answers the three fast paths actually distinguish, one per family of
+/// questions rather than one per `return`, because a reader asks what was
+/// wrong with the window and not which line said so.
+///
+/// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decline {
+    /// The longest window's tail would reach `next_check`, so no window may run
+    /// without a question falling inside it and the rows must dispatch one by
+    /// one. An append's bulk-charge variant is this too: the work it has
+    /// charged plus the copy ahead of it would cross the safepoint stride.
+    Safepoint,
+    /// The rows behind the head, or the argument list of a copy among them, are
+    /// not the window's shape — a grammar the decoder does not know.
+    Shape,
+    /// The owner's run is missing, has been consumed, is cut short of its
+    /// payload by a chunk boundary, or is not the layout family the window's
+    /// storage names.
+    Owner,
+    /// The store's run is missing, has been consumed, or is not the family the
+    /// window's storage expects of it.
+    Store,
+    /// A copy's source run is missing, is not a family the element reads as
+    /// units of, or its element is no words wide.
+    Source,
+    /// A value or a copy range the fast path does not admit: a byte over
+    /// `0xFF`, a negative count or offset, or a range that runs past the
+    /// source's length.
+    Range,
+    /// A chunk boundary of the heap cuts the source short of the range the copy
+    /// was asked for, so the units are not one slice to read.
+    Chunk,
+    /// The copy is longer than one window may charge at once: `count` over
+    /// `BULK_CHUNK_BYTES`, or over `BULK_CHUNK_WORDS` elements of its stride.
+    Bulk,
+}
+
+impl Decline {
+    /// Every reason, in [`Decline::index`] order.
+    pub const ALL: [Decline; 8] = [
+        Decline::Safepoint,
+        Decline::Shape,
+        Decline::Owner,
+        Decline::Store,
+        Decline::Source,
+        Decline::Range,
+        Decline::Chunk,
+        Decline::Bulk,
+    ];
+
+    /// Where this reason is in [`Decline::ALL`], for a table of counts, as
+    /// [`Pattern::index`] is.
+    pub fn index(self) -> usize {
+        match self {
+            Decline::Safepoint => 0,
+            Decline::Shape => 1,
+            Decline::Owner => 2,
+            Decline::Store => 3,
+            Decline::Source => 4,
+            Decline::Range => 5,
+            Decline::Chunk => 6,
+            Decline::Bulk => 7,
+        }
+    }
+
+    /// What a report calls it, as [`Pattern::name`] does.
+    pub fn name(self) -> &'static str {
+        match self {
+            Decline::Safepoint => "safepoint",
+            Decline::Shape => "shape",
+            Decline::Owner => "owner",
+            Decline::Store => "store",
+            Decline::Source => "source",
+            Decline::Range => "range",
+            Decline::Chunk => "chunk",
+            Decline::Bulk => "bulk",
+        }
+    }
+}
+
+/// What became of one window whose head a fused arm ran.
+///
+/// The three answers are what [ADR 0062]'s arms actually do, and they are
+/// three rather than two because the middle one is neither a fast path nor a
+/// decline: the fast path asked its questions, liked the answers, wrote the
+/// rows before the ensure — and then found no room, or a unit a chunk boundary
+/// cuts in two, and finished the window the ordinary way.
+///
+/// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// The fast path ran the whole window in its one call, the room already
+    /// there.
+    Fast,
+    /// The fast path's in-place write did not apply — no room, or a chunk
+    /// boundary cutting the units in two — and the window finished the ordinary
+    /// way: inside `fused_push` after its ensure for a push, and through
+    /// `fused_tail` after the ensure for an append.
+    Slow,
+    /// The fast path declined before it wrote anything, and the window ran as
+    /// the rows it is still encoded as.
+    Declined(Decline),
+}
+
+/// What each pattern's windows did, indexed by [`Pattern::index`].
+///
+/// [ADR 0062]'s `fusions` says how many windows a fused head ran through to
+/// their commit; it cannot tell a fast path from [`Outcome::Slow`]'s row-by-row
+/// completion, and it says nothing at all about a window that declined. This
+/// does both, so that a change to a fast path is priced by a counting run
+/// rather than by a third binary.
+///
+/// # `slow` is not a reallocation, and [`BoundaryReport::growths`] is
+///
+/// A window that took the slow completion is one whose fast path found no room
+/// *or* whose units a chunk boundary cut in two, and the ensure it then made
+/// may find the capacity already sufficient. A growth is counted where the
+/// reallocation happens instead — in the runtime's `grow` — so it also counts
+/// the growths an unfused ensure made, which no window here ever saw. Read the
+/// two together and neither as the other.
+///
+/// # A declined window may still have fused
+///
+/// [`BoundaryReport::fusions`] counts a window whose rows reached their commit
+/// in the head's one dispatch, and a window the fast path declined does that
+/// too — `fused_tail` runs its rows there. So `fast + slow` is *short* of
+/// `fusions` by every window that declined and fused anyway, and [`run`](Self::run)
+/// is *above* it by the windows that did not fuse at all.
+///
+/// Those are the windows a safepoint reached before the head, and they are not
+/// the whole of the [`Decline::Safepoint`] row: an append also declines there
+/// when the copy's charge would cross the stride, which declines the *copy* and
+/// not the dispatch, so that window runs fused as rows. Covefmt's first
+/// counting run shows both halves of that — the push row is exact, 5,438,985
+/// heads less 36,432 safepoint declines being its 5,402,553 fusions, because a
+/// push has no bulk charge; and the byte-append row is 2,860 above the same
+/// arithmetic, which is that variant, counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Windows {
+    /// Windows the pattern's fast path ran whole, in its one call.
+    pub fast: [u64; 4],
+    /// Windows whose fast path wrote the rows before the ensure and then
+    /// finished the ordinary way.
+    pub slow: [u64; 4],
+    /// Windows the fast path declined before writing anything, by
+    /// [`Decline::index`].
+    pub declined: [[u64; DECLINES]; 4],
+}
+
+impl Windows {
+    /// The heads of `pattern` a fused arm ran: the three outcomes summed.
+    pub fn run(&self, pattern: Pattern) -> u64 {
+        let at = pattern.index();
+        self.fast[at] + self.slow[at] + self.declined[at].iter().sum::<u64>()
+    }
+}
+
 /// One intrinsic's row: where the program names it, and how often each tier
 /// asked the runtime to perform it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,6 +482,21 @@ pub struct BoundaryReport {
     /// Windows a fused head ran through to their commit, by
     /// [`Pattern::index`].
     pub fusions: [u64; 4],
+    /// What each window a fused head named did: [ADR 0062]'s census, beside
+    /// `fusions` rather than instead of it, because `fusions` is the number the
+    /// ADR published and this one is finer.
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    pub windows: Windows,
+    /// Stores a growth **actually reallocated**, indexed 0 for
+    /// [`Storage::PackedBytes`](cove_ir::Storage::PackedBytes) and 1 for
+    /// [`Storage::Words`](cove_ir::Storage::Words).
+    ///
+    /// Counted where the reallocation happens and not where a window ends, for
+    /// the reason [`Windows`] gives: this also counts the growths an ensure
+    /// outside any window made, and [`Windows::slow`] counts a window that
+    /// finished the ordinary way whether or not its store moved.
+    pub growths: [u64; 2],
     /// The `Call`s into the standard library, by the tier that made them.
     pub library_calls: LibraryCalls,
     /// How the calls divided between the tiers, or `None` when no native tier was
@@ -359,6 +553,11 @@ pub(crate) struct Counting {
     folded: u64,
     /// Windows run fused through their commit, by [`Pattern::index`].
     fusions: [u64; 4],
+    /// What each window a fused head named did, by pattern and outcome.
+    windows: Windows,
+    /// Growths that reallocated, by storage kind, as
+    /// [`BoundaryReport::growths`] is indexed.
+    growths: [u64; 2],
     /// The tier counts when counting began, for the same reason.
     tiers_at: Tiers,
 }
@@ -379,6 +578,8 @@ impl Counting {
             instructions_at: instructions,
             folded: 0,
             fusions: [0; 4],
+            windows: Windows::default(),
+            growths: [0; 2],
             tiers_at: tiers,
         }
     }
@@ -391,6 +592,35 @@ impl Counting {
         if let (true, Some(pattern)) = (whole, pattern) {
             self.fusions[pattern.index()] += 1;
         }
+    }
+
+    /// What became of the window whose head is the opcode `head`: one outcome,
+    /// charged to the head's [`Pattern`].
+    ///
+    /// The pattern is found the way [`Counting::fused`] finds it, so the census
+    /// and `fusions` name a window the same way rather than each deciding for
+    /// itself. A head that names no pattern records nothing: there is no column
+    /// for it, and a total that quietly held one would be a total of something
+    /// else.
+    pub(crate) fn window(&mut self, head: u8, outcome: Outcome) {
+        let Some(pattern) = Op::from_number(head).and_then(Op::pattern) else {
+            return;
+        };
+        let at = pattern.index();
+        match outcome {
+            Outcome::Fast => self.windows.fast[at] += 1,
+            Outcome::Slow => self.windows.slow[at] += 1,
+            Outcome::Declined(why) => self.windows.declined[at][why.index()] += 1,
+        }
+    }
+
+    /// One growth that reallocated a store of `storage`.
+    pub(crate) fn growth(&mut self, storage: cove_ir::Storage) {
+        let at = match storage {
+            cove_ir::Storage::PackedBytes => 0,
+            cove_ir::Storage::Words(_) => 1,
+        };
+        self.growths[at] += 1;
     }
 
     /// One `IntrinsicCall` of `builtin`, whichever tier made it.
@@ -472,6 +702,8 @@ impl Counting {
                 .saturating_sub(self.instructions_at)
                 .saturating_sub(self.folded),
             fusions: self.fusions,
+            windows: self.windows,
+            growths: self.growths,
             library_calls: LibraryCalls {
                 encoded: self.library_encoded,
                 native: native_counted.then_some(self.library_native),
@@ -503,6 +735,15 @@ fn since(now: Tiers, then: Tiers) -> Tiers {
 ///
 /// Every line begins `boundary:` or is an indented row under one, so a reader can
 /// `grep` a run's stderr for the whole of it.
+///
+/// # Reading `buffer windows` against `growths`
+///
+/// The two blocks count different things in different places and the second is
+/// not a column of the first. A window's `slow` says its fast path wrote the
+/// rows before the ensure and then finished the ordinary way — which the ensure
+/// may do without reallocating anything — while `growths` is taken where a
+/// store is actually replaced, and so also holds the growths of every ensure
+/// outside a window. See [`Windows`].
 impl fmt::Display for BoundaryReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let emitted = self.emitted;
@@ -529,6 +770,63 @@ impl fmt::Display for BoundaryReport {
             thousands(self.encoded_instructions),
             thousands(self.encoded_dispatches),
             fused.join(", ")
+        )?;
+        let windows = self.windows;
+        let heads: u64 = Pattern::ALL
+            .iter()
+            .map(|&pattern| windows.run(pattern))
+            .sum();
+        writeln!(
+            f,
+            "boundary: buffer windows, {} head(s) a fused arm ran: what each did",
+            thousands(heads)
+        )?;
+        writeln!(
+            f,
+            "  {:>14} {:>14} {:>14}  pattern",
+            "fast", "slow", "declined"
+        )?;
+        // A pattern no head of which ran is left out, as an operation no call
+        // named is left out of the helper table above.
+        for pattern in Pattern::ALL.into_iter().filter(|&p| windows.run(p) > 0) {
+            let at = pattern.index();
+            writeln!(
+                f,
+                "  {:>14} {:>14} {:>14}  {}",
+                thousands(windows.fast[at]),
+                thousands(windows.slow[at]),
+                thousands(windows.declined[at].iter().sum::<u64>()),
+                pattern.name()
+            )?;
+        }
+        for pattern in Pattern::ALL {
+            let at = pattern.index();
+            let why: Vec<String> = Decline::ALL
+                .iter()
+                .filter(|why| windows.declined[at][why.index()] > 0)
+                .map(|why| {
+                    format!(
+                        "{} {}",
+                        why.name(),
+                        thousands(windows.declined[at][why.index()])
+                    )
+                })
+                .collect();
+            if !why.is_empty() {
+                writeln!(
+                    f,
+                    "  declines, by reason: {} {}",
+                    pattern.name(),
+                    why.join(", ")
+                )?;
+            }
+        }
+        writeln!(
+            f,
+            "boundary: growths, {} store(s) reallocated: packed bytes {}, words {}",
+            thousands(self.growths[0] + self.growths[1]),
+            thousands(self.growths[0]),
+            thousands(self.growths[1])
         )?;
         let library = self.library_calls;
         writeln!(
@@ -645,6 +943,50 @@ mod tests {
         assert_eq!(GrowableOp::from_abi(GROWABLE_OPS as u32), None);
         assert!((0..RUN_OPS as u32).all(|code| RunOp::from_abi(code).is_some()));
         assert_eq!(RunOp::from_abi(RUN_OPS as u32), None);
+        assert_eq!(DECLINES, Decline::ALL.len());
+    }
+
+    /// Every reason sits at its own index and answers to its own name, which is
+    /// what makes [`Windows::declined`] a table a reader can index by
+    /// [`Decline::index`] and print by [`Decline::name`]. A reason added to the
+    /// enum and forgotten in `ALL` — or given another's index, which would
+    /// charge two reasons to one column — fails here.
+    #[test]
+    fn every_decline_is_at_its_own_index_under_its_own_name() {
+        for (at, why) in Decline::ALL.into_iter().enumerate() {
+            assert_eq!(why.index(), at, "{why:?}");
+        }
+        let mut names: Vec<&str> = Decline::ALL.iter().map(|why| why.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), DECLINES, "the names are distinct");
+    }
+
+    /// A window is charged to its pattern and its outcome, and
+    /// [`Windows::run`] is the three summed — the heads of that pattern a fused
+    /// arm ran.
+    #[test]
+    fn a_window_is_charged_to_its_pattern_and_its_outcome() {
+        let mut counting = Counting::new(&Program::default(), 0, Tiers::default());
+        let head = Op::FusedPushWords.number();
+        counting.window(head, Outcome::Fast);
+        counting.window(head, Outcome::Fast);
+        counting.window(head, Outcome::Slow);
+        counting.window(head, Outcome::Declined(Decline::Safepoint));
+        counting.window(Op::Return.number(), Outcome::Fast);
+        counting.growth(cove_ir::Storage::PackedBytes);
+        counting.growth(cove_ir::Storage::Words(cove_ir::LayoutId(0)));
+        counting.growth(cove_ir::Storage::Words(cove_ir::LayoutId(0)));
+        let report = counting.report(&Program::default(), 0, None, false);
+        let at = Pattern::PushWords.index();
+        assert_eq!(report.windows.fast[at], 2);
+        assert_eq!(report.windows.slow[at], 1);
+        assert_eq!(report.windows.declined[at][Decline::Safepoint.index()], 1);
+        assert_eq!(report.windows.run(Pattern::PushWords), 4);
+        // A head that names no pattern has no column, so it is not counted at
+        // all rather than counted somewhere.
+        assert_eq!(report.windows.run(Pattern::PushByte), 0);
+        assert_eq!(report.growths, [1, 2]);
     }
 
     /// A charge lands on the total and on its operation's row, and the rows sum
@@ -692,6 +1034,17 @@ mod tests {
             encoded_instructions: 1_234_567,
             encoded_dispatches: 1_234_000,
             fusions: [80, 0, 3, 0],
+            windows: Windows {
+                fast: [70, 0, 2, 0],
+                slow: [10, 0, 1, 0],
+                declined: [
+                    [5, 0, 0, 0, 0, 0, 0, 0],
+                    [0; DECLINES],
+                    [1, 0, 0, 0, 0, 0, 0, 2],
+                    [0; DECLINES],
+                ],
+            },
+            growths: [4, 6],
             library_calls: LibraryCalls {
                 encoded: 9,
                 native: Some(1_001),
@@ -718,6 +1071,18 @@ mod tests {
             "standard library, 2 `Call` site(s) left unexpanded; 9 call(s) made from encoded, \
              1,001 from native"
         ));
+        assert!(text.contains("buffer windows, 91 head(s) a fused arm ran"));
+        assert!(text.contains("\n              70             10              5  push.words\n"));
+        assert!(text.contains("\n               2              1              3  append.bytes\n"));
+        assert!(text.contains("\n  declines, by reason: push.words safepoint 5\n"));
+        assert!(text.contains("\n  declines, by reason: append.bytes safepoint 1, bulk 2\n"));
+        assert!(
+            !text.contains("  push.byte\n"),
+            "a pattern no head of which ran is left out of the census table"
+        );
+        assert!(
+            text.contains("boundary: growths, 10 store(s) reallocated: packed bytes 4, words 6")
+        );
         assert!(text.contains("VM->native 2,"));
         assert!(text.contains("helper calls, 10 in all"));
         assert!(text.contains("\n    Alloc                     1\n"));
