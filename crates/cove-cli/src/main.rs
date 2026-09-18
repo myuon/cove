@@ -1474,6 +1474,11 @@ struct Coverage {
     stubs: usize,
     compiled: usize,
     code_bytes: u64,
+    /// Which part of `code_bytes` is [ADR 0062] buffer windows, and how many
+    /// windows of each pattern the program emitted.
+    ///
+    /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    windows: cove_runtime::WindowCode,
     compile: Duration,
     tiers: cove_runtime::Tiers,
     /// Every refused function with the dynamic calls it kept in the VM, ranked by
@@ -1505,9 +1510,75 @@ impl Coverage {
             stubs: native.stubs(),
             compiled: native.compiled(),
             code_bytes: native.code_bytes(),
+            windows: native.window_code(),
             compile: native.compile_time(),
             tiers: vm.tiers(),
             refused,
+        }
+    }
+
+    /// How much of the machine code above is a buffer window, by pattern.
+    ///
+    /// [Issue #423](https://github.com/myuon/cove/issues/423)'s "machine-code
+    /// bytes attributable to each buffer-window shape". Three things about the
+    /// shape are deliberate:
+    ///
+    /// - **the sites are beside the bytes, and so is the quotient.** Bytes per
+    ///   window is the number a code-size policy turns on, and a reader who has
+    ///   to divide one report's figure by another's will divide the wrong pair;
+    /// - **the share of the whole program is printed**, because the question
+    ///   the table exists to answer is whether window code size is the right
+    ///   lever at all — ADR 0062's +39.8% on cq could as easily be the four
+    ///   standard-library functions it newly compiled;
+    /// - **a code generator that cannot attribute bytes says so in a sentence**
+    ///   rather than printing a table of zeroes. See
+    ///   [`WindowCode`](cove_runtime::WindowCode) for which one and why.
+    ///
+    /// A pattern that emitted no window is left out, as an operation no call
+    /// named is left out of the boundary report's helper table.
+    fn print_windows(&self) {
+        use cove_ir::legalize::Pattern;
+        let windows = self.windows;
+        let sites = windows.total_sites();
+        if sites == 0 {
+            return;
+        }
+        let Some(bytes) = windows.bytes else {
+            eprintln!(
+                "native: {} buffer window(s) emitted; this code generator does not attribute \
+                 machine code to one, because its byte layout is decided after lowering",
+                thousands(sites)
+            );
+            return;
+        };
+        let total: u64 = bytes.iter().sum();
+        let share = match self.code_bytes {
+            0 => 0.0,
+            whole => 100.0 * total as f64 / whole as f64,
+        };
+        eprintln!(
+            "native: of that, ADR 0062 buffer windows are {} byte(s) in {} window(s) \
+             ({:.1}% of this program's machine code)",
+            thousands(total),
+            thousands(sites),
+            share
+        );
+        eprintln!(
+            "  {:>14} {:>14} {:>14}  pattern",
+            "bytes", "windows", "per window"
+        );
+        for pattern in Pattern::ALL {
+            let at = pattern.index();
+            if windows.sites[at] == 0 {
+                continue;
+            }
+            eprintln!(
+                "  {:>14} {:>14} {:>14}  {}",
+                thousands(bytes[at]),
+                thousands(windows.sites[at]),
+                thousands(bytes[at] / windows.sites[at]),
+                pattern.name()
+            );
         }
     }
 
@@ -1529,6 +1600,7 @@ impl Coverage {
             self.refused.len(),
             self.code_bytes
         );
+        self.print_windows();
         // Apart from the figures above, and named, because a reader has to know
         // what the denominator excludes. See `NativeProgram::reachable`.
         eprintln!(

@@ -39,6 +39,12 @@ impl Arm for Cranelift {
     fn code_bytes(handle: Compiled) -> u32 {
         handle.code_bytes
     }
+
+    fn window_code(handle: Compiled) -> cove_native::WindowCode {
+        handle.windows
+    }
+
+    const ATTRIBUTES_WINDOWS: bool = false;
 }
 
 #[test]
@@ -414,4 +420,9 @@ fn an_append_window_is_an_ensure_a_copy_and_a_commit() {
 #[test]
 fn a_window_is_less_code_than_its_rows() {
     suite::a_window_is_less_code_than_its_rows::<Cranelift>();
+}
+
+#[test]
+fn a_windows_machine_code_is_charged_to_its_pattern() {
+    suite::a_windows_machine_code_is_charged_to_its_pattern::<Cranelift>();
 }

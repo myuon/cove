@@ -73,7 +73,7 @@ pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Wo
 // for: the whole point of `abi` being compiled without a code generator is that
 // the boundary can be written against it, and this is a caller of the boundary
 // doing exactly that.
-pub use cove_native::Entry as NativeEntry;
+pub use cove_native::{Entry as NativeEntry, WindowCode};
 pub use native::{
     compile as compile_native, compile_counting as compile_native_counting, Blocked, Blocker,
     NativeProgram, Refused,
