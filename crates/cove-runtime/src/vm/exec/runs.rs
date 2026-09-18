@@ -179,6 +179,15 @@ fn grow(machine: &mut Machine<'_>, run: &mut Growable, needed: u64) -> Result<()
     machine.mem.set_payload(run.owner, GROWABLE_STORE, store);
     run.store = store;
     run.capacity = machine.mem.object_len(store);
+    // The one place a store is replaced, so the one place a growth can be
+    // counted as a growth: a window that finished the ordinary way may not have
+    // grown anything, and an ensure outside every window may have. See
+    // `BoundaryReport::growths`. A run that asked for no counts pays one
+    // `Option` test per reallocation, on a path that has just allocated and
+    // copied the live prefix.
+    if machine.counting.is_some() {
+        machine.count_growth(run.storage);
+    }
     Ok(())
 }
 

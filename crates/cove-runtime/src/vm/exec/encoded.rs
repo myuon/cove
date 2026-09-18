@@ -101,10 +101,14 @@ use crate::budget::Meter;
 use crate::error::RuntimeError;
 use crate::vm::cell;
 use crate::vm::mem::{header_layout, header_len, Overflow};
+// `Outcome` here is the window census's — what became of one fused window —
+// and not `super::Outcome`, which is a task's `Result`. The one signature in
+// this file that wants that one says `super::Outcome`.
+use crate::vm::report::{Decline, Outcome};
 
 use super::{
     compare, float_arith, int_arith, native, null_object, overflowed, reentrant_lock, runs,
-    wrong_arity, ChildState, Frame, Live, Machine, Outcome, ScopeEntry, SAFEPOINT_STRIDE,
+    wrong_arity, ChildState, Frame, Live, Machine, ScopeEntry, SAFEPOINT_STRIDE,
 };
 
 // The opcodes this path runs, by the name ADR 0041 gives them rather than by
@@ -1245,6 +1249,15 @@ fn fused_window(
     let from = machine.mem.payload_addr(addr, field);
     machine.mem.copy_words(base + held.a() as u64, from, width);
     if !open {
+        // The census records nothing here, and this is the one place in a
+        // fused arm where a `return Ok(0)` does not. `open` is the negation of
+        // the test each fast path makes on entry, and nothing between the two
+        // moves `instructions` or `next_check` — a fast path that declines
+        // writes nothing and counts nothing — so this return is reached
+        // exactly when the fast path has already recorded
+        // `Decline::Safepoint` for this head. A second record here would
+        // count one window twice and put the safepoint row at double what it
+        // is.
         return Ok(0);
     }
     fused_tail(machine, program, budget, code, id, base, head, head + 1)
@@ -1333,6 +1346,14 @@ fn fused_push(
     head: usize,
 ) -> Result<usize, RuntimeError> {
     if machine.instructions + WINDOW_TAIL >= machine.next_check {
+        // The head's opcode is read here rather than above, because the row is
+        // not loaded yet and hoisting the load out of this branch would put a
+        // memory read on the path of every window a run that asked for no
+        // counts runs.
+        if machine.counting.is_some() {
+            let head = encoded.function(id)[head].opcode();
+            machine.count_window(head, Outcome::Declined(Decline::Safepoint));
+        }
         return Ok(0);
     }
     let program = machine.program;
@@ -1340,6 +1361,10 @@ fn fused_push(
     // Seven rows are always there: the shortest push is six, and a function's
     // last row is a terminator, which no window's commit is.
     let Some(&[first, count, ensure, read, write, after, next]) = code.get(head..head + 7) else {
+        if machine.counting.is_some() {
+            let head = code[head].opcode();
+            machine.count_window(head, Outcome::Declined(Decline::Shape));
+        }
         return Ok(0);
     };
     let byte = first.opcode() == FUSED_PUSH_BYTE;
@@ -1370,6 +1395,9 @@ fn fused_push(
     let (frame, heap) = machine.mem.stack_and_heap();
     let owner = frame[base_at + first.b() as usize];
     let Some([header, length, stored]) = heap.run_at(owner).and_then(|run| run.get(..3)) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Owner));
+        }
         return Ok(0);
     };
     let family = header_layout(header.load(Relaxed));
@@ -1379,11 +1407,17 @@ fn fused_push(
         matches!(program.layout(family).shape, Shape::Vector { elem } if elem.0 == ensure.lo())
     };
     if !owned {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Owner));
+        }
         return Ok(0);
     }
     let len = length.load(Relaxed);
     let store = stored.load(Relaxed);
     let Some(run) = heap.run_at(store) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Store));
+        }
         return Ok(0);
     };
     let store_header = run[0].load(Relaxed);
@@ -1391,6 +1425,15 @@ fn fused_push(
         // The unit as the write would read it, after the head has written `at`.
         let value = if src == at { len } else { frame[src] };
         if value > 0xFF || header_layout(store_header) != program.bytes_layout {
+            // Two questions in one test, told apart here rather than there:
+            // the value is not a byte, or the store is not a byte store.
+            if machine.counting.is_some() {
+                let why = match value > 0xFF {
+                    true => Decline::Range,
+                    false => Decline::Store,
+                };
+                machine.count_window(first.opcode(), Outcome::Declined(why));
+            }
             return Ok(0);
         }
     }
@@ -1428,12 +1471,9 @@ fn fused_push(
         }
         length.store(len + 1, Relaxed);
         machine.instructions += rows as u64;
-        #[cfg(test)]
-        {
-            machine.fused_fast += 1;
-        }
         if machine.counting.is_some() {
             machine.count_fusion(first.opcode(), rows, true);
+            machine.count_window(first.opcode(), Outcome::Fast);
         }
         return Ok(rows);
     }
@@ -1485,6 +1525,10 @@ fn fused_push(
     machine.mem.set_payload(owner, runs::GROWABLE_LEN, len + 1);
     if machine.counting.is_some() {
         machine.count_fusion(first.opcode(), rows, true);
+        // One call for both ways in: the in-place write did not apply, and the
+        // window finished the ordinary way. Whether the ensure above it moved
+        // the store is `BoundaryReport::growths`' answer and not this one.
+        machine.count_window(first.opcode(), Outcome::Slow);
     }
     Ok(rows)
 }
@@ -1658,6 +1702,12 @@ fn fused_append_bytes(
     head: usize,
 ) -> Result<usize, RuntimeError> {
     if machine.instructions + WINDOW_TAIL >= machine.next_check {
+        // The head's opcode is read inside the branch, for the reason
+        // [`fused_push`]'s is: the row is not loaded yet.
+        if machine.counting.is_some() {
+            let head = encoded.function(id)[head].opcode();
+            machine.count_window(head, Outcome::Declined(Decline::Safepoint));
+        }
         return Ok(0);
     }
     let program = machine.program;
@@ -1681,9 +1731,16 @@ fn fused_append_bytes(
         GROWABLE_COMMIT_BYTES,
     )
     else {
+        if machine.counting.is_some() {
+            let head = code[head].opcode();
+            machine.count_window(head, Outcome::Declined(Decline::Shape));
+        }
         return Ok(0);
     };
     let [_, _, src_arg, from_arg, _] = program.arg_list(ArgsId(copy.lo())) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Shape));
+        }
         return Ok(0);
     };
     let (src_slot, from_slot) = (src_arg.slot as usize, from_arg.slot as usize);
@@ -1691,26 +1748,44 @@ fn fused_append_bytes(
     let (frame, heap) = machine.mem.stack_and_heap();
     let owner = frame[base_at + first.b() as usize];
     let Some([header, length, stored]) = heap.run_at(owner).and_then(|run| run.get(..3)) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Owner));
+        }
         return Ok(0);
     };
     if header_layout(header.load(Relaxed)) != program.buffer_layout {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Owner));
+        }
         return Ok(0);
     }
     let len = length.load(Relaxed);
     let store = stored.load(Relaxed);
     let Some(dst) = heap.run_at(store) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Store));
+        }
         return Ok(0);
     };
     let store_header = dst[0].load(Relaxed);
     if header_layout(store_header) != program.bytes_layout {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Store));
+        }
         return Ok(0);
     }
     let src = frame[base_at + src_slot];
     let Some(text) = heap.run_at(src) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Source));
+        }
         return Ok(0);
     };
     let text_header = text[0].load(Relaxed);
     if header_layout(text_header) != program.str_layout {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Source));
+        }
         return Ok(0);
     }
     // The count and the offset as the copy would read them, after the
@@ -1727,6 +1802,9 @@ fn fused_append_bytes(
     } as i64;
     let text_len = i64::from(header_len(text_header));
     if count < 0 || from < 0 || from > text_len - count {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Range));
+        }
         return Ok(0);
     }
     // In chunks the copy would poll once its charge reached a stride; one that
@@ -1741,6 +1819,21 @@ fn fused_append_bytes(
             >= machine.charged_work + SAFEPOINT_STRIDE
         || !reaches(text, from + count)
     {
+        // Three reasons in one test, and the test stays one: it short-circuits
+        // around `reaches`, which reads the source's run. They are told apart
+        // here, in the order the chain asks them.
+        if machine.counting.is_some() {
+            let why = if count > BULK_CHUNK_BYTES as usize {
+                Decline::Bulk
+            } else if machine.instructions + window as u64 + machine.bulk_work + words
+                >= machine.charged_work + SAFEPOINT_STRIDE
+            {
+                Decline::Safepoint
+            } else {
+                Decline::Chunk
+            };
+            machine.count_window(first.opcode(), Outcome::Declined(why));
+        }
         return Ok(0);
     }
 
@@ -1761,6 +1854,11 @@ fn fused_append_bytes(
                 machine.count_fusion(first.opcode(), ensure_at, false);
             }
             return Err(error.at(machine.span(id, head + ensure_at)));
+        }
+        if machine.counting.is_some() {
+            // The window ran; the fast path's copy did not. An ensure that
+            // refused above records nothing, because no window ran at all.
+            machine.count_window(first.opcode(), Outcome::Slow);
         }
         return fused_tail(
             machine,
@@ -1804,12 +1902,9 @@ fn fused_append_bytes(
     length.store(len + count as u64, Relaxed);
     machine.instructions += window as u64;
     machine.bulk_work += words;
-    #[cfg(test)]
-    {
-        machine.fused_fast += 1;
-    }
     if machine.counting.is_some() {
         machine.count_fusion(first.opcode(), window, true);
+        machine.count_window(first.opcode(), Outcome::Fast);
     }
     Ok(window)
 }
@@ -1899,6 +1994,12 @@ fn fused_append_words(
     head: usize,
 ) -> Result<usize, RuntimeError> {
     if machine.instructions + WINDOW_TAIL >= machine.next_check {
+        // The head's opcode is read inside the branch, for the reason
+        // [`fused_push`]'s is: the row is not loaded yet.
+        if machine.counting.is_some() {
+            let head = encoded.function(id)[head].opcode();
+            machine.count_window(head, Outcome::Declined(Decline::Safepoint));
+        }
         return Ok(0);
     }
     let program = machine.program;
@@ -1922,9 +2023,16 @@ fn fused_append_words(
         GROWABLE_COMMIT_WORDS,
     )
     else {
+        if machine.counting.is_some() {
+            let head = code[head].opcode();
+            machine.count_window(head, Outcome::Declined(Decline::Shape));
+        }
         return Ok(0);
     };
     let [_, _, src_arg, from_arg, _] = program.arg_list(ArgsId(copy.lo())) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Shape));
+        }
         return Ok(0);
     };
     let (src_slot, from_slot) = (src_arg.slot as usize, from_arg.slot as usize);
@@ -1934,35 +2042,56 @@ fn fused_append_words(
     let elem = LayoutId(ensure.lo());
     let stride = machine.width(elem) as usize;
     if stride == 0 {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Source));
+        }
         return Ok(0);
     }
 
     let (frame, heap) = machine.mem.stack_and_heap();
     let owner = frame[base_at + first.b() as usize];
     let Some([header, length, stored]) = heap.run_at(owner).and_then(|run| run.get(..3)) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Owner));
+        }
         return Ok(0);
     };
     let family = program.layout(header_layout(header.load(Relaxed)));
     if !matches!(family.shape, Shape::Vector { elem: held } if held == elem) {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Owner));
+        }
         return Ok(0);
     }
     let len = length.load(Relaxed);
     let store = stored.load(Relaxed);
     let Some(dst) = heap.run_at(store) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Store));
+        }
         return Ok(0);
     };
     let store_header = dst[0].load(Relaxed);
     let store_shape = &program.layout(header_layout(store_header)).shape;
     if !matches!(store_shape, Shape::Elements { elem: held, .. } if *held == elem) {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Store));
+        }
         return Ok(0);
     }
     let src = frame[base_at + src_slot];
     let Some(run) = heap.run_at(src) else {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Source));
+        }
         return Ok(0);
     };
     let run_header = run[0].load(Relaxed);
     let run_shape = &program.layout(header_layout(run_header)).shape;
     if !cove_ir::reads_as_units_of(&program.layouts, run_shape, elem) {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Source));
+        }
         return Ok(0);
     }
     // The count and the offset as the copy would read them, after the
@@ -1979,6 +2108,9 @@ fn fused_append_words(
     } as i64;
     let run_len = i64::from(header_len(run_header));
     if count < 0 || from < 0 || from > run_len - count {
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Range));
+        }
         return Ok(0);
     }
     // In chunks the copy would poll once its charge reached a stride; one that
@@ -2001,6 +2133,21 @@ fn fused_append_words(
             >= machine.charged_work + SAFEPOINT_STRIDE
         || !reaches(run, from + count)
     {
+        // Three reasons in one test, told apart here and not there, for
+        // [`fused_append_bytes`]' reason: the chain short-circuits around a
+        // read of the source's run and must keep doing so.
+        if machine.counting.is_some() {
+            let why = if count > (BULK_CHUNK_WORDS as usize / stride).max(1) {
+                Decline::Bulk
+            } else if machine.instructions + window as u64 + machine.bulk_work + words
+                >= machine.charged_work + SAFEPOINT_STRIDE
+            {
+                Decline::Safepoint
+            } else {
+                Decline::Chunk
+            };
+            machine.count_window(first.opcode(), Outcome::Declined(why));
+        }
         return Ok(0);
     }
 
@@ -2021,6 +2168,11 @@ fn fused_append_words(
                 machine.count_fusion(first.opcode(), ensure_at, false);
             }
             return Err(error.at(machine.span(id, head + ensure_at)));
+        }
+        if machine.counting.is_some() {
+            // The window ran; the fast path's copy did not. An ensure that
+            // refused above records nothing, because no window ran at all.
+            machine.count_window(first.opcode(), Outcome::Slow);
         }
         return fused_tail(
             machine,
@@ -2059,12 +2211,9 @@ fn fused_append_words(
     length.store(len + count as u64, Relaxed);
     machine.instructions += window as u64;
     machine.bulk_work += words;
-    #[cfg(test)]
-    {
-        machine.fused_fast += 1;
-    }
     if machine.counting.is_some() {
         machine.count_fusion(first.opcode(), window, true);
+        machine.count_window(first.opcode(), Outcome::Fast);
     }
     Ok(window)
 }
@@ -2219,7 +2368,7 @@ pub(super) fn dispatch<'s, 'a>(
     encoded: &Encoded,
     budget: &Meter,
     threads: &'s Scope<'s, 'a>,
-    running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+    running: &mut Vec<Option<ScopedJoinHandle<'s, super::Outcome>>>,
     floor: usize,
 ) -> Result<Vec<u64>, RuntimeError> {
     let program = machine.program;
@@ -6795,6 +6944,8 @@ mod tests {
     /// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     mod window {
         use super::*;
+        // The census's rows are this, and the test module reads them by name.
+        use cove_ir::legalize::Pattern;
 
         struct Windows {
             program: Program,
@@ -7802,7 +7953,8 @@ mod tests {
                 fuel: budget.fuel_spent(),
                 collections: machine.collected().collections,
             };
-            (ran, report, machine.fused_fast)
+            let fast = report.windows.fast.iter().sum::<u64>();
+            (ran, report, fast)
         }
 
         /// **A fused window is the rows it stands for**: the same answer or the
@@ -7810,8 +7962,9 @@ mod tests {
         /// fuel and collections. Answers the fused run, its report — which says
         /// how many windows fused and how many dispatches they took — and how
         /// many windows a fused head's own fast path ran whole, which is
-        /// `Machine::fused_fast` and the only thing that separates a fast path
-        /// that is right from one that declines everything.
+        /// `BoundaryReport::windows`' `fast` row summed over the patterns and
+        /// the only thing that separates a fast path that is right from one
+        /// that declines everything.
         #[allow(clippy::too_many_arguments)]
         fn fuses_as_unfused<T: PartialEq + std::fmt::Debug>(
             what: &str,
@@ -7829,6 +7982,12 @@ mod tests {
                 (unreport.fusions, unreport.encoded_dispatches, unfast),
                 ([0; 4], unreport.encoded_instructions, 0),
                 "{what}: the unfused run fused nothing"
+            );
+            assert_eq!(
+                unreport.windows,
+                crate::vm::report::Windows::default(),
+                "{what}: a run with no fused head reaches no fused arm, so the \
+                 census records nothing at all"
             );
             assert_eq!(
                 report.encoded_instructions, unreport.encoded_instructions,
@@ -7904,13 +8063,28 @@ mod tests {
                     u64::from(!consumed && len < capacity as u64),
                     "{what}"
                 );
+                // The census says the same thing with the reason attached: a
+                // consumed vector is a store the fast path cannot read, and a
+                // full one is the window it ran the ordinary way.
+                assert_eq!(report.windows.run(Pattern::PushWords), 1, "{what}");
                 if consumed {
                     assert!(fused.said.contains("consumed"), "{what}: {}", fused.said);
                     assert!(fused.said.contains("start: 2"), "{what}: at the ensure");
                     assert_eq!(report.fusions, [0; 4], "{what}");
+                    assert_eq!(
+                        report.windows.declined[PUSH_WORDS][Decline::Store.index()],
+                        1,
+                        "{what}"
+                    );
                 } else {
                     assert_eq!(fused.heap.0, len + 1, "{what}");
                     assert_eq!(report.fusions, [1, 0, 0, 0], "{what}");
+                    let grew = u64::from(len == capacity as u64);
+                    assert_eq!(report.windows.fast[PUSH_WORDS], 1 - grew, "{what}");
+                    assert_eq!(report.windows.slow[PUSH_WORDS], grew, "{what}");
+                    // A growth is counted where the store is replaced, which
+                    // is why it is a word growth and not a byte one.
+                    assert_eq!(report.growths, [0, grew], "{what}");
                     // Seven rows and a return, in two dispatches.
                     assert_eq!(
                         (report.encoded_instructions, report.encoded_dispatches),
@@ -8007,6 +8181,10 @@ mod tests {
             assert_eq!(report.fusions[PUSH_WORDS], 1);
             assert_eq!(report.encoded_dispatches, 2);
             assert_eq!(fast, 0, "a growth is not the fast path");
+            // What `fusions` cannot say: the window ran, the fast path's write
+            // did not, and the store was replaced.
+            assert_eq!(report.windows.slow[PUSH_WORDS], 1);
+            assert_eq!(report.growths, [0, 1]);
 
             let (fused, report, fast) = fuses_as_unfused(
                 "a growth with no room anywhere",
@@ -8025,6 +8203,10 @@ mod tests {
             );
             assert_eq!(fused.heap.0, 64, "nothing was published");
             assert_eq!((report.fusions, fast), ([0; 4], 0));
+            // An ensure that refused ran no window, so the census records
+            // nothing — not a decline, which is a window that ran as rows.
+            assert_eq!(report.windows.run(Pattern::PushWords), 0);
+            assert_eq!(report.growths, [0; 2], "nothing was reallocated");
         }
 
         /// **A byte push**: into room, into a full store, of a value that is not a
@@ -8143,11 +8325,28 @@ mod tests {
                     "{what}: {} byte(s)",
                     text.len()
                 );
+                // One head ran either way, and the census says what became of
+                // it: a consumed buffer is a store it cannot read, a piece
+                // longer than a bulk chunk is work one window may not charge,
+                // a piece longer than the room is the ordinary way, and the
+                // rest is the fast path.
+                assert_eq!(report.windows.run(Pattern::AppendBytes), 1, "{what}");
+                let declined = &report.windows.declined[APPEND_BYTES];
                 if consumed {
                     assert!(fused.said.contains("already consumed"), "{}", fused.said);
+                    assert_eq!(declined[Decline::Store.index()], 1, "{what}");
                 } else {
                     assert_eq!(fused.heap.1, text.as_bytes(), "{what}");
                     assert_eq!(report.fusions[APPEND_BYTES], 1, "{what}");
+                    if text.len() > BULK_CHUNK_BYTES as usize {
+                        assert_eq!(declined[Decline::Bulk.index()], 1, "{what}");
+                    } else if text.len() <= 16 {
+                        assert_eq!(report.windows.fast[APPEND_BYTES], 1, "{what}");
+                        assert_eq!(report.growths, [0; 2], "{what}: it fitted");
+                    } else {
+                        assert_eq!(report.windows.slow[APPEND_BYTES], 1, "{what}");
+                        assert_eq!(report.growths, [1, 0], "{what}: a byte store");
+                    }
                 }
             }
             for capacity in [4i64, 1] {
@@ -8178,6 +8377,10 @@ mod tests {
                 // Three elements onto one: room in a store of four and not in
                 // one of one, which is the growth.
                 assert_eq!(fast, u64::from(capacity == 4), "{what}");
+                let grew = u64::from(capacity != 4);
+                assert_eq!(report.windows.fast[APPEND_WORDS], 1 - grew, "{what}");
+                assert_eq!(report.windows.slow[APPEND_WORDS], grew, "{what}");
+                assert_eq!(report.growths, [0, grew], "{what}");
                 // A length, the window's six rows and a return, in three.
                 assert_eq!(
                     (report.encoded_instructions, report.encoded_dispatches),
@@ -8380,6 +8583,12 @@ mod tests {
             // It still fuses — the rows run in the head's one dispatch — and it
             // still does not run on the fast path.
             assert_eq!((report.fusions[APPEND_WORDS], fast), (1, 0));
+            // And the census says *why* it did not: two thousand elements is
+            // more than one window may charge at once.
+            assert_eq!(
+                report.windows.declined[APPEND_WORDS][Decline::Bulk.index()],
+                1
+            );
         }
 
         /// **A word append of references**: the elements copied are addresses
@@ -8681,6 +8890,18 @@ mod tests {
                 windows > 0 && windows < WINDOWS as u64,
                 "{windows} of {WINDOWS} windows fused, and some straddle a safepoint"
             );
+            // Every head is counted once, whatever became of it — which is
+            // what makes the census a census — and the ones that did not fuse
+            // are the ones a safepoint fell inside.
+            assert_eq!(report.windows.run(Pattern::PushByte), WINDOWS as u64);
+            let declined = report.windows.declined[PUSH_BYTE];
+            assert_eq!(
+                declined[Decline::Safepoint.index()],
+                WINDOWS as u64 - windows,
+                "a window that did not fuse here is one a safepoint reached"
+            );
+            assert!(report.windows.fast[PUSH_BYTE] > 0, "and some ran whole");
+            assert!(report.growths[0] > 0, "a byte store grew");
             assert_eq!(
                 report.encoded_dispatches,
                 report.encoded_instructions - 6 * windows
@@ -8853,6 +9074,19 @@ mod tests {
             // too — `a_word_append_longer_than_a_chunk_is_left_to_the_rows` is
             // where that one is reached on its own.
             assert!(fast > 0 && fast < windows, "{fast} of {windows} ran whole");
+            // The same census, over the word append: every head counted once,
+            // and the growths counted where the stores were replaced. `fast`
+            // and `slow` do not sum to `windows` — a window the fast path
+            // declined still fuses, because `fused_tail` runs its rows through
+            // their commit in the head's one dispatch — so what holds is that
+            // the three outcomes together are every window there was.
+            assert_eq!(report.windows.run(Pattern::AppendWords), WINDOWS as u64);
+            assert_eq!(report.windows.fast[APPEND_WORDS], fast);
+            assert!(
+                report.windows.slow[APPEND_WORDS] > 0,
+                "and some finished the ordinary way, through the growth"
+            );
+            assert!(report.growths[1] > 0, "a word store grew");
             assert_eq!(
                 report.encoded_dispatches,
                 report.encoded_instructions - 5 * windows
@@ -8868,6 +9102,93 @@ mod tests {
                     &inspect,
                 );
                 assert!(stopped.said.contains("fuel"), "{limit}: {}", stopped.said);
+            }
+        }
+
+        /// **A run that did not ask for the census is the run it was.** Every
+        /// count the census takes is behind an `Option` test on a path that had
+        /// already decided what to do — a `return`, a growth, a window's last
+        /// line — so an uncounted run takes the same path, leaves the same heap
+        /// and spends the same fuel as a counted one.
+        ///
+        /// That is `ablate::CENSUS`'s discipline asked of this tier: the fast
+        /// paths are the same function bodies whether or not anything is
+        /// counting, rather than a copy with a branch in it. Each shape below
+        /// reaches a different arm of the census — a window that runs whole,
+        /// one that grows, and an append that copies — and none of them may
+        /// differ.
+        #[test]
+        fn a_run_that_did_not_ask_for_the_census_is_the_run_it_was() {
+            let f = framed();
+            /// The whole of what a run leaves that a count could disturb.
+            type Left = (String, (u64, Vec<u64>), u64, u64, u64);
+            let pushed = |counted: bool, len: u64, capacity: i64| -> Left {
+                let budget = crate::budget::Budget::new(crate::budget::Limits::default());
+                let mut machine = Machine::new(&f.program, 1 << 16);
+                let owner = vector_of(
+                    &mut machine,
+                    f.int_vector,
+                    f.int_store,
+                    len,
+                    capacity,
+                    false,
+                );
+                if counted {
+                    machine.count_boundary(native::Tiers::default());
+                }
+                let said = format!(
+                    "{:?}",
+                    machine.run(f.push_int, &[owner, 42], &budget.meter())
+                );
+                (
+                    said,
+                    store_words(&machine, owner, 1),
+                    machine.instructions(),
+                    budget.fuel_spent(),
+                    machine.collected().collections,
+                )
+            };
+            for (len, capacity) in [(1u64, 4i64), (1, 1)] {
+                assert_eq!(
+                    pushed(true, len, capacity),
+                    pushed(false, len, capacity),
+                    "a push at {len} of {capacity}"
+                );
+            }
+            let appended = |counted: bool, text: &str| -> Left {
+                let budget = crate::budget::Budget::new(crate::budget::Limits::default());
+                let mut machine = Machine::new(&f.program, 1 << 16);
+                let owner = machine.alloc_buffer(16).unwrap();
+                machine.push_temp(owner);
+                let src = machine.new_string(text).unwrap();
+                if counted {
+                    machine.count_boundary(native::Tiers::default());
+                }
+                let said = format!(
+                    "{:?}",
+                    machine.run(f.append_text, &[owner, src], &budget.meter())
+                );
+                let store = machine.payload(owner, runs::GROWABLE_STORE);
+                let bytes = machine
+                    .string_bytes(store)
+                    .into_iter()
+                    .map(u64::from)
+                    .collect();
+                (
+                    said,
+                    (machine.payload(owner, runs::GROWABLE_LEN), bytes),
+                    machine.instructions(),
+                    budget.fuel_spent(),
+                    machine.collected().collections,
+                )
+            };
+            for text in ["hi", "a piece longer than the sixteen bytes of room"] {
+                assert_eq!(
+                    appended(true, text),
+                    appended(false, text),
+                    "an append of {} byte(s)",
+                    text.len()
+                );
             }
         }
 
@@ -8911,6 +9232,15 @@ mod tests {
                 match halt_at {
                     None => {
                         assert!(answered.is_ok(), "{answered:?}");
+                        // An installed debugger makes `next_check` the next
+                        // instruction, so the window declines at the safepoint
+                        // test and runs as rows. `fusions` can only say that
+                        // nothing fused; the census says which window and why.
+                        assert_eq!(report.windows.run(Pattern::PushByte), 1);
+                        assert_eq!(
+                            report.windows.declined[PUSH_BYTE][Decline::Safepoint.index()],
+                            1
+                        );
                         assert_eq!(seen, (0..=8).collect::<Vec<u32>>());
                         assert_eq!(machine.payload(owner, runs::GROWABLE_LEN), 1);
                     }
