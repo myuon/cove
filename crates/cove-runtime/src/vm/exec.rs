@@ -88,7 +88,7 @@ pub(crate) mod native;
 pub(crate) mod runs;
 
 use cove_ir::Validation;
-use runs::{Growable, GROWABLE_LEN, GROWABLE_STORE, MIN_GROWABLE_BYTES};
+use runs::{word_runs, Growable, WordRun, GROWABLE_LEN, GROWABLE_STORE, MIN_GROWABLE_BYTES};
 
 /// How many instructions run between two budget checks.
 ///
@@ -667,6 +667,26 @@ pub(crate) struct Machine<'a> {
     /// layouts are fixed by then: there is no invalidation to get wrong and
     /// no entry that can be missing.
     widths: Arc<[u32]>,
+    /// The owner and store layouts a growable run of each element has, by the
+    /// *element's* [`LayoutId`] — `None` for a layout no vector is declared
+    /// over.
+    ///
+    /// [`Machine::widths`]' table, read backwards. Every growable operation but
+    /// one is handed an object whose own header names its layout; an
+    /// **allocation** has no object yet, so it is the one that has to go from an
+    /// element to the `Shape::Vector` of it and the growable `Shape::Elements`
+    /// of it. `Inst::GrowableAlloc` carries only the element, because the other
+    /// two are derivable and a second copy of a derivable fact is what ADR 0058
+    /// spent instructions removing — so the derivation lives here.
+    ///
+    /// A table and not a scan, for the reason `widths` is one: the alternative
+    /// is `cove_native::subset`'s `word_owner`, a linear walk of the layout
+    /// table, which is right where it is — once per function compiled — and
+    /// wrong once per allocation. Built in one pass over `Program::layouts`
+    /// before the first instruction, because a program's layouts are fixed by
+    /// then: there is no invalidation to get wrong and no entry that can go
+    /// missing.
+    word_runs: Arc<[Option<WordRun>]>,
     /// Every layout's fixed payload width, in `LayoutId` order — `0` where
     /// there is none.
     ///
@@ -809,6 +829,7 @@ impl<'a> Machine<'a> {
                 .iter()
                 .map(|layout| layout.width())
                 .collect(),
+            word_runs: word_runs(program),
             fixed_payload_words: program
                 .layouts
                 .iter()
@@ -850,6 +871,7 @@ impl<'a> Machine<'a> {
         encoded: Arc<cove_ir::bytecode::Encoded>,
         literal_addrs: Arc<[u64]>,
         widths: Arc<[u32]>,
+        word_runs: Arc<[Option<WordRun>]>,
         fixed_payload_words: Arc<[u32]>,
     ) -> Machine<'a> {
         Machine {
@@ -890,6 +912,7 @@ impl<'a> Machine<'a> {
             // a program the whole run shares is the same table in every task.
             widths,
             // The parent's, for the same reason.
+            word_runs,
             fixed_payload_words,
             // Not the parent's: see the field. A spawned task runs on the
             // encoded tier.
@@ -2613,6 +2636,82 @@ impl<'a> Machine<'a> {
         Ok(owner)
     }
 
+    /// A word [`Inst::GrowableAlloc`]: a new, empty `Vector` of `elem` whose
+    /// store has room for `capacity` elements.
+    ///
+    /// [`Machine::alloc_buffer`] in the word unit, and deliberately the same
+    /// four steps in the same order: the **store first**, held by
+    /// [`Machine::push_temp`] for exactly the window in which the owner is
+    /// allocated, then the owner, then its length word and its store word. That
+    /// method's "Which is allocated first, and why nothing is lost" is the
+    /// argument, unchanged — a Rust local is not a root, and the IR gives this
+    /// instruction one destination, so there is no slot a split form could keep
+    /// the store in. There is one rooting discipline for growable allocation,
+    /// not two.
+    ///
+    /// Two things differ, and the second is the one worth stating.
+    ///
+    /// The two layouts are not program-wide constants: they are the element's,
+    /// out of [`Machine::word_runs`].
+    ///
+    /// # The capacity asked for is the capacity allocated
+    ///
+    /// [`Machine::alloc_buffer`] raises a small capacity to
+    /// [`MIN_GROWABLE_BYTES`] and this does **not** raise one to
+    /// [`MIN_GROWABLE_ELEMENTS`](runs::MIN_GROWABLE_ELEMENTS), which reads
+    /// like an inconsistency and is the
+    /// two constants' own contract: a byte floor is "the smallest byte store a
+    /// buffer is allocated with, and the floor a growth doubles up from",
+    /// because four bytes is less than one word and a store below eight buys
+    /// nothing; an element floor is "the floor of the first growth rather than
+    /// of the first allocation", because a `Vector` built from known elements
+    /// is allocated to exactly those.
+    ///
+    /// It is also what the caller asks for. `core.vectorWithCapacity` is how
+    /// `std.map` and `std.set` build an output vector they are about to push a
+    /// known number of elements into, so a floor there is spare room nothing
+    /// fills. It was measured before it was decided: flooring cost cq's 196,677
+    /// constructions **666,740 allocated words**, 6.94% of the run's, for no
+    /// growth avoided — and a vector that *is* grown gets the floor anyway,
+    /// from `Growable::floor` at the first growth, which is where the constant
+    /// says it belongs.
+    ///
+    /// A negative capacity is left alone either way. It is nonsense rather than
+    /// a small number, and `Machine::allocate` already has the answer for a
+    /// length nothing could satisfy.
+    ///
+    /// # Nothing is allocated at a size nothing could hold
+    ///
+    /// `capacity` is a count of *elements* and the store is a run of them, so
+    /// the product that has to fit is `capacity * stride`. It is not computed
+    /// here: `Machine::allocate` takes a length in the layout's own units and
+    /// its `Layout::try_payload_words` is where `count * stride` is checked
+    /// against `u32`, for every allocation of a run alike. A capacity too large
+    /// fails there, before the owner exists, in the words every exhausted
+    /// allocation answers.
+    pub(crate) fn alloc_vector(
+        &mut self,
+        elem: LayoutId,
+        capacity: i64,
+    ) -> Result<u64, RuntimeError> {
+        let Some(run) = self.word_runs.get(elem.index()).copied().flatten() else {
+            return Err(RuntimeError::new(format!(
+                "a growable run of `{}` cannot be allocated: this program declares no vector of \
+                 that element",
+                self.program.layout(elem).name
+            )));
+        };
+        let mark = self.temps();
+        let store = self.allocate(run.store, capacity)?;
+        self.push_temp(store);
+        let owner = self.allocate(run.owner, 0);
+        self.release_temps(mark);
+        let owner = owner?;
+        self.set_payload(owner, GROWABLE_LEN, 0);
+        self.set_payload(owner, GROWABLE_STORE, store);
+        Ok(owner)
+    }
+
     /// A live buffer at `owner`: its store, its logical length and its
     /// capacity.
     ///
@@ -3445,6 +3544,7 @@ impl<'a> Machine<'a> {
         // And the same widths, for the reason the field gives: a table
         // derived from a program the whole run shares is one table.
         let widths = Arc::clone(&self.widths);
+        let word_runs = Arc::clone(&self.word_runs);
         let fixed_payload_words = Arc::clone(&self.fixed_payload_words);
         let handle = threads.spawn(move || {
             run_task(
@@ -3463,6 +3563,7 @@ impl<'a> Machine<'a> {
                 form,
                 literals,
                 widths,
+                word_runs,
                 fixed_payload_words,
             )
         });
@@ -4297,6 +4398,7 @@ fn run_task(
     encoded: Arc<cove_ir::bytecode::Encoded>,
     literal_addrs: Arc<[u64]>,
     widths: Arc<[u32]>,
+    word_runs: Arc<[Option<WordRun>]>,
     fixed_payload_words: Arc<[u32]>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
@@ -4310,6 +4412,7 @@ fn run_task(
         encoded,
         literal_addrs,
         widths,
+        word_runs,
         fixed_payload_words,
     );
     machine.watch(debugger);
@@ -4761,9 +4864,9 @@ pub(crate) mod tests {
 
         /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
         /// byte-run layout, declared and recorded as `Program::bytes_layout`
-        /// for `string_layout`'s reason: `Inst::GrowableAlloc` always allocates
-        /// its store as this field's layout rather than one named in the
-        /// instruction.
+        /// for `string_layout`'s reason: a byte `Inst::GrowableAlloc` always
+        /// allocates its store as this field's layout rather than one named in
+        /// the instruction.
         pub(crate) fn bytes_layout(&mut self) -> LayoutId {
             let id = self.layout("Bytes", Shape::Bytes);
             self.program.bytes_layout = id;
@@ -4773,9 +4876,10 @@ pub(crate) mod tests {
         /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
         /// byte-buffer owner layout, declared and recorded as
         /// `Program::buffer_layout` for `bytes_layout`'s reason:
-        /// `Inst::GrowableAlloc` allocates both of the field's layouts rather
-        /// than any named in the instruction, so a fixture that declared only
-        /// the shape would allocate owners the dispatch loop could not read.
+        /// a byte `Inst::GrowableAlloc` allocates both of the field's layouts
+        /// rather than any named in the instruction, so a fixture that declared
+        /// only the shape would allocate owners the dispatch loop could not
+        /// read.
         pub(crate) fn buffer_layout(&mut self) -> LayoutId {
             let id = self.layout("ByteBuffer", Shape::ByteBuffer);
             self.program.buffer_layout = id;
@@ -6731,6 +6835,7 @@ pub(crate) mod tests {
             entry.code().expect("this fixture encodes"),
             entry.literals().expect("the literals placed"),
             Arc::clone(&entry.widths),
+            Arc::clone(&entry.word_runs),
             Arc::clone(&entry.fixed_payload_words),
         );
 

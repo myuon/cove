@@ -510,17 +510,22 @@ pub struct Program {
     pub str_layout: LayoutId,
     /// The layout every byte run under construction shares.
     ///
-    /// A program-wide constant for the reason [`Program::str_layout`] is one:
-    /// [`Inst::GrowableAlloc`] should not have to be told its store's layout per
-    /// call site, and [ADR 0051](../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
+    /// A program-wide constant for the reason [`Program::str_layout`] is one: a
+    /// byte [`Inst::GrowableAlloc`] should not have to be told its store's
+    /// layout per call site, and
+    /// [ADR 0051](../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
     /// gives every run the same [`crate::layout::Shape::Bytes`] shape whatever
-    /// string it will become.
+    /// string it will become. A *word* allocation names no layout either, but
+    /// for the other reason: its owner and store are derived from the element
+    /// the instruction already carries, and the runtime keeps the table that
+    /// derives them.
     pub bytes_layout: LayoutId,
     /// The layout every byte buffer's owner shares.
     ///
     /// A program-wide constant for [`Program::bytes_layout`]'s reason, and the
     /// other half of the pair: an owner and its store are allocated together
-    /// by [`Inst::GrowableAlloc`], so neither layout is named at a call site.
+    /// by a byte [`Inst::GrowableAlloc`], so neither layout is named at a call
+    /// site.
     /// [ADR 0052](../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
     /// gives every buffer the same [`crate::layout::Shape::ByteBuffer`] shape
     /// whatever bytes it will hold, because an owner's two words are a length

@@ -3216,28 +3216,39 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
         );
     }
 
-    // A word allocation is not the byte buffer's helper, and is refused rather
-    // than handed to it. A word finish is admitted, but as an emitted fast path
-    // of its own — `every_cold_path_of_a_freeze_goes_to_the_runtime` is where
-    // that is asserted — and a word finish into anything but the fixed run of
-    // its element is refused.
+    // A word allocation is the same helper, handed over whole for the same
+    // reason — `core.vectorWithCapacity` since the growable allocation admitted
+    // words — and it is admitted on its own rather than paired with a finish: a
+    // vector allocated in one function is frozen in another as often as not.
     let words = Storage::Words(INT);
-    for inst in [
-        Inst::GrowableAlloc {
-            dst: 0,
-            capacity: 1,
-            storage: words,
-        },
-        Inst::RunFinish {
-            dst: 0,
-            owner: 0,
-            target: REF,
-            validation: Validation::None,
-            storage: words,
-        },
-    ] {
-        assert!(!compiles::<A>(&one(inst.clone())), "{inst:?}");
-    }
+    assert!(compiles::<A>(&one(Inst::GrowableAlloc {
+        dst: 0,
+        capacity: 1,
+        storage: words,
+    })));
+    // The element layout is read off the instruction, so one past the table is
+    // refused for the reason a slot past the frame is.
+    assert!(!compiles::<A>(&one(Inst::GrowableAlloc {
+        dst: 0,
+        capacity: 1,
+        storage: Storage::Words(LayoutId(u32::MAX)),
+    })));
+    assert!(!compiles::<A>(&one(Inst::GrowableAlloc {
+        dst: 9,
+        capacity: 1,
+        storage: words,
+    })));
+    // A word finish is admitted too, but as an emitted fast path of its own —
+    // `every_cold_path_of_a_freeze_goes_to_the_runtime` is where that is
+    // asserted — and a word finish into anything but the fixed run of its
+    // element is refused.
+    assert!(!compiles::<A>(&one(Inst::RunFinish {
+        dst: 0,
+        owner: 0,
+        target: REF,
+        validation: Validation::None,
+        storage: words,
+    })));
 }
 
 /// A run copy's five operands, as `ArgsId(1)`: `dst` in slot 0, `dst_at` in 1,

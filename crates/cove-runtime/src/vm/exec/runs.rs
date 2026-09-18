@@ -36,7 +36,9 @@
 //! observes, and that is a decision of its own (issue #378, Q13) rather than a
 //! side effect of moving the code.
 
-use cove_ir::{LayoutId, Storage, Validation};
+use std::sync::Arc;
+
+use cove_ir::{LayoutId, Shape, Storage, Validation};
 
 use super::Machine;
 use crate::error::RuntimeError;
@@ -71,6 +73,71 @@ pub(crate) const MIN_GROWABLE_BYTES: u64 = 16;
 /// A `Vector` built from known elements is allocated to exactly those, so this
 /// is the floor of the first growth rather than of the first allocation.
 pub(crate) const MIN_GROWABLE_ELEMENTS: u64 = 4;
+
+/// The two layouts a growable run of one element is built out of: the owner's
+/// and the store's.
+///
+/// An allocation is the only growable operation that has to read ADR 0052's
+/// ownership pair *backwards*, from the element to the objects: every other one
+/// is handed an owner whose own header names its layout.
+/// `Inst::GrowableAlloc` over [`Storage::Words`] carries the element and
+/// nothing else, so this is what the element is turned into, and
+/// [`word_runs`] is where the turning is done once per program rather than once
+/// per allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WordRun {
+    /// The `Shape::Vector` of the element: the two-word owner, a logical length
+    /// and a store reference.
+    pub(crate) owner: LayoutId,
+    /// The growable `Shape::Elements` of the element: the run the elements live
+    /// in, whose header length is the capacity.
+    pub(crate) store: LayoutId,
+}
+
+/// Every element's [`WordRun`], indexed by the *element's* `LayoutId`.
+///
+/// One pass over the layout table rather than one scan per element, which is
+/// what makes this a table worth building: a program with `n` layouts has at
+/// most `n` vectors, and asking each of them which element it is over is `n`
+/// questions, not `n` squared.
+///
+/// Where a program declares two layouts of the same shape over one element —
+/// which interning makes unlikely and does not forbid — the **first** is kept,
+/// which is the answer `cove_native::subset`'s `word_owner` gives from its own
+/// scan. The two agree because a run compiled natively and the same run
+/// interpreted must allocate the same object.
+///
+/// `None` is a bound and not a family: a lowering that grew a run of `elem`
+/// declared both of these, so an element with no entry is a program that never
+/// builds one, and the machine refuses the allocation rather than guessing.
+pub(crate) fn word_runs(program: &cove_ir::Program) -> Arc<[Option<WordRun>]> {
+    let mut owners: Vec<Option<LayoutId>> = vec![None; program.layouts.len()];
+    let mut stores: Vec<Option<LayoutId>> = vec![None; program.layouts.len()];
+    for (index, layout) in program.layouts.iter().enumerate() {
+        let id = LayoutId(index as u32);
+        let (held, elem) = match layout.shape {
+            Shape::Vector { elem } => (&mut owners, elem),
+            Shape::Elements {
+                elem,
+                growable: true,
+            } => (&mut stores, elem),
+            _ => continue,
+        };
+        if let Some(slot) = held.get_mut(elem.index()) {
+            slot.get_or_insert(id);
+        }
+    }
+    owners
+        .into_iter()
+        .zip(stores)
+        .map(|(owner, store)| {
+            Some(WordRun {
+                owner: owner?,
+                store: store?,
+            })
+        })
+        .collect()
+}
 
 /// A live growable run: its owner, its store, and how much of the store is
 /// value rather than spare room.
@@ -342,7 +409,7 @@ fn live_bytes(machine: &Machine<'_>, run: &Growable) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use cove_ir::{Program, Shape};
+    use cove_ir::Program;
 
     use super::super::tests::Build;
     use super::*;

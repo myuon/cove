@@ -846,6 +846,17 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.growable_op(GrowableOp::Alloc, *dst, *capacity);
                 false
             }
+            // `core.vectorWithCapacity`, handed over the same way: the helper's
+            // temporary root is what rules out emitting either allocation, and
+            // the element layout it needs is on the instruction at this pc.
+            Inst::GrowableAlloc {
+                dst,
+                capacity,
+                storage: Storage::Words(_),
+            } => {
+                self.growable_op(GrowableOp::AllocWords, *dst, *capacity);
+                false
+            }
             // `Vector.pop` and `Vector.remove`'s truncate, handed over whole.
             Inst::GrowableTruncate {
                 owner,
