@@ -2625,6 +2625,131 @@ export fn probeUnwritten() -> Int {
     }
 }
 
+/// **A truncate answers and refuses alike on both evaluators.**
+///
+/// `Vector.pop` and `Vector.remove` compute the new length from the length
+/// they have just read, so no Cove program can reach the truncate's own
+/// refusal — which is why it is reached here through a probe, the way
+/// `growableEnsure`'s negative room is. The message is the thing under test:
+/// the tree-walking oracle implements a truncate with Rust's `Vec::truncate`
+/// and the machine implements it with a clear and a length write, and two
+/// implementations that refuse the same program in different words are two
+/// languages (#378, Q9).
+///
+/// The lowering half is `probeTruncates`, which walks every length a truncate
+/// may be given — the one it already has, one below it, and nought — and
+/// finishes what is left, so a no-op that cleared, or a full truncate that
+/// kept a length, shows up in the answer rather than only in the heap.
+#[test]
+fn a_truncate_answers_and_refuses_alike() {
+    let probe = "\
+/// Three pushed, then the whole ladder of lengths a truncate may be given.
+export fn probeTruncates() -> String {
+  let xs: Vector<Int> = core.vectorWithCapacity(4)
+  var n = 1
+  while n <= 3 {
+    let at = core.vectorLength(xs)
+    core.vectorEnsure(xs, 1)
+    core.vectorStore(xs, at, n * 10)
+    core.vectorCommit(xs, 1)
+    n = n + 1
+  }
+  core.vectorTruncate(xs, 3)
+  let same = core.vectorLength(xs)
+  core.vectorTruncate(xs, 1)
+  let shrunk = core.vectorLength(xs)
+  core.vectorTruncate(xs, 0)
+  \"{same} {shrunk} {core.vectorLength(xs)} {core.vectorFinish(xs)}\"
+}
+
+/// A truncate to a length above the one the vector has.
+export fn probeRaises() -> Int {
+  let xs: Vector<Int> = core.vectorWithCapacity(2)
+  core.vectorTruncate(xs, 1)
+  core.vectorLength(xs)
+}
+
+/// A truncate to a length below zero.
+export fn probeNegative() -> Int {
+  let xs: Vector<Int> = core.vectorWithCapacity(2)
+  core.vectorTruncate(xs, -1)
+  core.vectorLength(xs)
+}
+";
+    let source = "\
+use std.set
+
+export fn main() -> Int {
+  1
+}
+";
+    let wanted = [
+        ("probeTruncates", Answer::Value("3 1 0 []".to_string())),
+        (
+            "probeRaises",
+            Answer::Failed(
+                "`growableTruncate` would take a length of 0 to 1, and a truncate only lowers a \
+                 length"
+                    .to_string(),
+            ),
+        ),
+        (
+            "probeNegative",
+            Answer::Failed(
+                "`growableTruncate` would take a length of 0 to -1, and a truncate only lowers \
+                 a length"
+                    .to_string(),
+            ),
+        ),
+    ];
+    for (name, want) in wanted {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", probe);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("std.set", name, vec![]))
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", probe);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke("std.set", name, vec![]))
+        });
+        assert_eq!(oracle, want, "`{name}` on the oracle");
+        assert_eq!(machine, oracle, "`{name}` answers alike");
+    }
+}
+
+/// **Two handles on one vector, and the one that did not shrink it reads the
+/// length and the elements across the truncate.**
+///
+/// A `Vector` is an owner every copy of it shares, so what an alias may
+/// observe is the old committed length or the new one and nothing between:
+/// there is no moment at which the elements have been cleared and the length
+/// has not, because the truncate that does both is one instruction. The alias
+/// is read *after* two truncates of different shapes — a `pop`, which vacates
+/// the last element, and a `remove`, which moves the tail down over the hole
+/// with a `run-copy` and then vacates the last — so a length that was lowered
+/// without the move, or a move without the lowering, answers different
+/// elements here.
+#[test]
+fn an_alias_reads_the_length_and_the_elements_a_truncate_left() {
+    let source = "
+export fn f() -> String {
+  var a = Vector.of(1, 2, 3)
+  let b = a
+  let popped = a.pop()
+  let removed = a.remove(0)
+  \"{popped} {removed} {b.length()} {b} {b.get(0)} {b.get(1)}\"
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("Some(3) Some(1) 1 [2] Some(2) None".to_string())
+    );
+}
+
 /// ADR 0062's append over a byte buffer — `core.bytesEnsure`, `core.bytesStore`
 /// or `core.bytesCopy` at the length, `core.bytesCommit` — answers alike on
 /// both evaluators: whole strings and single bytes through growths, a

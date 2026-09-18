@@ -1008,6 +1008,19 @@ pub enum Inst {
     /// element with a load, move the tail down with a [`Inst::RunCopy`] of the
     /// store into itself, and then give the last unit back.
     ///
+    /// **It is not a negative [`Inst::GrowableCommit`]**, and issue #423 forbids
+    /// modelling it as one. The two are inverses in what they do to the length
+    /// word and in nothing else. A commit *publishes* storage the window
+    /// immediately before it has just initialized, so the units it names are
+    /// written by the time it runs and there is nothing for it to clean; a
+    /// truncate *un-publishes* storage that was initialized arbitrarily long
+    /// ago, and the units it names hold live references until it clears them.
+    /// A commit of `-1` would therefore be a length write with no clear, which
+    /// is the one outcome this instruction exists to rule out — and it would
+    /// have to be refused by the very rule that makes a commit sound, the
+    /// reservation rule, which reasons about the window written *above* the
+    /// length and has nothing to say about the units below it.
+    ///
     /// # What it means
     ///
     /// **The vacated units are zeroed before the length is written.** A store's
@@ -1034,6 +1047,57 @@ pub enum Inst {
     /// `owner` names a `Vector<T>` whose element layout is the storage's, and
     /// `len` an `Int`. It writes no frame slot. Only [`Storage::Words`] is
     /// admitted: a byte builder has no operation that takes bytes back out.
+    ///
+    /// # Why this is one instruction and not two
+    ///
+    /// Issue #423 asked whether the clear and the length write should be two
+    /// verified instructions, the way ADR 0062 split an append into an ensure,
+    /// a store and a commit. They should not, and the argument is written out
+    /// here rather than asserted, because "a composite instruction" is the kind
+    /// of thing that reads like something nobody got round to.
+    ///
+    /// **The interval between the two halves is exactly the unsound state.**
+    /// The zeroing happens before the length is written, and neither order
+    /// survives being taken apart. A length published first exposes the vacated
+    /// words as elements: a collection between the two halves traces a store
+    /// whose header says its whole capacity is elements, so it would follow
+    /// words the program had just been told were gone, and a `Vector<T>` read
+    /// through an alias would answer them. A clear after the publish is a write
+    /// *above* the logical length — spare room, which the next
+    /// [`Inst::GrowableEnsure`] may hand to a window that has already written
+    /// into it and is about to commit. So the only sound arrangement is the one
+    /// the single instruction has, and a split form's whole contribution would
+    /// be to make the unsound interval nameable: a pc a debugger can stop on, a
+    /// safepoint a collection can happen at, a place a later optimizer can put
+    /// an instruction between. That is the opposite of what the issue asks for
+    /// — "do not expose unfinished buffers", "no uninitialized suffix becomes
+    /// visible" — and it is what ADR 0062 says of [`Inst::GrowableAlloc`] and
+    /// [`Inst::RunFinish`] too.
+    ///
+    /// **Nothing would read the pieces.** A split needs a typed clear
+    /// instruction over `Storage::Words(elem)` and a second verifier relation
+    /// tying that clear to the length write — the reservation rule's mirror
+    /// image, and a rule is the most expensive thing this IR can grow, because
+    /// every backend has to be held to it. Against that: there is exactly one
+    /// producer, `Body::core_vector_truncate` from `core.vectorTruncate`, whose
+    /// only callers are `Vector.pop` and `Vector.remove`; neither code generator
+    /// emits a fast path for it, both hand it to the runtime whole; and ADR
+    /// 0062's window optimizer has no window here, so there would be nothing
+    /// for the new relation to prove anything about. Two instructions and a
+    /// rule, read by nobody, is not a simplification.
+    ///
+    /// **It is not hot, and a split would not be measured as an improvement.**
+    /// Measured on fixed inputs for issue #423: covefmt executes it 14,008
+    /// times and calls the native helper for it 14,083 times over a run of some
+    /// 775 million instructions, and cq executes it **zero** times. There is no
+    /// dispatch to save, because the composite form is already one dispatch and
+    /// the split form would be two.
+    ///
+    /// So issue #423's outcome 2 — one composite `Truncate{Storage}` primitive,
+    /// justified — rather than outcome 1. Outcome 1's substance is already
+    /// true: `runs::growable_truncate` clears the removed word range and
+    /// publishes the smaller logical length as one step nothing can observe
+    /// between. What outcome 1 would have added is only the form.
     GrowableTruncate {
         owner: Slot,
         len: Slot,

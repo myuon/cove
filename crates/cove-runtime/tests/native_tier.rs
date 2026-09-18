@@ -536,6 +536,59 @@ export fn callsSetsPointAt(size: Int, index: Int, x: Int, y: Int) -> Int {
   answered * 1000000 + v.length() * 1000 + total
 }
 
+/// `Vector.remove` and `Vector.pop` in a compiled frame: the word
+/// `growable-truncate` each of them ends with.
+///
+/// That instruction is the one growable member for which **neither code
+/// generator emits a fast path** — both hand it to the runtime whole as
+/// `GrowableOp::TruncateWords`, because the clear of the vacated words and the
+/// length write have to be one uninterruptible step. So what this fixture is
+/// for is the crossing: compiled code that calls the helper, and a caller that
+/// reads back what the helper left.
+///
+/// `counts(0)` is here for `pushesOnto`'s reason.
+export fn shrinks(given: Vector<Int>, index: Int) -> Int {
+  var v = given
+  let removed = match v.remove(index) {
+    Some(x) => x
+    None => -1
+  }
+  let popped = match v.pop() {
+    Some(x) => x
+    None => -1
+  }
+  removed * 1000 + popped + counts(0)
+}
+
+/// A refused caller that builds `0, 10, .., (size - 1) * 10`, shrinks it from a
+/// compiled frame, and reads every element that is left back out.
+///
+/// The read-back is what says the *elements* are right and not only the length:
+/// a `remove` moves the tail down over the hole with a `run-copy` and then
+/// truncates, so a truncate that lowered the length without the move, or a
+/// clear at the wrong offset, answers a different sum here while the length is
+/// still what it should be.
+export fn callsShrinks(size: Int, index: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  var v = Vector.of(0)
+  var i = 1
+  while i < size {
+    v.push(i * 10)
+    i = i + 1
+  }
+  let answered = shrinks(v, index)
+  var total = 0
+  var at = 0
+  while at < v.length() {
+    match v.get(at) {
+      Some(x) => total = total + x
+      None => total = total - 1
+    }
+    at = at + 1
+  }
+  answered * 1000000 + v.length() * 1000 + total
+}
+
 /// `Vector.freeze() -> Array<T>`: `Memory::relabel` turning the store into the
 /// array in place, read back through `Array.get` and `Array.length` rather than
 /// through the `Vector` it no longer is.
@@ -2734,6 +2787,74 @@ fn a_set_from_compiled_code_writes_in_range_and_answers_none_outside_it() {
         assert!(
             both.tiers.vm_to_native >= 1,
             "index {index}: the set was machine code: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// **`Vector.remove` and `Vector.pop` from compiled code: the truncate the
+/// runtime keeps for itself, and what the owner sees afterwards.**
+///
+/// `GrowableOp::TruncateWords` is the growable member neither arm emits: the
+/// clear of the vacated words and the length write are one step, so both code
+/// generators call the helper. This is the case that says the crossing is right
+/// end to end — the compiled frame's operands reach `Machine::truncate_words`,
+/// and the header it wrote is read back by a frame that is not the one that
+/// wrote it.
+///
+/// The table walks a removal at the front, the middle and the back, two indices
+/// outside the vector on either side, and a vector of one that a `remove` and a
+/// `pop` between them take past empty — which is where a truncate to nought and
+/// a truncate of an already-empty vector both happen.
+#[test]
+fn a_pop_and_a_remove_from_compiled_code_agree_with_the_vm() {
+    on_each_tier(&["shrinks"], &["callsShrinks"]);
+    // The truncate itself runs in `std.vector.pop` and `std.vector.remove`
+    // rather than in `shrinks`: neither body is small enough for
+    // `cove_ir::lower::inline` to expand into its caller. Both are compiled,
+    // and asserting so is what makes this a case about machine code reaching
+    // `GrowableOp::TruncateWords` rather than about the VM reaching it from a
+    // compiled caller.
+    let names = compiled_names();
+    for held in ["std.vector.pop<Int>", "std.vector.remove<Int>"] {
+        assert!(
+            names.contains(&held.to_string()),
+            "`{held}` is where the truncate is, and the tier took {names:?}"
+        );
+    }
+    for (size, index) in [
+        (5i64, 0i64),
+        (5, 2),
+        (5, 4),
+        (5, 5),
+        (5, -1),
+        (1, 0),
+        (1, 3),
+    ] {
+        // The same arithmetic the fixture does, on a `Vec`: what is left after
+        // the removal and the pop, and the three numbers packed into one.
+        let mut left: Vec<i64> = (0..size).map(|at| at * 10).collect();
+        let removed = if (0..size).contains(&index) {
+            left.remove(index as usize)
+        } else {
+            -1
+        };
+        let popped = left.pop().unwrap_or(-1);
+        let total: i64 = left.iter().sum();
+        let want = (removed * 1000 + popped) * 1_000_000 + (left.len() as i64) * 1000 + total;
+        let both = both("callsShrinks", vec![Value::int(size), Value::int(index)]);
+        assert_eq!(
+            both.vm,
+            Ok(format!("{want}")),
+            "size {size}, index {index}: what was taken, the length and the sum of the rest"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "size {size}, index {index}: compiled `remove` and `pop` agree with the VM"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "size {size}, index {index}: the shrink was machine code: {:?}",
             both.tiers
         );
     }

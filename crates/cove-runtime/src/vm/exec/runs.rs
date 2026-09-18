@@ -287,6 +287,13 @@ pub(crate) fn growable_commit(machine: &mut Machine<'_>, run: &mut Growable, cou
 /// would be a root for whatever it named. The store is kept, and so is its
 /// capacity.
 ///
+/// Neither half can allocate — `Memory::clear_words` fills words that already
+/// exist, and `Memory::set_payload` writes one — so there is no safepoint
+/// between them and no collection can happen inside this function. That is what
+/// makes the order sufficient rather than merely correct, and it is the reason
+/// [`cove_ir::Inst::GrowableTruncate`] is one instruction and not two; the whole
+/// argument, including why it is not a negative commit, is written out there.
+///
 /// Only a word run has a truncate: `crate::verify` admits no byte member.
 /// `len` is at most the length, which the one caller checks and refuses.
 pub(crate) fn growable_truncate(machine: &mut Machine<'_>, run: &mut Growable, len: u32) {
@@ -668,6 +675,27 @@ mod tests {
     /// it: a high byte in the spare room of the last word does not refuse a
     /// finish, and one inside the prefix — at a word boundary as well as
     /// inside a word — still reaches the decoder and does.
+    /// **A byte run has no truncate, and the machine refuses to guess rather
+    /// than reading a byte length as a word length.**
+    ///
+    /// The third of the three layers that refuse one, and the only one that is
+    /// an assertion instead of a diagnostic: `cove_ir::verify` faults the
+    /// instruction over `Storage::PackedBytes` and the bytecode encoder has no
+    /// opcode to put it in, so nothing a program can express arrives here. That
+    /// is exactly why this is a panic and not a `Result` — the two static
+    /// refusals are the proof, and this says the proof is load-bearing. A byte
+    /// run that got through would clear `(run.len - len)` *words* starting at a
+    /// byte offset, over memory belonging to bytes the program still holds.
+    #[test]
+    #[should_panic(expected = "a byte run has no truncate")]
+    fn a_byte_run_has_no_truncate_and_the_machine_refuses_to_guess() {
+        let f = layouts();
+        let mut machine = Machine::new(&f.program, 1 << 14);
+        let mut bytes = bytes_run(&mut machine, 8);
+        push_bytes(&mut machine, &mut bytes, b"abc");
+        growable_truncate(&mut machine, &mut bytes, 1);
+    }
+
     #[test]
     fn a_byte_finish_reads_only_the_live_prefix_a_word_at_a_time() {
         let f = layouts();

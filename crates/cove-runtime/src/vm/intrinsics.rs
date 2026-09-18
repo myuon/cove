@@ -752,6 +752,33 @@ mod tests {
             },
         );
         build.structure("MapEntry", &[("key", int), ("value", int)]);
+
+        // A two-word element whose reference is **not** its first word.
+        //
+        // `Point` is two words of `Int` and `String` is one word that is a
+        // reference; neither can tell a walk at the element's stride from a
+        // walk at a stride of one, because the two coincide. A `Note` can: a
+        // clear at the wrong stride leaves word 3 — the second note's text —
+        // standing, and a clear at the wrong offset takes out word 1, which is
+        // the first note's. `Vector<Note>` is what
+        // `a_truncate_of_a_two_word_element_clears_the_reference_in_its_second_word`
+        // is built over.
+        let note = build.structure("Note", &[("at", int), ("text", string)]);
+        build.layout(
+            "Array",
+            Shape::Elements {
+                elem: note,
+                growable: false,
+            },
+        );
+        build.layout(
+            "Vector",
+            Shape::Elements {
+                elem: note,
+                growable: true,
+            },
+        );
+        build.layout("Vector", Shape::Vector { elem: note });
         build.done()
     }
 
