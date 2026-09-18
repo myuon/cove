@@ -270,6 +270,15 @@ mod tests {
     /// elements as far as the collector is concerned — and a truncate only
     /// lowers, so a length above the current one is refused with nothing
     /// written.
+    ///
+    /// Every length a truncate can be given is here: a partial one, the length
+    /// it already has (a no-op, which must still not clear anything), nought
+    /// (the whole live prefix), nought again on a vector that is already empty,
+    /// and the two that are not lengths at all — above the current one and
+    /// below zero. Both of those are refused **with the length unchanged and
+    /// nothing cleared**, which is the half a length assertion alone would miss:
+    /// a truncate that zeroed first and refused afterwards would pass on the
+    /// length and have destroyed the elements.
     #[test]
     fn a_truncate_shortens_the_vector_and_clears_the_words_it_vacates() {
         let program = world();
@@ -300,7 +309,159 @@ mod tests {
                 )
             );
             assert_eq!(machine.payload(items, 0), 1);
+            assert_eq!(
+                words_of(&machine, store),
+                vec![1, 0, 0],
+                "a refused truncate clears nothing either"
+            );
         }
+
+        // Down to nought: the whole live prefix, and the store is still the
+        // store — a truncate gives back no memory, only length.
+        machine.truncate_words(items, int, 0).unwrap();
+        assert_eq!(machine.payload(items, 0), 0);
+        assert_eq!(machine.payload(items, 1), store);
+        assert_eq!(words_of(&machine, store), vec![0, 0, 0]);
+
+        // And a vector that is already empty: a truncate to the length it has
+        // is the same no-op whether that length is its first or its last, and
+        // one to a length it does not have is refused in the same words.
+        let empty = growable(&mut machine, &[]);
+        machine.truncate_words(empty, int, 0).unwrap();
+        assert_eq!(machine.payload(empty, 0), 0);
+        let error = machine.truncate_words(empty, int, 1).unwrap_err();
+        assert_eq!(
+            error.message,
+            "`growableTruncate` would take a length of 0 to 1, and a truncate only lowers a \
+             length"
+        );
+    }
+
+    /// **A truncate clears at the element's own stride, so a reference in a
+    /// word other than the element's first is cleared too.**
+    ///
+    /// `a_string_a_truncate_takes_out_is_collected` below is a one-word
+    /// element, where the stride and the word are the same number, and
+    /// `an_array_of_points_is_walked_at_a_two_word_stride` is two words that
+    /// hold no reference at all: between them they leave the case that matters
+    /// uncovered. A `Note` is `{at: Int, text: String}` — two words, with the
+    /// reference in word 1. A clear at a stride of one leaves the taken note's
+    /// text standing, which is a root the collector follows to a string the
+    /// program can no longer reach; a clear from the wrong offset takes out
+    /// word 1, which is the *kept* note's text and a string it still holds.
+    /// Only a walk that knows both the stride and the offset passes.
+    #[test]
+    fn a_truncate_of_a_two_word_element_clears_the_reference_in_its_second_word() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let note = named(&program, "Note");
+        let text = program.str_layout;
+        let store = machine
+            .new_object(elements(&program, note, true), 2)
+            .unwrap();
+        machine.push_temp(store);
+        let items = machine.new_object(vector(&program, note), 0).unwrap();
+        machine.push_temp(items);
+        // Each note is written whole before the next string is allocated, so
+        // what is already in the store is traced through it by the allocation
+        // that follows — the store is the root, and word 1 of each element is
+        // where its reference map says a reference is.
+        let kept = machine.new_string("kept").unwrap();
+        machine.set_payload(store, 0, 11);
+        machine.set_payload(store, 1, kept);
+        let taken = machine.new_string("taken").unwrap();
+        machine.set_payload(store, 2, 22);
+        machine.set_payload(store, 3, taken);
+        machine.set_payload(items, 0, 2);
+        machine.set_payload(items, 1, store);
+
+        machine.truncate_words(items, note, 1).unwrap();
+        assert_eq!(
+            words_of(&machine, store),
+            vec![11, kept, 0, 0],
+            "both words of the vacated note, and neither word of the kept one"
+        );
+        machine.collect();
+        assert_eq!(
+            machine.object_layout(taken),
+            LayoutId::FREE,
+            "the taken note's text was swept"
+        );
+        assert_eq!(machine.object_layout(kept), text, "the kept one's was not");
+        assert_eq!(read(&machine, kept), "kept");
+    }
+
+    /// **A collection immediately before a truncate and immediately after it
+    /// each see a consistent vector — and one *during* a truncate cannot
+    /// happen, which is the property asserted here rather than the property
+    /// tested.**
+    ///
+    /// "During" is the case that would matter, and it is the case that cannot
+    /// be constructed: `runs::growable_truncate` is a clear of words that
+    /// already exist followed by one payload write, and neither allocates, so
+    /// there is no safepoint between the clear and the length write for a
+    /// collection to be scheduled at. Writing a test that tried to schedule one
+    /// there would be writing a test that can never fail, so what is asserted
+    /// instead is the fact that makes it impossible — the machine's allocation
+    /// counter does not move across a truncate — and then the two moments that
+    /// *are* observable are checked on either side of it.
+    ///
+    /// That is also the argument for the instruction being one instruction:
+    /// the interval this test says does not exist is exactly the interval a
+    /// split form would name. See `cove_ir::Inst::GrowableTruncate`.
+    #[test]
+    fn a_collection_before_a_truncate_and_after_it_agree_and_none_happens_inside() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let text = program.str_layout;
+        let store = machine
+            .new_object(elements(&program, text, true), 3)
+            .unwrap();
+        machine.push_temp(store);
+        let items = machine.new_object(vector(&program, text), 0).unwrap();
+        machine.push_temp(items);
+        for (at, word) in ["a", "b", "c"].iter().enumerate() {
+            let held = machine.new_string(word).unwrap();
+            machine.set_payload(store, at as u32, held);
+        }
+        machine.set_payload(items, 0, 3);
+        machine.set_payload(items, 1, store);
+        let held = machine.payload_run(store, 0, 3);
+
+        // Before: at the full length every element is a root, and a collection
+        // keeps all three.
+        machine.collect();
+        for addr in &held {
+            assert_eq!(machine.object_layout(*addr), text, "{addr} survived");
+        }
+
+        // During: there is no during. Nothing here allocates, so the clear and
+        // the length write are one step as far as the collector is concerned.
+        let allocations = machine.allocations();
+        machine.truncate_words(items, text, 2).unwrap();
+        assert_eq!(
+            machine.allocations(),
+            allocations,
+            "a truncate allocates nothing, so no collection can run between the clear and the \
+             length write"
+        );
+
+        // After: the vacated word was already cleared when the collection
+        // began, so what the vector no longer holds is swept and what it still
+        // holds is untouched. One element is taken rather than two, because two
+        // adjacent free objects are coalesced into one block and only the first
+        // of them keeps a header to read.
+        machine.collect();
+        assert_eq!(machine.payload(items, 0), 2);
+        assert_eq!(machine.object_layout(held[0]), text);
+        assert_eq!(machine.object_layout(held[1]), text);
+        assert_eq!(read(&machine, held[0]), "a");
+        assert_eq!(read(&machine, held[1]), "b");
+        assert_eq!(
+            machine.object_layout(held[2]),
+            LayoutId::FREE,
+            "the element the truncate vacated is no longer a root"
+        );
     }
 
     /// `freeze()` hands back the store it was already holding, and empties

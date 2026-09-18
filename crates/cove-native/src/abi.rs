@@ -902,6 +902,12 @@ pub enum GrowableOp {
     /// `Vector.remove` — handed over whole. `a` is the owner's slot and `b` the
     /// new length's; the element layout is read off the instruction at the pc,
     /// as for [`GrowableOp::FinishWords`].
+    ///
+    /// Whole, and with no emitted fast path, because the instruction is one
+    /// step and not two: the clear of the vacated words and the length write
+    /// have to be uninterruptible, and there is nothing else in it to emit. That
+    /// instruction's "Why this is one instruction and not two" is the argument;
+    /// this is where a code generator meets its consequence.
     TruncateWords = 3,
     /// [`Inst::GrowableEnsure`](cove_ir::Inst::GrowableEnsure) over packed
     /// bytes, reached only as the cold path of an emitted room test: a room the
