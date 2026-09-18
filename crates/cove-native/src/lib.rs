@@ -176,6 +176,113 @@ impl Unavailable {
     }
 }
 
+/// Machine code charged to [ADR 0062]'s buffer windows, one row per
+/// [`Pattern`](cove_ir::legalize::Pattern).
+///
+/// [Issue #423](https://github.com/myuon/cove/issues/423) asks for "generated
+/// machine-code bytes attributable to each buffer-window shape", and this is
+/// the carrier: one of these per compiled function, summed over a program by
+/// whoever compiled it. Before it, code size was a whole-program total and
+/// nothing said what any part of it was for — which is not enough to answer
+/// whether ADR 0062's +39.8% on cq is the windows or the four standard-library
+/// functions the ADR says it newly compiled.
+///
+/// # Why the bytes are an `Option` and the sites are not
+///
+/// A window is a **shape in the IR**. How many of each pattern a function
+/// emitted is therefore a fact about `cove_ir::legalize` and the lowering, and
+/// both code generators count it identically; `sites` is never in doubt.
+///
+/// The bytes are another matter, and only one arm can honestly report them. The
+/// template arm emits a whole window — hot path, both cold blocks and the join —
+/// as one contiguous run of its code buffer, so a difference of two buffer
+/// lengths taken across the emission *is* that window's machine code, to the
+/// byte. The Cranelift arm lowers to CLIF and the byte layout is settled by the
+/// backend at the end of the function: blocks are ordered, merged and laid out
+/// there, and no range of the emitted buffer corresponds to an IR window. So it
+/// answers `None` — not a zero, which a reader comparing the two arms would take
+/// for "windows cost this generator nothing".
+///
+/// A `None` is infectious through [`WindowCode::charge`] and
+/// [`WindowCode::add`] for the same reason: a sum over *some* of a program's
+/// windows reads as a sum over all of them.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowCode {
+    /// Bytes of machine code emitted for each pattern's windows, indexed by
+    /// [`Pattern::index`](cove_ir::legalize::Pattern::index), or `None` from a
+    /// code generator that cannot attribute them. See this type's own note for
+    /// which generator that is and why.
+    pub bytes: Option<[u64; 4]>,
+    /// How many windows of each pattern were emitted, indexed the same way.
+    ///
+    /// Carried beside the bytes rather than left for a reader to find
+    /// elsewhere, because bytes *per window* is the number a code-size policy
+    /// turns on, and a ratio taken from two figures in two reports is one a
+    /// reader gets wrong.
+    pub sites: [u64; 4],
+}
+
+impl Default for WindowCode {
+    /// Nothing emitted yet, and the bytes attributable.
+    ///
+    /// `Some([0; 4])` rather than `None`: a function with no window in it has
+    /// nought bytes of window code, and that is a measurement rather than an
+    /// absence. A generator that cannot attribute anything says so by charging
+    /// `None`, which is the first window's business and not this value's.
+    fn default() -> WindowCode {
+        WindowCode {
+            bytes: Some([0; 4]),
+            sites: [0; 4],
+        }
+    }
+}
+
+impl WindowCode {
+    /// Records one emitted window of `pattern`, with the bytes it was where the
+    /// code generator can say.
+    ///
+    /// `None` for the bytes counts the site and drops the whole byte table, for
+    /// the reason on the type: a partial sum is indistinguishable from a total.
+    pub fn charge(&mut self, pattern: cove_ir::legalize::Pattern, bytes: Option<u64>) {
+        self.sites[pattern.index()] += 1;
+        self.bytes = match (self.bytes, bytes) {
+            (Some(mut rows), Some(count)) => {
+                rows[pattern.index()] += count;
+                Some(rows)
+            }
+            _ => None,
+        };
+    }
+
+    /// Adds one function's windows to a running total.
+    pub fn add(&mut self, other: &WindowCode) {
+        for (at, sites) in self.sites.iter_mut().enumerate() {
+            *sites += other.sites[at];
+        }
+        self.bytes = match (self.bytes, other.bytes) {
+            (Some(mut rows), Some(theirs)) => {
+                for (at, row) in rows.iter_mut().enumerate() {
+                    *row += theirs[at];
+                }
+                Some(rows)
+            }
+            _ => None,
+        };
+    }
+
+    /// Every pattern's bytes together, or `None` where they are not attributed.
+    pub fn total_bytes(&self) -> Option<u64> {
+        self.bytes.map(|rows| rows.iter().sum())
+    }
+
+    /// Every pattern's windows together.
+    pub fn total_sites(&self) -> u64 {
+        self.sites.iter().sum()
+    }
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
 pub mod subset;
 

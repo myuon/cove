@@ -55,7 +55,7 @@ use crate::subset::{
     by_zero_of, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset, supported,
     windows, word_finish, BufferWindow, ByteStore, Reserve, WordFinish,
 };
-use crate::Unavailable;
+use crate::{Unavailable, WindowCode};
 
 /// The name the safepoint helper is imported under.
 ///
@@ -140,6 +140,19 @@ pub struct Compiled {
     /// so that the two arms' code size is one number read the same way from
     /// both.
     pub code_bytes: u32,
+    /// How many [ADR 0062] buffer windows this function emitted, by pattern —
+    /// and **not** how many bytes each cost.
+    ///
+    /// [`WindowCode::bytes`] is `None` from this arm, always. The reason is the
+    /// same one that makes `code_bytes` Cranelift's own count rather than a
+    /// difference of addresses: this generator hands CLIF to a backend that
+    /// orders, merges and lays out blocks at the end of the function, so no
+    /// range of the emitted buffer is a window. A zero would read as "the
+    /// windows cost nothing here", which is a different and false claim; see
+    /// [`WindowCode`].
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    pub windows: WindowCode,
 }
 
 /// A baseline code generator, and the memory its code lives in.
@@ -263,7 +276,7 @@ impl Jit {
 
         self.ctx.clear();
         self.ctx.func.signature = signature;
-        {
+        let windows = {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder);
             let safepoint = self
                 .module
@@ -288,7 +301,7 @@ impl Jit {
             let order_str = self
                 .module
                 .declare_func_in_func(self.order_str, builder.func);
-            Lower::new(
+            let windows = Lower::new(
                 &mut builder,
                 program,
                 function,
@@ -307,7 +320,8 @@ impl Jit {
             .run();
             builder.seal_all_blocks();
             builder.finalize(self.module.target_config());
-        }
+            windows
+        };
         self.module.define_function(func, &mut self.ctx).ok()?;
         let code_bytes = self
             .ctx
@@ -319,6 +333,7 @@ impl Jit {
             id: func,
             function: id,
             code_bytes,
+            windows,
         })
     }
 
@@ -568,6 +583,11 @@ struct Lower<'a, 'f> {
     ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     windows: Vec<Option<BufferWindow>>,
+    /// How many windows of each pattern this function emitted.
+    ///
+    /// The sites only: see [`Compiled::windows`] for why this arm has no bytes
+    /// to put beside them.
+    window_code: WindowCode,
 }
 
 impl<'a, 'f> Lower<'a, 'f> {
@@ -618,10 +638,12 @@ impl<'a, 'f> Lower<'a, 'f> {
             pc: 0,
             blocks,
             windows,
+            window_code: WindowCode::default(),
         }
     }
 
-    fn run(&mut self) {
+    /// Lowers the body, and answers what buffer windows it emitted.
+    fn run(&mut self) -> WindowCode {
         let (_, length) = self.blocks[0].expect("`supported` refused an empty body");
         self.charge(length);
 
@@ -654,6 +676,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             terminated,
             "`supported` admitted a function whose last instruction is not a terminator"
         );
+        self.window_code
     }
 
     /// Adds a block's static instruction count to the work accumulator.
@@ -1798,6 +1821,9 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.b.switch_to_block(done);
         // Every predecessor but the fast one came through a helper.
         self.forget();
+        // The site, and `None` for the bytes: this arm has emitted CLIF and the
+        // layout is the backend's. See `Compiled::windows`.
+        self.window_code.charge(window.pattern, None);
     }
 
     /// A block that is entered carrying `values` words, and the frame and

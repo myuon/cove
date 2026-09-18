@@ -49,7 +49,7 @@
 use std::time::Duration;
 
 use cove_ir::{FunctionId, Program};
-use cove_native::Unavailable;
+use cove_native::{Unavailable, WindowCode};
 
 use crate::vm::exec::native::Tiered;
 use crate::NativeEntry;
@@ -80,6 +80,16 @@ pub struct NativeProgram {
     stubs: usize,
     compiled: usize,
     code_bytes: u64,
+    /// How much of `code_bytes` is [ADR 0062] buffer windows, by pattern, and
+    /// how many windows of each pattern were emitted.
+    ///
+    /// [Issue #423](https://github.com/myuon/cove/issues/423) asks for it, and
+    /// the whole-program total above is why: before this, a report could say a
+    /// program grew by 39.8% and nothing could say what of. See [`WindowCode`]
+    /// for why the bytes are optional and the sites are not.
+    ///
+    /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    windows: WindowCode,
     compile: Duration,
     /// Whether the code was compiled against the counting helpers. See
     /// [`compile_counting`].
@@ -246,6 +256,16 @@ impl NativeProgram {
         self.code_bytes
     }
 
+    /// Which part of [`code_bytes`](Self::code_bytes) is ADR 0062's buffer
+    /// windows, and how many of each pattern were emitted.
+    ///
+    /// The bytes are `None` from a code generator that cannot attribute them,
+    /// which is a fact about the generator rather than about the program —
+    /// [`WindowCode`] says which and why. The sites are counted either way.
+    pub fn window_code(&self) -> WindowCode {
+        self.windows
+    }
+
     /// What compiling cost, which is never part of what executing cost.
     pub fn compile_time(&self) -> Duration {
         self.compile
@@ -297,6 +317,7 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
     let mut refusals = Vec::new();
     let mut done = Vec::new();
     let mut code_bytes = 0u64;
+    let mut windows = WindowCode::default();
     // One clock over the whole loop rather than one per function: what issue #369
     // asks to keep apart from execution is the *total*, and a per-function sample
     // is the comparison harness's question rather than this one's.
@@ -314,6 +335,7 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
         match jit.compile(program, id) {
             Some(compiled) => {
                 code_bytes += u64::from(compiled.code_bytes);
+                windows.add(&compiled.windows);
                 done.push((id, compiled));
             }
             None => refusals.push(refused_row(program, id)),
@@ -334,6 +356,7 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
         reachable: program.functions.len() - stubs,
         stubs,
         code_bytes,
+        windows,
         compile,
         counts_helpers: counting,
     })

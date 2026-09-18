@@ -38,6 +38,7 @@ use cove_ir::{
 };
 use cove_native::{
     Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp,
+    WindowCode,
 };
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
@@ -859,6 +860,17 @@ pub trait Arm {
     /// How many bytes of machine code a compiled function is, which both arms'
     /// handles carry: what a case comparing the code two shapes cost reads.
     fn code_bytes(handle: Self::Handle) -> u32;
+    /// What the compiled function's ADR 0062 buffer windows were, by pattern.
+    fn window_code(handle: Self::Handle) -> WindowCode;
+    /// Whether this arm can say how many *bytes* a window was.
+    ///
+    /// The sites are a fact about the IR and both arms count them the same; the
+    /// bytes are a fact about a code generator's layout and only one arm has
+    /// them. A constant rather than a suite that shrugs at whichever answer it
+    /// gets: "this arm attributes bytes" and "this arm does not" are both claims
+    /// worth a failing test if they stop being true. See
+    /// [`WindowCode`](cove_native::WindowCode).
+    const ATTRIBUTES_WINDOWS: bool;
 }
 
 // --- building a program by hand ----------------------------------------------
@@ -4860,6 +4872,83 @@ pub fn a_window_is_less_code_than_its_rows<A: Arm>() {
         assert!(
             window < rows,
             "{what}: {window} against {rows} for the rows"
+        );
+    }
+}
+
+/// **A window's machine code is charged to its own pattern, and to nothing
+/// else.**
+///
+/// [Issue #423](https://github.com/myuon/cove/issues/423)'s attribution, held to
+/// the three things that make it worth having:
+///
+/// - a function with a window charges **one site** to that window's pattern and
+///   none to the other three, and the same function with its rows unrecognised
+///   charges nothing anywhere — so the count follows `cove_ir::legalize` and not
+///   the shape of the body;
+/// - where the bytes are attributed they are **positive and no more than the
+///   whole function**, which is the arithmetic a reader of the report assumes;
+/// - the byte difference between the two compilations is **at least** what the
+///   attributed window is smaller by. A window that got cheaper while the
+///   function did not would mean bytes were being charged to a pattern that did
+///   not emit them.
+pub fn a_windows_machine_code_is_charged_to_its_pattern<A: Arm>() {
+    use cove_ir::legalize::Pattern;
+    let compiled = |program: &Program| {
+        let mut jit = A::new(helpers());
+        jit.compile(program, FunctionId(0))
+            .expect("the function is inside the slice")
+    };
+    for (what, storage, pattern) in [
+        ("Vector<Int>.push", Storage::Words(INT), Pattern::PushWords),
+        ("appendByte", Storage::PackedBytes, Pattern::PushByte),
+        ("appendSlice", Storage::PackedBytes, Pattern::AppendBytes),
+        ("keyed extend", Storage::Words(INT), Pattern::AppendWords),
+    ] {
+        let held = match pattern {
+            Pattern::PushWords | Pattern::PushByte => a_push_window(storage),
+            _ => an_append_window(storage),
+        };
+        let handle = compiled(&held);
+        let code = A::window_code(handle);
+        let wanted: Vec<u64> = Pattern::ALL
+            .iter()
+            .map(|&each| u64::from(each == pattern))
+            .collect();
+        assert_eq!(code.sites.to_vec(), wanted, "{what}: one site, its own");
+        assert_eq!(code.total_sites(), 1, "{what}");
+        assert_eq!(
+            code.bytes.is_some(),
+            A::ATTRIBUTES_WINDOWS,
+            "{what}: whether the bytes are attributed is the arm's, not the program's"
+        );
+        let Some(bytes) = code.bytes else {
+            continue;
+        };
+        let whole = u64::from(A::code_bytes(handle));
+        let charged = bytes[pattern.index()];
+        println!("{what}: {charged} of {whole} byte(s) are the window");
+        assert!(charged > 0, "{what}: a window that emitted nothing");
+        assert!(
+            charged <= whole,
+            "{what}: {charged} charged out of a function of {whole}"
+        );
+        assert_eq!(
+            bytes.iter().sum::<u64>(),
+            charged,
+            "{what}: another pattern was charged"
+        );
+    }
+
+    // And a body whose rows `legalize` does not recognise charges nothing,
+    // because there is no window in it to charge.
+    for storage in [Storage::Words(INT), Storage::PackedBytes] {
+        let code = A::window_code(compiled(&a_push_window_unrecognised(storage)));
+        assert_eq!(code.total_sites(), 0, "{storage:?}: unrecognised rows");
+        assert_eq!(
+            code.bytes,
+            Some([0; 4]),
+            "{storage:?}: a function with no window has nought bytes of window,              which is a measurement and not an absence"
         );
     }
 }

@@ -38,7 +38,7 @@ use crate::subset::{
     by_zero_of, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset, supported,
     windows, word_finish, BufferWindow, ByteStore, Reserve, WordFinish,
 };
-use crate::Unavailable;
+use crate::{Unavailable, WindowCode};
 
 // The `NativeCtx` field offsets, read from the declaration rather than written
 // out, exactly as the Cranelift arm reads them.
@@ -126,6 +126,16 @@ pub struct Compiled {
     pub function: FunctionId,
     /// How many bytes of machine code this function is.
     pub code_bytes: u32,
+    /// How much of that code is [ADR 0062]'s buffer windows, by pattern.
+    ///
+    /// Attributed exactly here, which is the property [`WindowCode`] is an
+    /// `Option` for: this arm's private `Emit::window` — named without a link,
+    /// because it is private and an intra-doc link to it fails `cargo doc` —
+    /// emits a whole window contiguously, so the charge is the difference of two
+    /// code lengths taken across it.
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    pub windows: WindowCode,
 }
 
 /// One mapping: the machine code of one function.
@@ -303,7 +313,7 @@ impl Jit {
         if !supported(program, function) {
             return None;
         }
-        let code = Emit::new(program, function, &self.helpers, self.direct).run();
+        let (code, windows) = Emit::new(program, function, &self.helpers, self.direct).run();
         let mapping = Mapping::write(&code)?;
         self.code.push(mapping);
         self.finalized = false;
@@ -311,6 +321,7 @@ impl Jit {
             at: self.code.len() - 1,
             function: id,
             code_bytes: code.len() as u32,
+            windows,
         })
     }
 
@@ -410,6 +421,16 @@ struct Emit<'a> {
     /// False at the start of every block and after every call: `NativeCtx`'s
     /// `words` is a `Vec`'s buffer, and a helper may have reallocated it.
     frame_live: bool,
+    /// What each window this function emitted cost, by pattern.
+    ///
+    /// Charged in [`Emit::window`] and nowhere else, as the difference of
+    /// [`Emit::code`]'s length across it. That difference is the window's whole
+    /// machine code because this arm emits one contiguously — the hot path, the
+    /// two cold blocks and the join are laid down in that order and nothing is
+    /// moved afterwards. [`Emit::patch`] rewrites `rel32` fields in place and
+    /// inserts nothing, so a byte count taken before it is the byte count after
+    /// it.
+    window_code: WindowCode,
 }
 
 impl<'a> Emit<'a> {
@@ -439,10 +460,12 @@ impl<'a> Emit<'a> {
             blocks,
             windows,
             frame_live: false,
+            window_code: WindowCode::default(),
         }
     }
 
-    fn run(mut self) -> Vec<u8> {
+    /// The function's machine code, and what its windows are of it.
+    fn run(mut self) -> (Vec<u8>, WindowCode) {
         self.prologue();
         let mut pc = 0;
         while pc < self.function.code.len() {
@@ -465,7 +488,7 @@ impl<'a> Emit<'a> {
             pc += 1;
         }
         self.patch();
-        self.code
+        (self.code, self.window_code)
     }
 
     /// [`Entry`] received: `ctx` in `rdi`, `base` in `rsi`, `return_base` in
@@ -1288,9 +1311,22 @@ impl<'a> Emit<'a> {
     /// pointer before it jumps back, so the path that never went cold keeps the
     /// one it had.
     ///
+    /// # Everything above is one contiguous range, which is what makes it
+    /// measurable
+    ///
+    /// The order in the sketch is the order it is laid down in, cold halves
+    /// included: nothing of a window is emitted anywhere else and nothing is
+    /// moved afterwards. So the difference of [`Emit::code`]'s length across
+    /// this method is exactly this window's machine code, and it is charged to
+    /// the window's pattern in [`Emit::window_code`] —
+    /// [issue #423](https://github.com/myuon/cove/issues/423)'s
+    /// "machine-code bytes attributable to each buffer-window shape". Keep the
+    /// emission contiguous or that number stops being true silently.
+    ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     fn window(&mut self, held: BufferWindow) {
         use cove_ir::legalize::Pattern;
+        let started = self.code.len();
         let BufferWindow {
             window,
             layout,
@@ -1478,6 +1514,8 @@ impl<'a> Emit<'a> {
         self.bind(done);
         // Every predecessor but the fast one came through a helper.
         self.frame_live = false;
+        self.window_code
+            .charge(window.pattern, Some((self.code.len() - started) as u64));
     }
 
     /// One frame write a window's row makes: the length the head read, which is

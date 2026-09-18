@@ -50,6 +50,12 @@ impl Arm for Cranelift {
     fn code_bytes(handle: Self::Handle) -> u32 {
         handle.code_bytes
     }
+
+    fn window_code(handle: Self::Handle) -> cove_native::WindowCode {
+        handle.windows
+    }
+
+    const ATTRIBUTES_WINDOWS: bool = false;
 }
 
 struct Template(cove_native::template::Jit);
@@ -76,6 +82,12 @@ impl Arm for Template {
     fn code_bytes(handle: Self::Handle) -> u32 {
         handle.code_bytes
     }
+
+    fn window_code(handle: Self::Handle) -> cove_native::WindowCode {
+        handle.windows
+    }
+
+    const ATTRIBUTES_WINDOWS: bool = true;
 }
 
 /// Runs `program` on both arms over identical frames and asserts they agree.
