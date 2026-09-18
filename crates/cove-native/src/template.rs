@@ -1323,6 +1323,57 @@ impl<'a> Emit<'a> {
     /// "machine-code bytes attributable to each buffer-window shape". Keep the
     /// emission contiguous or that number stops being true silently.
     ///
+    /// # Why a recognised window is inlined, and not demoted or declined
+    ///
+    /// [Issue #423](https://github.com/myuon/cove/issues/423) asks for a
+    /// code-size policy, because ADR 0062 cost +7.0% of machine code on covefmt
+    /// and +39.8% on cq. The policy is this code generator, unchanged, and the
+    /// measurements are why.
+    ///
+    /// **A window's rows are more machine code than the window**, which is the
+    /// opposite of what a fast path is usually assumed to cost. Whole-function
+    /// bytes, both sides over the same prologue and epilogue:
+    ///
+    /// | pattern | window | rows | difference |
+    /// | --- | ---: | ---: | ---: |
+    /// | `push.words`, `Vector<Int>` | 997 | 2,285 | +1,288 |
+    /// | `push.words`, `Vector<Pair>` | 1,081 | 2,369 | +1,288 |
+    /// | `push.byte` | 1,138 | 2,426 | +1,288 |
+    /// | `append.bytes` | 1,424 | 2,036 | +612 |
+    /// | `append.words` | 1,426 | 2,036 | +610 |
+    ///
+    /// The reason is the guards and not the work. An append's rows carry *four*
+    /// guard sequences — the two `load-field`s, the ensure and the commit, each
+    /// with its own inline fast path and its own cold half — where the window
+    /// asks one capacity question for all of them; the helper calls they replace
+    /// are about 70 B each. `Lower::window` agrees in direction on every row.
+    ///
+    /// At program scale, declining every window costs covefmt **+18.9%** of
+    /// machine code (922,417 B → 1,096,425 B) and cq **+38.1%** (375,036 B →
+    /// 518,034 B). So the issue's "size/admission threshold" is the option that
+    /// makes a large program larger: a threshold declines the windows it thinks
+    /// expensive, and what a declined window emits is the more expensive of the
+    /// two. `a_window_is_less_code_than_its_rows` holds that ordering for all
+    /// five patterns on both arms, so it cannot silently invert.
+    ///
+    /// **The copy is already outlined**, which removes the issue's other two
+    /// options at once. The append arm below emits an unconditional call to the
+    /// `RunCopyFn` helper — there is no inline copy loop here to take out, so
+    /// "outlined proportional copy with inline capacity check" *is* what this
+    /// method does, and "fully inlined byte/word copy windows" would only add
+    /// bytes to the table above.
+    ///
+    /// **The one real lever costs more time than it saves size.** A recognised
+    /// window can be emitted with no inline fast path at all, every heavy row
+    /// going straight to the helper that is already its cold half. Measured,
+    /// that saves cq 20.0% of its machine code and costs **+12.4% of native wall
+    /// time on cq and +39.1% on covefmt**; and covefmt could not save more than
+    /// 2.6% by it however well it went, because 70% of its window bytes are
+    /// `push.words`, whose demoted form is the same size. Issue #423's first
+    /// acceptance criterion is "no repeatable wall-clock regression outside
+    /// measured noise", and it outranks code size — which is also
+    /// `docs/PHILOSOPHY.md`'s "preserve the performance class".
+    ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     fn window(&mut self, held: BufferWindow) {
         use cove_ir::legalize::Pattern;
