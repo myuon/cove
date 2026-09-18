@@ -996,6 +996,27 @@ unsafe extern "C" fn growable(
                         machine.mem.set_slot(base, a as Slot, owner);
                         Ok(())
                     }
+                    // The same allocation over words, through the same
+                    // `Machine::alloc_vector` the `GROWABLE_ALLOC_WORDS` arm
+                    // calls; the element layout is the instruction's, and the
+                    // owner's and the store's are what the machine's own table
+                    // answers from it.
+                    GrowableOp::AllocWords => {
+                        let capacity = machine.mem.slot(base, b as Slot) as i64;
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::GrowableAlloc {
+                            storage: Storage::Words(elem),
+                            ..
+                        } = code[pc as usize]
+                        else {
+                            unreachable!(
+                                "a word allocation was handed over for a pc that is not one"
+                            )
+                        };
+                        let owner = machine.alloc_vector(elem, capacity)?;
+                        machine.mem.set_slot(base, a as Slot, owner);
+                        Ok(())
+                    }
                     // A word finish's cold path, through the same
                     // `Machine::finish_words` the `RUN_FINISH_WORDS` arm calls.
                     // The target and the element layout are the instruction's.

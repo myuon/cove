@@ -471,13 +471,25 @@ fn every_append_the_standard_library_writes_is_a_window() {
 /// Writing `0` into an owner an `Alloc` has just made publishes nothing —
 /// there is nothing above the length to publish. Writing `length + count`
 /// publishes units the store may not hold, which is what `core.extendFromSet`
-/// and `core.extendFromMap` did until this stage replaced them with an ensure,
-/// a copy and a commit.
+/// and `core.extendFromMap` did until ADR 0062's stage replaced them with an
+/// ensure, a copy and a commit.
 ///
-/// The constructions that remain are `core.vectorWithCapacity`'s, and they are
-/// counted rather than merely tolerated, so that this cannot pass by finding
-/// nothing. Removing them is admitting `GrowableAlloc{Words}`, which ADR 0062
-/// leaves as separate and measured work.
+/// **And an owner an `Inst::GrowableAlloc` made has none at all**, which is
+/// what admitting `GrowableAlloc{Words}` for `core.vectorWithCapacity` bought.
+/// That lowering was two `Alloc`s, an `Int` nought and two field writes, and
+/// the nought was the last store this rule tolerated on the growable path; it
+/// is one instruction now and the path publishes nothing by hand. The two
+/// counts are asserted separately because they say different things: the
+/// growable one is nought and must stay nought, and the other is above nought
+/// so that this test cannot pass by finding nothing at all.
+///
+/// What is left in that other count is `Vector.of`'s literal — a store written
+/// element by element and a header allocated after it, published whole. It is
+/// *not* the same tolerance: `Vector.of(1, 2)` writes a constant `2` there and
+/// would fail this test, which the test program does not reach because its only
+/// vector literal is empty. Bringing a literal construction under the rule
+/// needs a decision about what an exactly sized literal is worth, and is not
+/// this change's.
 ///
 /// Both approximations here fail rather than pass. A slot is taken for an
 /// owner if it is *ever* one in the function, and a slot is taken for a
@@ -504,12 +516,19 @@ fn no_field_store_publishes_a_growable_owner_s_length() {
         )
     };
     let mut constructions = 0;
+    let mut grown_constructions = 0;
     for f in &program.functions {
         let mut owner = vec![false; f.reprs.len()];
+        // Which of those the growable allocation itself made, so that the one
+        // count this change drove to nought is asserted as its own thing.
+        let mut grown = vec![false; f.reprs.len()];
         for inst in &f.code {
             match inst {
                 Inst::Alloc { dst, layout, .. } if owned(*layout) => owner[*dst as usize] = true,
-                Inst::GrowableAlloc { dst, .. } => owner[*dst as usize] = true,
+                Inst::GrowableAlloc { dst, .. } => {
+                    owner[*dst as usize] = true;
+                    grown[*dst as usize] = true;
+                }
                 Inst::GrowableEnsure { owner: at, .. }
                 | Inst::GrowableCommit { owner: at, .. }
                 | Inst::GrowableTruncate { owner: at, .. }
@@ -531,7 +550,11 @@ fn no_field_store_publishes_a_growable_owner_s_length() {
                         f.qualified(),
                         crate::print::function(&program, program_id(&program, f))
                     );
-                    constructions += 1;
+                    if grown[*obj as usize] {
+                        grown_constructions += 1;
+                    } else {
+                        constructions += 1;
+                    }
                 }
             }
             inst.writes(&program, &mut |slot, width| {
@@ -546,9 +569,13 @@ fn no_field_store_publishes_a_growable_owner_s_length() {
             }
         }
     }
+    assert_eq!(
+        grown_constructions, 0,
+        "an owner `GrowableAlloc` made still has its length written by a field store"
+    );
     assert!(
         constructions > 0,
-        "`core.vectorWithCapacity`'s zero is still written somewhere"
+        "`Vector.of`'s zero is still written somewhere"
     );
 }
 

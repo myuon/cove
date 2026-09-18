@@ -849,13 +849,40 @@ pub enum Inst {
     /// `capacity` is a **hint** and not a bound. Exceeding it grows the store
     /// rather than failing, so a tuning estimate cannot change what a program
     /// answers — which is the whole of ADR 0052's "capacity is not an Array
-    /// length". A capacity below the runtime's own floor is raised to it, and a
-    /// negative or oversized one fails through the same "this run has no memory
-    /// left" refusal every other allocation does.
+    /// length". A capacity below the runtime's own byte floor is raised to it,
+    /// and a negative or oversized one fails through the same "this run has no
+    /// memory left" refusal every other allocation does.
     ///
-    /// Only [`Storage::PackedBytes`] is admitted today; `crate::verify` refuses
-    /// [`Storage::Words`], whose owner is still built by `Vector`'s own
-    /// lowering.
+    /// # For [`Storage::Words`]
+    ///
+    /// `core.vectorWithCapacity`: an empty `Vector<T>` over the storage's
+    /// element, which is what every keyed update in `std.map` and `std.set`
+    /// builds its answer in — an `inserted`, a `removed`, a `keys` or a
+    /// `values`.
+    ///
+    /// Neither layout is named here either, and for a better reason than the
+    /// byte member's: the element *determines* both — the owner is the
+    /// program's [`crate::Shape::Vector`] of it, and the store the growable
+    /// [`crate::Shape::Elements`] of it — so a second copy of a derivable fact
+    /// in the row would be one more thing an encoder, a verifier and two code
+    /// generators could come to disagree about, which is the redundancy
+    /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+    /// spent instructions removing. An allocation is the **only** growable
+    /// operation that needs that map read backwards: every other one is handed
+    /// an object whose own header already names its layout. The runtime keeps
+    /// the reverse direction as a table built once per program and shared by
+    /// every task of a run, beside the one it keeps of every layout's width —
+    /// it is not a scan of the layout table per allocation.
+    ///
+    /// `capacity` is a hint here as it is for bytes, and it is raised to the
+    /// same floor: four elements, ADR 0052's small floor in the word unit.
+    /// Before this instruction admitted words the lowering allocated the store
+    /// at exactly the capacity asked for, so a keyed update of one entry
+    /// allocated a store of one element and grew it on the second. Capacity is
+    /// not readable from Cove — no API answers it — so nothing a program
+    /// answers changed; what changed is the allocated-word count of a run full
+    /// of small constructions, which rose, and that is the price of a vector
+    /// built through the growable path having the growth policy of one.
     GrowableAlloc {
         dst: Slot,
         capacity: Slot,

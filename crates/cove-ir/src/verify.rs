@@ -302,10 +302,11 @@ impl Check<'_> {
                 }
                 // ADR 0052's two poison `dst` exactly as `RunLoad` does rather
                 // than `identify`ing it the way `Inst::Alloc` and `Inst::Str`
-                // do: `GrowableAlloc` always allocates `Program::buffer_layout`
-                // and `RunFinish` answers the store its owner was holding,
-                // relabelled to a `Str` object. Neither is a layout this pass
-                // reasons about, only a `Repr`.
+                // do: `GrowableAlloc` allocates the owner its storage implies —
+                // `Program::buffer_layout` for bytes, the program's
+                // `Shape::Vector` of the element for words — and `RunFinish`
+                // answers the store its owner was holding, relabelled. Neither
+                // is a layout this pass reasons about, only a `Repr`.
                 Inst::GrowableAlloc { dst, .. } | Inst::RunFinish { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
@@ -930,12 +931,23 @@ impl Check<'_> {
             // byte finish a UTF-8 finish into `Program::str_layout`; Phase 3
             // admits `Words` for a push and a finish, which are what
             // `Vector.push` and `Vector.freeze` became.
+            //
+            // An allocation admits both storages, and there is nothing here to
+            // hold the element to beyond existing: the two layouts a word
+            // allocation needs are *derived* from it — the program's
+            // `Shape::Vector` of the element and the growable `Shape::Elements`
+            // of it — so what a lowering could get wrong is not a field this
+            // instruction carries. A program whose table declares neither is
+            // refused by the machine that looks them up, in the words the
+            // lookup has.
             Inst::GrowableAlloc {
                 dst,
                 capacity,
                 storage,
             } => {
-                self.admit_storage(at, "allocates", storage);
+                if let crate::Storage::Words(elem) = storage {
+                    self.layout_exists(at, elem);
+                }
                 self.expect(at, dst, &[Repr::Ref]);
                 self.expect(at, capacity, &[Repr::Int]);
             }
@@ -1593,11 +1605,17 @@ impl Check<'_> {
     }
 
     /// Refuses a run instruction over a storage ADR 0058's Phase 2 does not
-    /// admit it for: every run family but [`Inst::RunCopy`] — the load, the
-    /// three growable operations and the finish — has only its
-    /// [`crate::Storage::PackedBytes`] member so far.
+    /// admit it for. Two are left: [`Inst::RunLoad`] and [`Inst::RunStore`],
+    /// the unit load and the unit write, which have only their
+    /// [`crate::Storage::PackedBytes`] member — a word run is read and written
+    /// through [`Inst::LoadElem`] and [`Inst::StoreElem`], which already take a
+    /// layout, so the word members of these two have had no producer to arrive
+    /// with.
     ///
-    /// The word members arrive with their first producer, and until then a
+    /// Everything else in the family admits both storages now: the copy and the
+    /// slice from the start, the finish with `Vector.freeze()`, ADR 0062's
+    /// ensure and commit with the window, and the allocation with
+    /// `core.vectorWithCapacity`. Until a member has its word producer, a
     /// [`crate::Storage::Words`] here is a lowering mistake the machine has no
     /// opcode for, not a unit it could load.
     fn admit_storage(&mut self, at: Option<usize>, what: &str, storage: crate::Storage) {
@@ -3396,8 +3414,8 @@ mod tests {
         );
     }
 
-    /// ADR 0058's admission table for the growable family and its finish:
-    /// every member over packed bytes, a push over words too, and a byte
+    /// ADR 0058's admission table for the growable family and its finish: an
+    /// allocation over either storage, a truncate over words alone, and a byte
     /// finish only as a UTF-8 finish into `String`. Each disallowed
     /// combination is refused by name, and the admitted form of each is well
     /// formed.
@@ -3454,12 +3472,10 @@ mod tests {
         assert_eq!(one(alloc(bytes)), none);
         assert_eq!(one(finish(STR, Validation::Utf8, bytes)), none);
 
-        let refused = |what: &str| {
-            vec![format!(
-                "{what} a run of `Int` words, and this instruction admits only packed bytes"
-            )]
-        };
-        assert_eq!(one(alloc(words)), refused("allocates"));
+        // An allocation admits both, since `core.vectorWithCapacity` lowers to
+        // the word member: the owner and the store are derived from the
+        // element, so there is nothing here to hold them to.
+        assert_eq!(one(alloc(words)), none);
         // A truncate is the other way round: words and not bytes.
         assert_eq!(one(truncate(words)), none);
         assert_eq!(

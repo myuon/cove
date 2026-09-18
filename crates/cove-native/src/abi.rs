@@ -881,8 +881,9 @@ pub type FieldStoreFn = unsafe extern "C" fn(
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GrowableOp {
-    /// [`Inst::GrowableAlloc`](cove_ir::Inst::GrowableAlloc). `a` is `dst` and `b`
-    /// the slot holding the capacity.
+    /// [`Inst::GrowableAlloc`](cove_ir::Inst::GrowableAlloc) over
+    /// [`Storage::PackedBytes`](cove_ir::Storage::PackedBytes). `a` is `dst` and
+    /// `b` the slot holding the capacity.
     Alloc = 0,
     /// [`Inst::RunFinish`](cove_ir::Inst::RunFinish). `a` is `dst` and `b` the
     /// owner's slot. The target layout and the validation are not operands: the
@@ -931,6 +932,19 @@ pub enum GrowableOp {
     /// slot and `b` the offset's; the source slot is read off the instruction at
     /// the pc, because the ABI carries two operands.
     StoreBytes = 8,
+    /// [`GrowableOp::Alloc`] over [`Storage::Words`](cove_ir::Storage::Words) —
+    /// `core.vectorWithCapacity` — handed over whole for its byte twin's
+    /// reasons and one more. `a` is `dst` and `b` the capacity's slot; the
+    /// element layout is read off the instruction at the pc, as for
+    /// [`GrowableOp::TruncateWords`].
+    ///
+    /// The extra reason is the owner layout. A byte allocation's two layouts
+    /// are program-wide constants a code generator could materialise; a word
+    /// allocation's are the element's, and the machine keeps the element →
+    /// (owner, store) table that answers them. Emitting the allocation would
+    /// mean emitting that lookup as well as the temporary root, and the root is
+    /// already what rules it out.
+    AllocWords = 9,
 }
 
 impl GrowableOp {
@@ -951,6 +965,7 @@ impl GrowableOp {
             6 => Some(GrowableOp::CommitBytes),
             7 => Some(GrowableOp::CommitWords),
             8 => Some(GrowableOp::StoreBytes),
+            9 => Some(GrowableOp::AllocWords),
             _ => None,
         }
     }
@@ -1519,11 +1534,12 @@ mod tests {
             (6, GrowableOp::CommitBytes),
             (7, GrowableOp::CommitWords),
             (8, GrowableOp::StoreBytes),
+            (9, GrowableOp::AllocWords),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(GrowableOp::from_abi(9), None);
+        assert_eq!(GrowableOp::from_abi(10), None);
 
         for (code, op) in [
             (0, RunOp::CopyBytes),

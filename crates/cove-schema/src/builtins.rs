@@ -2237,13 +2237,28 @@ pub const CORE_ENTRY_AT: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// `core.vectorWithCapacity<T>(capacity: Int) -> Vector<T>`: an empty vector
 /// whose store has room for exactly `capacity` elements.
 ///
-/// The store, an `Int` nought and the vector's two-word header, as
-/// `core.arrayToVector` builds them, with no copy: `Inst::Alloc` of the store
-/// at `capacity` and of the header, and the two field writes. Exact rather
-/// than raised to the growth floor, because what a keyed update builds is a
-/// run whose final length it knows — `n + 1` or `n - 1` — and a finish gives
-/// back nothing it did not allocate. A push past the capacity grows the store
-/// as any push does.
+/// One `Inst::GrowableAlloc` over `Storage::Words`, which is
+/// [`CORE_BYTES_ALLOCATE`] in the word unit: the owner and its store are both
+/// derived from the element, so the call says only the capacity.
+///
+/// It was five instructions — `Inst::Alloc` of the store at `capacity`, an
+/// `Int` nought, `Inst::Alloc` of the header, and its two field writes — and
+/// the last of those was the reason it changed: a plain field store at a
+/// growable owner's length offset is what
+/// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md) spent
+/// a stage removing everywhere else, and a construction that happens to write
+/// nought there is a rule a reader has to check rather than one the instruction
+/// set states.
+///
+/// `capacity` is a hint — a push past it grows the store, as any push does —
+/// but it is allocated exactly, which is where this and a byte buffer part.
+/// `Machine::alloc_buffer` raises a small capacity to a floor and
+/// `Machine::alloc_vector` does not, because a byte store below eight buys
+/// nothing where eight bytes are one word, and an element floor is the floor of
+/// the first *growth*. What a keyed update builds is a run whose final length
+/// it already knows — `n + 1` or `n - 1` — so a floor here would be room
+/// nothing fills: it was measured at 666,740 allocated words on cq, 6.94% of
+/// the run's, for no growth avoided.
 ///
 /// Fresh: the vector was allocated by the call, which is what lets a body that
 /// holds it prove it may finish it.

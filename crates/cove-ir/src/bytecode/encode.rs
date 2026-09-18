@@ -437,9 +437,10 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::PackedBytes => build(Op::RunSliceBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunSliceWords, 0, 0, 0, halves(args.0, elem.0)),
         },
-        // The growable family's word members arrive one at a time with the
-        // method that needs each, so a word storage with no opcode is refused
-        // here the way `crate::verify` refuses it first.
+        // One opcode per storage, the word member's element layout in the
+        // payload's low half as `Op::GrowableTruncateWords`' is — and only the
+        // element, because the owner and the store are derived from it at run
+        // time rather than carried twice.
         Inst::GrowableAlloc {
             dst,
             capacity,
@@ -448,7 +449,13 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::PackedBytes => {
                 build(Op::GrowableAllocBytes, slot(dst)?, slot(capacity)?, 0, 0)
             }
-            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+            Storage::Words(elem) => build(
+                Op::GrowableAllocWords,
+                slot(dst)?,
+                slot(capacity)?,
+                0,
+                halves(elem.0, 0),
+            ),
         },
         // The opcode *is* the storage and the validation: a byte finish
         // validates UTF-8 and a word finish validates nothing, so the other
@@ -1042,6 +1049,14 @@ mod tests {
             ),
             (
                 0,
+                Inst::GrowableAlloc {
+                    dst: 1,
+                    capacity: 2,
+                    storage: Storage::Words(L),
+                },
+            ),
+            (
+                0,
                 Inst::RunFinish {
                     dst: 1,
                     owner: 2,
@@ -1456,25 +1471,18 @@ mod tests {
     fn a_run_instruction_over_a_storage_with_no_opcode_is_refused() {
         let words = Storage::Words(LayoutId(0));
         let bytes = Storage::PackedBytes;
-        for inst in [
-            Inst::GrowableAlloc {
-                dst: 0,
-                capacity: 1,
-                storage: words,
-            },
-            Inst::RunStore {
-                run: 0,
-                index: 1,
-                src: 2,
-                storage: words,
-            },
-        ] {
-            assert_eq!(
-                encode(&inst, 0),
-                Err(TooWide::Storage { storage: words }),
-                "{inst:?}"
-            );
-        }
+        assert_eq!(
+            encode(
+                &Inst::RunStore {
+                    run: 0,
+                    index: 1,
+                    src: 2,
+                    storage: words,
+                },
+                0
+            ),
+            Err(TooWide::Storage { storage: words })
+        );
         assert_eq!(
             encode(
                 &Inst::GrowableTruncate {

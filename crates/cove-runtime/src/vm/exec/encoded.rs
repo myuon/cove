@@ -285,6 +285,7 @@ const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
 const RUN_SLICE_BYTES: u8 = Op::RunSliceBytes.number();
 const RUN_SLICE_WORDS: u8 = Op::RunSliceWords.number();
 const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
+const GROWABLE_ALLOC_WORDS: u8 = Op::GrowableAllocWords.number();
 const GROWABLE_TRUNCATE_WORDS: u8 = Op::GrowableTruncateWords.number();
 const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
 const RUN_FINISH_WORDS: u8 = Op::RunFinishWords.number();
@@ -369,6 +370,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::RunSliceBytes
         | Op::RunSliceWords
         | Op::GrowableAllocBytes
+        | Op::GrowableAllocWords
         | Op::GrowableTruncateWords
         | Op::RunFinishBytes
         | Op::RunFinishWords
@@ -3186,6 +3188,22 @@ pub(super) fn dispatch<'s, 'a>(
                     Err(error) => fail!(error),
                 }
             }
+            // The same allocation over words: `core.vectorWithCapacity`, the
+            // empty `Vector` a keyed update is built in. The element layout is
+            // the payload's low half and is the *only* layout the row carries —
+            // `Machine::alloc_vector` reads the owner's and the store's off the
+            // table the machine built from the program's layouts, because an
+            // allocation is the one growable operation with no object to read a
+            // layout from yet.
+            GROWABLE_ALLOC_WORDS => {
+                let capacity = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let elem = LayoutId(held.lo());
+                machine.sync(pc - 1);
+                match machine.alloc_vector(elem, capacity) {
+                    Ok(owner) => machine.mem.set_word_at(base_at + (a!()) as usize, owner),
+                    Err(error) => fail!(error),
+                }
+            }
             // `Vector.pop` and `Vector.remove`'s last step since ADR 0058: the
             // length lowered and the vacated element cleared, as one call.
             GROWABLE_TRUNCATE_WORDS => {
@@ -5112,6 +5130,153 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A word allocation holds its store across the owner's allocation, so a
+    /// collection between the two does not free it.**
+    ///
+    /// `Machine::alloc_vector` allocates the store first and holds it with
+    /// `Machine::push_temp` for exactly the window in which the owner is
+    /// allocated, which is `Machine::alloc_buffer`'s discipline and its
+    /// argument: for that window the store is reachable from a Rust local and
+    /// nothing else, and a Rust local is not a root.
+    ///
+    /// Making the collection land *between* the two is the whole of the
+    /// fixture, and it is built rather than hoped for. The heap is given a dead
+    /// block exactly the size of an owner, then a live wall, then the tail
+    /// everything else is allocated out of — so freeing the dead block does not
+    /// lengthen the tail. A capacity is then searched for at which the store
+    /// fits the tail and the owner's three words do not: the store's allocation
+    /// cannot be the one that collects, because a collection there would free
+    /// an owner-sized hole and the store would still not fit, and the call
+    /// would fail rather than answer. So a call that both answers *and*
+    /// collected collected at the owner.
+    #[test]
+    fn a_word_allocation_holds_its_store_across_a_collection() {
+        const HEAP: usize = 512;
+        let mut build = Build::default();
+        let layouts = keyed_layouts(&mut build);
+        let program = build.done();
+        let found = (1..HEAP as i64).find_map(|capacity| {
+            let mut machine = Machine::new(&program, HEAP);
+            // A hole exactly an owner wide, dead the moment it is made.
+            machine
+                .allocate(layouts.text_vector, 0)
+                .expect("the hole fits");
+            // And a live wall after it, so that the hole cannot become part of
+            // the tail the store is taken from.
+            let wall = machine.allocate(layouts.ints, 4).expect("the wall fits");
+            machine.push_temp(wall);
+            let owner = machine.alloc_vector(layouts.text, capacity).ok()?;
+            (machine.collected().collections == 1).then_some((machine, owner, capacity))
+        });
+        let (machine, owner, capacity) =
+            found.expect("some capacity leaves the owner as the allocation that collects");
+        assert_eq!(machine.object_layout(owner), layouts.text_vector);
+        assert_eq!(machine.payload(owner, 0), 0, "a fresh vector is empty");
+        let store = machine.payload(owner, 1);
+        assert_ne!(store, 0, "the store survived the collection at the owner");
+        assert_eq!(
+            machine.object_layout(store),
+            layouts.text_store,
+            "and it is still the store, not a block the sweep folded back in"
+        );
+        assert_eq!(
+            u64::from(machine.object_len(store)),
+            capacity as u64,
+            "at the capacity asked for"
+        );
+    }
+
+    /// **A reference written into a freshly allocated store is traced through
+    /// it**, from the allocation onwards and with no finish in between.
+    ///
+    /// The store's own header carries `Shape::Elements { elem, growable: true }`
+    /// and `Machine::trace` reads the element's reference map out of it, so the
+    /// words a vector holds are followed the moment the store exists — there is
+    /// no window in which a `Vector<String>` built through this path is a run
+    /// of integers to the collector. The string here is reachable through the
+    /// owner's store and through nothing else when the collection happens.
+    #[test]
+    fn a_reference_in_a_freshly_allocated_store_is_traced() {
+        let mut build = Build::default();
+        let layouts = keyed_layouts(&mut build);
+        let program = build.done();
+        let mut machine = Machine::new(&program, 700);
+        // Room for the one element, asked for: a word allocation takes the
+        // capacity it is given and does not floor it, so a capacity of nought
+        // here would be a store with no payload word to write into.
+        let owner = machine
+            .alloc_vector(layouts.text, 1)
+            .expect("a one-element vector fits");
+        machine.push_temp(owner);
+        let text = machine.new_string("held only by the store").unwrap();
+        let store = machine.payload(owner, 1);
+        machine.set_payload(store, 0, text);
+        machine.set_payload(owner, 0, 1);
+        // Garbage enough to collect. Nothing roots `text` but the store.
+        for _ in 0..20 {
+            let _ = machine.allocate(layouts.ints, 60);
+        }
+        assert!(
+            machine.collected().collections > 0,
+            "the fixture did not force a collection"
+        );
+        let store = machine.payload(owner, 1);
+        assert_eq!(
+            machine.string_bytes(machine.payload(store, 0)),
+            b"held only by the store".to_vec()
+        );
+    }
+
+    /// **A word allocation takes the capacity it is asked for, and refuses a
+    /// negative one** — which is *not* `Machine::alloc_buffer`'s rule, and the
+    /// difference is the two floors' own contract.
+    ///
+    /// [`MIN_GROWABLE_BYTES`] is "the smallest byte store a buffer is allocated
+    /// with, and the floor a growth doubles up from";
+    /// [`MIN_GROWABLE_ELEMENTS`](super::super::runs::MIN_GROWABLE_ELEMENTS)
+    /// is "the floor of the first growth rather than of the first allocation",
+    /// because a `Vector` built from known elements is allocated to exactly
+    /// those. So nought gives a store of nothing here, and a vector that is
+    /// grown gets the floor from `Growable::floor` when it is grown.
+    ///
+    /// The number that settled it: flooring at the allocation cost cq's 196,677
+    /// constructions 666,740 allocated words, 6.94% of the run's, and avoided
+    /// no growth — `core.vectorWithCapacity`'s callers in `std.map` and
+    /// `std.set` size the vector to what they are about to push into it.
+    ///
+    /// A negative capacity is not a small number, it is the one arithmetic a
+    /// caller could not have meant, and clamping it would turn it into a silent
+    /// success.
+    #[test]
+    fn a_word_allocation_takes_the_capacity_asked_and_refuses_a_negative_one() {
+        let mut build = Build::default();
+        let layouts = keyed_layouts(&mut build);
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 14);
+        for (asked, held) in [(0, 0), (1, 1), (9, 9)] {
+            let owner = machine
+                .alloc_vector(layouts.text, asked)
+                .expect("a small vector fits");
+            machine.push_temp(owner);
+            assert_eq!(
+                u64::from(machine.object_len(machine.payload(owner, 1))),
+                held,
+                "a capacity of {asked}"
+            );
+        }
+        assert!(machine.alloc_vector(layouts.text, -1).is_err());
+        // And an element this program declares no vector of is refused by the
+        // table rather than guessed at.
+        let refused = machine
+            .alloc_vector(layouts.int, 4)
+            .expect_err("no `Vector<Int>` is declared here");
+        assert!(
+            refused.message.contains("declares no vector"),
+            "{}",
+            refused.message
+        );
     }
 
     /// **In this crate's tests a keyed finish of a run that is not ascending

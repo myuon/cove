@@ -290,6 +290,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             capacity: b,
             storage: Storage::PackedBytes,
         },
+        Op::GrowableAllocWords => Inst::GrowableAlloc {
+            dst: a,
+            capacity: b,
+            storage: Storage::Words(LayoutId(lo)),
+        },
         Op::GrowableTruncateWords => Inst::GrowableTruncate {
             owner: a,
             len: b,

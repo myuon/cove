@@ -1017,9 +1017,9 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // What fills the buffer between them is [ADR 0062]'s window, admitted
         // row by row further below.
         //
-        // Each is admitted over `Storage::PackedBytes`; the word members are
-        // admitted in arms of their own below, because each is an emitted fast
-        // path and not this helper whole.
+        // Each is admitted over `Storage::PackedBytes`; the word members of the
+        // *finish* are admitted in an arm of their own below, because that one
+        // is an emitted fast path and not this helper whole.
         //
         // They are admitted together: one without the other would be a subset
         // that could allocate a builder and not finish it, and the first function
@@ -1039,6 +1039,17 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             capacity,
             storage: Storage::PackedBytes,
         } => slot(*dst) && slot(*capacity),
+        // And the same allocation over words — `core.vectorWithCapacity` —
+        // handed to the same helper whole, with the element layout read off the
+        // instruction and bounded against the table as a truncate's is. It is
+        // not paired with anything: a word finish is admitted on its own terms
+        // below, and a vector allocated here may be frozen, pushed onto, or
+        // passed on without ever being finished in this function.
+        Inst::GrowableAlloc {
+            dst,
+            capacity,
+            storage: Storage::Words(elem),
+        } => elem.index() < program.layouts.len() && slot(*dst) && slot(*capacity),
         Inst::RunFinish {
             dst,
             owner,

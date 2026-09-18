@@ -201,8 +201,12 @@ mod base {
     pub const FUSED_PUSH_BYTE: u8 = FUSED_PUSH_WORDS + 1;
     pub const FUSED_APPEND_BYTES: u8 = FUSED_PUSH_BYTE + 1;
     pub const FUSED_APPEND_WORDS: u8 = FUSED_APPEND_BYTES + 1;
+    /// The word member of the growable allocation — `core.vectorWithCapacity`
+    /// — last rather than beside its byte twin, for `CMP_ORDER`'s reason:
+    /// adding it renumbered nothing already there.
+    pub const GROWABLE_ALLOC_WORDS: u8 = FUSED_APPEND_WORDS + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = FUSED_APPEND_WORDS + 1;
+    pub const END: u8 = GROWABLE_ALLOC_WORDS + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -265,6 +269,10 @@ pub enum Op {
     RunSliceWords,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
     GrowableAllocBytes,
+    /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::Words`], whose
+    /// element layout is the payload's low half — the only layout the row
+    /// carries, because the owner and the store are both derived from it.
+    GrowableAllocWords,
     /// [`crate::Inst::GrowableTruncate`] over [`crate::Storage::Words`], whose
     /// element layout is the payload's low half.
     GrowableTruncateWords,
@@ -600,6 +608,7 @@ impl Op {
             Op::FusedPushByte,
             Op::FusedAppendBytes,
             Op::FusedAppendWords,
+            Op::GrowableAllocWords,
         ]);
         all
     }
@@ -665,6 +674,7 @@ impl Op {
             Op::RunSliceBytes => base::RUN_SLICE_BYTES,
             Op::RunSliceWords => base::RUN_SLICE_WORDS,
             Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
+            Op::GrowableAllocWords => base::GROWABLE_ALLOC_WORDS,
             Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
             Op::RunFinishBytes => base::RUN_FINISH_BYTES,
             Op::RunFinishWords => base::RUN_FINISH_WORDS,
@@ -964,6 +974,16 @@ impl Op {
             Op::GrowableAllocBytes => {
                 fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty)
             }
+            // The word member carries one layout and not two: the element, from
+            // which the runtime's own table answers the owner and the store.
+            // Arranged as `Op::GrowableTruncateWords` is, for the same reason —
+            // a reference, a count, and the element in the payload's low half.
+            Op::GrowableAllocWords => fields(
+                Operand::Word(REF),
+                Operand::Word(INT),
+                NONE,
+                one(Half::Layout),
+            ),
             // The owner and the new length, and the element layout the vacated
             // units are cleared at the stride of.
             Op::GrowableTruncateWords => fields(
@@ -1107,7 +1127,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and seventy-six opcodes out of the 256 a byte
+    /// argued from: a hundred and seventy-seven opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -1140,16 +1160,17 @@ mod tests {
     /// hundred and seventy-nine once the same ADR's fused heads brought one per
     /// window pattern, and a hundred and seventy-six once that ADR's last stage
     /// deleted the composite `GrowablePushByte`, `GrowablePushWords` and
-    /// `GrowableExtendBytes`, whose windows the fused heads had replaced. What
-    /// the
+    /// `GrowableExtendBytes`, whose windows the fused heads had replaced, and a
+    /// hundred and seventy-seven once the growable allocation gained its word
+    /// member for `core.vectorWithCapacity`. What the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventy_six_opcodes() {
-        assert_eq!(Op::all().len(), 176);
-        assert_eq!(OPCODES, 176);
+    fn there_are_a_hundred_and_seventy_seven_opcodes() {
+        assert_eq!(Op::all().len(), 177);
+        assert_eq!(OPCODES, 177);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

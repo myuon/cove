@@ -1392,17 +1392,36 @@ impl Body<'_> {
         dst
     }
 
-    /// `core.vectorWithCapacity(capacity)`: an empty `Vector` whose store has
-    /// room for exactly `capacity` elements.
+    /// `core.vectorWithCapacity(capacity)`: an empty word [`Inst::GrowableAlloc`].
     ///
-    /// [`Body::vector_of_elements`]' two allocations and two field writes with
-    /// no copy between them: an [`Inst::Alloc`] of the store at `capacity`, an
-    /// `Int` nought, the header's [`Inst::Alloc`], and its length and store
-    /// fields. The store is zeroed by its allocation, so every unit above the
-    /// length traces as null until something writes it, and it is held in a
-    /// slot of its own across the header's allocation, which may collect. A
-    /// negative capacity is refused by the store's allocation, in the words
-    /// every allocation is.
+    /// [`Body::core_bytes_allocate`] over words, and the same one instruction:
+    /// the owner and the store are both derived from the element the storage
+    /// names — the program's [`crate::Shape::Vector`] of it and the growable
+    /// [`crate::Shape::Elements`] of it — so there is nothing for the call to
+    /// say beyond the capacity and the element.
+    ///
+    /// It was five instructions until then: an [`Inst::Alloc`] of the store at
+    /// the capacity, an `Int` nought, the header's [`Inst::Alloc`], and its
+    /// length and store fields. The last of those is why this changed and not
+    /// only how much it costs. A plain [`Inst::StoreField`] at a growable
+    /// owner's length offset is the instruction
+    /// [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+    /// spent a stage removing from every appending body, and a construction
+    /// that writes a constant nought there is harmless only because the
+    /// constant is nought — a rule a reader has to check rather than one the
+    /// instruction set states. There is now no field store at that offset
+    /// anywhere in the standard library, which
+    /// `no_field_store_publishes_a_growable_owner_s_length` holds.
+    ///
+    /// The capacity is still allocated exactly, and that is worth saying
+    /// because the byte member does not: `Machine::alloc_buffer` raises a small
+    /// capacity to a floor and `Machine::alloc_vector` does not, which is the
+    /// two floors' own contract — a byte store below eight buys nothing because
+    /// eight bytes are one word, and an element floor is the floor of the first
+    /// *growth*. This intrinsic's callers are `std.map` and `std.set` sizing an
+    /// output vector to the elements they are about to push into it, so a floor
+    /// here is spare room nothing fills: it was measured at 666,740 allocated
+    /// words on cq, 6.94% of the run's, for no growth avoided.
     fn core_vector_with_capacity(
         &mut self,
         expr: &Expr,
@@ -1424,55 +1443,22 @@ impl Body<'_> {
         else {
             return self.dead(expr);
         };
-        let store_layout = self.pool.shapes.store_of(element);
+        // Interned although the instruction does not name it: the machine finds
+        // the store by the element, out of the program's layout table, so a
+        // program whose only vector of this element is built here still has to
+        // declare the shape of the run it is built in.
+        self.pool.shapes.store_of(element);
         let room = self.expr(capacity);
-        let store = self.temp(shapes::REF);
+        let dst = self.answer_at(want, vector);
         self.emit(
-            Inst::Alloc {
-                dst: store.slot,
-                layout: store_layout,
-                len: Len::Slot(room.slot),
+            Inst::GrowableAlloc {
+                dst: dst.slot,
+                capacity: room.slot,
+                storage: Storage::Words(element),
             },
             expr.span,
         );
         self.release(room, expr.span);
-        let zero = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: zero.slot,
-                value: 0,
-            },
-            expr.span,
-        );
-        let dst = self.answer_at(want, vector);
-        self.emit(
-            Inst::Alloc {
-                dst: dst.slot,
-                layout: vector,
-                len: Len::Fixed,
-            },
-            expr.span,
-        );
-        self.emit(
-            Inst::StoreField {
-                obj: dst.slot,
-                at: VECTOR_LEN,
-                src: zero.slot,
-                layout: shapes::INT,
-            },
-            expr.span,
-        );
-        self.emit(
-            Inst::StoreField {
-                obj: dst.slot,
-                at: VECTOR_STORE,
-                src: store.slot,
-                layout: shapes::REF,
-            },
-            expr.span,
-        );
-        self.give_back(zero.slot, zero.layout);
-        self.release(store, expr.span);
         dst
     }
 
