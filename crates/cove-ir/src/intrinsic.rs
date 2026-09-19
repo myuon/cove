@@ -633,6 +633,97 @@ impl Effects {
 mod tests {
     use super::*;
 
+    /// The set of intrinsics may lose members and may never gain one.
+    ///
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)
+    /// decides that `IntrinsicCall` "is a migration mechanism, and its
+    /// population only falls": every variant below is a public method's
+    /// algorithm in Rust, [issue #432](https://github.com/myuon/cove/issues/432)
+    /// moves each one into Cove or into a primitive that names a machine
+    /// instead, and the enum is deleted when the list is empty.
+    ///
+    /// **It is compared as a set rather than as a count**, for the reason
+    /// `crates/cove-cli/tests/vm_coverage.rs` compares its known
+    /// disagreements as one: a count cannot tell a variant that left from one
+    /// that arrived, so a change that migrates `String.split` and adds
+    /// `Text.replace` leaves the number falling and the architecture exactly
+    /// where it was. Only a set says which happened.
+    ///
+    /// Deleting a line is the whole of what a migration owes this test.
+    /// Adding one is the design error ADR 0064 exists to make loud: an
+    /// operation that wants a runtime arm of its own has to pass Decision 2
+    /// first — its only failures are ones the program did not write — and an
+    /// operation named after a method never does.
+    #[test]
+    fn the_intrinsic_set_only_shrinks() {
+        const MIGRATED_BUT_STILL_HERE: &[&str] = &[
+            "Value.renderInto",
+            "String.length",
+            "String.words",
+            "String.chars",
+            "String.split",
+            "String.join",
+            "String.slice",
+            "String.trim",
+            "String.contains",
+            "String.startsWith",
+            "String.endsWith",
+            "String.indexOf",
+            "String.replace",
+            "String.toUpper",
+            "String.toLower",
+            "String.fromCodePoint",
+            "String.refuseByteRange",
+            "Int.parse",
+            "Int.parseRadix",
+            "Float.toInt",
+            "Float.round",
+            "Float.abs",
+            "Float.sqrt",
+            "Float.min",
+            "Float.max",
+            "Float.format",
+            "Float.parse",
+            "Any.equals",
+            "Value.order",
+            "Value.admitKey",
+            "Value.refuseDuplicate",
+        ];
+
+        let here: Vec<String> = ALL.iter().map(|one| one.to_string()).collect();
+        let allowed: Vec<&str> = MIGRATED_BUT_STILL_HERE.to_vec();
+
+        let added: Vec<&String> = here
+            .iter()
+            .filter(|one| !allowed.contains(&one.as_str()))
+            .collect();
+        assert!(
+            added.is_empty(),
+            "`Intrinsic` gained {added:?}. ADR 0064: the set only shrinks, and a \
+             new operation below the standard library names a machine — a typed \
+             scalar operation, a run load or store, a bounded run search, \
+             compare, slice or copy, a typed run's allocation or finish, or a \
+             dynamic value's layout — not a method. If this really is one of \
+             those, name it for the capability and give it an instruction; \
+             `IntrinsicCall` is not where it goes"
+        );
+
+        let left: Vec<&&str> = allowed
+            .iter()
+            .filter(|one| !here.iter().any(|had| had == *one))
+            .collect();
+        if !left.is_empty() {
+            // The ratchet: what a migration deletes, it deletes here too, so
+            // that the list is always what the enum is and the next reader
+            // can see how far #432 got by reading one of them.
+            panic!(
+                "`Intrinsic` no longer has {left:?} — good. Delete those lines \
+                 from `MIGRATED_BUT_STILL_HERE` in the same change, so the list \
+                 stays the census #432 is measured against"
+            );
+        }
+    }
+
     /// [`ALL`] names every variant exactly once.
     ///
     /// A hand-written list like [`ALL`] goes wrong in exactly two ways: a
