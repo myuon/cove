@@ -77,6 +77,17 @@ test fn an_escape_does_not_end_a_literal() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// A `"` inside a code-point literal is a character and not the start of a
+/// string, so what follows it is still code. Issue 402 was a scanner in the
+/// Rust formatter that did not know the form existed: it read the `"` in
+/// `'"'` as opening a string, and every comment up to the next `"` anywhere
+/// later in the file was never seen and so never written back.
+test fn a_quote_inside_a_code_point_opens_nothing() -> Result<Unit, Error> {
+  assertEqual(shape("'\"' // c"), "char space line")?
+  assertEqual(shape("'\"' x"), "char space word")?
+  Ok(())
+}
+
 /// An interpolation is inside the literal it is written in: what is between
 /// the braces is one more expression and is the parser's to take apart.
 test fn an_interpolation_stays_inside_its_literal() -> Result<Unit, Error> {

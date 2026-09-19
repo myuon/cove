@@ -110,6 +110,7 @@ fn scan_comments(source: &str) -> Vec<Comment> {
     while i < bytes.len() {
         match bytes[i] {
             b'"' => i = skip_string(bytes, i),
+            b'\'' => i = skip_code_point(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
                 let is_doc = bytes.get(i + 2) == Some(&b'/') && bytes.get(i + 3) != Some(&b'/');
                 let end = line_end(bytes, i);
@@ -176,6 +177,29 @@ fn skip_interpolation(bytes: &[u8], from: usize) -> usize {
             b'}' => return i + 1,
             b'{' => i = skip_interpolation(bytes, i + 1),
             b'"' => i = skip_string(bytes, i),
+            b'\'' => i = skip_code_point(bytes, i),
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// Skips a `'c'` code-point literal, exactly as the lexer does.
+///
+/// A literal is skipped rather than read because of what is *inside* one:
+/// `'"'` is a perfectly ordinary code point, and a scanner that does not know
+/// the form exists reads that `"` as opening a string. The phantom string then
+/// runs to the next `"` anywhere later in the file and every comment it covers
+/// is never seen — which is [issue 402], where one comment vanished from
+/// `examples/covefmt/lex.cove` and the 117 lines after it went with it.
+///
+/// [issue 402]: https://github.com/myuon/cove/issues/402
+fn skip_code_point(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'\'' => return i + 1,
             _ => i += 1,
         }
     }
@@ -3154,6 +3178,55 @@ fn a(/* four */ x: Int) { // five
         assert_eq!(format(&output), output, "formatting is not idempotent");
     }
 
+    /// A `"` inside a code-point literal is a character, not the start of a
+    /// string. Before [issue 402] the comment scanner did not know the form
+    /// existed, so `'"'` opened a string that closed at the next `"` anywhere
+    /// later in the file, and every comment under it was never scanned and so
+    /// never written back — silently, because the only thing that checked was
+    /// the same scanner.
+    ///
+    /// [issue 402]: https://github.com/myuon/cove/issues/402
+    #[test]
+    fn keeps_a_comment_beside_a_quote_code_point() {
+        let source = src("
+fn a(c: Int) {
+  if c == '\"' { // one
+    b()
+  }
+  // two
+  let d = '\\'' // three
+  // four
+}
+");
+        let output = format(&source);
+        for word in ["one", "two", "three", "four"] {
+            assert!(
+                output.contains(word),
+                "comment `{word}` was dropped:\n{output}"
+            );
+        }
+        assert_eq!(format(&output), output, "formatting is not idempotent");
+    }
+
+    /// The comment scanner is a second reader of the source beside the lexer,
+    /// and the cost of that is that the two can disagree. This pins the forms
+    /// a comment can hide behind: a string, an interpolation, a code point,
+    /// and a code point inside an interpolation.
+    #[test]
+    fn scans_comments_past_every_kind_of_literal() {
+        let source = src("
+fn a(c: Int) {
+  let s = \"a // not a comment\"
+  let t = \"{ if c == '\"' { 1 } else { 2 } } // still not one\"
+  let u = '\"'
+  // the only comment here
+}
+");
+        let comments = scan_comments(&source);
+        let texts: Vec<&str> = comments.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["// the only comment here"]);
+    }
+
     // -- whole-repository properties ---------------------------------------
 
     fn repo_root() -> PathBuf {
@@ -3280,6 +3353,128 @@ fn a(/* four */ x: Int) { // five
                 path.display()
             );
         }
+    }
+
+    /// Every line of every file in the repository, with a comment inserted
+    /// above it and a comment appended to it, still has that comment after
+    /// formatting.
+    ///
+    /// This is the probe that found [issue 402], and it is written this way
+    /// because of *why* it had to be written: the test above it compares
+    /// `scan_comments` of the input against `scan_comments` of the output,
+    /// which cannot see a comment the scanner is blind to on either side. It
+    /// passed for as long as the bug existed. A marker this test inserts
+    /// itself and counts with `str::matches` is an oracle the formatter does
+    /// not supply.
+    ///
+    /// A variant that does not parse is skipped: inserting into a string
+    /// literal or into an existing comment is expected to break parsing, and
+    /// `cove fmt` never rewrites a file it cannot parse.
+    ///
+    /// It is `#[ignore]`d, so it runs under `cargo ratchet` rather than
+    /// `cargo t`. Every variant reparses a whole file, so the work is
+    /// quadratic in file size and `print.cove` alone is three thousand lines;
+    /// it is 58s on one thread, and a few seconds spread over the cores.
+    ///
+    /// [issue 402]: https://github.com/myuon/cove/issues/402
+    #[test]
+    #[ignore = "reparses every repository file once per line; run under `cargo ratchet`"]
+    fn a_comment_inserted_at_any_line_of_any_repository_file_survives() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        const MARKER: &str = "// COVEPROBE";
+
+        /// Whether `variant` still has every marker in it after formatting.
+        fn survives(variant: &str) -> bool {
+            let mut sources = SourceMap::new();
+            let file = sources.add("probe.cove", variant.to_string());
+            let Ok(unit) = crate::parse_file(&sources, file) else {
+                return true;
+            };
+            format_source(variant, &unit).matches(MARKER).count() == variant.matches(MARKER).count()
+        }
+
+        /// The two ways a comment can be written at line `i`: on its own line
+        /// above, at the indent of the line it introduces, and at the end of
+        /// the line itself.
+        fn variants(lines: &[&str], i: usize) -> [(&'static str, String); 2] {
+            let indent: String = lines[i].chars().take_while(|c| c.is_whitespace()).collect();
+            let mut above = lines.to_vec();
+            let owned = format!("{indent}{MARKER}");
+            above.insert(i, &owned);
+            let mut beside = lines.to_vec();
+            let appended = format!("{} {MARKER}", lines[i]);
+            beside[i] = &appended;
+            [
+                ("above", format!("{}\n", above.join("\n"))),
+                ("beside", format!("{}\n", beside.join("\n"))),
+            ]
+        }
+
+        // One work item per line of the repository, so that the threads share
+        // the load evenly: a file's cost is quadratic in its length, so
+        // handing each thread whole files would hand one of them `print.cove`
+        // and leave the rest idle.
+        let sources: Vec<(PathBuf, String)> = cove_files()
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).expect("the file is readable");
+                (path, text)
+            })
+            .collect();
+        let work: Vec<(usize, usize)> = sources
+            .iter()
+            .enumerate()
+            .flat_map(|(f, (_, text))| (0..text.lines().count()).map(move |i| (f, i)))
+            .collect();
+
+        let sources = Arc::new(sources);
+        let work = Arc::new(work);
+        let cursor = Arc::new(AtomicUsize::new(0));
+        let dropped: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                let (sources, work) = (Arc::clone(&sources), Arc::clone(&work));
+                let (cursor, dropped) = (Arc::clone(&cursor), Arc::clone(&dropped));
+                scope.spawn(move || loop {
+                    let next = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(f, i)) = work.get(next) else {
+                        return;
+                    };
+                    let (path, text) = &sources[f];
+                    let lines: Vec<&str> = text.lines().collect();
+                    for (kind, variant) in variants(&lines, i) {
+                        if !survives(&variant) {
+                            let line = i + 1;
+                            dropped
+                                .lock()
+                                .expect("no thread panicked while holding the list")
+                                .push(format!("{} line {line} ({kind})", path.display()));
+                        }
+                    }
+                });
+            }
+        });
+
+        let mut dropped = Arc::into_inner(dropped)
+            .expect("every thread has finished")
+            .into_inner()
+            .expect("no thread panicked while holding the list");
+        dropped.sort();
+        assert!(
+            dropped.is_empty(),
+            "{} comments were dropped, the first ten being:\n{}",
+            dropped.len(),
+            dropped
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     #[test]

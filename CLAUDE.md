@@ -30,17 +30,29 @@ Run the ignored ones with `cargo ratchet`, an alias for the same thing under
 `--profile checked`. Use the alias rather than writing the command out: the
 profile is not a nicety there, it is 39s against 241s, because this is the
 one suite that is compute-bound rather than spawn-bound.
-There is one, and it is the roadmap: `crates/cove-cli/tests/vm_coverage.rs`
-runs every program in the repository on the linear-memory backend and sorts
-the answers into agrees, *disagrees*, and does not lower. It is ignored
-because it runs what it lowers, and the benchmark rows are two million turns
-each.
+
+There are two, and both do their work once per program in the repository.
+
+The first is the roadmap: `crates/cove-cli/tests/vm_coverage.rs` runs every
+program in the repository on the linear-memory backend and sorts the answers
+into agrees, *disagrees*, and does not lower. It is ignored because it runs
+what it lowers, and the benchmark rows are two million turns each.
 
 Its two ratchets are both load-bearing and they are not the same. The count
 may rise and never fall. The known-disagreement set is compared as a *set*,
 because a count cannot tell a new disagreement from an old one — a change
 that teaches one family and breaks another raises the count while introducing
 a program that lowers and lies. The set has caught that twice.
+
+The second is the formatter's comment probe in
+`crates/cove-syntax/src/format.rs`, which inserts a comment at every line of
+every `.cove` file and checks the formatter still emits it. It is there
+because the test beside it — comparing the comments the scanner finds in the
+input against the ones it finds in the output — is the scanner judging itself,
+and it passed for as long as [issue 402](https://github.com/myuon/cove/issues/402)
+existed. A marker the test inserts and counts itself is an oracle the
+formatter does not supply. Every variant reparses a whole file, so the work is
+quadratic in file size: 9s over the cores, 58s on one.
 
 Before pushing, the full gate is what CI runs, and CI runs all of it under
 `--profile checked`: `cargo fmt --all --check`,
