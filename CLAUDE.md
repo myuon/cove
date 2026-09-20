@@ -133,7 +133,7 @@ $ cd .. && ./target/checked/cove-bench --iterations 1
 ```
 
 `cove test (examples)` is the one that matters most and the one most easily
-forgotten: it runs 165 `test fn`s in `examples/`, on the linear-memory backend
+forgotten: it runs 222 `test fn`s in `examples/`, on the linear-memory backend
 and then on the interpreter, and it is the first place a lowering change is
 felt by a *real* program rather than by a fixture. A change to the IR has been
 merged-shaped and green on the five commands while crashing there — the
