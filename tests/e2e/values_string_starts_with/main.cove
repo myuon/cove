@@ -1,0 +1,118 @@
+use console.println
+
+/// `startsWith` at every character width, and at the byte patterns that would
+/// catch a prefix comparison that stopped early.
+///
+/// ADR 0064 moved the prefix test out of the runtime and into
+/// `std.string.startsWith`, a Cove loop over `core.byteLength` and `byteAt`
+/// that compares the receiver's first bytes against the prefix's.
+/// `str::starts_with` compared the same bytes, so the two cannot disagree
+/// about any input — but the loop has to get by hand what the Rust call got
+/// for nothing: the length test before a byte of either string is read, and
+/// every byte of the prefix rather than the first of them.
+///
+/// The offset the comparison starts at is 0, which is a character boundary in
+/// every string there is, so this owes none of the argument
+/// `tests/e2e/values_string_ends_with` is about. What it owes instead is the
+/// other end, and the last group is what that is worth. `あ` is `E3 81 82` and
+/// `ア` is `E3 82 A2`; `é` is `C3 A9` and `ä` is `C3 A4`; `😀` is
+/// `F0 9F 98 80` and U+10000 is `F0 90 80 80`. Each pair agrees on its **first**
+/// byte and on nothing after it, so a comparison that read one byte and
+/// stopped would answer `true` to all three. Each answers `false`.
+///
+/// That the three pairs are of equal width is not a convenience of the
+/// example, it is UTF-8: a lead byte declares how wide the character it begins
+/// is, so two characters whose first bytes agree are the same number of bytes
+/// long. There is no cross-width first-byte pair to write — which is exactly
+/// where a prefix and a suffix differ, because at the far end
+/// `values_string_ends_with` finds `あ` and U+0082 sharing a last byte across
+/// three bytes and two.
+///
+/// The pairs that agree on all but the last byte are the character-width group
+/// above: `あ` against `い` is `E3 81 82` against `E3 81 84`, and `😀` against
+/// `😁` is `F0 9F 98 80` against `F0 9F 98 81`.
+///
+/// The harness runs this on the linear-memory backend and again with
+/// `--backend ast`, and both runs are held to the one `expected.out` — which
+/// is the oracle the deleted `text.rs` unit test used to be, now supplied by a
+/// program rather than by the thing under test.
+export fn main() -> Result<Unit, Error> {
+  // An empty prefix: the loop does not run, so the answer is `true` whatever
+  // the receiver is, which is what `str::starts_with("")` answers. Asserted
+  // rather than left to be obvious, because it is the one answer that comes
+  // out of the loop's shape instead of out of a comparison.
+  let empty = ""
+  let cove = "cove"
+  println("empty/empty {empty.startsWith(empty)}")?
+  println("cove/empty {cove.startsWith(empty)}")?
+
+  // A prefix longer than the receiver is settled on the two lengths, before
+  // either is read: a loop that compared what there was would run off the end
+  // of the text and call a prefix of the prefix a match.
+  println("empty/cove {empty.startsWith(cove)}")?
+  let ab = "ab"
+  println("ab/abc {ab.startsWith("abc")}")?
+  let cov = "cov"
+  println("cov/cove {cov.startsWith(cove)}")?
+
+  // The receiver as its own prefix: the comparison reads every byte of both
+  // and stops where they both end.
+  println("cove/cove {cove.startsWith(cove)}")?
+
+  // Ordinary ASCII, matching and not.
+  let path = "main.cove"
+  println("main.cove/main {path.startsWith("main")}")?
+  println("main.cove/test {path.startsWith("test")}")?
+
+  // The first bytes agree and a later one does not, which is what a loop that
+  // stopped short would call a match. `main.rs` shares `main.` with the path
+  // and differs at the sixth byte compared; `cove.` shares `cove` with
+  // `covert` and differs at the fifth.
+  println("main.cove/main.rs {path.startsWith("main.rs")}")?
+  let covert = "covert"
+  println("covert/cove. {covert.startsWith("cove.")}")?
+
+  // Two bytes a character: `é` is U+00E9, `C3 A9`, and `è` is U+00E8, `C3 A8`.
+  // The two share their lead byte, so the miss is found at the end of the
+  // comparison rather than at its start.
+  let ecole = "école"
+  println("école/é {ecole.startsWith("é")}")?
+  println("école/è {ecole.startsWith("è")}")?
+
+  // Three bytes: `あいう` is `E3 81 82 | E3 81 84 | E3 81 86`. `あ` matches,
+  // and `い` agrees with it in two bytes of three.
+  let kana = "あいう"
+  println("あいう/あ {kana.startsWith("あ")}")?
+  println("あいう/い {kana.startsWith("い")}")?
+
+  // Four bytes: `😀` is U+1F600, `F0 9F 98 80`, and `😁` is U+1F601,
+  // `F0 9F 98 81` — three bytes of agreement and a difference in the last.
+  let face = "😀x"
+  println("😀x/😀 {face.startsWith("😀")}")?
+  println("😀x/😁 {face.startsWith("😁")}")?
+
+  // The three pairs that agree on the first byte and nowhere else, which is
+  // where a comparison that read one byte and stopped would answer `true`.
+  // `ä` is U+00E4, `C3 A4`, against `é`'s `C3 A9`; `ア` is U+30A2, `E3 82 A2`,
+  // against `あ`'s `E3 81 82`; U+10000 is `F0 90 80 80` against `😀`'s
+  // `F0 9F 98 80`. `String.fromCodePoint` for the last of them because a
+  // character outside every script anyone reads this file in is a byte
+  // sequence, not a glyph.
+  println("école/ä {ecole.startsWith("ä")}")?
+  println("あいう/ア {kana.startsWith("ア")}")?
+  let linearB = String.fromCodePoint(65536).unwrapOr("")
+  println("😀x/U+10000 {face.startsWith(linearB)}")?
+
+  // A receiver built at run time rather than written as a literal, since a
+  // literal is the one shape a constant fold could answer. The two prefixes
+  // are the same six bytes in the two orders, so one of them matches and the
+  // other differs at the very first byte compared — `C3` against `F0`.
+  var built = ""
+  var i = 0
+  while i < 3 {
+    built = "{built}é😀"
+    i += 1
+  }
+  println("built {built.startsWith("é😀")} {built.startsWith("😀é")} {built.byteLength()}")?
+  Ok(())
+}

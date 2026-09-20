@@ -162,6 +162,18 @@ allow = ["console", "clock"]
 entry = "endswith.main"
 allow = ["console", "clock"]
 
+# The same four rows for `String.startsWith`, in a package of its own rather
+# than four more rows in `endswith`: the two are the same loop with a
+# different offset, and one package per operation keeps a row attributable to
+# the operation the package is named for. What it gives up is the shared
+# bare-loop control that would have made the two directly comparable inside
+# one process; the sizes are deliberately `endswith`'s, so the comparison can
+# still be taken across the two, knowing it costs a code layout.
+
+[run.startswith]
+entry = "startswith.main"
+allow = ["console", "clock"]
+
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
 # #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,

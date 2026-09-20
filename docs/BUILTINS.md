@@ -211,7 +211,7 @@ written as a namespace.
 | `slice(from: Int, to: Int) -> String` |  |  |  | `machine` |
 | `trim() -> String` |  |  |  | `machine` |
 | `contains(text: String) -> Bool` |  |  |  | `machine` |
-| `startsWith(prefix: String) -> Bool` |  |  |  | `machine` |
+| `startsWith(prefix: String) -> Bool` |  |  |  | `std.string.startsWith` |
 | `endsWith(suffix: String) -> Bool` |  |  |  | `std.string.endsWith` |
 | `indexOf(text: String) -> Option<Int>` |  |  |  | `machine` |
 | `replace(old: String, new: String) -> String` |  |  |  | `machine` |
