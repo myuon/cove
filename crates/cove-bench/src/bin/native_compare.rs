@@ -1448,11 +1448,17 @@ fn covefmt(iterations: u32, dump: bool, decompose: bool) -> Result<(), String> {
     heading_line("the second raced slice: covefmt's `wantsASpaceBetween` and `byteOfPunct`");
 
     let (sources, checked) = examples_package()?;
+    // `byteOfPunct` is a root of this slice even though `wantsASpaceBetween`
+    // calls it, because *this* is what enters it: the race compiles it and
+    // calls it directly. `lower::sweep` stands down a function the lowered
+    // program stops naming — `wantsASpaceBetween` expands every call site of
+    // it — and a root is what the sweep keeps whatever names it. Naming it
+    // adds nothing to the slice: it was already reached.
     let ir = cove_ir::lower_roots(
         &checked,
         &sources,
         &HostSchemas::new(),
-        &[(COVEFMT, LEXER), (COVEFMT, WANTS)],
+        &[(COVEFMT, LEXER), (COVEFMT, WANTS), (COVEFMT, BYTE_OF_PUNCT)],
     )
     .map_err(|items| render(&sources, &items))?;
     let wants = entry_of(&ir, COVEFMT, WANTS)?;

@@ -183,17 +183,24 @@ fn a_session_starts_stopped_before_the_entry_s_first_instruction() {
 /// answered by a table `cove debug` computes and by nothing the compiler
 /// records.
 ///
-/// **Two locations, and the second is the point.** `twice` is a small leaf,
-/// so `lower::inline` expanded it into `raise` — its line is written in two
-/// functions now, its own copy and the expansion, and the expansion is the
-/// one that runs. Both are offered and both are named `debug_session.twice`,
-/// because that is the body the line is written in; what tells them apart is
-/// where each one *stands*.
+/// **One location, inside an expansion, and that is the point.** `twice` is
+/// a small leaf, so `lower::inline` expanded it into `raise` — and since
+/// `raise` held its only call site, nothing named `twice` afterwards and
+/// `lower::sweep` stood the function down (issue #440). Its line is written
+/// in one place that can be reached now: the expansion. The location is
+/// still named `debug_session.twice`, because that is the body the line is
+/// written in; what says where it stands is the function it was expanded
+/// into.
+///
+/// It used to be two, its own copy and the expansion, and the copy was the
+/// one that could never fire — which is exactly what
+/// [`a_breakpoint_on_a_line_with_no_lowered_instruction_is_refused_rather_than_accepted`]
+/// calls a debugger silently lying about where a program can stop. The sweep
+/// removes the lie rather than the location that answers.
 #[test]
 fn a_breakpoint_set_on_a_source_line_stops_the_run_on_that_line() {
     let session = debug("break debug_session/main.cove:6\ncontinue\nquit\n");
-    session.says("breakpoint 1 at 2 locations:");
-    session.says("debug_session.twice pc 0 at debug_session/main.cove:6:");
+    session.says("breakpoint 1 at 1 location:");
     // Named without its pc, which is wherever `raise` happens to hold the
     // expanded body and moves whenever anything above it in that function
     // does. What the location means is the function, the expansion it is

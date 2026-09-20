@@ -82,6 +82,7 @@ mod methods;
 mod pattern;
 mod shapes;
 mod stmt;
+mod sweep;
 mod tails;
 mod tasks;
 mod walks;
@@ -180,7 +181,7 @@ pub fn lower(
     let Lowering {
         program, errors, ..
     } = emit(checked, sources, schemas, &mut plan, &everything);
-    finish(program, errors)
+    finish(program, errors, Roots::Package)
 }
 
 /// Lowers only the declarations `roots` can reach.
@@ -255,10 +256,32 @@ pub fn lower_roots(
             wanted,
         } = emit(checked, sources, schemas, &mut plan, &reach);
         if wanted.is_empty() {
-            return finish(program, errors);
+            return finish(program, errors, Roots::Named(roots));
         }
         reach.extend(wanted);
     }
+}
+
+/// What a lowering is about, which is what `sweep` may not stand down.
+///
+/// The distinction is [`lower`]'s against [`lower_roots`]', and it is the
+/// same one their own documentation draws: a whole-package lowering means
+/// every declaration is part of the program, and a sliced one is about the
+/// entries it was given.
+enum Roots<'a> {
+    /// Everything the package declares, so nothing is unreferenced and
+    /// `sweep` has nothing to find. A listing, the corpus survey and an
+    /// embedding that invokes several functions through one `Vm` all lower
+    /// this way, and all three would be wrong if a body they can still name
+    /// went away.
+    Package,
+    /// The entry points a command named, as [`lower_roots`] was given them.
+    ///
+    /// Resolved against the finished program the way the machine resolves an
+    /// entry — [`Program::function_named`] — so what survives the sweep
+    /// whatever calls it is exactly what a run can enter at. A root that
+    /// names nothing this package declares contributes nothing here either.
+    Named(&'a [(&'a str, &'a str)]),
 }
 
 /// Lowers only the declarations `module.name` can reach.
@@ -369,7 +392,11 @@ fn emit<'a>(
 
 /// The lowered program, or what stopped it — and the verifier's word that
 /// the first of the two is well formed.
-fn finish(mut program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<Diagnostic>> {
+fn finish(
+    mut program: Program,
+    errors: Vec<Diagnostic>,
+    roots: Roots<'_>,
+) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(only_once(errors));
     }
@@ -380,6 +407,20 @@ fn finish(mut program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<
     // about to make pointless — and running them first would mean running
     // them twice. See `inline`.
     inline::expand_small_leaf_calls(&mut program);
+
+    // And then the slice's own question, asked again about what that left:
+    // expanding every call site of a function removes the last reference to
+    // it, and the reachability `lower_roots` closed was closed before this
+    // ran. What nothing names is stood down to a stub here, before the three
+    // passes below walk it and before anything encodes or compiles it. See
+    // `sweep`, and issue #440.
+    if let Roots::Named(named) = roots {
+        let kept: HashSet<FunctionId> = named
+            .iter()
+            .filter_map(|(module, name)| program.function_named(module, name))
+            .collect();
+        sweep::stand_down_unreferenced(&mut program, &kept);
+    }
 
     // A clear the `return` after it was going to make pointless is dropped
     // here rather than never emitted, because the emission sites are many and
@@ -1547,7 +1588,11 @@ fn lower_body(
 
 /// What stands in for a declaration this pass did not lower.
 ///
-/// Three kinds reach it, and they end differently.
+/// Three kinds reach it, and they end differently. A fourth stand-in of the
+/// same shape is built elsewhere — `sweep` stands down a body this pass
+/// lowered and `inline` then left nothing naming — and
+/// [`Function::is_stub`](crate::Function::is_stub) is where all four are
+/// written down together.
 ///
 /// One is a declaration this lowering reported a gap about, and nothing ever
 /// runs that: a gap is an error and the program is not handed back.

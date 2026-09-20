@@ -14,7 +14,7 @@
 
 use crate::inst::{Inst, Pc, Slot};
 use crate::layout::LayoutId;
-use crate::program::{Function, Program};
+use crate::program::{Function, FunctionId, Program};
 
 impl Inst {
     /// Calls `f` with the base and width of every run of frame words this
@@ -134,6 +134,93 @@ impl Inst {
             | Inst::Switch { .. }
             | Inst::Return { .. }
             | Inst::Trap { .. } => {}
+        }
+    }
+
+    /// The function this instruction names, where it names one.
+    ///
+    /// Two do. [`Inst::Call`] names the body it enters, and [`Inst::FuncRef`]
+    /// names the one it writes into a word — a callback handed to `map`, a
+    /// conformance a `dyn` dispatch will pick, the callee field of a closure
+    /// object. The second is why this is not "the callee of a call": a
+    /// function reached only as a *value* is named by no call site, and a
+    /// reader that asked only about calls would conclude nothing reaches it.
+    /// [`crate::lower_roots`] closes its slice against the lowering rather
+    /// than against the checker's call graph for exactly that reason, and
+    /// `lower::sweep` asks the same question again of the finished program.
+    ///
+    /// The match is exhaustive and has no wildcard arm, which is the whole
+    /// point of it being here: a new instruction that carries a
+    /// [`FunctionId`] does not compile until it is listed, and a reader that
+    /// greps for `Inst::Call` gets no such warning.
+    ///
+    /// The three other places a [`FunctionId`] is written down are not
+    /// instructions and are not here: `Shape::Closure`'s `function` in
+    /// [`Program::layouts`], `Inlined::callee` in a function's expansion
+    /// record, and the values of [`Program::by_name`].
+    pub fn callee(&self) -> Option<FunctionId> {
+        match *self {
+            Inst::Call { callee, .. } | Inst::FuncRef { callee, .. } => Some(callee),
+            Inst::Unit { .. }
+            | Inst::Bool { .. }
+            | Inst::Int { .. }
+            | Inst::Tag { .. }
+            | Inst::Float { .. }
+            | Inst::Str { .. }
+            | Inst::Copy { .. }
+            | Inst::Clear { .. }
+            | Inst::Neg { .. }
+            | Inst::Not { .. }
+            | Inst::Arith { .. }
+            | Inst::Cmp { .. }
+            | Inst::ArithImm { .. }
+            | Inst::CmpImm { .. }
+            | Inst::Convert { .. }
+            | Inst::Jump { .. }
+            | Inst::BranchFalse { .. }
+            | Inst::CmpBranch { .. }
+            | Inst::CmpImmBranch { .. }
+            | Inst::Switch { .. }
+            | Inst::Return { .. }
+            | Inst::CallClosure { .. }
+            | Inst::CallHost { .. }
+            | Inst::CallResource { .. }
+            | Inst::IntrinsicCall { .. }
+            | Inst::Alloc { .. }
+            | Inst::LoadField { .. }
+            | Inst::StoreField { .. }
+            | Inst::LoadElem { .. }
+            | Inst::StoreElem { .. }
+            | Inst::RunLoad { .. }
+            | Inst::RunCopy { .. }
+            | Inst::RunSlice { .. }
+            | Inst::RunStore { .. }
+            | Inst::RunFinish { .. }
+            | Inst::GrowableAlloc { .. }
+            | Inst::GrowableEnsure { .. }
+            | Inst::GrowableCommit { .. }
+            | Inst::GrowableTruncate { .. }
+            | Inst::Len { .. }
+            | Inst::LayoutOf { .. }
+            | Inst::AddrOfSlot { .. }
+            | Inst::AddrOfField { .. }
+            | Inst::AddrOfElem { .. }
+            | Inst::AddrOfPart { .. }
+            | Inst::Load { .. }
+            | Inst::Store { .. }
+            | Inst::Box { .. }
+            | Inst::Unbox { .. }
+            | Inst::ScopeEnter { .. }
+            | Inst::ScopeLeave { .. }
+            | Inst::ScopeCancel { .. }
+            | Inst::Spawn { .. }
+            | Inst::Await { .. }
+            | Inst::Cancel { .. }
+            | Inst::Settled { .. }
+            | Inst::SharedLock { .. }
+            | Inst::SharedUnlock { .. }
+            | Inst::Trap { .. }
+            | Inst::AssertFailed { .. } => None,
         }
     }
 
