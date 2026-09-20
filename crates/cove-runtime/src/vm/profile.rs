@@ -56,7 +56,7 @@
 //!   *beyond* the one unit every instruction costs — the words a bulk copy
 //!   moved, and, since [ADR 0064]'s Decision 7, the units a mediated
 //!   intrinsic reported having examined. It is what separates a
-//!   `String.length` over ten bytes from one over a hundred thousand, which
+//!   `String.trim` over ten bytes from one over a hundred thousand, which
 //!   until that decision were the same row and the same fuel.
 //!
 //! The heap and work figures are exact: a difference of two counters is what

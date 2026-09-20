@@ -2956,34 +2956,36 @@ mod tests {
     fn a_builtin_call_is_held_to_its_intrinsics_signature() {
         let string = |slot| Arg { slot, layout: STR };
         let int = |slot| Arg { slot, layout: INT };
-        let reprs = || vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Int];
+        // Slot 0 holds the answer and slot 3 is the `Int` an operand fault is
+        // made of. The one-operand sample below was `String.length` until ADR
+        // 0064 moved it into `std.string`; `String.trim` is the same shape
+        // with a `String` answer instead of an `Int` one, which is why slot 0
+        // is a reference here. Nothing this test asserts is about the answer's
+        // class — `String.indexOf` below is what checks that — so the swap
+        // costs the case nothing.
+        let reprs = || vec![Repr::Ref, Repr::Ref, Repr::Ref, Repr::Int];
 
-        // `String.length` over one `String`, answering an `Int`: nothing.
-        let held = calling(
-            crate::Intrinsic::StringLength,
-            INT,
-            reprs(),
-            vec![string(1)],
-        );
+        // `String.trim` over one `String`, answering a `String`: nothing.
+        let held = calling(crate::Intrinsic::StringTrim, STR, reprs(), vec![string(1)]);
         assert_eq!(faults(&held), Vec::<String>::new());
 
         // One operand too many.
         let held = calling(
-            crate::Intrinsic::StringLength,
-            INT,
+            crate::Intrinsic::StringTrim,
+            STR,
             reprs(),
             vec![string(1), string(2)],
         );
         assert_eq!(
             faults(&held),
-            vec!["`String.length` takes 1 operand(s), and this call passes 2"]
+            vec!["`String.trim` takes 1 operand(s), and this call passes 2"]
         );
 
         // An `Int` where a `String` goes.
-        let held = calling(crate::Intrinsic::StringLength, INT, reprs(), vec![int(3)]);
+        let held = calling(crate::Intrinsic::StringTrim, STR, reprs(), vec![int(3)]);
         assert_eq!(
             faults(&held),
-            vec!["operand 0 of `String.length` is `Int`, where its signature has String"]
+            vec!["operand 0 of `String.trim` is `Int`, where its signature has String"]
         );
 
         // The answer a `String.indexOf` writes is an `Option<Int>`, and the

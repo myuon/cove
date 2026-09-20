@@ -1,0 +1,75 @@
+use console.println
+
+/// `length()` beside `byteLength()` at every character width there is.
+///
+/// ADR 0064 moved the character count out of the runtime and into
+/// `std.string.length`, a Cove loop that reads each lead byte and advances by
+/// the width that byte declares. What a Rust `chars().count()` got right for
+/// free the loop has to get right four times over, so every line below prints
+/// **both** numbers for the same string: a count that had quietly become a
+/// byte count would read the same as the right one on the ASCII line and on
+/// nothing else, and the pair is what makes that impossible to miss.
+///
+/// The harness runs this on the linear-memory backend and again with
+/// `--backend ast`, and both runs are held to the one `expected.out` — which
+/// is the oracle the deleted `text.rs` unit test used to be, now supplied by a
+/// program rather than by the thing under test.
+export fn main() -> Result<Unit, Error> {
+  // Nothing at all: the loop must not run, and must not answer one.
+  let empty = ""
+  println("empty {empty.length()} {empty.byteLength()}")?
+  println("empty isEmpty {empty.isEmpty()}")?
+
+  // One byte a character, the case the lead-byte test takes first.
+  let ascii = "cove"
+  println("ascii {ascii.length()} {ascii.byteLength()}")?
+  println("ascii isEmpty {ascii.isEmpty()}")?
+
+  // Two bytes: U+00E9, a lead byte of 195 and one continuation byte.
+  let two = "ééé"
+  println("two {two.length()} {two.byteLength()}")?
+
+  // Three bytes: U+3042, a lead byte of 227 and two continuation bytes.
+  let three = "あいう"
+  println("three {three.length()} {three.byteLength()}")?
+
+  // Four bytes: U+1F600, a lead byte of 240 and three continuation bytes —
+  // the case the `else` arm answers, and the one an advance that stopped at
+  // three would run off the end of.
+  let four = "😀😀😀"
+  println("four {four.length()} {four.byteLength()}")?
+
+  // All four widths in one string, so that the loop has to change its stride
+  // rather than settle into one.
+  let mixed = "aéあ😀b"
+  println("mixed {mixed.length()} {mixed.byteLength()}")?
+
+  // Ascending width, then descending, which is where an advance that is one
+  // too short or one too long lands on a continuation byte and counts it as a
+  // character of its own. Ascending alone would not catch every such slip:
+  // running the widths back down puts a narrow character after a wide one.
+  let ascending = "aéあ😀"
+  println("ascending {ascending.length()} {ascending.byteLength()}")?
+  let descending = "😀あéa"
+  println("descending {descending.length()} {descending.byteLength()}")?
+
+  // The count against what `chars()` yields, which is the agreement the old
+  // Rust body had by construction and this one has to be held to.
+  println("chars {mixed.chars()} {mixed.chars().length()}")?
+
+  // A character index is still a character index: `slice` and `indexOf` count
+  // in the same units `length()` does, and these would move if it did not.
+  println("slice {mixed.slice(1, 4)}")?
+  println("indexOf {mixed.indexOf("b")} {mixed.indexOf("😀")}")?
+
+  // A count over something built at run time rather than written as a
+  // literal, since a literal is the one shape a constant fold could answer.
+  var built = ""
+  var i = 0
+  while i < 4 {
+    built = "{built}é😀"
+    i += 1
+  }
+  println("built {built.length()} {built.byteLength()}")?
+  Ok(())
+}

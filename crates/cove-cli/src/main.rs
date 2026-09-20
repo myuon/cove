@@ -2131,7 +2131,7 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler, rows: usize) {
     eprintln!(
         "  `work` is what an instruction was charged beyond the one every \
          instruction costs — the words a bulk copy moved, the bytes a mediated \
-         intrinsic examined — and it is the column that tells a `String.length` \
+         intrinsic examined — and it is the column that tells a `String.trim` \
          over ten bytes from one over a hundred thousand, which `instr` cannot. \
          Its unit is the run's: bytes for a string, words for a word run, one \
          per value visited for a walk over a value, so a total down the column \

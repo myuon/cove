@@ -1,0 +1,14 @@
+empty 0 0
+empty isEmpty true
+ascii 4 4
+ascii isEmpty false
+two 3 6
+three 3 9
+four 3 12
+mixed 5 11
+ascending 4 10
+descending 4 10
+chars [a, é, あ, 😀, b] 5
+slice éあ😀
+indexOf Some(4) Some(3)
+built 8 24

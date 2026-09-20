@@ -118,7 +118,7 @@ fn @m.shout(String String) -> Int
     17  growable-commit.bytes s4:ref s8:int
     18  run-finish.bytes s6:ref s4:ref String utf8
     19  clear s4:ByteBuffer
-    20  intrinsic-call s2:Int String.length (s6:String)
+    20  call s2:Int std.string.length (s6:String)
     21  return s2:Int
 "
     );
@@ -166,7 +166,7 @@ fn @m.f(String) -> Int
     19  growable-commit.bytes s4:ref s16:int
     20  run-finish.bytes s6:ref s4:ref String utf8
     21  clear s4:ByteBuffer
-    22  intrinsic-call s2:Int String.length (s6:String)
+    22  call s2:Int std.string.length (s6:String)
     23  clear s6:String
     24  copy s1:Int s2:Int
     25  return s1:Int
