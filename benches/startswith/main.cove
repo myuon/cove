@@ -1,0 +1,187 @@
+use console.println
+use clock.now
+
+/// What `String.startsWith` costs, at the four size pairs it can be called at.
+///
+/// ADR 0064 moved the prefix test out of the runtime and into
+/// `std.string.startsWith`, a Cove loop over `core.byteLength` and `byteAt`.
+/// A migration's own cost is the thing Decision 8 asks a pull request to
+/// record, and for this one no whole-program figure can supply it at all:
+/// `examples/covefmt` never calls `startsWith`, and `examples/cq` calls it
+/// twice, both times while reading its command line. These rows are the
+/// operation on its own, and they are the only measurement this migration
+/// has.
+///
+/// # A sibling of `benches/endswith` rather than four more rows in it
+///
+/// The two operations are the same loop with a different offset, so putting
+/// them in one program would have bought one bare-loop control instead of two
+/// and made the pair directly comparable inside one process — which is a real
+/// argument, and is what is given up here. What it would have cost is a
+/// package whose name says `endswith` and whose rows are half about something
+/// else, and a doc comment hedging every sentence it now states plainly: the
+/// suffix loop's long/short row is cheap because `n - m` is one subtraction,
+/// and the prefix loop's is cheap because there is no offset to compute at
+/// all. One package per operation also gives `contains` and `indexOf` an
+/// obvious place to go when Phase 1 reaches them.
+///
+/// The sizes are `benches/endswith`'s — five bytes and fifty, against the same
+/// eighty-eight-byte receiver — so that a reader who wants the comparison the
+/// shared control would have given them can still take it across the two
+/// programs, knowing it costs a code layout.
+///
+/// # The four sizes are four different bodies, not one body at four scales
+///
+/// The loop compares the **prefix's** bytes, never the receiver's, and it
+/// answers on the two lengths alone when the prefix is the longer. So the two
+/// dimensions do quite different things and the matrix is what separates them:
+///
+/// - **short / short** is the ordinary call, five bytes compared;
+/// - **short / long** is the refusal on length, and no byte of either string
+///   read: the cheapest answer `startsWith` has, and the one a reader would
+///   most easily assume costs the same as the others;
+/// - **long / short** is the same five bytes compared against a receiver five
+///   times as long, which is what says the cost does *not* grow with the
+///   receiver — the loop starts at 0 and stops at the prefix's length, and
+///   `core.byteLength` is a header load rather than a walk;
+/// - **long / long** is fifty bytes compared, which is where the per-byte
+///   slope shows up against the per-call constant the other three measure.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`, and this benchmark has to be
+/// able to speak for both tiers: ADR 0064's whole argument is that the ratio
+/// between them flips sign when an intrinsic call becomes Cove. Each row is
+/// therefore a call to [`countStartsWith`], whose body is the loop, and `main`
+/// does nothing in a turn but read a clock either side of it.
+///
+/// **That holds only while [`countStartsWith`] is too big to be inlined.**
+/// `benches/endswith` records what it looks like when it is not: while
+/// `endsWith` was one `IntrinsicCall` its callee was about ten instructions,
+/// inside `cove_ir::lower::inline`'s cold `LIMIT` of sixteen, so it folded
+/// into [`row`] — which the native tier refuses for the `now()` at its start —
+/// and the "native" column was the encoded VM wearing the native tier's name.
+/// The Cove `startsWith` is sixteen instructions, which is exactly the cold
+/// limit rather than past it — so whether a given site expands it is the
+/// caller's frame budget's to decide, not its size's. The site below is inside
+/// a `while`, so it is a hot one and `HOT_LIMIT` admits it regardless, and the
+/// expansion is what makes [`countStartsWith`] twenty-five instructions:
+/// past the limit itself, and so a function the native tier is given. That is
+/// checked rather than assumed: `--backend native --boundary` names the
+/// compiled and the refused, and the only two refused are [`row`] and `main`,
+/// each for the `now()` in it. A later change that makes
+/// `startsWith` small again — a bounded run comparison beneath it, say — would
+/// put this benchmark back in the state where its native column is the VM,
+/// silently. Check the compiled set before believing a native row here.
+///
+/// [`countBare`] is the control, the same loop with the call taken out, so
+/// that what each row reports is the call rather than the turn. **Its branch
+/// is always taken**, which matches the three rows that answer `true`; the
+/// short/long row answers `false` and so does one addition less per turn than
+/// its control does, and is reported cheap by exactly that much. Under
+/// `--backend native` that row may read *negative*, and it is not a broken
+/// clock: a length refusal there costs less than the addition the control
+/// makes, so the difference is below zero and the honest reading of the row
+/// is "too cheap to separate from the loop".
+///
+/// [`turns`] is 200,000 rather than the 2,000,000 `benches/arith` and
+/// `benches/builtincall` use, for `benches/endswith`'s reason:
+/// `crates/cove-cli/tests/vm_coverage.rs` runs every program in this
+/// repository on the tree-walking interpreter as well as on the linear-memory
+/// backend, and the long/long row is fifty byte comparisons a turn — 10
+/// million of them at this count, and ten times that at the usual one.
+fn turns() -> Int {
+  200000
+}
+
+fn shortText() -> String {
+  "crates/main.cove"
+}
+
+fn shortPrefix() -> String {
+  "crate"
+}
+
+/// Eighty-eight bytes, beginning with [`longPrefix`]'s fifty.
+fn longText() -> String {
+  "crates/cove-runtime/src/vm/intrinsics/text/deeply/nested/directory/tree/module/main.cove"
+}
+
+fn longPrefix() -> String {
+  "crates/cove-runtime/src/vm/intrinsics/text/deeply/"
+}
+
+/// `rounds` prefix tests and nothing else the loop can be about.
+///
+/// No host call in the body, so that the native tier compiles it and the rows
+/// price `startsWith` on the tier that runs it.
+fn countStartsWith(text: String, prefix: String, rounds: Int) -> Int {
+  var found = 0
+  var i = 0
+  while i < rounds {
+    if text.startsWith(prefix) {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// [`countStartsWith`]'s loop with the call taken out, and its branch taken
+/// every turn.
+fn countBare(rounds: Int) -> Int {
+  var found = 0
+  var i = 0
+  while i < rounds {
+    if i < rounds {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// How long `rounds` turns of [`countStartsWith`] took, in microseconds, and
+/// how many of them answered `true`.
+struct Row {
+  micros: Int
+  found: Int
+}
+
+fn row(text: String, prefix: String, rounds: Int) -> Row {
+  let from = now()
+  let found = countStartsWith(text, prefix, rounds)
+  Row(micros: (now() - from).micros(), found: found)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let shortShort = row(shortText(), shortPrefix(), rounds)
+  let shortLong = row(shortText(), longPrefix(), rounds)
+  let longShort = row(longText(), shortPrefix(), rounds)
+  let longLong = row(longText(), longPrefix(), rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped matching would still report a number, and the number
+  // would be of something else.
+  assertEqual(bare, rounds)?
+  assertEqual(shortShort.found, rounds)?
+  assertEqual(shortLong.found, 0)?
+  assertEqual(longShort.found, rounds)?
+  assertEqual(longLong.found, rounds)?
+
+  println(
+    "bare loop                 {bareMicros * 1000 / rounds} ns/turn ({bare})",
+  )?
+  println("short/short  (5 bytes)    {(shortShort.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("short/long   (no bytes)   {(shortLong.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long/short   (5 bytes)    {(longShort.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long/long    (50 bytes)   {(longLong.micros - bareMicros) * 1000 / rounds} ns/call")?
+  Ok(())
+}

@@ -52,6 +52,70 @@ export fn isEmpty(text: String) -> Bool {
   core.byteLength(text) == 0
 }
 
+/// Whether this string begins with `prefix`.
+///
+/// The comparison is of **bytes**: the first `prefix.byteLength()` bytes of
+/// the text against the whole of the prefix, one byte at a time, stopping at
+/// the first pair that differs. A prefix longer than the text is answered on
+/// the two lengths alone, before a byte of either is read.
+///
+/// Nothing here asks whether the comparison began or ended at a character
+/// boundary, and for a *prefix* that needs less argument than [`endsWith`]
+/// does — it needs none of the self-synchronization half at all. The
+/// comparison starts at offset 0, and 0 is a character boundary in every
+/// string there is, empty or not: no argument, a fact about where a string
+/// starts. What is left is the far end, and the prefix settles it. A `String`
+/// is valid UTF-8 in its shortest form, so the prefix's own bytes are whole
+/// characters and end at a boundary of its own; if the text's first `m` bytes
+/// are those bytes, then reading the text from 0 takes the same lead bytes and
+/// the same widths and lands on exactly the same offset, so byte `m` of the
+/// text begins a character too. A byte match is therefore a character match at
+/// both ends, and a character-by-character comparison would find exactly what
+/// this finds.
+///
+/// [`endsWith`] has the harder half of the same argument: its comparison
+/// starts at `n - m`, which is no boundary by construction, and what makes it
+/// one is that a continuation byte never begins a character. Read the two
+/// together — this one is what that one would be if the offset were free.
+///
+/// An empty prefix answers `true`, because the loop does not run — which is
+/// what `str::starts_with("")` answers, and
+/// `tests/e2e/values_string_starts_with` asserts it rather than leaving it to
+/// be obvious.
+///
+/// It was `str::starts_with` in Rust, one `IntrinsicCall` per call. ADR 0064
+/// moves it here: `startsWith` is a method's name and would have to be renamed
+/// the day the method was, which is Decision 2's test, and what is left
+/// underneath is `core.byteLength` — a header load — with one run load a byte
+/// over it. A loop the native tier compiles, in place of a call it can only
+/// cross back out of.
+///
+/// A private `matchesAt(text, at, needle)` under both this and [`endsWith`]
+/// was measured rather than assumed, and refused: the two differ only in the
+/// offset, but the shared callee recomputes the needle's length that the
+/// caller already took for the refusal, and its return adds a join. At
+/// covefmt's one `endsWith` site that is 2,178 instructions over 1,174 calls
+/// — 98,073 to 100,251 — for one body instead of two. A factoring that costs
+/// its existing caller is not one.
+///
+/// Each question is an `if` of its own and the answer is a `return`, for the
+/// reasons [`sliceBytes`] gives.
+export fn startsWith(text: String, prefix: String) -> Bool {
+  let prefixLength = core.byteLength(prefix)
+  let textLength = core.byteLength(text)
+  if prefixLength > textLength {
+    return false
+  }
+  var at = 0
+  while at < prefixLength {
+    if text.byteAt(at) != prefix.byteAt(at) {
+      return false
+    }
+    at += 1
+  }
+  return true
+}
+
 /// Whether this string ends with `suffix`.
 ///
 /// The comparison is of **bytes**: the last `suffix.byteLength()` bytes of the

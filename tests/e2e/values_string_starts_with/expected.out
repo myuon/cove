@@ -1,0 +1,20 @@
+empty/empty true
+cove/empty true
+empty/cove false
+ab/abc false
+cov/cove false
+cove/cove true
+main.cove/main true
+main.cove/test false
+main.cove/main.rs false
+covert/cove. false
+école/é true
+école/è false
+あいう/あ true
+あいう/い false
+😀x/😀 true
+😀x/😁 false
+école/ä false
+あいう/ア false
+😀x/U+10000 false
+built true false 18

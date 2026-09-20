@@ -323,9 +323,11 @@ code point is an `Int` and there is no `Char`. It also settles two of the
 methods that were waiting on it by measuring them: a Cove `contains` is 101×
 the builtin, so `contains`, `startsWith` and `endsWith` stayed primitive,
 while a Cove `Int.parse` is 6.3× and reads as arithmetic. ADR 0064 has since
-taken `endsWith` back — a suffix comparison is a bounded loop over these very
-byte primitives, and what it costs is not what scanning a whole haystack for
-a substring costs.
+taken `endsWith` and `startsWith` back — each is a bounded loop over these
+very byte primitives, comparing a needle whose length is known, and what that
+costs is not what scanning a whole haystack for a substring costs. `contains`
+is the one of the three still primitive, and it is the one the 101× was
+measured on.
 [ADR 0047](docs/adr/0047-a-code-point-is-written-as-a-character-and-is-an-int.md)
 adds the way to write one: `'a'` is a literal whose type is `Int` and whose
 value is a Unicode scalar value, holding exactly one — `''`, `'ab'` and an

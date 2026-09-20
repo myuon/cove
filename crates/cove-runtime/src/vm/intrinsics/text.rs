@@ -15,12 +15,13 @@
 //! - **`slice(from, to)` is in character positions**, and so is what
 //!   `indexOf` answers, which is why `indexOf` converts the byte offset it
 //!   finds by counting the characters before it.
-//! - **`contains`, `startsWith`, `split` and `replace` match bytes**, which
-//!   for UTF-8 is the same set of matches as matching characters and is what
-//!   Rust's own `str` does. `endsWith` matched bytes here too, and matches
-//!   them in Cove now: ADR 0064 moved it to `std.string.endsWith`, whose doc
-//!   comment carries the self-synchronization argument this bullet is a
-//!   summary of.
+//! - **`contains`, `split` and `replace` match bytes**, which for UTF-8 is
+//!   the same set of matches as matching characters and is what Rust's own
+//!   `str` does. `startsWith` and `endsWith` matched bytes here too, and match
+//!   them in Cove now: ADR 0064 moved them to `std.string.startsWith` and
+//!   `std.string.endsWith`, whose doc comments carry the boundary argument
+//!   this bullet is a summary of — the suffix one in full, the prefix one in
+//!   the half it needs.
 //! - **`trim()` trims Unicode whitespace** and **`words()` splits on ASCII
 //!   whitespace**, which is the pair the oracle has and is not a distinction
 //!   this file invented.
@@ -34,7 +35,7 @@
 //!
 //! # Every operation here says what it examined, in bytes
 //!
-//! Eight of the operations below walk the whole receiver, three search it and
+//! Eight of the operations below walk the whole receiver, two search it and
 //! one builds its answer out of parts, and until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7 every one of them cost the run **one** unit of work — the one
@@ -58,11 +59,12 @@
 //!   `trim`, `replace`, `toUpper`, `toLower` — charge the receiver's own byte
 //!   length, because [`operand::text`] has already decoded the whole of it
 //!   before any of them looks at a single character;
-//! - `startsWith` compares at most the needle, so it charges the needle's
-//!   length capped at the receiver's. `endsWith` was charged the same way
-//!   and by the same reasoning, until ADR 0064 made it `std.string.endsWith`
-//!   — where the loop pays for each byte it reads as an instruction, which
-//!   is the charge this bullet was approximating;
+//! - a bullet here used to say that `startsWith` and `endsWith` compare at
+//!   most the needle, so they charge the needle's length capped at the
+//!   receiver's. Neither is an intrinsic any more: ADR 0064 made both of them
+//!   Cove loops, where each byte read is paid for as an instruction — which
+//!   is exactly the charge that bullet was approximating, made by the
+//!   mechanism that charges everything else;
 //! - `contains` and `indexOf` charge the **receiver's** length, and that is
 //!   an upper bound rather than a measurement: `str::find` does not report
 //!   how far it got before it matched. An upper bound is the safe direction
@@ -316,26 +318,12 @@ pub(super) fn contains(
     Ok(())
 }
 
-/// `String.startsWith(prefix) -> Bool`.
-pub(super) fn starts_with(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    let prefix = operand::text(machine, frame, 1)?;
-    // At most the needle, and never past the receiver: a prefix longer than
-    // what it is tested against is refused on the length alone. `endsWith`
-    // was charged this way too, until ADR 0064 made it a Cove loop.
-    machine.examined(prefix.len().min(text.len()) as u64);
-    dest.word(machine, text.starts_with(&prefix) as u64);
-    Ok(())
-}
-
-// `endsWith` used to be here, beside `startsWith` and charged the same way.
-// ADR 0064 moved it to `std.string.endsWith`: a Cove loop that compares the
-// last bytes of the receiver against the suffix's, which needs no boundary
-// check because UTF-8 is self-synchronizing.
+// `startsWith` and `endsWith` used to be here, side by side and charged the
+// same way: at most the needle, capped at the receiver. ADR 0064 moved both
+// into `std.string`, as loops that compare the receiver's first or last bytes
+// against the needle's. The suffix one needs UTF-8's self-synchronization to
+// justify starting at `n - m`; the prefix one starts at 0 and needs only that
+// a prefix's own bytes end at a boundary.
 
 /// `String.indexOf(text) -> Option<Int>`, in character positions.
 ///
@@ -658,17 +646,16 @@ mod tests {
             on(&mut machine, "héllo", "contains", &[(Repr::Ref, needle)]),
             1
         );
-        let prefix = machine.new_string("hé").unwrap();
-        assert_eq!(
-            on(&mut machine, "héllo", "startsWith", &[(Repr::Ref, prefix)]),
-            1
-        );
-        // `endsWith` had a line here — `"héllo"` ends with `"lo"` — until ADR
-        // 0064 moved the comparison into `std.string.endsWith`. What replaced
-        // it is `tests/e2e/values_string_ends_with`, which asks the question
-        // on both evaluators over every character width and over the pair
-        // (`"あ"`, `"\u{0082}"`) whose last byte agrees and whose answer is
-        // `false`: an oracle no arm in this file supplies, for a body no arm
+        // `startsWith` and `endsWith` had a line each here — `"héllo"` begins
+        // with `"hé"` and ends with `"lo"` — until ADR 0064 moved both
+        // comparisons into `std.string`. What replaced them is
+        // `tests/e2e/values_string_starts_with` and
+        // `tests/e2e/values_string_ends_with`, which ask the question on both
+        // evaluators at every character width and at the byte patterns each
+        // loop could be wrong about: (`"あ"`, `"\u{0082}"`), whose last byte
+        // agrees, for the suffix, and (`"あ"`, `"ア"`) — `E3 81 82` against
+        // `E3 82 A2` — whose first byte agrees, for the prefix. Both answer
+        // `false`. An oracle no arm in this file supplies, for a body no arm
         // in this file executes.
         let absent = machine.new_string("z").unwrap();
         assert_eq!(

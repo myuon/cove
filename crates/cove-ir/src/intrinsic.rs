@@ -48,7 +48,6 @@ pub enum Intrinsic {
     StringSlice,
     StringTrim,
     StringContains,
-    StringStartsWith,
     StringIndexOf,
     StringReplace,
     StringToUpper,
@@ -85,7 +84,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringSlice,
     Intrinsic::StringTrim,
     Intrinsic::StringContains,
-    Intrinsic::StringStartsWith,
     Intrinsic::StringIndexOf,
     Intrinsic::StringReplace,
     Intrinsic::StringToUpper,
@@ -139,7 +137,6 @@ impl Intrinsic {
             Intrinsic::StringSlice => "String",
             Intrinsic::StringTrim => "String",
             Intrinsic::StringContains => "String",
-            Intrinsic::StringStartsWith => "String",
             Intrinsic::StringIndexOf => "String",
             Intrinsic::StringReplace => "String",
             Intrinsic::StringToUpper => "String",
@@ -174,7 +171,6 @@ impl Intrinsic {
             Intrinsic::StringSlice => "slice",
             Intrinsic::StringTrim => "trim",
             Intrinsic::StringContains => "contains",
-            Intrinsic::StringStartsWith => "startsWith",
             Intrinsic::StringIndexOf => "indexOf",
             Intrinsic::StringReplace => "replace",
             Intrinsic::StringToUpper => "toUpper",
@@ -252,7 +248,6 @@ impl Intrinsic {
             | Intrinsic::StringSlice
             | Intrinsic::StringTrim
             | Intrinsic::StringContains
-            | Intrinsic::StringStartsWith
             | Intrinsic::StringIndexOf
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
@@ -305,9 +300,7 @@ impl Intrinsic {
             Intrinsic::StringTrim | Intrinsic::StringToUpper | Intrinsic::StringToLower => {
                 fixed(&[C::Str], C::Str)
             }
-            Intrinsic::StringContains | Intrinsic::StringStartsWith => {
-                fixed(&[C::Str, C::Str], C::Bool)
-            }
+            Intrinsic::StringContains => fixed(&[C::Str, C::Str], C::Bool),
             Intrinsic::StringIndexOf => fixed(&[C::Str, C::Str], C::OptionOf(K::Int)),
             Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
             Intrinsic::StringFromCodePoint => fixed(&[C::Int], C::ResultOf(K::Str)),
@@ -382,15 +375,16 @@ impl Intrinsic {
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower => allocate.union(E::READS_MEMORY).union(E::BULK_WORK),
-            // The two predicates and `indexOf` search the receiver without
-            // allocating anything, and a search cannot fail: `indexOf`'s
-            // `Option` is words written into the destination, of a layout the
-            // verifier has already found. `endsWith` was a third predicate
-            // here until ADR 0064 made it `std.string.endsWith`, a Cove loop
-            // over `byteAt` — which is the same reading and the same
+            // `contains` and `indexOf` search the receiver without allocating
+            // anything, and a search cannot fail: `indexOf`'s `Option` is
+            // words written into the destination, of a layout the verifier has
+            // already found. There were four of these — `startsWith` and
+            // `endsWith` stood beside them until ADR 0064 made each a Cove
+            // loop over `byteAt`, which is the same reading and the same
             // proportionality, charged an instruction at a time instead of
-            // declared a flag at a time.
-            Intrinsic::StringContains | Intrinsic::StringStartsWith | Intrinsic::StringIndexOf => {
+            // declared a flag at a time. What is left is the pair that
+            // searches a whole haystack rather than comparing a known length.
+            Intrinsic::StringContains | Intrinsic::StringIndexOf => {
                 E::READS_MEMORY.union(E::BULK_WORK)
             }
             // `codePointAtByte` is not here: it is `std.string`, a decode in
@@ -688,7 +682,6 @@ mod tests {
             "String.slice",
             "String.trim",
             "String.contains",
-            "String.startsWith",
             "String.indexOf",
             "String.replace",
             "String.toUpper",
@@ -768,7 +761,6 @@ mod tests {
                 | Intrinsic::StringSlice
                 | Intrinsic::StringTrim
                 | Intrinsic::StringContains
-                | Intrinsic::StringStartsWith
                 | Intrinsic::StringIndexOf
                 | Intrinsic::StringReplace
                 | Intrinsic::StringToUpper
@@ -889,13 +881,14 @@ mod tests {
     }
 
     /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so the
-    /// intrinsics no program can be stopped by say so: the three searches,
+    /// intrinsics no program can be stopped by say so: the two searches,
     /// which allocate nothing and always have an answer, and the `Float`
     /// functions IEEE 754 answers for every input. A character count used to
-    /// head this list and a suffix test used to sit in the middle of it, and
-    /// neither is an intrinsic any more — ADR 0064 made `String.length` and
-    /// then `String.endsWith` Cove loops — which is the shape a migration
-    /// leaves here: a line gone from the vector and a numeral changed in this
+    /// head this list, and a suffix test and then a prefix test sat in the
+    /// middle of it; none of the three is an intrinsic any more — ADR 0064
+    /// made `String.length`, `String.endsWith` and `String.startsWith` Cove
+    /// loops, one migration each — which is the shape a migration leaves
+    /// here: a line gone from the vector and a numeral changed in this
     /// sentence, rather than a flag changed.
     #[test]
     fn raising_is_language_level() {
@@ -908,7 +901,6 @@ mod tests {
             never,
             vec![
                 Intrinsic::StringContains,
-                Intrinsic::StringStartsWith,
                 Intrinsic::StringIndexOf,
                 Intrinsic::FloatRound,
                 Intrinsic::FloatAbs,

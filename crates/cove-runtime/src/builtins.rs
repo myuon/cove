@@ -1447,17 +1447,14 @@ pub fn call_method(
                 let needle = expect_str("String.contains", "text", &args[0], span)?;
                 Ok(Value(Repr::Bool(text.contains(needle))))
             }
-            "startsWith" => {
-                let args = expect_args("String.startsWith", args, 1, span)?;
-                let prefix = expect_str("String.startsWith", "prefix", &args[0], span)?;
-                Ok(Value(Repr::Bool(text.starts_with(prefix))))
-            }
-            // `endsWith` used to answer here, `text.ends_with(suffix)`. It
-            // does not reach this arm any more: `Interpreter::eval_method_call`
-            // resolves it to a call into `std.string.endsWith` before this
-            // function is ever asked about it — a Cove loop that compares the
-            // last bytes of the text against the suffix's (ADR 0064), which
-            // needs no boundary check because UTF-8 is self-synchronizing.
+            // `startsWith` and `endsWith` used to answer here, one
+            // `text.starts_with(prefix)` and one `text.ends_with(suffix)`.
+            // Neither reaches this arm any more: `Interpreter::eval_method_call`
+            // resolves each to a call into `std.string` before this function is
+            // ever asked about it — two Cove loops comparing bytes (ADR 0064).
+            // The suffix one needs UTF-8's self-synchronization to justify the
+            // offset it starts at; the prefix one starts at 0 and needs
+            // nothing, which is why it went second and cost less to argue.
             "indexOf" => {
                 let args = expect_args("String.indexOf", args, 1, span)?;
                 let needle = expect_str("String.indexOf", "text", &args[0], span)?;

@@ -1000,6 +1000,20 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "isEmpty",
     },
+    // A prefix test goes the same way, and the argument under it is the
+    // shorter one: `std.string.startsWith` compares from offset 0, which is a
+    // character boundary in every string there is, so it owes no
+    // self-synchronization argument at all — only that a prefix's own bytes
+    // end at a boundary. `Intrinsic::StringStartsWith` is gone in the same
+    // change, and `String.contains` and `String.indexOf` are what is left of
+    // the three predicates ADR 0046 measured together.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "startsWith",
+        module: "std.string",
+        function: "startsWith",
+    },
     // A suffix test is a method's name before it is anything else — Decision
     // 2's discriminator is whether the operation would have to be renamed the
     // day `String.endsWith` was, and this one would. What is underneath it is

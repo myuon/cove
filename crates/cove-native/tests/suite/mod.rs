@@ -3901,9 +3901,9 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// level over:
 ///
 /// - a function with one `intrinsic-call` charges **one site** to that call's
-///   variant and none to the other thirty, and a function with no intrinsic call
-///   in it charges nothing anywhere — so the count follows the IR and not the
-///   shape of the body;
+///   variant and none to the other twenty-seven, and a function with no
+///   intrinsic call in it charges nothing anywhere — so the count follows the
+///   IR and not the shape of the body;
 /// - where the bytes are attributed they are **positive and no more than the
 ///   whole function**, which is the arithmetic a reader of the report assumes;
 /// - **whether they are attributed at all is the arm's and not the program's**,
