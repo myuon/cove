@@ -2643,8 +2643,27 @@ impl<'a> Machine<'a> {
     }
 
     /// Orders two string objects by their bytes.
+    ///
+    /// Defers to [`Machine::order_strings`] below, which answers the same
+    /// order over the same bytes and reads them where they are. This used to
+    /// be `self.string_bytes(a).cmp(&self.string_bytes(b))` — two heap `Vec`s
+    /// built a byte at a time, compared, and dropped again, per comparison —
+    /// and it is what *every* comparison on a `String` reaches in the encoded
+    /// loop: `EQ_STR` through `GE_STR` and each of their branch forms, twelve
+    /// arms. So `==` and `!=` paid for it exactly as `<` did, and on a real
+    /// program they are nearly all of it.
+    ///
+    /// `examples/covefmt` made 414,837 of those comparisons in one run over
+    /// this repository's 272 `.cove` files — 829,674 vectors and 12,393,739
+    /// bytes lifted out of the heap, 99.7% of both figures for the whole run.
+    /// `Inst::OrderStr` and the native tier's `OrderStrFn` were already on the
+    /// copy-free path; only these twelve arms were not.
+    ///
+    /// Nothing a run counts moves. The bytes compared and the order answered
+    /// are the same, and the vectors were never anything but somewhere to put
+    /// them on the way.
     fn compare_strings(&self, a: u64, b: u64) -> std::cmp::Ordering {
-        self.string_bytes(a).cmp(&self.string_bytes(b))
+        self.order_strings(a, b).cmp(&0)
     }
 
     /// `-1`, `0` or `1` as two string objects order by their bytes — the
@@ -2652,7 +2671,7 @@ impl<'a> Machine<'a> {
     /// `key::order`'s for a `Str`.
     ///
     /// The bytes are compared where they are, a payload word at a time,
-    /// rather than copied out as [`Machine::compare_strings`] copies them: a
+    /// rather than copied out as [`Machine::string_bytes`] copies them: a
     /// binary search over `String` keys asks this once per step, and nothing
     /// it answers needs the bytes anywhere else. A word holds eight bytes least
     /// significant first, so the first byte two words differ in is the lowest
@@ -9464,5 +9483,166 @@ pub(crate) mod tests {
         machine.instructions = 500;
         machine.bulk_work = 2000;
         assert_eq!(machine.poll_budget(), 0);
+    }
+
+    // --- `<` on a `String` reads the bytes where they are ------------------
+
+    /// The byte strings every pair below is drawn from.
+    ///
+    /// Written as bytes rather than as `&str` so that the corpus can hold
+    /// `0x7f` beside `0x80` and `0xff`: a byte comparison done on `i8` rather
+    /// than `u8` puts every one of those on the wrong side of an ASCII byte,
+    /// and no `&str` fixture can name a lone one.
+    fn ordering_corpus() -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = vec![
+            // The empty string, and the one-byte neighbourhood a prefix test
+            // and a first-byte difference both live in.
+            b"".to_vec(),
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"ab".to_vec(),
+            b"abc".to_vec(),
+            b"abd".to_vec(),
+            b"abcd".to_vec(),
+            // Lengths either side of a payload word, and the same lengths
+            // differing in the first byte, inside, and in the last.
+            b"abcdefg".to_vec(),
+            b"Abcdefg".to_vec(),
+            b"abcXefg".to_vec(),
+            b"abcdefG".to_vec(),
+            b"abcdefgh".to_vec(),
+            b"abcdefgH".to_vec(),
+            b"Abcdefgh".to_vec(),
+            b"abcdefghi".to_vec(),
+            b"abcdefghI".to_vec(),
+            b"abcdefghijklmno".to_vec(),
+            b"abcdefghijklmnO".to_vec(),
+            b"abcdefghijklmnop".to_vec(),
+            b"abcdefghijklmnoP".to_vec(),
+            b"abcdefghijklmnopq".to_vec(),
+            b"abcdefghijklmnopQ".to_vec(),
+            // Longer than one word and agreeing on every word but the last,
+            // which is the case a loop that stopped at the first word or
+            // compared the *highest* differing byte would get wrong.
+            b"the same first word, then a".to_vec(),
+            b"the same first word, then b".to_vec(),
+            // A common prefix and different lengths: the tie-break at the end.
+            b"prefix".to_vec(),
+            b"prefixed".to_vec(),
+            b"prefix and a good deal more".to_vec(),
+            // Bytes at and above `0x80`, where a signed comparison inverts.
+            vec![0x7f],
+            vec![0x80],
+            vec![0xff],
+            vec![0x00],
+            b"a\x7f".to_vec(),
+            b"a\x80".to_vec(),
+            b"a\xff".to_vec(),
+            "héllo".as_bytes().to_vec(),
+            "héllp".as_bytes().to_vec(),
+            "hello".as_bytes().to_vec(),
+        ];
+        // And a pair that agrees for seven bytes and differs in the eighth,
+        // either side of `0x80`, so the mask in the last partial word is
+        // exercised at every width.
+        for len in [7usize, 8, 9, 15, 16, 17] {
+            for last in [0x7fu8, 0x80, 0xff] {
+                let mut bytes = vec![b'z'; len - 1];
+                bytes.push(last);
+                out.push(bytes);
+            }
+        }
+        out
+    }
+
+    /// A string object holding exactly `bytes`.
+    ///
+    /// [`Machine::new_string`] takes a `&str` and so cannot make one whose
+    /// bytes are not UTF-8; the machine can hold one, and `ORDER_STR` orders
+    /// it, so the corpus is written into the heap directly.
+    fn string_of(machine: &mut Machine<'_>, bytes: &[u8]) -> u64 {
+        let addr = machine
+            .new_string_of(bytes.len() as i64)
+            .expect("the heap has room for the corpus");
+        machine.write_bytes(addr, bytes);
+        addr
+    }
+
+    /// **Reading the bytes where they are answers what copying them out
+    /// answered.**
+    ///
+    /// [`Machine::compare_strings`] is what `<`, `<=`, `>` and `>=` on a
+    /// `String` reach in the encoded loop, and it used to be
+    /// `string_bytes(a).cmp(&string_bytes(b))` — two heap `Vec`s per
+    /// comparison. It is [`Machine::order_strings`] now, which reads a payload
+    /// word at a time and copies nothing. The change is only allowed to be a
+    /// change in *how* the answer is computed, so the three ways of asking are
+    /// compared against each other and against an oracle the machine does not
+    /// supply: the corpus's own `&[u8]`s, ordered by Rust.
+    ///
+    /// The fourth is the one that matters. `string_bytes` is the code the new
+    /// path replaced, so agreeing with it proves the replacement faithful; but
+    /// a fixture that asked the subject for its own reference bytes would
+    /// agree with a machine that read the heap wrongly in both directions at
+    /// once. The `&[u8]`s here never went through the machine.
+    #[test]
+    fn a_string_comparison_orders_as_its_bytes_do() {
+        let program = Build::default().bare();
+        let mut machine = Machine::new(&program, 1 << 16);
+
+        let corpus = ordering_corpus();
+        let placed: Vec<(Vec<u8>, u64)> = corpus
+            .iter()
+            .map(|bytes| (bytes.clone(), string_of(&mut machine, bytes)))
+            .collect();
+
+        // A null address is the empty string on either side and on both, which
+        // is what the copying path answered for it: `string_bytes(0)` is
+        // empty, so `0 < "a"` and `0 == 0`.
+        let null: (Vec<u8>, u64) = (Vec::new(), 0);
+        let pairs = placed
+            .iter()
+            .chain(std::iter::once(&null))
+            .flat_map(|left| {
+                placed
+                    .iter()
+                    .chain(std::iter::once(&null))
+                    .map(move |right| (left, right))
+            });
+
+        let mut checked = 0usize;
+        for ((left_bytes, a), (right_bytes, b)) in pairs {
+            let want = left_bytes.as_slice().cmp(right_bytes.as_slice());
+
+            // The oracle the machine does not supply.
+            assert_eq!(
+                machine.compare_strings(*a, *b),
+                want,
+                "{left_bytes:x?} against {right_bytes:x?}"
+            );
+            // The code the fast path replaced, asked the way it was asked.
+            assert_eq!(
+                machine.string_bytes(*a).cmp(&machine.string_bytes(*b)),
+                want,
+                "the copying path disagrees on {left_bytes:x?} against {right_bytes:x?}"
+            );
+            // And the three-way answer `ORDER_STR`, `key::order` and the
+            // native tier's `OrderStrFn` all carry, which is the same order
+            // narrowed to `-1`, `0` and `1`.
+            assert_eq!(
+                machine.order_strings(*a, *b),
+                match want {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                },
+                "the three-way order disagrees on {left_bytes:x?} against {right_bytes:x?}"
+            );
+            checked += 1;
+        }
+
+        // A corpus that silently emptied would pass every assertion above.
+        assert_eq!(checked, (corpus.len() + 1).pow(2));
+        assert!(checked > 2000, "{checked} pairs is not a corpus");
     }
 }
