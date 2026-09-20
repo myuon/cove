@@ -947,6 +947,13 @@ export fn main() -> Int {
         pub(crate) fn watched<'w>(&'w self, debugger: &'w dyn Debugger) -> Vm<'w> {
             Vm::debugged(&self.runtime, &self.hosts, &self.program, debugger)
         }
+
+        /// The program every `Vm` this world builds runs, for a test that has
+        /// to read an instruction back — which `Intrinsic` an
+        /// `IntrinsicCall`'s site names — rather than only run it.
+        pub(crate) fn program(&self) -> &cove_ir::Program {
+            &self.program
+        }
     }
 
     /// Parses, resolves and checks one module called `m`.

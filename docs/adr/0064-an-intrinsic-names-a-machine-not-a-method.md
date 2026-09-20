@@ -350,7 +350,7 @@ nobody can reproduce is a number, not a baseline.
 **The per-site profile reconciles exactly.** Summing every `intrinsic-call`
 row of `--profile --profile-rows all`'s by-instruction table gives 415,809 on
 covefmt and 140,092 on cq — the boundary totals, to the call. (The by-opcode
-table gives 140,000 on cq, 46 short, and that is `OPCODE_FLOOR`: four variants
+table gives 140,000 on cq, 92 short, and that is `OPCODE_FLOOR`: four variants
 ran fewer than 1,000 times. Decision 7 fixes the attribution, not the floor.)
 
 ### The 31 variants

@@ -33,7 +33,11 @@
 //!
 //! - one `Option` test at the top of `Machine::call_intrinsic`, which is already a
 //!   Rust call that dispatches on the intrinsic — the same shape `Machine::tiered`
-//!   puts at a `call`;
+//!   puts at a `call` — and a second one right after `intrinsics::call` returns,
+//!   for [ADR 0064]'s per-variant allocations and words: the first test's `Some`
+//!   arm is what reads the allocation counters before the call, so the second
+//!   reads them again and charges the difference rather than reading them
+//!   unconditionally;
 //! - one `Option` test in the native `intrinsic` helper, which is already a call
 //!   out of compiled code into that same function;
 //! - and nothing at all in the other eight helpers: those are counted by a
@@ -52,6 +56,7 @@
 //!
 //! [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
 //! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+//! [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
 //! [`NativeHelpers`]: cove_native::NativeHelpers
 //! [`helpers_counting`]: crate::native_helpers_counting
 
@@ -405,6 +410,16 @@ pub struct IntrinsicCalls {
     pub encoded: u64,
     /// Calls compiled code made through the `intrinsic` helper.
     pub native: u64,
+    /// Objects the heap handed out across every call of this variant, from
+    /// either tier — [ADR 0064]'s Decision 7, which the opcode table's
+    /// `OPCODE_FLOOR` leaves off any variant that ran fewer than a thousand
+    /// times. This row has no such floor.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    pub allocations: u64,
+    /// Words the heap handed out across every call of this variant, for
+    /// [`allocations`](Self::allocations)'s reason.
+    pub words: u64,
 }
 
 impl IntrinsicCalls {
@@ -494,8 +509,10 @@ impl Emitted {
 ///
 /// Nothing is on the dispatch loop. A run that did not ask pays one `Option` test
 /// at the top of `Machine::call_intrinsic` — already a Rust call that dispatches on
-/// the intrinsic — and one in the native `intrinsic` helper, which is already a call
-/// out of compiled code into that function. The per-helper counts cost such a run nothing at
+/// the intrinsic — a second one right after `intrinsics::call` returns, for the
+/// per-variant allocations and words this report also carries, and one in the
+/// native `intrinsic` helper, which is already a call out of compiled code into
+/// that function. The per-helper counts cost such a run nothing at
 /// all, because they are a second helper table,
 /// [`native_helpers_counting`](crate::native_helpers_counting), which only
 /// [`compile_native_counting`](crate::compile_native_counting) binds:
@@ -574,6 +591,13 @@ pub(crate) struct Counting {
     sites: Vec<u64>,
     /// The ones among them the native `intrinsic` helper made.
     from_native: Vec<u64>,
+    /// Objects the heap handed out while running the calls at each `SiteId`,
+    /// charged by `Machine::charge_intrinsic_allocations` as the difference
+    /// of `Machine::allocations()` read before and after `intrinsics::call`.
+    allocations: Vec<u64>,
+    /// Words the heap handed out at each `SiteId`, for
+    /// [`allocations`](Self::allocations)'s reason.
+    words: Vec<u64>,
     /// Whether each function, by `FunctionId`, is the standard library's.
     library: Vec<bool>,
     /// Frames the encoded tier opened for a library function.
@@ -606,6 +630,8 @@ impl Counting {
         Counting {
             sites: vec![0; program.intrinsic_sites.len()],
             from_native: vec![0; program.intrinsic_sites.len()],
+            allocations: vec![0; program.intrinsic_sites.len()],
+            words: vec![0; program.intrinsic_sites.len()],
             library: program
                 .functions
                 .iter()
@@ -691,6 +717,21 @@ impl Counting {
         }
     }
 
+    /// What one call at `site` allocated: `allocations` objects, `words`
+    /// words, whichever tier made the call. Charged once per call, as the
+    /// difference `Machine::charge_intrinsic_allocations` takes across
+    /// `intrinsics::call` — so a call that allocated nothing charges `0`
+    /// rather than nothing at all, and the row still exists for
+    /// [`Counting::report`] to sum.
+    pub(crate) fn intrinsic_allocated(&mut self, site: SiteId, allocations: u64, words: u64) {
+        if let Some(total) = self.allocations.get_mut(site.index()) {
+            *total += allocations;
+        }
+        if let Some(total) = self.words.get_mut(site.index()) {
+            *total += words;
+        }
+    }
+
     /// The report, over `program` and the machine's current counts.
     ///
     /// `tiers` is `None` for a run with no native tier, and `helpers_counted`
@@ -716,10 +757,14 @@ impl Counting {
                     sites: 0,
                     encoded: 0,
                     native: 0,
+                    allocations: 0,
+                    words: 0,
                 });
             row.sites += sites.get(at).copied().unwrap_or(0);
             row.native += native;
             row.encoded += all.saturating_sub(native);
+            row.allocations += self.allocations.get(at).copied().unwrap_or(0);
+            row.words += self.words.get(at).copied().unwrap_or(0);
         }
         let mut intrinsics: Vec<IntrinsicCalls> = rows
             .into_values()
@@ -937,16 +982,18 @@ impl fmt::Display for BoundaryReport {
         )?;
         writeln!(
             f,
-            "  {:>14} {:>14} {:>7}  intrinsic",
-            "from encoded", "from native", "sites"
+            "  {:>14} {:>14} {:>7} {:>11} {:>12}  intrinsic",
+            "from encoded", "from native", "sites", "allocs", "words"
         )?;
         for row in &self.intrinsics {
             writeln!(
                 f,
-                "  {:>14} {:>14} {:>7}  {}",
+                "  {:>14} {:>14} {:>7} {:>11} {:>12}  {}",
                 thousands(row.encoded),
                 thousands(row.native),
                 row.sites,
+                thousands(row.allocations),
+                thousands(row.words),
                 row.intrinsic
             )?;
         }
@@ -1062,12 +1109,16 @@ mod tests {
                     sites: 1,
                     encoded: 1_000,
                     native: 7,
+                    allocations: 1_007,
+                    words: 5_035,
                 },
                 IntrinsicCalls {
                     intrinsic: Intrinsic::StringFromCodePoint,
                     sites: 3,
                     encoded: 0,
                     native: 0,
+                    allocations: 0,
+                    words: 0,
                 },
             ],
             encoded_instructions: 1_234_567,
@@ -1132,7 +1183,138 @@ mod tests {
             !text.contains("    Finish "),
             "an operation that never ran is left out"
         );
-        assert!(text.contains("           1,000              7       1  String.join"));
-        assert!(text.contains("               0              0       3  String.fromCodePoint"));
+        assert!(text.contains(
+            "           1,000              7       1       1,007        5,035  String.join"
+        ));
+        assert!(text.contains(
+            "               0              0       3           0            0  String.fromCodePoint"
+        ));
+    }
+
+    /// A loop that calls an intrinsic that allocates (`String.join` builds
+    /// the string it answers) and one that does not (`String.length` walks
+    /// its receiver and answers a count), each several times over, so both
+    /// [`Counting`]'s wiring and the reconciliation test below have more than
+    /// one call and more than one site to work with.
+    const JOIN_AND_LENGTH: &str = "
+export fn main() -> Int {
+  var total = 0
+  var i = 0
+  while i < 50 {
+    let text = \"n={i}\"
+    total = total + text.length()
+    let joined = \",\".join([\"a\", \"b\", \"c\"])
+    total = total + joined.length()
+    i = i + 1
+  }
+  total
+}
+";
+
+    /// [ADR 0064]'s Decision 7 asks that allocations and allocated words be
+    /// attributed per variant, and this is the property worth pinning about
+    /// that attribution: it is not just present, it tells two operations
+    /// apart. `String.join` allocates the string it hands back, and
+    /// `String.length` only reads the bytes it is given, so a run of both
+    /// must show one row with allocations and one row without — from the
+    /// real machinery in `Machine::call_intrinsic`, not from calling
+    /// [`Counting::intrinsic_allocated`] directly, which would only prove the
+    /// bookkeeping adds correctly and not that it is wired to anything.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    #[test]
+    fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
+        use crate::vm::debug::tests::World;
+
+        let world = World::new(JOIN_AND_LENGTH);
+        let mut vm = world.plain();
+        vm.count_boundary();
+        vm.run_entry("m", "main", Vec::new()).expect("it answers");
+        let boundary = vm.boundary().expect("count_boundary was called");
+
+        let join = boundary
+            .intrinsic(Intrinsic::StringJoin)
+            .expect("the program calls String.join");
+        assert!(join.calls() > 0, "{join:?}");
+        assert!(
+            join.allocations > 0,
+            "String.join allocates the string it answers: {join:?}"
+        );
+        assert!(join.words > 0, "{join:?}");
+        // The per-variant total is a subset of the whole run's, never past
+        // it — the sanity Decision 7's own measurement leans on.
+        assert!(join.allocations <= vm.allocations(), "{join:?}");
+        assert!(join.words <= vm.allocated_words(), "{join:?}");
+
+        let length = boundary
+            .intrinsic(Intrinsic::StringLength)
+            .expect("the program calls String.length");
+        assert!(length.calls() > 0, "{length:?}");
+        assert_eq!(
+            length.allocations, 0,
+            "String.length reads its receiver and answers a count: {length:?}"
+        );
+        assert_eq!(length.words, 0, "{length:?}");
+    }
+
+    /// **The totals must reconcile exactly with the opcode and site
+    /// profile.** [ADR 0064]'s Decision 7 says so in those words, for the
+    /// same reason `vm_coverage.rs`'s ratchets are compared as sets rather
+    /// than as counts: a total that merely matches in aggregate could still
+    /// be attributing the right number of allocations to the wrong variant.
+    /// So this checks it per variant, from one run watched by both a
+    /// [`Profiler`](crate::vm::profile::Profiler) and boundary counting at
+    /// once — the same instructions, read two ways — rather than trusting
+    /// that two separate runs of the same program would have counted the
+    /// same thing.
+    ///
+    /// For every `Intrinsic` the boundary report names, this sums the
+    /// profiler's own per-instruction cost over every `IntrinsicCall` site
+    /// naming that variant, and checks the sum against the boundary row's
+    /// calls, allocations and words. `program.intrinsic_site` is what turns a
+    /// profiled `(FunctionId, pc)` back into the `Intrinsic` an
+    /// `IntrinsicCall` there names, exactly as `Counting::report` does.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    #[test]
+    fn the_boundary_report_and_the_profile_reconcile_by_variant() {
+        use crate::vm::debug::tests::World;
+        use crate::vm::profile::Profiler;
+
+        let world = World::new(JOIN_AND_LENGTH);
+        let profiler = Profiler::new();
+        let mut vm = world.watched(&profiler);
+        vm.count_boundary();
+        vm.run_entry("m", "main", Vec::new()).expect("it answers");
+        let boundary = vm.boundary().expect("count_boundary was called");
+        assert!(
+            !boundary.intrinsics.is_empty(),
+            "the program names some intrinsic"
+        );
+
+        let program = world.program();
+        let rows = profiler.rows();
+        for row in &boundary.intrinsics {
+            let mut calls = 0u64;
+            let mut allocations = 0u64;
+            let mut words = 0u64;
+            for ((id, pc), cost) in &rows {
+                let Some(function) = program.functions.get(id.index()) else {
+                    continue;
+                };
+                let Some(Inst::IntrinsicCall { site, .. }) = function.code.get(*pc as usize) else {
+                    continue;
+                };
+                if program.intrinsic_site(*site).intrinsic != row.intrinsic {
+                    continue;
+                }
+                calls += cost.ran;
+                allocations += cost.allocations;
+                words += cost.words;
+            }
+            assert_eq!(calls, row.calls(), "{:?}: {row:?}", row.intrinsic);
+            assert_eq!(allocations, row.allocations, "{:?}: {row:?}", row.intrinsic);
+            assert_eq!(words, row.words, "{:?}: {row:?}", row.intrinsic);
+        }
     }
 }

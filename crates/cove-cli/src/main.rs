@@ -2022,8 +2022,8 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler, rows: usize) {
     hottest.sort_by(|a, b| b.1.nanos.cmp(&a.1.nanos).then(a.0.cmp(&b.0)));
     eprintln!("  by instruction, most time first:");
     eprintln!(
-        "  {:>13} {:>7} {:>7} {:>6}  instruction",
-        "instr", "instr%", "time%", "ns/in"
+        "  {:>13} {:>7} {:>7} {:>6} {:>11} {:>12}  instruction",
+        "instr", "instr%", "time%", "ns/in", "allocs", "words"
     );
     for ((id, pc), cost) in hottest.iter().take(rows) {
         let function = program.function(*id);
@@ -2032,11 +2032,13 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler, rows: usize) {
             None => "<past the end of this function>".to_string(),
         };
         eprintln!(
-            "  {:>13} {:>6.2}% {:>6.2}% {:>6.0}  {}+{pc}  {line}",
+            "  {:>13} {:>6.2}% {:>6.2}% {:>6.0} {:>11} {:>12}  {}+{pc}  {line}",
             cost.ran,
             share(cost.ran),
             spent(cost.nanos),
             each(cost),
+            cost.allocations,
+            cost.words,
             function.qualified()
         );
     }
