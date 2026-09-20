@@ -2,9 +2,8 @@ cove debug — debug_session.main on the linear-memory backend. `help` lists the
 entering debug_session.main at debug_session/main.cove:30:11
 >   30 |   println("before")?
 (cove) break debug_session/main.cove:6
-breakpoint 1 at 2 locations:
+breakpoint 1 at 1 location:
   debug_session.twice (inlined into debug_session.raise) pc 5 at debug_session/main.cove:6:17
-  debug_session.twice pc 0 at debug_session/main.cove:6:17
 (cove) break debug_session/main.cove:2
 no instruction was lowered for debug_session/main.cove:2
   `cove debug` lowers what the entry reaches, so a line in code no path leads to has no instructions to stop at, and neither has a line that is blank, a comment, or a declaration
@@ -13,7 +12,6 @@ no instruction was lowered for debug_session/main.cove:2
 (cove) info breakpoints
 breakpoint 1 at `debug_session/main.cove:6`, hit 0 time(s)
   debug_session.twice (inlined into debug_session.raise) pc 5 at debug_session/main.cove:6:17
-  debug_session.twice pc 0 at debug_session/main.cove:6:17
 (cove) continue
 before
 breakpoint 1, debug_session.twice at debug_session/main.cove:6:17

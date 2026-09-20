@@ -463,16 +463,25 @@ impl Function {
     /// written.
     ///
     /// It answers `true` for all three kinds `lower::stub`'s doc comment
-    /// describes, because `stub` is the one place any of them is built and
-    /// this reads back exactly what it recorded. But a program that actually
-    /// runs — the output of [`lower_roots`](crate::lower_roots) or
+    /// describes, and for a fourth `lower::sweep` makes: a declaration this
+    /// lowering *did* lower and then stood down, because a later pass removed
+    /// the last reference to it. `lower::inline` expands a call to a small
+    /// leaf where it is made, and a function every call site of which was
+    /// expanded is named by nothing — so its body is replaced by this same
+    /// stand-in rather than emitted, encoded and compiled for nobody (issue
+    /// #440). Its module, name and span stay, because an expansion record
+    /// names it and a backtrace reads that name.
+    ///
+    /// A program that actually runs — the output of
+    /// [`lower_roots`](crate::lower_roots) or
     /// [`lower_entry`](crate::lower_entry) once a lowering finishes without
-    /// error — can only hold two of the three: the declaration a slice left
-    /// out, and a generic declaration whose instantiations carry the real
-    /// code beside it. The third kind, a declaration this lowering reported
-    /// a gap about, belongs to a lowering that never got handed back — a gap
-    /// is an error, so the program it would have been part of does not exist
-    /// for a caller of this method to ask about.
+    /// error — can hold three of the four: the declaration a slice left out,
+    /// the one a later pass stopped anything naming, and a generic
+    /// declaration whose instantiations carry the real code beside it. The
+    /// remaining kind, a declaration this lowering reported a gap about,
+    /// belongs to a lowering that never got handed back — a gap is an error,
+    /// so the program it would have been part of does not exist for a caller
+    /// of this method to ask about.
     ///
     /// This is a stored fact rather than a test of the four fields above,
     /// because a shape a stub happens to have is not a shape only a stub

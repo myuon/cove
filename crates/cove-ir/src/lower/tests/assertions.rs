@@ -178,9 +178,18 @@ fn @m.unused() -> Unit
 /// `lower::stub` builds, `used` is what `main` calls and gets `used`'s own
 /// lowered body, and `main` itself — the root the slice is built from — is
 /// unreached by nothing and is a real body too.
+///
+/// `used` recurses, which is what keeps it a body. `super::inline` expands a
+/// *leaf*, and a leaf every call site of which is expanded is stood down to a
+/// stub by `lower::sweep` — a third way to be one, and the subject of
+/// [`super::sweep`] rather than of this. `fn used() -> Int { 2 }` was this
+/// fixture until that pass existed, and it now answers this question the
+/// other way.
 #[test]
 fn a_declaration_the_slice_does_not_reach_is_a_stub_and_one_it_does_is_not() {
-    let source = "fn unused() -> Int { 1 }\nfn used() -> Int { 2 }\nfn main() -> Int { used() }";
+    let source = "fn unused() -> Int { 1 }\n\
+                  fn used(n: Int) -> Int { if n > 0 { used(n - 1) } else { 2 } }\n\
+                  fn main() -> Int { used(1) }";
     let (sources, checked) = super::checked(source);
     let program = crate::lower_roots(
         &checked,
@@ -229,6 +238,15 @@ fn @m.double(Int) -> Int
 /// A conformance a `dyn` dispatch picks is named by no call site either:
 /// which one runs is a fact about the value. Every one of them is in the
 /// slice, or the `Switch` this builds would have an arm that traps.
+///
+/// Asked of the dispatch rather than of the two conformances, because both
+/// bodies are one instruction and `super::inline` expands each into its own
+/// arm — after which nothing names either function and `lower::sweep` stands
+/// both down. What the slice did is still visible, and visible in the one
+/// place it matters: a conformance the slice had left out would be a stub,
+/// and the arm would copy its `()` rather than hold its string. So the two
+/// strings standing in `main` are the evidence, and they are better evidence
+/// than the conformance's own listing was.
 #[test]
 fn every_conformance_a_dyn_dispatch_can_reach_is_in_the_slice() {
     let source = "trait D { fn shown(self) -> String }\n\
@@ -237,9 +255,9 @@ fn every_conformance_a_dyn_dispatch_can_reach_is_in_the_slice() {
                   impl D for P { fn shown(self) -> String { \"p\" } }\n\
                   impl D for Q { fn shown(self) -> String { \"q\" } }\n\
                   fn main(d: dyn D) -> String { d.shown() }";
-    for conformance in ["P.shown", "Q.shown"] {
-        let listed = sliced(source, "main", conformance);
-        assert!(listed.contains("str "), "{conformance}: {listed}");
+    let listed = sliced(source, "main", "main");
+    for answer in ["\"p\"", "\"q\""] {
+        assert!(listed.contains(answer), "{answer}: {listed}");
     }
 }
 
@@ -250,10 +268,13 @@ fn every_conformance_a_dyn_dispatch_can_reach_is_in_the_slice() {
 /// `right` share `common` or that `wide` is reached by neither.
 #[test]
 fn a_slice_over_several_roots_is_the_union_of_what_they_reach() {
+    // `common` recurses so that it stays a call rather than being expanded
+    // into both callers and stood down by `lower::sweep`, which is a
+    // question [`super::sweep`] asks and this one does not.
     let source = "fn wide<T>(x: T) -> T { x }\n\
-                  fn common() -> Int { 1 }\n\
-                  fn left() -> Int { common() }\n\
-                  fn right() -> Int { common() + 1 }";
+                  fn common(n: Int) -> Int { if n > 0 { common(n - 1) } else { 1 } }\n\
+                  fn left() -> Int { common(1) }\n\
+                  fn right() -> Int { common(1) + 1 }";
     for reached in ["left", "right", "common"] {
         let listed = sliced_to(source, &["left", "right"], reached);
         assert!(!listed.contains("-> Unit"), "{reached}: {listed}");
