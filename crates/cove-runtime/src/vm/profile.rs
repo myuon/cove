@@ -39,7 +39,7 @@
 //! absolutely: every instruction is counted, not one in a thousand, so a
 //! function that ran once is in the report and a share is exact.
 //!
-//! It is also, alone, **not enough**, and that is why the three figures
+//! It is also, alone, **not enough**, and that is why the four figures
 //! beside it are here. An `intrinsic-call` that allocates a string, a `call`
 //! that pushes a frame and an `add.int` are one instruction each. Replacing
 //! a byte loop in `examples/covefmt` with one `String.contains` cut the run
@@ -51,10 +51,16 @@
 //! - **nanoseconds**, measured as the interval between the stop before an
 //!   instruction and the stop after it;
 //! - **words** and **allocations**, measured as what the heap handed out
-//!   across that same interval.
+//!   across that same interval;
+//! - **work**, measured as what the run was charged across that interval
+//!   *beyond* the one unit every instruction costs — the words a bulk copy
+//!   moved, and, since [ADR 0064]'s Decision 7, the units a mediated
+//!   intrinsic reported having examined. It is what separates a
+//!   `String.length` over ten bytes from one over a hundred thousand, which
+//!   until that decision were the same row and the same fuel.
 //!
-//! The heap figures are exact: a difference of two counters is what happened
-//! in between, whatever it took to happen.
+//! The heap and work figures are exact: a difference of two counters is what
+//! happened in between, whatever it took to happen.
 //!
 //! The time is **not** exact, and reading it as though it were is the mistake
 //! this paragraph exists to stop. The interval holds the instruction, the
@@ -80,6 +86,8 @@
 //! its own. So a run that spawns profiles the task the profiler was installed
 //! on. [`crate::Vm::instructions`] is counted the same way and for the same
 //! reason.
+//!
+//! [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -104,6 +112,25 @@ pub struct Cost {
     pub words: u64,
     /// Objects its heap handed out while it ran.
     pub allocations: u64,
+    /// Work it was charged **beyond** the one every instruction costs: the
+    /// words a bulk copy moved, the bytes a window appended, and the units a
+    /// mediated intrinsic reported having examined.
+    ///
+    /// Nought for almost every opcode, which is the point of it: an
+    /// `intrinsic-call` that walked a hundred thousand bytes and an `add.int`
+    /// are one instruction each and [`ran`](Self::ran) cannot tell them
+    /// apart, while this says how much the first one looked at. It is the
+    /// per-instruction half of [ADR 0064]'s Decision 7, and it reconciles
+    /// exactly with the boundary report's per-variant `work` column — summed
+    /// over every `IntrinsicCall` site naming one variant, the two are the
+    /// same number.
+    ///
+    /// **The unit is the storage run's**: bytes for a packed byte run, words
+    /// for a word run, one per value visited for a walk over a value. Adding
+    /// this to `ran` would be adding two units and is not what either is for.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    pub work: u64,
 }
 
 impl Cost {
@@ -113,6 +140,7 @@ impl Cost {
         self.nanos += other.nanos;
         self.words += other.words;
         self.allocations += other.allocations;
+        self.work += other.work;
     }
 }
 
@@ -124,6 +152,7 @@ struct Previous {
     when: Instant,
     words: u64,
     allocations: u64,
+    work: u64,
 }
 
 /// Counts what a run executes, by the instruction that executed.
@@ -166,7 +195,7 @@ impl Profiler {
             .sum()
     }
 
-    /// What the whole run cost, by the four figures a row carries.
+    /// What the whole run cost, by the five figures a row carries.
     pub fn total(&self) -> Cost {
         let mut all = Cost::default();
         for cost in self.at.lock().expect("a lock").values() {
@@ -221,9 +250,9 @@ impl Profiler {
 impl Debugger for Profiler {
     /// Closes the instruction that just ran and opens the one about to.
     ///
-    /// The count belongs to the instruction this stop is *before*; the time
-    /// and the heap belong to the one the previous stop was before, because
-    /// those are what moved in between.
+    /// The count belongs to the instruction this stop is *before*; the time,
+    /// the heap and the work belong to the one the previous stop was before,
+    /// because those are what moved in between.
     ///
     /// The clock is read twice, first thing and last thing, and the bookkeeping
     /// sits between the two reads. So the interval a number is measured over
@@ -236,6 +265,7 @@ impl Debugger for Profiler {
         let here = (stop.function_id(), stop.pc());
         let words = stop.allocated_words();
         let allocations = stop.allocations();
+        let work = stop.bulk_work();
         let mut held = self.at.lock().expect("a lock");
         held.entry(here).or_default().ran += 1;
         let mut last = self.last.lock().expect("a lock");
@@ -244,11 +274,13 @@ impl Debugger for Profiler {
             cost.nanos += now.saturating_duration_since(before.when).as_nanos() as u64;
             cost.words += words.saturating_sub(before.words);
             cost.allocations += allocations.saturating_sub(before.allocations);
+            cost.work += work.saturating_sub(before.work);
         }
         *last = Some(Previous {
             at: here,
             words,
             allocations,
+            work,
             when: Instant::now(),
         });
         Resume::Go

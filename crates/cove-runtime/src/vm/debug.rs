@@ -199,6 +199,25 @@ impl<'m> Stop<'m> {
         self.machine.allocations()
     }
 
+    /// Work this task has been charged beyond the one every instruction
+    /// costs: the words a bulk copy moved, the bytes a window appended, and —
+    /// since [ADR 0064]'s Decision 7 — the units a mediated intrinsic
+    /// reported having examined.
+    ///
+    /// Read at the same moment as the two counters above and for the same
+    /// reason: the difference between two consecutive stops is what the
+    /// instruction between them was charged, so
+    /// [`crate::vm::profile::Profiler`] can attribute a proportional charge
+    /// to the instruction that incurred it without a seam inside the charging
+    /// itself. It is *not* [`Stop::instructions`] plus this — a profiler row
+    /// already counts how often an instruction ran, and adding one per run
+    /// would bury the proportional part under the constant one.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    pub fn bulk_work(&self) -> u64 {
+        self.machine.bulk_work()
+    }
+
     /// Which task this stop is in.
     ///
     /// Everything else a `Stop` answers is one task's — the count, the

@@ -43,6 +43,7 @@
 //! buffer, no spill area and no fallback path, which is what ADR 0034 asks
 //! for and what the predecessor could not say.
 
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
 use std::time::Duration;
@@ -482,6 +483,47 @@ pub(crate) struct Machine<'a> {
     /// and `next_check` absorbs the offset instead, since it is recomputed
     /// only when something charges in bulk.
     bulk_work: u64,
+    /// What the intrinsic now running has reported it examined, in the unit
+    /// of the storage run it walked — and nothing at all between two
+    /// intrinsic calls, because [`Machine::call_intrinsic`] takes it after
+    /// every one.
+    ///
+    /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 7 asks for "proportional-work charges per variant", and
+    /// eighteen of the 31 variants declare
+    /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
+    /// *one* unit of [`Machine::work`] — the one every instruction costs —
+    /// whatever they examined. So the work was not merely unattributed, it
+    /// was not in the fuel total at all: 10,000 `String.length` calls over
+    /// ten characters and over 100,000 characters spent the same fuel and
+    /// 383 times the wall clock. This is where an arm says what it walked so
+    /// that `call_intrinsic` can charge it once, for every arm, in one place.
+    ///
+    /// **A [`Cell`] rather than a plain `u64`, because the walkers hold the
+    /// machine by shared reference and must.** `equal::equals`,
+    /// `key::value_order`, `key::admit_key` and `intrinsics::render_into`
+    /// each narrow their `&mut Machine` to a `&Machine` before they start,
+    /// because the value they are walking is borrowed *out of the caller's
+    /// frame* — see [`Operands`] — and that borrow lives for the whole walk.
+    /// A counter those walks could add to therefore has to be writable
+    /// through a shared borrow, and threading a `&mut u64` through fourteen
+    /// recursive functions in three modules would be the same counter with
+    /// the signature churn as well. Nothing here is shared between threads:
+    /// a spawned task gets a machine of its own.
+    ///
+    /// # The unit is the storage run's, so a text intrinsic charges bytes
+    ///
+    /// This is the same unit [`Machine::bulk_work`] already counts, and it is
+    /// not words. `Inst::RunCopy` over a `Storage::PackedBytes` charges one
+    /// per **byte** and over a `Storage::Words` one per **word**, which is
+    /// ADR 0052's "charged proportionally to the bytes or words examined".
+    /// A `String` is a packed byte run, so every text arm below charges the
+    /// **bytes** it walked; a walk over a value — an equality, a key order, a
+    /// rendering — charges one per scalar, field or element it visited. A
+    /// reader who assumes words will be out by a factor of eight on the
+    /// commonest variant in the repository, which is why it is written down
+    /// here as well as at [`Machine::examined`].
+    examined: Cell<u64>,
     /// The instruction count at which the loop next asks a question.
     ///
     /// The whole of what a debugger costs the dispatch loop, and it is
@@ -809,6 +851,7 @@ impl<'a> Machine<'a> {
             instructions: 0,
             charged_work: 0,
             bulk_work: 0,
+            examined: Cell::new(0),
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -893,6 +936,7 @@ impl<'a> Machine<'a> {
             instructions: 0,
             charged_work: 0,
             bulk_work: 0,
+            examined: Cell::new(0),
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -1114,9 +1158,9 @@ impl<'a> Machine<'a> {
         (self.allocations(), self.allocated_words())
     }
 
-    /// Charges `site` with the allocations and allocated words
-    /// `intrinsics::call` made, out of line for [`Machine::count_intrinsic`]'s
-    /// reason.
+    /// Charges `site` with the allocations, the allocated words and the
+    /// units `intrinsics::call` examined, out of line for
+    /// [`Machine::count_intrinsic`]'s reason.
     ///
     /// `allocations_before` and `words_before` are the snapshot
     /// `count_intrinsic` took immediately before the call; read again here,
@@ -1132,18 +1176,26 @@ impl<'a> Machine<'a> {
     /// only ever rise and a collection in the middle of the call does not
     /// lower either one. A charge of nought is what a future counter that
     /// could fall should answer here, not a number near `u64::MAX`.
+    ///
+    /// `examined` is neither a difference nor read here: it is the total the
+    /// arm itself reported through [`Machine::examined`], which
+    /// `call_intrinsic` has already taken and charged to
+    /// [`Machine::bulk_work`] before reaching this. It is passed in rather
+    /// than taken again for exactly that reason — a second take would answer
+    /// nought and attribute nothing.
     #[inline(never)]
     #[cold]
-    fn charge_intrinsic_allocations(
+    fn charge_intrinsic_costs(
         &mut self,
         site: SiteId,
         allocations_before: u64,
         words_before: u64,
+        examined: u64,
     ) {
         let allocations = self.allocations().saturating_sub(allocations_before);
         let words = self.allocated_words().saturating_sub(words_before);
         if let Some(counting) = self.counting.as_deref_mut() {
-            counting.intrinsic_allocated(site, allocations, words);
+            counting.intrinsic_cost(site, allocations, words, examined);
         }
     }
 
@@ -1250,6 +1302,42 @@ impl<'a> Machine<'a> {
     #[inline]
     fn work(&self) -> u64 {
         self.instructions + self.bulk_work
+    }
+
+    /// The intrinsic now running reports that it examined `units` of what it
+    /// walked.
+    ///
+    /// **A report, not a policy.** An arm knows how much it looked at and
+    /// knows nothing about safepoints, fuel or the compiled tier's poll; the
+    /// one place that does is [`Machine::call_intrinsic`], which takes the
+    /// total once the arm has returned and charges it. So an arm adds this
+    /// line where it has read the thing it is about to walk, and the question
+    /// of what a charge *does* is asked in exactly one place rather than in
+    /// eighteen.
+    ///
+    /// `units` is in the unit of the run the arm walked, which for a
+    /// `String` is **bytes** — see [`Machine::examined`](Self::examined)'s
+    /// field for why, and why that is not words. Several reports in one call
+    /// add up, which is what a rendering does: one per value visited, and the
+    /// bytes it finally appended.
+    ///
+    /// Reported for a call that goes on to *fail*, too, and deliberately:
+    /// work that was done before a refusal was still done, and a bound that
+    /// forgave it would be a bound a program could walk under by raising.
+    #[inline]
+    pub(crate) fn examined(&self, units: u64) {
+        self.examined.set(self.examined.get() + units);
+    }
+
+    /// Work this run has been charged beyond the one per instruction.
+    ///
+    /// For [`Stop::bulk_work`], which is how
+    /// [`crate::vm::profile::Profiler`] attributes a proportional charge to
+    /// the instruction that incurred it: the difference between two
+    /// consecutive stops is what the instruction between them was charged,
+    /// exactly as the heap counters beside it work.
+    pub(crate) fn bulk_work(&self) -> u64 {
+        self.bulk_work
     }
 
     /// Cancellation, fuel and the collector's rendezvous, at `pc`.
@@ -2177,12 +2265,62 @@ impl<'a> Machine<'a> {
             Dest::new(base, dst, called.result),
         );
 
+        // What the arm said it examined, charged as work — [ADR
+        // 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+        // Decision 7. This is the one funnel: the encoded `INTRINSIC_CALL`
+        // arm and both native helpers (`intrinsic` and
+        // `intrinsic_at_safepoint`) reach `call_intrinsic`, so the charge is
+        // written once and cannot be forgotten on a tier. It is taken on the
+        // error path as well, because the walk a refusal ended had already
+        // walked.
+        //
+        // `next_check` **must** be recomputed with it. `next_question`
+        // subtracts `bulk_work`, so a charge that left the old threshold
+        // standing would leave the encoded loop's next safepoint late by the
+        // whole charge — which is the very overshoot this is here to close.
+        // `encoded::in_chunks` is the precedent and does exactly this after
+        // each piece.
+        //
+        // # What this fixes, and what it does not
+        //
+        // It makes the work visible to fuel, to cancellation and to the
+        // deadline **at the next safepoint**, so the overshoot past a bound
+        // becomes one intrinsic call rather than unbounded and invisible. It
+        // does *not* make one call interruptible: nothing can poll inside
+        // `str::to_uppercase`. Splitting a bulk intrinsic into pieces that
+        // can is what ADR 0064's migration is for, and that is a point in the
+        // migration's favour rather than something this replaces.
+        //
+        // # The compiled tier feels it one poll later, and that is honest
+        //
+        // Compiled code polls on `NativeCtx::pending_work >= poll_at` and
+        // never reads `bulk_work`. `Machine::poll_budget` folds
+        // `work() - charged_work` in, so a charge made here shortens the
+        // *next* poll interval compiled code is given rather than forcing an
+        // immediate poll — ADR 0040's `S + T` with `T` including one
+        // intrinsic call. `poll_at` is deliberately **not** republished from
+        // the non-safepoint `intrinsic` helper: `pending_work` has not been
+        // reset there, so a fresh `poll_budget` and the accumulator compiled
+        // code is still counting in would disagree, and two numbers
+        // disagreeing about one budget is worse than an interval one call
+        // long.
+        //
+        // The test is against nought rather than unconditional so that the
+        // thirteen variants which examine nothing — every scalar, `Float`,
+        // parse and `fromCodePoint` arm — pay no `next_question` for a charge
+        // of zero. Adding nought could not have moved the threshold anyway.
+        let examined = self.examined.take();
+        if examined != 0 {
+            self.bulk_work += examined;
+            self.next_check = self.next_question();
+        }
+
         // Read again immediately after the call returns, so the difference
         // from `allocation_charge`'s snapshot is exactly what this call did.
         // `None` when counting is off, which is the same test `allocation_charge`
         // already paid — nothing new is read unconditionally.
         if let Some((allocations_before, words_before)) = allocation_charge {
-            self.charge_intrinsic_allocations(site, allocations_before, words_before);
+            self.charge_intrinsic_costs(site, allocations_before, words_before, examined);
         }
 
         // An intrinsic that answered a `RuntimeError` while its declared

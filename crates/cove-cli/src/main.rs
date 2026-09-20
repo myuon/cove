@@ -2107,8 +2107,8 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler, rows: usize) {
     hottest.sort_by(|a, b| b.1.nanos.cmp(&a.1.nanos).then(a.0.cmp(&b.0)));
     eprintln!("  by instruction, most time first:");
     eprintln!(
-        "  {:>13} {:>7} {:>7} {:>6} {:>11} {:>12}  instruction",
-        "instr", "instr%", "time%", "ns/in", "allocs", "words"
+        "  {:>13} {:>7} {:>7} {:>6} {:>11} {:>12} {:>14}  instruction",
+        "instr", "instr%", "time%", "ns/in", "allocs", "words", "work"
     );
     for ((id, pc), cost) in hottest.iter().take(rows) {
         let function = program.function(*id);
@@ -2117,16 +2117,26 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler, rows: usize) {
             None => "<past the end of this function>".to_string(),
         };
         eprintln!(
-            "  {:>13} {:>6.2}% {:>6.2}% {:>6.0} {:>11} {:>12}  {}+{pc}  {line}",
+            "  {:>13} {:>6.2}% {:>6.2}% {:>6.0} {:>11} {:>12} {:>14}  {}+{pc}  {line}",
             cost.ran,
             share(cost.ran),
             spent(cost.nanos),
             each(cost),
             cost.allocations,
             cost.words,
+            cost.work,
             function.qualified()
         );
     }
+    eprintln!(
+        "  `work` is what an instruction was charged beyond the one every \
+         instruction costs — the words a bulk copy moved, the bytes a mediated \
+         intrinsic examined — and it is the column that tells a `String.length` \
+         over ten bytes from one over a hundred thousand, which `instr` cannot. \
+         Its unit is the run's: bytes for a string, words for a word run, one \
+         per value visited for a walk over a value, so a total down the column \
+         adds two units and a row is what to read."
+    );
     eprintln!(
         "  a count is exact and a nanosecond is not: every instruction carries the \
          same floor, which the cheapest opcode in the table above is a reading of, \

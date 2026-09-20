@@ -25,6 +25,47 @@
 //! bytes are decoded into a Rust `String` once and the operation runs on
 //! that, so there is exactly one place either backend could be reading them
 //! differently, and it is this sentence.
+//!
+//! # Every operation here says what it examined, in bytes
+//!
+//! Nine of the operations below walk the whole receiver, four search it and
+//! one builds its answer out of parts, and until
+//! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+//! Decision 7 every one of them cost the run **one** unit of work — the one
+//! an `add.int` costs. So `"ab".length()` and a `length()` over a hundred
+//! thousand characters spent the same fuel, ran for 383 times the wall clock,
+//! and were the same to a cancellation, a deadline and a fuel bound alike.
+//!
+//! Each arm therefore calls [`Machine::examined`] with what it looked at, and
+//! **the unit is bytes**, not characters and not words: it is the unit
+//! `Machine::bulk_work` already counts for an `Inst::RunCopy` over a
+//! `Storage::PackedBytes`, and a `String`'s object *is* a packed byte run.
+//! Charging characters would make the same text cost different amounts
+//! depending on the script it is written in, and charging words would divide
+//! every figure by eight for no reason a reader could recover.
+//!
+//! What is charged is **what was examined**, not what was handed back, and
+//! the two part company in both directions:
+//!
+//! - the nine that walk the receiver — `length`, `words`, `chars`, `split`,
+//!   `slice`, `trim`, `replace`, `toUpper`, `toLower` — charge the receiver's
+//!   own byte length, because [`operand::text`] has already decoded the whole
+//!   of it before any of them looks at a single character;
+//! - `startsWith` and `endsWith` compare at most the needle, so they charge
+//!   the needle's length capped at the receiver's;
+//! - `contains` and `indexOf` charge the **receiver's** length, and that is
+//!   an upper bound rather than a measurement: `str::find` does not report
+//!   how far it got before it matched. An upper bound is the safe direction
+//!   for a *bound* — overcharging makes a safepoint arrive early, where
+//!   undercharging is the overshoot this whole decision exists to close;
+//! - `join` charges the bytes of the answer it builds, parts and separators
+//!   together, which is what it copies and is unrelated to the length of the
+//!   array it was handed.
+//!
+//! The charge is made as soon as the receiver has been read, which is before
+//! `split` and `replace` refuse an empty needle: a call that raises still
+//! walked what it walked, and a bound a program could slip under by failing
+//! would not be one.
 
 use cove_ir::{LayoutId, Shape};
 
@@ -39,7 +80,9 @@ pub(super) fn length(
     frame: Frame<'_>,
     dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let count = operand::text(machine, frame, 0)?.chars().count();
+    let text = operand::text(machine, frame, 0)?;
+    machine.examined(text.len() as u64);
+    let count = text.chars().count();
     dest.word(machine, count as u64);
     Ok(())
 }
@@ -51,6 +94,7 @@ pub(super) fn words(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    machine.examined(text.len() as u64);
     let parts: Vec<&str> = text.split_ascii_whitespace().collect();
     let array = make::strings(machine, &parts)?;
     dest.word(machine, array);
@@ -67,6 +111,7 @@ pub(super) fn chars(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    machine.examined(text.len() as u64);
     let parts: Vec<String> = text.chars().map(String::from).collect();
     let array = make::strings(machine, &parts)?;
     dest.word(machine, array);
@@ -80,6 +125,9 @@ pub(super) fn split(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    // Before the refusal below, not after it: the receiver was decoded either
+    // way. See the module's "Every operation here says what it examined".
+    machine.examined(text.len() as u64);
     let separator = operand::text(machine, frame, 1)?;
     if separator.is_empty() {
         return Err(operand::empty_needle(
@@ -145,6 +193,11 @@ fn joined_bytes(machine: &mut Machine, separator: u64, parts: &[u64]) -> Result<
     for part in parts {
         total += width(*part);
     }
+    // The bytes this builds, which is what it copies: every part once and
+    // every separator between two of them. It is not the length of the array
+    // it was handed, and it is not the receiver — the receiver is the
+    // separator, and a join of one part copies none of it.
+    machine.examined(total.max(0) as u64);
     let result = machine.new_string_of(total)?;
     let mut at = 0usize;
     for (index, part) in parts.iter().enumerate() {
@@ -177,6 +230,12 @@ pub(super) fn slice(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    // The **receiver's** bytes rather than the answer's, because that is what
+    // this arm examines: `from` and `to` are character positions, so the line
+    // below collects every character of the receiver before it can take a
+    // range of them. A slice of two characters out of a megabyte reads the
+    // megabyte, and charging the answer's own length would say it did not.
+    machine.examined(text.len() as u64);
     let from = operand::int(machine, frame, 1);
     let to = operand::int(machine, frame, 2);
     let chars: Vec<char> = text.chars().collect();
@@ -239,6 +298,7 @@ pub(super) fn trim(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    machine.examined(text.len() as u64);
     let word = machine.new_string(text.trim())?;
     dest.word(machine, word);
     Ok(())
@@ -251,6 +311,9 @@ pub(super) fn contains(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    // An upper bound: `str::contains` does not report where it stopped. See
+    // the module's note on why an upper bound is the safe direction here.
+    machine.examined(text.len() as u64);
     let needle = operand::text(machine, frame, 1)?;
     dest.word(machine, text.contains(&needle) as u64);
     Ok(())
@@ -264,6 +327,9 @@ pub(super) fn starts_with(
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
     let prefix = operand::text(machine, frame, 1)?;
+    // At most the needle, and never past the receiver: a prefix longer than
+    // what it is tested against is refused on the length alone.
+    machine.examined(prefix.len().min(text.len()) as u64);
     dest.word(machine, text.starts_with(&prefix) as u64);
     Ok(())
 }
@@ -276,6 +342,8 @@ pub(super) fn ends_with(
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
     let suffix = operand::text(machine, frame, 1)?;
+    // As `startsWith`: at most the needle, capped at the receiver.
+    machine.examined(suffix.len().min(text.len()) as u64);
     dest.word(machine, text.ends_with(&suffix) as u64);
     Ok(())
 }
@@ -292,6 +360,10 @@ pub(super) fn index_of(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    // An upper bound, as `contains`: `str::find` answers where it matched and
+    // not how much it read on the way, and the character count below walks
+    // the front of the receiver again.
+    machine.examined(text.len() as u64);
     let needle = operand::text(machine, frame, 1)?;
     match text.find(&needle) {
         // `find` answers a byte offset; the characters before it are counted
@@ -308,6 +380,8 @@ pub(super) fn replace(
     dest: Dest,
 ) -> Result<(), RuntimeError> {
     let text = operand::text(machine, frame, 0)?;
+    // Before the refusal below, as `split`.
+    machine.examined(text.len() as u64);
     let old = operand::text(machine, frame, 1)?;
     if old.is_empty() {
         return Err(operand::empty_needle(
@@ -329,7 +403,9 @@ pub(super) fn to_upper(
     frame: Frame<'_>,
     dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?.to_uppercase();
+    let receiver = operand::text(machine, frame, 0)?;
+    machine.examined(receiver.len() as u64);
+    let text = receiver.to_uppercase();
     let word = machine.new_string(&text)?;
     dest.word(machine, word);
     Ok(())
@@ -341,7 +417,9 @@ pub(super) fn to_lower(
     frame: Frame<'_>,
     dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?.to_lowercase();
+    let receiver = operand::text(machine, frame, 0)?;
+    machine.examined(receiver.len() as u64);
+    let text = receiver.to_lowercase();
     let word = machine.new_string(&text)?;
     dest.word(machine, word);
     Ok(())

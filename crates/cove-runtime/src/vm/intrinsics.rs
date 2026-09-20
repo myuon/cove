@@ -247,11 +247,28 @@ pub(crate) fn call(
 /// The piece is rendered when the lowering calls this, which is right after
 /// the piece was evaluated: a later piece that changes what this one showed
 /// cannot change its text (#389).
+///
+/// # What it reports having examined
+///
+/// Two things, and they do not overlap. [`render_value`] reports **one unit
+/// per value it visits**, which is [ADR 0064]'s Decision 7 asked of a walk
+/// over a value; this reports the **bytes it finally appended**, which is the
+/// same decision asked of a copy, and is where every string the walk read
+/// ends up. Charging a string's bytes inside `render_object` as well would
+/// count them twice — the bytes are in `text` by then — so that arm does not,
+/// and this line is where the whole of the text is paid for.
+///
+/// The append is real work that nothing else charges: `Machine::append_text`
+/// is not an `Inst::RunCopy` and takes no chunked poll, so before this a
+/// `"{v}"` over a megabyte of value cost the run one unit.
+///
+/// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
 fn render_into(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<(), RuntimeError> {
     let piece = frame.operand(machine, 0);
     let mut text = String::new();
     render_value(machine, piece.layout, piece.words, 0, &mut text)?;
     let owner = frame.word(machine, 1);
+    machine.examined(text.len() as u64);
     machine.append_text(owner, text.as_bytes())?;
     dest.word(machine, 0);
     Ok(())
@@ -305,6 +322,12 @@ fn render_value(
     depth: usize,
     out: &mut String,
 ) -> Result<(), RuntimeError> {
+    // One value visited, reported for [`render_into`]'s reason. Every field,
+    // element, member and entry-half of the walk arrives here — `render` and
+    // `render_object` are reached from here and return to here — so one
+    // report here is one per value and no value twice. The bytes are not
+    // reported here: `render_into` reports the whole of the text once.
+    machine.examined(1);
     if depth >= MAX_DEPTH {
         return Err(too_deep());
     }
