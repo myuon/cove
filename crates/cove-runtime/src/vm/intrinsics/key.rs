@@ -79,6 +79,24 @@
 //! `NaN` is not equal to itself, which breaks the total order every key needs.
 //! [`check`] is that question asked of a value, and its refusals are
 //! [`crate::builtins`]' word for word, path included.
+//!
+//! # Both walks say how far they got
+//!
+//! `core.order` and `core.admitKey` both declare `Effects::BULK_WORK` and,
+//! until
+//! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+//! Decision 7, cost the run one unit of work whichever key they were handed —
+//! a `Duration`, or a `Map` of arrays of structs. So [`order`] and [`admits`]
+//! each report **one unit per value they visit** through
+//! [`Machine::examined`], and the string arm of `order` reports the bytes it
+//! compared besides.
+//!
+//! The report is made in the walk rather than from the key's size, for
+//! [`super::equal`]'s reason: an order that answers at the first field of a
+//! struct has done one field's work, and a charge taken up front would say
+//! otherwise. `admitKey` walks twice when it refuses — once with nothing to
+//! name and once to build the path — and is charged for both, because it
+//! really did walk twice.
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;
@@ -468,6 +486,10 @@ fn admits(
     key: Key,
     depth: usize,
 ) -> Result<(), RuntimeError> {
+    // One value visited. `admits_object` and `admits_value` are reached only
+    // from here and reach every element, field and part back through here, so
+    // one report here is one per value and no value twice.
+    machine.examined(1);
     if depth >= super::MAX_DEPTH {
         return Err(equal::too_deep());
     }
@@ -652,6 +674,11 @@ fn path(anchor: Option<&str>, own: impl FnOnce() -> String) -> String {
 // --- ordering two keys -----------------------------------------------------
 
 fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, RuntimeError> {
+    // One pair of values visited, for [`admits`]' reason: `sequences` and
+    // `maps` compare element for element and entry for entry back through
+    // here, so an order that stops at the first difference reports what it
+    // compared and not what it was given.
+    machine.examined(1);
     if depth >= super::MAX_DEPTH {
         return Err(equal::too_deep());
     }
@@ -675,6 +702,12 @@ fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, Ru
         (Family::Duration(a), Family::Duration(b)) => Ok(a.cmp(&b)),
         // Byte-wise, which is what `String`'s own `Ord` is.
         (Family::Str(a), Family::Str(b)) => {
+            // The bytes this can read, which is the shorter of the two: a
+            // lexicographic comparison stops at the first difference and at
+            // the shorter string's end at the latest. On top of the one unit
+            // `order` charged for reaching the pair.
+            let (one, other) = (machine.object_len(a), machine.object_len(b));
+            machine.examined(u64::from(one.min(other)));
             Ok(machine.string_bytes(a).cmp(&machine.string_bytes(b)))
         }
         // Type name, then case name, then payload — and the case is read out

@@ -34,10 +34,11 @@
 //! - one `Option` test at the top of `Machine::call_intrinsic`, which is already a
 //!   Rust call that dispatches on the intrinsic — the same shape `Machine::tiered`
 //!   puts at a `call` — and a second one right after `intrinsics::call` returns,
-//!   for [ADR 0064]'s per-variant allocations and words: the first test's `Some`
-//!   arm is what reads the allocation counters before the call, so the second
-//!   reads them again and charges the difference rather than reading them
-//!   unconditionally;
+//!   for [ADR 0064]'s per-variant allocations, words and examined work: the
+//!   first test's `Some` arm is what reads the allocation counters before the
+//!   call, so the second reads them again and charges the difference rather
+//!   than reading them unconditionally, and the work is a number the arm
+//!   already reported and the machine has already charged;
 //! - one `Option` test in the native `intrinsic` helper, which is already a call
 //!   out of compiled code into that same function;
 //! - and nothing at all in the other eight helpers: those are counted by a
@@ -420,6 +421,25 @@ pub struct IntrinsicCalls {
     /// Words the heap handed out across every call of this variant, for
     /// [`allocations`](Self::allocations)'s reason.
     pub words: u64,
+    /// Units this variant examined across every call of it, from either
+    /// tier — the proportional work [ADR 0064]'s Decision 7 asks for, and the
+    /// figure that answers "what did this variant actually walk?" where the
+    /// call count only answers how often it was asked.
+    ///
+    /// **The unit is the storage run's, so a text variant counts bytes.**
+    /// That is what `Machine::bulk_work` already counts for an
+    /// `Inst::RunCopy` — bytes over a `Storage::PackedBytes`, words over a
+    /// `Storage::Words` — and a `String` is a packed byte run. A walk over a
+    /// value counts one per scalar, field or element visited. Summing the
+    /// column across variants is therefore summing two units, and the row is
+    /// the thing to read.
+    ///
+    /// Eighteen of the 31 variants can be non-zero here, which is exactly the
+    /// set that declares `Effects::BULK_WORK`; the other thirteen examine
+    /// nothing proportional and report nought.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    pub work: u64,
 }
 
 impl IntrinsicCalls {
@@ -510,7 +530,7 @@ impl Emitted {
 /// Nothing is on the dispatch loop. A run that did not ask pays one `Option` test
 /// at the top of `Machine::call_intrinsic` — already a Rust call that dispatches on
 /// the intrinsic — a second one right after `intrinsics::call` returns, for the
-/// per-variant allocations and words this report also carries, and one in the
+/// per-variant allocations, words and work this report also carries, and one in the
 /// native `intrinsic` helper, which is already a call out of compiled code into
 /// that function. The per-helper counts cost such a run nothing at
 /// all, because they are a second helper table,
@@ -598,6 +618,12 @@ pub(crate) struct Counting {
     /// Words the heap handed out at each `SiteId`, for
     /// [`allocations`](Self::allocations)'s reason.
     words: Vec<u64>,
+    /// Units the calls at each `SiteId` reported having examined, which
+    /// `Machine::charge_intrinsic_costs` is handed after `Machine` has
+    /// already charged the same number to its work total. Unlike the two
+    /// above it is not a difference of counters: an arm reports it, through
+    /// `Machine::examined`.
+    examined: Vec<u64>,
     /// Whether each function, by `FunctionId`, is the standard library's.
     library: Vec<bool>,
     /// Frames the encoded tier opened for a library function.
@@ -632,6 +658,7 @@ impl Counting {
             from_native: vec![0; program.intrinsic_sites.len()],
             allocations: vec![0; program.intrinsic_sites.len()],
             words: vec![0; program.intrinsic_sites.len()],
+            examined: vec![0; program.intrinsic_sites.len()],
             library: program
                 .functions
                 .iter()
@@ -717,18 +744,34 @@ impl Counting {
         }
     }
 
-    /// What one call at `site` allocated: `allocations` objects, `words`
-    /// words, whichever tier made the call. Charged once per call, as the
-    /// difference `Machine::charge_intrinsic_allocations` takes across
-    /// `intrinsics::call` — so a call that allocated nothing charges `0`
-    /// rather than nothing at all, and the row still exists for
-    /// [`Counting::report`] to sum.
-    pub(crate) fn intrinsic_allocated(&mut self, site: SiteId, allocations: u64, words: u64) {
+    /// What one call at `site` cost: `allocations` objects, `words` words,
+    /// and `examined` units of whatever it walked, whichever tier made the
+    /// call. Charged once per call, from
+    /// `Machine::charge_intrinsic_costs` — so a call that allocated nothing
+    /// and examined nothing charges `0` rather than nothing at all, and the
+    /// row still exists for [`Counting::report`] to sum.
+    ///
+    /// The first two are a difference of the machine's own counters taken
+    /// across `intrinsics::call`; the third is not a difference at all but
+    /// what the arm reported through `Machine::examined`, which the machine
+    /// has already added to its work total by the time this is called. The
+    /// three travel together because they are charged at one point and cost
+    /// one `Option` test between them.
+    pub(crate) fn intrinsic_cost(
+        &mut self,
+        site: SiteId,
+        allocations: u64,
+        words: u64,
+        examined: u64,
+    ) {
         if let Some(total) = self.allocations.get_mut(site.index()) {
             *total += allocations;
         }
         if let Some(total) = self.words.get_mut(site.index()) {
             *total += words;
+        }
+        if let Some(total) = self.examined.get_mut(site.index()) {
+            *total += examined;
         }
     }
 
@@ -759,12 +802,14 @@ impl Counting {
                     native: 0,
                     allocations: 0,
                     words: 0,
+                    work: 0,
                 });
             row.sites += sites.get(at).copied().unwrap_or(0);
             row.native += native;
             row.encoded += all.saturating_sub(native);
             row.allocations += self.allocations.get(at).copied().unwrap_or(0);
             row.words += self.words.get(at).copied().unwrap_or(0);
+            row.work += self.examined.get(at).copied().unwrap_or(0);
         }
         let mut intrinsics: Vec<IntrinsicCalls> = rows
             .into_values()
@@ -982,18 +1027,19 @@ impl fmt::Display for BoundaryReport {
         )?;
         writeln!(
             f,
-            "  {:>14} {:>14} {:>7} {:>11} {:>12}  intrinsic",
-            "from encoded", "from native", "sites", "allocs", "words"
+            "  {:>14} {:>14} {:>7} {:>11} {:>12} {:>14}  intrinsic",
+            "from encoded", "from native", "sites", "allocs", "words", "work"
         )?;
         for row in &self.intrinsics {
             writeln!(
                 f,
-                "  {:>14} {:>14} {:>7} {:>11} {:>12}  {}",
+                "  {:>14} {:>14} {:>7} {:>11} {:>12} {:>14}  {}",
                 thousands(row.encoded),
                 thousands(row.native),
                 row.sites,
                 thousands(row.allocations),
                 thousands(row.words),
+                thousands(row.work),
                 row.intrinsic
             )?;
         }
@@ -1111,6 +1157,7 @@ mod tests {
                     native: 7,
                     allocations: 1_007,
                     words: 5_035,
+                    work: 128_440,
                 },
                 IntrinsicCalls {
                     intrinsic: Intrinsic::StringFromCodePoint,
@@ -1119,6 +1166,7 @@ mod tests {
                     native: 0,
                     allocations: 0,
                     words: 0,
+                    work: 0,
                 },
             ],
             encoded_instructions: 1_234_567,
@@ -1184,10 +1232,12 @@ mod tests {
             "an operation that never ran is left out"
         );
         assert!(text.contains(
-            "           1,000              7       1       1,007        5,035  String.join"
+            "           1,000              7       1       1,007        5,035        128,440  \
+             String.join"
         ));
         assert!(text.contains(
-            "               0              0       3           0            0  String.fromCodePoint"
+            "               0              0       3           0            0              0  \
+             String.fromCodePoint"
         ));
     }
 
@@ -1298,6 +1348,7 @@ export fn main() -> Int {
             let mut calls = 0u64;
             let mut allocations = 0u64;
             let mut words = 0u64;
+            let mut work = 0u64;
             for ((id, pc), cost) in &rows {
                 let Some(function) = program.functions.get(id.index()) else {
                     continue;
@@ -1311,10 +1362,167 @@ export fn main() -> Int {
                 calls += cost.ran;
                 allocations += cost.allocations;
                 words += cost.words;
+                work += cost.work;
             }
             assert_eq!(calls, row.calls(), "{:?}: {row:?}", row.intrinsic);
             assert_eq!(allocations, row.allocations, "{:?}: {row:?}", row.intrinsic);
             assert_eq!(words, row.words, "{:?}: {row:?}", row.intrinsic);
+            assert_eq!(work, row.work, "{:?}: {row:?}", row.intrinsic);
         }
+        // And the work is not vacuously nought on both sides: this program
+        // calls `String.length` and `String.join`, and both walk bytes.
+        assert!(
+            boundary.intrinsics.iter().any(|row| row.work > 0),
+            "a program that walks strings examines something: {:?}",
+            boundary.intrinsics
+        );
+    }
+
+    /// Ten `String.length` calls over a string of `characters` ASCII
+    /// characters, so that two runs of it differ in exactly the one thing the
+    /// charge is supposed to be proportional to.
+    ///
+    /// The receiver is a literal rather than something the program builds,
+    /// because anything that built it would call intrinsics of its own and
+    /// the two runs would then differ in more than the receiver's length.
+    fn length_over(characters: usize) -> String {
+        let text = "a".repeat(characters);
+        format!(
+            "
+export fn main() -> Int {{
+  let text = \"{text}\"
+  var total = 0
+  var i = 0
+  while i < 10 {{
+    total = total + text.length()
+    i = i + 1
+  }}
+  total
+}}
+"
+        )
+    }
+
+    /// **The charge is proportional to what the call examined.**
+    ///
+    /// This is the property the whole of [ADR 0064]'s Decision 7 exists for,
+    /// and the one a regression would silently undo: before it, an
+    /// `IntrinsicCall` was charged one unit of work whatever it walked, so
+    /// 10,000 `String.length` calls over ten characters and over 100,000
+    /// characters spent `fuel_spent` 160,027 against 160,026 — the same fuel
+    /// for 383 times the wall clock.
+    ///
+    /// Two runs of the same shape over receivers a hundred times apart,
+    /// making the same number of calls, from the real machinery. The call
+    /// counts are asserted equal first: a work column that rose because the
+    /// program made more calls would say nothing about proportionality, and
+    /// the equality is what rules that out.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    #[test]
+    fn the_work_a_variant_is_charged_scales_with_what_it_examined() {
+        use crate::vm::debug::tests::World;
+
+        let row = |source: &str| {
+            let world = World::new(source);
+            let mut vm = world.plain();
+            vm.count_boundary();
+            vm.run_entry("m", "main", Vec::new()).expect("it answers");
+            vm.boundary()
+                .expect("count_boundary was called")
+                .intrinsic(Intrinsic::StringLength)
+                .expect("the program calls String.length")
+        };
+
+        let short = row(&length_over(10));
+        let long = row(&length_over(1_000));
+
+        assert_eq!(
+            short.calls(),
+            long.calls(),
+            "the two runs make the same calls: {short:?} against {long:?}"
+        );
+        assert!(short.calls() >= 10, "{short:?}");
+        // A hundred times the bytes. Exactly, because the receivers are ASCII
+        // literals and the unit is bytes — which is the other half of what
+        // this pins: a charge in *characters* would be the same two numbers
+        // here, and one in words an eighth of them.
+        assert_eq!(short.work, short.calls() * 10, "{short:?}");
+        assert_eq!(long.work, long.calls() * 1_000, "{long:?}");
+    }
+
+    /// Ten `==` comparisons of two four-field structs that `differ` in the
+    /// first field or not at all.
+    ///
+    /// A struct is compared field by field in declaration order, so the two
+    /// programs differ in how far the walk gets and in nothing else: the same
+    /// declaration, the same number of comparisons, the same layouts.
+    fn equals_four_fields(differ: bool) -> String {
+        let first = if differ { 9 } else { 1 };
+        format!(
+            "
+struct Quad {{
+  a: Int
+  b: Int
+  c: Int
+  d: Int
+}}
+
+export fn main() -> Int {{
+  let x = Quad(a: 1, b: 2, c: 3, d: 4)
+  let y = Quad(a: {first}, b: 2, c: 3, d: 4)
+  var total = 0
+  var i = 0
+  while i < 10 {{
+    if x == y {{
+      total = total + 1
+    }}
+    i = i + 1
+  }}
+  total
+}}
+"
+        )
+    }
+
+    /// **An early exit is charged what it did, not what it was handed.**
+    ///
+    /// The charge is made *in* the walk — `equal::value` reports one unit
+    /// per value it reaches — rather than computed from the operands' width
+    /// before the comparison begins. The two are the same number only when
+    /// the walk runs to the end, and the difference is what makes the column
+    /// a measurement rather than a second rendering of the layout table.
+    ///
+    /// Two structs that differ in their first field are one struct and one
+    /// field. Two equal ones are the struct and all four of its fields. The
+    /// exact multiples are asserted rather than an inequality, because an
+    /// inequality would hold just as well for a charge that was merely noisy.
+    #[test]
+    fn an_early_exit_is_charged_less_than_a_whole_walk() {
+        use crate::vm::debug::tests::World;
+
+        let row = |source: &str| {
+            let world = World::new(source);
+            let mut vm = world.plain();
+            vm.count_boundary();
+            vm.run_entry("m", "main", Vec::new()).expect("it answers");
+            vm.boundary()
+                .expect("count_boundary was called")
+                .intrinsic(Intrinsic::AnyEquals)
+                .expect("comparing two structs calls Any.equals")
+        };
+
+        let early = row(&equals_four_fields(true));
+        let whole = row(&equals_four_fields(false));
+
+        assert_eq!(
+            early.calls(),
+            whole.calls(),
+            "the two runs make the same calls: {early:?} against {whole:?}"
+        );
+        assert!(early.calls() >= 10, "{early:?}");
+        assert_eq!(early.work, early.calls() * 2, "{early:?}");
+        assert_eq!(whole.work, whole.calls() * 5, "{whole:?}");
+        assert!(early.work < whole.work);
     }
 }

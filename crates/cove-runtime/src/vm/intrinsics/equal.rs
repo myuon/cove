@@ -41,6 +41,25 @@
 //! reference, an object the sweeper reclaimed, a run of words narrower than
 //! the layout that describes it, a box naming a family the program does not
 //! have, and a graph that nests deeper than a walk of it can.
+//!
+//! # The walk says how far it got
+//!
+//! `Any.equals` declares `Effects::BULK_WORK` and, until
+//! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+//! Decision 7, cost the run one unit of work whether it compared two `Int`s
+//! or two thousand-element arrays. So [`value`] reports **one unit per value
+//! it visits** through [`Machine::examined`], and the string arm of
+//! [`objects`] reports the bytes it compared on top of that: one unit per
+//! scalar, field, element, member or entry-half that the walk actually
+//! reached.
+//!
+//! *In the walk*, and not from a size computed up front, because that is what
+//! makes an early exit cost what it did: two structs that differ in their
+//! first field charge two units — the struct and the field — where two equal
+//! ones charge one per field besides. A charge taken from the layout's width
+//! before the comparison began would say the two cost the same, which is
+//! exactly the thing the call count already says and the reason this column
+//! exists.
 
 use cove_ir::{LayoutId, Program, Repr, Shape};
 
@@ -114,6 +133,12 @@ pub(super) fn same(
 /// two layouts and one value, which is what comparing the *names* of the
 /// declaration and of the case says and what comparing indices would not.
 fn value(machine: &Machine, x: Held<'_>, y: Held<'_>, depth: usize) -> Result<bool, RuntimeError> {
+    // One value visited. Every field, element, member and entry-half of the
+    // walk arrives here and nowhere else — `word`, `held` and `objects` are
+    // all reached *from* here — so counting once here counts each of them
+    // exactly once, and counting in `word` as well would count a scalar
+    // twice. See the module's "The walk says how far it got".
+    machine.examined(1);
     if depth >= super::MAX_DEPTH {
         return Err(too_deep());
     }
@@ -337,7 +362,16 @@ fn objects(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<bool, Runt
         );
     }
     Ok(match (&left.shape, &right.shape) {
-        (Shape::Str, Shape::Str) => machine.string_bytes(a) == machine.string_bytes(b),
+        (Shape::Str, Shape::Str) => {
+            // The bytes a comparison of two strings can read, which is the
+            // shorter of the two: `[u8]`'s own equality compares the lengths
+            // first and stops there when they differ. On top of the one unit
+            // `value` charged for reaching this pair, because the pair is a
+            // value and its bytes are work of their own.
+            let (one, other) = (machine.object_len(a), machine.object_len(b));
+            machine.examined(u64::from(one.min(other)));
+            machine.string_bytes(a) == machine.string_bytes(b)
+        }
         // An object whose layout is a scalar, a struct or an enum *is* that
         // value: its payload is the value's own inline words, which is what a
         // recursion the lowering had to break looks like from here. So the
