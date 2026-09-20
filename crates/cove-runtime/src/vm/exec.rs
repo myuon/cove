@@ -1098,11 +1098,52 @@ impl<'a> Machine<'a> {
 
     /// One `IntrinsicCall`, counted — out of line, for [`Machine::tiered`]'s
     /// reason: what `call_intrinsic` keeps inline is the `Option` test.
+    ///
+    /// Answers the allocation counters as they stand right now, which
+    /// `call_intrinsic` takes before `intrinsics::call` runs so that
+    /// [`Machine::charge_intrinsic_allocations`] can difference against them
+    /// once it returns. This is called only from inside the `Some` arm of
+    /// that `Option` test, so the read is exactly as conditional as the count
+    /// it sits beside — see the module doc's "free when it is off".
     #[inline(never)]
     #[cold]
-    fn count_intrinsic(&mut self, site: SiteId) {
+    fn count_intrinsic(&mut self, site: SiteId) -> (u64, u64) {
         if let Some(counting) = self.counting.as_deref_mut() {
             counting.intrinsic(site);
+        }
+        (self.allocations(), self.allocated_words())
+    }
+
+    /// Charges `site` with the allocations and allocated words
+    /// `intrinsics::call` made, out of line for [`Machine::count_intrinsic`]'s
+    /// reason.
+    ///
+    /// `allocations_before` and `words_before` are the snapshot
+    /// `count_intrinsic` took immediately before the call; read again here,
+    /// immediately after it, the difference is exactly what this one call
+    /// did and not what the run has done since `count_boundary`. Distinct
+    /// from the `#[cfg(debug_assertions)]` snapshot beside it in
+    /// `call_intrinsic`, which reads `thread_allocations()` for an effects
+    /// check and answers to no report.
+    ///
+    /// The subtraction saturates rather than wrapping, and that is belt and
+    /// braces rather than a case this expects: both counters are of what the
+    /// heap handed out *over the whole run, reuse counted each time*, so they
+    /// only ever rise and a collection in the middle of the call does not
+    /// lower either one. A charge of nought is what a future counter that
+    /// could fall should answer here, not a number near `u64::MAX`.
+    #[inline(never)]
+    #[cold]
+    fn charge_intrinsic_allocations(
+        &mut self,
+        site: SiteId,
+        allocations_before: u64,
+        words_before: u64,
+    ) {
+        let allocations = self.allocations().saturating_sub(allocations_before);
+        let words = self.allocated_words().saturating_sub(words_before);
+        if let Some(counting) = self.counting.as_deref_mut() {
+            counting.intrinsic_allocated(site, allocations, words);
         }
     }
 
@@ -2092,12 +2133,12 @@ impl<'a> Machine<'a> {
         args: ArgsId,
     ) -> Result<(), RuntimeError> {
         // Nothing unless a caller asked for the boundary report; see
-        // [`Machine::counting`]. A `match` on the discriminant with the counting
-        // out of line, which is [`Machine::tiered`]'s shape.
-        match self.counting {
-            None => {}
-            Some(_) => self.count_intrinsic(site),
-        }
+        // [`Machine::counting`]. A discriminant test with the counting out of
+        // line, which is [`Machine::tiered`]'s shape. When it is on,
+        // `count_intrinsic` also answers the allocation counters as they
+        // stand before the call, so `allocation_charge` below is a value
+        // rather than a second, unconditional read of `self.counting`.
+        let allocation_charge = self.counting.is_some().then(|| self.count_intrinsic(site));
         let program = self.program;
         let called = program.intrinsic_site(site);
         let list = program.arg_list(args);
@@ -2135,6 +2176,14 @@ impl<'a> Machine<'a> {
             Operands::new(base, list),
             Dest::new(base, dst, called.result),
         );
+
+        // Read again immediately after the call returns, so the difference
+        // from `allocation_charge`'s snapshot is exactly what this call did.
+        // `None` when counting is off, which is the same test `allocation_charge`
+        // already paid — nothing new is read unconditionally.
+        if let Some((allocations_before, words_before)) = allocation_charge {
+            self.charge_intrinsic_allocations(site, allocations_before, words_before);
+        }
 
         // An intrinsic that answered a `RuntimeError` while its declared
         // `Effects` do not carry `MAY_RAISE` has broken an invariant this
