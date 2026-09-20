@@ -55,7 +55,12 @@ impl Arm for Cranelift {
         handle.windows
     }
 
+    fn intrinsic_code(handle: Self::Handle) -> cove_native::IntrinsicCode {
+        handle.intrinsics
+    }
+
     const ATTRIBUTES_WINDOWS: bool = false;
+    const ATTRIBUTES_INTRINSIC_CALLS: bool = false;
 }
 
 struct Template(cove_native::template::Jit);
@@ -87,7 +92,12 @@ impl Arm for Template {
         handle.windows
     }
 
+    fn intrinsic_code(handle: Self::Handle) -> cove_native::IntrinsicCode {
+        handle.intrinsics
+    }
+
     const ATTRIBUTES_WINDOWS: bool = true;
+    const ATTRIBUTES_INTRINSIC_CALLS: bool = true;
 }
 
 /// Runs `program` on both arms over identical frames and asserts they agree.
@@ -1030,6 +1040,59 @@ fn both_arms_refuse_the_same_programs() {
     // so the assertions above are not both vacuous.
     assert!(suite::compiles::<Cranelift>(&suite::summing_loop()));
     assert!(suite::compiles::<Template>(&suite::summing_loop()));
+}
+
+/// **Both arms count the same intrinsic call sites, and one of them says what
+/// the bytes were.**
+///
+/// [ADR 0064](https://github.com/myuon/cove/blob/main/docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 7 divides its per-variant report in two, and this is the case that
+/// holds the division. The suite already asks each arm separately whether its
+/// own table is the right one; what only this file can ask is whether the two
+/// tables are the *same* table, which is the claim that makes a site a fact
+/// about `cove_ir` rather than about a code generator — and it is the
+/// precondition for reading one arm's byte figures as a fact about the IR at
+/// all.
+///
+/// The bytes go the other way and that is asserted too, because "only the
+/// template arm attributes them" is a claim and not a shrug: a Cranelift arm
+/// that started answering `Some` would be answering with a byte layout it does
+/// not decide, and a template arm that started answering `None` would have
+/// stopped emitting a call contiguously. Either is worth a red test.
+#[test]
+fn both_arms_count_the_same_intrinsic_sites() {
+    let program = suite::intrinsic_calling_each(&[
+        suite::INTRINSIC_CLASSES[0],
+        suite::INTRINSIC_CLASSES[1],
+        suite::INTRINSIC_CLASSES[2],
+        suite::INTRINSIC_CLASSES[0],
+    ]);
+    let sites = |code: cove_native::IntrinsicCode| code.sites;
+
+    let mut cranelift = Cranelift::new(suite::helpers());
+    let cranelift = Cranelift::intrinsic_code(
+        cranelift
+            .compile(&program, FunctionId(0))
+            .expect("the function is inside the slice"),
+    );
+    let mut template = Template::new(suite::helpers());
+    let template = Template::intrinsic_code(
+        template
+            .compile(&program, FunctionId(0))
+            .expect("the function is inside the slice"),
+    );
+
+    assert_eq!(
+        sites(cranelift),
+        sites(template),
+        "the sites are the IR's, so both arms count them alike"
+    );
+    assert_eq!(template.total_sites(), 4, "four calls, four sites");
+    assert_eq!(cranelift.bytes, None, "this arm's layout is the backend's");
+    assert!(
+        template.total_bytes().is_some_and(|bytes| bytes > 0),
+        "this arm emits a call contiguously, so it can say what one cost"
+    );
 }
 
 fn trap() -> Program {

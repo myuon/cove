@@ -55,7 +55,7 @@ use crate::subset::{
     by_zero_of, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset, supported,
     windows, word_finish, BufferWindow, ByteStore, Reserve, WordFinish,
 };
-use crate::{Unavailable, WindowCode};
+use crate::{IntrinsicCode, Unavailable, WindowCode};
 
 /// The name the safepoint helper is imported under.
 ///
@@ -153,6 +153,24 @@ pub struct Compiled {
     ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     pub windows: WindowCode,
+    /// How many [ADR 0064] mediated intrinsic calls this function emitted, by
+    /// variant — and **not** how many bytes each cost.
+    ///
+    /// [`IntrinsicCode::bytes`] is `None` from this arm, always, and it is the
+    /// same `None` and the same reason as `windows` above: a site is a fact
+    /// about the IR and this arm counts it exactly, while the bytes would have
+    /// to be a range of an emitted buffer, and this arm hands CLIF to a backend
+    /// that settles ranges after lowering. A zero would read as "intrinsic calls
+    /// cost this generator nothing", which is a different and false claim; see
+    /// [`IntrinsicCode`].
+    ///
+    /// The sites are worth carrying from this arm even so, and that is not a
+    /// consolation: two arms that agree on the sites and differ on the bytes
+    /// prove the counting follows `cove_ir` and not a code generator, which is
+    /// what makes the other arm's bytes attributable to a *variant* at all.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    pub intrinsics: IntrinsicCode,
 }
 
 /// A baseline code generator, and the memory its code lives in.
@@ -276,7 +294,7 @@ impl Jit {
 
         self.ctx.clear();
         self.ctx.func.signature = signature;
-        let windows = {
+        let (windows, intrinsics) = {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder);
             let safepoint = self
                 .module
@@ -301,7 +319,7 @@ impl Jit {
             let order_str = self
                 .module
                 .declare_func_in_func(self.order_str, builder.func);
-            let windows = Lower::new(
+            let emitted = Lower::new(
                 &mut builder,
                 program,
                 function,
@@ -320,7 +338,7 @@ impl Jit {
             .run();
             builder.seal_all_blocks();
             builder.finalize(self.module.target_config());
-            windows
+            emitted
         };
         self.module.define_function(func, &mut self.ctx).ok()?;
         let code_bytes = self
@@ -334,6 +352,7 @@ impl Jit {
             function: id,
             code_bytes,
             windows,
+            intrinsics,
         })
     }
 
@@ -588,6 +607,11 @@ struct Lower<'a, 'f> {
     /// The sites only: see [`Compiled::windows`] for why this arm has no bytes
     /// to put beside them.
     window_code: WindowCode,
+    /// How many mediated intrinsic calls this function emitted, by variant.
+    ///
+    /// The sites only, again, and for the same reason one level over: see
+    /// [`Compiled::intrinsics`].
+    intrinsic_code: IntrinsicCode,
 }
 
 impl<'a, 'f> Lower<'a, 'f> {
@@ -639,11 +663,13 @@ impl<'a, 'f> Lower<'a, 'f> {
             blocks,
             windows,
             window_code: WindowCode::default(),
+            intrinsic_code: IntrinsicCode::default(),
         }
     }
 
-    /// Lowers the body, and answers what buffer windows it emitted.
-    fn run(&mut self) -> WindowCode {
+    /// Lowers the body, and answers what buffer windows and what mediated
+    /// intrinsic calls it emitted.
+    fn run(&mut self) -> (WindowCode, IntrinsicCode) {
         let (_, length) = self.blocks[0].expect("`supported` refused an empty body");
         self.charge(length);
 
@@ -676,7 +702,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             terminated,
             "`supported` admitted a function whose last instruction is not a terminator"
         );
-        self.window_code
+        (self.window_code, self.intrinsic_code)
     }
 
     /// Adds a block's static instruction count to the work accumulator.
@@ -2147,8 +2173,22 @@ impl<'a, 'f> Lower<'a, 'f> {
     ///   an answer other than `Returned` can come back, and an exit that did not
     ///   publish before the call publishes on the way out, for
     ///   [`Lower::field_call`]'s reason.
+    ///
+    /// The site is counted for [ADR 0064]'s Decision 7 and the bytes are not,
+    /// which is [`Compiled::intrinsics`]'s note and this arm's standing answer
+    /// about byte attribution: what is emitted here is CLIF in three blocks, and
+    /// which bytes of the finished function those became is decided by the
+    /// backend after this method, after this function, and after any block
+    /// merging it chose to do.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     fn intrinsic_call(&mut self, dst: Slot, site: cove_ir::SiteId, args: cove_ir::ArgsId) {
-        let protocol = IntrinsicProtocol::of(self.program.intrinsic_site(site).intrinsic);
+        let which = self.program.intrinsic_site(site).intrinsic;
+        // The site, and `None` for the bytes, before anything that could return
+        // early: a count that a protocol arm could skip would be a count of the
+        // protocols rather than of the sites.
+        self.intrinsic_code.charge(which, None);
+        let protocol = IntrinsicProtocol::of(which);
         if protocol.safepoint {
             let work = self.b.use_var(self.work);
             self.store_ctx(OFF_PENDING_WORK, work);

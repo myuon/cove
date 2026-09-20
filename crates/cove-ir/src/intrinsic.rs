@@ -112,6 +112,16 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRefuseDuplicate,
 ];
 
+/// How many variants there are, as the width of a per-variant table.
+///
+/// [`Intrinsic::index`] numbers every variant below this, so a `[T; COUNT]` has
+/// exactly one row per variant and no row that is not one. Taken from [`ALL`]
+/// rather than written as a numeral for the reason [`Intrinsic::index`] is a
+/// search of it: ADR 0064's Decision 1 says the set only shrinks, so the number
+/// is going to change, and a numeral somewhere else is a second thing to
+/// remember to change with it.
+pub const COUNT: usize = ALL.len();
+
 impl Intrinsic {
     /// The type the operation belongs to: `Array`, `String`, `Map`, `Int`.
     ///
@@ -208,6 +218,30 @@ impl Intrinsic {
         ALL.iter().copied().find(|intrinsic| {
             intrinsic.receiver() == receiver && intrinsic.operation() == operation
         })
+    }
+
+    /// Where this variant is in [`ALL`], for a table with one row per variant.
+    ///
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 7 asks for allocations, allocated words, proportional work and
+    /// machine-code bytes reported **per variant**, and a report that wants one
+    /// row each needs somewhere to put the row. `cove_native::IntrinsicCode` is
+    /// the first caller; it indexes a `[u64; COUNT]` by this.
+    ///
+    /// It is a search of [`ALL`] rather than a `match` arm per variant, and
+    /// that is Decision 1's doing rather than an economy. The variant set "may
+    /// lose variants and may never gain one", so every migration deletes a
+    /// line from the enum and from [`ALL`] — and a hand-written `match`
+    /// returning 0, 1, 2… would have to be renumbered from the deletion
+    /// downwards each time, which is thirty chances to write the wrong number
+    /// in exchange for nothing. Deriving the index from [`ALL`] means the one
+    /// list that already has to be edited is the only list that has to be
+    /// edited. The search costs what [`Intrinsic::from_names`]'s does, on a
+    /// path that runs once per emitted call site at compile time.
+    pub fn index(self) -> usize {
+        ALL.iter()
+            .position(|each| *each == self)
+            .expect("`ALL` names every variant; `all_names_every_variant_once` is what holds it")
     }
 
     /// What the intrinsic is about, which is what the verifier holds its
@@ -780,6 +814,29 @@ mod tests {
                 assert_ne!(left, right, "`ALL` names {left} twice");
             }
         }
+    }
+
+    /// [`Intrinsic::index`] numbers every variant once, and numbers none of
+    /// them past [`COUNT`].
+    ///
+    /// Both halves are the contract a per-variant table depends on, and neither
+    /// implies the other. A table indexed by a value at or past its own width
+    /// panics, which is loud; a table two of whose variants share an index adds
+    /// their rows together and reports a plausible wrong number, which is not.
+    /// The second is the one worth a test.
+    #[test]
+    fn index_numbers_every_variant_once() {
+        let mut seen = [false; COUNT];
+        for intrinsic in ALL {
+            let at = intrinsic.index();
+            assert!(at < COUNT, "`{intrinsic}` is numbered {at} of {COUNT}");
+            assert!(!seen[at], "`{intrinsic}` shares index {at} with another");
+            seen[at] = true;
+        }
+        assert!(
+            seen.iter().all(|had| *had),
+            "`COUNT` is wider than the variants `index` numbers"
+        );
     }
 
     /// Every intrinsic is found again by the pair it prints as.
