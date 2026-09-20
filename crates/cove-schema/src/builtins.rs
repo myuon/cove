@@ -1000,6 +1000,21 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "isEmpty",
     },
+    // A suffix test is a method's name before it is anything else — Decision
+    // 2's discriminator is whether the operation would have to be renamed the
+    // day `String.endsWith` was, and this one would. What is underneath it is
+    // a byte comparison, which the run substrate already expresses:
+    // `std.string.endsWith` is `core.byteLength` twice and a loop over
+    // `byteAt`, and it needs no boundary check because UTF-8 is
+    // self-synchronizing. `Intrinsic::StringEndsWith` is gone in the same
+    // change.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "endsWith",
+        module: "std.string",
+        function: "endsWith",
+    },
     // The first binding over a core intrinsic: `std.string.byteLength` is
     // `core.byteLength(text)`, which ADR 0058's library-only boundary lets the
     // standard library write and nothing else. It is a binding, rather than a

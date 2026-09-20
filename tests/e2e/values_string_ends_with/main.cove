@@ -1,0 +1,114 @@
+use console.println
+
+/// `endsWith` at every character width, and at the byte patterns that would
+/// catch a suffix comparison reading from the wrong place.
+///
+/// ADR 0064 moved the suffix test out of the runtime and into
+/// `std.string.endsWith`, a Cove loop over `core.byteLength` and `byteAt` that
+/// compares the receiver's last bytes against the suffix's. `str::ends_with`
+/// compared the same bytes, so the two cannot disagree about any input — but
+/// the loop has to get by hand what the Rust call got for nothing: the length
+/// test before a byte of either string is read, and the fact that a byte match
+/// at `n - m` is necessarily a match at a character boundary.
+///
+/// The last group is what that second fact is worth. `あ` is `E3 81 82` and
+/// U+0082 is `C2 82`, so the two end in the same byte and agree nowhere else;
+/// `€` is `E2 82 AC` against U+00AC's `C2 AC`, and `😀` is `F0 9F 98 80`
+/// against U+0080's `C2 80`. A comparison that looked only at the final byte
+/// would answer `true` to all three. The answer is `false`, and it is `false`
+/// because the byte where the comparison starts is a continuation byte where
+/// the suffix has a lead byte — and a continuation byte is never a lead byte,
+/// which is the self-synchronization argument written out as three lines of
+/// output.
+///
+/// The harness runs this on the linear-memory backend and again with
+/// `--backend ast`, and both runs are held to the one `expected.out` — which
+/// is the oracle the deleted `text.rs` unit test used to be, now supplied by a
+/// program rather than by the thing under test.
+export fn main() -> Result<Unit, Error> {
+  // An empty suffix: the loop does not run, so the answer is `true` whatever
+  // the receiver is, which is what `str::ends_with("")` answers. Asserted
+  // rather than left to be obvious, because it is the one answer that comes
+  // out of the loop's shape instead of out of a comparison.
+  let empty = ""
+  let cove = "cove"
+  println("empty/empty {empty.endsWith(empty)}")?
+  println("cove/empty {cove.endsWith(empty)}")?
+
+  // A suffix longer than the receiver is settled on the two lengths, before
+  // either is read: there is no offset for the comparison to start at, and a
+  // loop that took `n - m` anyway would run off the front of the text.
+  println("empty/cove {empty.endsWith(cove)}")?
+  let ab = "ab"
+  println("ab/abc {ab.endsWith("abc")}")?
+  let ove = "ove"
+  println("ove/cove {ove.endsWith(cove)}")?
+
+  // The receiver as its own suffix: the comparison starts at 0 and reads
+  // every byte of both.
+  println("cove/cove {cove.endsWith(cove)}")?
+
+  // Ordinary ASCII, matching and not.
+  let path = "main.cove"
+  println("main.cove/.cove {path.endsWith(".cove")}")?
+  let rust = "main.rs"
+  println("main.rs/.cove {rust.endsWith(".cove")}")?
+
+  // The last bytes agree and an earlier one does not, which is what a loop
+  // that stopped short would call a match. `.love` shares `ove` with `.cove`
+  // and differs at the second byte compared; `recove` shares `cove` with it
+  // and differs at the first.
+  let love = "main.love"
+  println("main.love/.cove {love.endsWith(".cove")}")?
+  let recove = "recove"
+  println("recove/.cove {recove.endsWith(".cove")}")?
+
+  // Two bytes a character: `é` is U+00E9, `C3 A9`, and `è` is U+00E8, `C3 A8`.
+  // The two share their lead byte, so the miss is found at the end of the
+  // comparison rather than at its start.
+  let cafe = "café"
+  println("café/é {cafe.endsWith("é")}")?
+  println("café/è {cafe.endsWith("è")}")?
+
+  // Three bytes: `あいう` is `E3 81 82 | E3 81 84 | E3 81 86`. `う` matches,
+  // and `い` agrees with it in two bytes of three.
+  let kana = "あいう"
+  println("あいう/う {kana.endsWith("う")}")?
+  println("あいう/い {kana.endsWith("い")}")?
+
+  // Four bytes: `😀` is U+1F600, `F0 9F 98 80`, and `😁` is U+1F601,
+  // `F0 9F 98 81` — three bytes of agreement and a difference in the last.
+  let face = "a😀"
+  println("a😀/😀 {face.endsWith("😀")}")?
+  println("a😀/😁 {face.endsWith("😁")}")?
+
+  // A wide character as the receiver and a narrow one as the suffix, ending
+  // in the same byte and agreeing nowhere else. `String.fromCodePoint` rather
+  // than a literal because Cove has no `\u{...}` escape, and because a C1
+  // control written into the source is a byte nobody reading the file can see.
+  let euro = "€"
+  println("€/€ {euro.endsWith(euro)}")?
+  let a = "あ"
+  let control82 = String.fromCodePoint(130).unwrapOr("")
+  println("あ/U+0082 {a.endsWith(control82)}")?
+  let controlAC = String.fromCodePoint(172).unwrapOr("")
+  println("€/U+00AC {euro.endsWith(controlAC)}")?
+  let emoji = "😀"
+  let control80 = String.fromCodePoint(128).unwrapOr("")
+  println("😀/U+0080 {emoji.endsWith(control80)}")?
+
+  // A receiver built at run time rather than written as a literal, since a
+  // literal is the one shape a constant fold could answer. The two suffixes
+  // are the same six bytes in the two orders, so one of them matches and the
+  // other differs at the very first byte compared.
+  var built = ""
+  var i = 0
+  while i < 3 {
+    built = "{built}é😀"
+    i += 1
+  }
+  println(
+    "built {built.endsWith("é😀")} {built.endsWith("😀é")} {built.byteLength()}",
+  )?
+  Ok(())
+}

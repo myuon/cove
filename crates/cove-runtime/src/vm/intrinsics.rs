@@ -160,7 +160,10 @@ pub(crate) fn call(
         Intrinsic::StringTrim => text::trim(machine, frame, dest),
         Intrinsic::StringContains => text::contains(machine, frame, dest),
         Intrinsic::StringStartsWith => text::starts_with(machine, frame, dest),
-        Intrinsic::StringEndsWith => text::ends_with(machine, frame, dest),
+        // `String.endsWith` is not here either: ADR 0064 made it
+        // `std.string.endsWith`, a Cove loop comparing the receiver's last
+        // bytes against the suffix's over `core.byteLength` and `byteAt`.
+        // `startsWith` above is what the shape used to be.
         Intrinsic::StringIndexOf => text::index_of(machine, frame, dest),
         Intrinsic::StringReplace => text::replace(machine, frame, dest),
         Intrinsic::StringToUpper => text::to_upper(machine, frame, dest),

@@ -15,9 +15,12 @@
 //! - **`slice(from, to)` is in character positions**, and so is what
 //!   `indexOf` answers, which is why `indexOf` converts the byte offset it
 //!   finds by counting the characters before it.
-//! - **`contains`, `startsWith`, `endsWith`, `split` and `replace` match
-//!   bytes**, which for UTF-8 is the same set of matches as matching
-//!   characters and is what Rust's own `str` does.
+//! - **`contains`, `startsWith`, `split` and `replace` match bytes**, which
+//!   for UTF-8 is the same set of matches as matching characters and is what
+//!   Rust's own `str` does. `endsWith` matched bytes here too, and matches
+//!   them in Cove now: ADR 0064 moved it to `std.string.endsWith`, whose doc
+//!   comment carries the self-synchronization argument this bullet is a
+//!   summary of.
 //! - **`trim()` trims Unicode whitespace** and **`words()` splits on ASCII
 //!   whitespace**, which is the pair the oracle has and is not a distinction
 //!   this file invented.
@@ -31,7 +34,7 @@
 //!
 //! # Every operation here says what it examined, in bytes
 //!
-//! Eight of the operations below walk the whole receiver, four search it and
+//! Eight of the operations below walk the whole receiver, three search it and
 //! one builds its answer out of parts, and until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7 every one of them cost the run **one** unit of work — the one
@@ -55,8 +58,11 @@
 //!   `trim`, `replace`, `toUpper`, `toLower` — charge the receiver's own byte
 //!   length, because [`operand::text`] has already decoded the whole of it
 //!   before any of them looks at a single character;
-//! - `startsWith` and `endsWith` compare at most the needle, so they charge
-//!   the needle's length capped at the receiver's;
+//! - `startsWith` compares at most the needle, so it charges the needle's
+//!   length capped at the receiver's. `endsWith` was charged the same way
+//!   and by the same reasoning, until ADR 0064 made it `std.string.endsWith`
+//!   — where the loop pays for each byte it reads as an instruction, which
+//!   is the charge this bullet was approximating;
 //! - `contains` and `indexOf` charge the **receiver's** length, and that is
 //!   an upper bound rather than a measurement: `str::find` does not report
 //!   how far it got before it matched. An upper bound is the safe direction
@@ -319,25 +325,17 @@ pub(super) fn starts_with(
     let text = operand::text(machine, frame, 0)?;
     let prefix = operand::text(machine, frame, 1)?;
     // At most the needle, and never past the receiver: a prefix longer than
-    // what it is tested against is refused on the length alone.
+    // what it is tested against is refused on the length alone. `endsWith`
+    // was charged this way too, until ADR 0064 made it a Cove loop.
     machine.examined(prefix.len().min(text.len()) as u64);
     dest.word(machine, text.starts_with(&prefix) as u64);
     Ok(())
 }
 
-/// `String.endsWith(suffix) -> Bool`.
-pub(super) fn ends_with(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    let suffix = operand::text(machine, frame, 1)?;
-    // As `startsWith`: at most the needle, capped at the receiver.
-    machine.examined(suffix.len().min(text.len()) as u64);
-    dest.word(machine, text.ends_with(&suffix) as u64);
-    Ok(())
-}
+// `endsWith` used to be here, beside `startsWith` and charged the same way.
+// ADR 0064 moved it to `std.string.endsWith`: a Cove loop that compares the
+// last bytes of the receiver against the suffix's, which needs no boundary
+// check because UTF-8 is self-synchronizing.
 
 /// `String.indexOf(text) -> Option<Int>`, in character positions.
 ///
@@ -665,11 +663,13 @@ mod tests {
             on(&mut machine, "héllo", "startsWith", &[(Repr::Ref, prefix)]),
             1
         );
-        let suffix = machine.new_string("lo").unwrap();
-        assert_eq!(
-            on(&mut machine, "héllo", "endsWith", &[(Repr::Ref, suffix)]),
-            1
-        );
+        // `endsWith` had a line here — `"héllo"` ends with `"lo"` — until ADR
+        // 0064 moved the comparison into `std.string.endsWith`. What replaced
+        // it is `tests/e2e/values_string_ends_with`, which asks the question
+        // on both evaluators over every character width and over the pair
+        // (`"あ"`, `"\u{0082}"`) whose last byte agrees and whose answer is
+        // `false`: an oracle no arm in this file supplies, for a body no arm
+        // in this file executes.
         let absent = machine.new_string("z").unwrap();
         assert_eq!(
             on(&mut machine, "héllo", "contains", &[(Repr::Ref, absent)]),

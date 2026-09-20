@@ -825,6 +825,10 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// the counter-example now: ADR 0064 made it `std.string.length`, a Cove loop
 /// over `core.byteLength` and one run load a character, and the thing that
 /// argued it belonged here was the policy that argued it belonged there.
+/// `String.endsWith` has since followed it out, for a reason that is the same
+/// one worded about a predicate: a byte suffix comparison is a loop over the
+/// substrate `byteAt` already is, and the only thing `endsWith` named that an
+/// instruction did not was the method.
 ///
 /// The sequence operations are not here — `cove_ir::lower::collections` has
 /// its own list, because for a sequence some of them *are* instructions and
@@ -849,7 +853,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "trim"),
     ("String", "contains"),
     ("String", "startsWith"),
-    ("String", "endsWith"),
     ("String", "indexOf"),
     ("String", "replace"),
     ("String", "toUpper"),

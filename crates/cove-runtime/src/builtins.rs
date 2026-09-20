@@ -1452,11 +1452,12 @@ pub fn call_method(
                 let prefix = expect_str("String.startsWith", "prefix", &args[0], span)?;
                 Ok(Value(Repr::Bool(text.starts_with(prefix))))
             }
-            "endsWith" => {
-                let args = expect_args("String.endsWith", args, 1, span)?;
-                let suffix = expect_str("String.endsWith", "suffix", &args[0], span)?;
-                Ok(Value(Repr::Bool(text.ends_with(suffix))))
-            }
+            // `endsWith` used to answer here, `text.ends_with(suffix)`. It
+            // does not reach this arm any more: `Interpreter::eval_method_call`
+            // resolves it to a call into `std.string.endsWith` before this
+            // function is ever asked about it — a Cove loop that compares the
+            // last bytes of the text against the suffix's (ADR 0064), which
+            // needs no boundary check because UTF-8 is self-synchronizing.
             "indexOf" => {
                 let args = expect_args("String.indexOf", args, 1, span)?;
                 let needle = expect_str("String.indexOf", "text", &args[0], span)?;

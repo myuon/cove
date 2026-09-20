@@ -150,6 +150,18 @@ allow = ["console", "clock"]
 entry = "scanshape.main"
 allow = ["console", "clock"]
 
+# What `String.endsWith` costs on its own, at the four pairs of receiver and
+# suffix size — ADR 0064's Phase 1 moved it out of the runtime and into
+# `std.string.endsWith`, and the operation's own cost is what Decision 8 asks
+# a migration to record. A bare-loop control row is beside them, so each
+# figure is a per-call cost taken by difference, and the loop is in a callee
+# so that the row means the same thing under `--backend native`, where the
+# outermost frame is always encoded.
+
+[run.endswith]
+entry = "endswith.main"
+allow = ["console", "clock"]
+
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
 # #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,

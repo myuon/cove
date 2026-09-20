@@ -212,7 +212,7 @@ written as a namespace.
 | `trim() -> String` |  |  |  | `machine` |
 | `contains(text: String) -> Bool` |  |  |  | `machine` |
 | `startsWith(prefix: String) -> Bool` |  |  |  | `machine` |
-| `endsWith(suffix: String) -> Bool` |  |  |  | `machine` |
+| `endsWith(suffix: String) -> Bool` |  |  |  | `std.string.endsWith` |
 | `indexOf(text: String) -> Option<Int>` |  |  |  | `machine` |
 | `replace(old: String, new: String) -> String` |  |  |  | `machine` |
 | `toUpper() -> String` |  |  |  | `machine` |
