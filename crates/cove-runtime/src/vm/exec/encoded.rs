@@ -2784,8 +2784,10 @@ pub(super) fn dispatch<'s, 'a>(
                     .set_word_at(base_at + (a!()) as usize, answer as u64);
             }
             // Out of line, and reading the bytes where they are: a search step
-            // over `String` keys is one of these, and `cmp_str!`'s copy of
-            // both strings into two vectors is not a cost it should pay.
+            // over `String` keys is one of these. `cmp_str!` reaches the same
+            // helper now rather than copying both strings into two vectors of
+            // its own, so the two arms differ in what they answer and no
+            // longer in what they pay.
             ORDER_STR => {
                 let x = machine.mem.word_at(base_at + (b!() as usize));
                 let y = machine.mem.word_at(base_at + (c!() as usize));
