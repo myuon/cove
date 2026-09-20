@@ -49,7 +49,7 @@
 use std::time::Duration;
 
 use cove_ir::{FunctionId, Program};
-use cove_native::{Unavailable, WindowCode};
+use cove_native::{IntrinsicCode, Unavailable, WindowCode};
 
 use crate::vm::exec::native::Tiered;
 use crate::NativeEntry;
@@ -90,6 +90,22 @@ pub struct NativeProgram {
     ///
     /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     windows: WindowCode,
+    /// How much of `code_bytes` is [ADR 0064] mediated intrinsic calls, by
+    /// variant, and how many call sites of each variant were emitted.
+    ///
+    /// Beside the windows above because that is where ADR 0064's Decision 7
+    /// asks for it — "machine-code bytes attributable to intrinsic calls,
+    /// beside the window bytes ADR 0063 already reports" — and the two answer
+    /// the same question about different parts of the same total. What this one
+    /// is *for* is different, though: a window's bytes are asked after because
+    /// ADR 0062 made a program larger and something had to say what of, while
+    /// these bytes are the size of a boundary ADR 0064 intends to delete, so the
+    /// figure a reader wants from them is a share that should fall with every
+    /// migrated variant and reach zero when the last one goes. See
+    /// [`IntrinsicCode`] for why the bytes are optional and the sites are not.
+    ///
+    /// [ADR 0064]: ../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    intrinsics: IntrinsicCode,
     compile: Duration,
     /// Whether the code was compiled against the counting helpers. See
     /// [`compile_counting`].
@@ -266,6 +282,23 @@ impl NativeProgram {
         self.windows
     }
 
+    /// Which part of [`code_bytes`](Self::code_bytes) is ADR 0064's mediated
+    /// intrinsic calls, and how many call sites of each variant were emitted.
+    ///
+    /// The bytes are `None` from a code generator that cannot attribute them,
+    /// which is a fact about the generator rather than about the program —
+    /// [`IntrinsicCode`] says which and why. The sites are counted either way.
+    ///
+    /// The sites are **static**: this is a fact about a compiled program and
+    /// not about a run, exactly as [`Refused`] is, and how often each variant
+    /// was actually called comes from the run's own boundary report. A reader
+    /// who wants both has to join them, and that is the honest shape — a
+    /// program that emits one `String.length` site and calls it 405,588 times
+    /// has one site.
+    pub fn intrinsic_code(&self) -> IntrinsicCode {
+        self.intrinsics
+    }
+
     /// What compiling cost, which is never part of what executing cost.
     pub fn compile_time(&self) -> Duration {
         self.compile
@@ -318,6 +351,7 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
     let mut done = Vec::new();
     let mut code_bytes = 0u64;
     let mut windows = WindowCode::default();
+    let mut intrinsics = IntrinsicCode::default();
     // One clock over the whole loop rather than one per function: what issue #369
     // asks to keep apart from execution is the *total*, and a per-function sample
     // is the comparison harness's question rather than this one's.
@@ -336,6 +370,7 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
             Some(compiled) => {
                 code_bytes += u64::from(compiled.code_bytes);
                 windows.add(&compiled.windows);
+                intrinsics.add(&compiled.intrinsics);
                 done.push((id, compiled));
             }
             None => refusals.push(refused_row(program, id)),
@@ -357,6 +392,7 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
         stubs,
         code_bytes,
         windows,
+        intrinsics,
         compile,
         counts_helpers: counting,
     })

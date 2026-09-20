@@ -283,6 +283,151 @@ impl WindowCode {
     }
 }
 
+/// Machine code charged to [ADR 0064]'s mediated intrinsic calls, one row per
+/// [`Intrinsic`](cove_ir::Intrinsic) variant.
+///
+/// [ADR 0064]'s Decision 7 asks for "machine-code bytes attributable to
+/// intrinsic calls, beside the window bytes ADR 0063 already reports", and this
+/// is the carrier: one of these per compiled function, summed over a program by
+/// whoever compiled it. It is [`WindowCode`] one level over, and deliberately
+/// the same shape, because it is read for the same reason — a whole-program byte
+/// count says how large a program's machine code is and nothing about what any
+/// part of it is *for*, and ADR 0064's argument is that the call sequences
+/// counted here are work the native tier is structurally unable to speed up.
+/// What fraction of a program they are is the figure that turns that argument
+/// into a measurement.
+///
+/// # Why the rows are per variant
+///
+/// Decision 7 asks for attribution "per variant" throughout — allocations,
+/// allocated words and proportional work as well as these bytes — and ADR 0064's
+/// own census says why: `String.length` is 405,588 of covefmt's 415,809 mediated
+/// calls, and `Float.parse` 60,000 of cq's 140,092. A single total is therefore
+/// a number about whichever one or two variants happen to dominate, wearing the
+/// name of all 31. A migration is decided one variant at a time, so a report it
+/// is judged against has to answer one variant at a time.
+/// [`Intrinsic::index`](cove_ir::Intrinsic::index) numbers the rows and
+/// `cove_ir::intrinsic::COUNT` is how many there are — taken from
+/// `cove_ir::intrinsic::ALL` rather than written as a numeral here, because
+/// Decision 1 says the variant set only shrinks and this table's width shrinks
+/// with it.
+///
+/// # Why the bytes are an `Option` and the sites are not
+///
+/// The division [`WindowCode`] makes, for the reason it makes it, restated
+/// rather than cross-referenced because the two halves are easy to conflate.
+///
+/// A site is an **instruction in the IR**. How many `Inst::IntrinsicCall`s of
+/// each variant a function emitted code for is a fact about the lowering, both
+/// code generators count it identically, and `sites` is never in doubt.
+///
+/// The bytes are a fact about a code generator's layout, and only one arm can
+/// honestly report them. The template arm emits a whole intrinsic call — the
+/// hand-over, the indirect call, and the outcome test with the leave it guards —
+/// as one contiguous run of its code buffer, so a difference of two buffer
+/// lengths taken across the emission *is* that call's machine code, to the byte.
+/// The Cranelift arm hands CLIF to a backend that orders, merges and lays out
+/// blocks at the end of the function, so no range of the emitted buffer is one
+/// call's. It answers `None` — not a zero, which a reader comparing the two arms
+/// would take for "intrinsic calls cost this generator nothing".
+///
+/// A `None` is infectious through [`IntrinsicCode::charge`] and
+/// [`IntrinsicCode::add`] for the reason it is infectious through
+/// [`WindowCode`]'s: a sum over *some* of a program's call sites reads as a sum
+/// over all of them.
+///
+/// [ADR 0064]: ../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntrinsicCode {
+    /// Bytes of machine code emitted for each variant's call sites, indexed by
+    /// [`Intrinsic::index`](cove_ir::Intrinsic::index), or `None` from a code
+    /// generator that cannot attribute them. See this type's own note for which
+    /// generator that is and why.
+    ///
+    /// What is counted is the **call sequence a site compiles to**, and not what
+    /// the runtime does once it is entered: the hand-over of the frame, the pc,
+    /// the destination, the site and the argument list, the indirect call
+    /// itself, and the outcome test the intrinsic's effects ask for. The
+    /// algorithm on the far side is Rust compiled once for the whole program,
+    /// and charging a copy of it to each of a variant's sites is the one way
+    /// this figure could be made to say something false.
+    pub bytes: Option<[u64; cove_ir::intrinsic::COUNT]>,
+    /// How many `Inst::IntrinsicCall` sites of each variant were emitted,
+    /// indexed the same way.
+    ///
+    /// Carried beside the bytes rather than left for a reader to find
+    /// elsewhere, for [`WindowCode::sites`]'s reason: bytes *per site* is the
+    /// number that says whether a call sequence is large, and a ratio taken from
+    /// two figures in two reports is one a reader gets wrong.
+    ///
+    /// These are **static sites and not dynamic calls**, which is the
+    /// distinction ADR 0064's census draws in each of its two columns: covefmt
+    /// has two `String.length` sites and makes 405,588 calls through them. Bytes
+    /// divide by the sites, never by the calls — a byte of machine code is
+    /// emitted once and executed as often as the program likes.
+    pub sites: [u64; cove_ir::intrinsic::COUNT],
+}
+
+impl Default for IntrinsicCode {
+    /// Nothing emitted yet, and the bytes attributable.
+    ///
+    /// `Some([0; _])` rather than `None`, for [`WindowCode`]'s reason: a
+    /// function with no intrinsic call in it has nought bytes of intrinsic call,
+    /// and that is a measurement rather than an absence. A generator that cannot
+    /// attribute anything says so by charging `None`, which is the first site's
+    /// business and not this value's.
+    fn default() -> IntrinsicCode {
+        IntrinsicCode {
+            bytes: Some([0; cove_ir::intrinsic::COUNT]),
+            sites: [0; cove_ir::intrinsic::COUNT],
+        }
+    }
+}
+
+impl IntrinsicCode {
+    /// Records one emitted call site of `intrinsic`, with the bytes it was where
+    /// the code generator can say.
+    ///
+    /// `None` for the bytes counts the site and drops the whole byte table, for
+    /// the reason on the type: a partial sum is indistinguishable from a total.
+    pub fn charge(&mut self, intrinsic: cove_ir::Intrinsic, bytes: Option<u64>) {
+        self.sites[intrinsic.index()] += 1;
+        self.bytes = match (self.bytes, bytes) {
+            (Some(mut rows), Some(count)) => {
+                rows[intrinsic.index()] += count;
+                Some(rows)
+            }
+            _ => None,
+        };
+    }
+
+    /// Adds one function's intrinsic calls to a running total.
+    pub fn add(&mut self, other: &IntrinsicCode) {
+        for (at, sites) in self.sites.iter_mut().enumerate() {
+            *sites += other.sites[at];
+        }
+        self.bytes = match (self.bytes, other.bytes) {
+            (Some(mut rows), Some(theirs)) => {
+                for (at, row) in rows.iter_mut().enumerate() {
+                    *row += theirs[at];
+                }
+                Some(rows)
+            }
+            _ => None,
+        };
+    }
+
+    /// Every variant's bytes together, or `None` where they are not attributed.
+    pub fn total_bytes(&self) -> Option<u64> {
+        self.bytes.map(|rows| rows.iter().sum())
+    }
+
+    /// Every variant's call sites together.
+    pub fn total_sites(&self) -> u64 {
+        self.sites.iter().sum()
+    }
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
 pub mod subset;
 

@@ -1479,6 +1479,11 @@ struct Coverage {
     ///
     /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     windows: cove_runtime::WindowCode,
+    /// Which part of `code_bytes` is [ADR 0064] mediated intrinsic calls, and
+    /// how many call sites of each variant the program emitted.
+    ///
+    /// [ADR 0064]: ../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    intrinsics: cove_runtime::IntrinsicCode,
     compile: Duration,
     tiers: cove_runtime::Tiers,
     /// Every refused function with the dynamic calls it kept in the VM, ranked by
@@ -1511,6 +1516,7 @@ impl Coverage {
             compiled: native.compiled(),
             code_bytes: native.code_bytes(),
             windows: native.window_code(),
+            intrinsics: native.intrinsic_code(),
             compile: native.compile_time(),
             tiers: vm.tiers(),
             refused,
@@ -1582,6 +1588,84 @@ impl Coverage {
         }
     }
 
+    /// How much of the machine code above is a mediated intrinsic call, by
+    /// variant.
+    ///
+    /// [ADR 0064](https://github.com/myuon/cove/blob/main/docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 7: "machine-code bytes attributable to intrinsic calls, beside
+    /// the window bytes ADR 0063 already reports". It is deliberately
+    /// `print_windows` in every respect of its shape — the sites and the
+    /// quotient beside the bytes, the share of the whole program, the sentence a
+    /// generator that cannot attribute bytes prints instead of a table of
+    /// zeroes, and a row left out where nothing was emitted — because a reader
+    /// comparing two parts of one total should not have to read two table
+    /// formats to do it.
+    ///
+    /// What differs is what the share *means*, and it is worth saying which
+    /// direction is the good one. A buffer window's share is a cost ADR 0062
+    /// decided to pay and expects to keep paying. An intrinsic call's share is
+    /// the size of a boundary ADR 0064 intends to remove: it should fall as
+    /// variants migrate and be zero when the last one is gone, and a rise in it
+    /// is the report saying a migration went the wrong way.
+    ///
+    /// The rows are **static sites**, not dynamic calls. A variant with one site
+    /// and four hundred thousand calls is one row of a few dozen bytes here, and
+    /// that is not a contradiction of the boundary report — it is the difference
+    /// between what a program *is* and what a run *did*. Both are printed, by
+    /// two reports, and joining them is the reader's.
+    fn print_intrinsics(&self) {
+        let code = &self.intrinsics;
+        let sites = code.total_sites();
+        if sites == 0 {
+            return;
+        }
+        let Some(bytes) = code.bytes else {
+            eprintln!(
+                "native: {} mediated intrinsic call site(s) emitted; this code generator does \
+                 not attribute machine code to one, because its byte layout is decided after \
+                 lowering",
+                thousands(sites)
+            );
+            return;
+        };
+        let total: u64 = bytes.iter().sum();
+        let share = match self.code_bytes {
+            0 => 0.0,
+            whole => 100.0 * total as f64 / whole as f64,
+        };
+        eprintln!(
+            "native: of that, ADR 0064 mediated intrinsic calls are {} byte(s) in {} site(s) \
+             ({:.1}% of this program's machine code)",
+            thousands(total),
+            thousands(sites),
+            share
+        );
+        eprintln!(
+            "  {:>14} {:>14} {:>14}  intrinsic",
+            "bytes", "sites", "per site"
+        );
+        // Descending by bytes, which is the order the question is asked in: what
+        // is the boundary's machine code mostly made of. Ties break on the name,
+        // so one program's report is the same report twice.
+        let mut rows: Vec<(u64, u64, String)> = cove_ir::intrinsic::ALL
+            .iter()
+            .filter(|intrinsic| code.sites[intrinsic.index()] != 0)
+            .map(|intrinsic| {
+                let at = intrinsic.index();
+                (bytes[at], code.sites[at], intrinsic.to_string())
+            })
+            .collect();
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+        for (charged, sites, named) in rows {
+            eprintln!(
+                "  {:>14} {:>14} {:>14}  {named}",
+                thousands(charged),
+                thousands(sites),
+                thousands(charged / sites)
+            );
+        }
+    }
+
     /// Prints the report, on stderr, whether or not `--stats` was asked for.
     ///
     /// `execution` is the run's wall time with compilation already outside it —
@@ -1601,6 +1685,7 @@ impl Coverage {
             self.code_bytes
         );
         self.print_windows();
+        self.print_intrinsics();
         // Apart from the figures above, and named, because a reader has to know
         // what the denominator excludes. See `NativeProgram::reachable`.
         eprintln!(

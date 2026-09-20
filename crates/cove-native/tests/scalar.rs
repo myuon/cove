@@ -44,7 +44,12 @@ impl Arm for Cranelift {
         handle.windows
     }
 
+    fn intrinsic_code(handle: Compiled) -> cove_native::IntrinsicCode {
+        handle.intrinsics
+    }
+
     const ATTRIBUTES_WINDOWS: bool = false;
+    const ATTRIBUTES_INTRINSIC_CALLS: bool = false;
 }
 
 #[test]
@@ -425,4 +430,14 @@ fn a_window_is_less_code_than_its_rows() {
 #[test]
 fn a_windows_machine_code_is_charged_to_its_pattern() {
     suite::a_windows_machine_code_is_charged_to_its_pattern::<Cranelift>();
+}
+
+#[test]
+fn an_intrinsic_calls_machine_code_is_charged_to_its_variant() {
+    suite::an_intrinsic_calls_machine_code_is_charged_to_its_variant::<Cranelift>();
+}
+
+#[test]
+fn every_intrinsic_call_site_is_counted() {
+    suite::every_intrinsic_call_site_is_counted::<Cranelift>();
 }

@@ -37,8 +37,8 @@ use cove_ir::{
     Len, Num, Program, RefMap, Repr, SiteId, Slot, Storage, StrId, Table, TableId, Validation,
 };
 use cove_native::{
-    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp,
-    WindowCode,
+    Entry, GrowableOp, IntrinsicCode, IntrinsicProtocol, NativeCtx, NativeHelpers, Opened, Outcome,
+    Raise, RunOp, WindowCode,
 };
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
@@ -862,6 +862,9 @@ pub trait Arm {
     fn code_bytes(handle: Self::Handle) -> u32;
     /// What the compiled function's ADR 0062 buffer windows were, by pattern.
     fn window_code(handle: Self::Handle) -> WindowCode;
+    /// What the compiled function's ADR 0064 mediated intrinsic calls were, by
+    /// variant.
+    fn intrinsic_code(handle: Self::Handle) -> IntrinsicCode;
     /// Whether this arm can say how many *bytes* a window was.
     ///
     /// The sites are a fact about the IR and both arms count them the same; the
@@ -871,6 +874,17 @@ pub trait Arm {
     /// worth a failing test if they stop being true. See
     /// [`WindowCode`](cove_native::WindowCode).
     const ATTRIBUTES_WINDOWS: bool;
+    /// Whether this arm can say how many *bytes* a mediated intrinsic call was.
+    ///
+    /// A second constant rather than a reuse of the one above, and not from
+    /// symmetry: attribution is a property of the *method that emits the thing*,
+    /// not of the arm. The template arm can charge a window because its
+    /// `Emit::window` is contiguous and an intrinsic call because its
+    /// `Emit::intrinsic_call` is, which are two facts about two methods, and one
+    /// of them could stop being true on its own — a cold half moved out of line
+    /// would do it. Two constants let a test say which. See
+    /// [`IntrinsicCode`](cove_native::IntrinsicCode).
+    const ATTRIBUTES_INTRINSIC_CALLS: bool;
 }
 
 // --- building a program by hand ----------------------------------------------
@@ -3822,6 +3836,218 @@ pub fn an_intrinsic_call_out_of_bounds_refuses_the_function<A: Arm>() {
     assert!(
         !compiles::<A>(&no_args),
         "an argument list the program does not have"
+    );
+}
+
+/// One `intrinsic-call` per pair in `names`, each answering into slot 1, and
+/// then a return.
+///
+/// [`intrinsic_calling`] for more than one call, with site `n` being `names[n]`
+/// because [`cove_ir::IntrinsicSite`]s are pushed in order. The argument list is
+/// the same one for every call — the double does not read it — so what differs
+/// between two of these calls is the variant and nothing else, which is what a
+/// case counting sites per variant wants to be able to say.
+pub fn intrinsic_calling_each(names: &[(&str, &str)]) -> Program {
+    let mut code: Vec<Inst> = names
+        .iter()
+        .enumerate()
+        .map(|(at, _)| Inst::IntrinsicCall {
+            dst: 1,
+            site: SiteId(at as u32),
+            args: ArgsId(1),
+        })
+        .collect();
+    code.push(Inst::Return { src: 1 });
+    let mut held = program_with_args(
+        function(vec![Repr::Ref, Repr::Int, Repr::Ref], INT, code),
+        vec![
+            Arg {
+                slot: 0,
+                layout: REF,
+            },
+            Arg {
+                slot: 2,
+                layout: REF,
+            },
+        ],
+    );
+    for (receiver, operation) in names {
+        let intrinsic = cove_ir::Intrinsic::from_names(receiver, operation)
+            .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
+        held.intrinsic_sites.push(cove_ir::IntrinsicSite {
+            intrinsic,
+            result: INT,
+        });
+    }
+    held
+}
+
+/// What a variant's row of an [`IntrinsicCode`] would be if it were the only
+/// variant with a site: a table of noughts with `sites` at its own index.
+fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
+    let intrinsic = cove_ir::Intrinsic::from_names(receiver, operation)
+        .unwrap_or_else(|| panic!("`{receiver}.{operation}` is an intrinsic"));
+    let mut wanted = vec![0; cove_ir::intrinsic::COUNT];
+    wanted[intrinsic.index()] = sites;
+    wanted
+}
+
+/// **An intrinsic call's machine code is charged to its own variant, and to
+/// nothing else.**
+///
+/// [ADR 0064](https://github.com/myuon/cove/blob/main/docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 7 attribution, held to the same three things
+/// [`a_windows_machine_code_is_charged_to_its_pattern`] holds its own to, one
+/// level over:
+///
+/// - a function with one `intrinsic-call` charges **one site** to that call's
+///   variant and none to the other thirty, and a function with no intrinsic call
+///   in it charges nothing anywhere — so the count follows the IR and not the
+///   shape of the body;
+/// - where the bytes are attributed they are **positive and no more than the
+///   whole function**, which is the arithmetic a reader of the report assumes;
+/// - **whether they are attributed at all is the arm's and not the program's**,
+///   which is the claim `ATTRIBUTES_INTRINSIC_CALLS` exists to make failable.
+///
+/// One case per member of [`INTRINSIC_CLASSES`], because the three differ in
+/// exactly the thing that decides how much code a site is — the protocol — and a
+/// charge taken across the wrong span would show up on the safepoint class and
+/// on no other.
+pub fn an_intrinsic_calls_machine_code_is_charged_to_its_variant<A: Arm>() {
+    let compiled = |program: &Program| {
+        let mut jit = A::new(helpers());
+        jit.compile(program, FunctionId(0))
+            .expect("the function is inside the slice")
+    };
+    for (receiver, operation) in INTRINSIC_CLASSES {
+        let what = format!("`{receiver}.{operation}`");
+        let handle = compiled(&intrinsic_calling(receiver, operation));
+        let code = A::intrinsic_code(handle);
+        assert_eq!(
+            code.sites.to_vec(),
+            only_variant(receiver, operation, 1),
+            "{what}: one site, its own"
+        );
+        assert_eq!(code.total_sites(), 1, "{what}");
+        assert_eq!(
+            code.bytes.is_some(),
+            A::ATTRIBUTES_INTRINSIC_CALLS,
+            "{what}: whether the bytes are attributed is the arm's, not the program's"
+        );
+        let Some(bytes) = code.bytes else {
+            continue;
+        };
+        let whole = u64::from(A::code_bytes(handle));
+        let at = cove_ir::Intrinsic::from_names(receiver, operation)
+            .expect("an intrinsic")
+            .index();
+        let charged = bytes[at];
+        println!("{what}: {charged} of {whole} byte(s) are the call");
+        assert!(charged > 0, "{what}: a call site that emitted nothing");
+        assert!(
+            charged <= whole,
+            "{what}: {charged} charged out of a function of {whole}"
+        );
+        assert_eq!(
+            bytes.iter().sum::<u64>(),
+            charged,
+            "{what}: another variant was charged"
+        );
+        assert_eq!(
+            code.total_bytes(),
+            Some(charged),
+            "{what}: the total is the sum of the rows"
+        );
+    }
+
+    // And a body with no `intrinsic-call` in it charges nothing, because there
+    // is no site in it to charge.
+    let nothing = program(function(
+        vec![Repr::Int],
+        INT,
+        vec![Inst::Return { src: 0 }],
+    ));
+    let code = A::intrinsic_code(compiled(&nothing));
+    assert_eq!(code.total_sites(), 0, "a function with no intrinsic call");
+    assert_eq!(
+        code.bytes,
+        Some([0; cove_ir::intrinsic::COUNT]),
+        "a function with no intrinsic call has nought bytes of intrinsic call, \
+         which is a measurement and not an absence"
+    );
+}
+
+/// **Every site is counted, and every site of one variant is charged to one
+/// row.**
+///
+/// The case above would pass a `charge` that ran once per *function* rather than
+/// once per site, which is the way a per-variant table most plausibly goes
+/// wrong: three calls in one body, two of them the same variant, and the table
+/// has to read two and one rather than one and one.
+///
+/// Where the bytes are attributed, the repeated variant's row is held to
+/// **exactly twice** what the same variant's single-site function charges. That
+/// is an equality rather than an inequality because this arm's encoder does not
+/// choose between encodings — every immediate it lays down for a site is a fixed
+/// width, whatever the pc, the destination or the site number is — so two sites
+/// of one variant are two identical spans. If that ever stops being true this
+/// fails, which is the point: a byte figure whose size depends on where in a
+/// function a call sits is one a report cannot divide by the sites.
+pub fn every_intrinsic_call_site_is_counted<A: Arm>() {
+    let compiled = |program: &Program| {
+        let mut jit = A::new(helpers());
+        jit.compile(program, FunctionId(0))
+            .expect("the function is inside the slice")
+    };
+    let (repeated, once) = (INTRINSIC_CLASSES[0], INTRINSIC_CLASSES[2]);
+    let handle = compiled(&intrinsic_calling_each(&[repeated, once, repeated]));
+    let code = A::intrinsic_code(handle);
+
+    let mut wanted = only_variant(repeated.0, repeated.1, 2);
+    let at_once = cove_ir::Intrinsic::from_names(once.0, once.1)
+        .expect("an intrinsic")
+        .index();
+    wanted[at_once] = 1;
+    assert_eq!(
+        code.sites.to_vec(),
+        wanted,
+        "two of one variant and one of another"
+    );
+    assert_eq!(code.total_sites(), 3, "three sites, three charges");
+
+    assert_eq!(
+        code.bytes.is_some(),
+        A::ATTRIBUTES_INTRINSIC_CALLS,
+        "whether the bytes are attributed is the arm's, not the program's"
+    );
+    let Some(bytes) = code.bytes else {
+        return;
+    };
+    let at_repeated = cove_ir::Intrinsic::from_names(repeated.0, repeated.1)
+        .expect("an intrinsic")
+        .index();
+    let one_site = A::intrinsic_code(compiled(&intrinsic_calling(repeated.0, repeated.1)))
+        .bytes
+        .expect("this arm attributes bytes");
+    let alone = one_site[at_repeated];
+    println!(
+        "`{}.{}`: {} byte(s) for two sites, {alone} for one",
+        repeated.0, repeated.1, bytes[at_repeated]
+    );
+    assert_eq!(
+        bytes[at_repeated],
+        2 * alone,
+        "two sites of one variant are two identical spans"
+    );
+    assert!(bytes[at_once] > 0, "the third variant charged nothing");
+    assert_eq!(
+        code.total_bytes(),
+        Some(bytes[at_repeated] + bytes[at_once]),
+        "the total is the sum of the rows, and no other row was charged"
+    );
+    assert!(
+        code.total_bytes() <= Some(u64::from(A::code_bytes(handle))),
+        "more was charged to the calls than the function is"
     );
 }
 
