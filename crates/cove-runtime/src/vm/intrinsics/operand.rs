@@ -208,6 +208,46 @@ pub(super) fn text(machine: &Machine, frame: Frame<'_>, at: usize) -> Result<Str
     super::string_of(machine, string(machine, frame, at))
 }
 
+/// The text of the `String` operand `at`, handed to `f` for as long as the
+/// call lasts and not a moment longer.
+///
+/// [`text`] above answers a `String`, which is a heap allocation, a copy and a
+/// validation per operand per call — and on the measurement that closed #442
+/// the *allocation* was about seventy per cent of it. This answers the same
+/// text out of a buffer the machine already owns, so a steady-state run
+/// allocates nothing to read an operand.
+///
+/// The closure is what makes that safe without borrowing the heap: the buffer
+/// is taken out of the machine rather than borrowed from it, so `f` may still
+/// take the machine by `&mut` and allocate, and the buffer goes back when the
+/// call ends — or is dropped rather than given back, if the operand was big
+/// enough that keeping it would put the pool over the bound
+/// [`Machine::scratch`] states. So a read of a whole file costs one
+/// allocation, once, and is not still being held afterwards. Nothing here reads a payload word any differently from
+/// [`Machine::string_bytes`], so no host endianness and no chunk boundary is
+/// load-bearing.
+///
+/// The `Err` is a string object whose bytes are not UTF-8, which nothing that
+/// builds one can make.
+#[inline]
+pub(super) fn with_text<R>(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    at: usize,
+    f: impl FnOnce(&mut Machine, &str) -> Result<R, RuntimeError>,
+) -> Result<R, RuntimeError> {
+    let addr = string(machine, frame, at);
+    let mut buf = machine.take_scratch();
+    buf.clear();
+    machine.string_bytes_into(addr, &mut buf);
+    let answer = match core::str::from_utf8(&buf) {
+        Ok(text) => f(machine, text),
+        Err(_) => Err(RuntimeError::new("this string's bytes are not valid UTF-8")),
+    };
+    machine.give_scratch(buf);
+    answer
+}
+
 /// What the language calls the value in `word`, read as `repr`.
 ///
 /// [`crate::value::Value::type_name`] is the oracle's copy of this, and the

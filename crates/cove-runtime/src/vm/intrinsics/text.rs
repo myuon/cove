@@ -309,13 +309,16 @@ pub(super) fn contains(
     frame: Frame<'_>,
     dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    // An upper bound: `str::contains` does not report where it stopped. See
-    // the module's note on why an upper bound is the safe direction here.
-    machine.examined(text.len() as u64);
-    let needle = operand::text(machine, frame, 1)?;
-    dest.word(machine, text.contains(&needle) as u64);
-    Ok(())
+    operand::with_text(machine, frame, 0, |machine, text| {
+        // An upper bound: `str::contains` does not report where it stopped.
+        // See the module's note on why an upper bound is the safe direction.
+        machine.examined(text.len() as u64);
+        operand::with_text(machine, frame, 1, |machine, needle| {
+            let found = text.contains(needle);
+            dest.word(machine, found as u64);
+            Ok(())
+        })
+    })
 }
 
 // `startsWith` and `endsWith` used to be here, side by side and charged the
@@ -438,6 +441,7 @@ pub(super) fn from_code_point(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::exec::{SCRATCH_BUFFERS, SCRATCH_BYTES};
     use crate::vm::intrinsics::tests::{
         elements, message_of, option_of, read, result_of, run, scalar, word, words_of, world,
     };
@@ -635,6 +639,90 @@ mod tests {
         assert_eq!(text_of(&mut machine, "\u{a0} a \n", "trim"), "a");
         assert_eq!(text_of(&mut machine, "straße", "toUpper"), "STRASSE");
         assert_eq!(text_of(&mut machine, "ÉÀ", "toLower"), "éà");
+    }
+
+    /// **`contains` on an operand far larger than the scratch cap answers
+    /// correctly and leaves the pool inside its bound.**
+    ///
+    /// [`operand::with_text`] is the only caller of the pool today, and this
+    /// is the shape of the run the caps are for: one enormous operand — a
+    /// whole document — read once. `exec.rs` holds the pool to its bound
+    /// through [`Machine::take_scratch`] directly; this one goes through the
+    /// intrinsic, so the buffer the cap drops is a buffer `with_text` really
+    /// filled.
+    ///
+    /// The needle sits at the very end of the receiver, which is what makes
+    /// the answer a statement about the *whole* read: a buffer truncated
+    /// anywhere at all answers `false` here.
+    #[test]
+    fn contains_reads_an_operand_larger_than_the_scratch_cap() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 17);
+
+        let mut huge = "0123456789".repeat(SCRATCH_BYTES * 2);
+        assert!(huge.len() > SCRATCH_BYTES * 16);
+        huge.push_str("the tail");
+        let needle = machine.new_string("the tail").unwrap();
+        assert_eq!(
+            on(&mut machine, &huge, "contains", &[(Repr::Ref, needle)]),
+            1,
+            "the receiver was read whole, to its last byte"
+        );
+
+        let absent = machine.new_string("no such text").unwrap();
+        assert_eq!(
+            on(&mut machine, &huge, "contains", &[(Repr::Ref, absent)]),
+            0
+        );
+
+        assert!(
+            machine.scratch_retained() <= SCRATCH_BUFFERS * SCRATCH_BYTES,
+            "{} bytes retained, over the stated {} × {}",
+            machine.scratch_retained(),
+            SCRATCH_BUFFERS,
+            SCRATCH_BYTES
+        );
+        assert!(
+            machine.scratch_retained() < huge.len(),
+            "the buffer that held the whole receiver was dropped"
+        );
+    }
+
+    /// **The two buffers `contains` holds at once come back, and the next
+    /// call reuses them.**
+    ///
+    /// The caps are only allowed to bound the pool, not to empty it: the
+    /// steady state this change exists for is a call that allocates nothing.
+    /// The pool is primed with two buffers of a capacity well under the cap
+    /// and well over what the call needs, so a call that reused them leaves
+    /// exactly that capacity behind and a call that dropped or replaced
+    /// either leaves something else.
+    #[test]
+    fn contains_gives_back_the_buffers_it_held() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+
+        let primed = 1024;
+        assert!(primed < SCRATCH_BYTES);
+        for _ in 0..2 {
+            let buf: Vec<u8> = Vec::with_capacity(primed);
+            assert_eq!(buf.capacity(), primed);
+            machine.give_scratch(buf);
+        }
+        assert_eq!(machine.scratch_retained(), 2 * primed);
+
+        let needle = machine.new_string("ll").unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                on(&mut machine, "hello", "contains", &[(Repr::Ref, needle)]),
+                1
+            );
+            assert_eq!(
+                machine.scratch_retained(),
+                2 * primed,
+                "a call took the two primed buffers and gave the same two back"
+            );
+        }
     }
 
     #[test]
