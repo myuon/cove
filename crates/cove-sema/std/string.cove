@@ -52,6 +52,58 @@ export fn isEmpty(text: String) -> Bool {
   core.byteLength(text) == 0
 }
 
+/// Whether this string ends with `suffix`.
+///
+/// The comparison is of **bytes**: the last `suffix.byteLength()` bytes of the
+/// text against the whole of the suffix, one byte at a time, stopping at the
+/// first pair that differs. A suffix longer than the text is answered on the
+/// two lengths alone, before a byte of either is read.
+///
+/// Nothing here asks whether the offset the comparison starts at begins a
+/// character, and that is not an omission — it is the reason a byte loop is
+/// allowed to answer a question about text at all. **UTF-8 is
+/// self-synchronizing.** A continuation byte is `10xxxxxx`, 128 through 191,
+/// and no character begins with one; a `String` is valid UTF-8 in its shortest
+/// form — nothing makes one from anything else — so a suffix's first byte is a
+/// lead byte and never a continuation byte. If every byte from `n - m` onwards
+/// matches, then in particular the byte at `n - m` equals the suffix's first
+/// byte, so it is a lead byte too, and a lead byte in valid UTF-8 is the start
+/// of a character. A byte match at `n - m` is therefore a match at a character
+/// boundary by construction, and a character-by-character comparison would
+/// find exactly what this finds. That is [`codePointAtByte`]'s fact read in
+/// the other direction: there it says the lead byte alone decides a
+/// character's width, here it says a match cannot land inside one.
+///
+/// An empty suffix answers `true`, because the loop does not run — which is
+/// what `str::ends_with("")` answers, and `tests/e2e/values_string_ends_with`
+/// asserts it rather than leaving it to be obvious.
+///
+/// It was `str::ends_with` in Rust, one `IntrinsicCall` per call. ADR 0064
+/// moves it here: `endsWith` is a method's name and would have to be renamed
+/// the day the method was, which is Decision 2's test, and what is left
+/// underneath is `core.byteLength` — a header load — with one run load a byte
+/// over it. A loop the native tier compiles, in place of a call it can only
+/// cross back out of.
+///
+/// Each question is an `if` of its own and the answer is a `return`, for the
+/// reasons [`sliceBytes`] gives.
+export fn endsWith(text: String, suffix: String) -> Bool {
+  let suffixLength = core.byteLength(suffix)
+  let textLength = core.byteLength(text)
+  if suffixLength > textLength {
+    return false
+  }
+  let start = textLength - suffixLength
+  var at = 0
+  while at < suffixLength {
+    if text.byteAt(start + at) != suffix.byteAt(at) {
+      return false
+    }
+    at += 1
+  }
+  return true
+}
+
 /// How many bytes this string's UTF-8 encoding is.
 ///
 /// Bytes and not characters: a two-byte character counts two here and one in

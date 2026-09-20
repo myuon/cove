@@ -1,0 +1,21 @@
+empty/empty true
+cove/empty true
+empty/cove false
+ab/abc false
+ove/cove false
+cove/cove true
+main.cove/.cove true
+main.rs/.cove false
+main.love/.cove false
+recove/.cove false
+café/é true
+café/è false
+あいう/う true
+あいう/い false
+a😀/😀 true
+a😀/😁 false
+€/€ true
+あ/U+0082 false
+€/U+00AC false
+😀/U+0080 false
+built true false 18

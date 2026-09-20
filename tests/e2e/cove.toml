@@ -356,6 +356,10 @@ allow = ["console"]
 entry = "values_string_length.main"
 allow = ["console"]
 
+[run.values_string_ends_with]
+entry = "values_string_ends_with.main"
+allow = ["console"]
+
 [run.values_string_builder]
 entry = "values_string_builder.main"
 allow = ["console"]

@@ -1,0 +1,163 @@
+use console.println
+use clock.now
+
+/// What `String.endsWith` costs, at the four size pairs it can be called at.
+///
+/// ADR 0064 moved the suffix test out of the runtime and into
+/// `std.string.endsWith`, a Cove loop over `core.byteLength` and `byteAt`.
+/// A migration's own cost is the thing Decision 8 asks a pull request to
+/// record, and a whole-program figure cannot supply it: `endsWith` is one call
+/// in `examples/covefmt`'s directory walk, so its cost there is a rounding
+/// error against the formatting. These rows are the operation on its own.
+///
+/// # The four sizes are four different bodies, not one body at four scales
+///
+/// The loop compares the **suffix's** bytes, never the receiver's, and it
+/// answers on the two lengths alone when the suffix is the longer. So the two
+/// dimensions do quite different things and the matrix is what separates them:
+///
+/// - **short / short** is the ordinary call, five bytes compared;
+/// - **short / long** is the refusal on length, and no byte of either string
+///   read: the cheapest answer `endsWith` has, and the one a reader would
+///   most easily assume costs the same as the others;
+/// - **long / short** is the same five bytes compared against a receiver ten
+///   times as long, which is what says the cost does *not* grow with the
+///   receiver — `core.byteLength` is a header load and the start offset is
+///   one subtraction;
+/// - **long / long** is fifty bytes compared, which is where the per-byte
+///   slope shows up against the per-call constant the other three measure.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`, and this benchmark has to be
+/// able to speak for both tiers: ADR 0064's whole argument is that the ratio
+/// between them flips sign when an intrinsic call becomes Cove. Each row is
+/// therefore a call to [`countEndsWith`], whose body is the loop, and `main`
+/// does nothing in a turn but read a clock either side of it.
+///
+/// **That holds only while [`countEndsWith`] is too big to be inlined**, and
+/// it is worth writing down because the benchmark was measured on the
+/// pre-migration binary and there it was not. While `endsWith` was one
+/// `IntrinsicCall`, this callee was about ten instructions — inside
+/// `cove_ir::lower::inline`'s cold `LIMIT` of sixteen — so it folded into
+/// [`row`], which the native tier refuses for the `now()` at its start, and
+/// the baseline's `--backend native` column was the encoded VM wearing the
+/// native tier's name. It ran 5,600,304 encoded instructions and made not one
+/// runtime helper call. The Cove body is nineteen instructions, so the callee
+/// is past the limit and is compiled, which is why the rows below mean what
+/// they say. A later change that makes `endsWith` small again — a bounded
+/// run comparison beneath it, say — would put this benchmark back in the
+/// state where its native column is the VM, silently. Check the compiled set
+/// before believing a native row here.
+///
+/// [`countBare`] is the control, the same loop with the call taken out, so
+/// that what each row reports is the call rather than the turn. **Its branch
+/// is always taken**, which matches the three rows that answer `true`; the
+/// short/long row answers `false` and so does one addition less per turn than
+/// its control does, and is reported cheap by exactly that much. Under
+/// `--backend native` that row reads *negative*, and it is not a broken
+/// clock: a length refusal there costs less than the addition the control
+/// makes, so the difference is below zero and the honest reading of the row
+/// is "too cheap to separate from the loop".
+///
+/// [`turns`] is 200,000 rather than the 2,000,000 `benches/arith` and
+/// `benches/builtincall` use. `crates/cove-cli/tests/vm_coverage.rs` runs
+/// every program in this repository on the tree-walking interpreter as well as
+/// on the linear-memory backend, and the long/long row is fifty byte
+/// comparisons a turn — 10 million of them at this count, and ten times that
+/// at the usual one.
+fn turns() -> Int {
+  200000
+}
+
+fn shortText() -> String {
+  "main.cove"
+}
+
+fn shortSuffix() -> String {
+  ".cove"
+}
+
+/// Eighty-eight bytes, ending in [`longSuffix`]'s fifty.
+fn longText() -> String {
+  "crates/cove-runtime/src/vm/intrinsics/text/deeply/nested/directory/tree/module/main.cove"
+}
+
+fn longSuffix() -> String {
+  "text/deeply/nested/directory/tree/module/main.cove"
+}
+
+/// `rounds` suffix tests and nothing else the loop can be about.
+///
+/// No host call in the body, so that the native tier compiles it and the rows
+/// price `endsWith` on the tier that runs it.
+fn countEndsWith(text: String, suffix: String, rounds: Int) -> Int {
+  var found = 0
+  var i = 0
+  while i < rounds {
+    if text.endsWith(suffix) {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// [`countEndsWith`]'s loop with the call taken out, and its branch taken
+/// every turn.
+fn countBare(rounds: Int) -> Int {
+  var found = 0
+  var i = 0
+  while i < rounds {
+    if i < rounds {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// How long `rounds` turns of [`countEndsWith`] took, in microseconds, and
+/// how many of them answered `true`.
+struct Row {
+  micros: Int
+  found: Int
+}
+
+fn row(text: String, suffix: String, rounds: Int) -> Row {
+  let from = now()
+  let found = countEndsWith(text, suffix, rounds)
+  Row(micros: (now() - from).micros(), found: found)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let shortShort = row(shortText(), shortSuffix(), rounds)
+  let shortLong = row(shortText(), longSuffix(), rounds)
+  let longShort = row(longText(), shortSuffix(), rounds)
+  let longLong = row(longText(), longSuffix(), rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped matching would still report a number, and the number
+  // would be of something else.
+  assertEqual(bare, rounds)?
+  assertEqual(shortShort.found, rounds)?
+  assertEqual(shortLong.found, 0)?
+  assertEqual(longShort.found, rounds)?
+  assertEqual(longLong.found, rounds)?
+
+  println(
+    "bare loop                 {bareMicros * 1000 / rounds} ns/turn ({bare})",
+  )?
+  println("short/short  (5 bytes)    {(shortShort.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("short/long   (no bytes)   {(shortLong.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long/short   (5 bytes)    {(longShort.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long/long    (50 bytes)   {(longLong.micros - bareMicros) * 1000 / rounds} ns/call")?
+  Ok(())
+}
