@@ -157,16 +157,23 @@ fn @m.total(Int) -> Int
 /// One location holds the element for every turn, and it is cleared at the
 /// end of each — so a walk over a large array holds one element at a time
 /// rather than every element it has reached.
+///
+/// The body asks the element for its `byteLength()`, which is one `len`. It
+/// asked for its `length()` until ADR 0064 made that a Cove loop the inliner
+/// expands here, and eighteen instructions of somebody else's body between
+/// the `load-elem` and the `clear` is a listing about the wrong thing. What
+/// this case needs of the body is that it read the element and answer an
+/// `Int`, which `byteLength` does in one instruction.
 #[test]
 fn a_for_over_an_array_walks_the_object_and_clears_the_element() {
     assert_eq!(
         listing(
-            "fn count(xs: Array<String>) -> Int {\n  var t = 0\n  for x in xs { t = t + x.length() }\n  t\n}",
+            "fn count(xs: Array<String>) -> Int {\n  var t = 0\n  for x in xs { t = t + x.byteLength() }\n  t\n}",
             "count"
         ),
         "\
 fn @m.count(Array) -> Int
-  frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int
+  frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
   local xs -> s0:Array [0, 16)
   local t -> s2:Int [1, 15)
   local x -> s8:String [9, 11)
@@ -179,7 +186,7 @@ fn @m.count(Array) -> Int
      6  add.int s5:int s5:int s6:int
      7  lt.int.branch s7:bool s5:int s4:int 13
      8  load-elem s8:String s3:ref s5:int
-     9  intrinsic-call s9:Int String.length (s8:String)
+     9  len s9:int s8:ref
     10  add.int s2:int s2:int s9:int
     11  clear s8:String
     12  jump 6

@@ -1356,10 +1356,12 @@ pub fn call_method(
             _ => Err(no_method("Set", name, span)),
         },
         Value(Repr::Str(text)) => match name {
-            "length" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(text.chars().count() as i64)))
-            }
+            // `length` used to answer here, `text.chars().count()`. It does
+            // not reach this arm any more: `Interpreter::eval_method_call`
+            // resolves it to a call into `std.string.length` before this
+            // function is ever asked about it — a Cove loop that reads each
+            // lead byte and advances by its width (ADR 0064), which is where
+            // the character-counting policy belongs.
             // `isEmpty` used to answer here too, `text.is_empty()`. It does
             // not reach this arm any more: `Interpreter::eval_method_call`
             // resolves it to a call into `std.string.isEmpty` before this

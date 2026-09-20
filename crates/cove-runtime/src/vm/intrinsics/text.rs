@@ -5,10 +5,13 @@
 //! how it reads those bytes, this one reads them the same way rather than
 //! choosing again:
 //!
-//! - **`length()` counts characters, not bytes.** It is `chars().count()`, so
-//!   it agrees with `chars()`, and it is *not* the header's length field —
-//!   which is why `String.length` is a builtin rather than an
-//!   [`Inst::Len`](cove_ir::Inst::Len).
+//! - **`length()` is not here.** It counted characters rather than bytes —
+//!   `chars().count()`, and not the header's length field — and a count in
+//!   characters is a policy over a representation rather than an operation of
+//!   the machine, so [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)
+//!   moved it to `std.string.length`: a Cove loop that reads each lead byte
+//!   and advances by the width that byte declares. It still agrees with
+//!   `chars()` below, for the same reason it always did.
 //! - **`slice(from, to)` is in character positions**, and so is what
 //!   `indexOf` answers, which is why `indexOf` converts the byte offset it
 //!   finds by counting the characters before it.
@@ -28,13 +31,14 @@
 //!
 //! # Every operation here says what it examined, in bytes
 //!
-//! Nine of the operations below walk the whole receiver, four search it and
+//! Eight of the operations below walk the whole receiver, four search it and
 //! one builds its answer out of parts, and until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7 every one of them cost the run **one** unit of work — the one
-//! an `add.int` costs. So `"ab".length()` and a `length()` over a hundred
-//! thousand characters spent the same fuel, ran for 383 times the wall clock,
-//! and were the same to a cancellation, a deadline and a fuel bound alike.
+//! an `add.int` costs. So `"ab".toUpper()` and a `toUpper()` over a hundred
+//! thousand characters spent the same fuel, ran for hundreds of times the
+//! wall clock, and were the same to a cancellation, a deadline and a fuel
+//! bound alike.
 //!
 //! Each arm therefore calls [`Machine::examined`] with what it looked at, and
 //! **the unit is bytes**, not characters and not words: it is the unit
@@ -47,10 +51,10 @@
 //! What is charged is **what was examined**, not what was handed back, and
 //! the two part company in both directions:
 //!
-//! - the nine that walk the receiver — `length`, `words`, `chars`, `split`,
-//!   `slice`, `trim`, `replace`, `toUpper`, `toLower` — charge the receiver's
-//!   own byte length, because [`operand::text`] has already decoded the whole
-//!   of it before any of them looks at a single character;
+//! - the eight that walk the receiver — `words`, `chars`, `split`, `slice`,
+//!   `trim`, `replace`, `toUpper`, `toLower` — charge the receiver's own byte
+//!   length, because [`operand::text`] has already decoded the whole of it
+//!   before any of them looks at a single character;
 //! - `startsWith` and `endsWith` compare at most the needle, so they charge
 //!   the needle's length capped at the receiver's;
 //! - `contains` and `indexOf` charge the **receiver's** length, and that is
@@ -73,19 +77,6 @@ use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
 use crate::vm::intrinsics::operand::{Dest, Frame};
 use crate::vm::intrinsics::{make, operand};
-
-/// `String.length() -> Int`, in characters.
-pub(super) fn length(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    machine.examined(text.len() as u64);
-    let count = text.chars().count();
-    dest.word(machine, count as u64);
-    Ok(())
-}
 
 /// `String.words() -> Array<String>`, split on ASCII whitespace.
 pub(super) fn words(
@@ -501,24 +492,17 @@ mod tests {
         read(machine, word)
     }
 
-    /// `length()` is `chars().count()` and not the header's byte count, which
-    /// is the whole reason it is a builtin rather than an `Inst::Len`.
-    #[test]
-    fn length_counts_characters_and_not_bytes() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let text = machine.new_string("héllo").unwrap();
-        assert_eq!(machine.object_len(text), 6, "six bytes");
-        assert_eq!(
-            word(&mut machine, "String", "length", &[(Repr::Ref, text)]).unwrap(),
-            5,
-            "five characters"
-        );
-
-        // `isEmpty` is not a machine builtin for `String` either: it is
-        // `std.string.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s
-        // tests that check it rather than a word read off the machine here.
-    }
+    // `length()` had a test here — `héllo` is six bytes and five
+    // characters — until ADR 0064 moved the count into `std.string.length`.
+    // What replaced it is `tests/e2e/values_string_length`, a program that
+    // asks for the count and the byte length of the same string at every
+    // character width and is run on both evaluators: an oracle no arm in this
+    // file supplies, for a body no arm in this file executes.
+    //
+    // `isEmpty` is not a machine builtin for `String` either, for the same
+    // reason and since ADR 0058: it is `std.string.isEmpty`, and it is
+    // `cove-sema`'s and `cove-ir`'s tests that check it rather than a word
+    // read off the machine here.
 
     #[test]
     fn chars_and_words_take_a_string_apart() {

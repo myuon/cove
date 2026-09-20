@@ -979,6 +979,20 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.map",
         function: "of",
     },
+    // A character count is a policy over a representation and not an
+    // operation of the machine, which is ADR 0064's Decision 2 read straight
+    // off `String.length`: it would have to be renamed the day the method
+    // was, and nothing below the standard library should have to know that
+    // Cove counts Unicode scalars rather than bytes or words. So
+    // `std.string.length` is a Cove loop over `core.byteLength` and `byteAt`,
+    // and `Intrinsic::StringLength` is gone in the same change.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "length",
+        module: "std.string",
+        function: "length",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "String",

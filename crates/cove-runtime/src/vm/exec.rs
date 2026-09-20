@@ -490,14 +490,17 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// eighteen of the 31 variants declare
+    /// seventeen of the 30 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
     /// was not in the fuel total at all: 10,000 `String.length` calls over
     /// ten characters and over 100,000 characters spent the same fuel and
-    /// 383 times the wall clock. This is where an arm says what it walked so
-    /// that `call_intrinsic` can charge it once, for every arm, in one place.
+    /// 383 times the wall clock. That was measured while `String.length` was
+    /// still an intrinsic; ADR 0064's first migration has since made it a
+    /// Cove loop, which is why the counts above are not the ADR's. This is
+    /// where an arm says what it walked so that `call_intrinsic` can charge
+    /// it once, for every arm, in one place.
     ///
     /// **A [`Cell`] rather than a plain `u64`, because the walkers hold the
     /// machine by shared reference and must.** `equal::equals`,

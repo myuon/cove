@@ -44,11 +44,13 @@ fn rendering(value: Int, rounds: Int) -> Rendering {
 /// allocate. All three are `std.string` now (ADR 0058), so what they report
 /// is the Cove that replaced the call, and they stay as the history.
 ///
-/// The four after them are the shapes of the intrinsic boundary that is left
-/// (#378, Phase 5), each timed apart because each pays a different part of
-/// it:
+/// The four after them are the shapes of the boundary, each timed apart
+/// because each pays a different part of it:
 ///
-/// - `String.length` answers one word;
+/// - `String.length` answered one word. It is `std.string` too now (ADR
+///   0064), a loop over `core.byteLength` and one byte load a character, so
+///   this row has become the second history the first three are — what the
+///   Cove that replaced a call costs, beside a row whose call is still made;
 /// - `Int.parse` answers a `Result`, several words written into the
 ///   destination;
 /// - `==` on a two-word struct is `Any.equals` over two operands wider than a

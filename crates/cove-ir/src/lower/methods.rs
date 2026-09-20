@@ -818,12 +818,17 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// [`IntrinsicSite`] names them with.
 ///
 /// Every one of them is an operation of a value that is one word or is text,
-/// and none of them is something an instruction expresses: a `String`'s
-/// length is in characters rather than bytes, `Int.abs` at `Int.MIN` stops
-/// the run, `Float.toInt` answers a `Result`. The sequence operations are
-/// not here — `cove_ir::lower::collections` has its own list, because for a
-/// sequence some of them *are* instructions and the split is the interesting
-/// part.
+/// and none of them is something an instruction expresses: `Int.abs` at
+/// `Int.MIN` stops the run, `Float.toInt` answers a `Result`, `String.trim`
+/// needs a Unicode table. A `String`'s length used to head that list — it is
+/// in characters rather than bytes, so no `Inst::Len` answers it — and it is
+/// the counter-example now: ADR 0064 made it `std.string.length`, a Cove loop
+/// over `core.byteLength` and one run load a character, and the thing that
+/// argued it belonged here was the policy that argued it belonged there.
+///
+/// The sequence operations are not here — `cove_ir::lower::collections` has
+/// its own list, because for a sequence some of them *are* instructions and
+/// the split is the interesting part.
 ///
 /// `Duration.nanos` is the one `Duration` name left here: it is both a
 /// reader and a builder — [`ASSOCIATED`] holds the builder half and this
@@ -836,7 +841,6 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// are not intrinsics: [`conversion`] names each as the [`Convert`] it
 /// lowers to.
 const MACHINE_METHODS: &[(&str, &str)] = &[
-    ("String", "length"),
     ("String", "words"),
     ("String", "chars"),
     ("String", "split"),

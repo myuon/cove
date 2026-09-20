@@ -41,7 +41,6 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
     ValueRenderInto,
-    StringLength,
     StringWords,
     StringChars,
     StringSplit,
@@ -80,7 +79,6 @@ pub enum Intrinsic {
 /// written list like this one goes wrong.
 pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRenderInto,
-    Intrinsic::StringLength,
     Intrinsic::StringWords,
     Intrinsic::StringChars,
     Intrinsic::StringSplit,
@@ -136,7 +134,6 @@ impl Intrinsic {
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "Value",
-            Intrinsic::StringLength => "String",
             Intrinsic::StringWords => "String",
             Intrinsic::StringChars => "String",
             Intrinsic::StringSplit => "String",
@@ -173,7 +170,6 @@ impl Intrinsic {
     pub const fn operation(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "renderInto",
-            Intrinsic::StringLength => "length",
             Intrinsic::StringWords => "words",
             Intrinsic::StringChars => "chars",
             Intrinsic::StringSplit => "split",
@@ -253,8 +249,7 @@ impl Intrinsic {
     /// category to be.
     pub const fn category(self) -> Category {
         match self {
-            Intrinsic::StringLength
-            | Intrinsic::StringWords
+            Intrinsic::StringWords
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
             | Intrinsic::StringJoin
@@ -308,7 +303,6 @@ impl Intrinsic {
             // The piece first, then the buffer it is appended to: the value
             // is the receiver, as it is of every other operation here.
             Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
-            Intrinsic::StringLength => fixed(&[C::Str], C::Int),
             Intrinsic::StringWords | Intrinsic::StringChars => fixed(&[C::Str], C::Strings),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
             Intrinsic::StringJoin => fixed(&[C::Str, C::Strings], C::Str),
@@ -380,13 +374,10 @@ impl Intrinsic {
                 .union(E::WRITES_MEMORY)
                 .union(E::BULK_WORK),
 
-            // `length()` decodes every byte to count characters, and nothing
-            // about a valid `String` can make that fail.
-            Intrinsic::StringLength => E::READS_MEMORY.union(E::BULK_WORK),
-            // The other readers do the same one decode and then walk, split
-            // or map the result, so every one of them is proportional to the
-            // receiver and allocates the array or string it answers. `split`
-            // and `replace` also refuse an empty needle.
+            // The readers do one decode and then walk, split or map the
+            // result, so every one of them is proportional to the receiver
+            // and allocates the array or string it answers. `split` and
+            // `replace` also refuse an empty needle.
             Intrinsic::StringWords
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
@@ -692,7 +683,6 @@ mod tests {
     fn the_intrinsic_set_only_shrinks() {
         const MIGRATED_BUT_STILL_HERE: &[&str] = &[
             "Value.renderInto",
-            "String.length",
             "String.words",
             "String.chars",
             "String.split",
@@ -774,7 +764,6 @@ mod tests {
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
                 Intrinsic::ValueRenderInto
-                | Intrinsic::StringLength
                 | Intrinsic::StringWords
                 | Intrinsic::StringChars
                 | Intrinsic::StringSplit
@@ -904,8 +893,13 @@ mod tests {
     }
 
     /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so the
-    /// intrinsics no program can be stopped by say so: a character count, a
-    /// search, and the `Float` functions IEEE 754 answers for every input.
+    /// intrinsics no program can be stopped by say so: the four searches,
+    /// which allocate nothing and always have an answer, and the `Float`
+    /// functions IEEE 754 answers for every input. A character count used to
+    /// head this list and is no longer an intrinsic at all — ADR 0064 made
+    /// `String.length` a Cove loop — which is the shape a migration leaves
+    /// here: a line gone from the vector and a clause gone from this
+    /// sentence, rather than a flag changed.
     #[test]
     fn raising_is_language_level() {
         let never: Vec<Intrinsic> = ALL
@@ -916,7 +910,6 @@ mod tests {
         assert_eq!(
             never,
             vec![
-                Intrinsic::StringLength,
                 Intrinsic::StringContains,
                 Intrinsic::StringStartsWith,
                 Intrinsic::StringEndsWith,

@@ -147,9 +147,11 @@ pub(crate) fn call(
         // and slices, and a keyed finish (ADR 0059, #378 Phase 4).
 
         // ---- String ------------------------------------------------------
-        Intrinsic::StringLength => text::length(machine, frame, dest),
-        // `String.isEmpty` is not here: it is `std.string.isEmpty` — see
-        // `cove_schema::builtins::standard_binding`.
+        // Neither `String.length` nor `String.isEmpty` is here. Both are
+        // `std.string`'s — `isEmpty` since ADR 0058 and `length` since ADR
+        // 0064, a Cove loop over `core.byteLength` and one byte load a
+        // character — and `cove_schema::builtins::standard_binding` resolves
+        // each before lowering ever looks for an intrinsic.
         Intrinsic::StringWords => text::words(machine, frame, dest),
         Intrinsic::StringChars => text::chars(machine, frame, dest),
         Intrinsic::StringSplit => text::split(machine, frame, dest),

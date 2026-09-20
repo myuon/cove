@@ -202,7 +202,7 @@ written as a namespace.
 
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
-| `length() -> Int` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `std.string.length` |
 | `isEmpty() -> Bool` |  |  |  | `std.string.isEmpty` |
 | `words() -> Array<String>` |  |  |  | `machine` |
 | `chars() -> Array<String>` |  |  |  | `machine` |
