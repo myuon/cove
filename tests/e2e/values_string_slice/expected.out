@@ -1,0 +1,61 @@
+pos.text 5 9
+pos.whole 0..5 [é😀abc] 5 9
+pos.proof 1..4 [😀ab] 3 6
+pos.first 0..1 [é] 1 2
+pos.second 1..2 [😀] 1 4
+pos.one 3..4 [b] 1 1
+pos.last 4..5 [c] 1 1
+pos.tail 2..5 [abc] 3 3
+pos.head 0..2 [é😀] 2 6
+pos.empty 2..2 [] 0 0
+pos.empty.start 0..0 [] 0 0
+pos.empty.end 5..5 [] 0 0
+mix.text 5 11
+mix.whole 0..5 [aあいbう] 5 11
+mix.head 0..2 [aあ] 2 4
+mix.mid 1..4 [あいb] 3 7
+mix.tail 3..5 [bう] 2 4
+mix.one 2..3 [い] 1 3
+mix.first 0..1 [a] 1 1
+mix.last 4..5 [う] 1 3
+clamp.from.negative -3..2 [aあ] 2 4
+clamp.from.least -9223372036854775808..2 [aあ] 2 4
+clamp.to.past 2..99 [いbう] 3 7
+clamp.to.huge 0..9223372036854775807 [aあいbう] 5 11
+clamp.backwards 3..1 [] 0 0
+clamp.backwards.one 2..1 [] 0 0
+clamp.backwards.all 5..0 [] 0 0
+clamp.both.past 7..9 [] 0 0
+clamp.both.negative -5..-2 [] 0 0
+clamp.both.least -9223372036854775808..-9223372036854775808 [] 0 0
+clamp.both.extreme -9223372036854775808..9223372036854775807 [aあいbう] 5 11
+clamp.reversed.extreme 9223372036854775807..-9223372036854775808 [] 0 0
+clamp.from.past.to.inside 9..2 [] 0 0
+clamp.at.end 5..5 [] 0 0
+clamp.at.end.past 5..9 [] 0 0
+clamp.negative.to.end -1..5 [aあいbう] 5 11
+empty.text 0 0
+empty.zero 0..0 [] 0 0
+empty.past 0..5 [] 0 0
+empty.negative -2..3 [] 0 0
+empty.backwards 3..1 [] 0 0
+empty.extreme -9223372036854775808..9223372036854775807 [] 0 0
+ascii.whole 0..5 [hello] 5 5
+ascii.mid 1..4 [ell] 3 3
+ascii.first 0..1 [h] 1 1
+ascii.last 4..5 [o] 1 1
+ascii.empty 2..2 [] 0 0
+ascii.past 3..12 [lo] 2 2
+unit.chars 1..4 [😀ab] 6
+unit.bytes 1..4 Err(`from` is `1`, which is inside a character rather than at the start of one)
+unit.inside 3..6 Err(`from` is `3`, which is inside a character rather than at the start of one)
+unit.past 2..9 [abc] 3 3
+unit.past.bytes 2..9 Ok([😀abc] 7)
+unit.whole true
+built.builder 1..4 [😀ab] 3 6
+built.builder.same true
+built.interpolated 1..4 [😀ab] 3 6
+built.joined 1..5 [😀-ab] 4 7
+built.sliceBytes 1..4 [😀ab] 3 6
+built.twice [😀ab] [a] true
+built.walked 1..4 [😀ab] 3 6

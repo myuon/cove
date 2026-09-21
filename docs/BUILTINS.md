@@ -209,7 +209,7 @@ written as a namespace.
 | `chars() -> Array<String>` |  |  |  | `machine` |
 | `split(separator: String) -> Array<String>` |  |  |  | `machine` |
 | `join(parts: Array<String>) -> String` |  |  |  | `machine` |
-| `slice(from: Int, to: Int) -> String` |  |  |  | `machine` |
+| `slice(from: Int, to: Int) -> String` |  |  |  | `std.string.slice` |
 | `trim() -> String` |  |  |  | `machine` |
 | `contains(text: String) -> Bool` |  |  |  | `std.string.contains` |
 | `startsWith(prefix: String) -> Bool` |  |  |  | `std.string.startsWith` |

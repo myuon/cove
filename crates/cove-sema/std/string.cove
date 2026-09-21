@@ -375,13 +375,165 @@ export fn codePointAtByte(text: String, offset: Int) -> Option<Int> {
   return Some((((lead - 240) * 64 + second) * 64 + third) * 64 + fourth)
 }
 
+/// The characters at positions `from` up to but not including `to`.
+///
+/// Both bounds are **character** positions — the unit [`length`] counts and
+/// [`indexOf`] answers in — and both are clamped into `0..length()`, so a
+/// `to` at or below `from` answers `""` and no pair of arguments stops the
+/// program. A negative bound, a bound past the end, a reversed pair, two
+/// bounds past the end and two below it are each answered.
+///
+/// **It clamps where [`sliceBytes`] refuses, and that difference is the whole
+/// of what separates them.** A byte offset outside the string or inside a
+/// character is one this type never handed out, so moving it to the nearest
+/// legal one would answer a question nobody asked; a character *position* has
+/// no such thing as inside, and `Array.slice` and `Vector.slice` clamp the same
+/// two bounds the same way for a sequence. `std.array.slice` is this body with
+/// no walk under it — the array's index *is* its offset, where a character's is
+/// not.
+///
+/// The positions are turned into byte offsets by [`boundaryAfter`] and the copy
+/// beneath that is `core.stringSlice`, ADR 0058's run slice over packed bytes,
+/// which allocates the answer at exactly its length and validates nothing. It
+/// needs to validate nothing for [`sliceBytes`]' reason: both offsets are where
+/// a walk of the lead bytes stopped, so each begins a character or is the end
+/// of the string, and a run of valid UTF-8 cut at two character boundaries is
+/// valid UTF-8.
+///
+/// **The two calls are one pass, not two.** The second starts at the offset the
+/// first stopped on and walks `stop - start` characters further, so the prefix
+/// in front of `from` is read once rather than once per bound. Both
+/// subtractions are of non-negative numbers in increasing order — `start` is at
+/// least 0 and `stop` at least `start` — so neither can overflow the `Int` that
+/// `Int` arithmetic would trap on.
+///
+/// It was `chars().collect()`, two `i64::clamp`s and a re-collection in Rust,
+/// one `IntrinsicCall` per call. ADR 0064 moves it here: `slice` is a method's
+/// name and would have to be renamed the day the method was, which is Decision
+/// 2's test, and the clamp is a range policy — ADR 0058's table gives ranges
+/// and branches to Cove and keeps the bounded copy below. The Rust arm
+/// collected the whole receiver into a `Vec<char>` to take two of them;
+/// this walks the lead bytes as far as `to` and no further, and allocates only
+/// the answer.
+///
+/// **What the change costs is in `benches/slice`, and it is not one number.**
+/// The census measured this operation at 0 sites and 0 calls on both
+/// representative programs, and both are unchanged to the instruction by the
+/// migration, so the bench is the whole of the measurement. Per call, median
+/// of three, against the same rows on the build that had the intrinsic:
+///
+/// ```text
+///                        VM  old -> new     native  old -> new
+///   16 B, 5 ch at 0      460 ->   362       457 ->  163
+///   88 B, 5 ch at 0      746 ->   362       737 ->  170
+///   88 B, 5 ch at 83     755 ->  2628       741 ->  619
+///  110 B, 5 ch at 0      696 ->   381       693 ->  186
+///  110 B, 5 ch at 35     699 ->  1509       693 ->  436
+///   88 B, the whole      909 ->  2749       902 ->  746
+///   88 B, empty answer   693 ->   261       693 ->  120
+/// ```
+///
+/// **On the native tier every row is faster**, by 1.2x to 5.8x. On the VM the
+/// sign is the walk's: a slice whose `to` is near the front is 1.3x to 2.7x
+/// faster, because the Rust arm paid for the whole receiver and this pays for
+/// the prefix; a slice at the far end, or of the whole string, is 2.2x to 3.5x
+/// slower, because a character step is a VM dispatch where it was a turn of a
+/// Rust loop. That is ADR 0064's own trade, and the ratio between the tiers is
+/// the reason it is taken: the intrinsic cost the same on both (460 against
+/// 457) because a call crosses out of compiled code either way, and this does
+/// not.
+///
+/// **It allocates nothing extra**, which is what Decision 8 gates on: the same
+/// bench is 700,038 allocations and 2,500,215 allocated words on both builds,
+/// to the word. One `String` per call, as before, and no intermediate.
+export fn slice(text: String, from: Int, to: Int) -> String {
+  let start = if from < 0 {
+    0
+  } else {
+    from
+  }
+  let stop = if to < start {
+    start
+  } else {
+    to
+  }
+  let begin = boundaryAfter(text, 0, start)
+  let end = boundaryAfter(text, begin, stop - start)
+  return core.stringSlice(text, begin, end - begin)
+}
+
+/// The byte offset `characters` characters after byte `at`, or the end of the
+/// string if there are fewer than that many left.
+///
+/// [`charactersBefore`] read the other way round: that one is bounded by a byte
+/// offset and counts characters, this one is bounded by a count and answers a
+/// byte offset. They share the shape of the step and nothing else — the loops
+/// stop on different things and answer different variables — and the one part
+/// they really do share is the four-way width `if`, which is
+/// [`charactersBefore`]'s reasoning and is stated in full there: a `String` is
+/// valid UTF-8 in its shortest form, so the lead byte alone says how wide the
+/// character it begins is, and a lead byte of `11111xxx` cannot occur, so the
+/// last case needs no test of its own.
+///
+/// **Factoring that `if` into a shared `characterWidth(lead)` was measured and
+/// refused**, by the rule the [`startsWith`] migration set: a factoring is
+/// taken only if the lowered sequence at the *existing* caller's sites is
+/// unchanged. It is not, and what it costs is paid per character rather than
+/// per call, because the shared body is inside the loop. The inliner does
+/// expand it — no call survives — but the expansion lands the width in a slot
+/// of its own and adds it, where the two copies written out lower to
+/// `add.int.imm`, and a constant plus an `add.int` is two instructions for the
+/// one that immediate was. At `covefmt.column`, [`length`]'s hot caller, the
+/// function is 65 instruction sites and 33,885,902 instructions written out
+/// and 67 sites and 35,509,514 factored, over the same 154,986 calls: **plus
+/// 1,623,612 instructions, 4.8% of that function**. The whole of covefmt is
+/// 934,033,557 instructions against 935,657,169 — and the two deltas are
+/// *equal to the instruction*, so `column` is the entire cost and every other
+/// caller of this walk is cold. Allocations and allocated words are 4,577,750
+/// and 57,661,551 on both sides, so nothing about the heap moved.
+///
+/// [`charactersBefore`] was taken in the [`indexOf`] round at exactly zero by
+/// the same rule, and `matchesAt` was refused in the [`startsWith`] round at
+/// +2,178. This is the same rule saying no a second time, which is what makes
+/// it a rule rather than a taste.
+///
+/// **A count bigger than the characters left is not an error here**, it is the
+/// clamp: [`slice`] hands this `to` unbounded and reads back the end of the
+/// string. The loop therefore has two reasons to stop, and they are an `if` and
+/// the `while`'s own test rather than one condition joined by `&&`, for the
+/// reason [`sliceBytes`] gives — the arms of a joined condition meet at a
+/// shared test that nothing can fuse, where a comparison that is all a branch
+/// looks at is one instruction.
+fn boundaryAfter(text: String, at: Int, characters: Int) -> Int {
+  let length = core.byteLength(text)
+  var offset = at
+  var left = characters
+  while offset < length {
+    if left < 1 {
+      return offset
+    }
+    let lead = text.byteAt(offset)
+    if lead < 128 {
+      offset += 1
+    } else if lead < 224 {
+      offset += 2
+    } else if lead < 240 {
+      offset += 3
+    } else {
+      offset += 4
+    }
+    left -= 1
+  }
+  return offset
+}
+
 /// The text between two byte offsets, or why there is none.
 ///
 /// Both offsets are **byte** offsets — the ones `byteLength`, `byteAt` and
 /// `codePointAtByte` deal in — and the range they name has to be in the string,
 /// run forwards, and begin and end at the start of a character (the end of the
 /// string counts as one). It refuses rather than clamps, which is where it parts
-/// from `slice`: an offset outside the string or inside a character is one this
+/// from [`slice`]: an offset outside the string or inside a character is one this
 /// type never handed out, and moving it to the nearest legal one would answer a
 /// question nobody asked.
 ///

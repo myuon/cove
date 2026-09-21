@@ -45,7 +45,6 @@ pub enum Intrinsic {
     StringChars,
     StringSplit,
     StringJoin,
-    StringSlice,
     StringTrim,
     StringReplace,
     StringToUpper,
@@ -74,7 +73,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringChars,
     Intrinsic::StringSplit,
     Intrinsic::StringJoin,
-    Intrinsic::StringSlice,
     Intrinsic::StringTrim,
     Intrinsic::StringReplace,
     Intrinsic::StringToUpper,
@@ -120,7 +118,6 @@ impl Intrinsic {
             Intrinsic::StringChars => "String",
             Intrinsic::StringSplit => "String",
             Intrinsic::StringJoin => "String",
-            Intrinsic::StringSlice => "String",
             Intrinsic::StringTrim => "String",
             Intrinsic::StringReplace => "String",
             Intrinsic::StringToUpper => "String",
@@ -147,7 +144,6 @@ impl Intrinsic {
             Intrinsic::StringChars => "chars",
             Intrinsic::StringSplit => "split",
             Intrinsic::StringJoin => "join",
-            Intrinsic::StringSlice => "slice",
             Intrinsic::StringTrim => "trim",
             Intrinsic::StringReplace => "replace",
             Intrinsic::StringToUpper => "toUpper",
@@ -217,7 +213,6 @@ impl Intrinsic {
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
             | Intrinsic::StringJoin
-            | Intrinsic::StringSlice
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
@@ -261,7 +256,6 @@ impl Intrinsic {
             Intrinsic::StringWords | Intrinsic::StringChars => fixed(&[C::Str], C::Strings),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
             Intrinsic::StringJoin => fixed(&[C::Str, C::Strings], C::Str),
-            Intrinsic::StringSlice => fixed(&[C::Str, C::Int, C::Int], C::Str),
             Intrinsic::StringTrim | Intrinsic::StringToUpper | Intrinsic::StringToLower => {
                 fixed(&[C::Str], C::Str)
             }
@@ -292,7 +286,7 @@ impl Intrinsic {
     /// `cove-runtime`'s `vm::intrinsics`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
     /// differently, the way [`Intrinsic::StringRefuseByteRange`] allocates
-    /// nothing and [`Intrinsic::StringSlice`] does.
+    /// nothing and [`Intrinsic::StringTrim`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // `MAY_RAISE` is language-level failure only (#378, Q5.3). An arm no
@@ -329,7 +323,6 @@ impl Intrinsic {
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
             | Intrinsic::StringJoin
-            | Intrinsic::StringSlice
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
@@ -642,7 +635,6 @@ mod tests {
             "String.chars",
             "String.split",
             "String.join",
-            "String.slice",
             "String.trim",
             "String.replace",
             "String.toUpper",
@@ -714,7 +706,6 @@ mod tests {
                 | Intrinsic::StringChars
                 | Intrinsic::StringSplit
                 | Intrinsic::StringJoin
-                | Intrinsic::StringSlice
                 | Intrinsic::StringTrim
                 | Intrinsic::StringReplace
                 | Intrinsic::StringToUpper

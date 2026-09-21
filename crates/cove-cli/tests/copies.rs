@@ -798,13 +798,43 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// had two because two of its groups bound a root first, and this one binds
 /// nothing a `println` then names.
 ///
+/// **The thirty-sixth rise is two new rows and nothing else.** 2573 to 2598,
+/// 168 programs to 170. Fifteen are `tests/e2e:values_string_slice` — two in
+/// the `prod` column and thirteen in the `ret` column — and ten are
+/// `benches:slice`, one and nine. The overlap between the two sub-totals is 49
+/// before and after, so nothing moved between the columns. The check the
+/// paragraphs above prescribe says the rest: the survey with **both**
+/// directories removed is **2573 exactly**, over the same 168 programs, and
+/// the twenty-five programs this table prints are identical line for line.
+///
+/// The pair is issue #454's Step 3 for `String.slice`: ADR 0064's Decision 6
+/// corpus, landed before a line of the reimplementation, and the benchmark
+/// that prices it — which the migration needs because the census measured
+/// that operation at 0 sites and 0 calls on both representative programs, so
+/// no whole-program figure can price it at all. The e2e file's `prod` column
+/// of two is its two `match` arms over `sliceBytes`' `Result`, which bind a
+/// value before printing it; everything else it prints, it interpolates.
+///
+/// **What is not the same as the row before it is the function and the
+/// instruction count, and that is the migration rather than the corpus.**
+/// 16,529 functions and 277,181 instructions become 16,865 and 283,397 with
+/// both directories still removed — plus two functions and plus 37
+/// instructions in every one of the 168, which is `std.string.slice` and its
+/// `boundaryAfter` appearing in a survey that lowers a *package* rather than
+/// an entry. **No shipped program carries them**: `cove run --boundary`
+/// reports covefmt at 11,278 instructions in 109 functions and cq at 6,355 in
+/// 74, before and after, to the instruction, because #441's sweep removes a
+/// standard-library body nothing in the program names. So those two figures
+/// move in this survey and in nothing a program runs, and the copies the
+/// migration itself added are **nought**.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2573;
+const FORWARDABLE_COPIES: usize = 2598;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

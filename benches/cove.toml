@@ -266,3 +266,16 @@ allow = ["console", "clock"]
 [run.keyed]
 entry = "keyed.main"
 allow = ["console", "clock"]
+
+# `String.slice` at the receiver lengths and character widths that separate a
+# walk of the lead bytes from a collection of the whole receiver into a
+# `Vec<char>` — ADR 0064 and issue #454's Step 3. The census measured this
+# operation at 0 sites and 0 calls on both representative programs, so no
+# whole-program figure can price the migration and these rows are the whole of
+# what it has. The pair that carries the question is `long.head` against
+# `short.head`: the same five-character answer off a receiver five times as
+# long.
+
+[run.slice]
+entry = "slice.main"
+allow = ["console", "clock"]

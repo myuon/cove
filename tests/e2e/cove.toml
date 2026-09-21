@@ -376,6 +376,10 @@ allow = ["console"]
 entry = "values_string_index_of.main"
 allow = ["console"]
 
+[run.values_string_slice]
+entry = "values_string_slice.main"
+allow = ["console"]
+
 [run.values_string_builder]
 entry = "values_string_builder.main"
 allow = ["console"]

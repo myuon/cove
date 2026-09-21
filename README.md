@@ -319,11 +319,16 @@ allocating a one-character `String` per character. `length`, `slice` and
 `indexOf` still count characters and do not change; what keeps the two index
 spaces apart is that a byte offset is a value those three hand out and take
 back, named so in every signature, rather than a way to index a `String`.
-That line is where `std.string.indexOf` is now written: ADR 0064 moved the
-method into Cove over the same run search `contains` stands on, and the body
-is a byte offset from the machine turned into a character position by walking
-the prefix — the two index spaces, converted in the one place that has to know
-both. A code point is an `Int` and there is no `Char`. It also settles two of the
+That line is where `std.string.indexOf` and `std.string.slice` are now
+written: ADR 0064 moved the search into Cove over the same run search
+`contains` stands on, and its body is a byte offset from the machine turned
+into a character position by walking the prefix; it then moved `slice`, whose
+body is the conversion in the other direction — two character positions
+clamped into the string and then walked into the two byte offsets the run
+slice under `sliceBytes` copies between. Both are the two index spaces
+converted in the one place that has to know both, and `slice` is where the
+conversion is a *policy* as well: it clamps where `sliceBytes` refuses,
+because a position has no such thing as inside a character. A code point is an `Int` and there is no `Char`. It also settles two of the
 methods that were waiting on it by measuring them: a Cove `contains` is 101×
 the builtin, so `contains`, `startsWith` and `endsWith` stayed primitive,
 while a Cove `Int.parse` is 6.3× and reads as arithmetic. All three predicates

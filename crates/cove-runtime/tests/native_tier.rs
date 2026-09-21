@@ -328,12 +328,16 @@ export fn threads(n: Int) -> Int {
 ///
 /// It needed no marker while `String.slice` was outside anything the template
 /// compiler lowers. Compiled code calls intrinsics now (#378, P5-6), so it carries
-/// the marker every refused fixture in this file carries.
+/// the marker every refused fixture in this file carries — and the marker is
+/// what still keeps it refused now that ADR 0064 has made `String.slice` a
+/// `std.string` body over the byte run slice the tier *does* lower. That is
+/// the fixture's whole point: what it must be is refused, and the reason has
+/// to be one this file owns rather than one a migration can take away.
 ///
 /// It was `sliceBytes` until ADR 0058 moved that into the standard library over
-/// a byte run slice, which the native tier lowers. `slice` counts characters
-/// rather than bytes, and every character of the text it is handed is ASCII, so
-/// the answer is the same number.
+/// a byte run slice. `slice` counts characters rather than bytes, and every
+/// character of the text it is handed is ASCII, so the answer is the same
+/// number.
 export fn allocates(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   s.slice(held(0), n).byteLength()

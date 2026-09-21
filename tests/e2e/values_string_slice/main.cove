@@ -1,0 +1,247 @@
+use console.println
+use std.stringbuilder.StringBuilder
+
+/// One `slice` call, printed with the characters and the bytes it answered.
+///
+/// The brackets are there so an empty answer is visible. The two numbers are
+/// the answer's own `length()` and `byteLength()`, and they are both here
+/// because they are what separates the two readings of this method: a slice
+/// that took the right characters and a slice that took the same count of
+/// *bytes* print the same bracket only when the receiver is ASCII.
+fn show(
+  label: String,
+  text: String,
+  from: Int,
+  to: Int,
+) -> Result<Unit, Error> {
+  let part = text.slice(from, to)
+  println("{label} {from}..{to} [{part}] {part.length()} {part.byteLength()}")
+}
+
+/// Pins every answer `String.slice` gives before it moves out of the runtime,
+/// so the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation. `String.slice` is `chars().collect()`, two `i64::clamp`s
+/// and a re-collection in Rust today, reached through one `Inst::IntrinsicCall`,
+/// and this is that corpus. It is issue #454's Step 3, and it is one of the
+/// variants ADR 0064's census measured at **0 static sites and 0 dynamic calls
+/// on both representative programs** — so nothing here is a hot path, and
+/// everything here is the only thing that will notice.
+///
+/// # It clamps, where `sliceBytes` refuses
+///
+/// The two are the same shape and the opposite policy, which is the single
+/// thing about this method most worth writing down. `sliceBytes` answers a
+/// `Result` and tells a caller which of five things was wrong with a range;
+/// `slice` answers a `String` always, and no pair of arguments can stop a
+/// program. Each bound is moved into `0..length()` on its own and a `to` at or
+/// below `from` answers `""`, so a negative bound, a bound past the end, a
+/// reversed pair, two bounds past the end and two below it are each *answered*.
+/// The `clamp.*` rows are every one of those, including both ends of `Int`.
+///
+/// # The positions are characters, and one row proves it rather than saying it
+///
+/// `pos.proof` is `"é😀abc".slice(1, 4)`. In characters that is `😀ab`, six
+/// bytes; in bytes it would begin in the middle of `é` and end in the middle of
+/// `😀`, which is not text at all. Every row of that section is on a receiver
+/// whose characters are two, four and one byte wide, so a byte-indexed
+/// implementation disagrees with this file on all but the first and the last of
+/// them. `unit.*` says the same thing the other way round, by putting `slice`
+/// and `sliceBytes` on one line with the same numbers: the character range 1..4
+/// is six bytes of text and the byte range 1..4 is a refusal.
+///
+/// # What a `String` is made of does not change what a slice of it is
+///
+/// The `built.*` rows are receivers a run made rather than a literal the
+/// program spelled — a builder's `finish`, an interpolation, a `join`, a
+/// `sliceBytes` and a `slice` of a slice. A `String` has one representation and
+/// these cannot answer differently, which is exactly why a reimplementation
+/// that walked a literal's bytes and not a built one's would be caught here and
+/// nowhere else.
+export fn main() -> Result<Unit, Error> {
+  positions()?
+  mixed()?
+  clamping()?
+  emptyReceiver()?
+  ascii()?
+  units()?
+  built()?
+  Ok(())
+}
+
+/// Character positions on a receiver of three different widths.
+///
+/// `é` is two bytes, `😀` is four, and `a`, `b`, `c` are one each: five
+/// characters and nine bytes. `pos.proof` is the row a byte-indexed
+/// implementation cannot answer.
+fn positions() -> Result<Unit, Error> {
+  let text = "é😀abc"
+  println("pos.text {text.length()} {text.byteLength()}")?
+  show("pos.whole", text, 0, 5)?
+  show("pos.proof", text, 1, 4)?
+  show("pos.first", text, 0, 1)?
+  show("pos.second", text, 1, 2)?
+  show("pos.one", text, 3, 4)?
+  show("pos.last", text, 4, 5)?
+  show("pos.tail", text, 2, 5)?
+  show("pos.head", text, 0, 2)?
+  show("pos.empty", text, 2, 2)?
+  show("pos.empty.start", text, 0, 0)?
+  show("pos.empty.end", text, 5, 5)?
+  Ok(())
+}
+
+/// The receiver `values_string_bytes` takes its byte offsets in, read in
+/// characters instead.
+///
+/// `a` is one byte, `あ` and `い` three, `b` one, `う` three: five characters
+/// and eleven bytes, and the character starts are 0, 1, 4, 7, 8 and 11. So the
+/// same pair of numbers means something different to each method, and
+/// `mix.mid` — 1..4 — is three characters here and one `あ` there.
+fn mixed() -> Result<Unit, Error> {
+  let text = "aあいbう"
+  println("mix.text {text.length()} {text.byteLength()}")?
+  show("mix.whole", text, 0, 5)?
+  show("mix.head", text, 0, 2)?
+  show("mix.mid", text, 1, 4)?
+  show("mix.tail", text, 3, 5)?
+  show("mix.one", text, 2, 3)?
+  show("mix.first", text, 0, 1)?
+  show("mix.last", text, 4, 5)?
+  Ok(())
+}
+
+/// Every argument that is not a position in the receiver, and what it answers
+/// instead of refusing.
+///
+/// Both ends of `Int` are here because a clamp that is written as a comparison
+/// has to hold at them too: `-2^63` is the one negative with no positive, and
+/// `2^63 - 1` is the one value a length can never reach.
+fn clamping() -> Result<Unit, Error> {
+  let text = "aあいbう"
+  show("clamp.from.negative", text, -3, 2)?
+  show("clamp.from.least", text, -9223372036854775807 - 1, 2)?
+  show("clamp.to.past", text, 2, 99)?
+  show("clamp.to.huge", text, 0, 9223372036854775807)?
+  show("clamp.backwards", text, 3, 1)?
+  show("clamp.backwards.one", text, 2, 1)?
+  show("clamp.backwards.all", text, 5, 0)?
+  show("clamp.both.past", text, 7, 9)?
+  show("clamp.both.negative", text, -5, -2)?
+  show(
+    "clamp.both.least",
+    text,
+    -9223372036854775807 - 1,
+    -9223372036854775807 - 1,
+  )?
+  show(
+    "clamp.both.extreme",
+    text,
+    -9223372036854775807 - 1,
+    9223372036854775807,
+  )?
+  show(
+    "clamp.reversed.extreme",
+    text,
+    9223372036854775807,
+    -9223372036854775807 - 1,
+  )?
+  show("clamp.from.past.to.inside", text, 9, 2)?
+  show("clamp.at.end", text, 5, 5)?
+  show("clamp.at.end.past", text, 5, 9)?
+  show("clamp.negative.to.end", text, -1, 5)?
+  Ok(())
+}
+
+/// The empty receiver, which has one position and answers itself at all of
+/// them.
+fn emptyReceiver() -> Result<Unit, Error> {
+  let text = ""
+  println("empty.text {text.length()} {text.byteLength()}")?
+  show("empty.zero", text, 0, 0)?
+  show("empty.past", text, 0, 5)?
+  show("empty.negative", text, -2, 3)?
+  show("empty.backwards", text, 3, 1)?
+  show("empty.extreme", text, -9223372036854775807 - 1, 9223372036854775807)?
+  Ok(())
+}
+
+/// ASCII, where a character is a byte and the two readings agree.
+///
+/// These rows are the control: they are the ones that would still pass if the
+/// positions were bytes, and they are here so that the rows above are read as
+/// the ones that would not.
+fn ascii() -> Result<Unit, Error> {
+  let text = "hello"
+  show("ascii.whole", text, 0, 5)?
+  show("ascii.mid", text, 1, 4)?
+  show("ascii.first", text, 0, 1)?
+  show("ascii.last", text, 4, 5)?
+  show("ascii.empty", text, 2, 2)?
+  show("ascii.past", text, 3, 12)?
+  Ok(())
+}
+
+/// `slice` and `sliceBytes` on one receiver with the same numbers.
+///
+/// The pair is the whole of the difference: one counts characters and answers
+/// a `String`, the other counts bytes and answers a `Result` that refuses a
+/// range this one clamps. `unit.inside` is the range that is legal to one and
+/// inside a character to the other.
+fn units() -> Result<Unit, Error> {
+  let text = "é😀abc"
+  let cut = text.slice(1, 4)
+  println("unit.chars 1..4 [{cut}] {cut.byteLength()}")?
+  match text.sliceBytes(1, 4) {
+    Ok(part) => println("unit.bytes 1..4 Ok([{part}] {part.byteLength()})")?
+    Err(error) => println("unit.bytes 1..4 Err({error.message})")?
+  }
+  match text.sliceBytes(3, 6) {
+    Ok(part) => println("unit.inside 3..6 Ok([{part}] {part.byteLength()})")?
+    Err(error) => println("unit.inside 3..6 Err({error.message})")?
+  }
+  show("unit.past", text, 2, 9)?
+  match text.sliceBytes(2, 9) {
+    Ok(part) => println("unit.past.bytes 2..9 Ok([{part}] {part.byteLength()})")?
+    Err(error) => println("unit.past.bytes 2..9 Err({error.message})")?
+  }
+  println("unit.whole {text.slice(0, text.length()) == text}")?
+  Ok(())
+}
+
+/// Receivers a run made, sliced the same way a literal is.
+///
+/// A builder's `finish`, an interpolation, a `join`, a byte slice and a slice
+/// of a slice. The last is the one that composes: taking characters 1..4 and
+/// then 1..2 of that is taking character 2 of the original, and it says so on
+/// its own line.
+fn built() -> Result<Unit, Error> {
+  var out = StringBuilder.withCapacity(4)
+  out.append("é")
+  out.append("😀")
+  out.append("abc")
+  let assembled = out.finish()
+  show("built.builder", assembled, 1, 4)?
+  println("built.builder.same {assembled == "é😀abc"}")?
+
+  let head = "é😀"
+  let tail = "abc"
+  let joined = "{head}{tail}"
+  show("built.interpolated", joined, 1, 4)?
+
+  let pieces = "-".join(["é😀", "abc"])
+  show("built.joined", pieces, 1, 5)?
+
+  let bytes = "xé😀abcy".sliceBytes(1, 10).unwrapOr("?")
+  show("built.sliceBytes", bytes, 1, 4)?
+
+  let once = "é😀abc".slice(1, 4)
+  let twice = once.slice(1, 2)
+  println("built.twice [{once}] [{twice}] {twice == "a"}")?
+
+  let walked = "é😀abc".slice(0, 9223372036854775807)
+  show("built.walked", walked, 1, 4)?
+  Ok(())
+}

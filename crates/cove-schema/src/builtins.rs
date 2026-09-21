@@ -1062,6 +1062,22 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "sliceBytes",
     },
+    // And `slice` beside it, which is the same copy under the opposite policy:
+    // it clamps in **character** positions where `sliceBytes` refuses in byte
+    // offsets. The clamp is a range decision, which ADR 0058's table gives to
+    // Cove, and `slice` is a method's name that would have to be renamed the
+    // day the method was, which is Decision 2's test — so `std.string.slice`
+    // is the two comparisons, a walk of the lead bytes that turns each
+    // position into an offset, and `core.stringSlice` beneath them, and
+    // `Intrinsic::StringSlice` is gone in the same change. The Rust arm
+    // collected the whole receiver into a `Vec<char>` to take two of them.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "slice",
+        module: "std.string",
+        function: "slice",
+    },
     // The fourth predicate, and the one that needed something underneath it.
     // `startsWith` and `endsWith` compare at an offset the caller's own
     // argument bounds, so a Cove loop over `byteAt` is the whole of each;

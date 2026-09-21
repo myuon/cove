@@ -156,7 +156,6 @@ pub(crate) fn call(
         Intrinsic::StringChars => text::chars(machine, frame, dest),
         Intrinsic::StringSplit => text::split(machine, frame, dest),
         Intrinsic::StringJoin => text::join(machine, frame, dest),
-        Intrinsic::StringSlice => text::slice(machine, frame, dest),
         Intrinsic::StringTrim => text::trim(machine, frame, dest),
         // None of the four searches and predicates ADR 0046 measured together
         // is here any more, and they did not all leave the same way.

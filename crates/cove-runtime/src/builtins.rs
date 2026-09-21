@@ -1460,24 +1460,16 @@ pub fn call_method(
                 }
                 Ok(Value(Repr::Str(joined.into())))
             }
-            "slice" => {
-                let args = expect_args("String.slice", args, 2, span)?;
-                let Value(Repr::Int(from)) = &args[0] else {
-                    return Err(type_error("String.slice", "from", "Int", &args[0], span));
-                };
-                let Value(Repr::Int(to)) = &args[1] else {
-                    return Err(type_error("String.slice", "to", "Int", &args[1], span));
-                };
-                let chars: Vec<char> = text.chars().collect();
-                let len = chars.len() as i64;
-                let from = (*from).clamp(0, len) as usize;
-                let to = (*to).clamp(0, len) as usize;
-                Ok(Value(Repr::Str(if to <= from {
-                    "".into()
-                } else {
-                    chars[from..to].iter().collect::<String>().into()
-                })))
-            }
+            // `slice` used to answer here, by collecting the whole receiver
+            // into a `Vec<char>`, clamping each bound into it and collecting
+            // the middle back again. It does not reach this arm any more:
+            // `Interpreter::eval_method_call` resolves it to `std.string.slice`
+            // first, which clamps the two positions the same way and then walks
+            // the lead bytes as far as `to` to find the two byte offsets its
+            // `core.stringSlice` copies between. ADR 0064's Decision 2 — a
+            // clamp is a range policy and `slice` is a method's name — and ADR
+            // 0058's table, which gives ranges to Cove and keeps the bounded
+            // copy below.
             "trim" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Str(text.trim().into())))
