@@ -751,13 +751,42 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `values_float_round`'s reason: `identity` and `computed` are the only
 /// functions here that bind a root rather than interpolate it.
 ///
+/// **The thirty-fourth rise is thirteen from a new row and one from a bug the
+/// new row found.** 2544 to 2558, 166 programs to 167. Thirteen are
+/// `benches:floatsqrt` — five in the `prod` column and eleven in the `ret`
+/// column, three copies counted in both — and the fourteenth is
+/// `examples:covefmtBench`, which gained a `test fn` and with it one `ret`
+/// copy. The survey with the bench directory removed is **2545**, which is
+/// 2544 and that one, over 166 programs and 16,343 functions.
+///
+/// The extra function is worth the sentence, because it is the only rise in
+/// this list that is a *repair*. covefmt's number scanner did not take the
+/// sign of an exponent, so `5.0e-324` lexed as three tokens and printed as
+/// `5.0e - 324`; every such literal already in the repository sat inside a
+/// string interpolation or a call's parentheses, where `print` copies the
+/// source, and `benches/floatsqrt`' `let sub = 5.0e-324` was the first
+/// written anywhere else. `covefmtBench` failed on it, which is what that
+/// gate is for.
+///
+/// **The migration itself still moved nothing at all — for the fourth time
+/// running.** Hold the scanner fix aside and the figure to read is the
+/// instruction count: issue #454's Step 2 replaced `Float.sqrt`'s
+/// `Inst::IntrinsicCall` with one `Inst::FloatSqrt`, one instruction for one
+/// instruction, so **no program in the corpus holds a different number of
+/// anything** — including the 76-line e2e corpus committed just before it,
+/// which calls the operation on nearly every line. The *machine code* is not
+/// one for one either, and this time it is smaller rather than larger: the
+/// native lowering of that instruction is two instructions and eighteen bytes
+/// where the call was a crossing, which is what `benches/floatsqrt` measures
+/// and what this survey, being over the IR, cannot see.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2544;
+const FORWARDABLE_COPIES: usize = 2558;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

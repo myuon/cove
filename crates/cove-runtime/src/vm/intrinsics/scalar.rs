@@ -91,21 +91,6 @@ pub(super) fn float_to_int(
     make::ok(machine, dest, &[truncated as i64 as u64])
 }
 
-/// `Float.sqrt() -> Float`.
-///
-/// IEEE 754 requires a correctly-rounded square root, so this is the one
-/// irrational operation whose bits are the same on every conforming
-/// machine — the whole reason issue #250 asked for it. It traps on
-/// nothing: Rust's `f64::sqrt` answers `NaN` for a negative operand
-/// (`-0.0` included, whose root is `-0.0` rather than `NaN`) exactly as
-/// IEEE 754 does, and `Float`'s other primitives already leave `NaN` and
-/// signed-zero semantics undecided — see issue #254 — so this does not
-/// decide them either.
-pub(super) fn float_sqrt(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
-    let x = operand::float(machine, frame, 0);
-    dest.word(machine, x.sqrt().to_bits());
-}
-
 /// `Float.format(digits) -> String`, fixed-point.
 pub(super) fn float_format(
     machine: &mut Machine,
@@ -145,10 +130,6 @@ mod tests {
     use super::*;
     use crate::vm::intrinsics::tests::{message_of, read, result_of, run, scalar, word, world};
     use cove_ir::Repr;
-
-    fn float_of(machine: &mut Machine, operation: &str, operands: &[(Repr, u64)]) -> f64 {
-        f64::from_bits(word(machine, "Float", operation, operands).unwrap())
-    }
 
     /// Text that is not a number is the *data's* failure and answers `Err`; a
     /// radix that names no notation is the *call's* and stops the run.
@@ -210,14 +191,19 @@ mod tests {
         );
     }
 
-    /// `round`, `min` and `max` are not here any more: ADR 0064's last two
-    /// Phase 1 migrations made the pair `Inst::FloatMinMax` and issue #454's
-    /// Step 2 made `round` `Inst::FloatRound`, instructions rather than
-    /// runtime calls, so there is no arm of this module left to ask. What
-    /// they answer is asserted in bits, on both tiers, by `vm::exec`'s
-    /// `a_float_extremum_answers_one_of_its_operands` and
-    /// `a_float_rounding_answers_the_nearest_integer` and by `cove-native`'s
-    /// `EXTREMA` and `ROUNDINGS`.
+    /// `sqrt`, `round`, `min` and `max` are not here any more: ADR 0064's
+    /// last two Phase 1 migrations made the pair `Inst::FloatMinMax` and
+    /// issue #454's Step 2 made `round` `Inst::FloatRound` and then `sqrt`
+    /// `Inst::FloatSqrt`, instructions rather than runtime calls, so there is
+    /// no arm of this module left to ask. **What is left in this file is the
+    /// three operations that allocate or refuse** — `toInt`, `format`,
+    /// `parse` — which is the same sentence `Intrinsic::effects` now makes
+    /// about the whole enum. What the four answer is asserted in bits, on
+    /// both tiers, by `vm::exec`'s
+    /// `a_float_extremum_answers_one_of_its_operands`,
+    /// `a_float_rounding_answers_the_nearest_integer` and
+    /// `a_float_square_root_is_correctly_rounded`, and by `cove-native`'s
+    /// `EXTREMA`, `ROUNDINGS` and `SQUARE_ROOTS`.
     #[test]
     fn a_float_formats() {
         let program = world();
@@ -240,31 +226,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "`Float.format` cannot use `18` digits");
-    }
-
-    /// `sqrt` answers what IEEE 754 answers: the correctly-rounded root for
-    /// a non-negative operand, `NaN` for a negative one, and `-0.0` for
-    /// `-0.0` — the one case where a negative operand's root is not `NaN`.
-    #[test]
-    fn sqrt_answers_what_ieee_754_answers() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        assert_eq!(
-            float_of(&mut machine, "sqrt", &[(Repr::Float, 4.0f64.to_bits())]),
-            2.0
-        );
-        assert_eq!(
-            float_of(&mut machine, "sqrt", &[(Repr::Float, 2.0f64.to_bits())]),
-            std::f64::consts::SQRT_2
-        );
-        assert_eq!(
-            float_of(&mut machine, "sqrt", &[(Repr::Float, 0.0f64.to_bits())]),
-            0.0
-        );
-        let negative_zero = float_of(&mut machine, "sqrt", &[(Repr::Float, (-0.0f64).to_bits())]);
-        assert_eq!(negative_zero, 0.0);
-        assert!(negative_zero.is_sign_negative());
-        assert!(float_of(&mut machine, "sqrt", &[(Repr::Float, (-1.0f64).to_bits())]).is_nan());
     }
 
     /// Three floats have no truncation an `Int` can hold, and each is named

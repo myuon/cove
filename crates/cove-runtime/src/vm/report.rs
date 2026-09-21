@@ -434,8 +434,8 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Thirteen of the 22 variants can be non-zero here, which is exactly the
-    /// set that declares `Effects::BULK_WORK`; the other nine examine
+    /// Thirteen of the 21 variants can be non-zero here, which is exactly the
+    /// set that declares `Effects::BULK_WORK`; the other eight examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
     /// `String.startsWith` out of the enum, ADR 0065 took `String.contains`
@@ -445,9 +445,13 @@ pub struct IntrinsicCalls {
     /// the carriers stayed at thirteen and the rest fell to twelve. The last
     /// two Phase 1 migrations took `Float.min` and `Float.max`, which examine
     /// nothing either, so the carriers stayed at thirteen again and the rest
-    /// fell to ten. Issue #454's Step 2 took `Float.round`, which examines
-    /// nothing either, so the carriers stayed at thirteen for the third time
-    /// running and the rest fell to nine. Both are
+    /// fell to ten. Issue #454's Step 2 took `Float.round` and then
+    /// `Float.sqrt`, neither of which examines anything either, so the
+    /// carriers stayed at thirteen for the third and fourth times running and
+    /// the rest fell to nine and then eight. **Thirteen of twenty-one is the
+    /// highest that fraction has been**, and it is going one way: every
+    /// migration so far has taken an operation that examines nothing, because
+    /// those are the ones a typed scalar instruction can replace. Both are
     /// measured off `Intrinsic::effects` rather than counted by hand.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md

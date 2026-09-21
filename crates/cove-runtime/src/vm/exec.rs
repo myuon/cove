@@ -501,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// thirteen of the 22 variants declare
+    /// thirteen of the 21 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -5486,6 +5486,142 @@ pub(crate) mod tests {
         }
     }
 
+    /// `Op::FloatSqrt` answers the correctly rounded square root.
+    ///
+    /// The encoded arm of the last of ADR 0064's Decision 2 typed scalar
+    /// operations, held to the same table `cove-native`'s `tests/suite`'s
+    /// `SQUARE_ROOTS` holds the native lowering to — deliberately duplicated
+    /// rather than shared, for `ABSOLUTES`' reason.
+    ///
+    /// **Duplicated but not identical, and the difference is the finding.**
+    /// IEEE 754 §5.4.1 fixes the answer for every operand whose answer is a
+    /// number, so those rows are the same bits on any conforming machine and
+    /// are asserted here as bits. It does **not** fix the quiet NaN an
+    /// invalid operation answers — §6.2 leaves the sign and the payload to
+    /// the implementation — so a negative operand's answer is
+    /// `0xfff8_0000_0000_0000` on x86-64 and is something else elsewhere.
+    /// `cove-runtime` is not an x86-64 crate, so [`INVALID`] asserts what the
+    /// standard requires and no more: a NaN, and a *quiet* one. The bits are
+    /// pinned where the host is known, which is `cove-native`'s suite.
+    ///
+    /// **The inexact rows are the ones that separate correct rounding from
+    /// accuracy.** `sqrt(2.0)`, `sqrt(3.0)` and `sqrt(0.1)` are asserted to
+    /// the last bit; an implementation within an ulp — a Newton iteration
+    /// stopped early, an `rsqrt` approximation refined once — passes every
+    /// exact root above them and fails those three.
+    ///
+    /// **A NaN operand is a different case from a negative one**, which is
+    /// the other thing this table says that no Cove program can: a negative
+    /// operand answers the *machine's* NaN whatever it was handed, and a NaN
+    /// operand answers *its own* NaN, sign and payload kept, quiet bit set.
+    /// The `qNaN` and `sNaN` rows are the ones that say so.
+    #[test]
+    fn a_float_square_root_is_correctly_rounded() {
+        // Operand, and the answer IEEE 754 fixes for it.
+        const SQUARE_ROOTS: &[(&str, u64, u64)] = &[
+            ("+0.0", 0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+            // §5.4.1: "squareRoot(-0) is -0". The one negative operand whose
+            // answer is not a NaN, and the one row of this table a Cove
+            // program can see, through `1.0 / x`.
+            ("-0.0", 0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+            ("+1.0", 0x3ff0_0000_0000_0000, 0x3ff0_0000_0000_0000),
+            ("+4.0", 0x4010_0000_0000_0000, 0x4000_0000_0000_0000),
+            ("+9.0", 0x4022_0000_0000_0000, 0x4008_0000_0000_0000),
+            ("+0.25", 0x3fd0_0000_0000_0000, 0x3fe0_0000_0000_0000),
+            ("+2.25", 0x4002_0000_0000_0000, 0x3ff8_0000_0000_0000),
+            ("+2^52", 0x4330_0000_0000_0000, 0x4190_0000_0000_0000),
+            ("+(2^26+1)^2", 0x4330_0000_0800_0001, 0x4190_0000_0400_0000),
+            // The smallest subnormal there is, whose root is `2^-537` — a
+            // *normal* double, and exact. Anything that scaled its operand to
+            // normalise it would show here.
+            ("+2^-1074", 0x0000_0000_0000_0001, 0x1e60_0000_0000_0000),
+            ("+2^-1072", 0x0000_0000_0000_0004, 0x1e70_0000_0000_0000),
+            ("+max subnorm", 0x000f_ffff_ffff_ffff, 0x1fff_ffff_ffff_ffff),
+            ("+MIN_POS", 0x0010_0000_0000_0000, 0x2000_0000_0000_0000),
+            // The roots that are not representable, to the last bit.
+            ("+2.0", 0x4000_0000_0000_0000, 0x3ff6_a09e_667f_3bcd),
+            ("+3.0", 0x4008_0000_0000_0000, 0x3ffb_b67a_e858_4caa),
+            ("+0.5", 0x3fe0_0000_0000_0000, 0x3fe6_a09e_667f_3bcd),
+            ("+10.0", 0x4024_0000_0000_0000, 0x4009_4c58_3ada_5b53),
+            ("+0.1", 0x3fb9_9999_9999_999a, 0x3fd4_3d13_6248_490f),
+            // The largest finite magnitude, which anything that squared or
+            // doubled its operand first would overflow.
+            ("+MAX", 0x7fef_ffff_ffff_ffff, 0x5fef_ffff_ffff_ffff),
+            ("+inf", 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+            // A NaN operand keeps its sign and its payload and is quieted.
+            ("+qNaN", 0x7ff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+            ("-qNaN", 0xfff8_0000_dead_beef, 0xfff8_0000_dead_beef),
+            ("+sNaN", 0x7ff0_0000_dead_beef, 0x7ff8_0000_dead_beef),
+            ("-sNaN", 0xfff0_0000_dead_beef, 0xfff8_0000_dead_beef),
+        ];
+
+        /// The operands IEEE 754 calls an invalid operation, whose answer it
+        /// requires to be a quiet NaN and whose sign and payload it leaves to
+        /// the implementation (§6.2). Asserted as "a quiet NaN" here and as
+        /// bits in `cove-native`'s `SQUARE_ROOTS`, whose host is x86-64 by
+        /// construction and answers `0xfff8_0000_0000_0000` for every one of
+        /// them.
+        const INVALID: &[(&str, u64)] = &[
+            ("-2^-1074", 0x8000_0000_0000_0001),
+            ("-max subnorm", 0x800f_ffff_ffff_ffff),
+            ("-MIN_POS", 0x8010_0000_0000_0000),
+            ("-1.0", 0xbff0_0000_0000_0000),
+            ("-4.0", 0xc010_0000_0000_0000),
+            ("-MAX", 0xffef_ffff_ffff_ffff),
+            ("-inf", 0xfff0_0000_0000_0000),
+        ];
+
+        let mut build = Build::default();
+        let float = build.scalar(Repr::Float);
+        let apart = build.function(
+            "apart",
+            &[float],
+            &[Repr::Float, Repr::Float],
+            float,
+            vec![Inst::FloatSqrt { dst: 1, a: 0 }, Inst::Return { src: 1 }],
+        );
+        let in_place = build.function(
+            "inPlace",
+            &[float],
+            &[Repr::Float],
+            float,
+            vec![Inst::FloatSqrt { dst: 0, a: 0 }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+
+        for (label, operand, want) in SQUARE_ROOTS {
+            let answered = run(&program, apart, &[*operand]).unwrap();
+            assert_eq!(
+                answered, *want,
+                "sqrt({label}): 0x{operand:016x} answered 0x{answered:016x}, \
+                 want 0x{want:016x}"
+            );
+            let answered = run(&program, in_place, &[*operand]).unwrap();
+            assert_eq!(
+                answered, *want,
+                "sqrt({label}) in place: 0x{operand:016x} answered 0x{answered:016x}, \
+                 want 0x{want:016x}"
+            );
+        }
+
+        for (label, operand) in INVALID {
+            for (how, entry) in [("", apart), (" in place", in_place)] {
+                let answered = run(&program, entry, &[*operand]).unwrap();
+                assert!(
+                    f64::from_bits(answered).is_nan(),
+                    "sqrt({label}){how}: 0x{operand:016x} answered 0x{answered:016x}, \
+                     which is not a NaN"
+                );
+                assert_ne!(
+                    answered & 0x0008_0000_0000_0000,
+                    0,
+                    "sqrt({label}){how}: 0x{answered:016x} is a *signalling* NaN; an \
+                     invalid operation answers a quiet one"
+                );
+            }
+        }
+    }
+
     /// `Op::FloatMin` and `Op::FloatMax` answer one of their two operands, to
     /// the bit.
     ///
@@ -9904,30 +10040,34 @@ pub(crate) mod tests {
     /// sentence from somewhere else attached to a fault somewhere else.
     ///
     /// **This case used to drive it end to end, through
-    /// [`Machine::call_intrinsic`], and it cannot any more.** Its subject was
-    /// `String.indexOf`: an intrinsic declaring no `MAY_RAISE` whose arm
-    /// nonetheless decoded its receiver, so a receiver whose bytes are not
-    /// UTF-8 — an object no checked program can build — made it answer an
-    /// `Err`. ADR 0064 moved that operation into `std.string`, and then took
-    /// `Float.abs`, `Float.min` and `Float.max` out of the enum altogether —
-    /// all three are instructions rather than calls now — so the **two**
-    /// variants left without `MAY_RAISE` are `Float.round` and `Float.sqrt`,
-    /// whose arms answer `()` and have no `Err` to construct. There is no pair of a fallible arm and an infallible
-    /// declaration left to build a program out of, which is the state
-    /// `cove_ir::intrinsic`'s `raising_is_language_level` asserts from the
-    /// other side.
+    /// [`Machine::call_intrinsic`], and there is no longer any intrinsic it
+    /// could drive it with.** Its subject was `String.indexOf`: an intrinsic
+    /// declaring no `MAY_RAISE` whose arm nonetheless decoded its receiver,
+    /// so a receiver whose bytes are not UTF-8 — an object no checked program
+    /// can build — made it answer an `Err`. ADR 0064 moved that operation
+    /// into `std.string` and then took `Float.abs`, `Float.min` and
+    /// `Float.max` out of the enum altogether; issue #454's Step 2 took
+    /// `Float.round` and then `Float.sqrt`. **Every variant left declares
+    /// `MAY_RAISE`**, which is what `cove_ir::intrinsic`'s
+    /// `every_intrinsic_left_can_be_refused` asserts from the other side, so
+    /// the `if` at [`Machine::call_intrinsic`] cannot fire for any program
+    /// the enum can now name.
     ///
-    /// So what is checked here is the panic itself — that it names the arm and
-    /// quotes the sentence, which is the pair that says which of the two is
-    /// wrong — and the wiring above it is a two-line `if` in
-    /// `call_intrinsic` read beside this. Reported rather than quietly
-    /// narrowed: a migration that gives some future intrinsic a fallible arm
-    /// again should put the end-to-end case back.
+    /// **The guard stays, and so does this test.** What the guard costs is one
+    /// branch on a path only an `Err` reaches; what it buys is that an
+    /// intrinsic added back without `MAY_RAISE` — which
+    /// `every_intrinsic_left_can_be_refused` would also catch, in the crate
+    /// that owns the flag — cannot silently hand an error to compiled code
+    /// that does not read it. So what is checked here is the panic itself:
+    /// that it names the arm and quotes the sentence, which is the pair that
+    /// says which of the two is wrong. The intrinsic below is an arbitrary
+    /// surviving variant, chosen because the message has to name *some*
+    /// operation and no operation is the right one any more.
     #[test]
-    #[should_panic(expected = "`Float.sqrt` answered a `RuntimeError`")]
+    #[should_panic(expected = "`String.trim` answered a `RuntimeError`")]
     fn an_intrinsic_that_cannot_raise_must_not_answer_an_error() {
         unraisable(
-            cove_ir::Intrinsic::FloatSqrt,
+            cove_ir::Intrinsic::StringTrim,
             &RuntimeError::new("this string's bytes are not valid UTF-8"),
         );
     }

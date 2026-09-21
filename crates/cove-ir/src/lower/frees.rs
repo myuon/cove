@@ -362,6 +362,7 @@ impl<'p> Flow<'p> {
             | Inst::FloatAbs { dst, .. }
             | Inst::FloatMinMax { dst, .. }
             | Inst::FloatRound { dst, .. }
+            | Inst::FloatSqrt { dst, .. }
             | Inst::RunLoad { dst, .. }
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
@@ -487,7 +488,8 @@ impl<'p> Flow<'p> {
             | Inst::CmpImmBranch { a, .. }
             | Inst::Convert { a, .. }
             | Inst::FloatAbs { a, .. }
-            | Inst::FloatRound { a, .. } => f(a, 1),
+            | Inst::FloatRound { a, .. }
+            | Inst::FloatSqrt { a, .. } => f(a, 1),
             Inst::Arith { a, b, .. }
             | Inst::Cmp { a, b, .. }
             | Inst::CmpBranch { a, b, .. }

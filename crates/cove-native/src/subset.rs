@@ -62,13 +62,18 @@ const MAX_RUN_WORDS: u32 = 16;
 /// whose function will be refused anyway.
 ///
 /// [`Repr::Float`] is admitted although almost no float *operation* is
-/// lowered — [`Inst::FloatAbs`], [`Inst::FloatMinMax`] and
-/// [`Inst::FloatRound`] are the three, and none of them is float *arithmetic*
-/// in the sense this slice refuses: one is a mask, one picks one of its two
-/// operands whole, and the third is a fixed sequence whose only addition is of
-/// a constant it writes itself. A float slot that is only copied is a run of
-/// bits like any other, and refusing the whole function because one of its
-/// frame slots is a `Float` would refuse it for a reason that is not true.
+/// lowered — [`Inst::FloatAbs`], [`Inst::FloatMinMax`], [`Inst::FloatRound`]
+/// and [`Inst::FloatSqrt`] are the four, and none of them is float
+/// *arithmetic* in the sense this slice refuses: one is a mask, one picks one
+/// of its two operands whole, the third is a fixed sequence whose only
+/// addition is of a constant it writes itself, and the fourth is one machine
+/// instruction over one operand. What is still refused is arithmetic the
+/// *program* wrote — an `Inst::Arith` over `Num::Float`, a `ConstFloat`, a
+/// comparison — so a Newton iteration written in Cove is refused at each of
+/// the three, which is why `Float.sqrt` is an instruction here and not a
+/// standard-library body. A float slot that is only copied is a run of bits
+/// like any other, and refusing the whole function because one of its frame
+/// slots is a `Float` would refuse it for a reason that is not true.
 fn is_lowered(repr: Repr) -> bool {
     match repr {
         Repr::Unit
@@ -870,6 +875,43 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // `cove-runtime`'s `native_tier.rs` against the VM for the part one
         // can.
         Inst::FloatRound { dst, a } => slot(*dst) && slot(*a),
+        // `encoded.rs`'s `FLOAT_SQRT` arm, and the **fourth** float operation
+        // this slice lowers — the last of ADR 0064's Decision 2 list, and the
+        // only one of the four the machine has an instruction for.
+        //
+        // It is the *shortest* sequence in `template.rs` that is a whole
+        // instruction of IR: two instructions and eighteen bytes, where
+        // `FloatAbs` is three and nineteen, `FloatMinMax` nine and fifty-two
+        // and `FloatRound` seventeen and eighty-seven. `sqrtsd` is SSE2,
+        // takes a memory operand, and is bound to the same correctly rounded
+        // answer by the same clause of IEEE 754 that binds `f64::sqrt`, so
+        // there is nothing to spell out and nothing to repair.
+        //
+        // **Being short is not why it is admitted**, any more than being long
+        // was why `FloatRound` was: the rule is ADR 0065's Decision 5, that a
+        // refused instruction refuses the whole function and takes every
+        // caller back to the VM. What is different here is that the
+        // instruction's own work is **not** negligible, and it is the first of
+        // the four for which that is true. `benches/floatsqrt` measures the
+        // compiled operation at 1.30 ns where the mediated intrinsic call it
+        // replaces was 31.9 ns — a factor of twenty-five, and 5,000,000
+        // native-to-runtime crossings taken to nought — but also at 2.37 ns
+        // for an operand whose root is not exactly representable, and at
+        // **35.7 ns** for a subnormal one. `FloatRound`'s seventeen
+        // instructions measure 0.91 ns on the same machine and do not vary by
+        // a picosecond across their five rows. So the shortest sequence here
+        // is the dearest, the only one whose cost depends on its operand, and
+        // the only one where a call site's saving is a small multiple rather
+        // than a large one. It costs the program 26 bytes *less* than the call
+        // did — 18 emitted where a mediated call site was 44 — which is also a
+        // first.
+        //
+        // What holds it to the bit is `tests/suite`'s `SQUARE_ROOTS` —
+        // computed by a standalone program calling `f64::sqrt`, and carrying
+        // the NaN a negative operand answers, which no Cove program can see
+        // and which IEEE 754 does not fix — with `cove-runtime`'s
+        // `native_tier.rs` against the VM for the part one can.
+        Inst::FloatSqrt { dst, a } => slot(*dst) && slot(*a),
         // ---- places ---------------------------------------------------------
         //
         // Six of the eight, and the two that are missing are missing on purpose.
@@ -971,9 +1013,10 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         //
         // `Num::Float` is not here and falls to `Reason::Instruction`, the same
         // division `Inst::Arith` above makes. `Inst::FloatAbs`,
-        // `Inst::FloatMinMax` and `Inst::FloatRound` *are* lowered, so the
-        // rule is no longer "no float operation": it is that a float operation
-        // is lowered when it has been asked for, and a negation has not been.
+        // `Inst::FloatMinMax`, `Inst::FloatRound` and `Inst::FloatSqrt` *are*
+        // lowered, so the rule is no longer "no float operation": it is that a
+        // float operation is lowered when it has been asked for, and a
+        // negation has not been.
         // `NEG_FLOAT` cannot raise at all, so the two arms here are not one arm
         // with a flag.
         Inst::Neg {

@@ -328,8 +328,18 @@ jobs:
           cargo build --profile checked -p cove-cli --features template
           cd examples
           strip_timings() { grep -v '^lex\|^parse\|^print\|^whole'; }
+          # Neither run's stderr is redirected, and the VM run's used to be.
+          # `2>/dev/null` sat on the line below and cost an investigation: the
+          # VM run exited 1 because one file no longer round-tripped through
+          # covefmt, `set -euo pipefail` ended the step before `diff` ran, and
+          # the sentence saying which — the only thing in the run that says
+          # *why* — had already been thrown away. The log held an exit code
+          # and nothing else. A step that discards the diagnostic of the
+          # command it is gating on is not quieter, it is a step whose
+          # failures have to be reproduced before they can be read. On a
+          # passing run both are silent, so this costs the log nothing.
           ../target/checked/cove run covefmtBench --files-root .. --backend vm \
-            2>/dev/null | strip_timings > /tmp/covefmt-vm.out
+            | strip_timings > /tmp/covefmt-vm.out
           ../target/checked/cove run covefmtBench --files-root .. --backend native \
             | strip_timings > /tmp/covefmt-native.out
           diff /tmp/covefmt-vm.out /tmp/covefmt-native.out

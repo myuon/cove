@@ -220,6 +220,7 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             build(Op::FloatMinMax(op), slot(dst)?, slot(a)?, slot(b)?, 0)
         }
         Inst::FloatRound { dst, a } => build(Op::FloatRound, slot(dst)?, slot(a)?, 0, 0),
+        Inst::FloatSqrt { dst, a } => build(Op::FloatSqrt, slot(dst)?, slot(a)?, 0, 0),
 
         // ---- control flow --------------------------------------------------
         Inst::Jump { to } => build(Op::Jump, 0, 0, 0, displacement(pc, to)? as u64),
@@ -852,6 +853,7 @@ mod tests {
         }
         held.push((0, Inst::FloatAbs { dst: 1, a: 2 }));
         held.push((0, Inst::FloatRound { dst: 1, a: 2 }));
+        held.push((0, Inst::FloatSqrt { dst: 1, a: 2 }));
         for op in [MinMax::Min, MinMax::Max] {
             held.push((
                 0,

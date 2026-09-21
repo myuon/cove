@@ -144,6 +144,29 @@ fn @m.f(Float) -> Float
     );
 }
 
+/// `Float.sqrt` is one instruction and not a runtime call.
+///
+/// The last of ADR 0064's Decision 2 typed scalar operations, and the listing
+/// says what the three above it say: **no `intrinsic-call` at all**, where the
+/// same function held one before, and the same two-slot frame `Float.abs` has.
+///
+/// Unlike `Float.round` there is no tension to explain away here — the
+/// lowering is one instruction and the machine code is one instruction plus
+/// the store, because x86-64 has `sqrtsd`.
+#[test]
+fn a_float_square_root_is_one_instruction() {
+    assert_eq!(
+        listing("fn f(x: Float) -> Float { x.sqrt() }", "f"),
+        "\
+fn @m.f(Float) -> Float
+  frame 2: s0!:float s1:float
+  local x -> s0:Float [0, 2)
+     0  sqrt.float s1:float s0:float
+     1  return s1:Float
+"
+    );
+}
+
 /// `Int.toFloat` is the conversion instruction the IR has always had, and
 /// not a runtime call.
 #[test]

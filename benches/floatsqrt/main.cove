@@ -1,0 +1,270 @@
+use console.println
+use clock.now
+
+/// What `Float.sqrt` costs as an instruction against what it cost as a call.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 2 names `sqrt` first in its list of typed scalar operations, and
+/// this is the migration that made it one: `Inst::FloatSqrt` where it was an
+/// `Inst::IntrinsicCall` naming the method and reaching `f64::sqrt` in Rust.
+/// It runs **zero times** on covefmt and on cq, so no whole-program figure
+/// exists to make; this package is the whole of the performance argument, and
+/// it is `benches/floatround`' arrangement for `benches/floatround`' reasons.
+///
+/// # This is the first of the four where the instruction's own work matters
+///
+/// `abs` is three instructions of machine code, `min` nine and `round`
+/// seventeen, and every one of them is a handful of integer and SSE
+/// operations the machine issues several of per cycle: what the migration
+/// removed was the crossing, and what it put back cost nothing worth
+/// measuring. `sqrtsd` is **one** instruction and is not in that class — a
+/// square root is the one arithmetic operation on this machine that is not
+/// fully pipelined — so the question here is not only "how much did the
+/// crossing cost" but "how much of what is left is the square root itself".
+/// The `bare` row is what makes the second question answerable, and the
+/// answer is that the second number is now the larger of the two concerns.
+///
+/// # The two arms are two binaries over one source
+///
+/// There is no way to write both arms in one process: the intrinsic is gone
+/// and a program cannot ask for the one that is not there. So this file is run
+/// twice — once by a `cove` built at the migration's parent, where `x.sqrt()`
+/// lowers to an `IntrinsicCall`, and once by a `cove` built here, where it
+/// lowers to one instruction — over the **same bytes of the same package**.
+///
+/// # The control is the loop, and the rows are taken from it by difference
+///
+/// [`countBare`] is [`countSqrt`] with the call taken out and **nothing** put
+/// in its place, which is the correction `benches/floatabs` had to make: a
+/// copy of the receiver is an `Inst::Copy` and is dearer than the instruction
+/// it was standing in for, so every row came out negative.
+///
+/// # Five rows, because a square root can be data-dependent where a mask is
+/// not
+///
+/// `abs`, `min` and `round` cost the same whatever they are handed because
+/// nothing in their lowering branches. `sqrtsd` does not branch either, but a
+/// divider is not a mask: a subnormal operand, an operand whose answer is
+/// exact, and an operand that is an invalid operation are three different
+/// things to ask of one, and whether they cost the same is a measurement and
+/// not a deduction.
+///
+/// - `four` is `4.0`, whose root is exact;
+/// - `two` is `2.0`, whose root is not and is the correctly rounded one;
+/// - `neg` is `-1.0`, an invalid operation whose answer is a NaN;
+/// - `sub` is `2^-1074`, the smallest subnormal there is, whose root is
+///   normal;
+/// - `big` is `f64::MAX`, at the other end of the range.
+///
+/// # No float constant, comparison or arithmetic below `main`
+///
+/// `crates/cove-native/src/subset.rs` admits none of the three, so a counting
+/// callee that folded its answer or tested it against a literal would be
+/// **refused** and the column headed `native` would be a second VM column.
+/// The operand arrives as a parameter, the loop counts in `Int`, and the
+/// `Float` leaves as the function's answer. Checked rather than assumed:
+/// `--backend native --boundary` names the compiled and the refused, and the
+/// only refusals are the timing rows and `main`, each for the `now()` or the
+/// literal in it.
+///
+/// # The loop is in a callee, and it is padded
+///
+/// `benches/floatabs`' arrangement, for its reason: the outermost frame is
+/// always encoded, so a loop written in `main` is a VM measurement even under
+/// `--backend native`. Each row is a call to a counting callee whose body is
+/// the loop, and every counting callee opens with [`ballast`] — a block the
+/// parameter's sign makes unreachable and nothing can fold away, sized past
+/// `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight — so that it is not
+/// expanded into [`sqrtRow`].
+fn turns() -> Int {
+  1000000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller, which the native tier refuses.
+///
+/// `roots` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(roots: Int) -> Int {
+  var dead = 0
+  if roots < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// `roots` calls of `Float.sqrt`, and nothing else in the loop.
+fn countSqrt(x: Float, roots: Int) -> Float {
+  var guard = ballast(roots)
+  var out = x
+  var i = 0
+  if roots < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < roots {
+    out = x.sqrt()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// [`countSqrt`]'s loop with the operation taken out and **nothing** put in
+/// its place.
+fn countBare(x: Float, roots: Int) -> Float {
+  var guard = ballast(roots)
+  var out = x
+  var i = 0
+  if roots < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < roots {
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// How long `roots` turns took, in microseconds, and the last value the loop
+/// wrote.
+struct Row {
+  micros: Int
+  witness: Float
+}
+
+fn sqrtRow(x: Float, roots: Int) -> Row {
+  let from = now()
+  let witness = countSqrt(x, roots)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn bareRow(x: Float, roots: Int) -> Row {
+  let from = now()
+  let witness = countBare(x, roots)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one call cost, in picoseconds, over `roots` turns of which `bare`
+/// microseconds were the loop itself.
+///
+/// Picoseconds rather than nanoseconds for `benches/floatabs`' reason: the
+/// subject is one instruction, and at a million turns a nanosecond figure
+/// would be three significant digits of integer division away from the truth.
+fn perCall(micros: Int, bare: Int, roots: Int) -> Int {
+  (micros - bare) * 1000000 / roots
+}
+
+export fn main() -> Result<Unit, Error> {
+  let roots = turns()
+  let four = 4.0
+  let two = 2.0
+  let neg = -1.0
+  let sub = 5.0e-324
+  let big = 1.7976931348623157e308
+
+  let bare = bareRow(two, roots)
+  let fourRow = sqrtRow(four, roots)
+  let twoRow = sqrtRow(two, roots)
+  let negRow = sqrtRow(neg, roots)
+  let subRow = sqrtRow(sub, roots)
+  let bigRow = sqrtRow(big, roots)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row whose loop stopped writing would still report a number, and the
+  // number would be of something else. The bare row's witness is its operand
+  // untouched, which is what "nothing in the loop" means. The NaN row is
+  // checked through its own inequality rather than through `assertEqual`,
+  // because a NaN equals nothing.
+  assertEqual(bare.witness, two)?
+  assertEqual(fourRow.witness, 2.0)?
+  assertEqual(twoRow.witness, 1.4142135623730951)?
+  assertEqual(negRow.witness == negRow.witness, false)?
+  assertEqual(subRow.witness > 0.0, true)?
+  assertEqual(bigRow.witness > 1.0e154, true)?
+
+  println("witness {bare.witness} {fourRow.witness} {twoRow.witness} {negRow.witness} {subRow.witness} {bigRow.witness}")?
+  println("operands {four} {two} {neg} {sub} {big}")?
+  println("")?
+  println("bare loop                     {bare.micros * 1000000 / roots} ps/turn over {roots} turn(s)")?
+  println("")?
+  println("row                 ps/call")?
+  println("sqrt.four           {perCall(fourRow.micros, bare.micros, roots)}")?
+  println("sqrt.two            {perCall(twoRow.micros, bare.micros, roots)}")?
+  println("sqrt.neg            {perCall(negRow.micros, bare.micros, roots)}")?
+  println("sqrt.sub            {perCall(subRow.micros, bare.micros, roots)}")?
+  println("sqrt.big            {perCall(bigRow.micros, bare.micros, roots)}")?
+  Ok(())
+}

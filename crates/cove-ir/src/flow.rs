@@ -56,6 +56,7 @@ impl Inst {
             | Inst::FloatAbs { dst, .. }
             | Inst::FloatMinMax { dst, .. }
             | Inst::FloatRound { dst, .. }
+            | Inst::FloatSqrt { dst, .. }
             | Inst::RunLoad { dst, .. }
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
@@ -184,6 +185,7 @@ impl Inst {
             | Inst::FloatAbs { .. }
             | Inst::FloatMinMax { .. }
             | Inst::FloatRound { .. }
+            | Inst::FloatSqrt { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::CmpBranch { .. }
