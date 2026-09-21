@@ -57,6 +57,30 @@ fn @m.ns(Duration) -> Int
     );
 }
 
+/// `Float.abs` is one instruction and not a runtime call.
+///
+/// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 2 admits "a typed scalar operation that maps to a CPU or backend
+/// operation" below the standard library and refuses an operation named after
+/// a method, so `Intrinsic::FloatAbs` — which was `f64::abs` reached through an
+/// `intrinsic-call` carrying the method's own name — is `Inst::FloatAbs`. The
+/// listing is what says so: **no `intrinsic-call` at all**, where the same
+/// function held one before, and the same two-slot frame `Int.toFloat` above
+/// has.
+#[test]
+fn a_float_absolute_is_one_instruction() {
+    assert_eq!(
+        listing("fn f(x: Float) -> Float { x.abs() }", "f"),
+        "\
+fn @m.f(Float) -> Float
+  frame 2: s0!:float s1:float
+  local x -> s0:Float [0, 2)
+     0  abs.float s1:float s0:float
+     1  return s1:Float
+"
+    );
+}
+
 /// `Int.toFloat` is the conversion instruction the IR has always had, and
 /// not a runtime call.
 #[test]

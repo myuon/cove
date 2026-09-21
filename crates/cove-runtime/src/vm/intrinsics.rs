@@ -202,10 +202,6 @@ pub(crate) fn call(
             scalar::float_round(machine, frame, dest);
             Ok(())
         }
-        Intrinsic::FloatAbs => {
-            scalar::float_abs(machine, frame, dest);
-            Ok(())
-        }
         Intrinsic::FloatSqrt => {
             scalar::float_sqrt(machine, frame, dest);
             Ok(())

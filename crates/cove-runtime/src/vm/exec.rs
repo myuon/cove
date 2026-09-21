@@ -501,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// thirteen of the 26 variants declare
+    /// thirteen of the 25 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -2327,7 +2327,7 @@ impl<'a> Machine<'a> {
         // long.
         //
         // The test is against nought rather than unconditional so that the
-        // thirteen variants which examine nothing — every scalar, `Float`,
+        // twelve variants which examine nothing — every scalar, `Float`,
         // parse and `fromCodePoint` arm — pay no `next_question` for a charge
         // of zero. Adding nought could not have moved the threshold anyway.
         let examined = self.examined.take();
@@ -5290,6 +5290,84 @@ pub(crate) mod tests {
         let program = build.done();
         assert_eq!(run(&program, f, &[(-5i64) as u64]).unwrap() as i64, 5);
         assert_eq!(run(&program, f, &[5]).unwrap() as i64, 5);
+    }
+
+    /// `Op::FloatAbs` clears the sign bit and touches no other bit.
+    ///
+    /// The encoded arm of
+    /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 2 typed scalar operation, held to the same table
+    /// `cove-native`'s `tests/suite`'s `ABSOLUTES` holds both code generators
+    /// to — deliberately duplicated rather than shared, because this crate and
+    /// that one do not depend on each other and a table read from one place by
+    /// one tier would be a table the other tier could drift away from
+    /// silently.
+    ///
+    /// **It is stated in bits because two of the rows cannot be stated any
+    /// other way.** `abs(-0.0)` being `+0.0` rather than a number equal to it
+    /// is observable from Cove and is pinned in `tests/e2e/values_float_abs`;
+    /// a NaN's sign, its payload and its quiet bit are observable from
+    /// nowhere, and this is where the machine's answer to them is written
+    /// down.
+    ///
+    /// The last two rows are a **signalling** NaN — exponent all ones, bit 51
+    /// clear, payload non-zero — and they are what separates a sign-bit
+    /// operation from an arithmetic one. `f64::abs` is specified as a clear of
+    /// bit 63 and quiets nothing; `0.0 - x`, `-1.0 * x` and every other
+    /// arithmetic route to the same magnitude set bit 51 and fail this row
+    /// while passing every other one.
+    #[test]
+    fn a_float_absolute_clears_the_sign_bit_and_nothing_else() {
+        const ABSOLUTES: &[(&str, u64, u64)] = &[
+            ("+0.0", 0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+            ("-0.0", 0x8000_0000_0000_0000, 0x0000_0000_0000_0000),
+            ("+1.5", 0x3ff8_0000_0000_0000, 0x3ff8_0000_0000_0000),
+            ("-1.5", 0xbff8_0000_0000_0000, 0x3ff8_0000_0000_0000),
+            ("+inf", 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+            ("-inf", 0xfff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+            ("-MAX", 0xffef_ffff_ffff_ffff, 0x7fef_ffff_ffff_ffff),
+            ("-MIN_POS", 0x8010_0000_0000_0000, 0x0010_0000_0000_0000),
+            ("-2^-1074", 0x8000_0000_0000_0001, 0x0000_0000_0000_0001),
+            ("-qNaN", 0xfff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+            ("+qNaN", 0x7ff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+            ("-sNaN", 0xfff0_0000_dead_beef, 0x7ff0_0000_dead_beef),
+            ("+sNaN", 0x7ff0_0000_dead_beef, 0x7ff0_0000_dead_beef),
+        ];
+
+        let mut build = Build::default();
+        let float = build.scalar(Repr::Float);
+        // Into a slot the operand is not, so that the operand is still
+        // readable after — and then, below, into the operand itself.
+        let apart = build.function(
+            "apart",
+            &[float],
+            &[Repr::Float, Repr::Float],
+            float,
+            vec![Inst::FloatAbs { dst: 1, a: 0 }, Inst::Return { src: 1 }],
+        );
+        let in_place = build.function(
+            "inPlace",
+            &[float],
+            &[Repr::Float],
+            float,
+            vec![Inst::FloatAbs { dst: 0, a: 0 }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+
+        for (label, operand, want) in ABSOLUTES {
+            let answered = run(&program, apart, &[*operand]).unwrap();
+            assert_eq!(
+                answered, *want,
+                "|{label}|: 0x{operand:016x} answered 0x{answered:016x}, \
+                 want 0x{want:016x}"
+            );
+            let answered = run(&program, in_place, &[*operand]).unwrap();
+            assert_eq!(
+                answered, *want,
+                "|{label}| in place: 0x{operand:016x} answered 0x{answered:016x}, \
+                 want 0x{want:016x}"
+            );
+        }
     }
 
     #[test]
@@ -9375,10 +9453,11 @@ pub(crate) mod tests {
     /// `String.indexOf`: an intrinsic declaring no `MAY_RAISE` whose arm
     /// nonetheless decoded its receiver, so a receiver whose bytes are not
     /// UTF-8 — an object no checked program can build — made it answer an
-    /// `Err`. ADR 0064 moved that operation into `std.string`, and the five
-    /// variants that are left without `MAY_RAISE` are `Float.round`, `abs`,
-    /// `sqrt`, `min` and `max`, whose arms answer `()` and have no `Err` to
-    /// construct. There is no pair of a fallible arm and an infallible
+    /// `Err`. ADR 0064 moved that operation into `std.string`, and then took
+    /// `Float.abs` out of the enum altogether — it is `Inst::FloatAbs` now, an
+    /// instruction rather than a call — so the **four** variants left without
+    /// `MAY_RAISE` are `Float.round`, `sqrt`, `min` and `max`, whose arms
+    /// answer `()` and have no `Err` to construct. There is no pair of a fallible arm and an infallible
     /// declaration left to build a program out of, which is the state
     /// `cove_ir::intrinsic`'s `raising_is_language_level` asserts from the
     /// other side.

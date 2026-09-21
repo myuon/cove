@@ -128,6 +128,7 @@ const CLEAR: u8 = Op::Clear.number();
 
 const NEG_INT: u8 = Op::Neg(Num::Int).number();
 const NEG_FLOAT: u8 = Op::Neg(Num::Float).number();
+const FLOAT_ABS: u8 = Op::FloatAbs.number();
 
 const ADD_INT: u8 = Op::Arith(Num::Int, ArithOp::Add).number();
 const SUB_INT: u8 = Op::Arith(Num::Int, ArithOp::Sub).number();
@@ -352,6 +353,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::CmpImm(_)
         | Op::Not
         | Op::Convert(_)
+        | Op::FloatAbs
         | Op::Jump
         | Op::BranchFalse
         | Op::CmpBranch(_, _)
@@ -2965,6 +2967,29 @@ pub(super) fn dispatch<'s, 'a>(
                 machine
                     .mem
                     .set_word_at(base_at + (a!()) as usize, (-x).to_bits());
+            }
+            // Bit 63 cleared and no other bit touched, which is what
+            // `f64::abs` is and what `Intrinsic::FloatAbs` used to reach
+            // through a runtime call — ADR 0064's Decision 2 typed scalar
+            // operation.
+            //
+            // **`x.abs()`, and the alternatives differ on a NaN.**
+            // `f64::abs` is `llvm.fabs`, a sign-bit operation that leaves the
+            // quiet bit and the payload where it found them; every
+            // *arithmetic* route to the same magnitude sets bit 51, and the
+            // branchy `if x < 0.0 { -x } else { x }` never clears the sign at
+            // all, because a NaN compares false against everything. Rust
+            // promises little about NaN bit patterns, so what makes this a
+            // contract rather than an observation is the table in
+            // `a_float_absolute_clears_the_sign_bit_and_nothing_else`, which
+            // is the same table both code generators are held to — and which
+            // was watched failing on its signalling rows, and on no others,
+            // with this arm's answer quieted when it is a NaN.
+            FLOAT_ABS => {
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, x.abs().to_bits());
             }
 
             ADD_INT => int_op!(ArithOp::Add),

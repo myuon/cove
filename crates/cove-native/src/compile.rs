@@ -848,6 +848,32 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.store_slot(*dst, x);
                 false
             }
+            // `encoded.rs`'s `FLOAT_ABS`, and the one float operation this
+            // arm lowers. `fabs` is named rather than the mask it becomes, and
+            // that is the difference between the two arms: this one hands
+            // Cranelift the *operation* and lets it choose the encoding, where
+            // the template arm clears bit 63 with `btr` because it has no
+            // constant pool to hold a mask in. A `band_imm` here would answer
+            // the same bits and would be this code generator claiming the bit
+            // layout of an `f64` in a place that does not otherwise know one.
+            // The two `bitcast`s are free — the word is already in a register
+            // and this is a reinterpretation — and `Inst::Convert`'s
+            // `IntToFloat` arm above already crosses the same way.
+            //
+            // `fabs` is a sign-bit operation in Cranelift as it is in IEEE
+            // 754, so it does not quiet a signalling NaN; `tests/suite`'s
+            // `ABSOLUTES` is where that is asserted rather than assumed.
+            Inst::FloatAbs { dst, a } => {
+                let x = self.load_slot(*a);
+                let float = self.b.ins().bitcast(types::F64, MemFlagsData::new(), x);
+                let cleared = self.b.ins().fabs(float);
+                let bits = self
+                    .b
+                    .ins()
+                    .bitcast(types::I64, MemFlagsData::new(), cleared);
+                self.store_slot(*dst, bits);
+                false
+            }
             Inst::Len { dst, obj } => {
                 self.len_of(*dst, *obj);
                 false

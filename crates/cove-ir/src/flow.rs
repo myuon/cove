@@ -53,6 +53,7 @@ impl Inst {
             | Inst::CmpBranch { dst, .. }
             | Inst::CmpImmBranch { dst, .. }
             | Inst::Convert { dst, .. }
+            | Inst::FloatAbs { dst, .. }
             | Inst::RunLoad { dst, .. }
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
@@ -178,6 +179,7 @@ impl Inst {
             | Inst::ArithImm { .. }
             | Inst::CmpImm { .. }
             | Inst::Convert { .. }
+            | Inst::FloatAbs { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::CmpBranch { .. }

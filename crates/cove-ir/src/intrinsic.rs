@@ -56,7 +56,6 @@ pub enum Intrinsic {
     IntParseRadix,
     FloatToInt,
     FloatRound,
-    FloatAbs,
     FloatSqrt,
     FloatMin,
     FloatMax,
@@ -90,7 +89,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
     Intrinsic::FloatRound,
-    Intrinsic::FloatAbs,
     Intrinsic::FloatSqrt,
     Intrinsic::FloatMin,
     Intrinsic::FloatMax,
@@ -141,7 +139,6 @@ impl Intrinsic {
             Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatRound => "Float",
-            Intrinsic::FloatAbs => "Float",
             Intrinsic::FloatSqrt => "Float",
             Intrinsic::FloatMin => "Float",
             Intrinsic::FloatMax => "Float",
@@ -173,7 +170,6 @@ impl Intrinsic {
             Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatRound => "round",
-            Intrinsic::FloatAbs => "abs",
             Intrinsic::FloatSqrt => "sqrt",
             Intrinsic::FloatMin => "min",
             Intrinsic::FloatMax => "max",
@@ -248,7 +244,6 @@ impl Intrinsic {
             | Intrinsic::IntParseRadix
             | Intrinsic::FloatToInt
             | Intrinsic::FloatRound
-            | Intrinsic::FloatAbs
             | Intrinsic::FloatSqrt
             | Intrinsic::FloatMin
             | Intrinsic::FloatMax
@@ -298,9 +293,7 @@ impl Intrinsic {
             Intrinsic::IntParse => fixed(&[C::Str], C::ResultOf(K::Int)),
             Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
-            Intrinsic::FloatRound | Intrinsic::FloatAbs | Intrinsic::FloatSqrt => {
-                fixed(&[C::Float], C::Float)
-            }
+            Intrinsic::FloatRound | Intrinsic::FloatSqrt => fixed(&[C::Float], C::Float),
             Intrinsic::FloatMin | Intrinsic::FloatMax => fixed(&[C::Float, C::Float], C::Float),
             Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
@@ -409,7 +402,6 @@ impl Intrinsic {
             // read and nothing that can fail: IEEE 754 answers every one of
             // them for every input.
             Intrinsic::FloatRound
-            | Intrinsic::FloatAbs
             | Intrinsic::FloatSqrt
             | Intrinsic::FloatMin
             | Intrinsic::FloatMax => E::NONE,
@@ -680,7 +672,6 @@ mod tests {
             "Int.parseRadix",
             "Float.toInt",
             "Float.round",
-            "Float.abs",
             "Float.sqrt",
             "Float.min",
             "Float.max",
@@ -757,7 +748,6 @@ mod tests {
                 | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatRound
-                | Intrinsic::FloatAbs
                 | Intrinsic::FloatSqrt
                 | Intrinsic::FloatMin
                 | Intrinsic::FloatMax
@@ -869,7 +859,7 @@ mod tests {
     /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so the
     /// intrinsics no program can be stopped by say so: the `Float` functions
     /// IEEE 754 answers for every input, and nothing else at all. **Every one
-    /// of the five is infallible in the arithmetic sense rather than in the
+    /// of the four is infallible in the arithmetic sense rather than in the
     /// bookkeeping one**, and that is new. A character count used to head this
     /// list; a suffix test, a prefix test, a whole-haystack search and a
     /// search that answers a position sat under it; none of the five is an
@@ -880,9 +870,18 @@ mod tests {
     /// gone from the vector and a sentence changed, rather than a flag
     /// changed.
     ///
+    /// **`Float.abs` left the vector a fifth way**, and it is the first of
+    /// these four to go: it did not become a Cove body over anything, because
+    /// there is nothing in Cove to write it over — `crates/cove-native`'s
+    /// subset admits no float constant, comparison or arithmetic, so the
+    /// obvious `if x < 0.0 { -x } else { x }` would take every caller out of
+    /// the compiled set. It became `Inst::FloatAbs`, ADR 0064's Decision 2
+    /// typed scalar operation, and `Float.round` and `Float.sqrt` below it are
+    /// the two the census sends the same way in Phase 3.
+    ///
     /// It is also why `vm::exec`'s `unraisable` no longer has an end-to-end
     /// case: that panic needs an arm that can answer an `Err` while its
-    /// variant declares no `MAY_RAISE`, and the five below each answer `()`.
+    /// variant declares no `MAY_RAISE`, and the four below each answer `()`.
     #[test]
     fn raising_is_language_level() {
         let never: Vec<Intrinsic> = ALL
@@ -894,7 +893,6 @@ mod tests {
             never,
             vec![
                 Intrinsic::FloatRound,
-                Intrinsic::FloatAbs,
                 Intrinsic::FloatSqrt,
                 Intrinsic::FloatMin,
                 Intrinsic::FloatMax,

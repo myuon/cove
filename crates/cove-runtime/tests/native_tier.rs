@@ -125,6 +125,25 @@ export fn callsAbsolutes(a: Int) -> Int {
   absolutes(a)
 }
 
+/// `Float.abs`, so that `Inst::FloatAbs` runs as machine code.
+///
+/// `counts(n)`'s answer is discarded and its only job is `negates`': it keeps
+/// `cove_ir::lower::inline` from expanding this body into its refused caller,
+/// which would put the one float operation the tier lowers on the caller's
+/// tier instead of on this one's. It cannot be added to the answer the way
+/// `negates` adds it, because the answer is a `Float` and the language
+/// converts nothing implicitly.
+export fn magnitudes(x: Float, n: Int) -> Float {
+  let guard = counts(n)
+  x.abs()
+}
+
+/// A refused caller, so the absolute is reached across the boundary.
+export fn callsMagnitudes(x: Float, n: Int) -> Float {
+  let nothing = Shared(0).lock(fn(v) { v })
+  magnitudes(x, n)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -1365,6 +1384,57 @@ fn negation_and_its_overflow_are_the_vm_s() {
         vm.contains("negation"),
         "and it names the operation rather than renaming it: {vm}"
     );
+}
+
+/// `Float.abs` is compiled, and answers what the VM answers.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// sixth Phase 1 migration made `Float.abs` an `Inst::FloatAbs` — a typed
+/// scalar operation both code generators lower — where it was an
+/// `Inst::IntrinsicCall` that crossed into the runtime. **This is the case
+/// that says it is on the right side of the boundary now**: `magnitudes` is
+/// *compiled*, where a function whose only float work was a mediated call
+/// would have been compiled too but would have crossed at the call, and
+/// `native -> runtime` intrinsic crossings for it are gone because there is no
+/// call left to make.
+///
+/// `-0.0` is here because it is the one input whose answer a Cove program can
+/// see and a bitwise-wrong body would get wrong: `abs(-0.0)` renders `0.0` and
+/// `abs(0.0)` renders `0.0`, where the operand renders `-0.0`. What the
+/// language cannot see — a NaN's sign and payload — is pinned in
+/// `cove-native`'s own suite, where the assertions can be in bits.
+#[test]
+fn a_float_absolute_runs_as_machine_code() {
+    on_each_tier(&["magnitudes"], &["callsMagnitudes"]);
+
+    for (x, expected) in [
+        (-1.5f64, "1.5"),
+        (1.5, "1.5"),
+        (-0.0, "0.0"),
+        (0.0, "0.0"),
+        (f64::NEG_INFINITY, "inf"),
+        (f64::MIN, "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0"),
+    ] {
+        let answered = both(
+            "callsMagnitudes",
+            vec![Value::float(x), Value::int(0)],
+        );
+        assert_eq!(answered.vm, Ok(expected.to_string()), "|{x}| on the VM");
+        assert_eq!(
+            answered.native, answered.vm,
+            "and compiled code answers the same: |{x}|"
+        );
+        assert!(
+            answered.tiers.vm_to_native >= 1,
+            "the crossing into the compiled absolute was taken: {:?}",
+            answered.tiers
+        );
+        assert_eq!(
+            answered.tiers.native_to_vm, 0,
+            "and nothing went back the other way: {:?}",
+            answered.tiers
+        );
+    }
 }
 
 /// **A fault in a standard-library body, raised under compiled code, is blamed on

@@ -1,0 +1,268 @@
+use console.println
+use clock.now
+
+/// What `Float.abs` costs as an instruction against what it cost as a call.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// sixth Phase 1 migration made `Float.abs` an `Inst::FloatAbs` — Decision 2's
+/// "typed scalar operation that maps to a CPU or backend operation" — where it
+/// was an `Inst::IntrinsicCall` naming a method and reaching `f64::abs` in
+/// Rust. `Float.abs` runs **zero times** on covefmt and on cq, so no
+/// whole-program figure exists to make; this package is the whole of the
+/// performance argument and it is written to make that one thing say
+/// something.
+///
+/// # The two arms are two binaries over one source
+///
+/// There is no way to write both arms in one process: the intrinsic is gone,
+/// and a program cannot ask for the one that is not there. So this file is run
+/// twice — once by a `cove` built at the migration's parent, where `x.abs()`
+/// lowers to an `IntrinsicCall`, and once by a `cove` built here, where it
+/// lowers to one instruction — over the **same bytes of the same package**.
+/// Nothing but the operation varies, which is what a difference of two runs
+/// has to be able to claim.
+///
+/// # The control is the loop, and the rows are taken from it by difference
+///
+/// [`countBare`] is [`countAbs`] with the call taken out and a copy of the
+/// receiver put in its place, so subtracting it leaves the operation and the
+/// destination it writes. Both are exactly the same loop otherwise: an `Int`
+/// counter, a `Float` parameter, and a `Float` that leaves as the answer.
+///
+/// # Three operands, because a mask should not care which
+///
+/// `abs` is branch-free at both ends of the migration — `f64::abs` clears the
+/// sign bit and so does the instruction — so the three rows below should be
+/// the same number, and their being the same number is a claim rather than a
+/// formality. A row over an ordinary negative, a row over the positive it
+/// answers, and a row over a negative zero, which is the one input whose
+/// answer a Cove program can tell from its operand.
+///
+/// # No float constant, anywhere below `main`
+///
+/// `crates/cove-native/src/subset.rs` admits no `ConstFloat`, no float
+/// comparison and no float arithmetic, so a counting callee that folded its
+/// answer with `+` or tested it against a literal would be **refused by the
+/// native tier** and the column headed `native` would be a second VM column.
+/// The receiver arrives as a parameter, the loop counts in `Int`, and the
+/// `Float` leaves as the function's answer and is touched by nothing else.
+/// That is checked rather than assumed: `--backend native --boundary` names
+/// the compiled and the refused, and the only refusals are [`row`] and `main`,
+/// each for the `now()` in it.
+///
+/// # The loops are in callees, and they are padded
+///
+/// `benches/indexof`'s arrangement, for its reason: the outermost frame is
+/// always encoded, so a loop written in `main` is a VM measurement even under
+/// `--backend native`. Each row is a call to a counting callee whose body is
+/// the loop, and every counting callee opens with [`ballast`] — a block the
+/// parameter's sign makes unreachable and nothing can fold away, sized past
+/// `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight rather than merely
+/// past its cold `LIMIT` of sixteen — so that it is not expanded into [`row`].
+///
+/// # A million turns, not two hundred thousand
+///
+/// Five times `benches/endswith`', because the subject is **one instruction**
+/// at one end of the comparison: a per-call figure taken by difference from a
+/// loop that costs tens of nanoseconds a turn needs enough turns that the
+/// difference is milliseconds rather than clock quantisation. It is still a
+/// fifth of `benches/arith`', which is what `crates/cove-cli/tests/vm_coverage.rs`
+/// already runs on both evaluators.
+fn turns() -> Int {
+  1000000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into
+/// [`row`], which the native tier refuses.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// `rounds` calls of `Float.abs`, and nothing else in the loop.
+fn countAbs(x: Float, rounds: Int) -> Float {
+  var guard = ballast(rounds)
+  var out = x
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x.abs()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// [`countAbs`]'s loop with the operation taken out and **nothing put in its
+/// place**.
+///
+/// Not a copy of the receiver, which was the first thing written here and was
+/// wrong: `out = x` is an `Inst::Copy`, and a copy measured 13.2 ns a turn
+/// against 10.1 for the loop with `abs` in it — so the control was *dearer
+/// than its subject* and every row came out negative. A control has to see
+/// what it controls, and what this one controls is one instruction, so what it
+/// holds is the turn and no instruction at all.
+fn countBare(x: Float, rounds: Int) -> Float {
+  var guard = ballast(rounds)
+  var out = x
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// How long `rounds` turns took, in microseconds, and the last value the loop
+/// wrote.
+struct Row {
+  micros: Int
+  witness: Float
+}
+
+fn absRow(x: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countAbs(x, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn bareRow(x: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countBare(x, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one call cost, in picoseconds, over `rounds` turns of which `bare`
+/// microseconds were the loop itself.
+///
+/// Picoseconds rather than nanoseconds because the subject is one instruction:
+/// at a million turns a nanosecond-per-call figure would be three significant
+/// digits of integer division away from the truth, and the whole comparison is
+/// between a number near one and a number near a hundred.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000000 / rounds
+}
+
+/// Three operands, each against the same bare loop.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+  let negative = 0.0 - 1.5
+  let positive = 1.5
+  let negativeZero = 0.0 * -1.0
+
+  let bare = bareRow(negative, rounds)
+  let xNegative = absRow(negative, rounds)
+  let xPositive = absRow(positive, rounds)
+  let xNegativeZero = absRow(negativeZero, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row whose loop stopped writing would still report a number, and the
+  // number would be of something else. The witnesses are *printed* as well as
+  // compared, because `-0.0 == 0.0` is true and an equality could not tell
+  // the negative-zero row's answer from its operand. The bare row's witness is
+  // its operand untouched, which is what "nothing in the loop" means.
+  assertEqual(bare.witness, negative)?
+  assertEqual(xNegative.witness, positive)?
+  assertEqual(xPositive.witness, positive)?
+
+  println("witness {bare.witness} {xNegative.witness} {xPositive.witness} {xNegativeZero.witness}")?
+  println("operands {negative} {positive} {negativeZero}")?
+  println("")?
+  println("bare loop                     {bare.micros * 1000000 / rounds} ps/turn over {rounds} turn(s)")?
+  println("")?
+  println("row                 ps/call")?
+  println(
+    "negative            {perCall(xNegative.micros, bare.micros, rounds)}",
+  )?
+  println(
+    "positive            {perCall(xPositive.micros, bare.micros, rounds)}",
+  )?
+  println(
+    "negativeZero        {perCall(xNegativeZero.micros, bare.micros, rounds)}",
+  )?
+  Ok(())
+}

@@ -52,10 +52,11 @@ const MAX_RUN_WORDS: u32 = 16;
 /// runtime call this slice does not lower, so a frame holding one is a frame
 /// whose function will be refused anyway.
 ///
-/// [`Repr::Float`] is admitted although no float *operation* is lowered. A
-/// float slot that is only copied is a run of bits like any other, and
-/// refusing the whole function because one of its frame slots is a `Float`
-/// would refuse it for a reason that is not true.
+/// [`Repr::Float`] is admitted although almost no float *operation* is
+/// lowered — [`Inst::FloatAbs`] is the one, and it is a mask rather than
+/// arithmetic. A float slot that is only copied is a run of bits like any
+/// other, and refusing the whole function because one of its frame slots is a
+/// `Float` would refuse it for a reason that is not true.
 fn is_lowered(repr: Repr) -> bool {
     match repr {
         Repr::Unit
@@ -782,6 +783,23 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             dst,
             a,
         } => slot(*dst) && slot(*a),
+        // `encoded.rs`'s `FLOAT_ABS` arm, and the **one float operation this
+        // slice lowers**. It is here rather than beside the float arithmetic
+        // and the float comparison it sits between in the IR because it is not
+        // arithmetic: it clears bit 63 and touches no other bit, so there is
+        // nothing to round, nothing to signal, nothing that quiets a
+        // signalling NaN, and no `Raise`. The two arms reach it two ways —
+        // `btr $63` on an integer register here, `fabs` through Cranelift —
+        // and `tests/agree.rs` holds them to the same bits.
+        //
+        // [ADR 0065](../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)'s
+        // Decision 5 is why it is lowered in the same change that emits it and
+        // not later: the tier refuses a *function* that holds an instruction it
+        // cannot lower, so a refused `FloatAbs` would take every caller of
+        // `Float.abs` back to the VM — strictly worse than the mediated
+        // intrinsic call it replaces, which crosses once and leaves its caller
+        // compiled.
+        Inst::FloatAbs { dst, a } => slot(*dst) && slot(*a),
         // ---- places ---------------------------------------------------------
         //
         // Six of the eight, and the two that are missing are missing on purpose.
@@ -882,9 +900,11 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // `encoded.rs`'s `NEG_INT` arm, which is `checked_neg` and nothing else.
         //
         // `Num::Float` is not here and falls to `Reason::Instruction`, the same
-        // division `Inst::Arith` above makes: no float *operation* is lowered, and
-        // `NEG_FLOAT` cannot raise at all, so the two arms are not one arm with a
-        // flag.
+        // division `Inst::Arith` above makes. `Inst::FloatAbs` *is* lowered, so
+        // the rule is no longer "no float operation": it is that a float
+        // operation is lowered when it has been asked for, and a negation has
+        // not been. `NEG_FLOAT` cannot raise at all, so the two arms here are
+        // not one arm with a flag.
         Inst::Neg {
             num: Num::Int,
             dst,

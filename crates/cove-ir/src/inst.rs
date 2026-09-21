@@ -403,6 +403,63 @@ pub enum Inst {
     Not { dst: Slot, a: Slot },
     /// `dst = <a, converted>`
     Convert { to: Convert, dst: Slot, a: Slot },
+    /// `dst = |a|`, on an IEEE-754 double: **bit 63 cleared, and no other bit
+    /// touched.**
+    ///
+    /// That is the contract and not a description of one implementation of it.
+    /// IEEE 754 makes `abs` a *sign-bit* operation rather than an arithmetic
+    /// one, so it never rounds, never signals, and — the part that is easy to
+    /// lose — never **quiets** a signalling NaN. A route through arithmetic
+    /// reaches the same magnitude for every ordinary operand and sets bit 51
+    /// on a signalling one: measured at run time, `0.0 - x`, `-1.0 * x` and
+    /// `x + 0.0` each turn `0xfff0_0000_dead_beef` into
+    /// `0xfff8_0000_dead_beef` where this answers
+    /// `0x7ff0_0000_dead_beef`. All three tiers are held to
+    /// the same table of bit patterns, signalling rows included: the encoded
+    /// VM in `vm::exec`'s
+    /// `a_float_absolute_clears_the_sign_bit_and_nothing_else`, and both code
+    /// generators in `cove-native`'s `tests/suite`'s `ABSOLUTES`, which
+    /// `tests/agree.rs` then runs on both at once.
+    ///
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 2 admits "a typed scalar operation that maps to a CPU or
+    /// backend operation (`sqrt`, `abs`, `round`, a checked typed
+    /// conversion)" below the standard library, and this is that: it is total,
+    /// it allocates nothing, it touches no heap, and the only failure it could
+    /// have is one no program wrote down — so there is none. `Float.abs` was
+    /// an `Inst::IntrinsicCall` naming a method until this replaced it.
+    ///
+    /// **It is not a family, and that is the whole of the decision.**
+    /// `Float.round` and `Float.sqrt` are the census's other two typed scalar
+    /// operations and are ADR 0064's Phase 3; a `FloatUnary { op }` added here
+    /// would be a one-member family guessing at both of them, and the guess
+    /// buys nothing — the bytecode gives a member of such a family one opcode
+    /// each exactly as three instructions would, and each of the other two has
+    /// a question of its own still to settle (`round`'s tie rule is on
+    /// Decision 6's list of things pinned before the arm that implements them
+    /// is touched; `sqrt` is the one *irrational* operation IEEE 754 still
+    /// requires to be correctly rounded, so its bits are the same on every
+    /// conforming machine and a Newton iteration in Cove would not be).
+    /// Three near-identical instructions later is a
+    /// mechanical refactor into one family; a family now is a decision taken
+    /// for two operations nobody has measured. `PHILOSOPHY.md`'s "earn
+    /// complexity through use", and one caller is one caller.
+    ///
+    /// **There is no `Num` on it**, where [`Inst::Neg`] has one. An `Int`'s
+    /// absolute value is not this operation: `Int.abs` raises at `Int.MIN`,
+    /// where two's complement has no answer, and it is `std.int.abs` in Cove
+    /// for that reason. A `Num::Int` arm here would be the second, wrong
+    /// answer in the IR that Decision 6 refuses of
+    /// [`Convert::FloatToInt`].
+    ///
+    /// Both code generators lower it, by two different routes to the same
+    /// bits: the template arm clears bit 63 with `btr` on an integer register,
+    /// five bytes, the word never reaching an SSE register at all; Cranelift
+    /// is asked for `fabs` and lowers that to the mask itself. `tests/agree.rs`
+    /// is what holds the two together. That both of them lower it is ADR
+    /// 0065's Decision 5 applied again, and is why this route is available at
+    /// all: a refusal would take every caller back to the VM.
+    FloatAbs { dst: Slot, a: Slot },
 
     // ---- control flow --------------------------------------------------
     /// Continue at `to`.

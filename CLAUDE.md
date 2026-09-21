@@ -28,8 +28,18 @@ wrong twice, once for 241 seconds.
 
 Run the ignored ones with `cargo ratchet`, an alias for the same thing under
 `--profile checked`. Use the alias rather than writing the command out: the
-profile is not a nicety there, it is 39s against 241s, because this is the
-one suite that is compute-bound rather than spawn-bound.
+profile is not a nicety there, because this is the one suite that is
+compute-bound rather than spawn-bound.
+
+**It costs about five minutes now, not the 39s this file used to claim.**
+Measured 2026-09-21: `cargo ratchet` 5:11 in all, of which `vm_coverage` is
+**301s** and the formatter's comment probe 9.6s. Nothing regressed — the
+corpus did what it is supposed to do and grew, to 160 programs, and
+`vm_coverage` runs every one of them on the tree-walking interpreter as well
+as on the linear-memory backend. The old figure was right when the corpus was
+a third of the size, and it is the sort of number that goes stale quietly, so
+it is dated here. Budget for it: this is the one part of the gate worth
+starting before you need the answer.
 
 There are two, and both do their work once per program in the repository.
 
@@ -168,6 +178,38 @@ felt by a *real* program rather than by a fixture. A change to the IR has been
 merged-shaped and green on the five commands while crashing there — the
 symptom was a VM panic writing past a frame, and nothing above `cove test`
 went anywhere near it.
+
+**And there is one more step after those, at `ci.yml`'s line 328**, which is
+the same class of gap as the second native step above and is listed here for
+the same reason — it was not, and a gap in this file is what makes a green
+local run a red pull request:
+
+```console
+$ cargo build --profile checked -p cove-cli --features template
+$ cd examples
+$ ../target/checked/cove run covefmtBench --files-root .. --backend vm
+$ ../target/checked/cove run covefmtBench --files-root .. --backend native
+```
+
+and the two outputs, with the four timing lines stripped, have to be **equal
+byte for byte**. It is a check and not a measurement: a shared runner's wall
+clock says nothing, so what is asserted is that the two tiers printed the same
+bytes and both exited zero.
+
+What it catches that nothing above it can is a **native tier that compiles and
+answers wrongly on a real program**. The seven `-p cove-native` commands hold
+each code generator to fixtures; the second native step runs the tier from the
+runtime, on fixtures again. This is the only place either generator is asked
+to compile 103 of covefmt's 109 functions and produce 905 KB of formatted Cove
+— and it is the only place a wrong answer has a *right* answer sitting beside
+it to be diffed against, because the encoded VM ran the same program in the
+same command. A code generator that lowered an instruction to the wrong bits
+would pass every fixture that did not happen to cover that bit and fail here
+on the first file.
+
+It is cheap: the build is a feature flag on a workspace that is already warm,
+and the two runs are about two and five seconds. Run it after touching either
+generator, `subset.rs`, or any instruction they lower.
 
 ### What the gate costs, measured
 

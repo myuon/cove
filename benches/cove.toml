@@ -201,6 +201,18 @@ allow = ["console", "clock"]
 entry = "indexof.main"
 allow = ["console", "clock"]
 
+# What `Float.abs` costs as an instruction against what it cost as a call —
+# ADR 0064's sixth Phase 1 migration. The operation runs zero times on covefmt
+# and on cq, so there is no whole-program figure to take and this package is
+# the whole of the performance argument. The two arms cannot be written in one
+# process, because one of them no longer exists: the same source is run by a
+# `cove` built either side of the migration, and the difference between the two
+# runs is the operation and nothing else.
+
+[run.floatabs]
+entry = "floatabs.main"
+allow = ["console", "clock"]
+
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
 # #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,

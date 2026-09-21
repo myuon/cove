@@ -97,12 +97,6 @@ pub(super) fn float_round(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
     dest.word(machine, x.round().to_bits());
 }
 
-/// `Float.abs() -> Float`.
-pub(super) fn float_abs(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
-    let x = operand::float(machine, frame, 0);
-    dest.word(machine, x.abs().to_bits());
-}
-
 /// `Float.sqrt() -> Float`.
 ///
 /// IEEE 754 requires a correctly-rounded square root, so this is the one
@@ -242,7 +236,6 @@ mod tests {
         let mut machine = Machine::new(&program, 1 << 14);
         let x = (-2.5f64).to_bits();
         assert_eq!(float_of(&mut machine, "round", &[(Repr::Float, x)]), -3.0);
-        assert_eq!(float_of(&mut machine, "abs", &[(Repr::Float, x)]), 2.5);
         assert_eq!(
             float_of(
                 &mut machine,

@@ -369,6 +369,29 @@ impl Body<'_> {
             return dst;
         }
 
+        // A typed scalar operation is one instruction over one operand too,
+        // and for a reason of its own rather than a conversion's: ADR 0064's
+        // Decision 2 admits "a typed scalar operation that maps to a CPU or
+        // backend operation" below the standard library, and refuses the
+        // runtime call that named the method instead. `Float.abs` is the
+        // first, and it always has a receiver.
+        if scalar_operation(receiver, operation, base.is_some()) {
+            let Some(base) = base else {
+                return self.gap(&format!("`{receiver}.{operation}`"), expr);
+            };
+            let operand = self.expr(base);
+            let dst = self.answer_at(want, result);
+            self.emit(
+                Inst::FloatAbs {
+                    dst: dst.slot,
+                    a: operand.slot,
+                },
+                expr.span,
+            );
+            self.release(operand, expr.span);
+            return dst;
+        }
+
         let held_receiver = base.map(|base| self.expr(base));
         let mut held = Vec::with_capacity(args.len());
         for arg in args {
@@ -851,7 +874,12 @@ fn snapshots_itself(ty: &Ty) -> bool {
 ///
 /// `Int.toFloat` and both halves of `Duration.nanos` are in these tables and
 /// are not intrinsics: [`conversion`] names each as the [`Convert`] it
-/// lowers to.
+/// lowers to. `Float.abs` is in them on the same footing and for a rule of its
+/// own: [`scalar_operation`] names it as the [`Inst::FloatAbs`] it lowers to,
+/// ADR 0064's Decision 2 typed scalar operation. **A pair leaves this table
+/// when the *method* leaves the machine, not when the intrinsic does** — an
+/// entry here is what says the lowering answers the call at all, and the three
+/// ways it can answer are an instruction, a conversion and a runtime call.
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "words"),
     ("String", "chars"),
@@ -904,6 +932,30 @@ fn conversion(receiver: &str, operation: &str, has_receiver: bool) -> Option<Con
         ("Duration", "nanos", false) => Some(Convert::IntToDuration),
         _ => None,
     }
+}
+
+/// Whether `receiver.operation(...)` is a typed scalar operation this
+/// lowering emits as one instruction rather than as a runtime call.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 2 names "a typed scalar operation that maps to a CPU or backend
+/// operation (`sqrt`, `abs`, `round`, a checked typed conversion)" in the
+/// vocabulary a primitive may be written in, and refuses one named after a
+/// method. `Float.abs` was `Intrinsic::FloatAbs` — `f64::abs` in Rust, reached
+/// through an `Inst::IntrinsicCall` that carried the method's own name — and
+/// is [`Inst::FloatAbs`] since Phase 1's sixth migration.
+///
+/// It answers a `bool` rather than an operation, because there is one and
+/// [`Inst::FloatAbs`]'s doc says at length why there is not a family. When
+/// `Float.round` and `Float.sqrt` follow it in Phase 3 this becomes what
+/// [`conversion`] is: a `match` answering which one.
+///
+/// `has_receiver` is asked for [`conversion`]'s reason. There is no
+/// `Float.abs(x)` written on the type's name — `ASSOCIATED` does not name one
+/// — so the `false` arm is a pair this lowering does not emit rather than a
+/// pair it emits differently.
+fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> bool {
+    matches!((receiver, operation, has_receiver), ("Float", "abs", true))
 }
 
 /// Whether `head.name(...)` is an associated function this lowering knows
@@ -984,8 +1036,8 @@ mod tests {
     use super::*;
 
     /// Every pair [`MACHINE_METHODS`] and [`ASSOCIATED`] name is an
-    /// [`Intrinsic`] `emit_intrinsic_call` can resolve, or a [`conversion`] that
-    /// never reaches it.
+    /// [`Intrinsic`] `emit_intrinsic_call` can resolve, or a [`conversion`] or
+    /// a [`scalar_operation`] that never reaches it.
     ///
     /// `emit_intrinsic_call` treats a pair with no `Intrinsic` as an internal bug —
     /// see its doc comment — so a table entry that resolved to nothing would
@@ -998,17 +1050,20 @@ mod tests {
         let named = |receiver, operation, has_receiver| {
             Intrinsic::from_names(receiver, operation).is_some()
                 || conversion(receiver, operation, has_receiver).is_some()
+                || scalar_operation(receiver, operation, has_receiver)
         };
         for &(receiver, operation) in MACHINE_METHODS {
             assert!(
                 named(receiver, operation, true),
-                "`{receiver}.{operation}` has no `Intrinsic` and is no conversion"
+                "`{receiver}.{operation}` has no `Intrinsic` and is neither a \
+                 conversion nor a scalar operation"
             );
         }
         for &(receiver, operation) in ASSOCIATED {
             assert!(
                 named(receiver, operation, false),
-                "`{receiver}.{operation}` has no `Intrinsic` and is no conversion"
+                "`{receiver}.{operation}` has no `Intrinsic` and is neither a \
+                 conversion nor a scalar operation"
             );
         }
     }

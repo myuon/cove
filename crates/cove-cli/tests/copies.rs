@@ -672,13 +672,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `println` lines whose `ret` column is what a fixture that hands each
 /// group's result back through a `Result<Unit, Error>` has.
 ///
+/// **The twenty-eighth rise is one new row again, and the migration beside it
+/// moved nothing at all.** 2448 to 2461, 160 programs to 161, and all thirteen
+/// are `benches:floatabs` — five in the `prod` column and eleven in the `ret`
+/// column, one copy counted in both. The same check as above says so twice
+/// over: the survey with that directory removed is **2448 exactly**, over the
+/// same 160 programs, the same 15,776 functions and the same 256,887
+/// instructions. That second figure is the interesting one. ADR 0064's sixth
+/// Phase 1 migration replaced `Float.abs`'s `Inst::IntrinsicCall` with one
+/// `Inst::FloatAbs`, which is one instruction for one instruction, so **no
+/// program in the corpus holds a different number of anything** — a migration
+/// that leaves this survey byte-identical is a migration that changed the
+/// operation and not the shape of the code around it.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2448;
+const FORWARDABLE_COPIES: usize = 2461;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
