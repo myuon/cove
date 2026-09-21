@@ -661,13 +661,24 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// and `ret` columns a fixture of one `println` per line has. The lowering is
 /// this commit's for all of it.
 ///
+/// **The twenty-seventh rise is one new row and nothing else.** 2432 to 2448,
+/// 159 programs to 160, and the sixteen are all in
+/// `tests/e2e:values_float_abs` — four in the `prod` column and twelve in the
+/// `ret` column. It is the corpus moving, in the plainest of the four ways
+/// this constant cannot tell apart by itself, and the check is the one the
+/// paragraphs above prescribe: the survey with that directory removed is
+/// **2432 exactly**, so no row that was here before moved by a copy. The
+/// program is ADR 0064's Decision 6 corpus for `Float.abs`, six functions of
+/// `println` lines whose `ret` column is what a fixture that hands each
+/// group's result back through a `Result<Unit, Error>` has.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2432;
+const FORWARDABLE_COPIES: usize = 2448;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
