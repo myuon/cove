@@ -113,6 +113,16 @@ fn negating_the_least_int_raises() {
 }
 
 #[test]
+fn a_float_absolute_clears_the_sign_bit() {
+    suite::a_float_absolute_clears_the_sign_bit::<Cranelift>();
+}
+
+#[test]
+fn a_float_absolute_in_place_answers_the_same() {
+    suite::a_float_absolute_in_place_answers_the_same::<Cranelift>();
+}
+
+#[test]
 fn an_immediate_operand_fails_the_same_way() {
     suite::an_immediate_operand_fails_the_same_way::<Cranelift>();
 }

@@ -456,6 +456,34 @@ fn both_arms_answer_the_same_thing() {
         );
     }
 
+    // The one float operation in the slice, and the row where the two arms are
+    // furthest apart in how they reach the answer: the template arm clears bit
+    // 63 with `btr` on an integer register and the Cranelift arm asks Cranelift
+    // for `fabs`. `suite::ABSOLUTES` is the same table the per-arm suite holds
+    // each of them to, taken whole rather than sampled, so what this adds is
+    // the comparison the suite cannot make — the two arms against each other.
+    //
+    // The NaN rows are the ones worth having here. A payload and a quiet bit
+    // are what an arm could disturb without any other row noticing, and no
+    // Cove program can see either, so `tests/e2e/values_float_abs` cannot ask
+    // and this is where it is asked. The **signalling** rows are stronger
+    // still: an arm that reached the answer through arithmetic would set bit
+    // 51 and agree with nothing.
+    for (label, operand, _) in suite::ABSOLUTES {
+        agree(
+            &format!("|{label}| (0x{operand:016x})"),
+            &suite::absolute(),
+            &[*operand, 0],
+            0,
+        );
+        agree(
+            &format!("|{label}| (0x{operand:016x}) in place"),
+            &suite::absolute_in_place(),
+            &[*operand],
+            0,
+        );
+    }
+
     // The covefmt slice: a heap read, a bound, a byte, a tag and a switch. Both
     // arms over the same words of the same heap, and the heap asserted unchanged
     // afterwards — neither arm writes to it.

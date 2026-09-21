@@ -324,6 +324,10 @@ allow = ["console"]
 entry = "values_float.main"
 allow = ["console"]
 
+[run.values_float_abs]
+entry = "values_float_abs.main"
+allow = ["console"]
+
 [run.values_int]
 entry = "values_int.main"
 allow = ["console"]

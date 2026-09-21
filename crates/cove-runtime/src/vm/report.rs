@@ -434,14 +434,16 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Thirteen of the 26 variants can be non-zero here, which is exactly the
-    /// set that declares `Effects::BULK_WORK`; the other thirteen examine
+    /// Thirteen of the 25 variants can be non-zero here, which is exactly the
+    /// set that declares `Effects::BULK_WORK`; the other twelve examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
     /// `String.startsWith` out of the enum, ADR 0065 took `String.contains`
     /// out of it in turn, and ADR 0064's fifth migration took `String.indexOf`
-    /// — both numbers fall as the enum does, and this is the first migration
-    /// after which they are equal.
+    /// — both numbers fall as the enum does, and they were equal for exactly
+    /// one migration: the sixth took `Float.abs`, which examines nothing, so
+    /// the carriers stayed at thirteen and the rest fell to twelve. Both are
+    /// measured off `Intrinsic::effects` rather than counted by hand.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,

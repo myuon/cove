@@ -1,4 +1,4 @@
-//! The hundred and sixty-eight opcodes, and what each one makes of the four
+//! The hundred and seventy-nine opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -20,6 +20,8 @@
 //!   [`Inst::CmpImmBranch`](crate::Inst::CmpImmBranch) six, the operator
 //!   alone;
 //! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] four;
+//!   [`Inst::FloatAbs`](crate::Inst::FloatAbs) one, because it is not a
+//!   family — see the instruction's own doc for why it is not;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
 //!   form, so no discriminant is stored anywhere.
 //!
@@ -211,8 +213,14 @@ mod base {
     /// like, for `CMP_ORDER`'s reason: adding it renumbered nothing already
     /// there.
     pub const RUN_FIND_BYTES: u8 = GROWABLE_ALLOC_WORDS + 1;
+    /// [`crate::Inst::FloatAbs`], ADR 0064's typed scalar operation — one
+    /// opcode, because the instruction is one operation and not a family.
+    /// Last rather than beside the [`crate::Inst::Neg`] it takes one operand
+    /// like, for `CMP_ORDER`'s reason: adding it renumbered nothing already
+    /// there.
+    pub const FLOAT_ABS: u8 = RUN_FIND_BYTES + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = RUN_FIND_BYTES + 1;
+    pub const END: u8 = FLOAT_ABS + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -277,6 +285,8 @@ pub enum Op {
     /// the only storage it has: `dst`, `haystack`, `needle` and `from` behind
     /// the `ArgsId`, as a byte slice's four are.
     RunFindBytes,
+    /// [`crate::Inst::FloatAbs`]: one `Float` in, one `Float` out.
+    FloatAbs,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
     GrowableAllocBytes,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::Words`], whose
@@ -620,6 +630,7 @@ impl Op {
             Op::FusedAppendWords,
             Op::GrowableAllocWords,
             Op::RunFindBytes,
+            Op::FloatAbs,
         ]);
         all
     }
@@ -685,6 +696,7 @@ impl Op {
             Op::RunSliceBytes => base::RUN_SLICE_BYTES,
             Op::RunSliceWords => base::RUN_SLICE_WORDS,
             Op::RunFindBytes => base::RUN_FIND_BYTES,
+            Op::FloatAbs => base::FLOAT_ABS,
             Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
             Op::GrowableAllocWords => base::GROWABLE_ALLOC_WORDS,
             Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
@@ -983,6 +995,14 @@ impl Op {
             // `from` — and nothing in the free half, because the one storage
             // it has names no element.
             Op::RunFindBytes => fields(NONE, NONE, NONE, one(Half::Args)),
+            // `Op::Neg(Num::Float)`'s shape exactly, and nothing in the
+            // payload: one `Float` in, one `Float` out.
+            Op::FloatAbs => fields(
+                Operand::Word(FLOAT),
+                Operand::Word(FLOAT),
+                NONE,
+                Payload::Empty,
+            ),
             // No `Half::Layout` on either of the two allocating buffer
             // opcodes, for the reason `Op::Str` carries none, twice over: an
             // owner is always `Program::buffer_layout` and its store is always
@@ -1144,7 +1164,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and seventy-eight opcodes out of the 256 a byte
+    /// argued from: a hundred and seventy-nine opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -1181,15 +1201,17 @@ mod tests {
     /// hundred and seventy-seven once the growable allocation gained its word
     /// member for `core.vectorWithCapacity`, and a hundred and seventy-eight
     /// once ADR 0065's run search brought one — one and not two, because the
-    /// instruction has a single storage. What the
+    /// instruction has a single storage — and a hundred and seventy-nine once
+    /// ADR 0064's typed scalar operation brought one for `Float.abs`, which is
+    /// one and not a family for the reason `crate::Inst::FloatAbs` gives. What the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventy_eight_opcodes() {
-        assert_eq!(Op::all().len(), 178);
-        assert_eq!(OPCODES, 178);
+    fn there_are_a_hundred_and_seventy_nine_opcodes() {
+        assert_eq!(Op::all().len(), 179);
+        assert_eq!(OPCODES, 179);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1251,6 +1273,9 @@ mod tests {
         assert_eq!(count(|op| matches!(op, Op::CmpImmBranch(_))), 6);
         assert_eq!(count(|op| matches!(op, Op::Neg(_))), 2);
         assert_eq!(count(|op| matches!(op, Op::Convert(_))), 4);
+        // Not a family, deliberately: ADR 0064's Decision 2 typed scalar
+        // operation is one operation, and `Inst::FloatAbs` says why.
+        assert_eq!(count(|op| matches!(op, Op::FloatAbs)), 1);
         assert_eq!(
             count(|op| matches!(op, Op::AllocFixed | Op::AllocImm | Op::AllocSlot)),
             3

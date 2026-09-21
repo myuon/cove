@@ -812,6 +812,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Neg { dst, .. }
             | Inst::Not { dst, .. }
             | Inst::Convert { dst, .. }
+            | Inst::FloatAbs { dst, .. }
             | Inst::Arith { dst, .. }
             | Inst::Cmp { dst, .. }
             | Inst::ArithImm { dst, .. }
@@ -1434,7 +1435,10 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::FuncRef { dst, .. } => vec![dst],
         Inst::Copy { dst, src, .. } => vec![dst, src],
         Inst::Clear { slot, .. } => vec![slot],
-        Inst::Neg { dst, a, .. } | Inst::Not { dst, a } | Inst::Convert { dst, a, .. } => {
+        Inst::Neg { dst, a, .. }
+        | Inst::Not { dst, a }
+        | Inst::Convert { dst, a, .. }
+        | Inst::FloatAbs { dst, a } => {
             vec![dst, a]
         }
         Inst::ArithImm { dst, a, .. } | Inst::CmpImm { dst, a, .. } => vec![dst, a],

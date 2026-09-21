@@ -670,6 +670,20 @@ impl<'a> Emit<'a> {
                 self.load_slot(RAX, *a);
                 self.store_slot(*dst, RAX);
             }
+            // `encoded.rs`'s `FLOAT_ABS`, and the one float operation this arm
+            // lowers. The word never leaves the integer registers: `f64::abs`
+            // clears the sign bit and bit 63 *is* the sign bit, so `btr` says
+            // the whole operation in five bytes — where a round trip through
+            // `xmm0` and an `andpd` against a constant in memory would need a
+            // constant pool this arm does not have. The Cranelift arm names
+            // `fabs` and gets the mask; this arm writes the mask and skips the
+            // name, and `tests/agree.rs` is what holds the two to the same
+            // answer.
+            Inst::FloatAbs { dst, a } => {
+                self.load_slot(RAX, *a);
+                self.btr_imm8(RAX, 63);
+                self.store_slot(*dst, RAX);
+            }
             Inst::Len { dst, obj } => self.len_of(*dst, *obj),
             Inst::LoadElem {
                 dst,
@@ -2949,6 +2963,20 @@ impl<'a> Emit<'a> {
         self.rex(true, 0, dst);
         self.byte(0xf7);
         self.modrm_reg(2, dst);
+    }
+
+    /// `btr r64, imm8`: the bit at `bit` cleared, and the rest left alone.
+    ///
+    /// The one caller is [`Inst::FloatAbs`](cove_ir::Inst::FloatAbs) at bit 63,
+    /// which is an IEEE-754 double's sign bit — so this is `f64::abs`, in one
+    /// instruction and five bytes, with the word never leaving an integer
+    /// register.
+    fn btr_imm8(&mut self, dst: u8, bit: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0x0f);
+        self.byte(0xba);
+        self.modrm_reg(6, dst);
+        self.byte(bit);
     }
 
     /// `and r64, r64`

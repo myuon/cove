@@ -984,6 +984,11 @@ pub const BUFFER: LayoutId = LayoutId(24);
 /// The packed store a [`BUFFER`] owns, whose header length is its capacity in
 /// bytes. The program's `bytes_layout`.
 pub const BYTES: LayoutId = LayoutId(25);
+/// One `Repr::Float` word, for the one float operation this slice lowers.
+///
+/// Last rather than beside [`INT`], so that adding it renumbered nothing —
+/// [`OPTION_INT`]'s reason, and the reason `base::CMP_ORDER` is where it is.
+pub const FLOAT: LayoutId = LayoutId(26);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -1118,6 +1123,7 @@ pub fn program(function: Function) -> Program {
     ));
     layouts.push(Layout::object("ByteBuffer", cove_ir::Shape::ByteBuffer));
     layouts.push(Layout::object("Bytes", cove_ir::Shape::Bytes));
+    layouts.push(Layout::word("Float", Repr::Float));
     Program {
         functions: vec![function],
         layouts,
@@ -2029,6 +2035,159 @@ pub fn negating_the_least_int_raises<A: Arm>() {
             answer.pending_work, 2,
             "the whole block is charged at its entry — the negation and the return \
              it never reached"
+        );
+    }
+}
+
+/// `s1 = |s0|; return s1`, over two `Float` slots.
+///
+/// `dst` is the second slot for [`negation`]'s reason: so that the case can
+/// assert the operand was not clobbered.
+pub fn absolute() -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Float],
+        FLOAT,
+        vec![Inst::FloatAbs { dst: 1, a: 0 }, Inst::Return { src: 1 }],
+    ))
+}
+
+/// The operands and answers `Inst::FloatAbs` is held to, **in bits**.
+///
+/// Stated as `u64` rather than as `f64` on purpose. Most of the rows would
+/// read better as numbers, but two of them cannot be written as numbers at
+/// all — a NaN's payload and its quiet bit are not something a decimal
+/// literal names — and one of them, the signalling NaN, is a bit pattern Rust
+/// is entitled to quiet the moment it passes through an arithmetic operation.
+/// Carrying the bits from the literal to the frame word means nothing between
+/// this table and the machine ever holds the value as a `f64` that a compiler
+/// could touch.
+pub const ABSOLUTES: &[(&str, u64, u64)] = &[
+    ("+0.0", 0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+    ("-0.0", 0x8000_0000_0000_0000, 0x0000_0000_0000_0000),
+    ("+1.5", 0x3ff8_0000_0000_0000, 0x3ff8_0000_0000_0000),
+    ("-1.5", 0xbff8_0000_0000_0000, 0x3ff8_0000_0000_0000),
+    ("+inf", 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+    ("-inf", 0xfff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+    // `f64::MIN` and `f64::MAX`: the largest finite magnitude, which anything
+    // that went through an addition or a multiplication would risk
+    // overflowing to `inf`.
+    ("-MAX", 0xffef_ffff_ffff_ffff, 0x7fef_ffff_ffff_ffff),
+    ("-MIN_POS", 0x8010_0000_0000_0000, 0x0010_0000_0000_0000),
+    // The smallest subnormal, `2^-1074`, which anything that went through an
+    // arithmetic operation would risk flushing.
+    ("-2^-1074", 0x8000_0000_0000_0001, 0x0000_0000_0000_0001),
+    // A **quiet** NaN carrying a payload nothing else here would produce, so
+    // that "the payload survived" is a claim about these bits rather than
+    // about whatever a default NaN happens to be.
+    ("-qNaN", 0xfff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+    ("+qNaN", 0x7ff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+    // A **signalling** NaN, and the row that decides whether this is a
+    // sign-bit operation or an arithmetic one. Sign set, exponent all ones,
+    // bit 51 — the quiet bit — *clear*, payload non-zero.
+    //
+    // Every *arithmetic* route sets bit 51. Measured at run time on this
+    // host, with the operands behind a `black_box` so that nothing is
+    // constant-folded: `0.0 - x`, `-1.0 * x` and `x + 0.0` each answer
+    // `0xfff8_0000_dead_beef` — the sign and the payload kept, the quiet bit
+    // *set* — where `f64::abs` answers `0x7ff0_0000_dead_beef`. `btr $63` and
+    // `fabs` leave bit 51 alone, and that is the contract this instruction
+    // exists to have.
+    //
+    // It is not a hypothetical. Both were watched failing on exactly these
+    // two rows and no others: the encoded arm with its answer quieted when it
+    // is a NaN, and the Cranelift arm with one `fadd` of `+0.0` after the
+    // `fabs`. Every other row in this table passed both breaks.
+    //
+    // **The unary `-` is not one of those routes**, which is worth writing
+    // down because it is the obvious thing to assume: `-x` is itself a
+    // sign-bit operation and answers `0x7ff0_0000_dead_beef` unquieted. What
+    // the row catches in the branchy body — `if x < 0.0 { -x } else { x }` —
+    // is the *branch*: a NaN compares false against everything, so that body
+    // takes the `else` and hands the operand back with its sign bit still
+    // set. Two different mistakes, one row.
+    ("-sNaN", 0xfff0_0000_dead_beef, 0x7ff0_0000_dead_beef),
+    ("+sNaN", 0x7ff0_0000_dead_beef, 0x7ff0_0000_dead_beef),
+];
+
+/// `Inst::FloatAbs` clears the sign bit and touches nothing else.
+///
+/// The one float operation in this slice, and
+/// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 2 typed scalar operation: `encoded.rs`'s `FLOAT_ABS` arm is
+/// `f64::abs`, which IEEE 754 defines as a *sign-bit* operation rather than an
+/// arithmetic one — total, never rounding, never signalling, and never
+/// quieting.
+///
+/// **The cases are [`ABSOLUTES`], stated in bits, and that is the point of
+/// having them here.** Four of them say something no Cove program can observe
+/// and no e2e case could therefore pin: that `abs(-0.0)` is `+0.0` and not
+/// merely a number equal to it, and that a NaN's sign bit is cleared while
+/// every other bit of it is left alone. `-0.0` is distinguishable from `0.0`
+/// in Cove three ways and so is pinned by `tests/e2e/values_float_abs`; the
+/// NaN sign, the payload and the quiet bit are distinguishable no way at all,
+/// and this is where the machine's answer is written down.
+///
+/// **The signalling rows are the ones that separate a mask from arithmetic.**
+/// The two arms reach the answer differently — the template arm clears bit 63
+/// with `btr` on an integer register and the Cranelift arm asks for `fabs` —
+/// and both leave bit 51 where they found it, where every arithmetic route to
+/// the same answer sets it. An implementation that answered `-x` for a
+/// negative operand would pass every other row here and fail that one.
+pub fn a_float_absolute_clears_the_sign_bit<A: Arm>() {
+    for (label, operand, want) in ABSOLUTES {
+        forget_polls();
+        let mut words = vec![*operand, 0];
+        let answer = run::<A>(&absolute(), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "|{label}|");
+        assert_eq!(
+            words[1], *want,
+            "|{label}|: 0x{operand:016x} answered 0x{:016x}, want 0x{want:016x} — \
+             to the bit, not merely a number equal to it",
+            words[1]
+        );
+        assert_eq!(
+            words[0], *operand,
+            "the operand is not the destination and was not written: |{label}|"
+        );
+        assert_eq!(
+            answer.returned[0], *want,
+            "the destination holds what the slot holds: |{label}|"
+        );
+    }
+}
+
+/// `s0 = |s0|; return s0`: the destination *is* the operand.
+pub fn absolute_in_place() -> Program {
+    program(function(
+        vec![Repr::Float],
+        FLOAT,
+        vec![Inst::FloatAbs { dst: 0, a: 0 }, Inst::Return { src: 0 }],
+    ))
+}
+
+/// `Inst::FloatAbs` answers the same thing when its destination is its
+/// operand.
+///
+/// Both arms load the word and then store it, so this cannot go wrong — which
+/// is exactly why the case is cheap and its absence would be a gap rather than
+/// a risk. A code generator that read the destination after writing it, or
+/// that emitted a read-modify-write against memory in the wrong order, would
+/// be caught here and nowhere else: every row of
+/// [`a_float_absolute_clears_the_sign_bit`] writes a slot the operand is not.
+pub fn a_float_absolute_in_place_answers_the_same<A: Arm>() {
+    for (label, operand, want) in ABSOLUTES {
+        forget_polls();
+        let mut words = vec![*operand];
+        let answer = run::<A>(&absolute_in_place(), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "|{label}| in place");
+        assert_eq!(
+            words[0], *want,
+            "|{label}| in place: 0x{operand:016x} answered 0x{:016x}, want 0x{want:016x}",
+            words[0]
+        );
+        assert_eq!(
+            answer.returned[0], *want,
+            "the destination holds what the slot holds: |{label}| in place"
         );
     }
 }

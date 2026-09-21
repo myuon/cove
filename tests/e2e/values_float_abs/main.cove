@@ -1,0 +1,289 @@
+use console.println
+
+/// `Float.abs` at every edge IEEE 754 has, and the attempts that decide which
+/// of those edges a Cove program can see at all.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line
+/// of a reimplementation, because the behaviour is part of Cove's API whether
+/// or not anyone decided it. `Float.abs` is `f64::abs` in Rust today, reached
+/// through one `Inst::IntrinsicCall`, and `f64::abs` is a clear of the sign
+/// bit: it is total, it never rounds, and the only inputs it says anything
+/// interesting about are the ones whose sign is the whole of what is being
+/// asked — the two zeros, the two infinities, and a NaN.
+///
+/// So this file is two things at once. It is the ordinary corpus: subnormals,
+/// the largest and smallest finite magnitudes, the ordinary values, and
+/// idempotence. And it is a **survey of what is observable**, which is the
+/// question a reimplementation actually has to answer, because a bit no
+/// program can see is not a contract and a bit every program can see is one.
+/// The attempts are printed rather than summarised — a line saying `0.0` where
+/// a wrong answer would say `-0.0` is evidence, and a sentence claiming it is
+/// not.
+///
+/// # Negative zero is observable, three separate ways
+///
+/// `-0.0 == 0.0` is true, so equality says nothing. Three other things say it
+/// all: interpolation renders the sign (`cove_runtime::value`'s `write_float`
+/// writes `-0.0`), `format` renders it (`-0.00`), and `1.0 / x` answers `-inf`
+/// against `inf`. All three are printed below for both zeros and for
+/// `abs`'s answer on each, so `abs(-0.0) == 0.0` — the sign *cleared* — is
+/// pinned by this file three times over and any body that answered `-0.0`
+/// fails three lines.
+///
+/// The attempts that cannot see it are printed too: `==`, `<`, `toInt()`, and
+/// structural equality through a struct field, an array and an `Option`, all
+/// of which compare as IEEE 754 numbers and answer the same for both zeros.
+///
+/// # A NaN's sign is not observable, and its payload is not constructible
+///
+/// A Cove program can make a NaN five ways — `0.0 / 0.0`, `(-1.0).sqrt()`,
+/// `inf - inf`, `inf * 0.0` and `Float.parse("nan")` — and can flip its sign
+/// with the unary `-`, which is an `Inst::Neg` over `Num::Float` and is `-x`
+/// on an `f64`. Nothing then reads the sign back. Interpolation and `format`
+/// both write the literal `NaN` before they look at anything else; `toInt`
+/// refuses with a message built from the same rendering; every comparison
+/// against a NaN is `false`, including `nan == nan`; `min` and `max` answer
+/// the other operand; and arithmetic on a NaN answers a NaN. Every one of
+/// those is printed below for a NaN and for its negation, and every pair of
+/// lines agrees.
+///
+/// The payload is a stronger statement: there is **no way to construct one**.
+/// The language has no bit access to a `Float` — `docs/BUILTINS.md` lists
+/// `toInt`, `round`, `abs`, `sqrt`, `min`, `max`, `format`, `parse` and
+/// `snapshot`, and none of them is a bit cast — so every NaN a program holds
+/// is whichever quiet NaN the operation that made it produced. `abs` clearing
+/// the sign bit of a NaN is therefore a fact about the machine and not about
+/// the API, and a reimplementation that answered a *different* NaN would be
+/// indistinguishable here. That is written down rather than assumed, because
+/// it is the one place this corpus deliberately does not constrain the
+/// reimplementation.
+///
+/// # The extremes print in full, and that is the point
+///
+/// Cove renders a finite `Float` without an exponent, so `Float.MAX` is 309
+/// digits and the smallest subnormal is a `0.` and 323 zeros. Decision 6 says
+/// "the bytes are the contract" of a formatting, and the same holds of a value
+/// pinned *through* a formatting: the shortest round-trip digits placed
+/// without an exponent name exactly one `f64`, so these lines are the bit
+/// patterns, written the one way this language can write them.
+///
+/// Every expected value was computed by a standalone `rustc` program calling
+/// `f64::abs` and reproducing `write_float`, and the harness was watched
+/// failing on a corrupted `expected.out` before the file was put back.
+export fn main() -> Result<Unit, Error> {
+  zeros()?
+  nans()?
+  infinities()?
+  magnitudes()?
+  ordinary()?
+  computed()?
+  Ok(())
+}
+
+/// The two zeros, and the three things that can tell them apart.
+fn zeros() -> Result<Unit, Error> {
+  let nz = -0.0
+  let pz = 0.0
+
+  // What renders. `abs` clears the sign, so the first and second columns of
+  // the second line are the ones that move if it does not.
+  println("zero.render {nz} {pz}")?
+  println("zero.abs {nz.abs()} {pz.abs()}")?
+
+  // What `format` renders, which is a second renderer and not the same code.
+  println("zero.format {nz.format(2)} {pz.format(2)}")?
+  println("zero.format.abs {nz.abs().format(2)} {pz.abs().format(2)}")?
+
+  // What division sees, which is the only observer that is arithmetic rather
+  // than text: `1.0 / -0.0` is `-inf` and `1.0 / 0.0` is `inf`.
+  println("zero.recip {1.0 / nz} {1.0 / pz}")?
+  println("zero.recip.abs {1.0 / nz.abs()} {1.0 / pz.abs()}")?
+
+  // The attempts that see nothing. Every one of these answers the same for
+  // both zeros, which is why none of them could have pinned this.
+  println("zero.blind.eq {nz == pz} {nz == 0.0} {pz == -0.0}")?
+  println("zero.blind.order {nz < pz} {pz < nz} {nz <= pz} {nz >= pz}")?
+  println("zero.blind.toInt {nz.toInt()} {pz.toInt()}")?
+  println("zero.blind.nested {Some(nz) == Some(pz)} {[nz] == [pz]}")?
+
+  // A negative zero nothing wrote down as a literal, in case a literal is the
+  // one shape something could fold. Multiplication, subtraction of equals and
+  // the unary minus each make one — and subtraction of equals makes `0.0`,
+  // which is IEEE 754's round-to-nearest rule and is here so the line is not
+  // read as saying every arithmetic route answers `-0.0`.
+  println("zero.made {0.0 * -1.0} {-1.0 * 0.0} {-pz} {0.0 - 0.0}")?
+  println(
+    "zero.made.recip {1.0 / (0.0 * -1.0)} {1.0 / (-pz)} {1.0 / (0.0 - 0.0)}",
+  )?
+  println("zero.made.abs {(0.0 * -1.0).abs()} {(-pz).abs()}")?
+  println("zero.made.abs.recip {1.0 / (0.0 * -1.0).abs()} {1.0 / (-pz).abs()}")?
+
+  // `sqrt` is the neighbouring scalar operation that also keeps a zero's sign,
+  // printed so that `abs` is seen next to one that does not clear it.
+  println("zero.sqrt {nz.sqrt()} {1.0 / nz.sqrt()}")?
+  Ok(())
+}
+
+/// Every NaN a Cove program can make, its negation, and every attempt to read
+/// a NaN's sign back.
+fn nans() -> Result<Unit, Error> {
+  let quotient = 0.0 / 0.0
+  let root = (-1.0).sqrt()
+  let inf = 1.0 / 0.0
+  let difference = inf - inf
+  let product = inf * 0.0
+  let parsed = Float.parse("nan").unwrapOr(0.0)
+
+  println("nan.sources {quotient} {root} {difference} {product} {parsed}")?
+  println(
+    "nan.abs {quotient.abs()} {root.abs()} {difference.abs()} {product.abs()}",
+  )?
+  println("nan.parsed.abs {parsed.abs()}")?
+
+  // The sign, flipped by the unary `-` — an `Inst::Neg` over `Num::Float`,
+  // which is `-x` on an `f64` and clears or sets the sign bit of a NaN like
+  // any other value — and then every way there is of asking about it.
+  let negated = -quotient
+  println("nan.negated {negated} {-root} {-(0.0 / 0.0)}")?
+  println("nan.negated.abs {negated.abs()} {(-root).abs()}")?
+  println("nan.negated.format {negated.format(2)} {quotient.format(2)}")?
+  println("nan.negated.toInt {negated.toInt()}")?
+  println("nan.negated.arith {negated * 1.0} {negated + 0.0} {1.0 / negated}")?
+  println("nan.negated.min {negated.min(1.0)} {(1.0).min(negated)}")?
+  println("nan.negated.max {negated.max(1.0)} {(1.0).max(negated)}")?
+
+  // What a NaN answers to a comparison, which is `false` to all of them —
+  // including against itself, which is the one line that says a NaN is here
+  // at all rather than some ordinary number.
+  println("nan.compare {quotient == quotient} {quotient == negated} {quotient < 1.0} {quotient > 1.0}")?
+  println("nan.compare.nested {Some(quotient) == Some(negated)} {[quotient] == [quotient]}")?
+
+  // `abs` twice, and `abs` of a NaN that was already positive: a clear of a
+  // bit that is already clear changes nothing, which is the only statement
+  // about a NaN's bits this file is in a position to make.
+  println("nan.abs.abs {negated.abs().abs()} {quotient.abs().abs()}")?
+  println("nan.abs.compare {quotient.abs() == quotient.abs()}")?
+  Ok(())
+}
+
+/// Both infinities, made three ways each.
+fn infinities() -> Result<Unit, Error> {
+  let pos = 1.0 / 0.0
+  let neg = -1.0 / 0.0
+  let overflowed = 1.0e308 * 10.0
+  let underflowed = -1.0e308 * 10.0
+  let parsedPos = Float.parse("inf").unwrapOr(0.0)
+  let parsedNeg = Float.parse("-inf").unwrapOr(0.0)
+
+  println(
+    "inf.render {pos} {neg} {overflowed} {underflowed} {parsedPos} {parsedNeg}",
+  )?
+  println(
+    "inf.abs {pos.abs()} {neg.abs()} {overflowed.abs()} {underflowed.abs()}",
+  )?
+  println("inf.parsed.abs {parsedPos.abs()} {parsedNeg.abs()}")?
+  println("inf.format {neg.format(2)} {neg.abs().format(2)}")?
+
+  // The reciprocal of an infinity is a zero, so `abs` of a negative infinity
+  // is checked a second way: `1.0 / abs(-inf)` is `0.0` where `1.0 / -inf` is
+  // `-0.0`, which is the signed-zero observer pointed at the other end of the
+  // range.
+  println("inf.recip {1.0 / pos} {1.0 / neg}")?
+  println("inf.recip.abs {1.0 / pos.abs()} {1.0 / neg.abs()}")?
+  println("inf.recip.abs.recip {1.0 / (1.0 / neg.abs())} {1.0 / (1.0 / neg)}")?
+
+  println("inf.compare {pos > 0.0} {neg < 0.0} {neg.abs() == pos} {pos == overflowed}")?
+  println("inf.toInt {pos.toInt()}")?
+  println("inf.toInt.neg {neg.toInt()}")?
+  Ok(())
+}
+
+/// The subnormals and the finite extremes: the values where a body that did
+/// arithmetic instead of clearing a bit would round, overflow or flush.
+fn magnitudes() -> Result<Unit, Error> {
+  // The smallest positive value there is, `2^-1074`, and its negation. A
+  // reimplementation that computed `0.0 - x` gets this right and one that
+  // multiplied by `-1.0` does too; one that went through an `Int` does not.
+  println("sub.min {-5.0e-324} {5.0e-324}")?
+  println("sub.min.abs {(-5.0e-324).abs()} {(5.0e-324).abs()}")?
+
+  // The largest subnormal, one unit below the smallest normal, and the
+  // smallest normal itself — the two values the exponent field changes
+  // between.
+  println("sub.max.abs {(-2.2250738585072009e-308).abs()}")?
+  println("norm.min.abs {(-2.2250738585072014e-308).abs()}")?
+
+  // The largest finite magnitude. `abs` may not overflow it to `inf`, which
+  // is what any route through an addition or a multiplication risks.
+  println("fin.max.abs {(-1.7976931348623157e308).abs()}")?
+  println(
+    "fin.max.eq {(-1.7976931348623157e308).abs() == 1.7976931348623157e308}",
+  )?
+
+  // One unit below the largest finite magnitude, so the line above is not
+  // the only wide one and a body that saturated would be seen doing it.
+  println("fin.next.abs {(-1.7976931348623155e308).abs()}")?
+  println(
+    "fin.next.lt {(-1.7976931348623155e308).abs() < 1.7976931348623157e308}",
+  )?
+
+  // An epsilon-scale value, where the fractional rendering is the shortest
+  // round-trip digits rather than an expansion of a whole number.
+  println("eps.abs {(-2.220446049250313e-16).abs()}")?
+  Ok(())
+}
+
+/// The ordinary cases, and idempotence.
+fn ordinary() -> Result<Unit, Error> {
+  println("plain {(-1.5).abs()} {(1.5).abs()} {(-0.1).abs()} {(0.1).abs()}")?
+  println("whole {(-2.0).abs()} {(3.0).abs()} {(-1.0).abs()}")?
+  println("small {(-0.25).abs()} {(-1.0e-5).abs()}")?
+  println("large {(-1.0e30).abs()} {(-9007199254740993.0).abs()}")?
+  println("idempotent {(-1.5).abs().abs()} {(1.5).abs().abs()} {(-1.5).abs() == (1.5).abs()}")?
+  println("format {(-3.14159).abs().format(2)} {(-2.0).abs().format(0)}")?
+  println("toInt {(-1.9).abs().toInt()} {(-1.0e30).abs().toInt()}")?
+  Ok(())
+}
+
+/// The same questions over values the lowering cannot have seen, so that no
+/// line above is answered by a fold of a literal.
+///
+/// The loop accumulates a sum whose sign flips, and the three values it hands
+/// out — a negative, a positive and a zero reached by subtracting equals —
+/// go through `abs` as the literals did.
+fn computed() -> Result<Unit, Error> {
+  var total = 0.0
+  var i = 0
+  while i < 5 {
+    total = total - 1.5
+    i += 1
+  }
+  println("run.sum {total} {total.abs()} {(-total).abs()}")?
+
+  let zero = total - total
+  println("run.zero {zero} {1.0 / zero} {zero.abs()} {1.0 / zero.abs()}")?
+
+  let negZero = zero * -1.0
+  println("run.negZero {negZero} {1.0 / negZero} {negZero.abs()} {1.0 / negZero.abs()}")?
+
+  var tiny = 1.0
+  var steps = 0
+  while steps < 1100 {
+    tiny = tiny / 2.0
+    steps += 1
+  }
+  println("run.flushed {tiny} {1.0 / tiny} {tiny.abs()}")?
+
+  let negTiny = -tiny
+  println("run.flushed.neg {negTiny} {1.0 / negTiny} {negTiny.abs()} {1.0 / negTiny.abs()}")?
+
+  var huge = 1.0
+  var doubled = 0
+  while doubled < 1100 {
+    huge = huge * 2.0
+    doubled += 1
+  }
+  println("run.overflowed {huge} {(-huge).abs()} {huge.abs()}")?
+  Ok(())
+}

@@ -193,6 +193,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             s(*dst),
             s(*a)
         ),
+        Inst::FloatAbs { dst, a } => format!("abs.float {} {}", s(*dst), s(*a)),
         Inst::Jump { to } => format!("jump {to}"),
         Inst::BranchFalse { cond, to } => format!("branch-false {} {to}", s(*cond)),
         // A fused comparison prints as the comparison it is, with `.branch`
