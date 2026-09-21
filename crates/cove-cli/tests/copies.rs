@@ -685,13 +685,24 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// that leaves this survey byte-identical is a migration that changed the
 /// operation and not the shape of the code around it.
 ///
+/// **The twenty-ninth rise is one new row and nothing else, again.** 2461 to
+/// 2477, 161 programs to 162, and all sixteen are
+/// `tests/e2e:values_float_min_max` — two in the `prod` column and fourteen in
+/// the `ret` column. The check the paragraphs above prescribe says so: the
+/// survey with that directory removed is **2461 exactly**, so no row that was
+/// here before moved by a copy. The program is ADR 0064's Decision 6 corpus
+/// for `Float.min` and `Float.max`, seven functions of `println` lines whose
+/// `ret` column is what a fixture that hands each group's result back through
+/// a `Result<Unit, Error>` has — and whose `prod` column is small because the
+/// lines are interpolations rather than bindings.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2461;
+const FORWARDABLE_COPIES: usize = 2477;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
