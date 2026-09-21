@@ -1,0 +1,50 @@
+trunc.two Ok(2) Ok(-2)
+trunc.nine Ok(1) Ok(-1)
+trunc.small Ok(0) Ok(0)
+trunc.half Ok(0) Ok(0)
+trunc.whole Ok(3) Ok(-3)
+trunc.almost Ok(0) Ok(0)
+trunc.tie Ok(2) Ok(-2)
+zero.self Ok(0) Ok(0)
+zero.witness -inf inf
+zero.render -0.0 0.0
+zero.small Ok(0) Ok(0)
+zero.small.witness -2.5 2.5
+sub.least Ok(0) Ok(0)
+sub.most Ok(0) Ok(0)
+sub.normal Ok(0) Ok(0)
+sub.render 0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005 -0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005
+nan.made Err(`Float.toInt` cannot convert `NaN`, which is not a number)
+nan.divided Err(`Float.toInt` cannot convert `NaN`, which is not a number)
+nan.negated Err(`Float.toInt` cannot convert `NaN`, which is not a number)
+nan.scaled Err(`Float.toInt` cannot convert `NaN`, which is not a number)
+nan.mixed Err(`Float.toInt` cannot convert `NaN`, which is not a number)
+nan.render NaN NaN
+nan.same false false
+inf.pos Err(`Float.toInt` cannot convert `inf`, which has no truncation)
+inf.neg Err(`Float.toInt` cannot convert `-inf`, which has no truncation)
+inf.divided Err(`Float.toInt` cannot convert `inf`, which has no truncation)
+inf.divided.neg Err(`Float.toInt` cannot convert `-inf`, which has no truncation)
+inf.render inf -inf
+range.top Ok(9223372036854774784)
+range.over Err(`Float.toInt` cannot convert `9223372036854776000`, which is outside Int's range)
+range.bottom Ok(-9223372036854775808)
+range.under Err(`Float.toInt` cannot convert `-9223372036854778000`, which is outside Int's range)
+range.gap true true
+range.gap.neg true true
+range.order true true
+quote.over 9223372036854775808.0 9223372036854775808 Err(`Float.toInt` cannot convert `9223372036854776000`, which is outside Int's range)
+quote.under -9223372036854777856.0 -9223372036854777856 Err(`Float.toInt` cannot convert `-9223372036854778000`, which is outside Int's range)
+quote.e30 1000000000000000019884624838656.0 1000000000000000019884624838656 Err(`Float.toInt` cannot convert `1000000000000000000000000000000`, which is outside Int's range)
+quote.max Err(`Float.toInt` cannot convert `179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`, which is outside Int's range)
+quote.min Err(`Float.toInt` cannot convert `-179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`, which is outside Int's range)
+quote.inf inf inf Err(`Float.toInt` cannot convert `inf`, which has no truncation)
+trip.small Ok(7) Ok(-7)
+trip.most Err(`Float.toInt` cannot convert `9223372036854776000`, which is outside Int's range)
+trip.least Ok(-9223372036854775808)
+trip.fits Ok(9223372036854774784)
+trip.render 9223372036854775808.0 -9223372036854775808.0
+big.maxint Err(`Float.toInt` cannot convert `9223372036854776000`, which is outside Int's range)
+run.halves 0 0
+run.doubling 63 17
+run.boundary 1 9223372036854775808.0

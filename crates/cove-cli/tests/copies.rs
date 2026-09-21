@@ -780,13 +780,31 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// where the call was a crossing, which is what `benches/floatsqrt` measures
 /// and what this survey, being over the IR, cannot see.
 ///
+/// **The thirty-fifth rise is one new row and nothing else.** 2558 to 2573,
+/// 167 programs to 168, and all fifteen are `tests/e2e:values_float_to_int` —
+/// every one of them in the `ret` column and none in `prod`, which the two
+/// sub-totals say on their own: the producer sub-total is 677 before and 677
+/// after, the return sub-total is 1930 and then 1945, and the overlap between
+/// them is 49 both times. The check the paragraphs above prescribe says the
+/// rest: the survey with that directory removed is **2558 exactly**, over the
+/// same 167 programs, the same 16,435 functions and the same 274,634
+/// instructions the row before it left, and the twenty-five programs this
+/// table prints are identical line for line.
+///
+/// The program is ADR 0064's Decision 6 corpus for `Float.toInt`, the last of
+/// issue #454's Step 2 and the only one of that step's five operations a
+/// representative program runs. A `prod` column of nought is what a file that
+/// interpolates every answer rather than binding it has — `values_float_sqrt`
+/// had two because two of its groups bound a root first, and this one binds
+/// nothing a `println` then names.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2558;
+const FORWARDABLE_COPIES: usize = 2573;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

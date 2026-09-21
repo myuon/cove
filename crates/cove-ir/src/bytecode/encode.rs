@@ -845,7 +845,6 @@ mod tests {
         held.push((0, Inst::Not { dst: 1, a: 2 }));
         for to in [
             Convert::IntToFloat,
-            Convert::FloatToInt,
             Convert::DurationToInt,
             Convert::IntToDuration,
         ] {

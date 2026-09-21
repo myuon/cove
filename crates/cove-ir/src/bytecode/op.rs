@@ -1,4 +1,4 @@
-//! The hundred and eighty-three opcodes, and what each one makes of the four
+//! The hundred and eighty-two opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -84,9 +84,8 @@ const COMPARES: [Compare; 6] = [
     Compare::Tag,
 ];
 /// Every [`Convert`], in opcode order.
-const CONVERTS: [Convert; 4] = [
+const CONVERTS: [Convert; 3] = [
     Convert::IntToFloat,
-    Convert::FloatToInt,
     Convert::DurationToInt,
     Convert::IntToDuration,
 ];
@@ -885,7 +884,6 @@ impl Op {
             Op::Convert(to) => {
                 let (from, into) = match to {
                     Convert::IntToFloat => (INT, FLOAT),
-                    Convert::FloatToInt => (FLOAT, INT),
                     // `INT` is `Int` or `Duration`, so a relabel's two fields
                     // are one class here; `crate::verify` is where the two
                     // `Repr`s are told apart.
@@ -1263,15 +1261,28 @@ mod tests {
     /// brought `Float.round`, one opcode again and for `Float.abs`' reason,
     /// and a hundred and eighty-three once the same step brought
     /// `Float.sqrt`, which is the last name on ADR 0064's Decision 2 list.
+    ///
+    /// **And a hundred and eighty-two once that step's last commit took one
+    /// away**: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
+    /// lowering emitted it, and its `x as i64` was a second and wrong answer
+    /// beside `Float.toInt`'s checked `Result` — so `Op::Convert` is three
+    /// opcodes rather than four. That is the third fall in this list and the
+    /// second of its exact shape: ADR 0058's 160 to 157 deleted three
+    /// opcodes "which no lowering had ever emitted" for the same reason, and
+    /// 179 to 176 deleted three whose work something else had taken over.
+    /// A removal is as much a fact about the format as an addition and it is
+    /// the cheaper of the two, because every opcode's number is computed from
+    /// the family bases rather than written down.
+    ///
     /// What the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_eighty_three_opcodes() {
-        assert_eq!(Op::all().len(), 183);
-        assert_eq!(OPCODES, 183);
+    fn there_are_a_hundred_and_eighty_two_opcodes() {
+        assert_eq!(Op::all().len(), 182);
+        assert_eq!(OPCODES, 182);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1332,7 +1343,12 @@ mod tests {
         assert_eq!(count(|op| matches!(op, Op::CmpBranch(_, _))), 36);
         assert_eq!(count(|op| matches!(op, Op::CmpImmBranch(_))), 6);
         assert_eq!(count(|op| matches!(op, Op::Neg(_))), 2);
-        assert_eq!(count(|op| matches!(op, Op::Convert(_))), 4);
+        // Three and not four since issue #454's Step 2: ADR 0064's Decision 6
+        // refused a float-to-int conversion whose `x as i64` disagreed with
+        // `Float.toInt`'s checked `Result`, and deleting it is the branch of
+        // that disjunction a one-word conversion leaves available. What is
+        // left is total — `Int.toFloat` and the two `Duration` relabels.
+        assert_eq!(count(|op| matches!(op, Op::Convert(_))), 3);
         // Not a family, deliberately: ADR 0064's Decision 2 typed scalar
         // operation is one operation, and `Inst::FloatAbs` says why.
         assert_eq!(count(|op| matches!(op, Op::FloatAbs)), 1);

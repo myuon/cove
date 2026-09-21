@@ -209,7 +209,6 @@ const GE_INT_IMM: u8 = Op::CmpImm(CmpOp::Ge).number();
 
 const NOT: u8 = Op::Not.number();
 const INT_TO_FLOAT: u8 = Op::Convert(Convert::IntToFloat).number();
-const FLOAT_TO_INT: u8 = Op::Convert(Convert::FloatToInt).number();
 const DURATION_TO_INT: u8 = Op::Convert(Convert::DurationToInt).number();
 const INT_TO_DURATION: u8 = Op::Convert(Convert::IntToDuration).number();
 
@@ -3173,12 +3172,6 @@ pub(super) fn dispatch<'s, 'a>(
                     .mem
                     .set_word_at(base_at + (a!()) as usize, (x as f64).to_bits());
             }
-            FLOAT_TO_INT => {
-                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
-                machine
-                    .mem
-                    .set_word_at(base_at + (a!()) as usize, x as i64 as u64);
-            }
             // A relabel: the word is a count of nanoseconds on both sides, and
             // only the slot's `Repr` changes.
             DURATION_TO_INT | INT_TO_DURATION => {
@@ -3917,22 +3910,31 @@ mod tests {
 
     /// Every opcode ADR 0041 defines has an implementation.
     ///
-    /// `crates/cove-cli/tests/bytecode_corpus.rs` names sixteen opcodes no
-    /// program in the repository reaches, and four of them — `addr.elem`,
-    /// `Convert(IntToFloat)`, `Convert(FloatToInt)` and `layout.of` — are not
-    /// merely absent from the corpus: **the lowering has no site that emits
-    /// three of them**, so no Cove source can reach them and neither the
-    /// differential harness nor any fixture written in Cove can cover them.
+    /// `crates/cove-cli/tests/bytecode_corpus.rs` names fifteen opcodes no
+    /// program in the repository reaches, and three of them — `addr.elem`,
+    /// `Convert(IntToFloat)` and `layout.of` — are not merely absent from the
+    /// corpus: **the lowering has no site that emits two of them**, so no
+    /// Cove source can reach them and neither the differential harness nor
+    /// any fixture written in Cove can cover them.
     /// (`Convert(IntToFloat)` has had a site since ADR 0058's Phase 5 made
-    /// `Int.toFloat` one; it stays below as the way out to the `Float` the
-    /// other conversion reads.)
+    /// `Int.toFloat` one; it stays below as the way out to a `Float`.)
     ///
-    /// A program written in the IR directly is the only thing that can, which
-    /// is what `super::tests::Build` is for. Before the cutover this
-    /// compared the two loops against each other; there is one loop now, so
-    /// what it asserts is the answer itself — a number chosen so that a
-    /// misread of any of the four is a wrong number rather than a discarded
-    /// one.
+    /// **It was sixteen and four until issue #454's Step 2**, and the
+    /// difference is `Convert(FloatToInt)`, which this test used to reach on
+    /// the way back from that `Float`. ADR 0064's Decision 6 refused it —
+    /// its `x as i64` answered `0` for a NaN and clamped at each end where
+    /// `Float.toInt` refuses and says which of the three stopped it, and "a
+    /// second, wrong answer in the IR is not an option" — so there is no way
+    /// back from a `Float` to an `Int` in the instruction set at all now, and
+    /// the float leg below decides a branch instead of contributing a
+    /// summand.
+    ///
+    /// A program written in the IR directly is the only thing that can reach
+    /// the rest, which is what `super::tests::Build` is for. Before the
+    /// cutover this compared the two loops against each other; there is one
+    /// loop now, so what it asserts is the answer itself — a number chosen so
+    /// that a misread of any of the three is a wrong number rather than a
+    /// discarded one.
     #[test]
     fn the_opcodes_no_cove_source_reaches_run() {
         let mut build = Build::default();
@@ -3951,6 +3953,8 @@ mod tests {
             Repr::Addr,
             Repr::Int,
             Repr::Float,
+            Repr::Float,
+            Repr::Bool,
             Repr::Int,
             Repr::Int,
         ];
@@ -3985,37 +3989,53 @@ mod tests {
                     addr: 3,
                     layout: int,
                 },
-                // Out to `Float` and back, which is the only round trip that
-                // reaches either `Convert`.
+                // Out to `Float`, which is the only way this fixture
+                // reaches a `Convert`. There is no way back: issue #454's
+                // Step 2 deleted `Convert::FloatToInt`, so what the float
+                // leg contributes is a *decision* rather than a summand.
                 Inst::Convert {
                     to: ConvertTo::IntToFloat,
                     dst: 5,
                     a: 4,
                 },
-                Inst::Convert {
-                    to: ConvertTo::FloatToInt,
+                Inst::Float {
                     dst: 6,
+                    bits: 7.0f64.to_bits(),
+                },
+                // Equal on the answer, and the branch is taken when it is
+                // *not*: a conversion that wrote anything but `7.0` lands on
+                // the zero below instead of on the sum.
+                Inst::CmpBranch {
+                    on: Compare::Float,
+                    op: CmpOp::Eq,
+                    dst: 7,
                     a: 5,
+                    b: 6,
+                    target: 11,
                 },
                 // And what the object says it is, folded into the answer so
                 // that a wrong reading is a wrong number rather than a
                 // discarded one.
-                Inst::LayoutOf { dst: 7, obj: 0 },
+                Inst::LayoutOf { dst: 8, obj: 0 },
                 Inst::Arith {
                     num: Num::Int,
                     op: ArithOp::Add,
-                    dst: 6,
-                    a: 6,
-                    b: 7,
+                    dst: 9,
+                    a: 4,
+                    b: 8,
                 },
-                Inst::Return { src: 6 },
+                Inst::Return { src: 9 },
+                Inst::Int { dst: 9, value: 0 },
+                Inst::Return { src: 9 },
             ],
         );
         let program = build.done();
 
         let answer = run_words(&program, entry, &[]).expect("the fixture runs");
-        // Seven, out to `Float` and back, plus the layout the object says it
-        // has: every one of the four opcodes contributes to it.
+        // Seven, plus the layout the object says it has, reached only through
+        // a comparison against the `Float` the conversion made: every one of
+        // the three opcodes contributes to it, and a misread of any of them
+        // answers a different number.
         assert_eq!(answer, vec![7 + u64::from(ints.0)]);
     }
 
