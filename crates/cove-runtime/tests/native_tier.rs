@@ -972,47 +972,71 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
   snapshotsWhileCollecting(n)
 }
 
-/// A refused caller making `n` calls to `String.indexOf`, which nothing
+/// A refused caller making `n` calls to `String.toUpper`, which nothing
 /// lowers, before handing the same `n` to the compiled loop above.
+///
+/// It was `String.indexOf` until ADR 0064 moved that into `std.string`. What
+/// the case below wants of it is only that it is an intrinsic called `n` times
+/// from a frame the tier refused, so that the mediated calls land on the
+/// encoded side of the report and nowhere else.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   var cut = 0
   var at = 0
   while at < n {
-    match s.indexOf(\"h\") {
-      Some(_) => cut = cut + 1
-      None => cut = cut - 1
-    }
+    cut = cut + s.toUpper().byteLength()
     at = at + 1
   }
   var v = Vector.of(7)
   measuresAndPushes(s, v, n) * 1000 + cut
 }
 
-/// `String.indexOf` in a compiled loop: an intrinsic whose declared effects
-/// neither allocate nor raise, so the call is a plain one — no work published,
-/// no program counter, no outcome tested, and the frame pointer kept across it.
+/// `Float.sqrt` in a compiled loop: an intrinsic whose declared effects neither
+/// allocate nor raise, so the call is a plain one — no work published, no
+/// program counter, no outcome tested, and the frame pointer kept across it.
 /// `counts(0)` for the reason it is in every fixture above.
 ///
-/// It was `String.contains` until ADR 0065 made that a Cove body over
-/// `Inst::RunFind`, which is a helper call and not an intrinsic call. `indexOf`
-/// is the same effect class and is what is left of it.
-export fn indexOfIn(s: String, n: Int) -> Int {
-  var found = counts(0)
+/// **It has been three operations, and each substitution is a migration.** It
+/// was `String.contains` until ADR 0065 made that a Cove body over
+/// `Inst::RunFind`, and `String.indexOf` until ADR 0064 wrote that over the
+/// same instruction. No `String` operation is of this effect class any longer —
+/// every text intrinsic left allocates what it answers — so the plain call is
+/// a `Float` function, which is what `cove_native::IntrinsicProtocol`'s own
+/// doc has named beside `indexOf` all along.
+///
+/// **Nothing here may look at the `Float` the call answers, and that is the
+/// subset rather than the fixture.** `cove-native`'s `subset.rs` admits exactly
+/// two float instructions: `Convert::IntToFloat`, and a plain `IntrinsicCall`
+/// whose operands and answer happen to be float words. `ConstFloat` is in no
+/// arm of it, `comparison_supported` answers `false` for `Compare::Float`, and
+/// `Arith(Float, _)` is absent too — `examples/cq` is refused three ways for
+/// exactly those three, at `programs.foldRevenue`'s `ConstFloat`,
+/// `json.renderNumber`'s `CmpBranch(Float, Eq)` and `programs.foldConfirmed`'s
+/// `Arith(Float, Mul)`. So a first version of this fixture, which folded the
+/// answer with `if at.toFloat().sqrt() < 2.0`, was refused at its `ConstFloat`
+/// with `CmpBranch(Float, Lt)` behind it, and the loop that was meant to be
+/// compiled ran in the VM.
+///
+/// What it does instead is let the answer **leave** as a `Float`, which is one
+/// word moved and needs no float instruction at all. The receiver still
+/// decides the result, through the `Int` path `byteLength` gives: it sets how
+/// many turns the loop takes, so each of the three receivers the case runs is
+/// a different answer rather than the same one three times.
+export fn sqrtsIn(s: String, n: Int) -> Float {
+  var last = counts(0).toFloat()
   var at = 0
-  while at < n {
-    if s.indexOf(\"needle\").isSome() {
-      found = found + 1
-    }
+  let rounds = n + s.byteLength()
+  while at < rounds {
+    last = at.toFloat().sqrt()
     at = at + 1
   }
-  found * 1000 + s.byteLength()
+  last
 }
 
 /// A refused caller, so the loop is reached across the boundary.
-export fn callsIndexOfIn(s: String, n: Int) -> Int {
+export fn callsSqrtsIn(s: String, n: Int) -> Float {
   let nothing = Shared(0).lock(fn(v) { v })
-  indexOfIn(s, n)
+  sqrtsIn(s, n)
 }
 
 /// `String.split` over a separator the caller chose: an intrinsic that may raise,
@@ -1907,16 +1931,16 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
 /// **An intrinsic that neither allocates nor raises is a plain call from compiled
 /// code, and answers what the VM answers.**
 ///
-/// `String.indexOf` carries neither `MAY_ALLOCATE`/`MAY_COLLECT` nor
-/// `MAY_RAISE`, so both code generators emit the call with nothing around it —
-/// see `cove_native::IntrinsicProtocol`. Under `debug_assertions`, which this
+/// `Float.sqrt` carries neither `MAY_ALLOCATE`/`MAY_COLLECT` nor `MAY_RAISE`,
+/// so both code generators emit the call with nothing around it — see
+/// `cove_native::IntrinsicProtocol`. Under `debug_assertions`, which this
 /// suite runs with, the runtime's helper also asserts the promise that makes that
 /// sound: the stack did not move and the heap did not collect.
 #[test]
 fn a_plain_intrinsic_call_from_compiled_code_agrees_with_the_vm() {
-    on_each_tier(&["indexOfIn"], &["callsIndexOfIn"]);
+    on_each_tier(&["sqrtsIn"], &["callsSqrtsIn"]);
     for text in ["hay needle hay", "haystack", ""] {
-        let both = both("callsIndexOfIn", vec![Value::string(text), Value::int(7)]);
+        let both = both("callsSqrtsIn", vec![Value::string(text), Value::int(7)]);
         assert!(both.vm.is_ok(), "`{text}`: {:?}", both.vm);
         assert_eq!(both.native, both.vm, "`{text}`: compiled code agrees");
         assert!(both.tiers.vm_to_native >= 1, "`{text}`: {:?}", both.tiers);
@@ -3245,8 +3269,8 @@ fn counted_run(
         .map_err(|error| error.message);
     assert_eq!(
         answered,
-        Ok(format!("{}", n * 1000 + n)),
-        "the loop's counter, then the `indexOf` that answered"
+        Ok(format!("{}", n * 1000 + 5 * n)),
+        "the loop's counter, then five bytes per `toUpper` of `hello`"
     );
     vm.boundary()
 }
@@ -3256,12 +3280,12 @@ fn counted_run(
 /// ADR 0058's Phase 1 asks for "emitted IR, mediated intrinsics, encoded VM
 /// instructions, native-to-VM crossings and native-to-runtime calls" to be
 /// reported separately. `countsTheBoundary` is refused and calls
-/// `indexOf` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
+/// `toUpper` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
 /// `byteLength` and `push` `n` times each in machine code. So each lands in a
 /// different place, and a report that lumped any two of them together would fail
 /// one of the rows below:
 ///
-/// - `String.indexOf`: `n` from the encoded tier, none from native code;
+/// - `String.toUpper`: `n` from the encoded tier, none from native code;
 /// - `String.byteLength`: not an intrinsic at all. It is `std.string` over
 ///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
@@ -3329,7 +3353,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .intrinsic(intrinsic)
             .unwrap_or_else(|| panic!("the program names {intrinsic}"))
     };
-    assert_eq!(row(&on_vm, Intrinsic::StringIndexOf).sites, 1);
+    assert_eq!(row(&on_vm, Intrinsic::StringToUpper).sites, 1);
     assert_eq!(
         on_vm.emitted.intrinsic_sites,
         on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
@@ -3342,9 +3366,9 @@ fn the_boundary_report_counts_each_quantity_apart() {
         let held = row(report, intrinsic);
         (held.encoded, held.native)
     };
-    assert_eq!(calls(&on_vm, Intrinsic::StringIndexOf), (n, 0));
+    assert_eq!(calls(&on_vm, Intrinsic::StringToUpper), (n, 0));
     for report in [&on_native, &uncounted] {
-        assert_eq!(calls(report, Intrinsic::StringIndexOf), (n, 0));
+        assert_eq!(calls(report, Intrinsic::StringToUpper), (n, 0));
         // Sorted by dynamic calls, most first.
         assert!(report
             .intrinsics

@@ -214,7 +214,7 @@ written as a namespace.
 | `contains(text: String) -> Bool` |  |  |  | `std.string.contains` |
 | `startsWith(prefix: String) -> Bool` |  |  |  | `std.string.startsWith` |
 | `endsWith(suffix: String) -> Bool` |  |  |  | `std.string.endsWith` |
-| `indexOf(text: String) -> Option<Int>` |  |  |  | `machine` |
+| `indexOf(text: String) -> Option<Int>` |  |  |  | `std.string.indexOf` |
 | `replace(old: String, new: String) -> String` |  |  |  | `machine` |
 | `toUpper() -> String` |  |  |  | `machine` |
 | `toLower() -> String` |  |  |  | `machine` |

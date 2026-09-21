@@ -318,15 +318,21 @@ adds three byte-counted `String` primitives — `byteLength`,
 allocating a one-character `String` per character. `length`, `slice` and
 `indexOf` still count characters and do not change; what keeps the two index
 spaces apart is that a byte offset is a value those three hand out and take
-back, named so in every signature, rather than a way to index a `String`. A
-code point is an `Int` and there is no `Char`. It also settles two of the
+back, named so in every signature, rather than a way to index a `String`.
+That line is where `std.string.indexOf` is now written: ADR 0064 moved the
+method into Cove over the same run search `contains` stands on, and the body
+is a byte offset from the machine turned into a character position by walking
+the prefix — the two index spaces, converted in the one place that has to know
+both. A code point is an `Int` and there is no `Char`. It also settles two of the
 methods that were waiting on it by measuring them: a Cove `contains` is 101×
 the builtin, so `contains`, `startsWith` and `endsWith` stayed primitive,
 while a Cove `Int.parse` is 6.3× and reads as arithmetic. All three predicates
-have since been taken back, and the two halves went different ways. ADR 0064
-made `endsWith` and `startsWith` Cove loops over these very byte primitives,
-each comparing a needle whose length is known — and what that costs is not
-what scanning a whole haystack for a substring costs.
+have since been taken back, and with `indexOf` that is all four of the
+`String` searches this ADR left below the standard library. The halves went
+different ways. ADR 0064 made `endsWith` and `startsWith` Cove loops over
+these very byte primitives, each comparing a needle whose length is known —
+and what that costs is not what scanning a whole haystack for a substring
+costs.
 [ADR 0065](docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)
 took `contains`, the one the 101× was actually measured on, and the reason it
 needed an ADR of its own is that a Cove loop was not enough for it: its work
@@ -334,7 +340,11 @@ is proportional to a haystack the caller did not size, and a Cove scan pays a
 VM dispatch per byte of one where an instruction pays one for the whole
 search. So the method is Cove — `std.string.contains` — over a new run
 instruction underneath it, `run-find`, a bounded byte search chunked, charged
-and polled the way a run copy is. The 101× itself did not survive the
+and polled the way a run copy is. `indexOf` followed it onto the same
+instruction and is the last of the four: a search answers a byte offset, and
+turning that into the character position the method promises is a walk of the
+prefix in Cove, because a unit is a policy and an offset is not. The 101×
+itself did not survive the
 measurement either: the intrinsic it was against was copying both operands
 before it looked at them, and the honest figure once that was removed is
 about 17×.

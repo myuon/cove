@@ -2,7 +2,25 @@
 ///
 /// Characters and not bytes: a two-byte character counts one here and two in
 /// [`byteLength`]. That difference is the whole of the line between them, and
-/// it is why this walks the text where `byteLength` reads a header word.
+/// it is why this walks the text where `byteLength` reads a header word. The
+/// walk is [`charactersBefore`], whose bound here is the whole string.
+///
+/// It was `chars().count()` in Rust, one `IntrinsicCall` per call and the
+/// most-called one in the repository. ADR 0064 moves it here: a character
+/// count is a policy over a representation, not an operation of the machine,
+/// and the bound below it is `core.byteLength` — a header load — with one run
+/// load a character over it. A loop the native tier compiles, in place of a
+/// call it can only cross back out of.
+export fn length(text: String) -> Int {
+  charactersBefore(text, core.byteLength(text))
+}
+
+/// How many characters begin before byte `end` of `text`.
+///
+/// The one UTF-8 walk in this file, under [`length`] and [`indexOf`]. Both
+/// ask the same question of the same bytes and differ only in where they stop
+/// — the whole string, and the offset a search answered — so one body takes a
+/// bound and the callers supply it.
 ///
 /// A `String` is valid UTF-8 in its shortest form — nothing makes one from
 /// anything else — so the lead byte alone says how wide the character it
@@ -14,17 +32,32 @@
 /// width it read, so it lands on a lead byte every time and never asks a
 /// continuation byte how wide it is.
 ///
-/// It was `chars().count()` in Rust, one `IntrinsicCall` per call and the
-/// most-called one in the repository. ADR 0064 moves it here: a character
-/// count is a policy over a representation, not an operation of the machine,
-/// and the bound below it is `core.byteLength` — a header load — with one run
-/// load a character over it. A loop the native tier compiles, in place of a
-/// call it can only cross back out of.
-export fn length(text: String) -> Int {
-  let bytes = core.byteLength(text)
+/// **`end` must begin a character**, or be the end of the string. Both
+/// callers' do: one is the byte length, and the other is where a needle's
+/// bytes were found, which [`indexOf`] argues is a boundary. Nothing checks
+/// it — a bound inside a character would make the walk step past it and count
+/// on, which is a wrong answer rather than an unsound read, and this is a
+/// private body with two callers rather than an API.
+///
+/// **The factoring was measured rather than assumed**, by the rule the
+/// [`startsWith`] migration set: it is taken only if the lowered instruction
+/// sequence at the existing caller's sites is unchanged. It is. At
+/// `covefmt.column` — 137,904 calls over this repository's 274 `.cove` files,
+/// and three inlined copies of this loop — every program counter holds the
+/// same opcode with the same execution count before and after, and only the
+/// frame slots the temporaries land in are renumbered; the function's total
+/// is 31,232,910 instructions either way. Whole programs say the same: covefmt
+/// is 831,921,093 instructions, 4,098,232 allocations and 51,338,466 allocated
+/// words on both sides, and cq 264,229,256 and 272,100,121 fuel on both. The
+/// inliner expands this into [`length`] and [`length`] into its callers, so
+/// the shared body costs a call at no site at all. `matchesAt` was refused in
+/// the [`startsWith`] round on the same rule, for +2,178 instructions at
+/// covefmt's one `endsWith` site — the rule is what differs between the two
+/// answers, not the taste.
+fn charactersBefore(text: String, end: Int) -> Int {
   var at = 0
   var count = 0
-  while at < bytes {
+  while at < end {
     let lead = text.byteAt(at)
     if lead < 128 {
       at += 1
@@ -224,6 +257,60 @@ export fn contains(text: String, needle: String) -> Bool {
     return false
   }
   return true
+}
+
+/// Where `needle` first occurs in this string, in **characters**, or `None`
+/// when it does not occur.
+///
+/// One `core.stringFind` — the same `Inst::RunFind` [`contains`] stands on,
+/// and the same argument for why a search is the one loop that stays below
+/// the standard library — and then a walk of the text in front of what it
+/// found. The instruction answers a **byte** offset and this answers a
+/// **character** position, because that is the unit `length`, `slice` and
+/// `chars` all count in and a string's API may not deal in two.
+///
+/// That a byte match is a character match, at whatever offset, is
+/// [`contains`]' argument and is made in full there: UTF-8 is
+/// self-synchronizing, so the needle's own first byte is a lead byte and the
+/// byte the match lands on equals it; the needle's bytes are whole characters,
+/// so the far end is a boundary too. Nothing below needs it again — what is
+/// left here is only counting the characters before a boundary already known
+/// to be one.
+///
+/// **The count walks the prefix's bytes where they are.** It is
+/// [`charactersBefore`], [`length`]'s own loop over a shorter run: each lead
+/// byte read and the width that byte declares stepped over. It builds
+/// nothing — a `sliceBytes(0, at)` whose characters were then counted would
+/// allocate a whole second copy of the prefix to answer a question about bytes
+/// the receiver already holds, on the path a scanner takes most often.
+///
+/// A needle that is nowhere answers `None` before a byte is walked, and an
+/// empty needle occurs at byte 0, so it answers `Some(0)` — which is what
+/// `"".find("")` and `"abc".find("")` answer, and what `str::find` answers in
+/// both. `tests/e2e/values_string_index_of` asserts all three rather than
+/// leaving them to be obvious.
+///
+/// **That the walk is shared with [`length`] was measured**, by the rule the
+/// [`startsWith`] migration set and against which that round refused
+/// `matchesAt`: a factoring is taken only if the lowered sequence at the
+/// existing caller's sites is unchanged. [`charactersBefore`] records the
+/// measurement — it is unchanged, opcode for opcode and count for count.
+///
+/// It was `str::find` in Rust, with `chars().count()` over the prefix, reached
+/// through one `IntrinsicCall`. ADR 0064 moves it here for Decision 2's
+/// reason: `indexOf` is a method's name and would have to be renamed the day
+/// the method was. What is underneath it now is named for the machine — find
+/// a byte run inside a byte run from an offset — and the conversion from what
+/// the machine found to what the API promises is policy, so it is Cove.
+///
+/// Each question is an `if` of its own and the answer is a `return`, for the
+/// reasons [`sliceBytes`] gives.
+export fn indexOf(text: String, needle: String) -> Option<Int> {
+  let found = core.stringFind(text, needle, 0)
+  if found < 0 {
+    return None
+  }
+  return Some(charactersBefore(text, found))
 }
 
 /// How many bytes this string's UTF-8 encoding is.

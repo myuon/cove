@@ -47,7 +47,6 @@ pub enum Intrinsic {
     StringJoin,
     StringSlice,
     StringTrim,
-    StringIndexOf,
     StringReplace,
     StringToUpper,
     StringToLower,
@@ -82,7 +81,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringJoin,
     Intrinsic::StringSlice,
     Intrinsic::StringTrim,
-    Intrinsic::StringIndexOf,
     Intrinsic::StringReplace,
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
@@ -134,7 +132,6 @@ impl Intrinsic {
             Intrinsic::StringJoin => "String",
             Intrinsic::StringSlice => "String",
             Intrinsic::StringTrim => "String",
-            Intrinsic::StringIndexOf => "String",
             Intrinsic::StringReplace => "String",
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
@@ -167,7 +164,6 @@ impl Intrinsic {
             Intrinsic::StringJoin => "join",
             Intrinsic::StringSlice => "slice",
             Intrinsic::StringTrim => "trim",
-            Intrinsic::StringIndexOf => "indexOf",
             Intrinsic::StringReplace => "replace",
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
@@ -243,7 +239,6 @@ impl Intrinsic {
             | Intrinsic::StringJoin
             | Intrinsic::StringSlice
             | Intrinsic::StringTrim
-            | Intrinsic::StringIndexOf
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower
@@ -295,7 +290,6 @@ impl Intrinsic {
             Intrinsic::StringTrim | Intrinsic::StringToUpper | Intrinsic::StringToLower => {
                 fixed(&[C::Str], C::Str)
             }
-            Intrinsic::StringIndexOf => fixed(&[C::Str, C::Str], C::OptionOf(K::Int)),
             Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
             Intrinsic::StringFromCodePoint => fixed(&[C::Int], C::ResultOf(K::Str)),
             // The text and the two offsets a refusal is worded with, in the
@@ -326,8 +320,8 @@ impl Intrinsic {
     /// Assigned by reading the VM arm each intrinsic dispatches to in
     /// `cove-runtime`'s `vm::intrinsics`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
-    /// differently, the way [`Intrinsic::StringIndexOf`] allocates nothing
-    /// and [`Intrinsic::StringSlice`] does.
+    /// differently, the way [`Intrinsic::StringRefuseByteRange`] allocates
+    /// nothing and [`Intrinsic::StringSlice`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // `MAY_RAISE` is language-level failure only (#378, Q5.3). An arm no
@@ -369,20 +363,20 @@ impl Intrinsic {
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower => allocate.union(E::READS_MEMORY).union(E::BULK_WORK),
-            // `indexOf` searches the receiver without allocating anything,
-            // and a search cannot fail: its `Option` is words written into the
-            // destination, of a layout the verifier has already found. There
-            // were four of these. `startsWith` and `endsWith` left first, for
-            // ADR 0064's reason: a bounded byte comparison is a Cove loop over
-            // `byteAt`, the same reading and the same proportionality, charged
-            // an instruction at a time instead of declared a flag at a time.
-            // `contains` left next and differently — ADR 0065 gave it
-            // `Inst::RunFind` to stand on, because its work is proportional to
-            // a haystack the caller did not size and a dispatch per byte of
-            // one is what an instruction is for. `indexOf` will follow it onto
-            // the same instruction, so this arm is the last of a family rather
-            // than a survivor of it.
-            Intrinsic::StringIndexOf => E::READS_MEMORY.union(E::BULK_WORK),
+            // No predicate or search of a `String` is here any more, and
+            // that is the whole of ADR 0046's four. `startsWith` and
+            // `endsWith` left first, for ADR 0064's reason: a bounded byte
+            // comparison is a Cove loop over `byteAt`, the same reading and
+            // the same proportionality, charged an instruction at a time
+            // instead of declared a flag at a time. `contains` left next and
+            // differently — ADR 0065 gave it `Inst::RunFind` to stand on,
+            // because its work is proportional to a haystack the caller did
+            // not size and a dispatch per byte of one is what an instruction
+            // is for. `indexOf` followed it onto the same instruction, and the
+            // byte offset that instruction answers becomes a character
+            // position in `std.string.indexOf`, a walk of the prefix's lead
+            // bytes. With it went the last arm here that read without
+            // allocating.
             // `codePointAtByte` is not here: it is `std.string`, a decode in
             // Cove over one run load a byte.
             // `fromCodePoint` reads no receiver — its one argument is an
@@ -677,7 +671,6 @@ mod tests {
             "String.join",
             "String.slice",
             "String.trim",
-            "String.indexOf",
             "String.replace",
             "String.toUpper",
             "String.toLower",
@@ -755,7 +748,6 @@ mod tests {
                 | Intrinsic::StringJoin
                 | Intrinsic::StringSlice
                 | Intrinsic::StringTrim
-                | Intrinsic::StringIndexOf
                 | Intrinsic::StringReplace
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
@@ -875,16 +867,22 @@ mod tests {
     }
 
     /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so the
-    /// intrinsics no program can be stopped by say so: the one search left,
-    /// which allocates nothing and always has an answer, and the `Float`
-    /// functions IEEE 754 answers for every input. A character count used to
-    /// head this list; a suffix test, then a prefix test, then a whole-haystack
-    /// search sat in the middle of it; none of the four is an intrinsic any
-    /// more — ADR 0064 made `String.length`, `String.endsWith` and
-    /// `String.startsWith` Cove loops, one migration each, and ADR 0065 made
-    /// `String.contains` a Cove body over `Inst::RunFind` — which is the shape
-    /// a migration leaves here: a line gone from the vector and a numeral
-    /// changed in this sentence, rather than a flag changed.
+    /// intrinsics no program can be stopped by say so: the `Float` functions
+    /// IEEE 754 answers for every input, and nothing else at all. **Every one
+    /// of the five is infallible in the arithmetic sense rather than in the
+    /// bookkeeping one**, and that is new. A character count used to head this
+    /// list; a suffix test, a prefix test, a whole-haystack search and a
+    /// search that answers a position sat under it; none of the five is an
+    /// intrinsic any more — ADR 0064 made `String.length`, `String.endsWith`
+    /// and `String.startsWith` Cove loops, one migration each, and ADR 0065
+    /// made `String.contains` and then `String.indexOf` Cove bodies over
+    /// `Inst::RunFind` — which is the shape a migration leaves here: a line
+    /// gone from the vector and a sentence changed, rather than a flag
+    /// changed.
+    ///
+    /// It is also why `vm::exec`'s `unraisable` no longer has an end-to-end
+    /// case: that panic needs an arm that can answer an `Err` while its
+    /// variant declares no `MAY_RAISE`, and the five below each answer `()`.
     #[test]
     fn raising_is_language_level() {
         let never: Vec<Intrinsic> = ALL
@@ -895,7 +893,6 @@ mod tests {
         assert_eq!(
             never,
             vec![
-                Intrinsic::StringIndexOf,
                 Intrinsic::FloatRound,
                 Intrinsic::FloatAbs,
                 Intrinsic::FloatSqrt,

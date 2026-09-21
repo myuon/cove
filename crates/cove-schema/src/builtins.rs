@@ -1005,8 +1005,11 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
     // character boundary in every string there is, so it owes no
     // self-synchronization argument at all — only that a prefix's own bytes
     // end at a boundary. `Intrinsic::StringStartsWith` is gone in the same
-    // change, and `String.contains` and `String.indexOf` are what is left of
-    // the three predicates ADR 0046 measured together.
+    // change; `String.contains` and `String.indexOf` were what was left of the
+    // four searches ADR 0046 measured together, and both have since gone the
+    // other way — onto ADR 0065's run search rather than into a Cove loop,
+    // because their work is proportional to a haystack the caller did not
+    // size. Nothing of ADR 0046's set is below the standard library now.
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "String",
@@ -1074,6 +1077,21 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "contains",
         module: "std.string",
         function: "contains",
+    },
+    // The same instruction, converted the other way. `contains` compares
+    // `core.stringFind`'s answer against -1; `indexOf` turns it from the byte
+    // offset the machine found into the character position the API promises,
+    // by walking the prefix's lead bytes where they are. The conversion is a
+    // policy over a representation, which is Decision 2's own line, so it is
+    // Cove — and `Intrinsic::StringIndexOf`, the last of ADR 0046's four
+    // predicates and the last `Text` intrinsic that read without allocating,
+    // is gone in the same change.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "indexOf",
+        module: "std.string",
+        function: "indexOf",
     },
     StdBinding {
         kind: StdBindingKind::Method,
@@ -1915,18 +1933,22 @@ pub const CORE_STRING_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// [ADR 0065](../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)
 /// adds as the sixth member of ADR 0058's run family. It is named for the
 /// machine and not for a method, which is ADR 0064's Decision 2 test: the
-/// three public operations over it — `contains`, `indexOf` and one day
+/// three public operations over it — `contains` and `indexOf`, and one day
 /// `split` — would each have to be renamed the day their method was, and none
-/// of them is this. What this is, is *find a byte run inside a byte run from
-/// an offset*, and it would answer the same for bytes that never came from
-/// text.
+/// of them is this. Two of the three are written over it now, and they answer
+/// different questions about the same number: one whether it is -1, one how
+/// many characters are in front of it. What this is, is *find a byte run
+/// inside a byte run from an offset*, and it would answer the same for bytes
+/// that never came from text.
 ///
 /// So it knows nothing about characters. The answer is a **byte** offset, not
 /// a character position, and a match is a match of bytes; that a byte match of
 /// a valid-UTF-8 needle in a valid-UTF-8 text is also a character match is
 /// `std.string.contains`' argument and is made there, the way
 /// `std.string.endsWith` makes it for its own offset. `std.string.indexOf`
-/// walks characters over this to answer the position its API promises.
+/// walks the characters in front of this answer to give the position its API
+/// promises, which is the one place in the language where the two index
+/// spaces meet.
 ///
 /// An empty needle answers `from`; a needle longer than what is left of the
 /// text answers -1. A `from` outside `0 ..= text.byteLength()` **stops the

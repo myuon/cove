@@ -1183,6 +1183,275 @@ export fn f(s: String) -> String {
     }
 }
 
+/// **`String.indexOf` answers a character position, against `str::find` and
+/// `chars().count()` over a corpus.**
+///
+/// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)
+/// moved the search into `std.string.indexOf`, which is one `core.stringFind`
+/// — ADR 0065's byte run search — and then a walk of the text in front of what
+/// it found. The instruction answers a **byte** offset; the method answers a
+/// **character** position. That conversion is the whole of what this body adds
+/// over `std.string.contains`, and it is the one thing the two evaluators
+/// cannot catch between them: both run the same Cove, so both are wrong
+/// together. **So the oracle here is Rust's**, exactly as
+/// `tests/e2e/values_string_index_of` reasoned its lines from the encoding and
+/// then checked them against it — `s.find(n).map(|b| s[..b].chars().count())`,
+/// the two halves written out.
+///
+/// The corpus is every character-boundary substring of each haystack, which is
+/// a needle at every position and of every length including the empty one,
+/// plus a fixed set of needles from other alphabets that are mostly
+/// near-misses: `z` in a Greek haystack, `é` in a Japanese one, a lone U+0082
+/// whose single byte `あ` ends with. The haystacks cross the widths on purpose
+/// and several of them *begin* with a multi-byte character, because a prefix
+/// of one is exactly what makes the byte offset and the character position
+/// two different numbers.
+///
+/// **That difference is counted rather than assumed.** A corpus that drifted
+/// to ASCII would agree with a body that forwarded the instruction's byte
+/// offset unchanged, and would say nothing at all; the assertion at the end is
+/// how many pairs actually disagree about the two numbers, and it is in the
+/// hundreds.
+///
+/// One compiled program for the whole corpus rather than one per pair: the
+/// pairs go in as an `Array<String>` and the answers come back as one string,
+/// because compiling the standard library several hundred times is the only
+/// expensive part of asking this.
+#[test]
+fn an_index_is_a_character_position_against_rusts_own() {
+    /// The oracle: the byte offset `str::find` answers, converted to the
+    /// character position `String.length` counts in.
+    fn oracle(haystack: &str, needle: &str) -> String {
+        match haystack.find(needle) {
+            Some(byte) => format!("Some({})", haystack[..byte].chars().count()),
+            None => "None".to_string(),
+        }
+    }
+
+    // Widths one through four, alone and mixed, with several haystacks whose
+    // first character is not ASCII. None of them holds a quote or a brace, so
+    // nothing below has to be escaped into a Cove literal.
+    const HAYSTACKS: &[&str] = &[
+        "",
+        "a",
+        "abc",
+        "aaab",
+        "banana",
+        "abcabcabd",
+        "é",
+        "éa",
+        "aé",
+        "ééé",
+        "é😀abc",
+        "abcé😀",
+        "αβγδε",
+        "ααββγγ",
+        "日本語テスト",
+        "あいうあいう",
+        "héllo wörld",
+        "😀😁😂",
+        "😀a😀a😀",
+        "aéb😀cあd",
+        "xyé😀zw",
+        "é😀あいabc",
+        // Long multi-byte prefixes in front of ASCII tails, which is where the
+        // two numbers are furthest apart: every substring of the tail is found
+        // at a byte offset several times its character position.
+        "ééééabcd",
+        "😀😀😀abcd",
+        "あいうえおabc",
+        "αβγδεabcd",
+        "日本語abcde",
+        "😀é日αabcd",
+    ];
+
+    // Needles from elsewhere, so that a miss is asked for as often as a hit.
+    // U+0082 is `C2 82` and `あ` is `E3 81 82`: the two share their last byte
+    // and nothing else, which is the miss a search of single bytes would get
+    // wrong.
+    let control = char::from_u32(130).expect("a code point").to_string();
+    let foreign: Vec<String> = ["z", "zz", "é", "è", "😀", "😁", "あ", "ア", "γ", "ab", "ba"]
+        .iter()
+        .map(|each| each.to_string())
+        .chain([control])
+        .collect();
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for haystack in HAYSTACKS {
+        let bounds: Vec<usize> = haystack
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain([haystack.len()])
+            .collect();
+        for (at, from) in bounds.iter().enumerate() {
+            for to in &bounds[at..] {
+                pairs.push((haystack.to_string(), haystack[*from..*to].to_string()));
+            }
+        }
+        for needle in &foreign {
+            pairs.push((haystack.to_string(), needle.clone()));
+        }
+    }
+    assert!(pairs.len() > 900, "{} pairs is not a corpus", pairs.len());
+
+    let source = r#"
+export fn f(pairs: Array<String>) -> String {
+  var out = ""
+  var i = 0
+  while i + 1 < pairs.length() {
+    let haystack = pairs.get(i).unwrapOr("")
+    let needle = pairs.get(i + 1).unwrapOr("")
+    out = "{out} {haystack.indexOf(needle)}"
+    i = i + 2
+  }
+  out
+}
+"#;
+    let flattened: Vec<String> = pairs
+        .iter()
+        .flat_map(|(haystack, needle)| [haystack.clone(), needle.clone()])
+        .collect();
+    let want: String = pairs
+        .iter()
+        .map(|(haystack, needle)| format!(" {}", oracle(haystack, needle)))
+        .collect();
+
+    // Both backends, and both against Rust. The two are asserted against each
+    // other as every case here does; the equality after it is what neither of
+    // them could supply. `agree` itself is not used because it passes scalars
+    // — an `Rc`-based `Value` does not cross a thread — so the array is
+    // rebuilt on each side out of the `Vec<String>`, which does, exactly as
+    // `a_string_method_agrees` rebuilds its receiver.
+    let built = |held: Vec<String>| vec![Value::array(held.into_iter().map(Value::string))];
+    let oracle_says = {
+        let (source, held) = (source.to_string(), flattened.clone());
+        on_a_deep_stack(move || on_the_oracle(&source, "f", built(held)))
+    };
+    let machine_says = {
+        let (source, held) = (source.to_string(), flattened.clone());
+        on_a_deep_stack(move || on_the_machine(&source, "f", built(held)))
+    };
+    assert_eq!(
+        machine_says, oracle_says,
+        "the machine and the interpreter do not agree about `indexOf`"
+    );
+    assert_eq!(
+        machine_says,
+        Answer::Value(want),
+        "an answer disagrees with `str::find` and `chars().count()`"
+    );
+
+    // A corpus that had drifted to ASCII would pass everything above against a
+    // body that answered the instruction's byte offset unchanged. This is how
+    // many of the pairs the two numbers are actually different for.
+    let differing = pairs
+        .iter()
+        .filter(|(haystack, needle)| match haystack.find(needle.as_str()) {
+            Some(byte) => haystack[..byte].chars().count() != byte,
+            None => false,
+        })
+        .count();
+    assert!(
+        differing > 200,
+        "only {differing} pair(s) have a byte offset that is not the character \
+         position, which is too few to be testing the conversion"
+    );
+}
+
+/// **`String.indexOf` lowers to one run search and a walk, and to no
+/// `IntrinsicCall` at all.**
+///
+/// This is the structural half of the migration, asserted rather than
+/// eyeballed. [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 8 says the variant dies in the stage that migrates its last
+/// producer, and a body that still reached a runtime arm would pass every
+/// semantic case above while migrating nothing.
+///
+/// Three claims, and each would fail differently:
+///
+/// - **no `Inst::IntrinsicCall` anywhere in the lowered program**, and so no
+///   `IntrinsicSite` either — the static count `--boundary` reports for
+///   `String.indexOf` is gone because there is nothing to count;
+/// - **exactly one `Inst::RunFind`**, which is the `core.stringFind`
+///   ADR 0065 already added, expanded at the one call site. One and not two:
+///   a body that searched again to count would be a second search;
+/// - **no run instruction but that search and the byte loads the walk makes.**
+///   The migration adds no primitive: `RunFind` for the search, `RunLoad`
+///   over `Storage::PackedBytes` for `byteAt`, and `Len` for `byteLength`,
+///   which are what `std.string.contains` and `std.string.length` were
+///   already built from. A `RunSlice` here would be the temporary `String`
+///   the walk exists not to build.
+#[test]
+fn an_index_of_lowers_to_a_run_find_and_a_walk_and_no_builtin_call() {
+    let source = r#"
+export fn f(s: String, needle: String) -> Option<Int> {
+  s.indexOf(needle)
+}
+"#;
+    let (sources, checked) = checked(source);
+    // From the one entry, as `cove run` lowers it, so that what is walked
+    // below is this program's own reachable code and not every standard-library
+    // body in the package.
+    let program = cove_ir::lower_entry(
+        &checked,
+        &sources,
+        &cove_schema::HostSchemas::new(),
+        "m",
+        "f",
+    )
+    .expect("the program lowers");
+
+    for function in &program.functions {
+        assert!(
+            function
+                .code
+                .iter()
+                .all(|inst| !matches!(inst, cove_ir::Inst::IntrinsicCall { .. })),
+            "`{}.{}` makes a builtin call: {:?}",
+            function.module,
+            function.name,
+            function.code
+        );
+    }
+    assert!(
+        program.intrinsic_sites.is_empty(),
+        "a program whose only builtin is `indexOf` names {} intrinsic site(s)",
+        program.intrinsic_sites.len()
+    );
+
+    let mut finds = 0;
+    let mut loads = 0;
+    let mut lengths = 0;
+    let mut other: Vec<String> = Vec::new();
+    for function in &program.functions {
+        for inst in &function.code {
+            match inst {
+                cove_ir::Inst::RunFind { storage, .. } => {
+                    assert_eq!(*storage, cove_ir::Storage::PackedBytes, "{inst:?}");
+                    finds += 1;
+                }
+                cove_ir::Inst::RunLoad { storage, .. } => {
+                    assert_eq!(*storage, cove_ir::Storage::PackedBytes, "{inst:?}");
+                    loads += 1;
+                }
+                cove_ir::Inst::Len { .. } => lengths += 1,
+                cove_ir::Inst::RunSlice { .. }
+                | cove_ir::Inst::RunCopy { .. }
+                | cove_ir::Inst::RunStore { .. }
+                | cove_ir::Inst::RunFinish { .. } => other.push(format!("{inst:?}")),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(finds, 1, "one run search and not two");
+    assert_eq!(loads, 1, "one byte load, which is the walk's `byteAt`");
+    assert_eq!(lengths, 0, "the walk is bounded by the search's own answer");
+    assert!(
+        other.is_empty(),
+        "`indexOf` lowers to a run instruction it has no business in: {other:?}"
+    );
+}
+
 #[test]
 fn a_scalar_method_agrees() {
     let source = r#"

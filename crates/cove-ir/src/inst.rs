@@ -865,7 +865,9 @@ pub enum Inst {
     /// - **Not found is -1.** Not an `Option`: an instruction answers a word,
     ///   and the standard library builds what the public API needs —
     ///   `std.string.contains` a `Bool`, `std.string.indexOf` an `Option<Int>`
-    ///   in *character* positions after a walk of its own.
+    ///   in *character* positions after a walk of its own — which it does, as
+    ///   of ADR 0064's fifth Phase 1 migration, so both of those sentences are
+    ///   now about code rather than about a plan.
     /// - **An empty needle answers `from`.** The empty needle occurs at every
     ///   position including the end, which is what `str::find("")` answers.
     /// - **A needle longer than `haystack_len - from` answers -1**, and is not

@@ -1,0 +1,173 @@
+use console.println
+
+/// `indexOf` at every character width, and wherever a byte offset and a
+/// character position are different numbers.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)
+/// moved the search out of the runtime and into `std.string.indexOf`, which is
+/// one `core.stringFind` — the IR's `run-find`, a bounded search over a run of
+/// packed bytes, the same instruction `std.string.contains` stands on — and
+/// then a walk of the text in front of what it found. `str::find` with
+/// `chars().count()` over the prefix matched the same bytes and counted the
+/// same characters, so the two cannot disagree about any input.
+///
+/// **The conversion is what this suite is mostly about**, because it is the
+/// half `contains` does not have. `values_string_contains` beside this file
+/// asks whether a needle occurs; this asks *where*, and the answer is in
+/// characters where the instruction underneath answers in bytes. Every group
+/// below whose receiver is not ASCII is a case where those two numbers differ,
+/// and a body that forwarded the instruction's answer would pass every ASCII
+/// line here and fail every other one.
+///
+/// The first group is the answers reached before any byte is examined: an
+/// empty needle occurs at 0, which is what `"".find("")` and `"abc".find("")`
+/// both answer, and a needle longer than the receiver occurs nowhere.
+///
+/// The middle groups are where the *shift* is, and they are `contains`'
+/// cases asked for a position instead of a `Bool`. `aaab` against `aab` is
+/// three overlapping candidates, the first of which fails at its last byte, so
+/// a matcher that restarted at the byte after the one it started at would miss
+/// the match at 1. `abcabcabd` against `abcabd` is the same question about a
+/// repeated prefix: the candidate at 0 agrees for five bytes and the match is
+/// at 3. `banana` against `ana` has two matches and the first is the answer.
+///
+/// The character-width groups are the boundary argument as a set of cases.
+/// `é` is `C3 A9` and `ä` is `C3 A4` — one byte of agreement; `あ` is
+/// `E3 81 82` and `ア` is `E3 82 A2`; `😀` is `F0 9F 98 80` and `😁` is
+/// `F0 9F 98 81` — three bytes of agreement and a difference in the last.
+/// A byte match of a valid needle begins at a lead byte, which begins a
+/// character, so no match can land inside one and no miss can be read as one.
+///
+/// U+0082 is `C2 82` and `あ` is `E3 81 82`: the two share their last byte and
+/// nothing else, so a run of `あ` holds `82` three times and `C2 82` never.
+///
+/// The harness runs this on the linear-memory backend and again with
+/// `--backend ast`, and both runs are held to the one `expected.out`.
+export fn main() -> Result<Unit, Error> {
+  // An empty needle is at 0, in the empty string as much as in a full one.
+  let empty = ""
+  let cove = "cove"
+  println("empty/empty {empty.indexOf(empty)}")?
+  println("cove/empty {cove.indexOf(empty)}")?
+
+  // Nothing occurs in the empty string, and a needle longer than the receiver
+  // occurs nowhere.
+  println("empty/a {empty.indexOf("a")}")?
+  println("cov/cove {"cov".indexOf(cove)}")?
+
+  // The receiver as its own needle, which matches at 0 and reads both runs to
+  // their ends.
+  println("cove/cove {cove.indexOf(cove)}")?
+
+  // A match at the start, in the middle and at the very end, and one that is
+  // nowhere. `alphabet` is eight ASCII bytes, so here the byte offset and the
+  // character position are the same number — which is what makes the groups
+  // below worth having.
+  let alphabet = "alphabet"
+  println("alphabet/alp {alphabet.indexOf("alp")}")?
+  println("alphabet/hab {alphabet.indexOf("hab")}")?
+  println("alphabet/bet {alphabet.indexOf("bet")}")?
+  println("alphabet/t {alphabet.indexOf("t")}")?
+  println("alphabet/a {alphabet.indexOf("a")}")?
+  println("alphabet/zed {alphabet.indexOf("zed")}")?
+  println("alphabet/alphabets {alphabet.indexOf("alphabets")}")?
+
+  // Overlapping candidates. `aaab` holds `aab` at 1, and the candidate at 0
+  // fails at its third byte.
+  println("aaab/aab {"aaab".indexOf("aab")}")?
+  println("aaa/aaaa {"aaa".indexOf("aaaa")}")?
+  println("aaaa/aaaa {"aaaa".indexOf("aaaa")}")?
+  println("abababab/abab {"abababab".indexOf("abab")}")?
+  println("abababab/abba {"abababab".indexOf("abba")}")?
+  println("banana/ana {"banana".indexOf("ana")}")?
+  println("banana/anana {"banana".indexOf("anana")}")?
+
+  // A repeating prefix: the candidate at 0 agrees for five of six bytes, and
+  // the answer is 3.
+  println("abcabcabd/abcabd {"abcabcabd".indexOf("abcabd")}")?
+  println("abcabcabd/abcabc {"abcabcabd".indexOf("abcabc")}")?
+  println("abcabcabd/abcabe {"abcabcabd".indexOf("abcabe")}")?
+
+  // Two bytes a character: `é` is U+00E9, `C3 A9`, `è` is U+00E8, `C3 A8`,
+  // and `ä` is U+00E4, `C3 A4`. All three share their lead byte. `école` is
+  // six bytes and five characters, so `col` is at byte 2 and character 1.
+  let ecole = "école"
+  println("école/é {ecole.indexOf("é")}")?
+  println("école/col {ecole.indexOf("col")}")?
+  println("école/e {ecole.indexOf("e")}")?
+  println("école/è {ecole.indexOf("è")}")?
+  println("école/ä {ecole.indexOf("ä")}")?
+
+  // Three bytes: `あいう` is `E3 81 82 | E3 81 84 | E3 81 86`, nine bytes and
+  // three characters, so `い` is at byte 3 and character 1.
+  let kana = "あいう"
+  println("あいう/い {kana.indexOf("い")}")?
+  println("あいう/いう {kana.indexOf("いう")}")?
+  println("あいう/ア {kana.indexOf("ア")}")?
+  println("あいう/うあ {kana.indexOf("うあ")}")?
+
+  // Four bytes: `😀` is U+1F600, `F0 9F 98 80`, and `😁` is U+1F601,
+  // `F0 9F 98 81`.
+  let faces = "x😀y"
+  println("x😀y/😀 {faces.indexOf("😀")}")?
+  println("x😀y/y {faces.indexOf("y")}")?
+  println("x😀y/😁 {faces.indexOf("😁")}")?
+
+  // **The byte offset and the character position, side by side.** `é😀abc` is
+  // `C3 A9 | F0 9F 98 80 | 61 62 63`: six bytes of prefix in front of `a`,
+  // which is character 2. Every answer below is the one a body that forwarded
+  // the search's byte offset would get wrong, and `byteLength` is printed
+  // beside it so the two numbers are on the same line.
+  let mixed = "é😀abc"
+  println("é😀abc/a {mixed.indexOf("a")} bytes {mixed.byteLength()}")?
+  println("é😀abc/b {mixed.indexOf("b")}")?
+  println("é😀abc/c {mixed.indexOf("c")}")?
+  println("é😀abc/bc {mixed.indexOf("bc")}")?
+  println("é😀abc/😀 {mixed.indexOf("😀")}")?
+  println("é😀abc/é {mixed.indexOf("é")}")?
+
+  // A multi-byte needle after a multi-byte prefix, which is the case a walk
+  // that counted the needle's own characters as well would get wrong.
+  let after = "é😀あい"
+  println("é😀あい/あい {after.indexOf("あい")}")?
+  println("é😀あい/い {after.indexOf("い")}")?
+  let repeated = "🙂🙂é"
+  println("🙂🙂é/é {repeated.indexOf("é")}")?
+  println("🙂🙂é/🙂 {repeated.indexOf("🙂")}")?
+  let greek = "αβ😀γ"
+  println("αβ😀γ/😀γ {greek.indexOf("😀γ")}")?
+  println("αβ😀γ/γ {greek.indexOf("γ")}")?
+  let words = "日本語テスト"
+  println("日本語テスト/テスト {words.indexOf("テスト")}")?
+  println("日本語テスト/語 {words.indexOf("語")}")?
+
+  // A mixed-width receiver read to its last character: `héllo wörld` is
+  // `ö` at character 7 and byte 8.
+  let world = "héllo wörld"
+  println("héllo wörld/ö {world.indexOf("ö")} bytes {world.byteLength()}")?
+  println("héllo wörld/rld {world.indexOf("rld")}")?
+
+  // The receiver as its own needle again, where the receiver is not ASCII.
+  println("é😀/é😀 {"é😀".indexOf("é😀")}")?
+
+  // What a search of whole needles must not find. `String.fromCodePoint`
+  // because a control character is a byte sequence rather than a glyph.
+  let control = String.fromCodePoint(130).unwrapOr("")
+  println("あああ/U+0082 {"あああ".indexOf(control)}")?
+  let linearB = String.fromCodePoint(65536).unwrapOr("")
+  println("x😀y/U+10000 {faces.indexOf(linearB)}")?
+
+  // A receiver built at run time rather than written as a literal, since a
+  // literal is the one shape a constant fold could answer. The needle spans
+  // the join between two of the repetitions, which is the offset a matcher
+  // that searched each piece would never look at — and it is at character 1
+  // where the bytes say 2.
+  var built = ""
+  var i = 0
+  while i < 3 {
+    built = "{built}é😀"
+    i += 1
+  }
+  println("built {built.indexOf("😀é")} {built.indexOf("😀😀")} {built.indexOf("é")} {built.byteLength()}")?
+  Ok(())
+}
