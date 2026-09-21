@@ -108,8 +108,8 @@ const HEAP_SPARE: u8 = R15;
 // The SSE registers this arm uses, which are scratch in the same sense the
 // integer scratch registers are: nothing lives in one between two
 // instructions, because every value of a frame lives in the frame. Only
-// `Inst::Convert(IntToFloat)`, `Inst::FloatMinMax` and `Inst::FloatRound`
-// touch them at all.
+// `Inst::Convert(IntToFloat)`, `Inst::FloatMinMax`, `Inst::FloatRound` and
+// `Inst::FloatSqrt` touch them at all.
 const XMM0: u8 = 0;
 const XMM2: u8 = 2;
 const XMM3: u8 = 3;
@@ -777,6 +777,63 @@ impl<'a> Emit<'a> {
                 self.packed_logic(ANDNPD, XMM3, XMM0);
                 self.packed_logic(ORPD, XMM2, XMM3);
                 self.movsd_store(FRAME, dst_at, XMM2);
+            }
+            // `encoded.rs`'s `FLOAT_SQRT`, the last of ADR 0064's Decision 2
+            // typed scalar operations, and the **shortest** sequence in this
+            // file that is a whole instruction of IR.
+            //
+            // **x86-64 has the instruction, and that is the whole of the
+            // arm.** `sqrtsd` is SSE2, takes `xmm2/m64`, and is bound by IEEE
+            // 754 §5.4.1 to the same correctly rounded answer `f64::sqrt` is
+            // bound to — so there is nothing to spell out, nothing to repair
+            // and no constant to write. It is the opposite of the
+            // `Inst::FloatRound` arm below it in every respect, which is why
+            // the two are worth reading together: seventeen instructions to
+            // reproduce an operation the machine has not got, and two to use
+            // one it has.
+            //
+            // ```text
+            // sqrtsd xmm0, [frame+a]
+            // movsd  [frame+dst], xmm0
+            // ```
+            //
+            // Two instructions and eighteen bytes, against three and nineteen
+            // for `FloatAbs`, nine and fifty-two for `FloatMinMax` and
+            // seventeen and eighty-seven for `FloatRound`.
+            //
+            // **The operand never touches an integer register**, where
+            // `FloatAbs` never leaves one: clearing a sign bit is `btr` and a
+            // square root is not expressible that way at all. The memory
+            // operand is the same idiom `FloatMinMax` uses for its second
+            // operand — [`Emit::min_max_sd`] — so nothing new was needed to
+            // get the word from the frame into the unit that computes on it,
+            // and [`Emit::movq_to_xmm`], which `FloatRound` added, is not
+            // used here.
+            //
+            // Three things this arm does *not* have to do, each of which the
+            // table it is held to would have caught:
+            //
+            // - **a negative operand needs no test.** `sqrtsd` answers the
+            //   QNaN indefinite for one, sets `MXCSR`'s invalid flag — which
+            //   is masked and unobserved by Cove — and carries on. A branch
+            //   in front of it would be a branch this file does not have and
+            //   would still have to answer the same bits.
+            // - **`-0.0` needs no special case.** `sqrtsd(-0.0)` is `-0.0`,
+            //   as §5.4.1 requires, which is the one row of `SQUARE_ROOTS` a
+            //   Cove program can see and the one a "negative means NaN" test
+            //   would get wrong.
+            // - **a NaN operand needs no special case either.** `sqrtsd`
+            //   hands it back with its sign and payload and its quiet bit
+            //   set, which is what `f64::sqrt` answers.
+            //
+            // `dst` may be `a`: the operand is read into `xmm0` before
+            // anything is written, so in place is the same sequence.
+            Inst::FloatSqrt { dst, a } => {
+                self.frame();
+                let a_at = slot_offset(*a).expect("`supported` bounded every slot");
+                let dst_at = slot_offset(*dst).expect("`supported` bounded every slot");
+                self.sqrtsd_load(XMM0, FRAME, a_at);
+                self.movsd_store(FRAME, dst_at, XMM0);
             }
             // `encoded.rs`'s `FLOAT_ROUND`, ADR 0064's third typed scalar
             // operation, and the longest sequence in this file that is still
@@ -3240,6 +3297,24 @@ impl<'a> Emit<'a> {
         self.byte(0x0f);
         self.byte(opcode);
         self.modrm_reg(dst, src);
+    }
+
+    /// `sqrtsd xmm, [base + disp]`: the correctly rounded square root of the
+    /// double at that address, into the low half of `dst`.
+    ///
+    /// SSE2, one instruction, and bound by IEEE 754 §5.4.1 to the same answer
+    /// `f64::sqrt` is bound to — which is why the
+    /// [`Inst::FloatSqrt`](cove_ir::Inst::FloatSqrt) arm is two instructions
+    /// where the [`Inst::FloatRound`](cove_ir::Inst::FloatRound) arm is
+    /// seventeen. It sets `MXCSR`'s invalid flag for a negative operand,
+    /// which is masked and which Cove cannot observe, and answers the QNaN
+    /// indefinite for one.
+    fn sqrtsd_load(&mut self, dst: u8, base: u8, disp: i32) {
+        self.byte(0xf2);
+        self.rex(false, dst, base);
+        self.byte(0x0f);
+        self.byte(0x51);
+        self.modrm_mem(dst, base, disp);
     }
 
     /// `movq xmm, r64`: a whole word moved into the low half of an SSE

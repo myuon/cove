@@ -55,7 +55,6 @@ pub enum Intrinsic {
     IntParse,
     IntParseRadix,
     FloatToInt,
-    FloatSqrt,
     FloatFormat,
     FloatParse,
     AnyEquals,
@@ -85,7 +84,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
-    Intrinsic::FloatSqrt,
     Intrinsic::FloatFormat,
     Intrinsic::FloatParse,
     Intrinsic::AnyEquals,
@@ -132,7 +130,6 @@ impl Intrinsic {
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
-            Intrinsic::FloatSqrt => "Float",
             Intrinsic::FloatFormat => "Float",
             Intrinsic::FloatParse => "Float",
             Intrinsic::AnyEquals => "Any",
@@ -160,7 +157,6 @@ impl Intrinsic {
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
-            Intrinsic::FloatSqrt => "sqrt",
             Intrinsic::FloatFormat => "format",
             Intrinsic::FloatParse => "parse",
             Intrinsic::AnyEquals => "equals",
@@ -231,7 +227,6 @@ impl Intrinsic {
             Intrinsic::IntParse
             | Intrinsic::IntParseRadix
             | Intrinsic::FloatToInt
-            | Intrinsic::FloatSqrt
             | Intrinsic::FloatFormat
             | Intrinsic::FloatParse => Category::Scalar,
             // Rendering is a walk directed by whatever layout the piece has,
@@ -278,7 +273,6 @@ impl Intrinsic {
             Intrinsic::IntParse => fixed(&[C::Str], C::ResultOf(K::Int)),
             Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
-            Intrinsic::FloatSqrt => fixed(&[C::Float], C::Float),
             Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
             Intrinsic::AnyEquals => fixed(&[C::Value, C::Value], C::Bool),
@@ -382,13 +376,16 @@ impl Intrinsic {
             // `Int.toFloat` and `Duration.nanos` are not here: each is an
             // `Inst::Convert` (#378, P5-2).
 
-            // A scalar function of its own words, with nothing on the heap to
-            // read and nothing that can fail: IEEE 754 answers it for every
-            // input. **One name and no longer two**: `Float.round` left this
-            // enum for `Inst::FloatRound` in the first of issue #454's Step 2,
-            // and `Float.sqrt` is the last of ADR 0064's Decision 2 list still
-            // here.
-            Intrinsic::FloatSqrt => E::NONE,
+            // **No arm here is `E::NONE` any more, and that is the whole of
+            // what issue #454's Step 2 did to this function.** There used to
+            // be a scalar family of its own words with nothing on the heap to
+            // read and nothing that can fail — `Float.abs`, `Float.min`,
+            // `Float.max`, `Float.round`, `Float.sqrt`, the operations IEEE
+            // 754 answers for every input — and every one of them is an
+            // instruction now. What is left below allocates, or refuses, or
+            // both. See `every_intrinsic_left_can_be_refused` for the form
+            // that takes as a test and for what it costs `cove-native`.
+            //
             // The three parsers read a `String` receiver's bytes and
             // allocate the message an `Err` carries, and `parseRadix` refuses
             // a radix outside `2..=36`; `format` allocates the `String` it
@@ -655,7 +652,6 @@ mod tests {
             "Int.parse",
             "Int.parseRadix",
             "Float.toInt",
-            "Float.sqrt",
             "Float.format",
             "Float.parse",
             "Any.equals",
@@ -728,7 +724,6 @@ mod tests {
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt
-                | Intrinsic::FloatSqrt
                 | Intrinsic::FloatFormat
                 | Intrinsic::FloatParse
                 | Intrinsic::AnyEquals
@@ -834,42 +829,70 @@ mod tests {
         }
     }
 
-    /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so the
-    /// intrinsics no program can be stopped by say so: the `Float` functions
-    /// IEEE 754 answers for every input, and nothing else at all. **The one
-    /// left is infallible in the arithmetic sense rather than in the
-    /// bookkeeping one**, and that is new. A character count used to head this
-    /// list; a suffix test, a prefix test, a whole-haystack search and a
-    /// search that answers a position sat under it; none of the five is an
-    /// intrinsic any more — ADR 0064 made `String.length`, `String.endsWith`
-    /// and `String.startsWith` Cove loops, one migration each, and ADR 0065
-    /// made `String.contains` and then `String.indexOf` Cove bodies over
-    /// `Inst::RunFind` — which is the shape a migration leaves here: a line
-    /// gone from the vector and a sentence changed, rather than a flag
-    /// changed.
+    /// **Every intrinsic left can be refused**, and that is a statement about
+    /// what this enum has become rather than a flag being checked.
     ///
-    /// **`Float.abs` left the vector a fifth way**, and it was the first of
-    /// these four to go: it did not become a Cove body over anything, because
-    /// there is nothing in Cove to write it over — `crates/cove-native`'s
-    /// subset admits no float constant, comparison or arithmetic, so the
-    /// obvious `if x < 0.0 { -x } else { x }` would take every caller out of
-    /// the compiled set. It became `Inst::FloatAbs`, ADR 0064's Decision 2
-    /// typed scalar operation. **`Float.round` left the same way**, for the
-    /// same reason checked the same way — a `round` written in Cove is refused
-    /// with `CmpBranch(Float, Lt)`, and so is a caller whose own float work is
-    /// one comparison — and this vector is down to `Float.sqrt` alone.
+    /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so this used
+    /// to be a *list*: the operations no program can be stopped by, which
+    /// were the `Float` functions IEEE 754 answers for every input and
+    /// nothing else at all. A character count headed it once; a suffix test,
+    /// a prefix test, a whole-haystack search and a search that answers a
+    /// position sat under it; then `Float.abs`, then `Float.min` and
+    /// `Float.max`, then `Float.round`, and with `Float.sqrt` the list is
+    /// empty. Each of those left the same way — ADR 0064's Decision 2, a
+    /// typed scalar operation that names a machine — and none of them left by
+    /// having a flag changed.
     ///
-    /// It is also why `vm::exec`'s `unraisable` no longer has an end-to-end
-    /// case: that panic needs an arm that can answer an `Err` while its
-    /// variant declares no `MAY_RAISE`, and the four below each answer `()`.
+    /// **So the assertion is inverted, and it is not the same assertion
+    /// spelled differently.** `assert_eq!(never, vec![])` would be a test
+    /// whose name no longer describes it and whose expected value is
+    /// satisfied by an `ALL` with nothing in it; what is asserted instead is
+    /// the fact — every surviving variant declares `MAY_RAISE` — with the
+    /// non-vacuity guard that makes it worth asserting. Deleting it and
+    /// moving the reasoning was the other option and is the wrong one: this
+    /// is a *ratchet in the other direction* from
+    /// [`the_intrinsic_set_only_shrinks`], and it is the thing that would
+    /// notice an intrinsic being added back below Decision 2's bar.
+    ///
+    /// **What it costs, which is real and is recorded here because nothing
+    /// else would record it.** `cove_native::IntrinsicProtocol` reads these
+    /// effects into two facts, and an intrinsic with neither — no safepoint
+    /// and no raise — is a *plain call*: no publish, no program counter, no
+    /// outcome test, and the frame pointer kept live across it. That class
+    /// had exactly one member left, `Float.sqrt`, and now has none, so the
+    /// code generator's plain-call path is reachable only by an intrinsic
+    /// nobody has written. `cove-native`'s `INTRINSIC_CLASSES` is down from
+    /// three classes to two, and `cove-runtime`'s `native_tier.rs` lost the
+    /// case that drove that path from a real program. The path itself stays:
+    /// it is what the effects *mean*, and the alternative is deleting a
+    /// lowering because the census happens to be empty this week.
+    ///
+    /// It is also why `vm::exec`'s `unraisable` has no end-to-end case and
+    /// can now have none at all: that panic needs an arm that can answer an
+    /// `Err` while its variant declares no `MAY_RAISE`, and there is no such
+    /// variant left to build a program out of.
     #[test]
-    fn raising_is_language_level() {
+    fn every_intrinsic_left_can_be_refused() {
+        assert!(
+            !ALL.is_empty(),
+            "the assertion below is about the variants there are, so there \
+             have to be some; when this enum is finally empty, delete this \
+             test with the enum rather than leaving it passing vacuously"
+        );
         let never: Vec<Intrinsic> = ALL
             .iter()
             .copied()
             .filter(|intrinsic| !intrinsic.effects().contains(Effects::MAY_RAISE))
             .collect();
-        assert_eq!(never, vec![Intrinsic::FloatSqrt]);
+        assert!(
+            never.is_empty(),
+            "{never:?} declare no `MAY_RAISE`. Every intrinsic left allocates \
+             or refuses; an operation IEEE 754 or the language answers for \
+             every input is a typed scalar instruction (ADR 0064, Decision 2) \
+             and not a runtime call. If one really belongs here, say in \
+             `IntrinsicProtocol`'s doc that the plain-call class has a member \
+             again, and put `native_tier.rs`' case back"
+        );
     }
 
     /// No intrinsic is a collection operation: ADR 0058 moved every one into

@@ -454,8 +454,8 @@ pub enum Inst {
     /// an `Inst::IntrinsicCall` naming a method until this replaced it.
     ///
     /// **It is not a family, and that is the whole of the decision.**
-    /// `Float.round` and `Float.sqrt` are the census's other two typed scalar
-    /// operations; a `FloatUnary { op }` added here
+    /// `Float.round` and `Float.sqrt` were the census's other two typed
+    /// scalar operations; a `FloatUnary { op }` added here
     /// would have been a one-member family guessing at both of them, and the
     /// guess would have bought nothing — the bytecode gives a member of such a family one opcode
     /// each exactly as three instructions would, and each of the other two has
@@ -469,13 +469,13 @@ pub enum Inst {
     /// for two operations nobody has measured. `PHILOSOPHY.md`'s "earn
     /// complexity through use", and one caller is one caller.
     ///
-    /// **`Float.round` has since arrived and the guess would have been
-    /// wrong**, which is worth leaving on the record beside the reasoning:
-    /// [`Inst::FloatRound`] is a separate instruction and not a member here,
-    /// because its lowering has nothing in common with this one at all — five
-    /// bytes of `btr` against eighty-seven bytes of conversion and select —
-    /// so a shared `op` field would have selected between two sequences with
-    /// no shared shape to factor.
+    /// **Both have since arrived and the guess would have been wrong**, which
+    /// is worth leaving on the record beside the reasoning:
+    /// [`Inst::FloatRound`] and [`Inst::FloatSqrt`] are separate instructions
+    /// and not members here, because the three lowerings have nothing in
+    /// common at all — five bytes of `btr`, eighty-seven bytes of conversion
+    /// and select, and one `sqrtsd` — so a shared `op` field would have
+    /// selected between three sequences with no shared shape to factor.
     ///
     /// **There is no `Num` on it**, where [`Inst::Neg`] has one. An `Int`'s
     /// absolute value is not this operation: `Int.abs` raises at `Int.MIN`,
@@ -649,6 +649,103 @@ pub enum Inst {
     /// **There is no `Num` on it**, for [`Inst::FloatAbs`]' reason: an `Int`
     /// is already an integer and has nothing to round.
     FloatRound { dst: Slot, a: Slot },
+    /// `dst = sqrt(a)`, on one IEEE-754 double: the **correctly rounded**
+    /// square root.
+    ///
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 2 names `sqrt` first in its list of typed scalar operations
+    /// and then names this instruction in as many words — "`Float.sqrt` need
+    /// not be a Newton iteration in Cove. A typed scalar IR operation that
+    /// maps to `sqrtsd` passes Decision 2: it names machine semantics and
+    /// would not be renamed if `Float.sqrt` were." This is it, and it is the
+    /// last of the four. `Float.sqrt` was an [`Inst::IntrinsicCall`] carrying
+    /// the method's own name until this replaced it; the Cove-body route the
+    /// census proposes instead is **blocked**, for the reason it is blocked
+    /// for [`Inst::FloatAbs`], [`Inst::FloatMinMax`] and [`Inst::FloatRound`]:
+    /// `crates/cove-native/src/subset.rs` admits no float constant,
+    /// comparison or arithmetic, and a Newton iteration needs all three. That
+    /// was checked by lowering one rather than assumed — see the measurement
+    /// in `benches/floatsqrt`.
+    ///
+    /// # The contract
+    ///
+    /// **The answer is correctly rounded, and that is the whole of the
+    /// numeric contract.** IEEE 754 §5.4.1 makes `squareRoot` one of the
+    /// operations that must be computed as if to infinite precision and then
+    /// rounded once, so there is exactly one answer for every operand whose
+    /// answer is a number and it is the same on every conforming machine.
+    /// It is the only one of the four typed scalar operations for which that
+    /// is true — `abs` is a sign bit, [`crate::MinMax`]'s tie is Cove's own
+    /// choice, and `round`'s tie rule is a choice between two defensible
+    /// rules — and it is why the tables below carry roots that are *not*
+    /// representable as well as ones that are: an implementation accurate to
+    /// within an ulp passes every exact root and fails those.
+    ///
+    /// **A zero keeps the sign of its operand.** IEEE 754 §5.4.1 states
+    /// `squareRoot(-0)` is `-0`, so `-0.0` is the one negative operand whose
+    /// answer is not a NaN, and `-0.0` is distinguishable from `0.0` in Cove
+    /// three ways — interpolation, `format`, and `1.0 / x`. A lowering that
+    /// refused a negative operand by testing the sign *bit* would get exactly
+    /// this one wrong.
+    ///
+    /// **`+inf` answers `+inf`, and is the only infinity whose answer is a
+    /// number.** Every negative operand but `-0.0`, and `-inf` with them, is
+    /// IEEE 754's invalid operation and answers a quiet NaN.
+    ///
+    /// **Which quiet NaN is not IEEE 754's to say, and it is not the same one
+    /// for the two ways of getting one.** For a *negative* operand the
+    /// standard requires a quiet NaN and leaves its sign and payload to the
+    /// implementation (§6.2); x86-64 answers the "QNaN floating-point
+    /// indefinite", `0xfff8_0000_0000_0000` — sign bit **set**, and the same
+    /// bits whatever the operand was. For a *NaN* operand the answer is that
+    /// operand with its sign and its payload kept and its quiet bit set. No
+    /// Cove program can see any of it — there is no bit access to a `Float`
+    /// and every NaN renders as `NaN` — so it is pinned in bits, in
+    /// `cove-native`'s `tests/suite`'s `SQUARE_ROOTS`, whose host is x86-64
+    /// by construction. `cove-runtime`'s own table pins the rest and asserts
+    /// only *quietness* for an invalid operation, because that crate is not
+    /// x86-64 and the bits would be a fact about the host rather than about
+    /// the operation.
+    ///
+    /// # Why the runtime still calls `f64::sqrt`
+    ///
+    /// [`crate::MinMax`]'s contract is spelled out in `cove-runtime`'s
+    /// `float::extremum` rather than delegated to `f64::min`, because
+    /// `f64::min`'s own documentation declines to decide its answer on
+    /// operands that compare equal. **`f64::sqrt` declines nothing, and here
+    /// the reason is the standard rather than the documentation**: a
+    /// correctly rounded operation has one answer, so a `float::sqrt` beside
+    /// `float::extremum` could only be a slower way of computing the same
+    /// bits, with no oracle but the thing it replaced. Both evaluators call
+    /// `f64::sqrt`; what is written down instead of a third implementation is
+    /// this contract, and the tables that hold the native lowering to it.
+    ///
+    /// # The native lowering, and why it is two instructions
+    ///
+    /// **x86-64 has the instruction.** `sqrtsd` is SSE2, is correctly rounded
+    /// by the same clause of the same standard, and takes a memory operand —
+    /// so the arm is `sqrtsd xmm0, [frame+a]` and `movsd [frame+dst], xmm0`,
+    /// two instructions and eighteen bytes, against three and nineteen for
+    /// [`Inst::FloatAbs`] and seventeen and eighty-seven for
+    /// [`Inst::FloatRound`].
+    ///
+    /// **It is the shortest of the four in instructions and the dearest in
+    /// time, which is the finding rather than an aside.** `benches/floatsqrt`
+    /// measures the compiled operation at 1.30 ns for an operand whose root is
+    /// exact and 2.37 ns for one whose root is not, where `FloatRound`'s
+    /// seventeen instructions measure 0.91 ns and `FloatAbs`' three measure
+    /// 0.097 ns on the same machine. So instruction count does not order these
+    /// four by cost: the square-root unit is not the ALU, and this is the
+    /// first of these migrations where what is left after the crossing is
+    /// removed is the operation itself rather than the dispatch around it. A
+    /// **subnormal** operand is dearer again by a factor of fifteen, in both
+    /// arms and on both tiers, which puts it in the hardware and not in
+    /// anything Cove does.
+    ///
+    /// **There is no `Num` on it**, for [`Inst::FloatAbs`]' reason, and more
+    /// strongly: there is no integer square root in the language to be the
+    /// other member of a family.
+    FloatSqrt { dst: Slot, a: Slot },
 
     // ---- control flow --------------------------------------------------
     /// Continue at `to`.

@@ -111,6 +111,38 @@ test fn a_number_carries_its_suffix() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// A number carries the **sign of its exponent**, so `5.0e-324` is one token
+/// and not three.
+///
+/// The unsigned form was always one token, because the suffix loop above
+/// takes letters and digits and `e308` is letters and digits. The sign is
+/// neither, so `5.0e-324` lexed as `5.0e`, `-`, `324` and `print` laid the
+/// three out as `5.0e - 324` — a **wrong program**, not a wrong layout, and
+/// the one thing a formatter may never do.
+///
+/// It survived for as long as it did because of where such literals were
+/// written: every one in this repository sat inside a string interpolation,
+/// which is one token, or inside a call's parentheses, where `print` copies
+/// the source instead of re-spacing it. `benches/floatsqrt`' `let sub =
+/// 5.0e-324` was the first written anywhere else, and `covefmtBench` — which
+/// formats every `.cove` file in the repository and compares — failed on it
+/// the day it landed. That is the gate working; this is the case that means
+/// the next reader does not have to find it that way.
+///
+/// The last two rows are the backtrack `crates/cove-syntax`'s
+/// `lex_decimal_number` does and this now does: an `e` with no digits behind
+/// it is not an exponent, so it falls to the suffix loop and the `-` after it
+/// is an operator again.
+test fn a_number_carries_the_sign_of_its_exponent() -> Result<Unit, Error> {
+  assertEqual(shape("5.0e-324"), "number")?
+  assertEqual(shape("5.0e+10"), "number")?
+  assertEqual(shape("1.0E-8"), "number")?
+  assertEqual(shape("1e308"), "number")?
+  assertEqual(shape("1ex - 2"), "number space punct space number")?
+  assertEqual(shape("1e-x"), "number punct word")?
+  Ok(())
+}
+
 /// A byte the language does not spell is still a token, so the tiling holds
 /// for source that does not lex.
 test fn a_byte_no_rule_claims_is_still_a_token() -> Result<Unit, Error> {

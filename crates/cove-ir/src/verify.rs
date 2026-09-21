@@ -295,7 +295,8 @@ impl Check<'_> {
                 Inst::Convert { dst, .. }
                 | Inst::FloatAbs { dst, .. }
                 | Inst::FloatMinMax { dst, .. }
-                | Inst::FloatRound { dst, .. } => {
+                | Inst::FloatRound { dst, .. }
+                | Inst::FloatSqrt { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -703,12 +704,16 @@ impl Check<'_> {
                 self.expect(at, dst, &[into]);
             }
             // One `Float` in and one `Float` out, and nothing else to check:
-            // two of ADR 0064's Decision 2 typed scalar operations, each total
-            // over every bit pattern its operand can hold. One arm and not
-            // two, because there is nothing here that tells them apart — a
-            // mask and a rounding differ in what they compute and not in what
-            // a verifier can ask about them.
-            Inst::FloatAbs { dst, a } | Inst::FloatRound { dst, a } => {
+            // three of ADR 0064's Decision 2 typed scalar operations, each
+            // total over every bit pattern its operand can hold. One arm and
+            // not three, because there is nothing here that tells them apart
+            // — a mask, a rounding and a square root differ in what they
+            // compute and not in what a verifier can ask about them. In
+            // particular a negative operand is **not** a refusal here: the
+            // square root of one is a NaN, which is an answer.
+            Inst::FloatAbs { dst, a }
+            | Inst::FloatRound { dst, a }
+            | Inst::FloatSqrt { dst, a } => {
                 self.expect(at, a, &[Repr::Float]);
                 self.expect(at, dst, &[Repr::Float]);
             }
@@ -2326,6 +2331,7 @@ fn admitted_in_a_window(inst: &Inst, written: bool) -> bool {
                     | Inst::FloatAbs { .. }
                     | Inst::FloatMinMax { .. }
                     | Inst::FloatRound { .. }
+                    | Inst::FloatSqrt { .. }
                     | Inst::LoadField { .. }
                     | Inst::LoadElem { .. }
                     | Inst::RunLoad { .. }

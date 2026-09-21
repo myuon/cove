@@ -174,6 +174,20 @@ export fn callsRounds(x: Float, n: Int) -> Float {
   rounds(x, n)
 }
 
+/// `Float.sqrt`, so that `Inst::FloatSqrt` runs as machine code.
+///
+/// `counts(n)` is `magnitudes`' guard and is here for its reason.
+export fn sqrts(x: Float, n: Int) -> Float {
+  let guard = counts(n)
+  x.sqrt()
+}
+
+/// A refused caller, so the square root is reached across the boundary.
+export fn callsSqrts(x: Float, n: Int) -> Float {
+  let nothing = Shared(0).lock(fn(v) { v })
+  sqrts(x, n)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -1040,53 +1054,19 @@ export fn countsTheBoundary(s: String, n: Int) -> Int {
   measuresAndPushes(s, v, n) * 1000 + cut
 }
 
-/// `Float.sqrt` in a compiled loop: an intrinsic whose declared effects neither
-/// allocate nor raise, so the call is a plain one — no work published, no
-/// program counter, no outcome tested, and the frame pointer kept across it.
-/// `counts(0)` for the reason it is in every fixture above.
-///
-/// **It has been three operations, and each substitution is a migration.** It
-/// was `String.contains` until ADR 0065 made that a Cove body over
-/// `Inst::RunFind`, and `String.indexOf` until ADR 0064 wrote that over the
-/// same instruction. No `String` operation is of this effect class any longer —
-/// every text intrinsic left allocates what it answers — so the plain call is
-/// a `Float` function, which is what `cove_native::IntrinsicProtocol`'s own
-/// doc has named beside `indexOf` all along.
-///
-/// **Nothing here may look at the `Float` the call answers, and that is the
-/// subset rather than the fixture.** `cove-native`'s `subset.rs` admits exactly
-/// two float instructions: `Convert::IntToFloat`, and a plain `IntrinsicCall`
-/// whose operands and answer happen to be float words. `ConstFloat` is in no
-/// arm of it, `comparison_supported` answers `false` for `Compare::Float`, and
-/// `Arith(Float, _)` is absent too — `examples/cq` is refused three ways for
-/// exactly those three, at `programs.foldRevenue`'s `ConstFloat`,
-/// `json.renderNumber`'s `CmpBranch(Float, Eq)` and `programs.foldConfirmed`'s
-/// `Arith(Float, Mul)`. So a first version of this fixture, which folded the
-/// answer with `if at.toFloat().sqrt() < 2.0`, was refused at its `ConstFloat`
-/// with `CmpBranch(Float, Lt)` behind it, and the loop that was meant to be
-/// compiled ran in the VM.
-///
-/// What it does instead is let the answer **leave** as a `Float`, which is one
-/// word moved and needs no float instruction at all. The receiver still
-/// decides the result, through the `Int` path `byteLength` gives: it sets how
-/// many turns the loop takes, so each of the three receivers the case runs is
-/// a different answer rather than the same one three times.
-export fn sqrtsIn(s: String, n: Int) -> Float {
-  var last = counts(0).toFloat()
-  var at = 0
-  let rounds = n + s.byteLength()
-  while at < rounds {
-    last = at.toFloat().sqrt()
-    at = at + 1
-  }
-  last
-}
-
-/// A refused caller, so the loop is reached across the boundary.
-export fn callsSqrtsIn(s: String, n: Int) -> Float {
-  let nothing = Shared(0).lock(fn(v) { v })
-  sqrtsIn(s, n)
-}
+/// **There is no plain-call fixture here any more, and there cannot be one.**
+/// A `sqrtsIn`/`callsSqrtsIn` pair used to sit at this point in the file and
+/// drive `cove_native::IntrinsicProtocol`'s third shape — an intrinsic that
+/// neither allocates nor raises, so the call publishes nothing, synchronises
+/// no program counter, tests no outcome and keeps the frame pointer live. Its
+/// subject was `String.contains`, then `String.indexOf`, then `Float.sqrt`,
+/// and issue #454's Step 2 made that last one `Inst::FloatSqrt`. Every
+/// variant of `cove_ir::Intrinsic` left declares `MAY_RAISE`, so no program
+/// can be written that takes that path, and a fixture that claimed to take it
+/// would be testing the protocol the *other* two shapes use. See
+/// `cove_ir::intrinsic`'s `every_intrinsic_left_can_be_refused`, which is
+/// where the fact is asserted and where the instruction to restore this pair
+/// lives if an intrinsic is ever added back below that bar.
 
 /// `String.split` over a separator the caller chose: an intrinsic that may raise,
 /// because an empty separator is the language's own refusal.
@@ -1525,6 +1505,64 @@ fn a_float_rounding_runs_as_machine_code() {
         assert!(
             answered.tiers.vm_to_native >= 1,
             "the crossing into the compiled rounding was taken: {:?}",
+            answered.tiers
+        );
+        assert_eq!(
+            answered.tiers.native_to_vm, 0,
+            "and nothing went back the other way: {:?}",
+            answered.tiers
+        );
+    }
+}
+
+/// `Float.sqrt` is compiled, and answers what the VM answers.
+///
+/// The last of issue #454's Step 2, and the only case that runs
+/// `Inst::FloatSqrt` as machine code entered from the VM. **It is the one
+/// float instruction whose lowering is obviously right by inspection** —
+/// `sqrtsd` and a store, where `round` is seventeen instructions that
+/// reproduce an operation x86-64 has not got — so what these rows are for is
+/// not the sequence but the *reach*: that the tier compiled the function at
+/// all, that the answer came back across the boundary, and that the operands
+/// a Cove program can tell apart come back telling apart.
+///
+/// - `-0.0` is the row a Cove program can see and a "negative means NaN"
+///   lowering would get wrong: the answer is `-0.0` and renders `-0.0`.
+/// - `2.0` and `3.0` are roots that are not representable, rendered to the
+///   shortest decimal that names their bits — so an implementation accurate
+///   to within an ulp fails here as well as in the bit table.
+/// - `-1.0`, `-4.0` and `-inf` are invalid operations and render `NaN`.
+///   *Which* NaN they are is not visible from Cove at all and is pinned in
+///   `cove-native`'s own suite, where the assertions can be in bits.
+/// - `inf` and `2^53` take the ends of the range.
+#[test]
+fn a_float_square_root_runs_as_machine_code() {
+    on_each_tier(&["sqrts"], &["callsSqrts"]);
+
+    for (x, expected) in [
+        (4.0f64, "2.0"),
+        (6.25, "2.5"),
+        (2.0, "1.4142135623730951"),
+        (3.0, "1.7320508075688772"),
+        (0.25, "0.5"),
+        (-0.0, "-0.0"),
+        (0.0, "0.0"),
+        (-1.0, "NaN"),
+        (-4.0, "NaN"),
+        (f64::INFINITY, "inf"),
+        (f64::NEG_INFINITY, "NaN"),
+        (9007199254740992.0, "94906265.62425156"),
+        (1.0e-8, "0.0001"),
+    ] {
+        let answered = both("callsSqrts", vec![Value::float(x), Value::int(0)]);
+        assert_eq!(answered.vm, Ok(expected.to_string()), "sqrt({x}) on the VM");
+        assert_eq!(
+            answered.native, answered.vm,
+            "and compiled code answers the same: sqrt({x})"
+        );
+        assert!(
+            answered.tiers.vm_to_native >= 1,
+            "the crossing into the compiled square root was taken: {:?}",
             answered.tiers
         );
         assert_eq!(
@@ -2164,25 +2202,6 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     // is refused for the `store-field` that fills the object in, and an opcode that
     // names one operation already carries no second key.
     assert_eq!(named("heapsThrough"), None);
-}
-
-/// **An intrinsic that neither allocates nor raises is a plain call from compiled
-/// code, and answers what the VM answers.**
-///
-/// `Float.sqrt` carries neither `MAY_ALLOCATE`/`MAY_COLLECT` nor `MAY_RAISE`,
-/// so the code generator emits the call with nothing around it — see
-/// `cove_native::IntrinsicProtocol`. Under `debug_assertions`, which this
-/// suite runs with, the runtime's helper also asserts the promise that makes that
-/// sound: the stack did not move and the heap did not collect.
-#[test]
-fn a_plain_intrinsic_call_from_compiled_code_agrees_with_the_vm() {
-    on_each_tier(&["sqrtsIn"], &["callsSqrtsIn"]);
-    for text in ["hay needle hay", "haystack", ""] {
-        let both = both("callsSqrtsIn", vec![Value::string(text), Value::int(7)]);
-        assert!(both.vm.is_ok(), "`{text}`: {:?}", both.vm);
-        assert_eq!(both.native, both.vm, "`{text}`: compiled code agrees");
-        assert!(both.tiers.vm_to_native >= 1, "`{text}`: {:?}", both.tiers);
-    }
 }
 
 /// **An intrinsic that raises from compiled code reports the VM's message, span

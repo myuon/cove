@@ -2979,6 +2979,191 @@ pub fn a_float_rounding_in_place_answers_the_same<A: Arm>() {
     }
 }
 
+/// `s1 = sqrt(s0); return s1`, over two `Float` slots.
+///
+/// `dst` is the second slot for [`absolute`]'s reason: so that the case can
+/// assert the operand was not clobbered.
+pub fn square_root() -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Float],
+        FLOAT,
+        vec![Inst::FloatSqrt { dst: 1, a: 0 }, Inst::Return { src: 1 }],
+    ))
+}
+
+/// `s0 = sqrt(s0); return s0`: the destination *is* the operand.
+pub fn square_root_in_place() -> Program {
+    program(function(
+        vec![Repr::Float],
+        FLOAT,
+        vec![Inst::FloatSqrt { dst: 0, a: 0 }, Inst::Return { src: 0 }],
+    ))
+}
+
+/// The operands and answers `Inst::FloatSqrt` is held to, **in bits**.
+///
+/// Stated as `u64` for [`ABSOLUTES`]' reason, and computed by a standalone
+/// `rustc` program calling `f64::sqrt` behind a `black_box`, so that these are
+/// the machine's answers rather than a transcription of an argument about
+/// them.
+///
+/// **This table is about x86-64, and it is the first of the four that has to
+/// say so.** IEEE 754 §5.4.1 makes a square root correctly rounded, so every
+/// row whose answer is a *number* is the same on any conforming machine and
+/// would belong in a portable table. The rows whose answer is a NaN are not:
+/// §6.2 leaves the sign and the payload of the NaN an invalid operation
+/// answers to the implementation, and x86-64 answers the QNaN indefinite,
+/// `0xfff8_0000_0000_0000` — sign bit **set**, and the same bits for every
+/// negative operand from `-2^-1074` to `-MAX`. A machine whose default NaN is
+/// positive is conforming and would fail eight rows here. This crate refuses
+/// every host but x86-64, so the bits can be written down; `cove-runtime`'s
+/// own copy of this table asserts *quietness* for those operands instead, and
+/// says why.
+///
+/// Five families of row, and each is here because an implementation can pass
+/// the other four without it.
+///
+/// **The roots that are exact.** A perfect square, a power of four, and
+/// `2^-1074` — whose root is `2^-537`, a *normal* double, exactly. That last
+/// one is aimed at any lowering that scaled its operand to normalise it
+/// first.
+///
+/// **The roots that are not.** `2.0`, `3.0`, `0.5`, `10.0` and `0.1`, to the
+/// last bit. This is the family that separates a correctly rounded square
+/// root from an accurate one, and it is the family every other table of the
+/// four lacks an analogue of, because `abs`, `min`, `max` and `round` all
+/// answer a value that was already representable. An implementation within an
+/// ulp — a Newton iteration stopped one step early, an `rsqrt` approximation
+/// refined once — passes every exact row above and fails these five.
+///
+/// **The zeros.** `squareRoot(-0)` is `-0` and `squareRoot(+0)` is `+0`
+/// (§5.4.1), so `-0.0` is the one negative operand whose answer is not a NaN.
+/// A lowering that tested the operand's sign bit and answered a NaN would
+/// pass every other row here and fail that one — and it is also the only row
+/// of this table a Cove program can see, through `1.0 / x`, which is why
+/// `tests/e2e/values_float_sqrt` asks it three ways.
+///
+/// **The invalid operations.** Every negative operand and `-inf` answer the
+/// machine's NaN, which is the *same* bits whatever they were handed. That is
+/// the row a lowering that handed the operand back, or that propagated the
+/// operand's sign, would fail.
+///
+/// **The NaNs, which are not the same case.** A NaN operand comes back with
+/// its sign and its payload kept and its quiet bit set — `+sNaN` answers
+/// `0x7ff8_0000_dead_beef` — where a negative operand's answer keeps nothing
+/// of its operand at all. A lowering that answered the default NaN for
+/// everything whose answer is a NaN would pass all seven invalid rows and
+/// fail all four NaN ones, and **nothing else in this repository would
+/// notice**: a Cove program cannot build a NaN payload or read one back.
+pub const SQUARE_ROOTS: &[(&str, u64, u64)] = &[
+    ("+0.0", 0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+    ("-0.0", 0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+    ("+1.0", 0x3ff0_0000_0000_0000, 0x3ff0_0000_0000_0000),
+    ("+4.0", 0x4010_0000_0000_0000, 0x4000_0000_0000_0000),
+    ("+9.0", 0x4022_0000_0000_0000, 0x4008_0000_0000_0000),
+    ("+0.25", 0x3fd0_0000_0000_0000, 0x3fe0_0000_0000_0000),
+    ("+2.25", 0x4002_0000_0000_0000, 0x3ff8_0000_0000_0000),
+    ("+2^52", 0x4330_0000_0000_0000, 0x4190_0000_0000_0000),
+    ("+(2^26+1)^2", 0x4330_0000_0800_0001, 0x4190_0000_0400_0000),
+    ("+2^-1074", 0x0000_0000_0000_0001, 0x1e60_0000_0000_0000),
+    ("+2^-1072", 0x0000_0000_0000_0004, 0x1e70_0000_0000_0000),
+    ("+max subnorm", 0x000f_ffff_ffff_ffff, 0x1fff_ffff_ffff_ffff),
+    ("+MIN_POS", 0x0010_0000_0000_0000, 0x2000_0000_0000_0000),
+    ("+2.0", 0x4000_0000_0000_0000, 0x3ff6_a09e_667f_3bcd),
+    ("+3.0", 0x4008_0000_0000_0000, 0x3ffb_b67a_e858_4caa),
+    ("+0.5", 0x3fe0_0000_0000_0000, 0x3fe6_a09e_667f_3bcd),
+    ("+10.0", 0x4024_0000_0000_0000, 0x4009_4c58_3ada_5b53),
+    ("+0.1", 0x3fb9_9999_9999_999a, 0x3fd4_3d13_6248_490f),
+    ("+MAX", 0x7fef_ffff_ffff_ffff, 0x5fef_ffff_ffff_ffff),
+    ("+inf", 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+    ("-2^-1074", 0x8000_0000_0000_0001, 0xfff8_0000_0000_0000),
+    ("-max subnorm", 0x800f_ffff_ffff_ffff, 0xfff8_0000_0000_0000),
+    ("-MIN_POS", 0x8010_0000_0000_0000, 0xfff8_0000_0000_0000),
+    ("-1.0", 0xbff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+    ("-4.0", 0xc010_0000_0000_0000, 0xfff8_0000_0000_0000),
+    ("-MAX", 0xffef_ffff_ffff_ffff, 0xfff8_0000_0000_0000),
+    ("-inf", 0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+    ("+qNaN", 0x7ff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+    ("-qNaN", 0xfff8_0000_dead_beef, 0xfff8_0000_dead_beef),
+    ("+sNaN", 0x7ff0_0000_dead_beef, 0x7ff8_0000_dead_beef),
+    ("-sNaN", 0xfff0_0000_dead_beef, 0xfff8_0000_dead_beef),
+];
+
+/// `Inst::FloatSqrt` answers the correctly rounded square root.
+///
+/// The last of ADR 0064's Decision 2 typed scalar operations, and the one
+/// whose lowering is shortest: `encoded.rs`'s `FLOAT_SQRT` arm is `f64::sqrt`
+/// and the template arm is `sqrtsd`, and [`SQUARE_ROOTS`] is what those two
+/// agree on, in bits.
+///
+/// **x86-64 has the instruction, which is why this is two instructions and
+/// [`a_float_rounding_answers_the_nearest_integer`] is seventeen.** The
+/// interesting consequence is that the table is not checking a *sequence*
+/// here — there is no identity to get wrong, no constant to mistype, no
+/// `cmov` whose sides could be swapped. What it is checking is that the
+/// lowering reached `sqrtsd` at all rather than something in its
+/// neighbourhood: `rsqrtsd` does not exist, but `rsqrtps` does, an `andpd`
+/// against the wrong constant would pass the positive rows, and a lowering
+/// that special-cased a negative operand would answer a NaN of its own
+/// choosing.
+///
+/// **Two thirds of the rows say something no Cove program can observe and no
+/// e2e case could therefore pin**: that a negative operand's answer is the
+/// machine's NaN and not the operand's, that a NaN operand's answer *is* the
+/// operand's, sign and payload and all, and that a subnormal's root is exact.
+/// `-0.0` is distinguishable from `0.0` in Cove three ways and so is pinned
+/// by `tests/e2e/values_float_sqrt`; the NaN bits are distinguishable no way
+/// at all, and this is where the machine's answer is written down.
+pub fn a_float_square_root_is_correctly_rounded<A: Arm>() {
+    for (label, operand, want) in SQUARE_ROOTS {
+        forget_polls();
+        let mut words = vec![*operand, 0];
+        let answer = run::<A>(&square_root(), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "sqrt({label})");
+        assert_eq!(
+            words[1], *want,
+            "sqrt({label}): 0x{operand:016x} answered 0x{:016x}, want 0x{want:016x} — \
+             to the bit, not merely a number equal to it",
+            words[1]
+        );
+        assert_eq!(
+            words[0], *operand,
+            "the operand is not the destination and was not written: sqrt({label})"
+        );
+        assert_eq!(
+            answer.returned[0], *want,
+            "the destination holds what the slot holds: sqrt({label})"
+        );
+    }
+}
+
+/// `Inst::FloatSqrt` answers the same thing when its destination is its
+/// operand.
+///
+/// [`a_float_absolute_in_place_answers_the_same`]' case, and as much of a
+/// formality as it is there: the lowering reads its operand into `xmm0` and
+/// then stores, so this cannot go wrong. It is here because its absence would
+/// be a gap rather than a risk, and because a future arm that emitted a
+/// read-modify-write against the frame word would be caught here and nowhere
+/// else.
+pub fn a_float_square_root_in_place_answers_the_same<A: Arm>() {
+    for (label, operand, want) in SQUARE_ROOTS {
+        forget_polls();
+        let mut words = vec![*operand];
+        let answer = run::<A>(&square_root_in_place(), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "sqrt({label}) in place");
+        assert_eq!(
+            words[0], *want,
+            "sqrt({label}) in place: 0x{operand:016x} answered 0x{:016x}, want 0x{want:016x}",
+            words[0]
+        );
+        assert_eq!(
+            answer.returned[0], *want,
+            "the destination holds what the slot holds: sqrt({label}) in place"
+        );
+    }
+}
+
 /// A `Duration` destination renames the overflow, and only for the three
 /// operations that consult the name.
 ///
@@ -4830,21 +5015,26 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
     )
 }
 
-/// One intrinsic of each effect class, as the pair of names that resolves to it:
-/// a plain call (`Float.sqrt`: neither collects nor raises), a raise
-/// (`Any.equals`: a walk too deep to finish) and a safepoint (`String.trim`:
-/// allocates the string it answers).
+/// One intrinsic of each effect class that still has a member, as the pair of
+/// names that resolves to it: a raise (`Any.equals`: a walk too deep to
+/// finish) and a safepoint (`String.trim`: allocates the string it answers).
 ///
-/// **The plain one has been three operations and is now the only shape left.**
-/// It was `String.contains` until ADR 0065 moved that onto `Inst::RunFind`, and
-/// `String.indexOf` until ADR 0064 wrote that over the same instruction. No
-/// text intrinsic reads without allocating any more, so the plain call is one
-/// of the five `Float` functions IEEE 754 answers for every input — which is
-/// the example `cove_native::IntrinsicProtocol`'s own doc has named beside
-/// `indexOf` all along. The double does not read the argument list, so the synthesized call
-/// hands it `String` operands either way and nothing here depends on that.
-pub const INTRINSIC_CLASSES: [(&str, &str); 3] =
-    [("Float", "sqrt"), ("Any", "equals"), ("String", "trim")];
+/// **There were three, and the third has no member left.** A *plain call* —
+/// neither a safepoint nor a raise, so no publish, no program counter, no
+/// outcome test and the frame pointer kept live — was `String.contains` until
+/// ADR 0065 moved that onto `Inst::RunFind`, `String.indexOf` until ADR 0064
+/// wrote that over the same instruction, and then `Float.sqrt`, the last of
+/// the `Float` functions IEEE 754 answers for every input. Issue #454's Step 2
+/// made that one `Inst::FloatSqrt`, and **every variant of
+/// `cove_ir::Intrinsic` now declares `MAY_RAISE`** — which that crate's
+/// `every_intrinsic_left_can_be_refused` asserts, and which
+/// `cove_native::IntrinsicProtocol`'s doc records the consequence of. The
+/// class is gone from this array because there is nothing to put in it, not
+/// because the code generator stopped lowering it.
+///
+/// The double does not read the argument list, so the synthesized call hands
+/// it `String` operands either way and nothing here depends on that.
+pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Any", "equals"), ("String", "trim")];
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///
@@ -5000,7 +5190,7 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// level over:
 ///
 /// - a function with one `intrinsic-call` charges **one site** to that call's
-///   variant and none to the other twenty-one, and a function with no
+///   variant and none to the other twenty, and a function with no
 ///   intrinsic call in it charges nothing anywhere — so the count follows the
 ///   IR and not the shape of the body;
 /// - where the bytes are attributed they are **positive and no more than the
@@ -5008,7 +5198,7 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// - **whether they are attributed at all is the arm's and not the program's**,
 ///   which is the claim `ATTRIBUTES_INTRINSIC_CALLS` exists to make failable.
 ///
-/// One case per member of [`INTRINSIC_CLASSES`], because the three differ in
+/// One case per member of [`INTRINSIC_CLASSES`], because the two differ in
 /// exactly the thing that decides how much code a site is — the protocol — and a
 /// charge taken across the wrong span would show up on the safepoint class and
 /// on no other.
@@ -5098,7 +5288,7 @@ pub fn every_intrinsic_call_site_is_counted<A: Arm>() {
         jit.compile(program, FunctionId(0))
             .expect("the function is inside the slice")
     };
-    let (repeated, once) = (INTRINSIC_CLASSES[0], INTRINSIC_CLASSES[2]);
+    let (repeated, once) = (INTRINSIC_CLASSES[0], INTRINSIC_CLASSES[1]);
     let handle = compiled(&intrinsic_calling_each(&[repeated, once, repeated]));
     let code = A::intrinsic_code(handle);
 

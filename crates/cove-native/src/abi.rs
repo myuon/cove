@@ -760,12 +760,26 @@ pub type IntrinsicFn = unsafe extern "C" fn(
 ///   refusal. The helper synchronises the program counter so that the error names
 ///   the instruction's span, and the generated code tests the outcome.
 ///
-/// An intrinsic with neither — `Float.sqrt`, and the four other `Float`
-/// functions IEEE 754 answers for every input — is a plain call: no publish,
-/// no program counter, no test, and the frame pointer stays live. It named
-/// `String.indexOf` first and for longer, which is worth knowing when reading
-/// the suites: ADR 0064 moved that into `std.string`, and the five that are
-/// left are the whole of this class.
+/// An intrinsic with neither is a plain call: no publish, no program counter,
+/// no test, and the frame pointer stays live.
+///
+/// **No intrinsic is of that class any more, and that is a fact about the
+/// enum rather than about this type.** It named `String.indexOf` first and
+/// for longest; ADR 0064 moved that into `std.string`, and then took every
+/// `Float` operation IEEE 754 answers for each input out of
+/// [`cove_ir::Intrinsic`] and made it a typed scalar instruction —
+/// `Float.abs`, `Float.min`, `Float.max`, `Float.round`, and `Float.sqrt` in
+/// the last of issue #454's Step 2. Every variant left allocates or refuses,
+/// so every one of them sets at least one of the two fields below;
+/// `cove_ir::intrinsic`'s `every_intrinsic_left_can_be_refused` is the
+/// assertion, and `cove-native`'s `INTRINSIC_CLASSES` is down from three
+/// classes to two because of it.
+///
+/// The plain-call path in the code generator stays, and is now reachable only
+/// by an intrinsic nobody has written. That is deliberate: this type is what
+/// the declared effects *mean*, and deleting a branch of the meaning because
+/// the census is empty this week would have to be undone by the next
+/// intrinsic that is neither.
 ///
 /// `MAY_ALLOCATE` without `MAY_COLLECT` is read as a safepoint too, although
 /// [`cove_ir::Intrinsic::effects`] sets the two together: an allocation that did

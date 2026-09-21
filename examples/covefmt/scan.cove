@@ -108,10 +108,11 @@ impl Scan {
 
   /// The end of the number beginning at `from`.
   ///
-  /// A digit run, an optional fraction, and an optional suffix, so that
-  /// `500ms` is one token and `1.5` is one. What a number *means* — which
-  /// suffixes name a `Duration`, whether the fraction makes it a `Float` — is
-  /// the parser's, and a lexer that decided it would be deciding it twice.
+  /// A digit run, an optional fraction, an optional **signed exponent**, and
+  /// an optional suffix, so that `500ms` is one token and `1.5` is one and
+  /// `5.0e-324` is one. What a number *means* — which suffixes name a
+  /// `Duration`, whether the fraction makes it a `Float` — is the parser's,
+  /// and a lexer that decided it would be deciding it twice.
   fn number(self, from: Int) -> Int {
     var at = from
     while isDigit(self.at(at)) {
@@ -121,6 +122,33 @@ impl Scan {
       at = at + 1
       while isDigit(self.at(at)) {
         at = at + 1
+      }
+    }
+    // **The sign of an exponent belongs to the number and not to the line.**
+    // The tail below takes letters, so `1.0e308` was already one token; the
+    // `-` in `5.0e-324` is neither a letter nor a digit, so without this the
+    // number ended at `5.0e` and the formatter printed three tokens as
+    // `5.0e - 324`. That is a wrong *program* and not a wrong layout, and it
+    // survived for as long as it did because every such literal in this
+    // repository was written inside a call's parentheses or inside a string
+    // interpolation, where `print` copies the source rather than re-spacing
+    // it. `benches/floatsqrt`' `let sub = 5.0e-324` is the first one written
+    // anywhere else, and `covefmtBench` failed on it the day it landed.
+    //
+    // `crates/cove-syntax`'s `lex_decimal_number` is the rule this matches,
+    // **backtracking and all**: an `e` is an exponent only if digits follow
+    // it, optionally behind a sign, so `1ex` is the tail's business and the
+    // `e` is not consumed here.
+    if self.at(at) == 'e' || self.at(at) == 'E' {
+      var after = at + 1
+      if self.at(after) == '+' || self.at(after) == '-' {
+        after = after + 1
+      }
+      if isDigit(self.at(after)) {
+        at = after
+        while isDigit(self.at(at)) {
+          at = at + 1
+        }
       }
     }
     // The tail takes digits as well as letters, because a separator is in the

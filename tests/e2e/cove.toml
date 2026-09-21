@@ -423,3 +423,7 @@ allow = ["console"]
 [run.values_float_round]
 entry = "values_float_round.main"
 allow = ["console"]
+
+[run.values_float_sqrt]
+entry = "values_float_sqrt.main"
+allow = ["console"]

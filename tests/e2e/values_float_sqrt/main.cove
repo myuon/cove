@@ -1,0 +1,339 @@
+use console.println
+
+/// `Float.sqrt` at every edge, and the record of which of those edges a Cove
+/// program can see at all.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line
+/// of a reimplementation. `Float.sqrt` is `f64::sqrt` today, reached through
+/// one `Inst::IntrinsicCall`, and this is that corpus.
+///
+/// # This one's contract is stronger than its two predecessors', not weaker
+///
+/// `tests/e2e/values_float_min_max` exists because `f64::min` hands its tie
+/// back undecided, and `tests/e2e/values_float_round` exists because
+/// `f64::round`'s tie rule is a choice between two defensible rules. Neither
+/// is true here. IEEE 754 §5.4.1 makes `squareRoot` a **correctly rounded**
+/// operation: there is exactly one answer for every operand whose answer is a
+/// number, the same answer on every conforming machine, and no latitude for
+/// an implementation to spend. So the rows below are not choosing between
+/// rivals — they are pinning the one answer, and pinning it tightly enough
+/// that "close" would fail.
+///
+/// **Rendering is a pin on all fifty-three bits.** `cove_runtime::value`'s
+/// `write_float` hands a non-integral value to Rust's `{}`, which prints the
+/// shortest decimal that reads back as the same double — so a line that
+/// prints `1.4142135623730951` has named one bit pattern and no other. The
+/// `root.*.ulp` rows say the same thing a second way, by comparing against
+/// the neighbour on each side: `== 1.4142135623730951` is `true` and the
+/// doubles either side of it are `false`, which is the strongest statement a
+/// Cove program can make about correct rounding.
+///
+/// # A zero keeps its sign, including the negative one
+///
+/// IEEE 754 §5.4.1: "squareRoot(−0) is −0". `-0.0` is the one negative
+/// operand whose answer is not a NaN, and the answer carries the sign.
+/// `tests/e2e/values_float_abs` established that a Cove program can tell the
+/// two zeros apart three ways — interpolation renders the sign, `format`
+/// renders it, and `1.0 / x` answers `-inf` against `inf` — and all three are
+/// asked of it here, with `==`, `<`, `<=` and `toInt()` printed beside them
+/// to record that none of those four could have pinned it.
+///
+/// # What a Cove program cannot ask
+///
+/// **Which NaN.** Every negative operand answers a NaN, and so does `-inf`;
+/// a NaN operand answers a NaN too. Whether those are the *same* NaN is a
+/// question this file cannot put: there is no bit access to a `Float` and
+/// every NaN renders as the literal `NaN`. They are not the same, as it
+/// happens — a negative operand is an invalid operation and answers the
+/// machine's default NaN, where a NaN operand is handed back with its payload
+/// and its sign and its quiet bit set — and that is pinned in bits in the
+/// tests beside each tier, not here.
+///
+/// Every expected value was computed by a standalone `rustc` program calling
+/// `f64::sqrt` and reproducing `write_float`, and the harness was watched
+/// failing on a corrupted `expected.out` before the file was put back.
+export fn main() -> Result<Unit, Error> {
+  zeros()?
+  negatives()?
+  nans()?
+  infinities()?
+  exact()?
+  rounded()?
+  extremes()?
+  ordinary()?
+  identities()?
+  computed()?
+  Ok(())
+}
+
+/// Both zeros, through the three observers that can tell them apart and the
+/// four that cannot.
+///
+/// `squareRoot(-0)` is `-0` and `squareRoot(+0)` is `+0`: the operand's sign
+/// survives, and this is the one place a *negative* operand does not answer a
+/// NaN. It is also the place a naive lowering goes wrong, because the obvious
+/// "negative means NaN" test would answer a NaN here.
+fn zeros() -> Result<Unit, Error> {
+  let pz = 0.0
+  let nz = -0.0
+
+  println("zero.self {pz.sqrt()} {nz.sqrt()}")?
+  println("zero.self.format {pz.sqrt().format(2)} {nz.sqrt().format(2)}")?
+  println("zero.self.recip {1.0 / pz.sqrt()} {1.0 / nz.sqrt()}")?
+
+  // The attempts that see nothing. Every one of these answers the same
+  // whichever zero came back, which is why the three lines above are the pin
+  // and these are the record of what would not have been.
+  println("zero.blind.eq {pz.sqrt() == nz.sqrt()} {nz.sqrt() == 0.0}")?
+  println("zero.blind.order {nz.sqrt() < pz.sqrt()} {nz.sqrt() <= pz.sqrt()}")?
+  println("zero.blind.toInt {pz.sqrt().toInt()} {nz.sqrt().toInt()}")?
+
+  // A negative zero nothing wrote down as a literal, in case a literal is the
+  // one shape something could fold.
+  let made = 0.0 * -1.0
+  println("zero.made.recip {1.0 / made} {1.0 / made.sqrt()}")?
+
+  // And the nearest thing to a zero that is not one: the smallest positive
+  // double, whose root is very much larger than it and is not flushed.
+  println(
+    "zero.notflushed {(5.0e-324).sqrt() > 0.0} {(5.0e-324).sqrt() == 0.0}",
+  )?
+  Ok(())
+}
+
+/// Every negative operand, all of which answer a NaN — and the one that does
+/// not.
+///
+/// IEEE 754 makes `squareRoot` of a negative an invalid operation, and its
+/// answer a quiet NaN. The magnitudes are spread from the smallest subnormal
+/// to `f64::MAX` because an implementation that tested the operand's sign
+/// *bit* and one that tested `x < 0.0` differ on exactly one input — `-0.0`,
+/// which the first calls negative and the second does not — and the last row
+/// here is that input.
+fn negatives() -> Result<Unit, Error> {
+  println("neg.one {(-1.0).sqrt()} {(-4.0).sqrt()} {(-0.25).sqrt()}")?
+  println("neg.minpos {(-2.2250738585072014e-308).sqrt()}")?
+  println("neg.maxsub {(-2.2250738585072009e-308).sqrt()}")?
+  println("neg.tiny {(-5.0e-324).sqrt()}")?
+  println("neg.max {(-1.7976931348623157e308).sqrt()}")?
+
+  // A NaN compares equal to nothing, itself included, which is the second way
+  // of saying the answer is one; and it compares *false* in every direction,
+  // which is the third.
+  println("neg.isNaN {(-1.0).sqrt() == (-1.0).sqrt()} {(-1.0).sqrt() == 0.0}")?
+  println("neg.order {(-1.0).sqrt() < 0.0} {(-1.0).sqrt() > 0.0} {(-1.0).sqrt() <= 0.0}")?
+  println("neg.format {(-1.0).sqrt().format(2)}")?
+  println("neg.toInt {(-1.0).sqrt().toInt()}")?
+
+  // The exception, said here as well as under `zeros` because this is the
+  // list it is an exception to.
+  println("neg.zero {(-0.0).sqrt()} {1.0 / (-0.0).sqrt()}")?
+
+  // A negative nothing wrote down as a literal.
+  let made = 0.0 - 1.0
+  println("neg.made {made.sqrt()} {made.sqrt() == made.sqrt()}")?
+  Ok(())
+}
+
+/// A NaN in, a NaN out — and the record of everything about that NaN this
+/// file cannot ask.
+fn nans() -> Result<Unit, Error> {
+  let nan = 0.0 / 0.0
+
+  println("nan.sqrt {nan.sqrt()}")?
+  println("nan.sqrt.twice {nan.sqrt().sqrt()}")?
+  println("nan.isNaN {nan.sqrt() == nan.sqrt()} {nan.sqrt() == nan}")?
+  println("nan.format {nan.sqrt().format(2)}")?
+  println("nan.toInt {nan.sqrt().toInt()}")?
+
+  // A NaN made four other ways, so that no line above is answered by a fold
+  // of `0.0 / 0.0` in particular. The second is where a sign *would* show if
+  // `write_float` rendered it, and it does not: every NaN is `NaN`.
+  let other = (-1.0).sqrt()
+  let negated = -(0.0 / 0.0)
+  let parsed = Float.parse("nan").unwrapOr(0.0)
+  let subtracted = 1.0 / 0.0 - 1.0 / 0.0
+  println("nan.made {other.sqrt()} {negated.sqrt()} {parsed.sqrt()} {subtracted.sqrt()}")?
+  Ok(())
+}
+
+/// The infinities, which are not a pair here: `+inf` answers itself and
+/// `-inf` answers a NaN.
+fn infinities() -> Result<Unit, Error> {
+  let pos = 1.0 / 0.0
+  let neg = -1.0 / 0.0
+
+  println("inf.sqrt {pos.sqrt()} {neg.sqrt()}")?
+  println("inf.same {pos.sqrt() == pos} {neg.sqrt() == neg}")?
+  println("inf.recip {1.0 / pos.sqrt()} {1.0 / neg.sqrt()}")?
+  println("inf.toInt {pos.sqrt().toInt()} {neg.sqrt().toInt()}")?
+  println("inf.twice {pos.sqrt().sqrt()} {neg.sqrt().sqrt()}")?
+  Ok(())
+}
+
+/// The operands whose root is exactly representable, where the answer has to
+/// be that root and not a neighbour of it.
+///
+/// Powers of four and squares of integers, small and large. `2^52` is the
+/// first magnitude whose neighbours are a whole unit apart and its root is
+/// `2^26`; `(2^26 + 1)^2` is the largest perfect square below `2^53` that is
+/// not a power of two, and its root is the integer it is the square of.
+fn exact() -> Result<Unit, Error> {
+  println(
+    "exact.small {(1.0).sqrt()} {(4.0).sqrt()} {(9.0).sqrt()} {(16.0).sqrt()}",
+  )?
+  println("exact.frac {(0.25).sqrt()} {(2.25).sqrt()} {(6.25).sqrt()}")?
+  println("exact.pow {(4503599627370496.0).sqrt()} {(1.0e-8).sqrt()}")?
+  println("exact.square {(4503599761588225.0).sqrt()}")?
+  println("exact.eq {(4.0).sqrt() == 2.0} {(6.25).sqrt() == 2.5} {(4503599627370496.0).sqrt() == 67108864.0}")?
+  // A root that is exact is exact both ways: squaring it comes back.
+  println(
+    "exact.back {(4.0).sqrt() * (4.0).sqrt()} {(6.25).sqrt() * (6.25).sqrt()}",
+  )?
+  Ok(())
+}
+
+/// The operands whose root is *not* representable, pinned to the last bit.
+///
+/// The rendering names one double and no other, and the `.ulp` rows say the
+/// same thing from the other side: the answer equals the correctly rounded
+/// root and equals neither of the two doubles beside it. That pair is what
+/// separates a correctly rounded implementation from one that is merely
+/// accurate to within an ulp — a Newton iteration stopped one step early, or
+/// an `rsqrt` approximation refined, would pass every rendering in this file
+/// that has few enough digits and fail exactly these.
+fn rounded() -> Result<Unit, Error> {
+  println("root.two {(2.0).sqrt()}")?
+  println("root.three {(3.0).sqrt()}")?
+  println("root.five {(5.0).sqrt()}")?
+  println("root.ten {(10.0).sqrt()}")?
+  println("root.half {(0.5).sqrt()}")?
+  println("root.tenth {(0.1).sqrt()}")?
+
+  println("root.two.ulp {(2.0).sqrt() == 1.4142135623730951} {(2.0).sqrt() == 1.4142135623730954} {(2.0).sqrt() == 1.414213562373095}")?
+  println("root.three.ulp {(3.0).sqrt() == 1.7320508075688772} {(3.0).sqrt() == 1.7320508075688774} {(3.0).sqrt() == 1.732050807568877}")?
+  println("root.ten.ulp {(10.0).sqrt() == 3.1622776601683795} {(10.0).sqrt() == 3.16227766016838} {(10.0).sqrt() == 3.162277660168379}")?
+
+  // Squaring an inexact root does not come back, and by how much is itself a
+  // pin: it is the rounding of the root and nothing else.
+  println("root.back {(2.0).sqrt() * (2.0).sqrt()} {(3.0).sqrt() * (3.0).sqrt()} {(10.0).sqrt() * (10.0).sqrt()}")?
+  Ok(())
+}
+
+/// The ends of the range, where an implementation that scaled its operand
+/// could overflow or flush.
+///
+/// `f64::MAX`'s root is a little over `2^512` and is fine; `2^-1074`'s root
+/// is `2^-537`, exactly — the smallest subnormal there is has a *normal* root
+/// and it is not zero. A lowering that multiplied by anything to normalise
+/// its operand first is what these rows are aimed at.
+fn extremes() -> Result<Unit, Error> {
+  println("ext.max {(1.7976931348623157e308).sqrt()}")?
+  println("ext.minpos {(2.2250738585072014e-308).sqrt()}")?
+  println("ext.maxsub {(2.2250738585072009e-308).sqrt()}")?
+  println("ext.tiny {(5.0e-324).sqrt()}")?
+  // `2^-1074`'s root is `2^-537`, which is exact, so squaring it comes back
+  // to the operand — the one subnormal for which that is true.
+  println("ext.tiny.back {(5.0e-324).sqrt() * (5.0e-324).sqrt() == 5.0e-324}")?
+  println("ext.max.finite {(1.7976931348623157e308).sqrt() < 1.0 / 0.0}")?
+  println("ext.tiny.normal {(5.0e-324).sqrt() > 2.2250738585072014e-308}")?
+  Ok(())
+}
+
+/// The ordinary cases, which is what nearly every call in a real program
+/// looks like.
+fn ordinary() -> Result<Unit, Error> {
+  println(
+    "plain.int {(2.0).sqrt()} {(3.0).sqrt()} {(100.0).sqrt()} {(144.0).sqrt()}",
+  )?
+  println("plain.frac {(0.01).sqrt()} {(1.44).sqrt()} {(2.56).sqrt()} {(0.0001).sqrt()}")?
+  println("plain.big {(1.0e100).sqrt()} {(1.0e-100).sqrt()}")?
+  println("format {(2.0).sqrt().format(4)} {(4.0).sqrt().format(0)} {(-0.0).sqrt().format(1)}")?
+  println("toInt {(2.0).sqrt().toInt()} {(16.0).sqrt().toInt()} {(0.25).sqrt().toInt()}")?
+  Ok(())
+}
+
+/// `sqrt` composed with itself and with multiplication, over operands that
+/// arrive as parameters so that nothing on the line is a fold of a literal.
+fn identities() -> Result<Unit, Error> {
+  identity("four", 4.0)?
+  identity("two", 2.0)?
+  identity("one", 1.0)?
+  identity("quarter", 0.25)?
+  identity("zero", 0.0)?
+  identity("negZero", -0.0)?
+  identity("negOne", -1.0)?
+  identity("inf", 1.0 / 0.0)?
+  identity("negInf", -1.0 / 0.0)?
+  identity("minPos", 2.2250738585072014e-308)?
+  identity("tiny", 5.0e-324)?
+  identity("max", 1.7976931348623157e308)?
+  Ok(())
+}
+
+/// One row of [`identities`]: the root, the root of the root, the root
+/// squared, and the reciprocal that shows a zero's sign.
+fn identity(name: String, x: Float) -> Result<Unit, Error> {
+  let once = x.sqrt()
+  let twice = once.sqrt()
+  let squared = once * once
+  println("id.{name} {once} {twice} {squared} {1.0 / once}")?
+  Ok(())
+}
+
+/// The same questions over values built by a loop, so that no line above is
+/// the only answer to its question.
+fn computed() -> Result<Unit, Error> {
+  // Four halves make a two nothing wrote down.
+  var total = 0.0
+  var i = 0
+  while i < 4 {
+    total = total + 0.5
+    i += 1
+  }
+  println("run.two {total} {total.sqrt()}")?
+
+  let zero = total - total
+  let negZero = zero * -1.0
+  println("run.zero.recip {1.0 / zero.sqrt()} {1.0 / negZero.sqrt()}")?
+
+  // Halved past the smallest subnormal: a zero, whose sign the root keeps.
+  var tiny = 1.0
+  var steps = 0
+  while steps < 1100 {
+    tiny = tiny / 2.0
+    steps += 1
+  }
+  println(
+    "run.flushed {tiny.sqrt()} {1.0 / tiny.sqrt()} {1.0 / (-tiny).sqrt()}",
+  )?
+
+  // Doubled past `f64::MAX`: an infinity, whose root is itself — and whose
+  // negation's root is a NaN.
+  var huge = 1.0
+  var doubled = 0
+  while doubled < 1100 {
+    huge = huge * 2.0
+    doubled += 1
+  }
+  println("run.overflowed {huge.sqrt()} {(-huge).sqrt()}")?
+
+  let madeNan = huge - huge
+  println("run.nan {madeNan.sqrt()} {madeNan.sqrt() == madeNan.sqrt()}")?
+
+  // Perfect squares from a loop, every one of which has an exact root.
+  var n = 0.0
+  var found = 0
+  var exactly = 0
+  while found < 64 {
+    n = n + 1.0
+    let square = n * n
+    if square.sqrt() == n {
+      exactly += 1
+    }
+    found += 1
+  }
+  println("run.squares {exactly} {n} {(n * n).sqrt()}")?
+  Ok(())
+}

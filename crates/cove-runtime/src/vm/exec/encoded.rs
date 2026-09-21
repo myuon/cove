@@ -132,6 +132,7 @@ const FLOAT_ABS: u8 = Op::FloatAbs.number();
 const FLOAT_MIN: u8 = Op::FloatMinMax(MinMax::Min).number();
 const FLOAT_MAX: u8 = Op::FloatMinMax(MinMax::Max).number();
 const FLOAT_ROUND: u8 = Op::FloatRound.number();
+const FLOAT_SQRT: u8 = Op::FloatSqrt.number();
 
 const ADD_INT: u8 = Op::Arith(Num::Int, ArithOp::Add).number();
 const SUB_INT: u8 = Op::Arith(Num::Int, ArithOp::Sub).number();
@@ -359,6 +360,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::FloatAbs
         | Op::FloatMinMax(_)
         | Op::FloatRound
+        | Op::FloatSqrt
         | Op::Jump
         | Op::BranchFalse
         | Op::CmpBranch(_, _)
@@ -3045,6 +3047,32 @@ pub(super) fn dispatch<'s, 'a>(
                 machine
                     .mem
                     .set_word_at(base_at + (a!()) as usize, x.round().to_bits());
+            }
+
+            // ADR 0064's fourth and last typed scalar operation, and the only
+            // one of the four the machine has an instruction for: the native
+            // tier lowers this to `sqrtsd` and gets the same bits because the
+            // same clause of the same standard binds both. `Inst::FloatSqrt`'s
+            // doc is the contract and says at length why this tier is allowed
+            // to call `f64::sqrt` where `FLOAT_MIN` and `FLOAT_MAX` above it
+            // are not allowed to call `f64::min`: IEEE 754 §5.4.1 makes a
+            // square root correctly rounded, so there is one answer and no
+            // latitude for a library to spend, where `f64::min`'s
+            // documentation hands the tie back undecided.
+            //
+            // **It quiets a signalling NaN, as `FLOAT_ROUND` does and for a
+            // different reason**: not because the answer went through an
+            // addition, but because a signalling operand is an invalid
+            // operation and the standard says its answer is quiet. The one
+            // thing the standard does *not* say is which quiet NaN a
+            // *negative* operand answers — see `Inst::FloatSqrt` — which is
+            // why the table below this file's own arm asserts quietness there
+            // and `cove-native`'s asserts the bits.
+            FLOAT_SQRT => {
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, x.sqrt().to_bits());
             }
 
             ADD_INT => int_op!(ArithOp::Add),

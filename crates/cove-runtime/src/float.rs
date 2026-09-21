@@ -5,17 +5,36 @@
 //! `crate::find` is the shape of this module and the precedent for it: one
 //! fact, held in one place, because two execution tiers reading two copies of
 //! it is two copies to keep in step. What is different here is which copies —
-//! this crate has *two* evaluators, and ADR 0055's native tier has two code
-//! generators below one of them, so a float operation the language decides has
-//! **four** implementations and needs one specification.
+//! this crate has *two* evaluators, and ADR 0055's native tier has a code
+//! generator below one of them, so a float operation the language decides has
+//! **three** implementations and needs one specification. It had four until
+//! [ADR 0066](../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md)
+//! retired the Cranelift arm: a change to the count and to nothing else about
+//! the argument, since one copy fewer is still more than one.
 //!
 //! Only what Rust declines to decide lives here. `Float.abs` does not: IEEE
 //! 754 makes it a sign-bit operation and `f64::abs` is specified to clear bit
-//! 63 and touch nothing else, so every tier may and does call it. `Float.sqrt`
-//! does not, for the stronger version of the same reason — IEEE 754 requires a
-//! correctly-rounded root, so the bits are the same on every conforming
-//! machine. A method whose own documentation settles the question is a method
-//! this module has no business restating.
+//! 63 and touch nothing else, so every tier may and does call it.
+//!
+//! **`Float.sqrt` does not either, for a stronger reason with one measured
+//! exception.** IEEE 754 §5.4.1 makes `squareRoot` correctly rounded, so for
+//! every operand whose answer is a *number* there is one answer and it is the
+//! same on every conforming machine — which was checked rather than repeated,
+//! over 3.1 million operands, by comparing `f64::sqrt`'s answer against the
+//! exact midpoints to both of its neighbours in integer arithmetic. What the
+//! standard does **not** fix is the quiet NaN an *invalid* operation answers:
+//! §6.2 leaves its sign and payload to the implementation, so `(-1.0).sqrt()`
+//! is `0xfff8_0000_0000_0000` on x86-64 — sign bit set — and need not be that
+//! anywhere else. That is not a reason for a `float::sqrt` beside
+//! [`extremum`]: a Cove program cannot observe a NaN's sign or payload, so
+//! there is no contract to state, and stating one would mean computing a root
+//! by hand in order to fix bits nobody can read. It is a reason for
+//! `cove-native`'s `SQUARE_ROOTS` to be a table about x86-64 and for
+//! `cove-runtime`'s to assert *quietness* and stop, which is what each of
+//! them does.
+//!
+//! A method whose own documentation settles the question is a method this
+//! module has no business restating.
 
 use cove_ir::MinMax;
 

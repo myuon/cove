@@ -234,6 +234,17 @@ allow = ["console", "clock"]
 entry = "floatround.main"
 allow = ["console", "clock"]
 
+# `Float.sqrt` as an instruction against the same operation as a call, which
+# is ADR 0064's Decision 2 typed scalar operation applied to the last of the
+# three names it lists. `benches/floatround`' arrangement for its reasons, with
+# five operands chosen for a different question: `sqrtsd` is one instruction
+# and is the only one of the four lowerings whose own latency is in the teens
+# of cycles, so the rows ask whether an exact root, an inexact one, an invalid
+# operation and a subnormal cost the same.
+[run.floatsqrt]
+entry = "floatsqrt.main"
+allow = ["console", "clock"]
+
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
 # #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,

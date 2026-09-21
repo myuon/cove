@@ -154,6 +154,16 @@ fn a_float_rounding_in_place_answers_the_same() {
 }
 
 #[test]
+fn a_float_square_root_is_correctly_rounded() {
+    suite::a_float_square_root_is_correctly_rounded::<Template>();
+}
+
+#[test]
+fn a_float_square_root_in_place_answers_the_same() {
+    suite::a_float_square_root_in_place_answers_the_same::<Template>();
+}
+
+#[test]
 fn an_immediate_operand_fails_the_same_way() {
     suite::an_immediate_operand_fails_the_same_way::<Template>();
 }
