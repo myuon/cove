@@ -1,4 +1,4 @@
-//! The hundred and eighty-one opcodes, and what each one makes of the four
+//! The hundred and eighty-two opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -23,7 +23,8 @@
 //!   [`Inst::FloatAbs`](crate::Inst::FloatAbs) one, because it is not a
 //!   family — see the instruction's own doc for why it is not — and
 //!   [`Inst::FloatMinMax`](crate::Inst::FloatMinMax) two, [`MinMax`], because
-//!   it is;
+//!   it is, and [`Inst::FloatRound`](crate::Inst::FloatRound) one again, for
+//!   `FloatAbs`' reason;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
 //!   form, so no discriminant is stored anywhere.
 //!
@@ -230,8 +231,13 @@ mod base {
     /// instructions would have cost. Last, for `CMP_ORDER`'s reason: adding
     /// them renumbered nothing already there.
     pub const FLOAT_MIN_MAX: u8 = FLOAT_ABS + 1;
+    /// [`crate::Inst::FloatRound`], ADR 0064's third typed scalar operation —
+    /// one opcode, for [`FLOAT_ABS`]' reason: one `Float` in, one `Float`
+    /// out, and no family to be a member of. Last, for `CMP_ORDER`'s reason:
+    /// adding it renumbered nothing already there.
+    pub const FLOAT_ROUND: u8 = FLOAT_MIN_MAX + MIN_MAXES.len() as u8;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = FLOAT_MIN_MAX + MIN_MAXES.len() as u8;
+    pub const END: u8 = FLOAT_ROUND + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -300,6 +306,8 @@ pub enum Op {
     FloatAbs,
     /// [`crate::Inst::FloatMinMax`]: two `Float`s in, one `Float` out.
     FloatMinMax(MinMax),
+    /// [`crate::Inst::FloatRound`]: one `Float` in, one `Float` out.
+    FloatRound,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
     GrowableAllocBytes,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::Words`], whose
@@ -646,6 +654,7 @@ impl Op {
             Op::FloatAbs,
         ]);
         all.extend(MIN_MAXES.map(Op::FloatMinMax));
+        all.push(Op::FloatRound);
         all
     }
 
@@ -712,6 +721,7 @@ impl Op {
             Op::RunFindBytes => base::RUN_FIND_BYTES,
             Op::FloatAbs => base::FLOAT_ABS,
             Op::FloatMinMax(op) => base::FLOAT_MIN_MAX + index_of!(MIN_MAXES, op),
+            Op::FloatRound => base::FLOAT_ROUND,
             Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
             Op::GrowableAllocWords => base::GROWABLE_ALLOC_WORDS,
             Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
@@ -1026,6 +1036,14 @@ impl Op {
                 Operand::Word(FLOAT),
                 Payload::Empty,
             ),
+            // `Op::FloatAbs`'s shape exactly, and for its reason: one `Float`
+            // in, one `Float` out.
+            Op::FloatRound => fields(
+                Operand::Word(FLOAT),
+                Operand::Word(FLOAT),
+                NONE,
+                Payload::Empty,
+            ),
             // No `Half::Layout` on either of the two allocating buffer
             // opcodes, for the reason `Op::Str` carries none, twice over: an
             // owner is always `Program::buffer_layout` and its store is always
@@ -1231,15 +1249,17 @@ mod tests {
     /// brought `Float.min` and `Float.max` — two opcodes and **one**
     /// instruction, for the reason `crate::MinMax` gives, which is the first
     /// time this file has been asked to say that those are different
-    /// questions. What the
+    /// questions — and a hundred and eighty-two once issue #454's Step 2
+    /// brought `Float.round`, one opcode again and for `Float.abs`' reason.
+    /// What the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_eighty_one_opcodes() {
-        assert_eq!(Op::all().len(), 181);
-        assert_eq!(OPCODES, 181);
+    fn there_are_a_hundred_and_eighty_two_opcodes() {
+        assert_eq!(Op::all().len(), 182);
+        assert_eq!(OPCODES, 182);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1307,6 +1327,10 @@ mod tests {
         // A family of two, equally deliberately, and `Inst::MinMax` says why:
         // one instruction with a flag is still one opcode per member here.
         assert_eq!(count(|op| matches!(op, Op::FloatMinMax(_))), 2);
+        // And the third is one again, for the first's reason: rounding is one
+        // operation, and there is no `Num` on it because an `Int` is already
+        // an integer.
+        assert_eq!(count(|op| matches!(op, Op::FloatRound)), 1);
         assert_eq!(
             count(|op| matches!(op, Op::AllocFixed | Op::AllocImm | Op::AllocSlot)),
             3

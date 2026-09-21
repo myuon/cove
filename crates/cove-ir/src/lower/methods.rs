@@ -373,18 +373,18 @@ impl Body<'_> {
         // too, and for a reason of its own rather than a conversion's: ADR
         // 0064's Decision 2 admits "a typed scalar operation that maps to a
         // CPU or backend operation" below the standard library, and refuses
-        // the runtime call that named the method instead. All three of them
-        // — `Float.abs`, `Float.min` and `Float.max` — always have a
-        // receiver.
+        // the runtime call that named the method instead. All four of them
+        // — `Float.abs`, `Float.min`, `Float.max` and `Float.round` — always
+        // have a receiver.
         if let Some(scalar) = scalar_operation(receiver, operation, base.is_some()) {
             let Some(base) = base else {
                 return self.gap(&format!("`{receiver}.{operation}`"), expr);
             };
             let operand = self.expr(base);
             // `min` and `max` take the one argument the checker has settled
-            // they take; `abs` takes none.
+            // they take; `abs` and `round` take none.
             let other = match (scalar, args) {
-                (ScalarOp::Abs, []) => None,
+                (ScalarOp::Abs | ScalarOp::Round, []) => None,
                 (ScalarOp::MinMax(_), [arg]) => Some(self.expr(&arg.value)),
                 _ => {
                     self.release(operand, expr.span);
@@ -394,6 +394,10 @@ impl Body<'_> {
             let dst = self.answer_at(want, result);
             let inst = match (scalar, &other) {
                 (ScalarOp::Abs, _) => Inst::FloatAbs {
+                    dst: dst.slot,
+                    a: operand.slot,
+                },
+                (ScalarOp::Round, _) => Inst::FloatRound {
                     dst: dst.slot,
                     a: operand.slot,
                 },
@@ -898,7 +902,8 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// lowers to. `Float.abs` is in them on the same footing and for a rule of its
 /// own: [`scalar_operation`] names it as the [`Inst::FloatAbs`] it lowers to,
 /// ADR 0064's Decision 2 typed scalar operation, and names `Float.min` and
-/// `Float.max` as the two halves of the [`Inst::FloatMinMax`] they lower to.
+/// `Float.max` as the two halves of the [`Inst::FloatMinMax`] they lower to
+/// and `Float.round` as the [`Inst::FloatRound`] it lowers to.
 /// **A pair leaves this table
 /// when the *method* leaves the machine, not when the intrinsic does** — an
 /// entry here is what says the lowering answers the call at all, and the three
@@ -965,6 +970,8 @@ enum ScalarOp {
     Abs,
     /// [`Inst::FloatMinMax`], which end of the pair it answers.
     MinMax(MinMax),
+    /// [`Inst::FloatRound`].
+    Round,
 }
 
 /// Which typed scalar operation `receiver.operation(...)` is, where it is one.
@@ -973,15 +980,16 @@ enum ScalarOp {
 /// Decision 2 names "a typed scalar operation that maps to a CPU or backend
 /// operation (`sqrt`, `abs`, `round`, a checked typed conversion)" in the
 /// vocabulary a primitive may be written in, and refuses one named after a
-/// method. Each of these three was an `Intrinsic` — `f64::abs`, `f64::min` and
-/// `f64::max` in Rust, reached through an `Inst::IntrinsicCall` that carried
-/// the method's own name. `Float.abs` left in Phase 1's sixth migration and
-/// the other two in its last.
+/// method. Each of these four was an `Intrinsic` — `f64::abs`, `f64::min`,
+/// `f64::max` and `f64::round` in Rust, reached through an
+/// `Inst::IntrinsicCall` that carried the method's own name. `Float.abs` left
+/// in Phase 1's sixth migration, `Float.min` and `Float.max` in its last, and
+/// `Float.round` in the first of issue #454's Step 2.
 ///
 /// It answers a `match` rather than the `bool` it answered while `abs` was
 /// alone, which is what that function's doc said would happen when a second
-/// operation arrived — though it arrived from Phase 1 rather than from Phase
-/// 3, and `Float.round` and `Float.sqrt` are still ahead of it.
+/// operation arrived. `Float.round` is the fourth and `Float.sqrt` is the
+/// only name on Decision 2's list still ahead of it.
 ///
 /// `has_receiver` is asked for [`conversion`]'s reason. There is no
 /// `Float.min(a, b)` written on the type's name — `ASSOCIATED` names none of
@@ -992,6 +1000,7 @@ fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> Opti
         ("Float", "abs", true) => Some(ScalarOp::Abs),
         ("Float", "min", true) => Some(ScalarOp::MinMax(MinMax::Min)),
         ("Float", "max", true) => Some(ScalarOp::MinMax(MinMax::Max)),
+        ("Float", "round", true) => Some(ScalarOp::Round),
         _ => None,
     }
 }

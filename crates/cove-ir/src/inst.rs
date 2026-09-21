@@ -455,9 +455,9 @@ pub enum Inst {
     ///
     /// **It is not a family, and that is the whole of the decision.**
     /// `Float.round` and `Float.sqrt` are the census's other two typed scalar
-    /// operations and are ADR 0064's Phase 3; a `FloatUnary { op }` added here
-    /// would be a one-member family guessing at both of them, and the guess
-    /// buys nothing — the bytecode gives a member of such a family one opcode
+    /// operations; a `FloatUnary { op }` added here
+    /// would have been a one-member family guessing at both of them, and the
+    /// guess would have bought nothing — the bytecode gives a member of such a family one opcode
     /// each exactly as three instructions would, and each of the other two has
     /// a question of its own still to settle (`round`'s tie rule is on
     /// Decision 6's list of things pinned before the arm that implements them
@@ -468,6 +468,14 @@ pub enum Inst {
     /// mechanical refactor into one family; a family now is a decision taken
     /// for two operations nobody has measured. `PHILOSOPHY.md`'s "earn
     /// complexity through use", and one caller is one caller.
+    ///
+    /// **`Float.round` has since arrived and the guess would have been
+    /// wrong**, which is worth leaving on the record beside the reasoning:
+    /// [`Inst::FloatRound`] is a separate instruction and not a member here,
+    /// because its lowering has nothing in common with this one at all — five
+    /// bytes of `btr` against eighty-seven bytes of conversion and select —
+    /// so a shared `op` field would have selected between two sequences with
+    /// no shared shape to factor.
     ///
     /// **There is no `Num` on it**, where [`Inst::Neg`] has one. An `Int`'s
     /// absolute value is not this operation: `Int.abs` raises at `Int.MIN`,
@@ -553,6 +561,94 @@ pub enum Inst {
         a: Slot,
         b: Slot,
     },
+    /// `dst = round(a)`, on one IEEE-754 double: the nearest integer, with a
+    /// half going **away from zero**.
+    ///
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 2 names `round` in its list of typed scalar operations, and
+    /// this is it. `Float.round` was an [`Inst::IntrinsicCall`] carrying the
+    /// method's own name until this replaced it; the Cove-body route the
+    /// census proposes instead is **blocked**, for the reason it is blocked
+    /// for [`Inst::FloatMinMax`]: `crates/cove-native/src/subset.rs` admits no
+    /// float constant, comparison or arithmetic, so a body written over any of
+    /// them would take every caller of `Float.round` back to the VM. Checked
+    /// rather than assumed — see the measurement in `benches/floatround`.
+    ///
+    /// # The contract
+    ///
+    /// The four things a reimplementation has to get right, in the order they
+    /// are easy to get wrong:
+    ///
+    /// **A half goes away from zero, not to even.** `0.5` is `1.0`, `2.5` is
+    /// `3.0`, `4.5` is `5.0`, and the negatives are the mirror of those.
+    /// Ties-to-even — which is what a machine's default rounding mode is, what
+    /// x86-64's `roundsd` offers and what `f64::round_ties_even` is — answers
+    /// `0.0`, `2.0` and `4.0` there. It does **not** disagree on every half:
+    /// `1.5` and `3.5` are `2.0` and `4.0` under both rules, so a table whose
+    /// halves all have an odd floor would pass an implementation with the tie
+    /// backwards. `tests/e2e/values_float_round` and `cove-native`'s
+    /// `tests/suite`'s `ROUNDINGS` both carry halves of each parity for that
+    /// reason.
+    ///
+    /// **The sign of the operand is the sign of the answer, zeros included.**
+    /// `(-0.4).round()` is `-0.0` and not `+0.0`, and `-0.0` is
+    /// distinguishable from `0.0` in Cove three ways — interpolation,
+    /// `format`, and `1.0 / x` — so this is a contract rather than an
+    /// observation. Every subnormal answers a zero of its own sign too.
+    ///
+    /// **A value with no fractional part is handed back unchanged, to the
+    /// bit.** Every double at or past `2^52` is already an integer, and so are
+    /// both infinities; the largest magnitude with a fraction at all is
+    /// `2^52 - 0.5`, whose answer is `2^52`.
+    ///
+    /// **A NaN keeps its sign and its payload and is *quieted*.** That last
+    /// part is where this differs from [`Inst::FloatAbs`] and
+    /// [`Inst::FloatMinMax`], both of which hand an operand back whole: this
+    /// operation's answer is computed rather than selected, the computation is
+    /// an addition, and an addition sets bit 51. No Cove program can see any
+    /// of it — there is no bit access to a `Float` and every NaN renders as
+    /// `NaN` — so it is pinned in bits, in `cove-native`'s `tests/suite`'s
+    /// `ROUNDINGS`, whose signalling rows are the ones that say so.
+    ///
+    /// # Why the runtime still calls `f64::round`
+    ///
+    /// [`crate::MinMax`]'s contract is spelled out in `cove-runtime`'s
+    /// `float::extremum` rather than delegated to `f64::min`, because
+    /// `f64::min`'s own documentation declines to decide its answer on
+    /// operands that compare equal — so a tier that delegated would be a tier
+    /// whose answer is a fact about which `rustc` built it. **`f64::round`
+    /// declines nothing that a Cove program can see.** Its first sentence
+    /// fixes the tie ("If a value is half-way between two integers, round away
+    /// from `0.0`") and the sentence after it refuses any latitude at all
+    /// ("This function always returns the precise result"); IEEE 754's
+    /// `roundToIntegralTiesToAway` fixes the sign of a zero answer, on the
+    /// same footing that makes `f64::abs` a sign-bit operation and `f64::sqrt`
+    /// correctly rounded — which is the footing `cove-runtime`'s `float`
+    /// module already names as keeping both of those *out* of it. So a
+    /// `float::round` beside `float::extremum` would be a **copy** of
+    /// `f64::round` rather than a departure from it, and the only oracle a
+    /// copy has is the thing it copied. Both evaluators call `f64::round`;
+    /// what is written down instead of a fourth implementation is this
+    /// contract, and the tables that hold the native lowering to it.
+    ///
+    /// # The native lowering, and why it is seventeen instructions
+    ///
+    /// **x86-64 has no instruction for this.** `roundsd`'s four modes are
+    /// nearest-even, floor, ceiling and truncate; half-away-from-zero is not
+    /// among them, and `roundsd` is SSE4.1 where this code generator is SSE2.
+    /// What `rustc -O` emits for `f64::round` on this target — read rather
+    /// than guessed — is `trunc(x + copysign(0.49999999999999994, x))`, and
+    /// the constant is `nextdown(0.5)` rather than `0.5` because
+    /// `0.49999999999999994 + 0.5` rounds *up* to `1.0` and would answer `1`
+    /// where the answer is `0`. The template arm is that identity over `|x|`,
+    /// with the truncation done by `cvttsd2si`/`cvtsi2sd` instead of the
+    /// `roundsd` it has not got, a magnitude test for the range where that
+    /// pair has no answer, and the operand's sign bit `or`ed back on at the
+    /// end. See the arm itself for the sequence.
+    ///
+    /// **There is no `Num` on it**, for [`Inst::FloatAbs`]' reason: an `Int`
+    /// is already an integer and has nothing to round.
+    FloatRound { dst: Slot, a: Slot },
 
     // ---- control flow --------------------------------------------------
     /// Continue at `to`.

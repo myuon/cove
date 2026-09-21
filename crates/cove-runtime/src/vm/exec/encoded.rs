@@ -131,6 +131,7 @@ const NEG_FLOAT: u8 = Op::Neg(Num::Float).number();
 const FLOAT_ABS: u8 = Op::FloatAbs.number();
 const FLOAT_MIN: u8 = Op::FloatMinMax(MinMax::Min).number();
 const FLOAT_MAX: u8 = Op::FloatMinMax(MinMax::Max).number();
+const FLOAT_ROUND: u8 = Op::FloatRound.number();
 
 const ADD_INT: u8 = Op::Arith(Num::Int, ArithOp::Add).number();
 const SUB_INT: u8 = Op::Arith(Num::Int, ArithOp::Sub).number();
@@ -357,6 +358,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::Convert(_)
         | Op::FloatAbs
         | Op::FloatMinMax(_)
+        | Op::FloatRound
         | Op::Jump
         | Op::BranchFalse
         | Op::CmpBranch(_, _)
@@ -3019,6 +3021,30 @@ pub(super) fn dispatch<'s, 'a>(
                 let y = machine.mem.word_at(base_at + (c!() as usize));
                 let answer = crate::float::extremum(x, y, MinMax::Max);
                 machine.mem.set_word_at(base_at + (a!()) as usize, answer);
+            }
+
+            // ADR 0064's third typed scalar operation, and the one whose
+            // answer is *computed* — the nearest integer, a half going away
+            // from zero. `Inst::FloatRound`'s doc is the contract and says at
+            // length why this tier is allowed to call `f64::round` where
+            // `FLOAT_MIN` and `FLOAT_MAX` above it are not allowed to call
+            // `f64::min`: the method's own first sentence fixes the tie and
+            // the sentence after it refuses any latitude, where `f64::min`'s
+            // documentation hands the tie back undecided.
+            //
+            // **It quiets a signalling NaN, and that is the one way it
+            // differs from the two above.** Their answer is one of their
+            // operands, whole; this one goes through an addition, and an
+            // addition sets bit 51. No Cove program can see it, so what says
+            // so is `cove-native`'s `tests/suite`'s `ROUNDINGS` — the same
+            // table the native lowering is held to — and the signalling rows
+            // of it are the ones that would catch a lowering that handed the
+            // operand back instead.
+            FLOAT_ROUND => {
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, x.round().to_bits());
             }
 
             ADD_INT => int_op!(ArithOp::Add),
