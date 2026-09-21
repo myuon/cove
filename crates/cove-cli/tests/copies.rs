@@ -738,13 +738,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// where the call was a crossing, which is what `benches/floatround` measures
 /// and what this survey, being over the IR, cannot see.
 ///
+/// **The thirty-third rise is one new row and nothing else.** 2525 to 2544,
+/// 165 programs to 166, and all nineteen are `tests/e2e:values_float_sqrt` —
+/// two in the `prod` column and seventeen in the `ret` column, none counted
+/// in both. The check the paragraphs above prescribe says so: the survey with
+/// that directory removed is **2525 exactly**, over the same 165 programs,
+/// the same 16,245 functions and the same 269,241 instructions, which are the
+/// figures the row before it left. The program is ADR 0064's Decision 6
+/// corpus for `Float.sqrt`, ten functions of `println` lines whose `ret`
+/// column is what a fixture that hands each group's result back through a
+/// `Result<Unit, Error>` has, and whose `prod` column is two for
+/// `values_float_round`'s reason: `identity` and `computed` are the only
+/// functions here that bind a root rather than interpolate it.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2525;
+const FORWARDABLE_COPIES: usize = 2544;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
