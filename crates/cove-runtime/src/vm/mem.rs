@@ -708,6 +708,34 @@ impl Space {
         }
     }
 
+    /// Appends the `len` payload bytes of the run of words at `addr` to `out`.
+    ///
+    /// Least significant byte of each word first, whatever the host's own
+    /// order, which is the order [`Memory::string_bytes_into`]'s one caller
+    /// and [`crate::vm::exec::Machine::order_strings`] both read a string in.
+    ///
+    /// Chunk by chunk as [`Space::read_into`] is, and for the same reason: an
+    /// object may cross a chunk boundary, and a loop that asks
+    /// [`Words::run`] again when it reaches the end of one needs no separate
+    /// path for the object that does — the `while` simply turns twice.
+    #[inline]
+    fn bytes_into(&self, addr: u64, len: usize, out: &mut Vec<u8>) {
+        let from = out.len();
+        let words = len.div_ceil(8);
+        let mut at = addr - STACK_WORDS;
+        let mut done = 0;
+        while done < words {
+            let run = self.words.run(at);
+            let take = run.len().min(words - done);
+            for word in &run[..take] {
+                out.extend_from_slice(&word.load(Ordering::Relaxed).to_le_bytes());
+            }
+            done += take;
+            at += take as u64;
+        }
+        out.truncate(from + len);
+    }
+
     /// Writes `src` over the run of words at `addr`.
     fn write_from(&self, addr: u64, src: &[u64]) {
         let mut at = addr - STACK_WORDS;
@@ -2073,6 +2101,14 @@ impl Memory {
         (&mut self.stack.words, &self.space)
     }
 
+    /// The payload bytes of the string object at `addr`, appended to `out`.
+    #[inline]
+    pub(crate) fn string_bytes_into(&self, addr: u64, out: &mut Vec<u8>) {
+        let len = self.object_len(addr) as usize;
+        out.reserve(len.div_ceil(8) * 8);
+        self.space.bytes_into(addr + 1, len, out);
+    }
+
     /// Writes payload word `at` of the object whose header is at `addr`.
     #[inline]
     pub(crate) fn set_payload(&mut self, addr: u64, at: u32, word: u64) {
@@ -2555,6 +2591,50 @@ mod tests {
         mem.clear_words(mem.payload_addr(object, 0), words);
         assert_eq!(mem.payload(object, 0), 0);
         assert_eq!(mem.payload(object, words - 1), 0);
+    }
+
+    /// A string whose payload crosses a chunk boundary reads back whole.
+    ///
+    /// [`Space::bytes_into`] asks [`Words::run`] again when it reaches the end
+    /// of a chunk rather than keeping a second path for the object that
+    /// straddles one, and this is what turns that `while` more than once. The
+    /// distinction matters: a reader that special-cased the straddle would
+    /// have a branch no program in this repository has ever taken, and a
+    /// branch nothing exercises is a branch nobody has run.
+    #[test]
+    fn a_strings_bytes_cross_a_chunk_boundary_whole() {
+        let mut table = Table::new();
+        let text = table.object("String", Shape::Str);
+        let len = (CHUNK_WORDS * 8 + 24) as u32;
+        let mut mem = Memory::new(4 * CHUNK_WORDS as usize);
+        let object = alloc(&mut mem, &table, text, len);
+
+        // A byte's value is its own offset, so a byte read from the wrong
+        // place is wrong rather than merely equal to its neighbour.
+        let want: Vec<u8> = (0..len).map(|at| at as u8).collect();
+        for (at, chunk) in want.chunks(8).enumerate() {
+            let mut word = 0u64;
+            for (byte, value) in chunk.iter().enumerate() {
+                word |= u64::from(*value) << (byte * 8);
+            }
+            mem.set_payload(object, at as u32, word);
+        }
+
+        // The chunk the payload starts in does not hold all of it, which is
+        // what makes this a test of the boundary rather than of the loop.
+        assert!(mem.space.run_at(object + 1).expect("a heap address").len() < want.len() / 8);
+
+        let mut out = Vec::new();
+        mem.string_bytes_into(object, &mut out);
+        assert_eq!(out, want);
+
+        // It appends, and the tail of the last word is not part of the string.
+        out.clear();
+        out.push(0xff);
+        mem.string_bytes_into(object, &mut out);
+        assert_eq!(out.len(), 1 + want.len());
+        assert_eq!(out[0], 0xff);
+        assert_eq!(&out[1..], &want[..]);
     }
 
     #[test]
