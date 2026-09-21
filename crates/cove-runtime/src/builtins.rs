@@ -1173,7 +1173,11 @@ pub fn call_associated(
         // `Map.of` and `Set.of` are not here: each is `std.map.of` or
         // `std.set.of` (#378, P4-8), which `Interpreter` reaches through
         // `cove_schema::builtins::standard_associated_binding` before this
-        // function is asked.
+        // function is asked. `String.fromCodePoint` left the same way and is
+        // `std.string.fromCodePoint`: the range of Unicode and the surrogate
+        // hole are a policy over a representation (ADR 0064's Decision 2), and
+        // the encode under them is `std.stringbuilder` over ADR 0062's
+        // ensure/store/commit. It was the only `String` arm this function had.
         // `Duration.nanos(count)`: the one primitive builder left.
         // `micros` through `hours` are `std.duration.ofMicros` and its four
         // neighbours now — see `cove_schema::builtins::standard_associated_binding`
@@ -1227,23 +1231,6 @@ pub fn call_associated(
                     "`{text}` is not an Int in radix {radix}"
                 ))),
             })
-        }
-        // The one-character `String` a Unicode code point names. A character
-        // in Cove is a `String` of length 1 — `chars()` answers an array of
-        // them — so this is that decomposition run backwards, and there is
-        // no `Character` type for it to answer instead.
-        ("String", "fromCodePoint") => {
-            let args = expect_args("String.fromCodePoint", args, 1, span)?;
-            let Value(Repr::Int(code_point)) = &args[0] else {
-                return Err(type_error(
-                    "String.fromCodePoint",
-                    "codePoint",
-                    "Int",
-                    &args[0],
-                    span,
-                ));
-            };
-            Ok(from_code_point(*code_point))
         }
         // Mirrors `Int.parse` exactly in shape. Rust's `f64::from_str`
         // accepts `inf`, `-inf`, and `NaN`, which is why this does too, and
@@ -1994,32 +1981,6 @@ fn float_to_int(x: f64) -> Value {
         )));
     }
     Value::ok(Value(Repr::Int(truncated as i64)))
-}
-
-/// `String.fromCodePoint`: the one-character `String` a code point names, and
-/// otherwise which of the two ways the number names no character.
-///
-/// The surrogates get a sentence of their own because they are the failure a
-/// caller is most likely to be able to do something about. A format that
-/// writes a code point in sixteen bits — JSON's `\u`, and UTF-16 generally —
-/// writes anything past `0xFFFF` as a pair of them, so a program that reached
-/// here with a `0xD800` has half of a character rather than a bad one, and
-/// what it needs to hear is that the other half is still to come. Combining
-/// the pair is arithmetic the program does before it calls this: there is no
-/// half-formed value to hand back, because a Cove `String` is UTF-8 and holds
-/// no such thing.
-fn from_code_point(code_point: i64) -> Value {
-    if (0xD800..=0xDFFF).contains(&code_point) {
-        return Value::err(Value::error(format!(
-            "`{code_point}` is a surrogate half, which is not a character on its own"
-        )));
-    }
-    match u32::try_from(code_point).ok().and_then(char::from_u32) {
-        Some(character) => Value::ok(Value(Repr::Str(one_character(character)))),
-        None => Value::err(Value::error(format!(
-            "`{code_point}` is not a Unicode code point"
-        ))),
-    }
 }
 
 /// `Int.parseRadix` refused a `radix` outside `2..=36`.

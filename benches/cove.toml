@@ -279,3 +279,16 @@ allow = ["console", "clock"]
 [run.slice]
 entry = "slice.main"
 allow = ["console", "clock"]
+
+# `String.fromCodePoint` at each of the four widths it encodes to and on each
+# of the two ways it refuses — ADR 0064 and issue #454's Step 3. The census
+# measured this operation at 0 sites and 0 calls on both representative
+# programs, so no whole-program figure can price the migration and these rows
+# are the whole of what it has. There is no receiver and nothing proportional
+# to one: the argument is an `Int` word, so the encoding width is the only axis
+# there is, and `one` against `two` is where `finish()`'s UTF-8 validation
+# stops taking its ASCII fast path.
+
+[run.frompoint]
+entry = "frompoint.main"
+allow = ["console", "clock"]

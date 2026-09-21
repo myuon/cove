@@ -434,8 +434,8 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Twelve of the 20 variants can be non-zero here, which is exactly the
-    /// set that declares `Effects::BULK_WORK`; the other eight examine
+    /// Twelve of the 19 variants can be non-zero here, which is exactly the
+    /// set that declares `Effects::BULK_WORK`; the other seven examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
     /// `String.startsWith` out of the enum, ADR 0065 took `String.contains`
@@ -459,8 +459,20 @@ pub struct IntrinsicCalls {
     /// whole receiver and is a Cove loop now, where the walk is charged an
     /// instruction at a time by the mechanism that charges every instruction.
     /// That is the same exchange ADR 0064 made for `String.length`, and it is
-    /// what the remaining twelve are queued up for. Both numbers are measured
-    /// off `Intrinsic::effects` rather than counted by hand.
+    /// what the remaining twelve are queued up for.
+    ///
+    /// **Step 3's `String.fromCodePoint` is not a second carrier**, and the
+    /// direction goes back the way it was for one migration: the carriers stay
+    /// at twelve and the rest fall to seven. It is the only migration so far
+    /// whose operation examined nothing because it had **nothing to examine**
+    /// rather than because it was a scalar operation — its one operand was an
+    /// `Int` word and what it did was build, where every `Float` migration's
+    /// operand was a `Float` word and what it did was arithmetic.
+    /// `Float.toInt` and `Float.format` are the only arms left of that shape —
+    /// a word in, an allocation out, nothing read off the heap — so they are
+    /// the only two a migration could take without moving the carriers again.
+    /// Both numbers are measured off `Intrinsic::effects` rather than counted
+    /// by hand.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,
@@ -1184,7 +1196,7 @@ mod tests {
                     work: 128_440,
                 },
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::StringFromCodePoint,
+                    intrinsic: Intrinsic::StringToUpper,
                     sites: 3,
                     encoded: 0,
                     native: 0,
@@ -1261,7 +1273,7 @@ mod tests {
         ));
         assert!(text.contains(
             "               0              0       3           0            0              0  \
-             String.fromCodePoint"
+             String.toUpper"
         ));
     }
 

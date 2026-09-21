@@ -630,7 +630,13 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Thirty-nine entries, and what is *not* here is as informative as what is.
+/// Sixty-six entries, and what is *not* here is as informative as what is.
+///
+/// That number said "thirty-nine" for long enough to be wrong by twenty-six,
+/// which is what a count in prose beside a list that only grows does. It is
+/// counted here rather than remembered: `grep -c "StdBinding {"` over this
+/// static answers it, and the same command answers the `Duration` sentence
+/// below with `receiver: "Duration"`.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -652,7 +658,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the thirty-nine are `Duration`'s, and they are the first entries
+/// Ten of the sixty-six are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -1052,6 +1058,21 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "codePointAtByte",
         module: "std.string",
         function: "codePointAtByte",
+    },
+    // `fromCodePoint` is the decode above run backwards, and it is `String`'s
+    // first **associated** binding: it is written on the type's name rather
+    // than on a value, so `cove_ir`'s `Body::call_associated` resolves it and
+    // not `Body::call_builtin_method`. The range of Unicode and the surrogate
+    // hole in the middle of it are a policy over a representation, which is
+    // ADR 0064's Decision 2; what is under it is `std.stringbuilder` — an
+    // exact capacity, one `appendByte` per byte, and the validating `finish`
+    // ADR 0062 decides — and nothing new was added to reach it.
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "String",
+        method: "fromCodePoint",
+        module: "std.string",
+        function: "fromCodePoint",
     },
     // `sliceBytes`' five checks and its `Result` are Cove; the copy beneath them
     // is `core.stringSlice`, a byte run slice.

@@ -163,12 +163,21 @@ fn the_run_writes_the_recording_a_run_writes() {
     // backtick of `assertEqual`'s message is one byte, and a one-byte run of
     // literal text is pushed as its byte rather than loaded from the pool, so
     // its two words — a header and one payload word — are no longer placed.
+    //
+    // It is 52 since ADR 0064 moved `String.fromCodePoint` into `std.string`,
+    // for exactly the `refuseRange` reason two paragraphs up and by an amount
+    // that can be counted rather than accepted: `refuseCodePoint`'s two
+    // sentences are placed, and their *opening* backticks are not, being
+    // one-byte runs. "` is a surrogate half, which is not a character on its
+    // own" is 58 bytes, so a header and eight payload words; "` is not a
+    // Unicode code point" is 29, so a header and four. Nine and five is the
+    // fourteen this row rose by.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(38), capacity_words: Some(38) }"
+            "HeapSummary { collections: 0, allocated_words: Some(52), capacity_words: Some(52) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

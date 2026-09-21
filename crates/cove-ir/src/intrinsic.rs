@@ -28,7 +28,7 @@ use std::fmt;
 /// One core operation an `IntrinsicCall` may name.
 ///
 /// A variant is named `ReceiverOperation` in upper camel case — `String`'s
-/// `fromCodePoint` is [`Intrinsic::StringFromCodePoint`] — because that pair is
+/// `toUpper` is [`Intrinsic::StringToUpper`] — because that pair is
 /// the language reference's own naming of it: [`Intrinsic::receiver`] and
 /// [`Intrinsic::operation`] answer the two halves back apart, and
 /// [`Display`](fmt::Display) prints them the way `cove-ir`'s printer and
@@ -49,7 +49,6 @@ pub enum Intrinsic {
     StringReplace,
     StringToUpper,
     StringToLower,
-    StringFromCodePoint,
     StringRefuseByteRange,
     IntParse,
     IntParseRadix,
@@ -77,7 +76,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringReplace,
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
-    Intrinsic::StringFromCodePoint,
     Intrinsic::StringRefuseByteRange,
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
@@ -122,7 +120,6 @@ impl Intrinsic {
             Intrinsic::StringReplace => "String",
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
-            Intrinsic::StringFromCodePoint => "String",
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
@@ -148,7 +145,6 @@ impl Intrinsic {
             Intrinsic::StringReplace => "replace",
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
-            Intrinsic::StringFromCodePoint => "fromCodePoint",
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
@@ -217,7 +213,6 @@ impl Intrinsic {
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower
-            | Intrinsic::StringFromCodePoint
             | Intrinsic::StringRefuseByteRange => Category::Text,
             Intrinsic::IntParse
             | Intrinsic::IntParseRadix
@@ -260,7 +255,6 @@ impl Intrinsic {
                 fixed(&[C::Str], C::Str)
             }
             Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
-            Intrinsic::StringFromCodePoint => fixed(&[C::Int], C::ResultOf(K::Str)),
             // The text and the two offsets a refusal is worded with, in the
             // order `String.sliceBytes` names them.
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
@@ -342,12 +336,13 @@ impl Intrinsic {
             // bytes. With it went the last arm here that read without
             // allocating.
             // `codePointAtByte` is not here: it is `std.string`, a decode in
-            // Cove over one run load a byte.
-            // `fromCodePoint` reads no receiver — its one argument is an
-            // `Int` word — and allocates the one-character `String` it
-            // answers, or the message an out-of-range code point fails
-            // with.
-            Intrinsic::StringFromCodePoint => allocate,
+            // Cove over one run load a byte, and neither is `fromCodePoint`,
+            // which is that decode run backwards over a `std.stringbuilder`
+            // run. It was the last `String` arm here whose operand was a
+            // *word*: it read nothing off the heap and what it did was
+            // allocate, which is `Float.toInt`'s and `Float.format`'s shape
+            // and not any other `String` operation's. Every `String` arm left
+            // below reads a receiver.
             // The byte-range refusal always raises and allocates nothing: it
             // reads the receiver's bytes to say which end is inside a
             // character, and the message is the machine's rather than an
@@ -639,7 +634,6 @@ mod tests {
             "String.replace",
             "String.toUpper",
             "String.toLower",
-            "String.fromCodePoint",
             "String.refuseByteRange",
             "Int.parse",
             "Int.parseRadix",
@@ -710,7 +704,6 @@ mod tests {
                 | Intrinsic::StringReplace
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
-                | Intrinsic::StringFromCodePoint
                 | Intrinsic::StringRefuseByteRange
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix

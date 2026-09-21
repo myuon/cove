@@ -1,3 +1,5 @@
+use std.stringbuilder.StringBuilder
+
 /// How many characters this string is.
 ///
 /// Characters and not bytes: a two-byte character counts one here and two in
@@ -373,6 +375,187 @@ export fn codePointAtByte(text: String, offset: Int) -> Option<Int> {
   }
   let fourth = text.byteAt(offset + 3) - 128
   return Some((((lead - 240) * 64 + second) * 64 + third) * 64 + fourth)
+}
+
+/// The one-character `String` the Unicode code point `point` names, or which
+/// of the two ways it names no character.
+///
+/// [`codePointAtByte`] run backwards, and written directly beneath it on
+/// purpose: that body multiplies by 64 and adds, this one divides by 64 and
+/// subtracts the multiple back off, and both ask the same four width
+/// questions in the same order. A character in Cove is a `String` of length 1
+/// — there is no `Character` type, which is what `chars()` already answers an
+/// array of — so a code point has nothing to become but a string, and this is
+/// the only operation that makes one out of a number.
+///
+/// It was `u32::try_from`, `char::from_u32` and `char::to_string` in Rust, one
+/// `IntrinsicCall` per call. ADR 0064 moves it here for Decision 2's reason:
+/// the range of Unicode and the hole in the middle of it are a **policy over a
+/// representation**, not an operation of the machine, and nothing below the
+/// standard library should have to know that a surrogate half is refused. What
+/// is left below is the substrate ADR 0062 decides — `ensure`, `store`,
+/// `commit` and a validating `finish`, reached through [`StringBuilder`]'s
+/// `appendByte` — and that substrate is the whole of what this needed.
+///
+/// **It is the first migration that builds a string rather than reading one.**
+/// Every one before it stood on a run slice or a run load; there was nothing
+/// for this to stand on until `std.stringbuilder` existed, and there is nothing
+/// new under it now.
+///
+/// # It allocates twice where the intrinsic allocated once, and the second
+/// one is the substrate's rather than this body's
+///
+/// Measured on `benches/frompoint`: **2 allocations and 6 allocated words per
+/// call, against the intrinsic's 1 and 2**, at every width and on both
+/// refusals alike. ADR 0064's Decision 8 asks that this be found and stated
+/// rather than discovered later, so here it is, with what it is and what it is
+/// not.
+///
+/// It is not a capacity that was guessed too small: `withCapacity` is called
+/// with the width this code point encodes to, nothing grows, and `finish`
+/// hands the spare tail back — and it would not grow at any of the four
+/// widths whatever number were passed, because `Machine::alloc_buffer` raises
+/// a capacity to a floor of sixteen bytes and every answer here is at most
+/// four. So the four `withCapacity` arguments below buy nothing measurable
+/// and are written exactly anyway: they are what the body says it is doing,
+/// and a floor is a fact about today's allocator rather than about this
+/// function. It is not the `StringBuilder` wrapper either. It is
+/// `Inst::GrowableAlloc`, which ADR 0052 makes allocate **two** objects
+/// — the stable owner and the store beneath it — because a builder whose
+/// identity moved when it grew would be no use to the recursion `std.vector`
+/// and the formatter both rely on. `core.bytesAllocate` called directly here,
+/// without a builder, would allocate exactly the same pair. So the second
+/// object is the price of building a string in Cove at all, and every string
+/// an interpolation builds already pays it; what the intrinsic had instead was
+/// a Rust stack to assemble four bytes on before handing the machine a
+/// finished run, which is not something a Cove body can be given without a new
+/// instruction, and ADR 0064's Decision 2 is the reason not to add one for an
+/// operation that `covefmt` and `cq` call **nought** times between them.
+///
+/// The owner is garbage the instant `finish` runs, which is the one thing that
+/// keeps the cost bounded: the bench's heap is one collection against the
+/// intrinsic's none, and no live object outlives the call on either side.
+///
+/// # What the call costs, and what it costs it on
+///
+/// `benches/frompoint`, medians of three, per call, VM then native:
+///
+/// ```text
+///                 intrinsic          this
+///   1 byte        185 / 147     338 / 220
+///   2 bytes       185 / 148     488 / 297
+///   3 bytes       183 / 148     570 / 322
+///   4 bytes       183 / 149     661 / 336
+///   surrogate     290 / 261     943 / 708
+///   past the end  261 / 233    1181 / 754
+/// ```
+///
+/// Slower on every row, by 1.5x to 4.5x, and flat became sloped: the Rust arm
+/// cost the same whatever it encoded and this costs a byte at a time. Two
+/// terms are most of it, and a probe over `StringBuilder` alone prices them —
+/// the pair of allocations is **142 ns on the VM and 108 native**, and
+/// `finish`'s validation and relabel is **59 / 65** for one ASCII byte and
+/// **108 / 123** for four non-ASCII ones. On the native tier those two are 69%
+/// of the four-byte row; the encode this file writes is the rest. The two
+/// refusals are slowest of all because an `Err`'s message is an interpolation
+/// here where it was a `format!` there.
+///
+/// It is a constant factor on an operation the census measured at **0 static
+/// sites and 0 dynamic calls on both representative programs**, and it is
+/// bounded above by four bytes, so it is not the change of performance class
+/// PHILOSOPHY refuses. It is the cost of the arm not being there.
+///
+/// # The two refusals, and why their order cannot be observed
+///
+/// A number names no character in exactly two ways, and [`refuseCodePoint`]
+/// decides which sentence each gets. The two sets are disjoint — the surrogate
+/// hole is strictly inside `0 ..= 0x10FFFF` — so no input is both and the order
+/// the three guards below ask their questions in changes no answer. That is
+/// why they are written in the order a reader would check them rather than in
+/// the order the Rust arm did, which asked about surrogates first.
+///
+/// # The remainder is a subtraction, because a division is not free
+///
+/// Each byte past the first needs the low six bits of what is left, and
+/// `point % 64` would be a second division of the same pair. `point - low * 64`
+/// is a multiply and a subtract instead, so an encoding of `n` bytes costs
+/// `n - 1` divisions rather than `2 * (n - 1)`. Measured on `benches/frompoint`
+/// at the four-byte row, where the difference is three divisions out of six:
+/// **661 ns against 683 on the VM and 336 against 350 native**, which is 3.3%
+/// and 4.2%, consistent over three runs of each on both tiers. It is a small
+/// number, and it is small because the allocation and the validation above are
+/// most of the call — but it is the only arithmetic choice in this body, so it
+/// is made the cheap way and written down rather than left to be rediscovered
+/// by someone who reads `/` and `%` in [`codePointAtByte`]'s mirror and
+/// assumes the symmetry was free.
+export fn fromCodePoint(point: Int) -> Result<String, Error> {
+  if point < 0 {
+    return refuseCodePoint(point)
+  }
+  if point > 1114111 {
+    return refuseCodePoint(point)
+  }
+  if point >= 55296 {
+    if point <= 57343 {
+      return refuseCodePoint(point)
+    }
+  }
+  if point < 128 {
+    var one = StringBuilder.withCapacity(1)
+    one.appendByte(point)
+    return Ok(one.finish())
+  }
+  if point < 2048 {
+    var two = StringBuilder.withCapacity(2)
+    let lead = point / 64
+    two.appendByte(192 + lead)
+    two.appendByte(128 + point - lead * 64)
+    return Ok(two.finish())
+  }
+  if point < 65536 {
+    var three = StringBuilder.withCapacity(3)
+    let low = point / 64
+    let lead = low / 64
+    three.appendByte(224 + lead)
+    three.appendByte(128 + low - lead * 64)
+    three.appendByte(128 + point - low * 64)
+    return Ok(three.finish())
+  }
+  var four = StringBuilder.withCapacity(4)
+  let low = point / 64
+  let middle = low / 64
+  let lead = middle / 64
+  four.appendByte(240 + lead)
+  four.appendByte(128 + middle - lead * 64)
+  four.appendByte(128 + low - middle * 64)
+  four.appendByte(128 + point - low * 64)
+  Ok(four.finish())
+}
+
+/// The `Err` that says why `point` names no character, which
+/// [`fromCodePoint`] has already found that it does not.
+///
+/// The surrogates get a sentence of their own because they are the refusal a
+/// caller is most likely to be able to do something about. A format that
+/// writes a code point in sixteen bits — JSON's `\u`, and UTF-16 generally —
+/// writes anything past `0xFFFF` as a *pair* of them, so a program that
+/// arrived here with a `0xD800` holds half of a character rather than a bad
+/// one, and what it needs to hear is that the other half is still to come.
+/// Combining the pair is arithmetic the program does before it calls
+/// [`fromCodePoint`]: there is no half-formed value to hand back, because a
+/// Cove `String` is UTF-8 and holds no such thing.
+///
+/// A function of its own for [`refuseRange`]'s reason: the path that succeeds
+/// carries no interpolation, and the whole `Result` rather than its `Error` so
+/// that each refusal above is a call answered straight into what that body
+/// returns.
+fn refuseCodePoint(point: Int) -> Result<String, Error> {
+  let message = if point >= 55296 && point <= 57343 {
+    "`{point}` is a surrogate half, which is not a character on its own"
+  } else {
+    "`{point}` is not a Unicode code point"
+  }
+  return Err(Error(message))
 }
 
 /// The characters at positions `from` up to but not including `to`.

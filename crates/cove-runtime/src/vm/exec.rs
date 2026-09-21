@@ -501,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// twelve of the 20 variants declare
+    /// twelve of the 19 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -2327,9 +2327,10 @@ impl<'a> Machine<'a> {
         // long.
         //
         // The test is against nought rather than unconditional so that the
-        // twelve variants which examine nothing — every scalar, `Float`,
-        // parse and `fromCodePoint` arm — pay no `next_question` for a charge
-        // of zero. Adding nought could not have moved the threshold anyway.
+        // seven variants which declare no `Effects::BULK_WORK` — the three
+        // parsers, both `Float` conversions and the two refusals — pay no
+        // `next_question` for a charge of zero. Adding nought could not have
+        // moved the threshold anyway.
         let examined = self.examined.take();
         if examined != 0 {
             self.bulk_work += examined;

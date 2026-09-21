@@ -197,7 +197,7 @@ written as a namespace.
 
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
-| `fromCodePoint(codePoint: Int) -> Result<String, Error>` |  |  | `machine` |
+| `fromCodePoint(codePoint: Int) -> Result<String, Error>` |  |  | `std.string.fromCodePoint` |
 
 **Methods.**
 

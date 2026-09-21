@@ -156,7 +156,7 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "fromCodePoint", "signature": "fromCodePoint(codePoint: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "codePoint", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "implementedBy": "machine", "host": false}
+        {"name": "fromCodePoint", "signature": "fromCodePoint(codePoint: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "codePoint", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "implementedBy": "std.string.fromCodePoint", "host": false}
       ],
       "methods": [
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.string.length", "host": false},

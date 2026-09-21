@@ -859,7 +859,34 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// questions. Every corpus before this one printed what it computed in one
 /// expression; this one has to hold a string still to read its bytes out, and
 /// that is what a corpus for an operation that *builds* a string looks like.
-const FORWARDABLE_COPIES: usize = 2624;
+///
+/// **The thirty-eighth rise is the first one that is mostly not a new row.**
+/// 2624 to 2808, 171 programs to 172, and only **13** of the 184 are
+/// `benches:frompoint`, three in the `prod` column and ten in the `ret`
+/// column. The other **171 are one copy in each of the 171 programs**, and
+/// they are `std.string.refuseCodePoint`'s `return Err(Error(message))` — a
+/// copy into the answer a `return` names, which is what every arm of
+/// `refuseRange` already is and what this survey counts once per program
+/// because it lowers a *package*. The check the paragraphs above prescribe
+/// separates the two: the survey with `benches/frompoint` removed is **2795**
+/// over 171 programs, so the bench is 13 and the migration is 171, and the
+/// overlap between the two sub-totals is 49 at 2624, at 2795 and at 2808.
+///
+/// **No shipped program carries any of the 171.** `cove run --boundary`
+/// reports covefmt at 11,278 instructions in 109 functions and cq at 6,355 in
+/// 74 before and after, to the instruction, with every other counter identical
+/// too; on the native tier the one line that moves in either is `further
+/// declaration(s) are stubs no path in this slice reaches`, 772 to 774 on
+/// covefmt and 810 to 812 on cq — the two new standard-library bodies, which
+/// #441's sweep keeps out of every program that does not name them. So this is
+/// a rise in a survey and in nothing a program runs, and it is worth saying
+/// out loud because the row before it said the opposite: `String.slice` added
+/// two functions and 37 instructions per program and **nought** copies, where
+/// this adds two functions, 284 instructions and one copy. The
+/// difference is that `slice` answers a `String` and this answers a `Result`,
+/// and an `Err` built in one branch and returned from another is the shape
+/// this column exists to count.
+const FORWARDABLE_COPIES: usize = 2808;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

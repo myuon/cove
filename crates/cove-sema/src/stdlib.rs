@@ -97,6 +97,17 @@ static SOURCES: &[StdSource] = &[
     // `ByteBuffer` intrinsic the VM does know. So it binds nothing in
     // `cove_schema::builtins::STANDARD_LIBRARY`, and a program reaches it by
     // importing the module like any other.
+    //
+    // **`std.string` is now one of those programs**, and it is the first
+    // module in this list to `use` another: ADR 0064's `fromCodePoint`
+    // migration needed somewhere to build a one-character `String`, and the
+    // answer was the builder that already existed rather than a new `core.*`.
+    // Nothing about the order of this list changed to allow it — a package is
+    // parsed and then resolved, so `std.string` may name a module attached
+    // after it — and nothing may go the other way: `std.stringbuilder` names no
+    // `std.string` function and must not, because a cycle between two
+    // standard-library modules is not something this list is ordered to
+    // prevent.
     StdSource {
         module: "std.stringbuilder",
         path: "std/stringbuilder.cove",
