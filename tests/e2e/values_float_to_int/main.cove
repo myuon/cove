@@ -1,0 +1,302 @@
+use console.println
+
+/// `Float.toInt` at every edge, and the record of which of those edges a Cove
+/// program can see at all.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line
+/// of a reimplementation. `Float.toInt` is `f64::trunc` and three refusals in
+/// Rust today, reached through one `Inst::IntrinsicCall`, and this is that
+/// corpus. It is the last of issue #454's Step 2 and the only one of the five
+/// that a representative program runs: 40,000 times on cq.
+///
+/// # It truncates toward zero, and one row says so on its own
+///
+/// `f64::trunc` is IEEE 754's `roundToIntegralTowardZero`, not a floor.
+/// The two rules agree on every non-negative operand and disagree on every
+/// negative one with a fraction, so `trunc.small` — `(-0.9).toInt()` — is the
+/// row that separates them: toward zero answers `Ok(0)` and toward negative
+/// infinity would answer `Ok(-1)`. `trunc.two` and `trunc.nine` say it again
+/// at two more magnitudes, and every positive column of those three rows
+/// would pass either rule.
+///
+/// # A zero's sign is the one thing the conversion is allowed to lose
+///
+/// `(-0.0).toInt()` is `Ok(0)`, because an `Int` has one zero. That is not a
+/// gap in the pin, it is the pin: `zero.witness` shows with `1.0 / x` that
+/// the operand really was the negative zero — the observer
+/// `tests/e2e/values_float_abs` established — and `zero.self` shows that the
+/// answer is nonetheless the same `Ok(0)` the positive zero gives. The three
+/// float migrations before this one each found a naive lowering failing on
+/// `-0.0`; here the failure would be the opposite one, a conversion that
+/// carried the sign into an `Int` that has nowhere to put it.
+///
+/// # The range is asymmetric, and `-2^63` is inside it
+///
+/// The conversion admits `-2^63 <= trunc(x) < 2^63`. The two ends are not
+/// symmetric and neither is representable in the way a reader expects:
+///
+/// - `-2^63` **is** an `f64` exactly, and it is `Int`'s least value, so
+///   `range.bottom` converts;
+/// - `2^63 - 1` is **not** an `f64`. Writing `9223372036854775807.0` gives
+///   `2^63`, which is outside, so `big.maxint` refuses — and the largest
+///   `f64` that converts is `2^63 - 1024`, one ulp below.
+///
+/// `range.gap` says the ulp from inside the language: adding `1.0` to the
+/// largest convertible float changes nothing, and adding `1024.0` reaches the
+/// first one that refuses.
+///
+/// # The refusal quotes the value in a notation Cove itself does not use
+///
+/// This is the thing the file exists to record, and it is not a rounding
+/// detail. The message is built by Rust's `{}`, which prints the shortest
+/// decimal that reads back as the same double. `cove_runtime::value`'s
+/// `write_float` prints an *integral* float with `{:.1}`, which is the exact
+/// value. Every float outside `Int`'s range is integral, so the two never
+/// agree there, and `Float.format(0)` is a third answer again. The `quote.*`
+/// rows print all three of the same value on one line:
+///
+/// ```text
+/// quote.over 9223372036854775808.0 9223372036854775808 Err(... `9223372036854776000` ...)
+/// ```
+///
+/// A Cove program can reach the first two and not the third. That is why
+/// those rows are here rather than in a comment, and it is the fact any
+/// reimplementation of this operation above the runtime has to answer.
+///
+/// `quote.inf` is the row where all of them agree, which is what says the
+/// disagreement is about the *finite* refusal and not about the wording.
+///
+/// # What a Cove program cannot ask
+///
+/// Which NaN. There is no bit access to a `Float` and every NaN renders as
+/// `NaN`, so the five ways of making one below are pinned as answering the
+/// same sentence and nothing is claimed about sign or payload. The tables
+/// beside each tier are where those bits belong.
+export fn main() -> Result<Unit, Error> {
+  truncation()?
+  zeros()?
+  subnormals()?
+  nans()?
+  infinities()?
+  range()?
+  quoting()?
+  roundTrip()?
+  computed()?
+  Ok(())
+}
+
+/// Toward zero, at every magnitude a fraction can be written at.
+///
+/// The negative column of the first three rows is the whole disagreement
+/// between truncation and a floor. `trunc.small` is the sharpest: a floor
+/// answers `Ok(-1)` there and this answers `Ok(0)`.
+fn truncation() -> Result<Unit, Error> {
+  println("trunc.two {(2.7).toInt()} {(-2.7).toInt()}")?
+  println("trunc.nine {(1.9).toInt()} {(-1.9).toInt()}")?
+  println("trunc.small {(0.9).toInt()} {(-0.9).toInt()}")?
+  println("trunc.half {(0.5).toInt()} {(-0.5).toInt()}")?
+  println("trunc.whole {(3.0).toInt()} {(-3.0).toInt()}")?
+  println("trunc.almost {(0.9999999999999999).toInt()} {(-0.9999999999999999).toInt()}")?
+  println("trunc.tie {(2.5).toInt()} {(-2.5).toInt()}")?
+  Ok(())
+}
+
+/// Both zeros, and the observer that says which one was handed in.
+///
+/// `1.0 / x` is the one of the three observers in `values_float_abs` that
+/// needs no rendering rule of its own, and it is what makes `zero.self` a
+/// statement about the conversion rather than about the literal.
+fn zeros() -> Result<Unit, Error> {
+  let nz = -0.0
+  let pz = 0.0
+  println("zero.self {nz.toInt()} {pz.toInt()}")?
+  println("zero.witness {1.0 / nz} {1.0 / pz}")?
+  println("zero.render {nz} {pz}")?
+  println("zero.small {(-0.4).toInt()} {(0.4).toInt()}")?
+  println("zero.small.witness {1.0 / (-0.4)} {1.0 / (0.4)}")?
+  Ok(())
+}
+
+/// Every subnormal answers `Ok(0)`, and the sign it had is gone.
+///
+/// `sub.render` is what says the operand really was the negative one: the
+/// answers on the line above it are indistinguishable by construction.
+fn subnormals() -> Result<Unit, Error> {
+  let least = 5.0e-324
+  let most = 2.225073858507201e-308
+  let normal = 2.2250738585072014e-308
+  println("sub.least {least.toInt()} {(0.0 - least).toInt()}")?
+  println("sub.most {most.toInt()} {(0.0 - most).toInt()}")?
+  println("sub.normal {normal.toInt()} {(0.0 - normal).toInt()}")?
+  println("sub.render {least} {0.0 - least}")?
+  Ok(())
+}
+
+/// Five ways of making a NaN, each answering the same sentence.
+///
+/// Nothing here claims anything about a NaN's sign or payload, because no
+/// Cove program can ask. What is pinned is that the refusal names `NaN` and
+/// never the operand, which is the one of the three messages that quotes no
+/// value at all.
+fn nans() -> Result<Unit, Error> {
+  let huge = 1.0e308
+  let vast = huge * 10.0
+  let zero = 0.0
+  let made = vast - vast
+  let divided = zero / zero
+  let negated = 0.0 - made
+  let scaled = made * -1.0
+  let mixed = vast * zero
+  println("nan.made {made.toInt()}")?
+  println("nan.divided {divided.toInt()}")?
+  println("nan.negated {negated.toInt()}")?
+  println("nan.scaled {scaled.toInt()}")?
+  println("nan.mixed {mixed.toInt()}")?
+  println("nan.render {made} {negated}")?
+  println("nan.same {made == made} {made == negated}")?
+  Ok(())
+}
+
+/// Both infinities, made two ways each.
+///
+/// This is the refusal whose message quotes the operand and whose quoting a
+/// Cove program *can* reproduce: `write_float` answers `inf` and `-inf` for
+/// these, which is what Rust's `{}` answers too.
+fn infinities() -> Result<Unit, Error> {
+  let huge = 1.0e308
+  let vast = huge * 10.0
+  let one = 1.0
+  let zero = 0.0
+  println("inf.pos {vast.toInt()}")?
+  println("inf.neg {(0.0 - vast).toInt()}")?
+  println("inf.divided {(one / zero).toInt()}")?
+  println("inf.divided.neg {((0.0 - one) / zero).toInt()}")?
+  println("inf.render {vast} {0.0 - vast}")?
+  Ok(())
+}
+
+/// The boundary either side, in both directions, to the ulp.
+///
+/// The four literals are the whole of the range's edge:
+/// `2^63 - 1024` is the largest `f64` that converts, `2^63` the smallest that
+/// does not, `-2^63` converts and is `Int`'s least value, and `-2^63 - 2048`
+/// is the first one below it that does not. The spacing is 1024 below `2^63`
+/// and 2048 below `-2^63`, which is why the two steps are different numbers.
+fn range() -> Result<Unit, Error> {
+  let top = 9223372036854774784.0
+  let over = 9223372036854775808.0
+  let bottom = -9223372036854775808.0
+  let under = -9223372036854777856.0
+  println("range.top {top.toInt()}")?
+  println("range.over {over.toInt()}")?
+  println("range.bottom {bottom.toInt()}")?
+  println("range.under {under.toInt()}")?
+  println("range.gap {top + 1.0 == top} {top + 1024.0 == over}")?
+  println("range.gap.neg {bottom - 1.0 == bottom} {bottom - 2048.0 == under}")?
+  println("range.order {top < over} {under < bottom}")?
+  Ok(())
+}
+
+/// The same value rendered three ways on one line, where only two of the
+/// three are reachable from Cove.
+///
+/// Column one is string interpolation, which is `write_float`; column two is
+/// `Float.format(0)`; column three is the refusal, which is Rust's `{}`. For
+/// every finite operand outside the range the three disagree, and `quote.inf`
+/// is the row where they do not.
+fn quoting() -> Result<Unit, Error> {
+  let over = 9223372036854775808.0
+  let under = -9223372036854777856.0
+  let e30 = 1.0e30
+  let max = 1.7976931348623157e308
+  let huge = 1.0e308
+  let vast = huge * 10.0
+  println("quote.over {over} {over.format(0)} {over.toInt()}")?
+  println("quote.under {under} {under.format(0)} {under.toInt()}")?
+  println("quote.e30 {e30} {e30.format(0)} {e30.toInt()}")?
+  println("quote.max {max.toInt()}")?
+  println("quote.min {(0.0 - max).toInt()}")?
+  println("quote.inf {vast} {vast.format(0)} {vast.toInt()}")?
+  Ok(())
+}
+
+/// Out to `Float` and back, which is the only place the two conversions meet.
+///
+/// `trip.most` is the row that says `Int.MAX` does not survive the trip:
+/// `Int.toFloat` rounds it **up** to `2^63`, which is outside the range this
+/// operation admits, so the value that was the largest `Int` comes back a
+/// refusal. `trip.least` is its opposite and converts exactly.
+fn roundTrip() -> Result<Unit, Error> {
+  let most = 9223372036854775807
+  let least = -9223372036854775807 - 1
+  let fits = 9223372036854774784
+  println("trip.small {(7).toFloat().toInt()} {(-7).toFloat().toInt()}")?
+  println("trip.most {most.toFloat().toInt()}")?
+  println("trip.least {least.toFloat().toInt()}")?
+  println("trip.fits {fits.toFloat().toInt()}")?
+  println("trip.render {most.toFloat()} {least.toFloat()}")?
+  println("big.maxint {(9223372036854775807.0).toInt()}")?
+  Ok(())
+}
+
+/// The same questions again over values a loop built, so that nothing on the
+/// line is a fold of a literal.
+///
+/// `run.halves` walks every half from `-31.5` to `31.5` and sums what
+/// converts: truncation toward zero makes that sum `0`, because `k + 0.5`
+/// and `-k - 0.5` truncate to `k` and `-k`. A floor would make it `-32`.
+fn computed() -> Result<Unit, Error> {
+  var i = 0
+  var total = 0
+  var refused = 0
+  while i < 64 {
+    let v = i.toFloat() - 32.0 + 0.5
+    match v.toInt() {
+      Ok(n) => {
+        total += n
+      }
+      Err(_) => {
+        refused += 1
+      }
+    }
+    i += 1
+  }
+  println("run.halves {total} {refused}")?
+
+  // Doubling from a value inside the range until nothing converts, which
+  // crosses the boundary without naming it.
+  var x = 1.0
+  var converted = 0
+  var steps = 0
+  while steps < 80 {
+    match x.toInt() {
+      Ok(_) => {
+        converted += 1
+      }
+      Err(_) => {
+        refused += 1
+      }
+    }
+    x = x * 2.0
+    steps += 1
+  }
+  println("run.doubling {converted} {refused}")?
+
+  // And the boundary itself, stepped by the ulp that separates the last two.
+  var edge = 9223372036854774784.0
+  var stillOk = 0
+  var tries = 0
+  while tries < 4 {
+    match edge.toInt() {
+      Ok(_) => {
+        stillOk += 1
+      }
+      Err(_) => { }
+    }
+    edge = edge + 1024.0
+    tries += 1
+  }
+  println("run.boundary {stillOk} {edge}")?
+  Ok(())
+}
