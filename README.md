@@ -599,6 +599,25 @@ moved 2% on identical counts and that is the rebuild's layout. Two of ADR 0062's
 measured statements are corrected rather than edited: its accounting for cq's
 +39.8% machine code, and its figure for dead native frame writes.
 
+[ADR 0066](docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md)
+retires the Cranelift arm, leaving the template compiler as the **only** native
+code generator. ADR 0056 kept the loser not as insurance but as the instrument
+that made the winner's numbers mean something — two arms on one shared subset
+predicate, asserted to answer the same words and refuse the same programs — and
+that instrument has read its measurement. What changed is the other side: every
+ADR 0064 migration adds an IR instruction both generators must lower, and Phase
+1's three cost 84 lines of a lowering no distributed binary contains, one of
+them a nine-instruction NaN-absorbing sequence written for an arm nothing
+enters. The two-arm test went case by case: four of its five cases were a second
+opinion on questions the shared suite already answers against the VM in
+literals, and the fifth — ADR 0060's backedge threshold, which has no VM oracle
+at all — became a literal table of poll turns. NaN, signed zero, overflow and
+boundary values are now pinned twice: what a Cove program can see, against the
+VM in `native_tier.rs`; what it cannot — a NaN's payload and quiet bit — in bits,
+in `cove-native`'s own `EXTREMA` and `ABSOLUTES`. Nothing that runs changed, and
+that is asserted rather than assumed: covefmt and cq answer byte-identical
+`--stats --boundary` reports before and after.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
