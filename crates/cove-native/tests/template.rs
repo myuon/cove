@@ -1,11 +1,20 @@
-//! The hand-written x86-64 template arm, run against the shared suite.
+//! The hand-written x86-64 template compiler, run against the suite.
 //!
 //! Every expectation is in `tests/suite/mod.rs`, and every test below is one
-//! line: the suite is what both arms are held to, and a file that could
-//! disagree with the other arm's file would be the wrong shape for a
-//! comparison. What belongs here is the binding of the suite's `Arm` to this
-//! code generator, and nothing else — every expectation the Cranelift arm is
-//! held to, this arm is held to, because both must equal the VM.
+//! line. What belongs here is the binding of the suite's `Arm` to the code
+//! generator, and nothing else: the expectations are the encoded VM's
+//! behaviour written out as literals, which is the oracle, and a file that
+//! restated any of them would be a second place for the VM's behaviour to be
+//! recorded.
+//!
+//! The shape is a leftover from there having been two of these — one file per
+//! code generator, over one suite, so that neither could be held to a weaker
+//! expectation than the other — and [ADR 0066] kept it after retiring the
+//! second arm, because "the expectations live apart from the binding" is worth
+//! having for one arm too. It is what makes adding a case a change to the
+//! suite rather than to the emitter's own test file.
+//!
+//! [ADR 0066]: ../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md
 
 #![cfg(feature = "template")]
 
@@ -72,6 +81,11 @@ fn a_safepoint_can_stop_the_run() {
 #[test]
 fn a_backedge_polls_only_once_the_threshold_is_reached() {
     suite::a_backedge_polls_only_once_the_threshold_is_reached::<Template>();
+}
+
+#[test]
+fn a_backedge_polls_at_the_turn_its_threshold_names() {
+    suite::a_backedge_polls_at_the_turn_its_threshold_names::<Template>();
 }
 
 #[test]

@@ -2,9 +2,10 @@
 //!
 //! Everything in this module is compiled whether or not a code generator's
 //! feature is on, and that is deliberate: the ABI is a contract between two
-//! crates, not a Cranelift artefact. A build with no code generator still has the
-//! declarations, so the runtime side can be written, read and type-checked
-//! against them without pulling in an executable-memory dependency.
+//! crates, not a code generator's artefact. A build with no code generator
+//! still has the declarations, so the runtime side can be written, read and
+//! type-checked against them without pulling in an executable-memory
+//! dependency.
 //!
 //! # One frame, addressed by index
 //!
@@ -101,11 +102,11 @@
 //! is what the covefmt slice is for. So ADR 0055's "Collection uses the VM
 //! stack as the first root map" is now load-bearing rather than vacuous.
 //!
-//! It is honoured by the rule above and by nothing else. **Neither code
-//! generator keeps a Cove value in a register across an instruction
-//! boundary**, so at every place a collection can happen — the safepoint
-//! helper, the call helper, and now [`AllocFn`], [`IntrinsicFn`], [`GrowableFn`] and
-//! [`RunCopyFn`], which are all the calls either arm emits that can reach one
+//! It is honoured by the rule above and by nothing else. **The code generator
+//! never keeps a Cove value in a register across an instruction boundary**, so
+//! at every place a collection can happen — the safepoint helper, the call
+//! helper, and now [`AllocFn`], [`IntrinsicFn`], [`GrowableFn`] and
+//! [`RunCopyFn`], which are all the calls it emits that can reach one
 //! ([`OrderStrFn`] is a leaf and cannot) — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
 //! walks for an encoded frame, and there is no spill sequence, because there is
@@ -135,7 +136,8 @@
 //! register, and is not a root: it is a copy of the reference the slot it was
 //! loaded from still holds, and no template contains a call, so no collection
 //! can happen between the load and the last use. Register promotion across
-//! instructions is what would end that argument, and neither arm does it.
+//! instructions is what would end that argument, and the lowering does not do
+//! it.
 //!
 //! # The heap is addressed through a table of chunk bases
 //!
@@ -665,8 +667,8 @@ pub type CloseFn = unsafe extern "C" fn(ctx: *mut NativeCtx, outcome: u32, calle
 /// # Safety
 ///
 /// As [`SafepointFn`]. The helper collects, so every live reference must already
-/// be in the slot the frame's `Function::refs` names — which both code generators
-/// satisfy by never keeping a Cove value in a register across an instruction
+/// be in the slot the frame's `Function::refs` names — which the code generator
+/// satisfies by never keeping a Cove value in a register across an instruction
 /// boundary. It may grow the stack and may commit a heap chunk, so it stores the
 /// current [`NativeCtx::words`] and [`NativeCtx::chunks`] before it returns and
 /// the generated code re-derives both afterwards.
@@ -690,7 +692,7 @@ pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u3
 /// and not a second copy of it here.
 ///
 /// **What the call costs around it is decided by the intrinsic's effects**, and
-/// [`IntrinsicProtocol`] is that decision, written once for both code generators
+/// [`IntrinsicProtocol`] is that decision, written once for the code generator
 /// and for the helper itself. A call that may collect is a safepoint for exactly
 /// [`AllocFn`]'s reason: the unpaid work is published before it, the helper
 /// synchronises the program counter and takes [ADR 0040]'s three steps, and the
@@ -746,8 +748,8 @@ pub type IntrinsicFn = unsafe extern "C" fn(
 /// publish roots, synchronize the program counter, take a safepoint and reload
 /// stack or heap pointers. A non-allocating field bound check does not pay the
 /// allocation protocol. A grow operation does." This is that sentence as two
-/// facts, computed in one place so that the Cranelift arm, the template arm and
-/// the runtime's helper cannot come to disagree about a call:
+/// facts, computed in one place so that the code generator and the runtime's
+/// helper cannot come to disagree about a call:
 ///
 /// - [`IntrinsicProtocol::safepoint`]: the intrinsic may allocate, collect or
 ///   block. The call publishes the unpaid work, the helper synchronises the
@@ -1143,7 +1145,7 @@ pub type RunCopyFn = unsafe extern "C" fn(
 /// [`FieldLoadFn`] is not a safepoint either, but it may raise, and so its
 /// callers still test an outcome and leave; this one has nothing to leave with.
 /// A future change that made it do any of the three would have to add those
-/// steps to both code generators first.
+/// steps to the code generator first.
 ///
 /// # Safety
 ///

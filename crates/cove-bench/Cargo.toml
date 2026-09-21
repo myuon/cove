@@ -8,16 +8,12 @@ license.workspace = true
 name = "cove-bench"
 path = "src/main.rs"
 
-# The native-tier comparison, which is a bin of its own rather than a
-# subcommand of the one above: it is an experiment with its own features, its
-# own output and no baseline, and `cove-bench`'s gate has neither.
-#
-# It lives in this crate because the comparison needs all three arms in one
-# process — the VM arm needs `cove-runtime`, which `cove-native` must not
-# depend on, and this crate already depends on both.
-[[bin]]
-name = "cove-native-compare"
-path = "src/bin/native_compare.rs"
+# (`cove-native-compare` was here: the bin that raced the two native code
+# generators on identical IR, whose numbers are ADR 0056's. ADR 0066 retired it
+# with the arm it was built to race — a comparison ends when its question is
+# answered, and the VM-oracle discipline it ran on one extracted loop is what
+# `cove-runtime`'s `native_tier.rs` and CI's `covefmtBench` step do on whole
+# programs.)
 
 # The Rust formatter's phase table, for issue #369's three-arm comparison. Also
 # a bin rather than a flag on `cove fmt`: it is a measurement with no baseline
@@ -27,18 +23,9 @@ path = "src/bin/native_compare.rs"
 name = "cove-fmt-phases"
 path = "src/bin/fmt_phases.rs"
 
-# One feature per arm, mirroring `cove-native`'s own, and both off by default
-# so that the ordinary `cargo build` of this workspace has no
-# executable-memory dependency.
-[features]
-default = []
-cranelift = ["dep:cove-native", "cove-native/cranelift"]
-template = ["dep:cove-native", "cove-native/template"]
-
 [dependencies]
 cove-diag.workspace = true
 cove-sema.workspace = true
 cove-syntax.workspace = true
 cove-ir.workspace = true
 cove-runtime.workspace = true
-cove-native = { workspace = true, optional = true }

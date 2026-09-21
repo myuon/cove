@@ -16,8 +16,8 @@ pub mod files;
 mod find;
 // Private: the float operations Cove decides for itself rather than inheriting
 // from `f64`, shared by the two evaluators for `find`'s reason and one more —
-// the native tier's two code generators spell the same contract out below one
-// of them, so this is one specification with four implementations.
+// the native tier's code generator spells the same contract out below one of
+// them, so this is one specification with three implementations.
 mod float;
 pub mod heap;
 pub mod host;

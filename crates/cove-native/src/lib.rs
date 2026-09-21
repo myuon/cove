@@ -2,11 +2,10 @@
 //! machine code out.
 //!
 //! [ADR 0055] decides that Cove compiles **optimized executable IR one
-//! function at a time**, with Cranelift as the first code generator and
-//! Cove's IR and runtime ABI — not Cranelift's API — as the semantic
-//! boundary. This crate is that lowering and nothing else. It does not
-//! execute a program, own a heap, decide which functions to compile, or know
-//! that a VM exists.
+//! function at a time**, with Cove's IR and runtime ABI — not a code
+//! generator's API — as the semantic boundary. This crate is that lowering and
+//! nothing else. It does not execute a program, own a heap, decide which
+//! functions to compile, or know that a VM exists.
 //!
 //! # The dependency edge runs one way, and the calls run both
 //!
@@ -38,28 +37,27 @@
 //! machinery into this crate so that the edge could run the other way — is
 //! not.
 //!
-//! # Two code generators, both off by default
+//! # One code generator, off by default
 //!
 //! ADR 0055's adoption gate asks that "a build without the native feature has
 //! no executable-memory dependency". That is a claim about the dependency
-//! graph, so every code generator's edge is optional and off by default; see
-//! this crate's manifest. Without them, what remains is
-//! [`mod@abi`] — the declarations the runtime side is written against — and
-//! `cargo tree` shows no `cranelift-jit`, which is the crate that maps an
-//! executable page.
+//! graph, so the code generator's edge is optional and off by default; see
+//! this crate's manifest. Without it, what remains is [`mod@abi`] — the
+//! declarations the runtime side is written against — and `cargo tree` names
+//! nothing that maps an executable page.
 //!
-//! The `cranelift` feature is the code generator ADR 0055 names. The
-//! `template` feature is a second one, a hand-written x86-64 template
-//! compiler, and it exists to be *measured against* the first: which code
-//! generator Cove adopts is a question a comparison on identical optimized IR
-//! answers and an argument does not. Both arms compile exactly the same subset
-//! of the IR — a comparison over two different subsets would not be one — and
-//! both are entered through the same [`Entry`] over the same [`NativeCtx`].
+//! The `template` feature is the code generator: a hand-written x86-64
+//! template compiler. It was not chosen by argument. ADR 0055 named Cranelift,
+//! [ADR 0056] built both against the same lowered IR, the same ABI and one
+//! shared subset predicate and raced them, and the hand-written arm won on
+//! compile latency by 69×, on the stripped bundle by 140× and on the
+//! dependency graph by 38 crates, with execution within a few per cent in both
+//! directions. [ADR 0066] then retired the loser: the comparison has been made
+//! and is recorded, and what remained of it was a second lowering per new IR
+//! instruction that no distributed build contains.
 //!
-//! ADR 0056 then decided between them on the measurements, and the template arm
-//! won: `cove_runtime::native` compiles with that one, and
-//! `cove run --backend native` runs what it emits. The Cranelift arm is kept for
-//! the comparison ADR 0056 keeps, and nothing selects it as a tier.
+//! So `cove_runtime::native` compiles with this one, `cove run --backend
+//! native` runs what it emits, and there is no second arm to select.
 //!
 //! # What it compiles today, and what it refuses
 //!
@@ -109,11 +107,11 @@
 //! implementation does not split one function into native and interpreted
 //! regions."
 //!
-//! Allocation was deliberately not on that list while the two arms were being
-//! raced. ADR 0055 keeps it a runtime helper, so it is *one identical call in
-//! both arms* — which cannot separate two code generators, and a subset made of
-//! such calls would have measured the runtime and reported it as a
-//! code-generator difference.
+//! Allocation was deliberately not on that list while ADR 0056's two
+//! candidates were being raced. ADR 0055 keeps it a runtime helper, so it was
+//! *one identical call in both arms* — which cannot separate two code
+//! generators, and a subset made of such calls would have measured the runtime
+//! and reported it as a code-generator difference.
 //!
 //! ADR 0056 settled the race, and that reason stopped applying with it. Since
 //! then the subset has taken [`Inst::Alloc`](cove_ir::Inst::Alloc) and [ADR
@@ -131,6 +129,8 @@
 //! [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
 //! [ADR 0054]: ../../../docs/adr/0054-a-comparison-that-only-feeds-a-branch-is-the-branch.md
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+//! [ADR 0056]: ../../../docs/adr/0056-the-first-code-generator-is-the-one-that-was-cheaper-everywhere.md
+//! [ADR 0066]: ../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md
 
 pub mod abi;
 
@@ -148,9 +148,9 @@ pub use abi::{
 /// an attempted fallback to something else — the caller's fallback is the
 /// encoded VM, which is a complete execution path and not a fallback at all.
 ///
-/// One type for both arms, and declared whether or not either is compiled: a
-/// refusal is a fact about the *host*, and the two arms refuse different hosts
-/// for the same reason.
+/// Declared whether or not a code generator is compiled, because a refusal is a
+/// fact about the *host* and a build with no code generator refuses every host
+/// there is.
 #[derive(Debug)]
 pub struct Unavailable(String);
 
@@ -190,24 +190,33 @@ impl Unavailable {
 /// # Why the bytes are an `Option` and the sites are not
 ///
 /// A window is a **shape in the IR**. How many of each pattern a function
-/// emitted is therefore a fact about `cove_ir::legalize` and the lowering, and
-/// both code generators count it identically; `sites` is never in doubt.
+/// emitted is therefore a fact about `cove_ir::legalize` and the lowering
+/// rather than about a code generator; `sites` is never in doubt.
 ///
-/// The bytes are another matter, and only one arm can honestly report them. The
-/// template arm emits a whole window — hot path, both cold blocks and the join —
-/// as one contiguous run of its code buffer, so a difference of two buffer
-/// lengths taken across the emission *is* that window's machine code, to the
-/// byte. The Cranelift arm lowers to CLIF and the byte layout is settled by the
-/// backend at the end of the function: blocks are ordered, merged and laid out
-/// there, and no range of the emitted buffer corresponds to an IR window. So it
-/// answers `None` — not a zero, which a reader comparing the two arms would take
-/// for "windows cost this generator nothing".
+/// The bytes are another matter, and not every code generator can honestly
+/// report them. The template compiler emits a whole window — hot path, both
+/// cold blocks and the join — as one contiguous run of its code buffer, so a
+/// difference of two buffer lengths taken across the emission *is* that
+/// window's machine code, to the byte. A generator that hands an IR-shaped
+/// region to a backend which orders, merges and lays out blocks at the end of
+/// the function has no range of its buffer corresponding to an IR window, and
+/// can only answer `None` — not a zero, which a reader would take for "windows
+/// cost this generator nothing".
+///
+/// **Today the one code generator answers `Some` and nothing produces the
+/// `None`.** It was the retired Cranelift arm that produced it, and the arm is
+/// gone; the variant is kept rather than collapsed because what it encodes is
+/// "this figure may be unattributable", which is a property of a *layout* and
+/// not of a particular backend, and because [ADR 0066] retires an arm without
+/// deciding that no future one exists. Collapsing it is a change to the
+/// boundary report and belongs with whatever asks for it.
 ///
 /// A `None` is infectious through [`WindowCode::charge`] and
 /// [`WindowCode::add`] for the same reason: a sum over *some* of a program's
 /// windows reads as a sum over all of them.
 ///
 /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+/// [ADR 0066]: ../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowCode {
     /// Bytes of machine code emitted for each pattern's windows, indexed by
@@ -318,18 +327,21 @@ impl WindowCode {
 /// rather than cross-referenced because the two halves are easy to conflate.
 ///
 /// A site is an **instruction in the IR**. How many `Inst::IntrinsicCall`s of
-/// each variant a function emitted code for is a fact about the lowering, both
-/// code generators count it identically, and `sites` is never in doubt.
+/// each variant a function emitted code for is a fact about the lowering rather
+/// than about a code generator, and `sites` is never in doubt.
 ///
-/// The bytes are a fact about a code generator's layout, and only one arm can
-/// honestly report them. The template arm emits a whole intrinsic call — the
-/// hand-over, the indirect call, and the outcome test with the leave it guards —
-/// as one contiguous run of its code buffer, so a difference of two buffer
-/// lengths taken across the emission *is* that call's machine code, to the byte.
-/// The Cranelift arm hands CLIF to a backend that orders, merges and lays out
-/// blocks at the end of the function, so no range of the emitted buffer is one
-/// call's. It answers `None` — not a zero, which a reader comparing the two arms
-/// would take for "intrinsic calls cost this generator nothing".
+/// The bytes are a fact about a code generator's layout, and not every
+/// generator can honestly report them. The template compiler emits a whole
+/// intrinsic call — the hand-over, the indirect call, and the outcome test with
+/// the leave it guards — as one contiguous run of its code buffer, so a
+/// difference of two buffer lengths taken across the emission *is* that call's
+/// machine code, to the byte. A generator whose blocks are ordered, merged and
+/// laid out at the end of the function has no range of its buffer that is one
+/// call's, and can only answer `None` — not a zero, which a reader would take
+/// for "intrinsic calls cost this generator nothing".
+///
+/// `None` has no producer today, for [`WindowCode`]'s reason and kept for
+/// [`WindowCode`]'s reason; see that type's note.
 ///
 /// A `None` is infectious through [`IntrinsicCode::charge`] and
 /// [`IntrinsicCode::add`] for the reason it is infectious through
@@ -428,17 +440,11 @@ impl IntrinsicCode {
     }
 }
 
-#[cfg(any(feature = "cranelift", feature = "template"))]
+#[cfg(feature = "template")]
 pub mod subset;
 
-#[cfg(any(feature = "cranelift", feature = "template"))]
+#[cfg(feature = "template")]
 pub use subset::{blockers, refusal, supported, Reason, Refusal};
-
-#[cfg(feature = "cranelift")]
-mod compile;
-
-#[cfg(feature = "cranelift")]
-pub use compile::{Compiled, Jit};
 
 #[cfg(feature = "template")]
 pub mod template;

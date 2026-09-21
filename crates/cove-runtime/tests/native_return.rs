@@ -1,6 +1,6 @@
 //! [ADR 0057]'s return path, over the real runtime.
 //!
-//! The two code generators' own suites live in `cove-native`, where the runtime
+//! The code generator's own suite lives in `cove-native`, where the runtime
 //! is a set of test doubles: a call helper that writes one recognisable word and
 //! a frame that is a `Vec<u64>` a test owns. They can say what *emitted code*
 //! does and they cannot say what happens to the answer afterwards, because
@@ -10,7 +10,7 @@
 //!
 //! This file is that half, and it needs a compiled function to have one. So it
 //! brings its own: `interpret` below is a **third tier** that walks the same
-//! optimized IR the two code generators compile, through the same
+//! optimized IR the code generator compiles, through the same
 //! [`Entry`](cove_runtime::NativeEntry) signature and the same two helpers, and
 //! is installed through the same [`Tiered`] table. It emits nothing and
 //! therefore needs no feature and no executable page, which is why these cases
@@ -137,7 +137,7 @@ export fn firstByte(s: String, at: Int) -> Int {
 /// it a native-to-VM call besides.
 ///
 /// It was `sliceBytes` until ADR 0058 moved that into the standard library over
-/// a byte run slice, which both code generators lower. `slice` counts characters
+/// a byte run slice, which the native tier lowers. `slice` counts characters
 /// rather than bytes, and every character of the text it is handed is ASCII, so
 /// the answer is the same number.
 export fn allocates(s: String, n: Int) -> Int {
@@ -464,7 +464,7 @@ unsafe fn region(ctx: *mut NativeCtx, addr: u64) -> Region {
 /// One function's IR, walked as a tier.
 ///
 /// Every slot read is a load and every slot write is a store, which is the
-/// property both code generators have and the reason the collector needs no
+/// property the real code generator has and the reason the collector needs no
 /// spill map: at the two points a collection can happen — the safepoint helper
 /// and the call helper — every live reference is in the slot
 /// `Function::refs` names.
@@ -634,12 +634,12 @@ unsafe fn interpret(
             // ---- places -------------------------------------------------
             //
             // A `Repr::Addr` slot holds a **linear word index**, so the three
-            // instructions below are the third independent implementation of
-            // `cove_native::abi`'s "An address names either region": this one, the
-            // Cranelift arm's and the template arm's. That is the point of them
-            // being here — a disagreement about what the word means is a wrong
-            // word written into whatever the number happened to name, and the
-            // encoded tier is the oracle for all three.
+            // instructions below are the second independent implementation of
+            // `cove_native::abi`'s "An address names either region": this one
+            // and the template arm's. That is the point of them being here —
+            // a disagreement about what the word means is a wrong word
+            // written into whatever the number happened to name, and the
+            // encoded tier is the oracle for both.
             Inst::AddrOfSlot { dst, slot } => {
                 set(ctx, base, *dst, address(ctx, base, *slot));
                 pc += 1;
@@ -754,7 +754,7 @@ fn witnessed(frame: Slot, dst: Slot, width: u32) -> u32 {
 /// Takes `target` when `taken` is false, and the next instruction otherwise.
 ///
 /// A backward target is a loop backedge and carries the safepoint, which is
-/// where both code generators put theirs. `Err` is a stop, which leaves.
+/// where the real code generator puts its own. `Err` is a stop, which leaves.
 ///
 /// # Safety
 ///

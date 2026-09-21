@@ -8,11 +8,12 @@
 //!
 //! # It is the tier's half now, and it was the experiment's first
 //!
-//! This module was written for the comparison
-//! `crates/cove-bench/src/bin/native_compare.rs` runs — two code generators over
+//! This module was written for ADR 0056's comparison — two code generators over
 //! identical optimized IR, on *real* data, with the VM beside them as the oracle
 //! — and it said so, because `cove run` did not reach it and the dispatch loop
-//! consulted no tier table.
+//! consulted no tier table. (That comparison is over: ADR 0056 chose the
+//! template compiler and ADR 0066 retired the arm it beat, along with the bin
+//! that raced them.)
 //!
 //! [Issue #369](https://github.com/myuon/cove/issues/369) changed that. The tier
 //! is selectable as `cove run --backend native`, `crate::native` owns the
@@ -57,8 +58,8 @@
 //! Everything else — an `Array` element, a `String` byte, an object's length, an
 //! enum's switch, a `Vector.push` into spare capacity — is emitted code, and that
 //! is deliberate: an operation that is one identical helper call in both arms
-//! cannot tell the two code generators apart, so a comparison over a subset made
-//! entirely of helper calls would measure nothing. An intrinsic call is admitted
+//! could not tell ADR 0056's two code generators apart, so a comparison over a
+//! subset made entirely of helper calls would have measured nothing. An intrinsic call is admitted
 //! for what it buys the function around it — its Unicode walk or its parse is the
 //! runtime's either way — and only where that function measured faster for it
 //! (#378, Q5.5).
@@ -784,7 +785,7 @@ unsafe extern "C" fn field_store(
 /// in a code generator.
 ///
 /// What happens around it is [`IntrinsicProtocol`], read off the intrinsic's
-/// declared effects — the one decision both code generators emitted the call
+/// declared effects — the one decision the code generator emitted the call
 /// from, asked again here so the two halves of the protocol cannot disagree:
 ///
 /// - **a safepoint**, for an intrinsic that may allocate or collect: the unpaid
@@ -2050,9 +2051,10 @@ impl<'v, 'a> Session<'v, 'a> {
 
 /// The helpers, as the table a code generator binds.
 ///
-/// One table, and both arms are given the same one: a helper that differed
-/// between two code generators would be a difference in the *runtime* presented
-/// as a difference in the code they emit.
+/// One table, handed to the code generator whole. It was one table while there
+/// were two arms to hand it to, for a reason that has outlived them: a helper
+/// that differed between code generators would be a difference in the *runtime*
+/// presented as a difference in the code they emit.
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,

@@ -1621,10 +1621,10 @@ pub fn call_method(
             // casts on both sides are the point of it: the answer is one of
             // the two operands handed back *whole*, so a winning signalling
             // NaN stays signalling here exactly as it does in the encoded VM
-            // and in both code generators. `f64::min`'s own documentation
+            // and in the native tier. `f64::min`'s own documentation
             // declines to decide the tie — "either input may be returned
             // non-deterministically" — and this operation's tie is decided, so
-            // the tier that is the **semantic oracle** for the other three is
+            // the tier that is the **semantic oracle** for the other two is
             // the last one that should be inheriting the answer from whichever
             // `rustc` built the binary. See that function for the whole of it.
             "min" => {

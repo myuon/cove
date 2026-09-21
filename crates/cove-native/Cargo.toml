@@ -4,39 +4,33 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Each code generator is an optional feature, and both are off by default.
+# The code generator is an optional feature, and it is off by default.
 #
 # ADR 0055's adoption gate asks that "a build without the native feature has
 # no executable-memory dependency". That is a fact about the *dependency
 # graph*, not about which functions are compiled, so it has to be bought with
-# `optional = true` on the dependencies themselves — a `cfg(feature = ...)`
-# inside a `.rs` file would still have built `cranelift-jit`, and
-# `cranelift-jit` is the crate that maps an executable page.
+# `optional = true` on the dependency itself — a `cfg(feature = ...)` inside a
+# `.rs` file would still have built `libc` and still have linked the `mmap`
+# and `mprotect` that map an executable page.
 #
 # Default off, so the ordinary `cargo t` and the ordinary `cargo build` of
 # this workspace compile none of it. What that costs is that this crate's own
-# tests are behind the features too, and the price is paid deliberately: the
+# tests are behind the feature too, and the price is paid deliberately: the
 # ADR's requirement is about the *default* build, and a feature that is on by
 # default is not one anybody would remember to turn off. `.github/workflows/
-# ci.yml` runs the suite again with each of them, which is where the tests
-# below are executed.
+# ci.yml` runs the suite again with it, which is where the tests below are
+# executed.
 #
-# `cranelift` was called `native` while it was the only code generator. It is
-# named for what it is now that there are two, and the comparison between them
-# is the reason for the rename: a feature called `native` could not say which
-# of two native arms a measurement came from.
+# There is one arm. [ADR 0066] retires the Cranelift arm ADR 0055 named and
+# ADR 0056 kept for the comparison: the comparison has been made, it is
+# recorded in ADR 0056, and what remained was a second lowering per new IR
+# instruction that no distributed build contains. `template` is the
+# hand-written x86-64 arm, and its only dependency is `libc` — `mmap` and
+# `mprotect`, which is the whole of what it needs to honour W^X.
 #
-# `template` is the hand-written x86-64 arm, and its only dependency is
-# `libc` — `mmap` and `mprotect`, which is the whole of what it needs to
-# honour the same W^X rule Cranelift's JIT honours for the arm above.
+# [ADR 0066]: ../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md
 [features]
 default = []
-cranelift = [
-  "dep:cranelift-codegen",
-  "dep:cranelift-frontend",
-  "dep:cranelift-jit",
-  "dep:cranelift-module",
-]
 template = ["dep:libc"]
 
 [dependencies]
@@ -50,14 +44,6 @@ cove-ir = { workspace = true }
 # no dependencies of its own, so this costs the "no executable-memory
 # dependency" gate nothing.
 cove-schema = { workspace = true }
-
-# Pinned to one minor line rather than left open. Cranelift's IR builder and
-# its `Module` trait both change across minor releases, and this crate is a
-# lowering written against them.
-cranelift-codegen = { version = "0.135", optional = true }
-cranelift-frontend = { version = "0.135", optional = true }
-cranelift-jit = { version = "0.135", optional = true }
-cranelift-module = { version = "0.135", optional = true }
 
 libc = { version = "0.2", optional = true }
 

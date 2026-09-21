@@ -138,38 +138,30 @@ jobs:
       - name: cargo test (the doc examples)
         run: cargo test --workspace --doc --profile checked
 
-      # The native tier, which every step above builds with both of its code
-      # generators absent.
+      # The native tier, which every step above builds with its code generator
+      # absent.
       #
-      # `cove-native`'s code generators are optional features that are *off by
+      # `cove-native`'s code generator is an optional feature that is *off by
       # default*, because ADR 0055's adoption gate asks that "a build without
       # the native feature has no executable-memory dependency" and that is a
       # fact about the dependency graph rather than about which functions
       # compile. The consequence is that `--workspace` compiles a crate of ABI
-      # declarations and runs none of either lowering's tests, so they need a
-      # pass of their own — a test no gate runs is not a test.
+      # declarations and runs none of the lowering's tests, so they need a pass
+      # of their own — a test no gate runs is not a test.
       #
-      # Two arms and then both together. `cranelift` is ADR 0055's code
-      # generator; `template` is the hand-written x86-64 one it is being
-      # measured against; and the third pass is the one that runs the test
-      # asserting the two arms agree, which neither single-feature pass can
+      # One arm. ADR 0056 chose the hand-written x86-64 template compiler over
+      # Cranelift on a measured comparison, and ADR 0066 retired the loser, so
+      # there is one lowering to lint, document and run. This step was three
+      # passes while there were two arms: one each, and a third for the test
+      # that asserted they agreed, which neither single-feature pass could
       # compile.
-      #
-      # The commands are grouped into one step because they are one dependency
-      # graph: Cranelift is about thirty seconds of compilation and this is the
-      # only step that pays it, so splitting them would pay it once and report
-      # it several times.
       - name: cargo clippy, doc and test (the native tier)
         env:
           RUSTDOCFLAGS: -D warnings
         run: |
-          cargo clippy -p cove-native --all-targets --features cranelift --profile checked -- -D warnings
-          cargo doc -p cove-native --no-deps --features cranelift --profile checked
-          cargo test -p cove-native --features cranelift --profile checked
           cargo clippy -p cove-native --all-targets --features template --profile checked -- -D warnings
           cargo doc -p cove-native --no-deps --features template --profile checked
           cargo test -p cove-native --features template --profile checked
-          cargo test -p cove-native --features cranelift,template --profile checked
 
       # The *runtime's* half of the tier, and the CLI's, which are behind the
       # same features for the same reason and were untested here until issue
@@ -185,21 +177,26 @@ jobs:
       # this step nothing would run it, and "a test no gate runs is not a
       # test" is already written above.
       #
-      # `cove-bench` is here for its `--features template` arm of
-      # `native_compare.rs`, which the default `--all-targets` clippy above
-      # compiles with neither arm and therefore does not lint.
+      # **Since ADR 0066 this is the only place a cross-implementation check on
+      # machine code happens at all.** While there were two code generators,
+      # `cove-native`'s `tests/agree.rs` compared them against each other; with
+      # one arm the comparison that remains is this file's, and it is the
+      # better of the two — VM against compiled code, on real Cove source
+      # rather than on hand-built IR.
+      #
+      # One pass, where this was a loop over `cranelift`, `template` and both.
+      # `cove-bench` has left it: it was here for `native_compare.rs`, the bin
+      # that raced the two arms, which ADR 0066 retired with the arm.
       - name: cargo clippy, doc and test (the native tier's runtime and CLI)
         env:
           RUSTDOCFLAGS: -D warnings
         run: |
-          for features in cranelift template cranelift,template; do
-            cargo clippy -p cove-runtime -p cove-cli -p cove-bench --all-targets \
-              --features "$features" --profile checked -- -D warnings
-            cargo doc -p cove-runtime -p cove-cli --no-deps \
-              --features "$features" --profile checked
-            cargo test -p cove-runtime -p cove-cli \
-              --features "$features" --profile checked
-          done
+          cargo clippy -p cove-runtime -p cove-cli --all-targets \
+            --features template --profile checked -- -D warnings
+          cargo doc -p cove-runtime -p cove-cli --no-deps \
+            --features template --profile checked
+          cargo test -p cove-runtime -p cove-cli \
+            --features template --profile checked
 
       # The `#[ignore]`d cases, which live in `crates/cove-cli/tests/` —
       # `vm_coverage.rs`, `bytecode_corpus.rs` and `build.rs`. The first is

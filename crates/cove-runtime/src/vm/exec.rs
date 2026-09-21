@@ -5298,7 +5298,7 @@ pub(crate) mod tests {
     /// The encoded arm of
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 2 typed scalar operation, held to the same table
-    /// `cove-native`'s `tests/suite`'s `ABSOLUTES` holds both code generators
+    /// `cove-native`'s `tests/suite`'s `ABSOLUTES` holds the native lowering
     /// to — deliberately duplicated rather than shared, because this crate and
     /// that one do not depend on each other and a table read from one place by
     /// one tier would be a table the other tier could drift away from

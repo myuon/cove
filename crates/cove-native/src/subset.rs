@@ -1,15 +1,24 @@
-//! What both code generators compile, decided once.
+//! What the code generator compiles, decided once and apart from it.
 //!
-//! Two arms compile Cove IR in this crate — Cranelift under the `cranelift`
-//! feature and a hand-written x86-64 template compiler under `template` — and
-//! the
-//! whole point of having two is to measure one against the other. A
-//! measurement over two different subsets of the IR would not be that
-//! measurement, so the subset is not written twice: [`supported`] is the one
-//! predicate both arms ask, and `leaders` is the one block partition both
-//! arms charge work over.
+//! [`supported`] is the predicate `crate::template` asks of every function
+//! before it lowers one, and `leaders` is the block partition it charges work
+//! over. Both live here rather than inside the lowering, which is where they
+//! were put when there were two arms to keep from drifting apart — a
+//! measurement over two different subsets of the IR would not have been a
+//! measurement of two code generators — and where they stay now that [ADR
+//! 0066] has left one.
+//!
+//! The separation earns its keep without the second arm. What this crate
+//! refuses decides which functions a *program* runs on the encoded tier, so a
+//! refusal is a fact the runtime's boundary report names and `cove run
+//! --backend native --boundary` prints; it is read, ranked and argued about far
+//! more often than the emitter beside it is. A predicate stated once, in a file
+//! of its own, is the difference between "this function is outside the slice"
+//! being a claim about the slice and its being a claim about whatever the
+//! emitter happened to reach.
 //!
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+//! [ADR 0066]: ../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md
 
 use cove_ir::{
     ArithOp, CmpOp, Compare, Convert, Function, Inst, LayoutId, Len, Num, Program, Repr, Shape,
@@ -22,7 +31,7 @@ use crate::abi::Raise;
 ///
 /// An [`Inst::Copy`], an [`Inst::LoadElem`]'s element, an [`Inst::Call`]'s
 /// answer, an [`Inst::Load`], an [`Inst::Store`] and an [`Inst::Clear`] are each
-/// emitted as a run of loads and a run of stores — see each arm's `copy` for why
+/// emitted as a run of loads and a run of stores — see the emitter's `copy` for why
 /// a copy is in that order — so the code they produce is linear in the width and
 /// there is no memmove helper to fall back to yet. A bound is therefore worth
 /// having, and it is deliberately generous: sixteen words is a wider inline value
@@ -73,7 +82,7 @@ fn is_lowered(repr: Repr) -> bool {
 }
 
 /// The byte offset of a slot from the frame's first word, if it fits the
-/// `i32` displacement both arms address a frame with.
+/// `i32` displacement a frame is addressed with.
 ///
 /// A frame is bounded by `cove_ir::MAX_FRAME_WORDS`, which is far inside
 /// this, so the `None` is unreachable in practice. It is checked rather than
@@ -85,7 +94,7 @@ pub(crate) fn slot_offset(slot: Slot) -> Option<i32> {
 
 /// The byte offset of a literal's address from the first word of
 /// [`NativeCtx::literals`](crate::abi::NativeCtx::literals), if it fits the `i32`
-/// displacement both arms address the table with.
+/// displacement the table is addressed with.
 ///
 /// [`slot_offset`] one table over, and the `None` is unreachable for the same
 /// kind of reason: a program with 2^28 string literals is one no source file
@@ -120,7 +129,7 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// because `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG` arm is one
 /// signed comparison of the two words for all of them. A `String`'s order is
 /// in the slice too, and only its order: `ORDER_STR` walks two objects' bytes,
-/// which both arms hand to [`OrderStrFn`](crate::abi::OrderStrFn), a leaf helper
+/// which is handed to [`OrderStrFn`](crate::abi::OrderStrFn), a leaf helper
 /// that cannot allocate, raise or move anything — so a standard-library search
 /// over `String` keys compiles (#378, Q4.14). `Str` equality and the ordered
 /// comparisons `cmp_str!` answers copy both strings out and stay outside.
@@ -143,7 +152,7 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
 ///
 /// [ADR 0058] moved `Vector.push` and `Vector.freeze` into the standard library
 /// over run instructions, so a word owner is no longer a builtin this crate
-/// recognises by name. It is decoded here once, for both arms and for every
+/// recognises by name. It is decoded here once, for every
 /// instruction that takes one — [ADR 0062]'s ensure and commit, and a word
 /// finish.
 ///
@@ -257,7 +266,7 @@ pub(crate) struct Reserve {
     pub(crate) count: Slot,
     /// The owner layout the object's own header is compared against.
     pub(crate) layout: LayoutId,
-    /// Which storage, so that each arm picks the cold operation.
+    /// Which storage, so that the emitter picks the cold operation.
     pub(crate) words: bool,
 }
 
@@ -323,7 +332,7 @@ pub(crate) fn byte_store(
 }
 
 /// A push or an append window — [ADR 0062]'s ensure, write and commit, as
-/// `cove_ir::legalize` recognises it — with the static facts both arms emit it
+/// `cove_ir::legalize` recognises it — with the static facts it is emitted
 /// from as **one fast path**.
 ///
 /// The rows of a window are each admitted on their own, and each has an emitted
@@ -331,8 +340,8 @@ pub(crate) fn byte_store(
 /// row by row, a push reads the owner's header three times and asks the room
 /// question twice. What [`windows`] decodes is the one fast path the composite
 /// `growable-push` had — [`WordOwner`]'s and [`byte_owner`]'s questions, which
-/// are these — so that both arms emit a window as one step, and make the frame
-/// writes the rows would have made besides. **The window is not a
+/// are these — so that a window is emitted as one step, and the frame
+/// writes the rows would have made are made besides. **The window is not a
 /// second definition of the shape**: [`cove_ir::legalize::recognize`] is asked,
 /// over this crate's own block partition, and nothing here matches a row.
 ///
@@ -392,15 +401,15 @@ pub(crate) struct BufferWindow {
     /// For a byte push, the `Shape::Bytes` layout the store's header is
     /// compared against — [`ByteStore::bytes`]. Unread otherwise.
     pub(crate) bytes: LayoutId,
-    /// Whether the storage is words, so that each arm picks the cold ensure and
+    /// Whether the storage is words, so that the emitter picks the cold ensure and
     /// masks the length word at the element's stride.
     pub(crate) words: bool,
     /// An append's `run-copy` argument row. Unread for a push.
     pub(crate) args: u32,
 }
 
-/// Every window of `function` that both arms emit as one fast path, indexed by
-/// its head's program counter.
+/// Every window of `function` emitted as one fast path, indexed by its head's
+/// program counter.
 ///
 /// `lengths` is [`leaders`] of the same function: a window is recognised over
 /// this crate's own blocks, which are the partition work is charged by. The scan
@@ -554,10 +563,10 @@ pub enum Reason {
     /// The body does not end in a terminator, so its last block falls off the
     /// end.
     NoTerminator,
-    /// An instruction no arm emits code for.
+    /// An instruction the code generator emits no code for.
     Instruction,
-    /// An instruction both arms lower, whose operands are outside a bound one
-    /// of them needs.
+    /// An instruction the code generator lowers, whose operands are outside a
+    /// bound the lowering needs.
     ///
     /// A value wider than this module's `MAX_RUN_WORDS`, a slot past the end of
     /// the frame,
@@ -599,12 +608,12 @@ pub struct Refusal {
 /// Whether every part of `function` is inside this slice.
 ///
 /// Called before lowering begins, which is what makes lowering infallible.
-/// The instruction match here and each arm's `inst` are two halves of one
+/// The instruction match here and the emitter's `inst` are two halves of one
 /// decision and have to agree: a form admitted here and not lowered there is
 /// a panic, which is why that arm is `unreachable!` and says so.
 ///
-/// It is [`refusal`] answering `None`, and it stays as the predicate both arms
-/// ask because a `bool` is what a code generator needs: *why* a function was
+/// It is [`refusal`] answering `None`, and it stays the predicate the emitter
+/// asks because a `bool` is what a code generator needs: *why* a function was
 /// refused is a question for the report and not for the emitter.
 pub fn supported(program: &Program, function: &Function) -> bool {
     refusal(program, function).is_none()
@@ -702,7 +711,7 @@ pub fn blockers(program: &Program, function: &Function) -> Vec<Refusal> {
 ///
 /// Every arm answers [`Reason::Operands`] and the fallback answers
 /// [`Reason::Instruction`], which is the whole of the division: an arm exists
-/// because both code generators emit that form, so reaching one and failing it
+/// because the code generator emits that form, so reaching one and failing it
 /// is a bound and never a missing family.
 fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<Reason> {
     let slots = function.reprs.len();
@@ -713,8 +722,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             .is_some_and(|last| (last as usize) <= slots)
             && slot_offset(at.saturating_add(width)).is_some()
     };
-    // `true` is "this instruction is inside the slice", so that each arm below
-    // reads the way it read while it was a predicate.
+    // `true` is "this instruction is inside the slice", so that each match
+    // arm below reads the way it read while it was a predicate.
     let inside = match inst {
         // `encoded.rs`'s `CONST_UNIT` arm, which is `set_word_at(base + dst, 0)`
         // and nothing else — one store of a zero word, the same shape
@@ -741,8 +750,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // `encoded.rs`'s `STR` arm: `set_slot(base, dst, literal_addr(text))`, a
         // read of the table [ADR 0045] placed before the run's first instruction.
         // There is no branch, no allocation and nothing that can fail — a
-        // placement failure is refused before a frame exists — so both arms emit
-        // the table read and the store and nothing else.
+        // placement failure is refused before a frame exists — so what is
+        // emitted is the table read and the store and nothing else.
         //
         // The `StrId` is bounded against the program's own table as well as
         // against the `i32` displacement, because `Refusal` is the honest answer
@@ -789,9 +798,12 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // and the float comparison it sits between in the IR because it is not
         // arithmetic: it clears bit 63 and touches no other bit, so there is
         // nothing to round, nothing to signal, nothing that quiets a
-        // signalling NaN, and no `Raise`. The two arms reach it two ways —
-        // `btr $63` on an integer register here, `fabs` through Cranelift —
-        // and `tests/agree.rs` holds them to the same bits.
+        // signalling NaN, and no `Raise`. The lowering is `btr $63` on an
+        // integer register, and what holds it to the bit is `tests/suite`'s
+        // `ABSOLUTES` — whose NaN rows carry a payload and a quiet bit no Cove
+        // program can see — with
+        // `cove-runtime`'s `native_tier.rs` against the VM for the part one
+        // can.
         //
         // [ADR 0065](../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)'s
         // Decision 5 is why it is lowered in the same change that emits it and
@@ -807,17 +819,20 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // so nothing rounds, nothing signals, nothing quiets a signalling NaN
         // and there is no `Raise`.
         //
-        // It is the one instruction in this file whose two arms had to be
-        // *written against the VM* rather than handed to the obvious machine
-        // operation, because both obvious operations are the wrong ones.
-        // x86-64's `minsd` answers its second operand when the two compare
-        // equal and when either is a NaN, which is `f64::min`'s tie rule but
-        // not its NaN rule; Cranelift's `fmin` is IEEE 754-2019's `minimum`
-        // and *propagates* a NaN where `f64::min` absorbs one. So the template
-        // arm is `minsd` and a blend that puts the absorbed case back, and the
-        // Cranelift arm is three `select`s over `fcmp` and never names `fmin`
-        // at all. `tests/agree.rs` over `tests/suite`'s `EXTREMA` is what
-        // holds the two to the same bits.
+        // It is the one instruction in this file that had to be *written
+        // against the VM* rather than handed to the obvious machine operation,
+        // because the obvious operations are the wrong ones. x86-64's `minsd`
+        // answers its second operand when the two compare equal and when
+        // either is a NaN, which is `f64::min`'s tie rule but not its NaN
+        // rule; an IEEE 754-2019 `minimum` — which is what a compiler
+        // back end's `fmin` usually is, and what the retired Cranelift arm's
+        // was — *propagates* a NaN where `f64::min` absorbs one. Two obvious
+        // instructions, wrong in two different directions, which is why the
+        // contract is spelled out on `Inst::FloatMinMax` instead of being
+        // delegated to either. The lowering is `minsd` and a blend that puts
+        // the absorbed case back, and `tests/suite`'s `EXTREMA` — computed by
+        // a standalone program calling `f64::min` and `f64::max` — is what
+        // holds it to the bit.
         Inst::FloatMinMax { dst, a, b, .. } => slot(*dst) && slot(*a) && slot(*b),
         // ---- places ---------------------------------------------------------
         //
@@ -828,9 +843,9 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // reads the object's own runtime header — but `Layout::fixed_payload_words`
         // answers that bound at compile time for every shape the census reaches:
         // `NativeCtx::fixed_payload_words` is a table of it, one `u32` per
-        // `LayoutId` with `0` standing in for "ask the runtime". Both arms read the
-        // object's layout out of its header, look the bound up in one load, and
-        // take the fast path if the field fits; a `0` entry — a variable-payload
+        // `LayoutId` with `0` standing in for "ask the runtime". The lowering reads
+        // the object's layout out of its header, looks the bound up in one load, and
+        // takes the fast path if the field fits; a `0` entry — a variable-payload
         // shape such as `Any` — always fails that comparison and falls to
         // [`crate::abi::FieldLoadFn`]/[`FieldStoreFn`], which perform the whole
         // access through `Machine::checked` itself. So the bound is emitted without
@@ -971,9 +986,9 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             // sign-extended, so a case index above `i32::MAX` would be compared
             // against a negative number. No enum has two billion cases and
             // `cove_ir::lower` could not build one, so this refuses nothing real —
-            // but an arm that was silently wrong above a threshold is worse than
-            // one that refuses at it, and the two arms share this predicate so
-            // neither may admit what the other cannot lower.
+            // but a lowering that was silently wrong above a threshold is worse
+            // than one that refuses at it, and the refusal is stated here so that
+            // the emitter cannot be handed what it cannot encode.
             i32::try_from(table.targets.len()).is_ok()
                 && slot(*on)
                 && table.default < end
@@ -1278,8 +1293,9 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
 ///
 /// A leader is the first instruction, any branch or jump target, and the
 /// instruction after any terminator. That last clause is what makes a
-/// conditional branch's fall-through a block of its own, which Cranelift
-/// needs because its `brif` names both successors explicitly.
+/// conditional branch's fall-through a block of its own — which is what keeps
+/// the charge honest, because the two successors of a branch are reached
+/// having done the same work and everything after them is not.
 pub(crate) fn leaders(program: &Program, function: &Function) -> Vec<Option<u32>> {
     let end = function.code.len();
     let mut leader = vec![false; end];
@@ -1346,9 +1362,9 @@ pub(crate) fn leaders(program: &Program, function: &Function) -> Vec<Option<u32>
 /// are the three arms of `int_arith` that call `named`. Division and remainder
 /// name themselves whatever the destination is.
 ///
-/// Shared by both arms for the same reason [`supported`] is: this is a rule of
-/// the *language*, and two code generators disagreeing about it would be two
-/// different languages.
+/// Here rather than in the emitter for the same reason [`supported`] is: this
+/// is a rule of the *language* — which error a Cove program is handed — and not
+/// a fact about how a word is added.
 pub(crate) fn overflow_of(function: &Function, op: ArithOp, dst: Slot) -> Raise {
     let duration = function.reprs.get(dst as usize) == Some(&Repr::Duration);
     match op {

@@ -303,7 +303,7 @@ export fn threads(n: Int) -> Int {
 /// the marker every refused fixture in this file carries.
 ///
 /// It was `sliceBytes` until ADR 0058 moved that into the standard library over
-/// a byte run slice, which both code generators lower. `slice` counts characters
+/// a byte run slice, which the native tier lowers. `slice` counts characters
 /// rather than bytes, and every character of the text it is handed is ASCII, so
 /// the answer is the same number.
 export fn allocates(s: String, n: Int) -> Int {
@@ -449,7 +449,7 @@ export fn callsAllocatesAndKeeps(s: String, n: Int) -> Int {
 /// where it was learnt: without it the whole body is a leaf of under sixteen
 /// instructions, `cove_ir::lower::inline` expands it into its caller, and the
 /// pushes run on the caller's tier — which is the VM. The case then compares the
-/// VM with itself and passes whatever either code generator emitted.
+/// VM with itself and passes whatever the code generator emitted.
 export fn pushesOnto(given: Vector<Int>, n: Int) -> Int {
   var v = given
   var at = 1
@@ -1194,8 +1194,8 @@ struct Both {
 /// **A `Repr::Addr` word is a linear index and a frame slot's index is
 /// segment-relative, and on segment 0 those are the same number.** The entry task
 /// of every run is segment 0, so a case that drives an address through the real
-/// runtime cannot tell an arm that added `NativeCtx::stack_origin` from one that
-/// forgot to: `origin` is nought and both arms answer alike. Mutation testing
+/// runtime cannot tell a lowering that added `NativeCtx::stack_origin` from one
+/// that forgot to: `origin` is nought and the two answer alike. Mutation testing
 /// found exactly that — the origin dropped in the template compiler's
 /// `frame_addr`, and dropped in its `word_ptr`, passes every other case in this
 /// file and every one of the runtime's own suites — and the only file that catches
@@ -1366,12 +1366,11 @@ fn a_raise_in_machine_code_is_the_vm_s_sentence() {
 
 /// **Negation in machine code, and the one input it refuses.**
 ///
-/// `Inst::Neg` over `Num::Int` is `checked_neg`, and the two arms of this crate
-/// reach its `None` differently — the template arm on the flag its `neg` set, the
-/// Cranelift arm on a comparison against `i64::MIN` — so what is asserted here is
-/// the *sentence*: `cove-native` names the operation and `cove-runtime` writes the
-/// error, and a negation that overflowed in compiled code has to say word for word
-/// what a dispatched one says.
+/// `Inst::Neg` over `Num::Int` is `checked_neg`, and the template arm reaches
+/// its `None` on the flag its `neg` set — so what is asserted here is the
+/// *sentence*: `cove-native` names the operation and `cove-runtime` writes the
+/// error, and a negation that overflowed in compiled code has to say word for
+/// word what a dispatched one says.
 #[test]
 fn negation_and_its_overflow_are_the_vm_s() {
     on_each_tier(&["negates"], &["callsNegates"]);
@@ -1406,7 +1405,7 @@ fn negation_and_its_overflow_are_the_vm_s() {
 ///
 /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 /// sixth Phase 1 migration made `Float.abs` an `Inst::FloatAbs` — a typed
-/// scalar operation both code generators lower — where it was an
+/// scalar operation the native tier lowers — where it was an
 /// `Inst::IntrinsicCall` that crossed into the runtime. **This is the case
 /// that says it is on the right side of the boundary now**: `magnitudes` is
 /// *compiled*, where a function whose only float work was a mediated call
@@ -1462,14 +1461,14 @@ fn a_float_absolute_runs_as_machine_code() {
 /// suite.
 ///
 /// **The operands are the ones the two obvious machine instructions get
-/// wrong.** `minsd` answers its second operand when either is a NaN and
-/// Cranelift's `fmin` propagates one, where `f64::min` absorbs one — so a NaN
-/// row is where a naively lowered arm would disagree with the VM, and it is
-/// the first row below. The signed zeros are the other: `min(-0.0, +0.0)` is
-/// `+0.0` and the reverse is `-0.0`, which Cove renders and so this case can
-/// read. The bits a Cove program cannot see — a NaN's payload and its quiet
-/// bit — are pinned in `cove-native`'s own suite, where the assertions can be
-/// in bits.
+/// wrong.** `minsd` answers its second operand when either is a NaN — and the
+/// retired Cranelift arm's `fmin` propagated one, too — where `f64::min`
+/// absorbs one, so a NaN row is where a naively lowered arm would disagree
+/// with the VM, and it is the first row below. The signed zeros are the
+/// other: `min(-0.0, +0.0)` is `+0.0` and the reverse is `-0.0`, which Cove
+/// renders and so this case can read. The bits a Cove program cannot see — a
+/// NaN's payload and its quiet bit — are pinned in `cove-native`'s own suite,
+/// where the assertions can be in bits.
 ///
 /// The trailing `.max(floor)` is what makes the answer carry the `min`
 /// through a second instruction rather than out of the frame, and `floor` is a
@@ -2088,7 +2087,7 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
 /// code, and answers what the VM answers.**
 ///
 /// `Float.sqrt` carries neither `MAY_ALLOCATE`/`MAY_COLLECT` nor `MAY_RAISE`,
-/// so both code generators emit the call with nothing around it — see
+/// so the code generator emits the call with nothing around it — see
 /// `cove_native::IntrinsicProtocol`. Under `debug_assertions`, which this
 /// suite runs with, the runtime's helper also asserts the promise that makes that
 /// sound: the stack did not move and the heap did not collect.
@@ -2979,9 +2978,9 @@ fn a_set_from_compiled_code_writes_in_range_and_answers_none_outside_it() {
 /// **`Vector.remove` and `Vector.pop` from compiled code: the truncate the
 /// runtime keeps for itself, and what the owner sees afterwards.**
 ///
-/// `GrowableOp::TruncateWords` is the growable member neither arm emits: the
-/// clear of the vacated words and the length write are one step, so both code
-/// generators call the helper. This is the case that says the crossing is right
+/// `GrowableOp::TruncateWords` is the growable member the lowering does not
+/// emit: the clear of the vacated words and the length write are one step, so
+/// the code generator calls the helper. This is the case that says the crossing is right
 /// end to end — the compiled frame's operands reach `Machine::truncate_words`,
 /// and the header it wrote is read back by a frame that is not the one that
 /// wrote it.
@@ -3068,8 +3067,8 @@ fn a_set_on_an_empty_vector_answers_none() {
 
 // **`Vector.set`'s two cold paths are not reachable from here.**
 //
-// A frozen store is exercised, and the two code generators are checked
-// against each other on it, in `cove-native`'s own suite —
+// A frozen store is exercised, and the lowering is held to the VM's
+// behaviour on it, in `cove-native`'s own suite —
 // `every_cold_path_of_a_set_goes_to_the_runtime` in
 // `crates/cove-native/tests/suite/mod.rs`, run over hand-built IR. It cannot
 // be exercised from checked Cove source in this file: `crates/cove-sema`'s
@@ -3185,7 +3184,7 @@ fn a_freeze_from_compiled_code_answers_the_same_elements() {
 /// **A `String` key's order from compiled code agrees with the VM's.**
 ///
 /// `std.set.contains<String>` and `std.map.get<String, Int>` search by
-/// `Cmp(Str, Order)`, which both code generators hand to the leaf
+/// `Cmp(Str, Order)`, which the code generator hands to the leaf
 /// `OrderStrFn` since #378's Q4.14 was answered. What is compared is the answer
 /// every probe's membership and rank folded into, on the encoded tier and on the
 /// native one, and that the searches did run natively.

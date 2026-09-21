@@ -1,12 +1,15 @@
 //! What the scalar and control-flow slice of the native tier actually does,
-//! run — once, for whichever code generator is asked for.
+//! run through the one code generator this crate has.
 //!
-//! # One suite, two arms
+//! # One suite, one arm
 //!
-//! There are two code generators in this crate and the reason for the second is
-//! to measure it against the first. So the expectations are written once, over
-//! the [`Arm`] trait, and each arm's test file is a list of one-line wrappers:
-//! two arms that agreed with two different suites would not have been compared.
+//! There were two code generators here once, so that one could be measured
+//! against the other.
+//! [ADR 0066](../../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md)
+//! retired the comparison and the code generator that lost it, so the
+//! expectations below no longer need to be shared between two test files.
+//! They are written once, over the [`Arm`] trait, and `tests/template.rs`
+//! binds that trait to the one code generator left.
 //!
 //! # Why the expectations are literals
 //!
@@ -846,11 +849,14 @@ pub fn watched() -> Vec<u64> {
 
 /// One code generator, as the suite below uses it.
 ///
-/// The four operations every arm has: make one, compile a function, make the
-/// code executable, and take an entry point. Nothing else is asked of an arm,
-/// and nothing in the suite names a concrete one.
+/// The four operations a code generator has: make one, compile a function,
+/// make the code executable, and take an entry point. Nothing else is asked of
+/// an arm, and **nothing in the suite names a concrete one** — which is what
+/// keeps every expectation below in this file and out of `tests/template.rs`,
+/// so that adding a case is a change to the suite rather than to the emitter's
+/// own test file.
 pub trait Arm {
-    /// What this arm's `compile` answers. Both arms' are `Copy` and carry the
+    /// What this arm's `compile` answers. `Copy`, and carrying the
     /// `FunctionId` and the code size; the suite reads only the size.
     type Handle: Copy;
 
@@ -858,8 +864,8 @@ pub trait Arm {
     fn compile(&mut self, program: &Program, id: FunctionId) -> Option<Self::Handle>;
     fn finalize(&mut self);
     fn entry(&self, handle: Self::Handle) -> Entry;
-    /// How many bytes of machine code a compiled function is, which both arms'
-    /// handles carry: what a case comparing the code two shapes cost reads.
+    /// How many bytes of machine code a compiled function is, which the arm's
+    /// handle carries: what a case comparing the code two shapes cost reads.
     fn code_bytes(handle: Self::Handle) -> u32;
     /// What the compiled function's ADR 0062 buffer windows were, by pattern.
     fn window_code(handle: Self::Handle) -> WindowCode;
@@ -868,11 +874,12 @@ pub trait Arm {
     fn intrinsic_code(handle: Self::Handle) -> IntrinsicCode;
     /// Whether this arm can say how many *bytes* a window was.
     ///
-    /// The sites are a fact about the IR and both arms count them the same; the
-    /// bytes are a fact about a code generator's layout and only one arm has
-    /// them. A constant rather than a suite that shrugs at whichever answer it
-    /// gets: "this arm attributes bytes" and "this arm does not" are both claims
-    /// worth a failing test if they stop being true. See
+    /// The sites are a fact about the IR and any arm counts them the same; the
+    /// bytes are a fact about a code generator's *layout*, and an arm that lays
+    /// its blocks out at the end of a function has no range of its buffer that
+    /// is one window's. A constant rather than a suite that shrugs at whichever
+    /// answer it gets: "this arm attributes bytes" and "this arm does not" are
+    /// both claims worth a failing test if they stop being true. See
     /// [`WindowCode`](cove_native::WindowCode).
     const ATTRIBUTES_WINDOWS: bool;
     /// Whether this arm can say how many *bytes* a mediated intrinsic call was.
@@ -1144,7 +1151,7 @@ pub fn program(function: Function) -> Program {
 /// `Inst::Str` names a `StrId`, and `supported` bounds that id against this very
 /// table — so a case that emits one has to declare the strings, exactly as a case
 /// that calls a builtin has to declare the builtin. The *text* is never read by
-/// either arm: what a literal lowers to is a load of
+/// the lowering: what a literal lowers to is a load of
 /// `NativeCtx::literals[text]`, and what the table holds is the address the
 /// runtime placed. `run_with_literals` is where those addresses come from.
 pub fn program_with_strings(function: Function, strings: &[&str]) -> Program {
@@ -1655,6 +1662,170 @@ pub fn a_backedge_polls_only_once_the_threshold_is_reached<A: Arm>() {
     );
 }
 
+/// **The threshold's own boundary: which turn polls, carrying how much, at
+/// every threshold that can tell a `>` from a `>=`.**
+///
+/// This table is the one thing in this file with **no oracle anywhere else in
+/// the repository**, and that is why it is written out rather than derived.
+/// [ADR 0060](../../../../docs/adr/0060-a-backedge-tests-the-stride-before-it-calls.md)
+/// moved the stride test out of the safepoint helper and into the code
+/// generator, so the encoded VM does not perform it and cannot be asked what it
+/// would answer: a case that ran the same loop on the VM would agree on the sum
+/// and say nothing about when the runtime was asked, which is the whole of what
+/// the threshold decides. While there were two code generators the rule was held
+/// by the two of them agreeing on it (`tests/agree.rs`, retired by
+/// [ADR 0066](../../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md)),
+/// and that was an agreement and not an oracle — two arms with the same
+/// off-by-one would have agreed. The literals below are the oracle the code
+/// generator does not supply.
+///
+/// [`summing_loop`]'s blocks are 2, 2, 3 and 1, so the first backedge is reached
+/// having done 7 and every later one 5, and `n = 10` turns it ten times. The
+/// accumulator is **not** cleared by a fall-through, so a threshold the first
+/// backedge does not reach is one the second carries 12 to. The rows are chosen
+/// to be boundaries rather than a spread:
+///
+/// | threshold | why it is here |
+/// | ---: | --- |
+/// | 0 | the default, which polls at every backedge |
+/// | 1 | the smallest threshold a turn can reach, which is the same thing |
+/// | 5 | *exactly* a later turn's work: `>` polls five times fewer than `>=` |
+/// | 7 | *exactly* the first backedge's work, the other side of the same coin |
+/// | 12 | the first two turns together, so a fall-through has to have carried |
+/// | 16 | [`a_backedge_polls_only_once_the_threshold_is_reached`]'s row, here for the shape |
+/// | 1024 | the real published stride, which this loop never reaches at all |
+///
+/// The last row is the one that says the accounting closes: no poll happens,
+/// and all 55 units — 7 + nine turns of 5, plus the 2 and the 1 the loop leaves
+/// through — are charged at the exit instead, which is ADR 0055's "pending work
+/// charged on every exit" doing the work a poll that never came would have done.
+pub fn a_backedge_polls_at_the_turn_its_threshold_names<A: Arm>() {
+    /// One threshold's expected run: what it was set to, the polls it took in
+    /// order, and the work the exit was left to charge.
+    ///
+    /// A struct rather than the tuple this began as, which `clippy::type_complexity`
+    /// refused — and it reads better for it, because a row of this table is three
+    /// different things and two of them are counts of work.
+    struct Row {
+        /// What `NativeCtx::poll_at` was published as.
+        at: u64,
+        /// `(pc, work)` for each poll the run took, in the order it took them.
+        polls: &'static [(u32, u64)],
+        /// What the return published, being everything no poll took.
+        pending: u64,
+    }
+    let rows: &[Row] = &[
+        Row {
+            at: 0,
+            polls: &[
+                (2, 7),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+            ],
+            pending: 3,
+        },
+        Row {
+            at: 1,
+            polls: &[
+                (2, 7),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+            ],
+            pending: 3,
+        },
+        Row {
+            at: 5,
+            polls: &[
+                (2, 7),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+                (2, 5),
+            ],
+            pending: 3,
+        },
+        Row {
+            at: 7,
+            polls: &[(2, 7), (2, 10), (2, 10), (2, 10), (2, 10)],
+            pending: 8,
+        },
+        Row {
+            at: 12,
+            polls: &[(2, 12), (2, 15), (2, 15)],
+            pending: 13,
+        },
+        Row {
+            at: 16,
+            polls: &[(2, 17), (2, 20)],
+            pending: 18,
+        },
+        Row {
+            at: 1024,
+            polls: &[],
+            pending: 55,
+        },
+    ];
+    for Row {
+        at,
+        polls: expected,
+        pending,
+    } in rows
+    {
+        forget_polls();
+        poll_at(*at);
+        let mut words = vec![10u64, 0, 0, 0];
+        let answer = run::<A>(&summing_loop(), &mut words, 0);
+
+        assert_eq!(answer.outcome, Outcome::Returned, "the threshold {at}");
+        assert_eq!(
+            words[1], 55,
+            "the threshold {at}: the loop answers what it always answers, \
+             whenever it polls"
+        );
+        assert_eq!(
+            polls(),
+            expected.to_vec(),
+            "the threshold {at}: the turn each poll happened at and the work it \
+             carried"
+        );
+        assert_eq!(
+            answer.pending_work, *pending,
+            "the threshold {at}: what no poll took, charged at the exit"
+        );
+        // The sum is the invariant the rows above are a decomposition of: every
+        // unit of work is published exactly once, to a poll or to the exit, at
+        // every threshold. A row whose literals were transcribed wrongly fails
+        // here as well as above.
+        let polled: u64 = polls().iter().map(|(_, work)| work).sum();
+        assert_eq!(
+            polled + answer.pending_work,
+            55,
+            "the threshold {at}: nothing charged twice and nothing dropped"
+        );
+    }
+    forget_polls();
+    poll_at(0);
+}
+
 /// A threshold of nought is a poll at every backedge, which is what a context
 /// that was published no budget holds.
 ///
@@ -1772,9 +1943,9 @@ pub fn a_zero_width_return_writes_nothing<A: Arm>() {
 /// ADR 0057: a raise and a stop publish no result.
 ///
 /// "Semantically" is the whole of it — a destination nothing may read is free to
-/// hold anything — but neither arm writes it at all, and that is the easiest
-/// version of the rule to keep true and the easiest to check. Both ways out are
-/// checked in one function because they are one claim about the two.
+/// hold anything — but the lowering does not write it at all, and that is the
+/// easiest version of the rule to keep true and the easiest to check. Both ways
+/// out are checked in one function because they are one claim about the two.
 pub fn leaving_publishes_no_destination<A: Arm>() {
     // A raise: the addition overflows before the return is reached.
     let (answer, _) = arith::<A>(ArithOp::Add, i64::MAX, 1);
@@ -1824,15 +1995,15 @@ pub fn arith<A: Arm>(op: ArithOp, a: i64, b: i64) -> (Answer, Vec<u64>) {
     (answer, words)
 }
 
-/// The ordinary answers, including the two rounding questions `sdiv` and
-/// `srem` could get wrong.
+/// The ordinary answers, including the two rounding questions `idiv` could
+/// get wrong.
 ///
 /// `encoded.rs`'s `int_op!` (line 877) calls `int_arith`
 /// (`crates/cove-runtime/src/vm/exec.rs:3705`), whose `Div` and `Rem` arms are
 /// `checked_div` and `checked_rem` — Rust's truncating division, so `-7 / 2`
-/// is `-3` and `-7 % 2` is `-1`. Cranelift's `sdiv` and `srem` are the same
-/// two, which is why this passes; it is here because "the same two" is a
-/// claim and not an axiom.
+/// is `-3` and `-7 % 2` is `-1`. x86-64's `idiv` truncates the same way,
+/// which is why this passes; it is here because "the same way" is a claim
+/// and not an axiom.
 pub fn integer_arithmetic_answers_what_the_vm_answers<A: Arm>() {
     for (op, a, b, expected) in [
         (ArithOp::Add, 2i64, 3i64, 5i64),
@@ -1868,7 +2039,7 @@ pub fn integer_arithmetic_answers_what_the_vm_answers<A: Arm>() {
 /// The two `i64::MIN` rows are the ones easiest to get wrong in either
 /// direction: `checked_div(i64::MIN, -1)` is `None`, which `int_arith` reports
 /// as an *overflow* of division rather than as a division by zero, and
-/// Cranelift's `sdiv` would have trapped on it — a machine signal, not a Cove
+/// x86-64's `idiv` would have trapped on it — a machine signal, not a Cove
 /// error — if the lowering had not branched around it.
 ///
 /// The zero-first order matters too: `int_arith`'s `Div` arm tests `b == 0`
@@ -2013,10 +2184,12 @@ pub fn negation_answers_what_the_vm_answers<A: Arm>() {
 /// reimplementation tidies up by accident. Both destinations are asserted here for
 /// that reason.
 ///
-/// It is the case the whole lowering is worth having: a native `-` that wrapped
-/// where this raises would be a silent wrong answer, and the template arm's
-/// `jno` and the Cranelift arm's comparison against `i64::MIN` are two different
-/// ways to get it wrong.
+/// It is the case the whole lowering is worth having: a native `-` that
+/// wrapped where this raises would be a silent wrong answer, and the
+/// template arm's `jno` is what stands between a wrapped answer and a
+/// raised one — the code generator retired by ADR 0066 guarded the same
+/// input by comparing against `i64::MIN` directly, a different mechanism
+/// for the same fact.
 pub fn negating_the_least_int_raises<A: Arm>() {
     for dst in [Repr::Int, Repr::Duration] {
         forget_polls();
@@ -2096,8 +2269,8 @@ pub const ABSOLUTES: &[(&str, u64, u64)] = &[
     //
     // It is not a hypothetical. Both were watched failing on exactly these
     // two rows and no others: the encoded arm with its answer quieted when it
-    // is a NaN, and the Cranelift arm with one `fadd` of `+0.0` after the
-    // `fabs`. Every other row in this table passed both breaks.
+    // is a NaN, and the arm retired by ADR 0066 with one `fadd` of `+0.0`
+    // after the `fabs`. Every other row in this table passed both breaks.
     //
     // **The unary `-` is not one of those routes**, which is worth writing
     // down because it is the obvious thing to assume: `-x` is itself a
@@ -2129,11 +2302,12 @@ pub const ABSOLUTES: &[(&str, u64, u64)] = &[
 /// and this is where the machine's answer is written down.
 ///
 /// **The signalling rows are the ones that separate a mask from arithmetic.**
-/// The two arms reach the answer differently — the template arm clears bit 63
-/// with `btr` on an integer register and the Cranelift arm asks for `fabs` —
-/// and both leave bit 51 where they found it, where every arithmetic route to
-/// the same answer sets it. An implementation that answered `-x` for a
-/// negative operand would pass every other row here and fail that one.
+/// The lowering clears bit 63 with `btr` on an integer register and leaves bit
+/// 51 where it found it — as an `fabs` would, which is how the code generator
+/// retired by ADR 0066 reached the same bits — where *every arithmetic route*
+/// to the same answer sets bit 51 instead. An implementation that answered
+/// `-x` for a negative operand would pass every other row here and fail that
+/// one.
 pub fn a_float_absolute_clears_the_sign_bit<A: Arm>() {
     for (label, operand, want) in ABSOLUTES {
         forget_polls();
@@ -2169,9 +2343,9 @@ pub fn absolute_in_place() -> Program {
 /// `Inst::FloatAbs` answers the same thing when its destination is its
 /// operand.
 ///
-/// Both arms load the word and then store it, so this cannot go wrong — which
-/// is exactly why the case is cheap and its absence would be a gap rather than
-/// a risk. A code generator that read the destination after writing it, or
+/// The lowering loads the word and then stores it, so this cannot go wrong —
+/// which is exactly why the case is cheap and its absence would be a gap rather
+/// than a risk. A code generator that read the destination after writing it, or
 /// that emitted a read-modify-write against memory in the wrong order, would
 /// be caught here and nowhere else: every row of
 /// [`a_float_absolute_clears_the_sign_bit`] writes a slot the operand is not.
@@ -2273,13 +2447,15 @@ pub fn extremum_over_b(op: MinMax) -> Program {
 ///   making it.
 /// - **a NaN is absorbed, not propagated.** `min(NaN, x)` is `x` and
 ///   `min(x, NaN)` is `x` — IEEE 754-2008's `minNum` rather than IEEE
-///   754-2019's `minimum`. Cranelift's `fmin` *is* the 2019 operation, so an
-///   arm written on it fails sixteen of these rows.
+///   754-2019's `minimum`. An `fmin` instruction — the one the code
+///   generator retired by ADR 0066 asked for — *is* the 2019 operation, so a
+///   lowering built on it fails sixteen of these rows.
 ///
 /// Every answer in the table is **bit-identical to one of the two operands**,
 /// on all 33 rows and both columns. That is not a coincidence and it is the
 /// strongest single statement the table makes: nothing here computes a value,
-/// both arms select a word, and so nothing can round and nothing can quiet.
+/// the lowering selects a word, and so nothing can round and nothing can
+/// quiet.
 /// The `sNaN` rows are what make it failable — `sNaN, qNaN` answers
 /// `0xfff0_0000_dead_beef` on both columns, sign, payload and *clear* quiet
 /// bit intact, where anything that moved the value through an addition or a
@@ -2524,18 +2700,17 @@ pub const EXTREMA: &[(&str, u64, u64, u64, u64)] = &[
 
 /// `Inst::FloatMinMax` answers one of its two operands, to the bit.
 ///
-/// The other of ADR 0064's two typed scalar operations, and the one whose two
-/// arms are furthest from the instruction that shares its name. `encoded.rs`'s
-/// `FLOAT_MIN` and `FLOAT_MAX` arms are `f64::min` and `f64::max`, and
-/// [`EXTREMA`] is what those are, in bits.
+/// The other of ADR 0064's two typed scalar operations, and the one whose
+/// lowering is furthest from the instruction that shares its name.
+/// `encoded.rs`'s `FLOAT_MIN` and `FLOAT_MAX` arms are `f64::min` and
+/// `f64::max`, and [`EXTREMA`] is what those are, in bits.
 ///
-/// **Neither arm may use the obvious machine operation.** x86-64's `minsd`
-/// answers its *second* operand when either operand is a NaN, where `f64::min`
-/// absorbs one; Cranelift's `fmin` *propagates* a NaN, where `f64::min`
-/// absorbs one. So the template arm is `minsd` plus a blend that puts the
-/// absorbed case back, and the Cranelift arm is three `select`s over `fcmp`
-/// and never names `fmin`. Two very different sequences, one table — which is
-/// the arrangement `tests/agree.rs` then makes say something.
+/// **The obvious machine operation is the wrong one.** x86-64's `minsd`
+/// answers its *second* operand when either operand is a NaN, where
+/// `f64::min` absorbs one instead. So the template arm is `minsd` plus a
+/// blend that puts the absorbed case back, and [`EXTREMA`] holds that
+/// sequence to the VM's answer, bit for bit, rather than to the instruction
+/// its name suggests.
 ///
 /// Three shapes per row per operation: the destination apart from both
 /// operands, the destination that *is* the first operand, and the destination
@@ -5371,7 +5546,7 @@ pub fn a_push_window_with_room_writes_the_unit_and_commits_it<A: Arm>() {
 
 /// [`a_push_window`] with its first constant moved in front of the head: the same
 /// instructions doing the same thing, which `cove_ir::legalize` does not recognise
-/// — a push's count is written just before its ensure — so each arm emits it one
+/// — a push's count is written just before its ensure — so the arm emits it one
 /// row at a time. What a case compares a recognised window with.
 pub fn a_push_window_unrecognised(storage: Storage) -> Program {
     let mut held = a_push_window(storage);
@@ -5460,7 +5635,7 @@ pub fn an_append_window(storage: Storage) -> Program {
 
 /// [`an_append_window`] with the run-copy's length operand handed a second slot
 /// holding the same value, and a `copy` in front of the head that writes it: the
-/// same semantics, which `cove_ir::legalize` does not recognise, so each arm
+/// same semantics, which `cove_ir::legalize` does not recognise, so the arm
 /// emits it one row at a time. What a case compares a recognised append window
 /// with.
 ///
@@ -6618,7 +6793,7 @@ pub fn a_field_access_on_a_variable_payload_object_goes_to_the_runtime<A: Arm>()
 /// this one asserts the number rather than the outcome.
 ///
 /// The nine instructions before the access are what make the number non-zero:
-/// each arm accumulates its block's static instruction count and hands it over at
+/// the arm accumulates its block's static instruction count and hands it over at
 /// a safepoint, so a refusal reached with nothing accumulated would pass with the
 /// store removed.
 ///
@@ -6641,7 +6816,7 @@ pub fn a_refused_field_access_publishes_its_unpaid_work<A: Arm>() {
         layout: INT,
     });
     code.push(Inst::Return { src: 2 });
-    // The whole block, because both arms add a block's static instruction count
+    // The whole block, because the arm adds a block's static instruction count
     // to the accumulator *at its head* rather than one instruction at a time —
     // so the `return` this access never reaches is counted too, and the number
     // an exit must publish is the block's, not the prefix that ran.
@@ -6793,8 +6968,8 @@ pub fn a_call_hands_over_and_an_outcome_travels_out<A: Arm>() {
 ///
 /// ADR 0055's "Collection uses the VM stack as the first root map" is only true
 /// if every live reference is materialised in its Cove slot before a safepoint.
-/// Neither arm register-promotes, so it *should* be true at every instruction
-/// boundary — but "should" is what this test is for: the safepoint helper stands
+/// The lowering does not register-promote, so it *should* be true at every
+/// instruction boundary — but "should" is what this test is for: the safepoint helper stands
 /// where the collector stands and reads the frame word the reference lives in.
 ///
 /// The loop is what makes there be safepoints at all: they go on backedges, and a

@@ -10,19 +10,18 @@ path = "src/main.rs"
 
 # The native tier of ADR 0055, off by default.
 #
-# One feature per code generator, forwarded to `cove-runtime` and from there to
+# The code generator's feature, forwarded to `cove-runtime` and from there to
 # `cove-native`, because ADR 0055's adoption gate — "a build without the native
 # feature has no executable-memory dependency" — is a fact about the dependency
 # graph of the *binary a user runs*. Default off, so `cargo build -p cove-cli`
 # maps no executable page and `cargo tree -p cove-cli` names no JIT.
 #
-# `--backend native` still parses without them, and answers a capability
+# `--backend native` still parses without it, and answers a capability
 # diagnostic: ADR 0055's "Selecting native execution on an unsupported target
 # produces a capability diagnostic, not an attempted fallback". A flag that
 # existed only in some builds would be a second command-line surface.
 [features]
 default = []
-cranelift = ["cove-runtime/cranelift"]
 template = ["cove-runtime/template"]
 
 [dependencies]
