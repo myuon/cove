@@ -15,13 +15,16 @@
 //! - **`slice(from, to)` is in character positions**, and so is what
 //!   `indexOf` answers, which is why `indexOf` converts the byte offset it
 //!   finds by counting the characters before it.
-//! - **`contains`, `split` and `replace` match bytes**, which for UTF-8 is
-//!   the same set of matches as matching characters and is what Rust's own
-//!   `str` does. `startsWith` and `endsWith` matched bytes here too, and match
-//!   them in Cove now: ADR 0064 moved them to `std.string.startsWith` and
-//!   `std.string.endsWith`, whose doc comments carry the boundary argument
-//!   this bullet is a summary of — the suffix one in full, the prefix one in
-//!   the half it needs.
+//! - **`split` and `replace` match bytes**, which for UTF-8 is the same set
+//!   of matches as matching characters and is what Rust's own `str` does.
+//!   `startsWith`, `endsWith` and `contains` matched bytes here too, and match
+//!   them in Cove now: ADR 0064 moved the two comparisons to
+//!   `std.string.startsWith` and `std.string.endsWith`, and
+//!   [ADR 0065](../../../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)
+//!   moved the search to `std.string.contains` over `Inst::RunFind`. All
+//!   three doc comments carry the boundary argument this bullet is a summary
+//!   of — the suffix one in full, the prefix one in the half it needs, and the
+//!   search one at every offset rather than at one.
 //! - **`trim()` trims Unicode whitespace** and **`words()` splits on ASCII
 //!   whitespace**, which is the pair the oracle has and is not a distinction
 //!   this file invented.
@@ -35,7 +38,7 @@
 //!
 //! # Every operation here says what it examined, in bytes
 //!
-//! Eight of the operations below walk the whole receiver, two search it and
+//! Eight of the operations below walk the whole receiver, one searches it and
 //! one builds its answer out of parts, and until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7 every one of them cost the run **one** unit of work — the one
@@ -65,11 +68,16 @@
 //!   Cove loops, where each byte read is paid for as an instruction — which
 //!   is exactly the charge that bullet was approximating, made by the
 //!   mechanism that charges everything else;
-//! - `contains` and `indexOf` charge the **receiver's** length, and that is
-//!   an upper bound rather than a measurement: `str::find` does not report
-//!   how far it got before it matched. An upper bound is the safe direction
-//!   for a *bound* — overcharging makes a safepoint arrive early, where
-//!   undercharging is the overshoot this whole decision exists to close;
+//! - `indexOf` charges the **receiver's** length, and that is an upper bound
+//!   rather than a measurement: `str::find` does not report how far it got
+//!   before it matched. An upper bound is the safe direction for a *bound* —
+//!   overcharging makes a safepoint arrive early, where undercharging is the
+//!   overshoot this whole decision exists to close. `contains` was charged the
+//!   same way and beside it; ADR 0065 moved it onto `Inst::RunFind`, which
+//!   charges what it *consumed* rather than an upper bound on it, because a
+//!   resumable matcher knows where it stopped and `str::find` does not. That
+//!   is the difference an instruction buys over a call, in the one coordinate
+//!   this bullet is about;
 //! - `join` charges the bytes of the answer it builds, parts and separators
 //!   together, which is what it copies and is unrelated to the length of the
 //!   array it was handed.
@@ -303,30 +311,23 @@ pub(super) fn trim(
     Ok(())
 }
 
-/// `String.contains(text) -> Bool`.
-pub(super) fn contains(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    operand::with_text(machine, frame, 0, |machine, text| {
-        // An upper bound: `str::contains` does not report where it stopped.
-        // See the module's note on why an upper bound is the safe direction.
-        machine.examined(text.len() as u64);
-        operand::with_text(machine, frame, 1, |machine, needle| {
-            let found = text.contains(needle);
-            dest.word(machine, found as u64);
-            Ok(())
-        })
-    })
-}
-
-// `startsWith` and `endsWith` used to be here, side by side and charged the
-// same way: at most the needle, capped at the receiver. ADR 0064 moved both
+// Three predicates used to be here, and each left for its own reason.
+// `startsWith` and `endsWith` stood side by side and were charged the same
+// way — at most the needle, capped at the receiver — and ADR 0064 moved both
 // into `std.string`, as loops that compare the receiver's first or last bytes
 // against the needle's. The suffix one needs UTF-8's self-synchronization to
 // justify starting at `n - m`; the prefix one starts at 0 and needs only that
 // a prefix's own bytes end at a boundary.
+//
+// `contains` could not go the same way for nothing, and that is the whole of
+// ADR 0065: its work is proportional to a haystack the caller did not size,
+// where theirs is bounded by an argument the caller already holds, so a Cove
+// scan would pay a VM dispatch per byte of a run nobody sized. It is
+// `std.string.contains` now, a comparison against -1 over one `Inst::RunFind`
+// — a bounded run search that is chunked, charged and polled the way
+// `Inst::RunCopy` is, and that charges what it consumed rather than the upper
+// bound this file had to charge because `str::contains` does not report where
+// it stopped.
 
 /// `String.indexOf(text) -> Option<Int>`, in character positions.
 ///
@@ -334,23 +335,34 @@ pub(super) fn contains(
 /// `[disc, Int]` written into the destination rather than an address — and a
 /// `None` leaves the payload word zero, which is what makes the region's one
 /// static reference map right for both cases.
+///
+/// Both operands are read through [`operand::with_text`], out of buffers the
+/// machine already owns, so a steady-state run allocates nothing to read them
+/// (#442, #446). `contains` was the first caller of that and this was the
+/// second; ADR 0065 has since taken `contains` out of this file, which leaves
+/// `indexOf` as the one operation holding two of the pool's buffers at once —
+/// the shape `Machine::scratch`'s own bound is written about.
 pub(super) fn index_of(
     machine: &mut Machine,
     frame: Frame<'_>,
     dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    // An upper bound, as `contains`: `str::find` answers where it matched and
-    // not how much it read on the way, and the character count below walks
-    // the front of the receiver again.
-    machine.examined(text.len() as u64);
-    let needle = operand::text(machine, frame, 1)?;
-    match text.find(&needle) {
-        // `find` answers a byte offset; the characters before it are counted
-        // to convert that into the character index `length()` counts in.
-        Some(byte) => make::some(machine, dest, &[text[..byte].chars().count() as u64]),
-        None => make::none(machine, dest),
-    }
+    operand::with_text(machine, frame, 0, |machine, text| {
+        // An upper bound: `str::find` answers where it matched and not how
+        // much it read on the way, and the character count below walks the
+        // front of the receiver again. See the module's note on why an upper
+        // bound is the safe direction.
+        machine.examined(text.len() as u64);
+        operand::with_text(machine, frame, 1, |machine, needle| {
+            match text.find(needle) {
+                // `find` answers a byte offset; the characters before it are
+                // counted to convert that into the character index `length()`
+                // counts in.
+                Some(byte) => make::some(machine, dest, &[text[..byte].chars().count() as u64]),
+                None => make::none(machine, dest),
+            }
+        })
+    })
 }
 
 /// `String.replace(old, new) -> String`.
@@ -641,7 +653,7 @@ mod tests {
         assert_eq!(text_of(&mut machine, "ÉÀ", "toLower"), "éà");
     }
 
-    /// **`contains` on an operand far larger than the scratch cap answers
+    /// **`indexOf` on an operand far larger than the scratch cap answers
     /// correctly and leaves the pool inside its bound.**
     ///
     /// [`operand::with_text`] is the only caller of the pool today, and this
@@ -651,29 +663,34 @@ mod tests {
     /// intrinsic, so the buffer the cap drops is a buffer `with_text` really
     /// filled.
     ///
+    /// It was `contains` that held these two buffers until ADR 0065 moved that
+    /// operation onto `Inst::RunFind`; `indexOf` is the same two-operand read
+    /// and is what is left of the shape here.
+    ///
     /// The needle sits at the very end of the receiver, which is what makes
     /// the answer a statement about the *whole* read: a buffer truncated
-    /// anywhere at all answers `false` here.
+    /// anywhere at all answers `None` here.
     #[test]
-    fn contains_reads_an_operand_larger_than_the_scratch_cap() {
+    fn index_of_reads_an_operand_larger_than_the_scratch_cap() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 17);
+        let int = scalar(&program, Repr::Int);
 
         let mut huge = "0123456789".repeat(SCRATCH_BYTES * 2);
         assert!(huge.len() > SCRATCH_BYTES * 16);
+        let tail = huge.chars().count();
         huge.push_str("the tail");
         let needle = machine.new_string("the tail").unwrap();
+        let words = words_on(&mut machine, &huge, "indexOf", &[(Repr::Ref, needle)]);
         assert_eq!(
-            on(&mut machine, &huge, "contains", &[(Repr::Ref, needle)]),
-            1,
+            option_of(&program, int, &words),
+            ("Some".to_string(), vec![tail as u64]),
             "the receiver was read whole, to its last byte"
         );
 
         let absent = machine.new_string("no such text").unwrap();
-        assert_eq!(
-            on(&mut machine, &huge, "contains", &[(Repr::Ref, absent)]),
-            0
-        );
+        let words = words_on(&mut machine, &huge, "indexOf", &[(Repr::Ref, absent)]);
+        assert_eq!(option_of(&program, int, &words).0, "None");
 
         assert!(
             machine.scratch_retained() <= SCRATCH_BUFFERS * SCRATCH_BYTES,
@@ -688,8 +705,8 @@ mod tests {
         );
     }
 
-    /// **The two buffers `contains` holds at once come back, and the next
-    /// call reuses them.**
+    /// **The two buffers `indexOf` holds at once come back, and the next call
+    /// reuses them.**
     ///
     /// The caps are only allowed to bound the pool, not to empty it: the
     /// steady state this change exists for is a call that allocates nothing.
@@ -698,9 +715,10 @@ mod tests {
     /// exactly that capacity behind and a call that dropped or replaced
     /// either leaves something else.
     #[test]
-    fn contains_gives_back_the_buffers_it_held() {
+    fn index_of_gives_back_the_buffers_it_held() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
+        let int = scalar(&program, Repr::Int);
 
         let primed = 1024;
         assert!(primed < SCRATCH_BYTES);
@@ -713,9 +731,10 @@ mod tests {
 
         let needle = machine.new_string("ll").unwrap();
         for _ in 0..3 {
+            let words = words_on(&mut machine, "hello", "indexOf", &[(Repr::Ref, needle)]);
             assert_eq!(
-                on(&mut machine, "hello", "contains", &[(Repr::Ref, needle)]),
-                1
+                option_of(&program, int, &words),
+                ("Some".to_string(), vec![2])
             );
             assert_eq!(
                 machine.scratch_retained(),
@@ -725,32 +744,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_predicates_match_bytes() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let needle = machine.new_string("él").unwrap();
-        assert_eq!(
-            on(&mut machine, "héllo", "contains", &[(Repr::Ref, needle)]),
-            1
-        );
-        // `startsWith` and `endsWith` had a line each here — `"héllo"` begins
-        // with `"hé"` and ends with `"lo"` — until ADR 0064 moved both
-        // comparisons into `std.string`. What replaced them is
-        // `tests/e2e/values_string_starts_with` and
-        // `tests/e2e/values_string_ends_with`, which ask the question on both
-        // evaluators at every character width and at the byte patterns each
-        // loop could be wrong about: (`"あ"`, `"\u{0082}"`), whose last byte
-        // agrees, for the suffix, and (`"あ"`, `"ア"`) — `E3 81 82` against
-        // `E3 82 A2` — whose first byte agrees, for the prefix. Both answer
-        // `false`. An oracle no arm in this file supplies, for a body no arm
-        // in this file executes.
-        let absent = machine.new_string("z").unwrap();
-        assert_eq!(
-            on(&mut machine, "héllo", "contains", &[(Repr::Ref, absent)]),
-            0
-        );
-    }
+    // A `the_predicates_match_bytes` case stood here, asserting that
+    // `"héllo".contains("él")` is `true` and `"héllo".contains("z")` is
+    // `false` — and, before that, a line each for `startsWith` and `endsWith`.
+    // None of the three is an arm in this file any more. What replaced each is
+    // an end-to-end suite that asks the question on *both* evaluators at every
+    // character width and at the byte patterns the body could be wrong about:
+    // `tests/e2e/values_string_starts_with`, `values_string_ends_with` and
+    // `values_string_contains`. An oracle no arm here supplies, for a body no
+    // arm here executes.
 
     /// `find` answers a byte offset and `indexOf` answers a character
     /// position, so the two disagree for anything past the first non-ASCII

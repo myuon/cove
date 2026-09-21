@@ -3705,6 +3705,153 @@ pub fn a_run_slice_is_admitted_with_four_one_word_operands<A: Arm>() {
     );
 }
 
+/// A run search's four operands, as `ArgsId(1)`: `dst` in slot 3, `haystack` in
+/// 0, `needle` in 1 and `from` in 2 — the destination last in the frame and
+/// first in the row, as a run slice's is, so an arm that confused the row's
+/// order with the frame's is caught. Unlike a slice's, `dst` is an `Int`: the
+/// answer is a unit offset or -1 and not a run.
+pub fn run_find_row() -> Vec<Arg> {
+    vec![
+        Arg {
+            slot: 3,
+            layout: INT,
+        },
+        Arg {
+            slot: 0,
+            layout: REF,
+        },
+        Arg {
+            slot: 1,
+            layout: REF,
+        },
+        Arg {
+            slot: 2,
+            layout: INT,
+        },
+    ]
+}
+
+/// One byte run search and a return of its destination, over [`run_find_row`].
+pub fn run_finds() -> Program {
+    program_with_args(
+        function(
+            vec![Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::RunFind {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 3 },
+            ],
+        ),
+        run_find_row(),
+    )
+}
+
+/// [ADR 0065]'s `run-find`, handed to the runtime whole on the run-copy helper.
+///
+/// [`a_run_slice_is_handed_to_the_runtime_whole`]'s case for the search, and it
+/// is the case the ADR's Decision 5 is *about*: a native refusal is not an
+/// acceptable outcome, because the tier refuses a whole function and
+/// `std.string.contains` is expanded at its call sites — so a refused search
+/// would take every caller back to the VM, strictly worse than the mediated
+/// intrinsic call it replaces. The row reaches the helper unchanged as
+/// [`RunOp::FindBytes`] with no element, at the instruction's own pc and with
+/// the unpaid work published, and the destination is read back out of the frame
+/// *after* the call.
+///
+/// [ADR 0065]: https://github.com/myuon/cove/blob/main/docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md
+pub fn a_run_find_is_handed_to_the_runtime_whole<A: Arm>() {
+    forget_copied();
+    let held = run_finds();
+    let heap = Heap::new(1);
+    let frame = [9u64, 2, 3, 77];
+    let mut words = frame.to_vec();
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        copied(),
+        vec![Copied {
+            base: 0,
+            pc: 0,
+            args: 1,
+            kind: RunOp::FindBytes.abi(),
+            elem: 0,
+            work: 2,
+        }],
+        "the search, with its storage and no element"
+    );
+    assert_eq!(words, frame, "the double wrote nothing");
+    assert_eq!(
+        answer.returned[0], 77,
+        "the destination, read after the call"
+    );
+
+    // A refusal leaves with that outcome and answers nothing.
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_copied();
+        copied_answers(&[outcome]);
+        let mut words = frame.to_vec();
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(answer.returned[0], UNWRITTEN);
+    }
+}
+
+/// A run search is admitted with four one-word operands the frame has, over
+/// packed bytes and over nothing else.
+///
+/// The word storage is refused here rather than lowered to a helper that has no
+/// arm for it: `cove_ir::verify` refuses it too, so a word search reaching a
+/// code generator is a program that did not verify.
+pub fn a_run_find_is_admitted_with_four_one_word_operands<A: Arm>() {
+    let one = |storage: Storage, row: Vec<Arg>| {
+        program_with_args(
+            function(
+                vec![Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+                INT,
+                vec![
+                    Inst::RunFind {
+                        args: ArgsId(1),
+                        storage,
+                    },
+                    Inst::Return { src: 3 },
+                ],
+            ),
+            row,
+        )
+    };
+    assert!(
+        compiles::<A>(&one(Storage::PackedBytes, run_find_row())),
+        "the byte member is admitted"
+    );
+    for storage in [Storage::Words(INT), Storage::Words(PAIR)] {
+        assert!(
+            !compiles::<A>(&one(storage, run_find_row())),
+            "{storage:?}: a run search is over packed bytes alone"
+        );
+    }
+    let mut short = run_find_row();
+    short.pop();
+    assert!(
+        !compiles::<A>(&one(Storage::PackedBytes, short)),
+        "three operands is not a `run-find` row"
+    );
+    let mut past = run_find_row();
+    past[0].slot = 9;
+    assert!(
+        !compiles::<A>(&one(Storage::PackedBytes, past)),
+        "a destination at a slot the frame does not have"
+    );
+    let mut wide = run_find_row();
+    wide[3].layout = PAIR;
+    assert!(
+        !compiles::<A>(&one(Storage::PackedBytes, wide)),
+        "an operand that is two words"
+    );
+}
+
 /// One `intrinsic-call` of `receiver.operation` over two references, answering
 /// into slot 1, and returned.
 pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
@@ -3738,14 +3885,16 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 }
 
 /// One intrinsic of each effect class, as the pair of names that resolves to it:
-/// a plain call (`String.contains`: neither collects nor raises), a raise
+/// a plain call (`String.indexOf`: neither collects nor raises), a raise
 /// (`Any.equals`: a walk too deep to finish) and a safepoint (`String.trim`:
 /// allocates the string it answers).
-pub const INTRINSIC_CLASSES: [(&str, &str); 3] = [
-    ("String", "contains"),
-    ("Any", "equals"),
-    ("String", "trim"),
-];
+///
+/// The plain one was `String.contains` until ADR 0065 moved that operation onto
+/// `Inst::RunFind` and out of the enum. `indexOf` is its effect class exactly —
+/// it reads its receiver, allocates nothing and cannot raise — and is the last
+/// intrinsic of that shape.
+pub const INTRINSIC_CLASSES: [(&str, &str); 3] =
+    [("String", "indexOf"), ("Any", "equals"), ("String", "trim")];
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///
@@ -3901,7 +4050,7 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// level over:
 ///
 /// - a function with one `intrinsic-call` charges **one site** to that call's
-///   variant and none to the other twenty-seven, and a function with no
+///   variant and none to the other twenty-six, and a function with no
 ///   intrinsic call in it charges nothing anywhere — so the count follows the
 ///   IR and not the shape of the body;
 /// - where the bytes are attributed they are **positive and no more than the

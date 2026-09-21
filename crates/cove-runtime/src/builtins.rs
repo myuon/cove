@@ -581,6 +581,45 @@ pub fn call_core(
                 .at(span)),
             }
         }
+        // ADR 0065's run search, beneath `std.string.contains`: the first byte
+        // offset at or after `from` where the needle's bytes occur, or -1.
+        //
+        // Over `as_bytes` rather than over `str::find`, and the difference is
+        // not a nicety: `&text[from..]` is a panic when `from` is not a
+        // character boundary, and the instruction admits every `from` in
+        // `0 ..= byteLength` because it has no notion of a character at all.
+        // `crate::find` is the matcher the linear-memory backend runs, called
+        // here without its safepoints, so the two tiers cannot come to
+        // different answers about what a run search means.
+        //
+        // A `from` outside the text stops the run, as an out-of-range slice
+        // does: the body above this has held it inside, and `contains` passes
+        // zero.
+        "stringFind" => {
+            let Value(Repr::Str(text)) = &args[0] else {
+                return Err(type_error(&shown, "text", "String", &args[0], span));
+            };
+            let Value(Repr::Str(needle)) = &args[1] else {
+                return Err(type_error(&shown, "needle", "String", &args[1], span));
+            };
+            let Value(Repr::Int(from)) = &args[2] else {
+                return Err(type_error(&shown, "from", "Int", &args[2], span));
+            };
+            let len = text.len();
+            if *from < 0 || *from > len as i64 {
+                return Err(RuntimeError::new(format!(
+                    "`runFind` starts at {from} of a haystack of {len} byte(s), and a search \
+                     starts at 0 to that length"
+                ))
+                .at(span));
+            }
+            let from = *from as usize;
+            Ok(Value(Repr::Int(crate::find::find_bytes(
+                text.as_bytes(),
+                needle.as_bytes(),
+                from,
+            ))))
+        }
         // `std.stringbuilder`'s `withCapacity`: ADR 0052's owner, empty, with
         // room for `capacity` bytes.
         //
@@ -1442,19 +1481,18 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Str(text.trim().into())))
             }
-            "contains" => {
-                let args = expect_args("String.contains", args, 1, span)?;
-                let needle = expect_str("String.contains", "text", &args[0], span)?;
-                Ok(Value(Repr::Bool(text.contains(needle))))
-            }
-            // `startsWith` and `endsWith` used to answer here, one
-            // `text.starts_with(prefix)` and one `text.ends_with(suffix)`.
-            // Neither reaches this arm any more: `Interpreter::eval_method_call`
-            // resolves each to a call into `std.string` before this function is
-            // ever asked about it — two Cove loops comparing bytes (ADR 0064).
-            // The suffix one needs UTF-8's self-synchronization to justify the
-            // offset it starts at; the prefix one starts at 0 and needs
-            // nothing, which is why it went second and cost less to argue.
+            // `contains`, `startsWith` and `endsWith` used to answer here,
+            // one `text.contains(needle)`, one `text.starts_with(prefix)` and
+            // one `text.ends_with(suffix)`. None of the three reaches this arm
+            // any more: `Interpreter::eval_method_call` resolves each to a
+            // call into `std.string` before this function is ever asked about
+            // it. The two comparisons are Cove loops over bytes (ADR 0064) —
+            // the suffix one needs UTF-8's self-synchronization to justify the
+            // offset it starts at, the prefix one starts at 0 and needs
+            // nothing. The search is a Cove body over `core.stringFind`
+            // (ADR 0065), which is `crate::find` above: a bounded run search
+            // rather than a loop, because its work is proportional to a
+            // haystack the caller did not size.
             "indexOf" => {
                 let args = expect_args("String.indexOf", args, 1, span)?;
                 let needle = expect_str("String.indexOf", "text", &args[0], span)?;

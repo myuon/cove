@@ -1059,6 +1059,22 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "sliceBytes",
     },
+    // The fourth predicate, and the one that needed something underneath it.
+    // `startsWith` and `endsWith` compare at an offset the caller's own
+    // argument bounds, so a Cove loop over `byteAt` is the whole of each;
+    // `contains` must touch a haystack the caller did not size, and a Cove
+    // scan of it pays a VM dispatch per byte where an instruction pays one for
+    // the search. ADR 0065 is that argument and `core.stringFind` is the
+    // instruction, so `std.string.contains` is a comparison against -1 over
+    // one of them — and `Intrinsic::StringContains` is gone in the same
+    // change.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "contains",
+        module: "std.string",
+        function: "contains",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "Option",
@@ -1518,7 +1534,10 @@ impl CoreIntrinsicSchema {
 /// `Vector.remove` are an element load, [`CORE_VECTOR_MOVE`] of the tail and
 /// [`CORE_VECTOR_TRUNCATE`], which gives the last element back.
 /// `String.sliceBytes` decides its range in Cove and copies it with
-/// [`CORE_STRING_SLICE`], the byte member of the same run slice. And
+/// [`CORE_STRING_SLICE`], the byte member of the same run slice, and
+/// `String.contains` asks [`CORE_STRING_FIND`], the byte run search ADR 0065
+/// adds — the one operation of the family whose work is proportional to a run
+/// the caller did not size. And
 /// `std.stringbuilder`'s `StringBuilder` is Cove over the `bytes*` entries —
 /// [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_FINISH`] and
 /// [`CORE_BYTES_LENGTH`], and ADR 0062's append of a byte, a whole string or a
@@ -1555,6 +1574,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_VECTOR_TRUNCATE,
     CORE_VECTOR_MOVE,
     CORE_STRING_SLICE,
+    CORE_STRING_FIND,
     CORE_BYTES_ALLOCATE,
     CORE_BYTES_ENSURE,
     CORE_BYTES_STORE,
@@ -1884,6 +1904,53 @@ pub const CORE_STRING_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::String,
+    fresh: false,
+};
+
+/// `core.stringFind(text: String, needle: String, from: Int) -> Int`: the
+/// first byte offset at or after `from` where `needle`'s bytes occur in
+/// `text`'s, or -1.
+///
+/// `Inst::RunFind` over `Storage::PackedBytes`, which
+/// [ADR 0065](../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)
+/// adds as the sixth member of ADR 0058's run family. It is named for the
+/// machine and not for a method, which is ADR 0064's Decision 2 test: the
+/// three public operations over it — `contains`, `indexOf` and one day
+/// `split` — would each have to be renamed the day their method was, and none
+/// of them is this. What this is, is *find a byte run inside a byte run from
+/// an offset*, and it would answer the same for bytes that never came from
+/// text.
+///
+/// So it knows nothing about characters. The answer is a **byte** offset, not
+/// a character position, and a match is a match of bytes; that a byte match of
+/// a valid-UTF-8 needle in a valid-UTF-8 text is also a character match is
+/// `std.string.contains`' argument and is made there, the way
+/// `std.string.endsWith` makes it for its own offset. `std.string.indexOf`
+/// walks characters over this to answer the position its API promises.
+///
+/// An empty needle answers `from`; a needle longer than what is left of the
+/// text answers -1. A `from` outside `0 ..= text.byteLength()` **stops the
+/// run**, as an out-of-range slice does: like [`CORE_STRING_SLICE`], this is
+/// safe to call only from the standard library, and the body above it is what
+/// holds a program's index to the range.
+pub const CORE_STRING_FIND: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "stringFind",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "text",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "needle",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Int,
     fresh: false,
 };
 

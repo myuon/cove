@@ -995,6 +995,20 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.run_copy(args.0, kind, elem);
                 false
             }
+            // ADR 0065's `run-find`: the same helper again, which reads the
+            // two runs a bounded step at a time and writes the answer into the
+            // row's `dst`. It is lowered here and not refused because a
+            // refusal is of the whole *function*, and `std.string.contains` is
+            // expanded at its call sites — so a refused search would take
+            // every caller back to the VM, which is worse than the mediated
+            // intrinsic call it replaces.
+            Inst::RunFind {
+                args,
+                storage: Storage::PackedBytes,
+            } => {
+                self.run_copy(args.0, RunOp::FindBytes, 0);
+                false
+            }
             Inst::Alloc { dst, layout, len } => {
                 self.allocate(*dst, layout.0, *len);
                 false

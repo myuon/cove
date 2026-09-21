@@ -1,0 +1,608 @@
+use console.println
+use clock.now
+
+/// What `String.contains` costs, at nine combinations of receiver length,
+/// needle length and match position — and what the same nine cost written in
+/// Cove.
+///
+/// `String.contains` **was** `Intrinsic::StringContains` when this package was
+/// written, and these rows are two migrations of history. It was the operation
+/// whose measurement would justify a bounded run-search primitive, and
+/// [issue #442](https://github.com/myuon/cove/issues/442) is the reason the
+/// package exists: the intrinsic's arm called `operand::text` **twice**, and
+/// that helper allocated a `Vec`, filled it one byte at a time, and validated
+/// the result as UTF-8 — per operand, per call. So the intrinsic arm of every
+/// intrinsic-against-Cove ratio carried a term that scaled with the *operands*
+/// rather than with the work, and a primitive justified against it would have
+/// been justified against an artefact.
+///
+/// [PR #446](https://github.com/myuon/cove/pull/446) removed the copy, which
+/// moved the row from 246.4 ns to 99.9 ns and flipped the sign of the native
+/// comparison; and
+/// [ADR 0065](../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)
+/// then took the operation out of `Intrinsic` altogether. `String.contains` is
+/// `std.string.contains` now — a comparison against -1 over one
+/// `Inst::RunFind`, an IR instruction the VM dispatches directly and both code
+/// generators lower to a runtime helper. So the first column measures the
+/// instruction where it measured a mediated intrinsic call, which is exactly
+/// what ADR 0065's third adoption gate asks for: the dispatch cost of the new
+/// instruction against the 46–49 ns an `Inst::IntrinsicCall` costs to be one.
+///
+/// # Nine rows, three axes
+///
+/// `benches/endswith` and `benches/startswith` need four rows because their
+/// loops have two axes — receiver length and needle length — and answer on
+/// the lengths alone when the needle is the longer. A search has a third:
+/// *where* the match is, which decides how many start positions the scan
+/// tries before it stops. So:
+///
+/// - **empty** is the empty needle, which every implementation answers `true`
+///   to without reading a byte — the cheapest answer `contains` has;
+/// - **needleLong** is the refusal on length, 16 bytes against 50, and no
+///   byte of either read;
+/// - **start**, **middle** and **end** are the same six-byte needle in the
+///   same eighty-eight-byte receiver at offsets 0, 50 and 82, so the only
+///   thing that differs between them is how far the scan walked;
+/// - **noMatch** is the same receiver and a six-byte needle that is not in
+///   it: eighty-three start positions tried and rejected, the worst case;
+/// - **shortHit** and **shortMiss** are the first-position hit and the whole
+///   scan over the sixteen-byte receiver, which is what says how much of a
+///   row is the per-call constant;
+/// - **longNeedle** is fifty bytes matched at position 0, where the
+///   per-compared-byte slope shows up against that constant.
+///
+/// # Three arms over the same inputs in the same process
+///
+/// Each row is run three ways:
+///
+/// - **runFind** — `text.contains(needle)`, which is `std.string.contains`:
+///   one `core.stringFind`, which is one `Inst::RunFind`, and a comparison of
+///   its answer against -1. It was an `Inst::IntrinsicCall` into
+///   `str::contains` over two freshly materialised `String`s when this file
+///   was written, and the column's name is what changed underneath it;
+/// - **scalar** — [`containsScalar`], which is `benches/stringlib`'s body
+///   verbatim: a scan over `codePointAtByte`, comparing one Unicode scalar at
+///   a time. It is the Cove `contains` this repository already has, and it is
+///   the one ADR 0064's 4.02x figure is about;
+/// - **byte** — [`containsByte`], the same scan over `byteAt`, which is what
+///   `std.string.startsWith` and `std.string.endsWith` were migrated to, and
+///   what `contains` would have been migrated to had a bounded comparison and
+///   a whole-haystack search been the same shape. It is here because `byteAt` lowers to `Inst::RunLoad` — an IR
+///   instruction, not a call — where `codePointAtByte` is a Cove function
+///   assembling an `Option`, so the two Cove arms are a factor apart and only
+///   one of them is what a `contains` migration would look like. A byte-wise
+///   scan cannot find a match that is not there: UTF-8 is self-synchronising,
+///   so a valid needle's first byte never equals a continuation byte.
+///
+/// Running all three over the same strings in one process is the point. A
+/// ratio taken across two programs is a ratio plus a code layout, and ADR
+/// 0063 measured that layout at more than the difference being looked for.
+///
+/// # Two turn counts, and why
+///
+/// [`turns`] is 200,000, `benches/endswith`'s and `benches/startswith`'s. The
+/// Cove arms run [`coveTurns`], a fortieth of that, and the rows are reported
+/// as nanoseconds per call either way so they stay comparable.
+///
+/// The reason is `crates/cove-cli/tests/vm_coverage.rs`, which runs every
+/// program in this repository on the tree-walking interpreter as well as on
+/// the linear-memory backend. `endswith`'s most expensive row is fifty byte
+/// comparisons a turn; **noMatch** on the scalar arm is eighty-three start
+/// positions, each decoding a scalar out of each string, which is more than
+/// an order of magnitude more work per turn than anything those two packages
+/// do. That is measured rather than assumed: at 20,000 Cove turns this
+/// program took 78s on `--backend ast`, of which 68s was the scalar arm,
+/// against 13.8s for `benches/endswith` and 93.3s for `benches/keyed` — the
+/// most expensive program in the repository. A fortieth puts it at about 20s,
+/// between `benches/seqsearch` and `benches/endswith`, and the rows it costs
+/// resolution on are the two cheapest, where a microsecond of clock
+/// quantisation is still under a nanosecond per call.
+///
+/// # The loops are in callees, and they are padded
+///
+/// The outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is therefore a call to
+/// a counting callee whose body is the loop, and `main` does nothing in a turn
+/// but read a clock either side of it.
+///
+/// That holds only while the callee is too big to be inlined into [`row`],
+/// which the native tier refuses for the `now()` at its start.
+/// `cove_ir::lower::inline`'s cold `LIMIT` is sixteen instructions and its
+/// `HOT_LIMIT` is forty-eight, and [`countContains`] is a `while` around one
+/// `RunFind` — about ten. `benches/endswith` records what happens then:
+/// its "native" column was the encoded VM wearing the native tier's name, for
+/// a whole baseline. So every counting callee here opens with [`ballast`], a
+/// block the parameter's sign makes unreachable and nothing can fold away,
+/// sized past `HOT_LIMIT` rather than past `LIMIT` so that the answer does not
+/// depend on which kind of site called it. It costs nothing at run time and
+/// it is checked rather than assumed: `--backend native --boundary` names the
+/// compiled and the refused, and the only refusals are [`row`] and `main`,
+/// each for the `now()` in it.
+fn turns() -> Int {
+  200000
+}
+
+/// A fortieth of [`turns`], for the two Cove arms. See the note above.
+fn coveTurns() -> Int {
+  5000
+}
+
+/// Sixteen bytes. `benches/startswith`'s short receiver.
+fn shortText() -> String {
+  "crates/main.cove"
+}
+
+/// Eighty-eight bytes. `benches/startswith`'s long receiver.
+fn longText() -> String {
+  "crates/cove-runtime/src/vm/intrinsics/text/deeply/nested/directory/tree/module/main.cove"
+}
+
+/// Six bytes, at offset 0 of both receivers.
+fn atStart() -> String {
+  "crates"
+}
+
+/// Six bytes, at offset 50 of [`longText`].
+fn atMiddle() -> String {
+  "nested"
+}
+
+/// Six bytes, at offset 82 of [`longText`] — its last six.
+fn atEnd() -> String {
+  "n.cove"
+}
+
+/// Six bytes, in neither receiver.
+fn absent() -> String {
+  "zzzzzz"
+}
+
+/// Fifty bytes, at offset 0 of [`longText`] and longer than [`shortText`].
+fn longNeedle() -> String {
+  "crates/cove-runtime/src/vm/intrinsics/text/deeply/"
+}
+
+fn empty() -> String {
+  ""
+}
+
+/// The number of UTF-8 bytes the scalar `codePoint` occupies.
+///
+/// A `String` is valid UTF-8 in its shortest form, so the width is a function
+/// of the value. `benches/stringlib`'s, verbatim.
+fn width(codePoint: Int) -> Int {
+  if codePoint < 128 {
+    1
+  } else if codePoint < 2048 {
+    2
+  } else if codePoint < 65536 {
+    3
+  } else {
+    4
+  }
+}
+
+/// Whether `needle`'s scalars run from byte `start` of `text`.
+///
+/// `benches/stringlib`'s, verbatim, including its reason for going scalar by
+/// scalar: `codePointAtByte` answers `None` inside a character, so two
+/// different characters' continuation bytes compare equal to one another and
+/// a byte-wise loop over *this* primitive would find matches that are not
+/// there.
+fn runsFrom(text: String, needle: String, start: Int, needleEnd: Int) -> Bool {
+  var t = start
+  var n = 0
+  while n < needleEnd {
+    match needle.codePointAtByte(n) {
+      Some(want) => {
+        match text.codePointAtByte(t) {
+          Some(got) => {
+            if got != want {
+              return false
+            }
+            t += width(got)
+            n += width(want)
+          }
+          None => {
+            return false
+          }
+        }
+      }
+      None => {
+        return false
+      }
+    }
+  }
+  true
+}
+
+/// `String.contains`, scanning scalars. `benches/stringlib`'s, verbatim.
+fn containsScalar(text: String, needle: String) -> Bool {
+  let needleEnd = needle.byteLength()
+  if needleEnd == 0 {
+    return true
+  }
+  let end = text.byteLength()
+  var at = 0
+  while at + needleEnd <= end {
+    if runsFrom(text, needle, at, needleEnd) {
+      return true
+    }
+    match text.codePointAtByte(at) {
+      Some(codePoint) => {
+        at += width(codePoint)
+      }
+      None => {
+        at += 1
+      }
+    }
+  }
+  false
+}
+
+/// `String.contains`, scanning bytes — `std.string.startsWith`'s loop at every
+/// start position.
+///
+/// Not `benches/stringlib`'s; this arm is the one a Phase 1 migration would
+/// actually be written as, because `byteAt` lowers to `Inst::RunLoad` and
+/// `codePointAtByte` lowers to a Cove call that builds an `Option`. It is
+/// correct for the same reason the two migrated predicates are: UTF-8 is
+/// self-synchronising, so a valid needle's bytes cannot match starting inside
+/// a character.
+fn containsByte(text: String, needle: String) -> Bool {
+  let needleEnd = needle.byteLength()
+  if needleEnd == 0 {
+    return true
+  }
+  let end = text.byteLength()
+  var at = 0
+  while at + needleEnd <= end {
+    var n = 0
+    var same = true
+    while n < needleEnd {
+      if text.byteAt(at + n) != needle.byteAt(n) {
+        same = false
+        n = needleEnd
+      } else {
+        n += 1
+      }
+    }
+    if same {
+      return true
+    }
+    at += 1
+  }
+  false
+}
+
+/// Instructions a counting callee carries so that it is not expanded into
+/// [`row`], which the native tier refuses.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either. See
+/// the module note — the size is past `HOT_LIMIT`, not merely past `LIMIT`.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// `rounds` calls of `String.contains` and nothing else the loop can be about.
+///
+/// One `Inst::RunFind` a turn since ADR 0065, where it was one
+/// `Inst::IntrinsicCall` a turn before it — the same call site, the same
+/// strings, and one dispatch either way.
+fn countContains(text: String, needle: String, rounds: Int) -> Int {
+  var found = ballast(rounds)
+  var i = 0
+  if rounds < 0 {
+    found = found + 1
+    found = found + 2
+    found = found + 3
+    found = found + 4
+    found = found + 5
+    found = found + 6
+    found = found + 7
+    found = found + 8
+    found = found + 9
+    found = found + 10
+    found = found + 11
+    found = found + 12
+    found = found + 13
+    found = found + 14
+    found = found + 15
+    found = found + 16
+    found = found + 17
+    found = found + 18
+    found = found + 19
+    found = found + 20
+    found = found + 21
+    found = found + 22
+    found = found + 23
+    found = found + 24
+  }
+  while i < rounds {
+    if text.contains(needle) {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// `rounds` calls of [`containsScalar`].
+fn countScalar(text: String, needle: String, rounds: Int) -> Int {
+  var found = ballast(rounds)
+  var i = 0
+  if rounds < 0 {
+    found = found + 1
+    found = found + 2
+    found = found + 3
+    found = found + 4
+    found = found + 5
+    found = found + 6
+    found = found + 7
+    found = found + 8
+    found = found + 9
+    found = found + 10
+    found = found + 11
+    found = found + 12
+    found = found + 13
+    found = found + 14
+    found = found + 15
+    found = found + 16
+    found = found + 17
+    found = found + 18
+    found = found + 19
+    found = found + 20
+    found = found + 21
+    found = found + 22
+    found = found + 23
+    found = found + 24
+  }
+  while i < rounds {
+    if containsScalar(text, needle) {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// `rounds` calls of [`containsByte`].
+fn countByte(text: String, needle: String, rounds: Int) -> Int {
+  var found = ballast(rounds)
+  var i = 0
+  if rounds < 0 {
+    found = found + 1
+    found = found + 2
+    found = found + 3
+    found = found + 4
+    found = found + 5
+    found = found + 6
+    found = found + 7
+    found = found + 8
+    found = found + 9
+    found = found + 10
+    found = found + 11
+    found = found + 12
+    found = found + 13
+    found = found + 14
+    found = found + 15
+    found = found + 16
+    found = found + 17
+    found = found + 18
+    found = found + 19
+    found = found + 20
+    found = found + 21
+    found = found + 22
+    found = found + 23
+    found = found + 24
+  }
+  while i < rounds {
+    if containsByte(text, needle) {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// The counting callees' loop with the call taken out, and its branch taken
+/// every turn.
+///
+/// Six of the nine rows answer `true`; the three that answer `false` do one
+/// addition a turn less than this does, and are reported cheap by exactly
+/// that much. On the native tier a row can therefore read *negative*, which
+/// is not a broken clock but "too cheap to separate from the loop".
+fn countBare(rounds: Int) -> Int {
+  var found = ballast(rounds)
+  var i = 0
+  if rounds < 0 {
+    found = found + 1
+    found = found + 2
+    found = found + 3
+    found = found + 4
+    found = found + 5
+    found = found + 6
+    found = found + 7
+    found = found + 8
+    found = found + 9
+    found = found + 10
+    found = found + 11
+    found = found + 12
+    found = found + 13
+    found = found + 14
+    found = found + 15
+    found = found + 16
+    found = found + 17
+    found = found + 18
+    found = found + 19
+    found = found + 20
+    found = found + 21
+    found = found + 22
+    found = found + 23
+    found = found + 24
+  }
+  while i < rounds {
+    if i < rounds {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// How long `rounds` turns took, in microseconds, and how many answered
+/// `true`.
+struct Row {
+  micros: Int
+  found: Int
+}
+
+fn runFindRow(text: String, needle: String, rounds: Int) -> Row {
+  let from = now()
+  let found = countContains(text, needle, rounds)
+  Row(micros: (now() - from).micros(), found: found)
+}
+
+fn scalarRow(text: String, needle: String, rounds: Int) -> Row {
+  let from = now()
+  let found = countScalar(text, needle, rounds)
+  Row(micros: (now() - from).micros(), found: found)
+}
+
+fn byteRow(text: String, needle: String, rounds: Int) -> Row {
+  let from = now()
+  let found = countByte(text, needle, rounds)
+  Row(micros: (now() - from).micros(), found: found)
+}
+
+/// What one call cost, in nanoseconds, over `rounds` turns of which `bare`
+/// microseconds were the loop itself.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000 / rounds
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+  let coveRounds = coveTurns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let coveBareFrom = now()
+  let coveBare = countBare(coveRounds)
+  let coveBareMicros = (now() - coveBareFrom).micros()
+
+  let iEmpty = runFindRow(shortText(), empty(), rounds)
+  let iNeedleLong = runFindRow(shortText(), longNeedle(), rounds)
+  let iStart = runFindRow(longText(), atStart(), rounds)
+  let iMiddle = runFindRow(longText(), atMiddle(), rounds)
+  let iEnd = runFindRow(longText(), atEnd(), rounds)
+  let iNoMatch = runFindRow(longText(), absent(), rounds)
+  let iShortHit = runFindRow(shortText(), atStart(), rounds)
+  let iShortMiss = runFindRow(shortText(), absent(), rounds)
+  let iLongNeedle = runFindRow(longText(), longNeedle(), rounds)
+
+  let sEmpty = scalarRow(shortText(), empty(), coveRounds)
+  let sNeedleLong = scalarRow(shortText(), longNeedle(), coveRounds)
+  let sStart = scalarRow(longText(), atStart(), coveRounds)
+  let sMiddle = scalarRow(longText(), atMiddle(), coveRounds)
+  let sEnd = scalarRow(longText(), atEnd(), coveRounds)
+  let sNoMatch = scalarRow(longText(), absent(), coveRounds)
+  let sShortHit = scalarRow(shortText(), atStart(), coveRounds)
+  let sShortMiss = scalarRow(shortText(), absent(), coveRounds)
+  let sLongNeedle = scalarRow(longText(), longNeedle(), coveRounds)
+
+  let bEmpty = byteRow(shortText(), empty(), coveRounds)
+  let bNeedleLong = byteRow(shortText(), longNeedle(), coveRounds)
+  let bStart = byteRow(longText(), atStart(), coveRounds)
+  let bMiddle = byteRow(longText(), atMiddle(), coveRounds)
+  let bEnd = byteRow(longText(), atEnd(), coveRounds)
+  let bNoMatch = byteRow(longText(), absent(), coveRounds)
+  let bShortHit = byteRow(shortText(), atStart(), coveRounds)
+  let bShortMiss = byteRow(shortText(), absent(), coveRounds)
+  let bLongNeedle = byteRow(longText(), longNeedle(), coveRounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped matching would still report a number, and the number
+  // would be of something else. The three arms are checked against each
+  // other's counts as well as against the expected one, which is what makes
+  // this a differential rather than three separate assertions.
+  assertEqual(bare, rounds)?
+  assertEqual(coveBare, coveRounds)?
+
+  assertEqual(iEmpty.found, rounds)?
+  assertEqual(iNeedleLong.found, 0)?
+  assertEqual(iStart.found, rounds)?
+  assertEqual(iMiddle.found, rounds)?
+  assertEqual(iEnd.found, rounds)?
+  assertEqual(iNoMatch.found, 0)?
+  assertEqual(iShortHit.found, rounds)?
+  assertEqual(iShortMiss.found, 0)?
+  assertEqual(iLongNeedle.found, rounds)?
+
+  assertEqual(sEmpty.found, coveRounds)?
+  assertEqual(sNeedleLong.found, 0)?
+  assertEqual(sStart.found, coveRounds)?
+  assertEqual(sMiddle.found, coveRounds)?
+  assertEqual(sEnd.found, coveRounds)?
+  assertEqual(sNoMatch.found, 0)?
+  assertEqual(sShortHit.found, coveRounds)?
+  assertEqual(sShortMiss.found, 0)?
+  assertEqual(sLongNeedle.found, coveRounds)?
+
+  assertEqual(bEmpty.found, coveRounds)?
+  assertEqual(bNeedleLong.found, 0)?
+  assertEqual(bStart.found, coveRounds)?
+  assertEqual(bMiddle.found, coveRounds)?
+  assertEqual(bEnd.found, coveRounds)?
+  assertEqual(bNoMatch.found, 0)?
+  assertEqual(bShortHit.found, coveRounds)?
+  assertEqual(bShortMiss.found, 0)?
+  assertEqual(bLongNeedle.found, coveRounds)?
+
+  println(
+    "bare loop                          {bareMicros * 1000 / rounds} ns/turn",
+  )?
+  println("bare loop (cove counts)            {coveBareMicros * 1000 / coveRounds} ns/turn")?
+  println("")?
+  println("row                 recv needle at    runFind     scalar       byte")?
+  println("empty                 16      0  -  {perCall(iEmpty.micros, bareMicros, rounds)} {perCall(sEmpty.micros, coveBareMicros, coveRounds)} {perCall(bEmpty.micros, coveBareMicros, coveRounds)}")?
+  println("needleLong            16     50  -  {perCall(iNeedleLong.micros, bareMicros, rounds)} {perCall(sNeedleLong.micros, coveBareMicros, coveRounds)} {perCall(bNeedleLong.micros, coveBareMicros, coveRounds)}")?
+  println("start                 88      6  0  {perCall(iStart.micros, bareMicros, rounds)} {perCall(sStart.micros, coveBareMicros, coveRounds)} {perCall(bStart.micros, coveBareMicros, coveRounds)}")?
+  println("middle                88      6 50  {perCall(iMiddle.micros, bareMicros, rounds)} {perCall(sMiddle.micros, coveBareMicros, coveRounds)} {perCall(bMiddle.micros, coveBareMicros, coveRounds)}")?
+  println("end                   88      6 82  {perCall(iEnd.micros, bareMicros, rounds)} {perCall(sEnd.micros, coveBareMicros, coveRounds)} {perCall(bEnd.micros, coveBareMicros, coveRounds)}")?
+  println("noMatch               88      6  -  {perCall(iNoMatch.micros, bareMicros, rounds)} {perCall(sNoMatch.micros, coveBareMicros, coveRounds)} {perCall(bNoMatch.micros, coveBareMicros, coveRounds)}")?
+  println("shortHit              16      6  0  {perCall(iShortHit.micros, bareMicros, rounds)} {perCall(sShortHit.micros, coveBareMicros, coveRounds)} {perCall(bShortHit.micros, coveBareMicros, coveRounds)}")?
+  println("shortMiss             16      6  -  {perCall(iShortMiss.micros, bareMicros, rounds)} {perCall(sShortMiss.micros, coveBareMicros, coveRounds)} {perCall(bShortMiss.micros, coveBareMicros, coveRounds)}")?
+  println("longNeedle            88     50  0  {perCall(iLongNeedle.micros, bareMicros, rounds)} {perCall(sLongNeedle.micros, coveBareMicros, coveRounds)} {perCall(bLongNeedle.micros, coveBareMicros, coveRounds)}")?
+  Ok(())
+}

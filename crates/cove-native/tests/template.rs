@@ -760,6 +760,16 @@ fn a_run_slice_is_admitted_with_four_one_word_operands() {
 }
 
 #[test]
+fn a_run_find_is_handed_to_the_runtime_whole() {
+    suite::a_run_find_is_handed_to_the_runtime_whole::<Template>();
+}
+
+#[test]
+fn a_run_find_is_admitted_with_four_one_word_operands() {
+    suite::a_run_find_is_admitted_with_four_one_word_operands::<Template>();
+}
+
+#[test]
 fn a_unit_constant_is_a_zero_word() {
     suite::a_unit_constant_is_a_zero_word::<Template>();
 }

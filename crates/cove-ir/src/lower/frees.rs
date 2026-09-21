@@ -416,9 +416,10 @@ impl<'p> Flow<'p> {
                 };
                 f(dst, answer);
             }
-            // The one row whose first entry is written rather than read: a run
-            // slice's `dst`, which receives the fresh run's address.
-            Inst::RunSlice { args, .. } => {
+            // The two rows whose first entry is written rather than read: a
+            // run slice's `dst`, which receives the fresh run's address, and a
+            // run find's, which receives an offset.
+            Inst::RunSlice { args, .. } | Inst::RunFind { args, .. } => {
                 if let Some(dst) = self.program.arg_list(args).first() {
                     f(dst.slot, 1);
                 }
@@ -521,7 +522,7 @@ impl<'p> Flow<'p> {
             // do, so they are read the same way.
             Inst::RunCopy { args: list, .. } => args(list, f),
             // Everything in the row but `dst`, which it writes.
-            Inst::RunSlice { args: list, .. } => {
+            Inst::RunSlice { args: list, .. } | Inst::RunFind { args: list, .. } => {
                 for arg in self.program.arg_list(list).iter().skip(1) {
                     f(arg.slot, width(arg.layout));
                 }

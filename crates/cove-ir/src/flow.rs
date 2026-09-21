@@ -106,8 +106,10 @@ impl Inst {
                     .map_or(1, |builtin| width(builtin.result));
                 f(dst, answer);
             }
-            // The one row whose first entry is written rather than read.
-            Inst::RunSlice { args, .. } => {
+            // The two rows whose first entry is written rather than read: a
+            // run slice's `dst`, which receives a fresh run's address, and a
+            // run find's, which receives an offset. One word either way.
+            Inst::RunSlice { args, .. } | Inst::RunFind { args, .. } => {
                 if let Some(dst) = program.args.get(args.index()).and_then(|row| row.first()) {
                     f(dst.slot, 1);
                 }
@@ -194,6 +196,7 @@ impl Inst {
             | Inst::RunLoad { .. }
             | Inst::RunCopy { .. }
             | Inst::RunSlice { .. }
+            | Inst::RunFind { .. }
             | Inst::RunStore { .. }
             | Inst::RunFinish { .. }
             | Inst::GrowableAlloc { .. }

@@ -285,6 +285,10 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             args: ArgsId(lo),
             storage: Storage::Words(LayoutId(hi)),
         },
+        Op::RunFindBytes => Inst::RunFind {
+            args: ArgsId(lo),
+            storage: Storage::PackedBytes,
+        },
         Op::GrowableAllocBytes => Inst::GrowableAlloc {
             dst: a,
             capacity: b,

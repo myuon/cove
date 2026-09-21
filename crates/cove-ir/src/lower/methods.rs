@@ -829,9 +829,12 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// reason that is the same one worded about a predicate: a bounded byte
 /// comparison is a loop over the substrate `byteAt` already is, and the only
 /// thing either of them named that an instruction did not was the method.
-/// `contains` and `indexOf` are the two of ADR 0046's four that are still
-/// here, and they are here because a whole-haystack search is not a bounded
-/// comparison and has not been measured yet.
+/// `String.contains` went a third way and is the one worth reading as a
+/// separate case: its work is proportional to a haystack the caller did not
+/// size, so ADR 0065 put a run search *under* it — `Inst::RunFind` — and the
+/// method became `std.string.contains` over that. `indexOf` is the last of
+/// ADR 0046's four still here, and it is here only until it is written over
+/// the same instruction.
 ///
 /// The sequence operations are not here — `cove_ir::lower::collections` has
 /// its own list, because for a sequence some of them *are* instructions and
@@ -854,7 +857,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "join"),
     ("String", "slice"),
     ("String", "trim"),
-    ("String", "contains"),
     ("String", "indexOf"),
     ("String", "replace"),
     ("String", "toUpper"),

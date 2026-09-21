@@ -109,12 +109,14 @@ pub const SAFEPOINT_STRIDE: u64 = 1024;
 
 /// The most buffers [`Machine::scratch`] keeps.
 ///
-/// The pool can only grow to the most operands one intrinsic holds *at once*,
-/// because every taker gives back before it returns: `String.contains` holds
-/// two, `split` and `replace` two or three. Four is that, plus one. It is a
-/// belt to the braces of [`SCRATCH_BYTES`] rather than the bound that does
-/// the work — but it is what makes the bound a product of two numbers a
-/// reader can multiply rather than a claim about what the callers do.
+/// The pool can only grow to the most buffers one operation holds *at once*,
+/// because every taker gives back before it returns: `String.indexOf` holds
+/// two operands, `split` and `replace` two or three, and `Inst::RunFind` holds
+/// two of its own — the needle it copies and the border table over it. Four is
+/// that, plus one. It is a belt to the braces of [`SCRATCH_BYTES`] rather than
+/// the bound that does the work — but it is what makes the bound a product of
+/// two numbers a reader can multiply rather than a claim about what the
+/// callers do.
 pub(crate) const SCRATCH_BUFFERS: usize = 4;
 
 /// The most capacity a buffer may have and still be kept.
@@ -487,10 +489,15 @@ pub(crate) struct Machine<'a> {
     ///
     /// An operand's bytes are in the heap a payload word at a time, and an arm
     /// that wants a `&str` has to have them contiguous somewhere. That used to
-    /// be a fresh `Vec` per operand per call — `String.contains` made two —
+    /// be a fresh `Vec` per operand per call — `String.indexOf` makes two —
     /// and the allocation, not the byte movement, was about seventy per cent
     /// of what the copy cost (#442). These are the same buffers reused, so a
     /// steady-state run allocates none.
+    ///
+    /// They are not only an intrinsic's any more. ADR 0065's `Inst::RunFind`
+    /// takes two of them for its matcher — a copy of the needle and the border
+    /// table over it — for the same reason and out of the same pool, so a
+    /// search of a needle up to a kibibyte allocates nothing either.
     ///
     /// A `Cell` rather than a plain field for the reason
     /// [`Machine::examined`]'s is: the arm holds the machine while it reads,
@@ -548,7 +555,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// fifteen of the 28 variants declare
+    /// fourteen of the 27 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -556,9 +563,10 @@ pub(crate) struct Machine<'a> {
     /// ten characters and over 100,000 characters spent the same fuel and
     /// 383 times the wall clock. That was measured while `String.length` was
     /// still an intrinsic; ADR 0064's Phase 1 has since made it,
-    /// `String.endsWith` and `String.startsWith` Cove loops, which is why the
-    /// counts above are not the ADR's — they fall with every migration. This
-    /// is
+    /// `String.endsWith` and `String.startsWith` Cove loops and ADR 0065 has
+    /// made `String.contains` a Cove body over `Inst::RunFind`, which is why
+    /// the counts above are not the ADR's — they fall with every migration.
+    /// This is
     /// where an arm says what it walked so that `call_intrinsic` can charge
     /// it once, for every arm, in one place.
     ///
@@ -2781,13 +2789,28 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// A buffer out of [`Machine::scratch`], empty, to be given back with
+    /// A buffer out of [`Machine::scratch`], **empty**, to be given back with
     /// [`Machine::give_scratch`].
+    ///
+    /// The clear is here rather than in each caller, and that is a correction
+    /// rather than a tidying: [`Machine::give_scratch`] keeps a buffer's
+    /// capacity *and* its length, so for as long as this only popped, the word
+    /// "empty" above was false and every caller had to know it. One did not —
+    /// `Inst::RunFind`'s matcher appends to its two buffers one entry at a
+    /// time, and against a primed pool it read a previous caller's bytes as
+    /// its needle and answered "not found" for a string that held one. The
+    /// contract is now true where it is written, and a caller that reads this
+    /// line may believe it.
+    ///
+    /// Clearing a `Vec<u8>` drops nothing and frees nothing: it is a store of
+    /// zero to the length, which is why making the contract true costs the
+    /// common path an instruction rather than a pass over the buffer.
     #[inline]
     pub(crate) fn take_scratch(&self) -> Vec<u8> {
         let mut pool = self.scratch.take();
-        let buf = pool.pop().unwrap_or_default();
+        let mut buf = pool.pop().unwrap_or_default();
         self.scratch.set(pool);
+        buf.clear();
         buf
     }
 
@@ -9469,7 +9492,7 @@ pub(crate) mod tests {
     /// **An intrinsic that cannot raise, answering an error, ends the run where
     /// it happened.**
     ///
-    /// `String.contains` declares no `MAY_RAISE` — searching a valid `String`
+    /// `String.indexOf` declares no `MAY_RAISE` — searching a valid `String`
     /// cannot fail — but its arm decodes the receiver, and a receiver whose bytes
     /// are not valid UTF-8 is an `Err`. That is an invariant the language does not
     /// define, so nothing is allowed to observe it as a program error: compiled
@@ -9483,14 +9506,14 @@ pub(crate) mod tests {
     /// purpose: no checked program can produce one, which is the whole reason this
     /// is a broken invariant and not a refusal.
     #[test]
-    #[should_panic(expected = "`String.contains` answered a `RuntimeError`")]
+    #[should_panic(expected = "`String.indexOf` answered a `RuntimeError`")]
     fn an_intrinsic_that_cannot_raise_must_not_answer_an_error() {
         let mut build = Build::default();
         let boolean = build.word("Bool", Repr::Bool);
         let string = build.string_layout();
         let args = build.args(&[(0, string), (1, string)]);
         build.program.intrinsic_sites.push(cove_ir::IntrinsicSite {
-            intrinsic: cove_ir::Intrinsic::StringContains,
+            intrinsic: cove_ir::Intrinsic::StringIndexOf,
             result: boolean,
         });
         let program = build.done();
@@ -9851,9 +9874,8 @@ pub(crate) mod tests {
         let huge: Vec<u8> = (0..SCRATCH_BYTES * 16).map(|at| (at % 251) as u8).collect();
         let addr = string_of(&mut machine, &huge);
 
-        // What `operand::with_text` does, in the three calls it is made of.
+        // What `operand::with_text` does, in the two calls it is made of.
         let mut buf = machine.take_scratch();
-        buf.clear();
         machine.string_bytes_into(addr, &mut buf);
         assert_eq!(buf, huge, "the pooled read is the bytes that are there");
         assert_eq!(
@@ -9881,9 +9903,10 @@ pub(crate) mod tests {
     /// **Three nested reads take three distinct buffers, and a second round
     /// takes the same three back — no allocation.**
     ///
-    /// `String.contains` holds two operands at once and `replace` three, so
-    /// the pool has to answer distinct buffers while a call is in flight and
-    /// still be reusing them on the next call. The oracle is the address each
+    /// `String.indexOf` holds two operands at once, `replace` three and
+    /// `Inst::RunFind` two of its own, so the pool has to answer distinct
+    /// buffers while a call is in flight and still be reusing them on the next
+    /// call. The oracle is the address each
     /// buffer's allocation is at: two buffers at one address would be one
     /// buffer, and a second round at new addresses would be a fresh
     /// allocation however small the pool looked.
@@ -9908,7 +9931,6 @@ pub(crate) mod tests {
             let mut held: Vec<Vec<u8>> = (0..3)
                 .map(|at| {
                     let mut buf = machine.take_scratch();
-                    buf.clear();
                     // Non-empty, or `as_ptr` is a dangling alignment rather
                     // than an allocation and every buffer shares it.
                     buf.extend_from_slice(&vec![at as u8; held]);

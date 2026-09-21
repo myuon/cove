@@ -1,0 +1,135 @@
+use console.println
+
+/// `contains` at every character width, and at the byte patterns that would
+/// catch a search whose shift is wrong by one.
+///
+/// [ADR 0065](../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)
+/// moved the search out of the runtime and into `std.string.contains`, which
+/// is a comparison against -1 over one `core.stringFind` — the IR's
+/// `run-find`, a bounded search over a run of packed bytes. `str::contains`
+/// matched the same bytes, so the two cannot disagree about any input; what
+/// the instruction has to get by hand is everything the Rust call got for
+/// nothing, and the groups below are the places a hand-written matcher goes
+/// wrong.
+///
+/// The first two are the answers reached before any byte is examined: an
+/// empty needle occurs at every position including the end, which is what
+/// `str::find("")` answers, and a needle longer than the receiver occurs
+/// nowhere. Neither is a search, and the instruction charges neither any work.
+///
+/// The middle groups are where the *shift* is. `aaab` against `aab` is three
+/// overlapping candidates, the first two of which fail at their last byte, so
+/// a matcher that restarted after a failure at the byte after the one it
+/// started at would miss the match at offset 1. `abcabcabd` against `abcabd`
+/// is the same question asked about a repeated prefix: the candidate at 0
+/// agrees for five bytes and fails at the sixth, and the match is at 3, which
+/// only a matcher that remembers what it already read can find without going
+/// back. `banana` against `ana` is two overlapping matches where the first is
+/// the answer.
+///
+/// The character-width groups are the boundary argument as a set of cases.
+/// `é` is `C3 A9` and `ä` is `C3 A4` — one byte of agreement; `あ` is
+/// `E3 81 82` and `ア` is `E3 82 A2` — one byte again, and `い` is `E3 81 84`,
+/// two; `😀` is `F0 9F 98 80` and `😁` is `F0 9F 98 81` — three. None of the
+/// misses is a match, and none of them can be: a byte match of a valid needle
+/// begins at a lead byte, which begins a character, so a match cannot land
+/// inside one.
+///
+/// The last two groups are what a byte search must **not** find. A
+/// continuation byte on its own is not a `String` any program can write, so
+/// the case that tests self-synchronisation is the other way round: `あ` is
+/// `E3 81 82` and U+0082 is `C2 82`, and the two share their last byte, so a
+/// search for U+0082 in a run of `あ` must answer `false` — it would answer
+/// `true` if the comparison were of single bytes at arbitrary offsets rather
+/// than of a whole needle.
+///
+/// The harness runs this on the linear-memory backend and again with
+/// `--backend ast`, and both runs are held to the one `expected.out`.
+export fn main() -> Result<Unit, Error> {
+  // An empty needle occurs at every position, including in the empty string.
+  // Answered before any preparation of the needle begins, so no byte of
+  // either string is read.
+  let empty = ""
+  let cove = "cove"
+  println("empty/empty {empty.contains(empty)}")?
+  println("cove/empty {cove.contains(empty)}")?
+
+  // A needle longer than the receiver is settled on the two lengths, having
+  // examined nothing.
+  println("empty/cove {empty.contains(cove)}")?
+  println("cov/cove {"cov".contains(cove)}")?
+
+  // The receiver as its own needle, which matches at 0 and reads both runs to
+  // their ends.
+  println("cove/cove {cove.contains(cove)}")?
+
+  // A match at the start, in the middle, and at the very end — the three
+  // offsets an off-by-one in the shift moves apart. `alphabet` is eight bytes.
+  let alphabet = "alphabet"
+  println("alphabet/alp {alphabet.contains("alp")}")?
+  println("alphabet/hab {alphabet.contains("hab")}")?
+  println("alphabet/bet {alphabet.contains("bet")}")?
+  println("alphabet/t {alphabet.contains("t")}")?
+  println("alphabet/zed {alphabet.contains("zed")}")?
+  println("alphabet/alphabets {alphabet.contains("alphabets")}")?
+
+  // Overlapping candidates. `aaab` holds `aab` at 1, and the candidate at 0
+  // fails at its third byte.
+  println("aaab/aab {"aaab".contains("aab")}")?
+  println("aaa/aaaa {"aaa".contains("aaaa")}")?
+  println("aaaa/aaaa {"aaaa".contains("aaaa")}")?
+  println("abababab/abab {"abababab".contains("abab")}")?
+  println("abababab/abba {"abababab".contains("abba")}")?
+  println("banana/ana {"banana".contains("ana")}")?
+  println("banana/anana {"banana".contains("anana")}")?
+
+  // A repeating prefix: the candidate at 0 agrees for five of six bytes.
+  println("abcabcabd/abcabd {"abcabcabd".contains("abcabd")}")?
+  println("abcabcabd/abcabc {"abcabcabd".contains("abcabc")}")?
+  println("abcabcabd/abcabe {"abcabcabd".contains("abcabe")}")?
+
+  // Two bytes a character: `é` is U+00E9, `C3 A9`, `è` is U+00E8, `C3 A8`,
+  // and `ä` is U+00E4, `C3 A4`. All three share their lead byte.
+  let ecole = "école"
+  println("école/é {ecole.contains("é")}")?
+  println("école/col {ecole.contains("col")}")?
+  println("école/è {ecole.contains("è")}")?
+  println("école/ä {ecole.contains("ä")}")?
+
+  // Three bytes: `あいう` is `E3 81 82 | E3 81 84 | E3 81 86`.
+  let kana = "あいう"
+  println("あいう/い {kana.contains("い")}")?
+  println("あいう/いう {kana.contains("いう")}")?
+  println("あいう/ア {kana.contains("ア")}")?
+  println("あいう/うあ {kana.contains("うあ")}")?
+
+  // Four bytes: `😀` is U+1F600, `F0 9F 98 80`, and `😁` is U+1F601,
+  // `F0 9F 98 81` — three bytes of agreement and a difference in the last.
+  let faces = "x😀y"
+  println("x😀y/😀 {faces.contains("😀")}")?
+  println("x😀y/😁 {faces.contains("😁")}")?
+
+  // What a search of whole needles must not find. U+0082 is `C2 82` and `あ`
+  // is `E3 81 82`: the two share their last byte and nothing else, so a run
+  // of `あ` holds `82` three times and `C2 82` never. `String.fromCodePoint`
+  // because a control character is a byte sequence rather than a glyph.
+  let control = String.fromCodePoint(130).unwrapOr("")
+  println("あああ/U+0082 {"あああ".contains(control)}")?
+  let linearB = String.fromCodePoint(65536).unwrapOr("")
+  println("x😀y/U+10000 {faces.contains(linearB)}")?
+
+  // A receiver built at run time rather than written as a literal, since a
+  // literal is the one shape a constant fold could answer. The needle spans
+  // the join between two of the repetitions, which is the offset a matcher
+  // that searched each piece would never look at.
+  var built = ""
+  var i = 0
+  while i < 3 {
+    built = "{built}é😀"
+    i += 1
+  }
+  println(
+    "built {built.contains("😀é")} {built.contains("😀😀")} {built.byteLength()}",
+  )?
+  Ok(())
+}

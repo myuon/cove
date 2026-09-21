@@ -314,11 +314,13 @@ impl Check<'_> {
                 // Writes no frame slot: `RunCopy` writes into the object its
                 // `args` table's `dst` already names.
                 Inst::RunCopy { .. } => {}
-                // Writes the one its row names first: the fresh run's address.
+                // Writes the one its row names first: the fresh run's
+                // address for a slice, the answer's offset for a search.
                 // Poisoned rather than identified, as `GrowableAlloc` is — a
                 // row this pass has not checked the shape of yet is not a place
-                // to read a layout fact from.
-                Inst::RunSlice { args, .. } => {
+                // to read a layout fact from, and a search's `dst` is an `Int`
+                // and so is neither an object nor a function from then on.
+                Inst::RunSlice { args, .. } | Inst::RunFind { args, .. } => {
                     if let Some(dst) = self
                         .program
                         .args
@@ -926,6 +928,7 @@ impl Check<'_> {
             }
             Inst::RunCopy { args, storage } => self.check_run_copy(at, args, storage),
             Inst::RunSlice { args, storage } => self.check_run_slice(at, args, storage),
+            Inst::RunFind { args, storage } => self.check_run_find(at, args, storage),
             // The growable family's admission table. Phase 2 of ADR 0058
             // admitted `PackedBytes` for every member and nothing else, with a
             // byte finish a UTF-8 finish into `Program::str_layout`; Phase 3
@@ -1796,6 +1799,59 @@ impl Check<'_> {
                     );
                 }
             }
+        }
+    }
+
+    /// [`Inst::RunFind`]'s four arguments — `dst`, `haystack`, `needle`,
+    /// `from`, in that order — and its storage.
+    ///
+    /// Checked by `Repr` for [`Self::check_run_copy`]'s reason: both runs'
+    /// shapes are run-time facts, and what is static is that both are
+    /// references, that `from` is an integer, and that `dst` — which this
+    /// instruction *writes* — is an integer too, because the answer is a unit
+    /// offset or -1 and not a run.
+    ///
+    /// **[`crate::Storage::Words`] is refused**, which is
+    /// [ADR 0065](../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)'s
+    /// Decision 1 and the one rule this check has that the slice's does not.
+    /// A sequence search is `Array.contains` and `Array.indexOf`, Cove loops
+    /// over `==` since ADR 0058, and a search over a word run that wanted this
+    /// instruction would get its own decision and its own measurement. The
+    /// refusal is here rather than left to the encoder so that a lowering that
+    /// asked for it is told what it did rather than told the instruction is
+    /// too wide.
+    fn check_run_find(&mut self, at: Option<usize>, args: crate::ArgsId, storage: crate::Storage) {
+        if let crate::Storage::Words(elem) = storage {
+            let name = self.name_of(elem);
+            self.fault(
+                at,
+                format!(
+                    "searches a run of `{name}` words, and a run search is over packed bytes \
+                     alone"
+                ),
+            );
+            return;
+        }
+        if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
+            return;
+        }
+        const NAMES: [&str; 4] = ["dst", "haystack", "needle", "from"];
+        const WANTS: [Repr; 4] = [Repr::Int, Repr::Ref, Repr::Ref, Repr::Int];
+        let passed = self.program.arg_list(args).to_vec();
+        if passed.len() != NAMES.len() {
+            self.fault(
+                at,
+                format!(
+                    "searches a run with {} argument(s), and this needs {} ({})",
+                    passed.len(),
+                    NAMES.len(),
+                    NAMES.join(", ")
+                ),
+            );
+            return;
+        }
+        for (arg, want) in passed.iter().zip(WANTS) {
+            self.expect(at, arg.slot, &[want]);
         }
     }
 

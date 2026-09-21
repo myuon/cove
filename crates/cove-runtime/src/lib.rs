@@ -7,6 +7,13 @@ pub mod database;
 pub mod embed;
 pub mod error;
 pub mod files;
+// Private: the matcher beneath `Inst::RunFind`, shared by the two execution
+// tiers so that neither can come to a different answer about what a run
+// search means. It is bytes and counters and nothing else — no `Machine`, no
+// `Value` — which is what lets the tree-walking interpreter run it over a
+// slice and the linear-memory backend over the heap, a bounded step at a
+// time.
+mod find;
 pub mod heap;
 pub mod host;
 pub mod http;

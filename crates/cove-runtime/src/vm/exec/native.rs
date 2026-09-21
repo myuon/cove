@@ -1117,8 +1117,8 @@ unsafe extern "C" fn growable(
     }
 }
 
-/// The run-copy helper: one [ADR 0058] `Inst::RunCopy` or `Inst::RunSlice`,
-/// handed over whole.
+/// The run-copy helper: one [ADR 0058] `Inst::RunCopy` or `Inst::RunSlice`, or
+/// [ADR 0065]'s `Inst::RunFind`, handed over whole.
 ///
 /// See [`cove_native::RunCopyFn`] for why the copy is a helper rather than an
 /// emitted loop. What happens here is `encoded.rs`'s `RUN_COPY_BYTES`,
@@ -1140,6 +1140,7 @@ unsafe extern "C" fn growable(
 /// As [`safepoint`].
 ///
 /// [ADR 0058]: ../../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+/// [ADR 0065]: ../../../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md
 unsafe extern "C" fn run_copy(
     ctx: *mut NativeCtx,
     base: u64,
@@ -1210,6 +1211,15 @@ unsafe extern "C" fn run_copy(
                         frame.base,
                         args,
                         LayoutId(elem),
+                        frame.function,
+                        pc as usize,
+                    ),
+                    RunOp::FindBytes => super::encoded::run_find_bytes(
+                        machine,
+                        program,
+                        budget,
+                        frame.base,
+                        args,
                         frame.function,
                         pc as usize,
                     ),

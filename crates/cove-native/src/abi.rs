@@ -758,7 +758,7 @@ pub type IntrinsicFn = unsafe extern "C" fn(
 ///   refusal. The helper synchronises the program counter so that the error names
 ///   the instruction's span, and the generated code tests the outcome.
 ///
-/// An intrinsic with neither — `String.contains`, `Float.sqrt` — is a plain call:
+/// An intrinsic with neither — `String.indexOf`, `Float.sqrt` — is a plain call:
 /// no publish, no program counter, no test, and the frame pointer stays live.
 ///
 /// `MAY_ALLOCATE` without `MAY_COLLECT` is read as a safepoint too, although
@@ -1167,6 +1167,15 @@ pub enum RunOp {
     /// [`Inst::RunSlice`](cove_ir::Inst::RunSlice) over packed bytes, the same
     /// four: `String.sliceBytes`' copy, answering a `String`.
     SliceBytes = 3,
+    /// [`Inst::RunFind`](cove_ir::Inst::RunFind) over packed bytes, which is
+    /// the only storage it has: `args` is `dst`, `haystack`, `needle`,
+    /// `from`, and `dst` is written — an `Int`, and not a run.
+    ///
+    /// It is on this helper rather than one of its own for the reason the run
+    /// slice is: what it needs is what a run copy needs, which is the chunks,
+    /// the polls and the refusals only the runtime can build. That it reads
+    /// where a copy writes changes none of them.
+    FindBytes = 4,
 }
 
 impl RunOp {
@@ -1182,6 +1191,7 @@ impl RunOp {
             1 => Some(RunOp::CopyWords),
             2 => Some(RunOp::SliceWords),
             3 => Some(RunOp::SliceBytes),
+            4 => Some(RunOp::FindBytes),
             _ => None,
         }
     }
@@ -1552,11 +1562,12 @@ mod tests {
             (1, RunOp::CopyWords),
             (2, RunOp::SliceWords),
             (3, RunOp::SliceBytes),
+            (4, RunOp::FindBytes),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(RunOp::from_abi(code), Some(op));
         }
-        assert_eq!(RunOp::from_abi(4), None);
+        assert_eq!(RunOp::from_abi(5), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

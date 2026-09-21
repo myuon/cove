@@ -817,6 +817,121 @@ pub enum Inst {
     /// it is a frame slot that receives the fresh run's address, which every
     /// pass asking what an instruction writes reads out of the row.
     RunSlice { args: ArgsId, storage: Storage },
+    /// `dst = <the first unit offset at or after `from` where `needle` occurs
+    /// in `haystack`, or -1>`, in units of `storage`.
+    ///
+    /// # In ADR 0058's families
+    ///
+    /// The sixth member of the run family, beside [`Inst::RunLoad`],
+    /// [`Inst::RunCopy`], [`Inst::RunSlice`], [`Inst::GrowableAlloc`] and
+    /// [`Inst::RunFinish`], added by
+    /// [ADR 0065](../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md).
+    /// Its argument is the family's own rather than a new one: the work is
+    /// proportional to the length of a run the caller has not bounded, and
+    /// each unit of it is a load and a comparison, so a Cove loop would pay a
+    /// VM dispatch per unit where this pays one for the whole. That is the
+    /// same purchase [`Inst::RunCopy`] makes for a copy — "one dispatch and one
+    /// unit of work per payload word moved" — and it is *not* an argument
+    /// about complexity classes: a Cove KMP would be `O(n + m)` too, and would
+    /// still turn its loop once a byte.
+    ///
+    /// **[`Storage::PackedBytes`] only.** `crate::verify` refuses
+    /// [`Storage::Words`]. ADR 0058 moved `Array.contains` and
+    /// `Array.indexOf` to Cove loops over `==` and they stay there; a sequence
+    /// search that wants this instruction gets its own decision, its own
+    /// measurement, and those loops as the thing to beat. Stated as a
+    /// restriction rather than left implicit because "a bounded run search
+    /// over a named storage" sounds general, and defining it over one storage
+    /// while calling it general would name a primitive after a capability it
+    /// does not have.
+    ///
+    /// # It searches bytes and knows nothing else
+    ///
+    /// The comparison is bitwise over units of [`Storage::PackedBytes`]. This
+    /// instruction has **no notion of a character, an encoding, a boundary or
+    /// a `String`**; it neither validates nor interprets what it reads, and it
+    /// would answer the same for a run of arbitrary bytes that never came from
+    /// text. Whether a byte match is also a character match is
+    /// `std.string.contains`' question and is argued in `std.string`, the way
+    /// `std.string.endsWith` argues it for its own offset. Putting that
+    /// argument here would be writing `String` policy into an instruction.
+    ///
+    /// # What it means
+    ///
+    /// - **The answer is an absolute unit offset into the haystack run**, not
+    ///   one relative to `from`. Relative would be a footgun at every call
+    ///   site, and `indexOf`, `split` and `replace` all want a position in the
+    ///   receiver.
+    /// - **Not found is -1.** Not an `Option`: an instruction answers a word,
+    ///   and the standard library builds what the public API needs —
+    ///   `std.string.contains` a `Bool`, `std.string.indexOf` an `Option<Int>`
+    ///   in *character* positions after a walk of its own.
+    /// - **An empty needle answers `from`.** The empty needle occurs at every
+    ///   position including the end, which is what `str::find("")` answers.
+    /// - **A needle longer than `haystack_len - from` answers -1**, and is not
+    ///   an error. So does any needle that does not occur.
+    /// - **`from` must be in `0 ..= haystack_len`.** `from == haystack_len` is
+    ///   legal and answers -1, or `from` for an empty needle. A `from` outside
+    ///   that range **stops the run**, as a range outside the source does in
+    ///   [`Inst::RunSlice`]: it is a broken invariant of the lowering, never a
+    ///   program's mistake, and the standard-library body above it is what
+    ///   holds a program's index to the range.
+    /// - **A null run stops the run**, as it does in [`Inst::RunSlice`].
+    /// - **The two runs may alias.** `s.contains(s)`, a needle that is the
+    ///   haystack, and two overlapping runs of one object are all defined: the
+    ///   instruction only reads, so there is no order in which a write could
+    ///   be seen. Stated because [`Inst::RunCopy`]'s aliasing rules are not
+    ///   this one's and a reader will ask.
+    /// - **Both operands are fixed runs.** A run under construction is not
+    ///   admitted, for the reason [`Inst::RunSlice`] gives.
+    ///
+    /// # What it is charged, and where it polls
+    ///
+    /// [`Inst::RunCopy`]'s convention, held to in **both** phases of the
+    /// search — which is the part an implementer would not think of unless it
+    /// were written down, because the preparation of a needle is `O(m)` work
+    /// before the first unit of haystack is read.
+    ///
+    /// Two answers are reached before any of it and charge no bulk work,
+    /// because neither examines a unit: an empty needle, and a needle longer
+    /// than `haystack_len - from`. The instruction's own single unit of fuel is
+    /// unchanged, so a fast path is one fuel and nothing else — the accounting
+    /// `std.string.endsWith`'s length refusal already has.
+    ///
+    /// Otherwise the needle is prepared and the haystack consumed in steps of
+    /// at most `SAFEPOINT_STRIDE` units each, charged as they are consumed and
+    /// followed by a safepoint, so **the uninterruptible span is
+    /// `SAFEPOINT_STRIDE` units whatever `n` and `m` are and whichever phase
+    /// the instruction is in**. That is what
+    /// [ADR 0040](../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
+    /// `S + T` asks for. A window of `max(SAFEPOINT_STRIDE, m)` would not be
+    /// it: a needle of ten million bytes would make one window ten million
+    /// units of uninterruptible work.
+    ///
+    /// Preparing an `m`-unit needle is `m` units of work and is paid for, and
+    /// a search that reaches the end of the haystack is `n - from` more, so a
+    /// whole scan is charged exactly `m + (n - from)`: preparation is charged
+    /// and no unit is charged twice.
+    ///
+    /// The implementation is therefore a **resumable** matcher, which rules
+    /// out calling `str::find` once — it reports neither where it stopped nor
+    /// anything to resume from — and it may not be a quadratic scan, because
+    /// if the work below the boundary is what a Cove loop would have done
+    /// anyway then the family's argument supports nothing.
+    ///
+    /// # Why four operands live behind an [`ArgsId`]
+    ///
+    /// [`Inst::RunSlice`]'s reason: a sixteen-byte instruction has three slot
+    /// operands and a payload of two ids, and this needs four — `dst`,
+    /// `haystack`, `needle`, `from`, in that order, each carrying its layout
+    /// the way a call's arguments do. Both runs' lengths come from their
+    /// headers, as `RunSlice`'s `src` length does; neither an offset nor a
+    /// count is passed for either run. Unlike [`Inst::RunCopy`]'s `dst` and
+    /// like [`Inst::RunSlice`]'s, this one is **written** — a frame slot that
+    /// receives the answer, which every pass asking what an instruction writes
+    /// reads out of the row — but unlike either it is an `Int` and not a
+    /// reference, because the answer is an offset and not a run.
+    RunFind { args: ArgsId, storage: Storage },
     /// `dst = <a new, empty growable run in `storage` whose store has room for
     /// `capacity` units>`.
     ///

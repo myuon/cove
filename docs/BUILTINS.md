@@ -59,6 +59,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `vectorTruncate` | `core.vectorTruncate(items: Vector<T>, len: Int) -> Unit` |
 | `vectorMove` | `core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit` |
 | `stringSlice` | `core.stringSlice(text: String, from: Int, count: Int) -> String` |
+| `stringFind` | `core.stringFind(text: String, needle: String, from: Int) -> Int` |
 | `bytesAllocate` | `core.bytesAllocate(capacity: Int) -> ByteBuffer` |
 | `bytesEnsure` | `core.bytesEnsure(buffer: ByteBuffer, additional: Int) -> Unit` |
 | `bytesStore` | `core.bytesStore(buffer: ByteBuffer, at: Int, byte: Int) -> Unit` |
@@ -210,7 +211,7 @@ written as a namespace.
 | `join(parts: Array<String>) -> String` |  |  |  | `machine` |
 | `slice(from: Int, to: Int) -> String` |  |  |  | `machine` |
 | `trim() -> String` |  |  |  | `machine` |
-| `contains(text: String) -> Bool` |  |  |  | `machine` |
+| `contains(text: String) -> Bool` |  |  |  | `std.string.contains` |
 | `startsWith(prefix: String) -> Bool` |  |  |  | `std.string.startsWith` |
 | `endsWith(suffix: String) -> Bool` |  |  |  | `std.string.endsWith` |
 | `indexOf(text: String) -> Option<Int>` |  |  |  | `machine` |

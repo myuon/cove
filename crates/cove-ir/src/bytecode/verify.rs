@@ -330,6 +330,10 @@ impl Check<'_> {
             // fixed shape (`dst`, `src`, `from`, `count`) is `crate::verify`'s
             // `check_run_slice`.
             Inst::RunSlice { args, .. } => self.args_fit(at, args),
+            // `Op::RunFindBytes`' four operands, by the same uniform rule; its
+            // fixed shape (`dst`, `haystack`, `needle`, `from`) is
+            // `crate::verify`'s `check_run_find`.
+            Inst::RunFind { args, .. } => self.args_fit(at, args),
             // `Len::Count` is the one `Len` form this check can settle ahead
             // of time: both halves of the payload are right here, so the
             // layout `Op::AllocImm` names and the count it carries are known

@@ -205,8 +205,14 @@ mod base {
     /// — last rather than beside its byte twin, for `CMP_ORDER`'s reason:
     /// adding it renumbered nothing already there.
     pub const GROWABLE_ALLOC_WORDS: u8 = FUSED_APPEND_WORDS + 1;
+    /// [`crate::Inst::RunFind`], ADR 0065's run search — one opcode and not
+    /// two, because the instruction has one storage: `crate::verify` refuses
+    /// [`crate::Storage::Words`]. Last rather than beside the slice it reads
+    /// like, for `CMP_ORDER`'s reason: adding it renumbered nothing already
+    /// there.
+    pub const RUN_FIND_BYTES: u8 = GROWABLE_ALLOC_WORDS + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = GROWABLE_ALLOC_WORDS + 1;
+    pub const END: u8 = RUN_FIND_BYTES + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -267,6 +273,10 @@ pub enum Op {
     /// layout is the payload's high half; the answer's layout is the row's
     /// `dst`.
     RunSliceWords,
+    /// [`crate::Inst::RunFind`] over [`crate::Storage::PackedBytes`], which is
+    /// the only storage it has: `dst`, `haystack`, `needle` and `from` behind
+    /// the `ArgsId`, as a byte slice's four are.
+    RunFindBytes,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
     GrowableAllocBytes,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::Words`], whose
@@ -609,6 +619,7 @@ impl Op {
             Op::FusedAppendBytes,
             Op::FusedAppendWords,
             Op::GrowableAllocWords,
+            Op::RunFindBytes,
         ]);
         all
     }
@@ -673,6 +684,7 @@ impl Op {
             Op::RunCopyWords => base::RUN_COPY_WORDS,
             Op::RunSliceBytes => base::RUN_SLICE_BYTES,
             Op::RunSliceWords => base::RUN_SLICE_WORDS,
+            Op::RunFindBytes => base::RUN_FIND_BYTES,
             Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
             Op::GrowableAllocWords => base::GROWABLE_ALLOC_WORDS,
             Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
@@ -966,6 +978,11 @@ impl Op {
             Op::RunSliceWords => fields(NONE, NONE, NONE, ids(Half::Args, Half::Layout)),
             // And `RunCopyBytes`' at four: a byte slice has no element to carry.
             Op::RunSliceBytes => fields(NONE, NONE, NONE, one(Half::Args)),
+            // A run search is `RunSliceBytes`' shape and for its reason: four
+            // operands behind the `ArgsId` — `dst`, `haystack`, `needle`,
+            // `from` — and nothing in the free half, because the one storage
+            // it has names no element.
+            Op::RunFindBytes => fields(NONE, NONE, NONE, one(Half::Args)),
             // No `Half::Layout` on either of the two allocating buffer
             // opcodes, for the reason `Op::Str` carries none, twice over: an
             // owner is always `Program::buffer_layout` and its store is always
@@ -1127,7 +1144,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and seventy-seven opcodes out of the 256 a byte
+    /// argued from: a hundred and seventy-eight opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -1162,15 +1179,17 @@ mod tests {
     /// deleted the composite `GrowablePushByte`, `GrowablePushWords` and
     /// `GrowableExtendBytes`, whose windows the fused heads had replaced, and a
     /// hundred and seventy-seven once the growable allocation gained its word
-    /// member for `core.vectorWithCapacity`. What the
+    /// member for `core.vectorWithCapacity`, and a hundred and seventy-eight
+    /// once ADR 0065's run search brought one — one and not two, because the
+    /// instruction has a single storage. What the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventy_seven_opcodes() {
-        assert_eq!(Op::all().len(), 177);
-        assert_eq!(OPCODES, 177);
+    fn there_are_a_hundred_and_seventy_eight_opcodes() {
+        assert_eq!(Op::all().len(), 178);
+        assert_eq!(OPCODES, 178);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
