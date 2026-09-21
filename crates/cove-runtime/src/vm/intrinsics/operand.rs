@@ -208,44 +208,20 @@ pub(super) fn text(machine: &Machine, frame: Frame<'_>, at: usize) -> Result<Str
     super::string_of(machine, string(machine, frame, at))
 }
 
-/// The text of the `String` operand `at`, handed to `f` for as long as the
-/// call lasts and not a moment longer.
-///
-/// [`text`] above answers a `String`, which is a heap allocation, a copy and a
-/// validation per operand per call — and on the measurement that closed #442
-/// the *allocation* was about seventy per cent of it. This answers the same
-/// text out of a buffer the machine already owns, so a steady-state run
-/// allocates nothing to read an operand.
-///
-/// The closure is what makes that safe without borrowing the heap: the buffer
-/// is taken out of the machine rather than borrowed from it, so `f` may still
-/// take the machine by `&mut` and allocate, and the buffer goes back when the
-/// call ends — or is dropped rather than given back, if the operand was big
-/// enough that keeping it would put the pool over the bound
-/// [`Machine::scratch`] states. So a read of a whole file costs one
-/// allocation, once, and is not still being held afterwards. Nothing here reads a payload word any differently from
-/// [`Machine::string_bytes`], so no host endianness and no chunk boundary is
-/// load-bearing.
-///
-/// The `Err` is a string object whose bytes are not UTF-8, which nothing that
-/// builds one can make.
-#[inline]
-pub(super) fn with_text<R>(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    at: usize,
-    f: impl FnOnce(&mut Machine, &str) -> Result<R, RuntimeError>,
-) -> Result<R, RuntimeError> {
-    let addr = string(machine, frame, at);
-    let mut buf = machine.take_scratch();
-    machine.string_bytes_into(addr, &mut buf);
-    let answer = match core::str::from_utf8(&buf) {
-        Ok(text) => f(machine, text),
-        Err(_) => Err(RuntimeError::new("this string's bytes are not valid UTF-8")),
-    };
-    machine.give_scratch(buf);
-    answer
-}
+// `with_text` stood here: the text of a `String` operand handed to a closure
+// out of a buffer the machine already owned, so that a steady-state run
+// allocated nothing to read an operand. It was #446's answer to #442's
+// finding that the *allocation* in [`text`] was about seventy per cent of the
+// cost of reading one.
+//
+// It is gone three pull requests later, and not because the measurement was
+// wrong. Its callers were the two whole-haystack searches, and both have since
+// migrated out of this crate's arms: ADR 0065 gave `String.contains` an
+// `Inst::RunFind` to stand on, which reads both runs where they are through a
+// one-word cache, and then ADR 0064's `String.indexOf` migration took the
+// last one. A mechanism with no caller cannot be measured and is not kept
+// against a caller that might arrive; `Machine`'s scratch pool went with it.
+// [`text`] is what the arms that are left use, as they always did.
 
 /// What the language calls the value in `word`, read as `repr`.
 ///

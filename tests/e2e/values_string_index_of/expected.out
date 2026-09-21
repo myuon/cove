@@ -1,0 +1,54 @@
+empty/empty Some(0)
+cove/empty Some(0)
+empty/a None
+cov/cove None
+cove/cove Some(0)
+alphabet/alp Some(0)
+alphabet/hab Some(3)
+alphabet/bet Some(5)
+alphabet/t Some(7)
+alphabet/a Some(0)
+alphabet/zed None
+alphabet/alphabets None
+aaab/aab Some(1)
+aaa/aaaa None
+aaaa/aaaa Some(0)
+abababab/abab Some(0)
+abababab/abba None
+banana/ana Some(1)
+banana/anana Some(1)
+abcabcabd/abcabd Some(3)
+abcabcabd/abcabc Some(0)
+abcabcabd/abcabe None
+école/é Some(0)
+école/col Some(1)
+école/e Some(4)
+école/è None
+école/ä None
+あいう/い Some(1)
+あいう/いう Some(1)
+あいう/ア None
+あいう/うあ None
+x😀y/😀 Some(1)
+x😀y/y Some(2)
+x😀y/😁 None
+é😀abc/a Some(2) bytes 9
+é😀abc/b Some(3)
+é😀abc/c Some(4)
+é😀abc/bc Some(3)
+é😀abc/😀 Some(1)
+é😀abc/é Some(0)
+é😀あい/あい Some(2)
+é😀あい/い Some(3)
+🙂🙂é/é Some(2)
+🙂🙂é/🙂 Some(0)
+αβ😀γ/😀γ Some(2)
+αβ😀γ/γ Some(3)
+日本語テスト/テスト Some(3)
+日本語テスト/語 Some(2)
+héllo wörld/ö Some(7) bytes 13
+héllo wörld/rld Some(8)
+é😀/é😀 Some(0)
+あああ/U+0082 None
+x😀y/U+10000 None
+built Some(1) None Some(0) 18

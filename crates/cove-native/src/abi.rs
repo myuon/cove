@@ -758,8 +758,12 @@ pub type IntrinsicFn = unsafe extern "C" fn(
 ///   refusal. The helper synchronises the program counter so that the error names
 ///   the instruction's span, and the generated code tests the outcome.
 ///
-/// An intrinsic with neither — `String.indexOf`, `Float.sqrt` — is a plain call:
-/// no publish, no program counter, no test, and the frame pointer stays live.
+/// An intrinsic with neither — `Float.sqrt`, and the four other `Float`
+/// functions IEEE 754 answers for every input — is a plain call: no publish,
+/// no program counter, no test, and the frame pointer stays live. It named
+/// `String.indexOf` first and for longer, which is worth knowing when reading
+/// the suites: ADR 0064 moved that into `std.string`, and the five that are
+/// left are the whole of this class.
 ///
 /// `MAY_ALLOCATE` without `MAY_COLLECT` is read as a safepoint too, although
 /// [`cove_ir::Intrinsic::effects`] sets the two together: an allocation that did

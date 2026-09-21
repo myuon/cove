@@ -641,13 +641,33 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// was **6.30% of the print phase's instructions** (#398): 3.47 M instructions
 /// and 248 calls off print for 0.70 M onto lex, and 2.77 M off the run.
 ///
+/// **The twenty-sixth rise is `String.indexOf` moving into the standard
+/// library, and two new rows with it.** The corpus had fallen to 2394 under a
+/// constant of 2405 — an upper bound is allowed to run ahead of it — and the
+/// migration takes the same 157 programs to 2400. ADR 0064's fifth Phase 1
+/// stage makes `String.indexOf` `std.string.indexOf`, one `core.stringFind`
+/// and a walk, whose answer is a `Some(..)` built beside the `return`; every
+/// program's standard library gains that body and the private
+/// `charactersBefore` under it, which is the 314 more functions over 157
+/// programs. Only the two programs that *call* it can move —
+/// `tests/e2e:values_string` and `tests/e2e:values_string_length`, which
+/// between them hold every `String.indexOf` site in the corpus, five and two.
+///
+/// Then 2400 to 2432, two new rows. `benches:indexof` adds 23 — 12 copies
+/// after a producer and 12 into a `return`'s answer, one copy counted in both
+/// — which is `benches:seqsearch`'s and `benches:contains`' shape: row
+/// functions answering a `Row` struct and counting callees handing back an
+/// `Int` through a call. `tests/e2e:values_string_index_of` adds 9, the `prod`
+/// and `ret` columns a fixture of one `println` per line has. The lowering is
+/// this commit's for all of it.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2405;
+const FORWARDABLE_COPIES: usize = 2432;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -829,12 +829,14 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// reason that is the same one worded about a predicate: a bounded byte
 /// comparison is a loop over the substrate `byteAt` already is, and the only
 /// thing either of them named that an instruction did not was the method.
-/// `String.contains` went a third way and is the one worth reading as a
-/// separate case: its work is proportional to a haystack the caller did not
-/// size, so ADR 0065 put a run search *under* it — `Inst::RunFind` — and the
-/// method became `std.string.contains` over that. `indexOf` is the last of
-/// ADR 0046's four still here, and it is here only until it is written over
-/// the same instruction.
+/// `String.contains` and `String.indexOf` went a third way and are the pair
+/// worth reading as a separate case: their work is proportional to a haystack
+/// the caller did not size, so ADR 0065 put a run search *under* both —
+/// `Inst::RunFind` — and each method became a `std.string` body over it, one
+/// comparing the byte offset it answers against -1 and one walking the prefix
+/// in front of that offset to turn it into a character position. **No
+/// predicate or search of a `String` is in this table any more**, which is all
+/// four of ADR 0046's.
 ///
 /// The sequence operations are not here — `cove_ir::lower::collections` has
 /// its own list, because for a sequence some of them *are* instructions and
@@ -857,7 +859,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "join"),
     ("String", "slice"),
     ("String", "trim"),
-    ("String", "indexOf"),
     ("String", "replace"),
     ("String", "toUpper"),
     ("String", "toLower"),

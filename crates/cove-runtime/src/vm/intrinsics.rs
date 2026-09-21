@@ -158,19 +158,20 @@ pub(crate) fn call(
         Intrinsic::StringJoin => text::join(machine, frame, dest),
         Intrinsic::StringSlice => text::slice(machine, frame, dest),
         Intrinsic::StringTrim => text::trim(machine, frame, dest),
-        // None of the three predicates ADR 0046 measured together is here any
-        // more, and the third left differently from the first two.
+        // None of the four searches and predicates ADR 0046 measured together
+        // is here any more, and they did not all leave the same way.
         // `String.startsWith` and `String.endsWith` became Cove loops over
         // `core.byteLength` and `byteAt` (ADR 0064), one comparing the
         // receiver's first bytes against the prefix's and one its last against
         // the suffix's — a bounded comparison needs nothing underneath it.
-        // `String.contains` could not be written that way for nothing: its
-        // work is proportional to a haystack the caller did not size, and a
-        // Cove scan pays a VM dispatch per byte of one. So ADR 0065 added
-        // `Inst::RunFind`, a bounded search over a run of packed bytes, and
-        // `std.string.contains` is a comparison of its answer against -1.
-        // `indexOf` below is what is left, and rides on the same decision.
-        Intrinsic::StringIndexOf => text::index_of(machine, frame, dest),
+        // Neither `String.contains` nor `String.indexOf` could be written that
+        // way for nothing: their work is proportional to a haystack the caller
+        // did not size, and a Cove scan pays a VM dispatch per byte of one. So
+        // ADR 0065 added `Inst::RunFind`, a bounded search over a run of
+        // packed bytes, and each is a `std.string` body over it —
+        // `contains` a comparison of its answer against -1, `indexOf` a walk
+        // of the prefix's lead bytes that turns the byte offset it found into
+        // the character position the method promises.
         Intrinsic::StringReplace => text::replace(machine, frame, dest),
         Intrinsic::StringToUpper => text::to_upper(machine, frame, dest),
         Intrinsic::StringToLower => text::to_lower(machine, frame, dest),
@@ -1138,14 +1139,10 @@ mod tests {
         (case.name.to_string(), payload)
     }
 
-    /// What the `Option` whose `Some` carries a `payload` holds.
-    pub(super) fn option_of(
-        program: &Program,
-        payload: LayoutId,
-        words: &[u64],
-    ) -> (String, Vec<u64>) {
-        case_of(program, two_case(program, "Option", "Some", payload), words)
-    }
+    // `option_of` stood here, beside `result_of`. Its callers were `text`'s
+    // cases over `String.indexOf`, which is the last intrinsic that answered
+    // an `Option` and is `std.string.indexOf` since ADR 0064. No arm answers
+    // one now, so nothing reads one back.
 
     /// What the `Result` whose `Ok` carries an `ok` holds.
     pub(super) fn result_of(program: &Program, ok: LayoutId, words: &[u64]) -> (String, Vec<u64>) {

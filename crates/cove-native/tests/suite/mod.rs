@@ -3885,16 +3885,20 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 }
 
 /// One intrinsic of each effect class, as the pair of names that resolves to it:
-/// a plain call (`String.indexOf`: neither collects nor raises), a raise
+/// a plain call (`Float.sqrt`: neither collects nor raises), a raise
 /// (`Any.equals`: a walk too deep to finish) and a safepoint (`String.trim`:
 /// allocates the string it answers).
 ///
-/// The plain one was `String.contains` until ADR 0065 moved that operation onto
-/// `Inst::RunFind` and out of the enum. `indexOf` is its effect class exactly —
-/// it reads its receiver, allocates nothing and cannot raise — and is the last
-/// intrinsic of that shape.
+/// **The plain one has been three operations and is now the only shape left.**
+/// It was `String.contains` until ADR 0065 moved that onto `Inst::RunFind`, and
+/// `String.indexOf` until ADR 0064 wrote that over the same instruction. No
+/// text intrinsic reads without allocating any more, so the plain call is one
+/// of the five `Float` functions IEEE 754 answers for every input — which is
+/// the example `cove_native::IntrinsicProtocol`'s own doc has named beside
+/// `indexOf` all along. The double does not read the argument list, so the synthesized call
+/// hands it `String` operands either way and nothing here depends on that.
 pub const INTRINSIC_CLASSES: [(&str, &str); 3] =
-    [("String", "indexOf"), ("Any", "equals"), ("String", "trim")];
+    [("Float", "sqrt"), ("Any", "equals"), ("String", "trim")];
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///
@@ -4050,7 +4054,7 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// level over:
 ///
 /// - a function with one `intrinsic-call` charges **one site** to that call's
-///   variant and none to the other twenty-six, and a function with no
+///   variant and none to the other twenty-five, and a function with no
 ///   intrinsic call in it charges nothing anywhere — so the count follows the
 ///   IR and not the shape of the body;
 /// - where the bytes are attributed they are **positive and no more than the

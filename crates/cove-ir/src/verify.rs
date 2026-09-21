@@ -3017,8 +3017,8 @@ mod tests {
         // 0064 moved it into `std.string`; `String.trim` is the same shape
         // with a `String` answer instead of an `Int` one, which is why slot 0
         // is a reference here. Nothing this test asserts is about the answer's
-        // class — `String.indexOf` below is what checks that — so the swap
-        // costs the case nothing.
+        // class — `Int.parse` below is what checks that — so the swap costs
+        // the case nothing.
         let reprs = || vec![Repr::Ref, Repr::Ref, Repr::Ref, Repr::Int];
 
         // `String.trim` over one `String`, answering a `String`: nothing.
@@ -3044,17 +3044,22 @@ mod tests {
             vec!["operand 0 of `String.trim` is `Int`, where its signature has String"]
         );
 
-        // The answer a `String.indexOf` writes is an `Option<Int>`, and the
-        // fixture's only `Option` carries a reference.
+        // The answer an `Int.parse` writes is a `Result<Int>`, and the
+        // fixture's wrapper is an `Option`. It was `String.indexOf` and an
+        // `Option<Int>` against the same `Option<String>` until ADR 0064 moved
+        // that operation into `std.string`; no intrinsic answers an `Option`
+        // at all now, so the class this arm checks is the other wrapper.
         let held = calling(
-            crate::Intrinsic::StringIndexOf,
+            crate::Intrinsic::IntParse,
             ANSWER,
             vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Ref],
-            vec![string(2), string(3)],
+            vec![string(2)],
         );
         assert_eq!(
             faults(&held),
-            vec!["the answer of `String.indexOf` is `Option`, where its signature has Option<Int>"]
+            vec![
+                "the answer of `Int.parse` is `Option`, where its signature has Result<Int, Error>"
+            ]
         );
 
         // A rendering takes a piece of any layout, and appends it to a byte

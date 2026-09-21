@@ -1,0 +1,371 @@
+use console.println
+use clock.now
+
+/// What turning a byte offset into a character position costs.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// fifth Phase 1 migration made `String.indexOf` a `std.string` body: one
+/// `core.stringFind` — ADR 0065's `Inst::RunFind`, the same instruction
+/// `std.string.contains` stands on — and then a walk of the text in front of
+/// what it found, reading each lead byte and advancing by the width that byte
+/// declares. The search is `benches/contains`' subject and is measured there.
+/// **What is new is the walk**, and this package is that and nothing else.
+///
+/// # The conversion is measured by difference, not by a column
+///
+/// Every row is run twice over the same receiver and the same needle: once as
+/// `indexOf`, which searches and then walks, and once as `contains`, which
+/// searches and compares the answer against -1. The two make the *same*
+/// `Inst::RunFind` with the same operands and find the same byte offset, so
+/// what is left between them is the walk and the `Some` around its answer —
+/// which is the whole of what the migration added over the body that was
+/// already there. A single `indexOf` column would have been the search plus
+/// the walk, and the search is the larger and the more variable half.
+///
+/// # Three axes, nine rows
+///
+/// - **prefix length**, 8 characters against 80: `ascii8` against `ascii80`
+///   and `wide8` against `wide80`. The walk is one turn a character, so this
+///   is the slope;
+/// - **character width**, one byte against two, three and four over the same
+///   80 characters: `ascii80`, `two80`, `three80`, `wide80`. A walk that
+///   advances by the width it read turns 80 times for all four and reads 80,
+///   160, 240 and 320 bytes — so these four say whether the cost follows the
+///   characters, as the loop says it should, or the bytes;
+/// - **match position**, which is what there is to walk at all: `start` finds
+///   the needle at character 0 and walks nothing, `noMatch` and `asciiNoMatch`
+///   find nothing and walk nothing. Those three are the per-call constant, and
+///   the difference between them and their own `contains` row should be the
+///   cost of an `Option` and no more.
+///
+/// The receivers are a prefix and then a three-character marker `zqx`, which
+/// occurs nowhere in any prefix, so a found row walks exactly its prefix.
+///
+/// # The loops are in callees, and they are padded
+///
+/// `benches/contains`' arrangement, for its reason: the outermost frame is
+/// always encoded, so a loop written in `main` is a VM measurement even under
+/// `--backend native`. Each row is a call to a counting callee whose body is
+/// the loop, and every counting callee opens with [`ballast`] — a block the
+/// parameter's sign makes unreachable and nothing can fold away, sized past
+/// `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight rather than merely
+/// past its cold `LIMIT` of sixteen — so that it is not expanded into
+/// [`row`], which the native tier refuses for the `now()` in it. It is
+/// checked rather than assumed: `--backend native --boundary` names the
+/// compiled and the refused, and the only refusals are [`row`] and `main`.
+///
+/// # Twenty thousand turns, not two hundred thousand
+///
+/// A tenth of `benches/contains`', because six of the nine rows walk eighty
+/// characters a call where a `contains` row walks none, and
+/// `crates/cove-cli/tests/vm_coverage.rs` runs every program in this
+/// repository on both evaluators. Every row is still microseconds rather than
+/// clock quantisation.
+fn turns() -> Int {
+  20000
+}
+
+/// Eighty ASCII characters, eighty bytes.
+fn ascii80() -> String {
+  "abcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghzqx"
+}
+
+/// Eight ASCII characters, eight bytes.
+fn ascii8() -> String {
+  "abcdefghzqx"
+}
+
+/// Eighty two-byte characters, a hundred and sixty bytes.
+fn two80() -> String {
+  "éèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëéèêëzqx"
+}
+
+/// Eighty three-byte characters, two hundred and forty bytes.
+fn three80() -> String {
+  "あいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえあいうえzqx"
+}
+
+/// Eighty four-byte characters, three hundred and twenty bytes.
+fn wide80() -> String {
+  "😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂😀😁😂🙂zqx"
+}
+
+/// Eight four-byte characters, thirty-two bytes.
+fn wide8() -> String {
+  "😀😁😂🙂😀😁😂🙂zqx"
+}
+
+/// The marker every receiver ends with and no prefix holds.
+fn marker() -> String {
+  "zqx"
+}
+
+/// The first character of [`wide80`], which is at character 0 and byte 0.
+fn atStart() -> String {
+  "😀"
+}
+
+/// In none of the receivers.
+fn absent() -> String {
+  "wvu"
+}
+
+/// Instructions a counting callee carries so that it is not expanded into
+/// [`row`], which the native tier refuses.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// `rounds` calls of `String.indexOf`: one `Inst::RunFind` and then the walk.
+fn countIndexOf(text: String, needle: String, rounds: Int) -> Int {
+  var found = ballast(rounds)
+  var i = 0
+  if rounds < 0 {
+    found = found + 1
+    found = found + 2
+    found = found + 3
+    found = found + 4
+    found = found + 5
+    found = found + 6
+    found = found + 7
+    found = found + 8
+    found = found + 9
+    found = found + 10
+    found = found + 11
+    found = found + 12
+    found = found + 13
+    found = found + 14
+    found = found + 15
+    found = found + 16
+    found = found + 17
+    found = found + 18
+    found = found + 19
+    found = found + 20
+    found = found + 21
+    found = found + 22
+    found = found + 23
+    found = found + 24
+  }
+  while i < rounds {
+    if text.indexOf(needle).isSome() {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// `rounds` calls of `String.contains`: the same `Inst::RunFind` over the same
+/// operands, and no walk.
+fn countContains(text: String, needle: String, rounds: Int) -> Int {
+  var found = ballast(rounds)
+  var i = 0
+  if rounds < 0 {
+    found = found + 1
+    found = found + 2
+    found = found + 3
+    found = found + 4
+    found = found + 5
+    found = found + 6
+    found = found + 7
+    found = found + 8
+    found = found + 9
+    found = found + 10
+    found = found + 11
+    found = found + 12
+    found = found + 13
+    found = found + 14
+    found = found + 15
+    found = found + 16
+    found = found + 17
+    found = found + 18
+    found = found + 19
+    found = found + 20
+    found = found + 21
+    found = found + 22
+    found = found + 23
+    found = found + 24
+  }
+  while i < rounds {
+    if text.contains(needle) {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// The counting callees' loop with the call taken out, and its branch taken
+/// every turn.
+fn countBare(rounds: Int) -> Int {
+  var found = ballast(rounds)
+  var i = 0
+  if rounds < 0 {
+    found = found + 1
+    found = found + 2
+    found = found + 3
+    found = found + 4
+    found = found + 5
+    found = found + 6
+    found = found + 7
+    found = found + 8
+    found = found + 9
+    found = found + 10
+    found = found + 11
+    found = found + 12
+    found = found + 13
+    found = found + 14
+    found = found + 15
+    found = found + 16
+    found = found + 17
+    found = found + 18
+    found = found + 19
+    found = found + 20
+    found = found + 21
+    found = found + 22
+    found = found + 23
+    found = found + 24
+  }
+  while i < rounds {
+    if i < rounds {
+      found = found + 1
+    }
+    i = i + 1
+  }
+  found
+}
+
+/// How long `rounds` turns took, in microseconds, and how many answered.
+struct Row {
+  micros: Int
+  found: Int
+}
+
+fn indexOfRow(text: String, needle: String, rounds: Int) -> Row {
+  let from = now()
+  let found = countIndexOf(text, needle, rounds)
+  Row(micros: (now() - from).micros(), found: found)
+}
+
+fn containsRow(text: String, needle: String, rounds: Int) -> Row {
+  let from = now()
+  let found = countContains(text, needle, rounds)
+  Row(micros: (now() - from).micros(), found: found)
+}
+
+/// What one call cost, in nanoseconds, over `rounds` turns of which `bare`
+/// microseconds were the loop itself.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000 / rounds
+}
+
+/// Nine rows, twice each, and the bare loop they are taken by difference
+/// from.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let xAscii8 = indexOfRow(ascii8(), marker(), rounds)
+  let xAscii80 = indexOfRow(ascii80(), marker(), rounds)
+  let xTwo80 = indexOfRow(two80(), marker(), rounds)
+  let xThree80 = indexOfRow(three80(), marker(), rounds)
+  let xWide8 = indexOfRow(wide8(), marker(), rounds)
+  let xWide80 = indexOfRow(wide80(), marker(), rounds)
+  let xStart = indexOfRow(wide80(), atStart(), rounds)
+  let xNoMatch = indexOfRow(wide80(), absent(), rounds)
+  let xAsciiNoMatch = indexOfRow(ascii80(), absent(), rounds)
+
+  let cAscii8 = containsRow(ascii8(), marker(), rounds)
+  let cAscii80 = containsRow(ascii80(), marker(), rounds)
+  let cTwo80 = containsRow(two80(), marker(), rounds)
+  let cThree80 = containsRow(three80(), marker(), rounds)
+  let cWide8 = containsRow(wide8(), marker(), rounds)
+  let cWide80 = containsRow(wide80(), marker(), rounds)
+  let cStart = containsRow(wide80(), atStart(), rounds)
+  let cNoMatch = containsRow(wide80(), absent(), rounds)
+  let cAsciiNoMatch = containsRow(ascii80(), absent(), rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped matching would still report a number, and the number
+  // would be of something else.
+  assertEqual(bare, rounds)?
+  assertEqual(xAscii8.found, rounds)?
+  assertEqual(xAscii80.found, rounds)?
+  assertEqual(xTwo80.found, rounds)?
+  assertEqual(xThree80.found, rounds)?
+  assertEqual(xWide8.found, rounds)?
+  assertEqual(xWide80.found, rounds)?
+  assertEqual(xStart.found, rounds)?
+  assertEqual(xNoMatch.found, 0)?
+  assertEqual(xAsciiNoMatch.found, 0)?
+  assertEqual(cAscii8.found, rounds)?
+  assertEqual(cAscii80.found, rounds)?
+  assertEqual(cTwo80.found, rounds)?
+  assertEqual(cThree80.found, rounds)?
+  assertEqual(cWide8.found, rounds)?
+  assertEqual(cWide80.found, rounds)?
+  assertEqual(cStart.found, rounds)?
+  assertEqual(cNoMatch.found, 0)?
+  assertEqual(cAsciiNoMatch.found, 0)?
+
+  // And that the positions are the ones the rows are named for, which is the
+  // other half: a walk that stopped early would answer a smaller number and
+  // still be a timing of something.
+  assertEqual(ascii8().indexOf(marker()).unwrapOr(-1), 8)?
+  assertEqual(ascii80().indexOf(marker()).unwrapOr(-1), 80)?
+  assertEqual(two80().indexOf(marker()).unwrapOr(-1), 80)?
+  assertEqual(three80().indexOf(marker()).unwrapOr(-1), 80)?
+  assertEqual(wide8().indexOf(marker()).unwrapOr(-1), 8)?
+  assertEqual(wide80().indexOf(marker()).unwrapOr(-1), 80)?
+  assertEqual(wide80().indexOf(atStart()).unwrapOr(-1), 0)?
+  assertEqual(wide80().indexOf(absent()).unwrapOr(-1), -1)?
+
+  println(
+    "bare loop                          {bareMicros * 1000 / rounds} ns/turn",
+  )?
+  println("")?
+  println("row            chars width at   indexOf   contains   walk")?
+  println("ascii8             8     1  8  {perCall(xAscii8.micros, bareMicros, rounds)} {perCall(cAscii8.micros, bareMicros, rounds)} {perCall(xAscii8.micros, cAscii8.micros, rounds)}")?
+  println("ascii80           80     1 80  {perCall(xAscii80.micros, bareMicros, rounds)} {perCall(cAscii80.micros, bareMicros, rounds)} {perCall(xAscii80.micros, cAscii80.micros, rounds)}")?
+  println("two80             80     2 80  {perCall(xTwo80.micros, bareMicros, rounds)} {perCall(cTwo80.micros, bareMicros, rounds)} {perCall(xTwo80.micros, cTwo80.micros, rounds)}")?
+  println("three80           80     3 80  {perCall(xThree80.micros, bareMicros, rounds)} {perCall(cThree80.micros, bareMicros, rounds)} {perCall(xThree80.micros, cThree80.micros, rounds)}")?
+  println("wide8              8     4  8  {perCall(xWide8.micros, bareMicros, rounds)} {perCall(cWide8.micros, bareMicros, rounds)} {perCall(xWide8.micros, cWide8.micros, rounds)}")?
+  println("wide80            80     4 80  {perCall(xWide80.micros, bareMicros, rounds)} {perCall(cWide80.micros, bareMicros, rounds)} {perCall(xWide80.micros, cWide80.micros, rounds)}")?
+  println("start             80     4  0  {perCall(xStart.micros, bareMicros, rounds)} {perCall(cStart.micros, bareMicros, rounds)} {perCall(xStart.micros, cStart.micros, rounds)}")?
+  println("noMatch           80     4  -  {perCall(xNoMatch.micros, bareMicros, rounds)} {perCall(cNoMatch.micros, bareMicros, rounds)} {perCall(xNoMatch.micros, cNoMatch.micros, rounds)}")?
+  println("asciiNoMatch      80     1  -  {perCall(xAsciiNoMatch.micros, bareMicros, rounds)} {perCall(cAsciiNoMatch.micros, bareMicros, rounds)} {perCall(xAsciiNoMatch.micros, cAsciiNoMatch.micros, rounds)}")?
+  Ok(())
+}

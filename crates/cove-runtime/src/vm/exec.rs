@@ -107,37 +107,6 @@ use runs::{word_runs, Growable, WordRun, GROWABLE_LEN, GROWABLE_STORE, MIN_GROWA
 /// moving this number moves a stated maximum and costs both.
 pub const SAFEPOINT_STRIDE: u64 = 1024;
 
-/// The most buffers [`Machine::scratch`] keeps.
-///
-/// The pool can only grow to the most buffers one operation holds *at once*,
-/// because every taker gives back before it returns: `String.indexOf` holds
-/// two operands, `split` and `replace` two or three, and `Inst::RunFind` holds
-/// two of its own — the needle it copies and the border table over it. Four is
-/// that, plus one. It is a belt to the braces of [`SCRATCH_BYTES`] rather than
-/// the bound that does the work — but it is what makes the bound a product of
-/// two numbers a reader can multiply rather than a claim about what the
-/// callers do.
-pub(crate) const SCRATCH_BUFFERS: usize = 4;
-
-/// The most capacity a buffer may have and still be kept.
-///
-/// Sized by measurement over every `String` operand the two representative
-/// programs read (#442, #446). `covefmt` reads 1,798 of them: longest 71
-/// bytes, median 1, p99 51. `cq` over `bookings-20k.jsonl` reads 80,160:
-/// longest 172 bytes, median 1, p99 170 — a quarter of them are whole JSONL
-/// records and the rest are field names and separators. Every read either
-/// program makes fits in 4 KiB with a factor of twenty-three to spare, so
-/// the cap never costs the common path a reallocation.
-///
-/// What it is for is the read that is *not* common: an operand the size of a
-/// file — a whole document through `String.split`, say — would otherwise
-/// leave its capacity in the pool for the rest of the run, and that is memory
-/// held outside the Cove heap, where `--stats`' heap peak cannot see it and
-/// no counter in this repository reports it. A buffer over this is dropped in
-/// [`Machine::give_scratch`] rather than shrunk, so the next such read
-/// allocates exactly as [`crate::vm::intrinsics::operand::text`] always did.
-pub(crate) const SCRATCH_BYTES: usize = 4096;
-
 /// One live call.
 ///
 /// The top of [`Machine::frames`] is the frame currently executing, not the
@@ -484,40 +453,17 @@ pub(crate) struct Machine<'a> {
     /// run, because a task id is a trace identity and two tasks spawned at
     /// the same time on two threads must not share one.
     next_task: u64,
-    /// Byte buffers an intrinsic borrows to read a `String` operand through,
-    /// returned when it is done with one.
-    ///
-    /// An operand's bytes are in the heap a payload word at a time, and an arm
-    /// that wants a `&str` has to have them contiguous somewhere. That used to
-    /// be a fresh `Vec` per operand per call — `String.indexOf` makes two —
-    /// and the allocation, not the byte movement, was about seventy per cent
-    /// of what the copy cost (#442). These are the same buffers reused, so a
-    /// steady-state run allocates none.
-    ///
-    /// They are not only an intrinsic's any more. ADR 0065's `Inst::RunFind`
-    /// takes two of them for its matcher — a copy of the needle and the border
-    /// table over it — for the same reason and out of the same pool, so a
-    /// search of a needle up to a kibibyte allocates nothing either.
-    ///
-    /// A `Cell` rather than a plain field for the reason
-    /// [`Machine::examined`]'s is: the arm holds the machine while it reads,
-    /// and the closure it hands the text to takes the machine by `&mut`. A
-    /// buffer *taken out* of the cell is owned by nobody for the length of the
-    /// call, so it borrows nothing and conflicts with nothing.
-    ///
-    /// A pool rather than one buffer because the calls nest: `contains`,
-    /// `split` and `replace` hold two or three operands at once. It sizes
-    /// itself — a take from an empty pool is a new buffer, which comes back
-    /// when the call ends.
-    ///
-    /// **It retains at most [`SCRATCH_BUFFERS`] buffers of at most
-    /// [`SCRATCH_BYTES`] bytes each: at most 4 × 4096 = 16,384 bytes.** A
-    /// buffer over either cap is dropped by [`Machine::give_scratch`], not
-    /// shrunk and not kept, so a run that reads one enormous operand does not
-    /// go on holding its capacity. That matters because this memory is
-    /// outside the Cove heap: nothing in `--stats` and no counter in this
-    /// repository would report it if it grew.
-    scratch: Cell<Vec<Vec<u8>>>,
+    // A `scratch` field stood here: a pool of byte buffers an intrinsic
+    // borrowed to read a `String` operand through, so that a steady-state run
+    // allocated none (#442, #446). Its one route in was
+    // `vm::intrinsics::operand::with_text`, whose one caller was
+    // `String.indexOf`, and ADR 0064 has moved that into `std.string`.
+    // ADR 0065's `Inst::RunFind` took two buffers from it once and does not
+    // any more — its matcher is `O(1)` in auxiliary space and reads both runs
+    // where they are. So the pool had no caller, and a mechanism with no
+    // caller cannot be measured: it is deleted rather than kept against a
+    // caller that might arrive. An arm that wants a `&str` calls
+    // `operand::text`, which allocates, as every arm left here already did.
     /// Instructions dispatched, exactly.
     ///
     /// This is an *observable*: `cove-bench` reports it, so does
@@ -555,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// fourteen of the 27 variants declare
+    /// thirteen of the 26 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -564,8 +510,9 @@ pub(crate) struct Machine<'a> {
     /// 383 times the wall clock. That was measured while `String.length` was
     /// still an intrinsic; ADR 0064's Phase 1 has since made it,
     /// `String.endsWith` and `String.startsWith` Cove loops and ADR 0065 has
-    /// made `String.contains` a Cove body over `Inst::RunFind`, which is why
-    /// the counts above are not the ADR's — they fall with every migration.
+    /// made `String.contains` and then `String.indexOf` Cove bodies over
+    /// `Inst::RunFind`, which is why the counts above are not the ADR's — they
+    /// fall with every migration.
     /// This is
     /// where an arm says what it walked so that `call_intrinsic` can charge
     /// it once, for every arm, in one place.
@@ -577,7 +524,7 @@ pub(crate) struct Machine<'a> {
     /// because the value they are walking is borrowed *out of the caller's
     /// frame* — see [`Operands`] — and that borrow lives for the whole walk.
     /// A counter those walks could add to therefore has to be writable
-    /// through a shared borrow, and threading a `&mut u64` through fourteen
+    /// through a shared borrow, and threading a `&mut u64` through thirteen
     /// recursive functions in three modules would be the same counter with
     /// the signature churn as well. Nothing here is shared between threads:
     /// a spawned task gets a machine of its own.
@@ -762,7 +709,7 @@ pub(crate) struct Machine<'a> {
     /// entry per wrapper rather than a map, because the shape of the miss is
     /// known — a loop calls one builtin with one result layout over and over,
     /// so the entry it wants is the one it left there.
-    cases: [Option<(LayoutId, u32)>; 4],
+    cases: [Option<(LayoutId, u32)>; 2],
     /// How many words a value of each layout occupies, by [`LayoutId`].
     ///
     /// [`Machine::width`] was `program.layout(id).width()` — an index into
@@ -850,15 +797,18 @@ pub(crate) struct Machine<'a> {
 
 /// Which of [`Machine::cases`] a wrapper memoises into.
 ///
-/// Four constants rather than a hash of the name: the callers are the four
+/// Two constants rather than a hash of the name: the callers are the two
 /// functions in [`crate::vm::intrinsics::make`] and nothing else, so the set is
 /// closed and naming it costs nothing at run time.
+///
+/// There were four. `Some` and `None` went with the last intrinsic that
+/// answered an `Option` — `String.indexOf`, which ADR 0064 moved into
+/// `std.string` over ADR 0065's run search — and an `Option` a Cove body
+/// builds is `Inst::MakeCase`, not a memoised case index.
 #[derive(Clone, Copy)]
 pub(crate) enum Wrapper {
-    Some = 0,
-    None = 1,
-    Ok = 2,
-    Err = 3,
+    Ok = 0,
+    Err = 1,
 }
 
 impl<'a> Machine<'a> {
@@ -919,7 +869,6 @@ impl<'a> Machine<'a> {
             reentry_depth: 0,
             task: ENTRY_TASK,
             next_task: 1,
-            scratch: Cell::new(Vec::new()),
             instructions: 0,
             charged_work: 0,
             bulk_work: 0,
@@ -938,7 +887,7 @@ impl<'a> Machine<'a> {
             encoded: encoded::prepare(program),
             #[cfg(debug_assertions)]
             answered: false,
-            cases: [None; 4],
+            cases: [None; 2],
             widths: program
                 .layouts
                 .iter()
@@ -1005,7 +954,6 @@ impl<'a> Machine<'a> {
             reentry_depth: 0,
             task,
             next_task: 1,
-            scratch: Cell::new(Vec::new()),
             instructions: 0,
             charged_work: 0,
             bulk_work: 0,
@@ -1024,7 +972,7 @@ impl<'a> Machine<'a> {
             encoded: Ok(encoded),
             #[cfg(debug_assertions)]
             answered: false,
-            cases: [None; 4],
+            cases: [None; 2],
             // The parent's, for the reason `encoded` is: a table derived from
             // a program the whole run shares is the same table in every task.
             widths,
@@ -2787,83 +2735,6 @@ impl<'a> Machine<'a> {
             Ordering::Equal => 0,
             Ordering::Greater => 1,
         }
-    }
-
-    /// A buffer out of [`Machine::scratch`], **empty**, to be given back with
-    /// [`Machine::give_scratch`].
-    ///
-    /// The clear is here rather than in each caller, and that is a correction
-    /// rather than a tidying: [`Machine::give_scratch`] keeps a buffer's
-    /// capacity *and* its length, so for as long as this only popped, the word
-    /// "empty" above was false and every caller had to know it. One did not —
-    /// `Inst::RunFind`'s matcher appends to its two buffers one entry at a
-    /// time, and against a primed pool it read a previous caller's bytes as
-    /// its needle and answered "not found" for a string that held one. The
-    /// contract is now true where it is written, and a caller that reads this
-    /// line may believe it.
-    ///
-    /// Clearing a `Vec<u8>` drops nothing and frees nothing: it is a store of
-    /// zero to the length, which is why making the contract true costs the
-    /// common path an instruction rather than a pass over the buffer.
-    #[inline]
-    pub(crate) fn take_scratch(&self) -> Vec<u8> {
-        let mut pool = self.scratch.take();
-        let mut buf = pool.pop().unwrap_or_default();
-        self.scratch.set(pool);
-        buf.clear();
-        buf
-    }
-
-    /// Gives `buf` back to [`Machine::scratch`] — unless keeping it would put
-    /// the pool over its bound, in which case `buf` is dropped here.
-    ///
-    /// Two caps, and a buffer failing either is *dropped* rather than shrunk:
-    /// shrinking is a reallocation, which is the cost this pool exists to
-    /// avoid, and a buffer that big is by measurement a once-per-run event
-    /// whose next occurrence can afford to allocate. Together they bound what
-    /// the pool holds at [`SCRATCH_BUFFERS`] × [`SCRATCH_BYTES`] = 16,384
-    /// bytes — see [`Machine::scratch_retained`], which adds up what is
-    /// actually there.
-    #[inline]
-    pub(crate) fn give_scratch(&self, buf: Vec<u8>) {
-        if buf.capacity() > SCRATCH_BYTES {
-            return;
-        }
-        let mut pool = self.scratch.take();
-        if pool.len() < SCRATCH_BUFFERS {
-            pool.push(buf);
-        }
-        self.scratch.set(pool);
-    }
-
-    /// The bytes [`Machine::scratch`] is holding on to, added up.
-    ///
-    /// The caps in [`Machine::give_scratch`] are a claim about a number no
-    /// counter in this repository reports, so this is the number: it is at
-    /// most [`SCRATCH_BUFFERS`] × [`SCRATCH_BYTES`], always, and a test holds
-    /// it to that after a read far larger than either cap. Kept off the hot
-    /// path deliberately — asserting the bound on every give would cost the
-    /// pool part of what it saves — so today only the tests call it, and a
-    /// boundary or stats report that one day wants to say how much memory a
-    /// run holds outside the heap can call it too.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn scratch_retained(&self) -> usize {
-        let pool = self.scratch.take();
-        let total = pool.iter().map(Vec::capacity).sum();
-        self.scratch.set(pool);
-        total
-    }
-
-    /// The bytes of the string object at `addr`, appended to `out`.
-    ///
-    /// [`Machine::string_bytes`]' bytes, for a caller that already has
-    /// somewhere to put them — see [`Machine::scratch`].
-    #[inline]
-    pub(crate) fn string_bytes_into(&self, addr: u64, out: &mut Vec<u8>) {
-        if addr == 0 {
-            return;
-        }
-        self.mem.string_bytes_into(addr, out);
     }
 
     /// The bytes of the string object at `addr`.
@@ -9489,44 +9360,42 @@ pub(crate) mod tests {
         assert_eq!(cell::holder(&machine.mem, addr), 0);
     }
 
-    /// **An intrinsic that cannot raise, answering an error, ends the run where
-    /// it happened.**
+    /// **An intrinsic that cannot raise, answering an error, ends the run
+    /// where it happened.**
     ///
-    /// `String.indexOf` declares no `MAY_RAISE` — searching a valid `String`
-    /// cannot fail — but its arm decodes the receiver, and a receiver whose bytes
-    /// are not valid UTF-8 is an `Err`. That is an invariant the language does not
-    /// define, so nothing is allowed to observe it as a program error: compiled
-    /// code omits the outcome test for exactly this call
-    /// (`cove_native::IntrinsicProtocol`), and an error that reached the native
-    /// bridge would be stashed and reported at whatever raised next. See
-    /// [`unraisable`], which is what this drives, in every profile rather than only
-    /// under `debug_assertions`.
+    /// [`unraisable`] is what a broken invariant of that shape reaches, in
+    /// every profile rather than only under `debug_assertions`: compiled code
+    /// omits the outcome test for a call whose variant declares no `MAY_RAISE`
+    /// (`cove_native::IntrinsicProtocol`), so an error that reached the native
+    /// bridge would be stashed and reported at whatever raised next — a
+    /// sentence from somewhere else attached to a fault somewhere else.
     ///
-    /// The receiver is built here rather than reached through a Cove program on
-    /// purpose: no checked program can produce one, which is the whole reason this
-    /// is a broken invariant and not a refusal.
+    /// **This case used to drive it end to end, through
+    /// [`Machine::call_intrinsic`], and it cannot any more.** Its subject was
+    /// `String.indexOf`: an intrinsic declaring no `MAY_RAISE` whose arm
+    /// nonetheless decoded its receiver, so a receiver whose bytes are not
+    /// UTF-8 — an object no checked program can build — made it answer an
+    /// `Err`. ADR 0064 moved that operation into `std.string`, and the five
+    /// variants that are left without `MAY_RAISE` are `Float.round`, `abs`,
+    /// `sqrt`, `min` and `max`, whose arms answer `()` and have no `Err` to
+    /// construct. There is no pair of a fallible arm and an infallible
+    /// declaration left to build a program out of, which is the state
+    /// `cove_ir::intrinsic`'s `raising_is_language_level` asserts from the
+    /// other side.
+    ///
+    /// So what is checked here is the panic itself — that it names the arm and
+    /// quotes the sentence, which is the pair that says which of the two is
+    /// wrong — and the wiring above it is a two-line `if` in
+    /// `call_intrinsic` read beside this. Reported rather than quietly
+    /// narrowed: a migration that gives some future intrinsic a fallible arm
+    /// again should put the end-to-end case back.
     #[test]
-    #[should_panic(expected = "`String.indexOf` answered a `RuntimeError`")]
+    #[should_panic(expected = "`Float.sqrt` answered a `RuntimeError`")]
     fn an_intrinsic_that_cannot_raise_must_not_answer_an_error() {
-        let mut build = Build::default();
-        let boolean = build.word("Bool", Repr::Bool);
-        let string = build.string_layout();
-        let args = build.args(&[(0, string), (1, string)]);
-        build.program.intrinsic_sites.push(cove_ir::IntrinsicSite {
-            intrinsic: cove_ir::Intrinsic::StringIndexOf,
-            result: boolean,
-        });
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 12);
-
-        // Two bytes, the first of which is a lone continuation byte: a `String`
-        // object no `Inst::RunFinish` would have answered.
-        let text = machine.new_string_of(2).expect("the heap has room");
-        machine.mem.set_payload(text, 0, 0xff);
-
-        let base = machine.push_test_frame(&[text, text, 0]);
-        machine.begin_intrinsic();
-        let _ = machine.call_intrinsic(base, 2, cove_ir::SiteId(0), args);
+        unraisable(
+            cove_ir::Intrinsic::FloatSqrt,
+            &RuntimeError::new("this string's bytes are not valid UTF-8"),
+        );
     }
 
     // --- ADR 0052: the safepoint schedule is work, not a multiple ----------
@@ -9791,187 +9660,12 @@ pub(crate) mod tests {
         assert!(checked > 2000, "{checked} pairs is not a corpus");
     }
 
-    // --- the scratch pool holds a bounded amount of memory ----------------
-
-    /// **A buffer at the capacity cap is kept and a buffer one byte over is
-    /// dropped.**
-    ///
-    /// The boundary in both directions, because a cap tested only from above
-    /// is satisfied by dropping everything — which would bound the memory and
-    /// cost the pool its whole purpose — and a cap tested only from below is
-    /// satisfied by keeping everything, which is the defect this fixes.
-    #[test]
-    fn the_scratch_cap_keeps_a_buffer_at_it_and_drops_one_over() {
-        let program = Build::default().bare();
-        let machine = Machine::new(&program, 1 << 12);
-
-        let at_the_cap: Vec<u8> = Vec::with_capacity(SCRATCH_BYTES);
-        assert_eq!(
-            at_the_cap.capacity(),
-            SCRATCH_BYTES,
-            "the allocator gave more than was asked for, so this is no longer \
-             the boundary case"
-        );
-        machine.give_scratch(at_the_cap);
-        assert_eq!(
-            machine.scratch_retained(),
-            SCRATCH_BYTES,
-            "a buffer exactly at the cap is under it and is kept"
-        );
-
-        let over: Vec<u8> = Vec::with_capacity(SCRATCH_BYTES + 1);
-        assert!(
-            over.capacity() > SCRATCH_BYTES,
-            "this buffer has to be over the cap for the case to mean anything"
-        );
-        machine.give_scratch(over);
-        assert_eq!(
-            machine.scratch_retained(),
-            SCRATCH_BYTES,
-            "the buffer over the cap was dropped, not kept and not shrunk into \
-             the pool"
-        );
-    }
-
-    /// **The pool never holds more than [`SCRATCH_BUFFERS`] buffers.**
-    ///
-    /// Five equal buffers go in and four buffers' worth of capacity stays,
-    /// which the sum alone can say because they are equal.
-    #[test]
-    fn the_scratch_pool_keeps_no_more_buffers_than_its_depth() {
-        let program = Build::default().bare();
-        let machine = Machine::new(&program, 1 << 12);
-
-        let each = 64;
-        for _ in 0..SCRATCH_BUFFERS + 1 {
-            let mut buf = Vec::with_capacity(each);
-            assert_eq!(buf.capacity(), each);
-            buf.push(1);
-            machine.give_scratch(buf);
-        }
-        assert_eq!(
-            machine.scratch_retained(),
-            SCRATCH_BUFFERS * each,
-            "the pool kept {SCRATCH_BUFFERS} of the {} it was given",
-            SCRATCH_BUFFERS + 1
-        );
-    }
-
-    /// **Reading an operand far larger than the cap leaves the pool under the
-    /// bound, and reads the right bytes on the way.**
-    ///
-    /// This is the defect the caps exist for, at the size it appears at: a
-    /// whole file through one operand. The two claims are one test on purpose
-    /// — a pool that bounded itself by truncating the read would satisfy the
-    /// first and be a silent wrong answer, so the bytes are compared against
-    /// [`Machine::string_bytes`], which allocates its own `Vec` and shares no
-    /// code with the pool.
-    #[test]
-    fn a_huge_operand_read_leaves_nothing_behind() {
-        let program = Build::default().bare();
-        let mut machine = Machine::new(&program, 1 << 16);
-
-        let huge: Vec<u8> = (0..SCRATCH_BYTES * 16).map(|at| (at % 251) as u8).collect();
-        let addr = string_of(&mut machine, &huge);
-
-        // What `operand::with_text` does, in the two calls it is made of.
-        let mut buf = machine.take_scratch();
-        machine.string_bytes_into(addr, &mut buf);
-        assert_eq!(buf, huge, "the pooled read is the bytes that are there");
-        assert_eq!(
-            buf,
-            machine.string_bytes(addr),
-            "and the same bytes the allocating read answers"
-        );
-        assert!(
-            buf.capacity() > SCRATCH_BYTES,
-            "the buffer really did grow past the cap"
-        );
-        machine.give_scratch(buf);
-
-        assert_eq!(
-            machine.scratch_retained(),
-            0,
-            "the buffer that held a whole file is gone, not retained"
-        );
-        assert!(
-            machine.scratch_retained() <= SCRATCH_BUFFERS * SCRATCH_BYTES,
-            "and the pool is inside the bound its documentation states"
-        );
-    }
-
-    /// **Three nested reads take three distinct buffers, and a second round
-    /// takes the same three back — no allocation.**
-    ///
-    /// `String.indexOf` holds two operands at once, `replace` three and
-    /// `Inst::RunFind` two of its own, so the pool has to answer distinct
-    /// buffers while a call is in flight and still be reusing them on the next
-    /// call. The oracle is the address each
-    /// buffer's allocation is at: two buffers at one address would be one
-    /// buffer, and a second round at new addresses would be a fresh
-    /// allocation however small the pool looked.
-    ///
-    /// Addresses alone are not that oracle, which is worth saying because the
-    /// first version of this test was written as if they were and **passed
-    /// against a pool that dropped every buffer**: the allocator handed the
-    /// blocks straight back, so three fresh `Vec`s landed exactly where the
-    /// three freed ones had been. The decoys below are what close that. They
-    /// are allocated *between* the rounds, at the size the pool deals in, so
-    /// if the first round's buffers had been freed the decoys would now be
-    /// sitting in them and the second round could not answer the same
-    /// addresses. The retained total is checked beside them, so the test
-    /// still bites if some allocator one day declines the decoys' bait.
-    #[test]
-    fn nested_reads_take_distinct_buffers_and_the_next_round_reuses_them() {
-        let program = Build::default().bare();
-        let machine = Machine::new(&program, 1 << 12);
-
-        let held = 40;
-        let addresses = |machine: &Machine<'_>| {
-            let mut held: Vec<Vec<u8>> = (0..3)
-                .map(|at| {
-                    let mut buf = machine.take_scratch();
-                    // Non-empty, or `as_ptr` is a dangling alignment rather
-                    // than an allocation and every buffer shares it.
-                    buf.extend_from_slice(&vec![at as u8; held]);
-                    buf
-                })
-                .collect();
-            let mut at: Vec<usize> = held.iter().map(|buf| buf.as_ptr() as usize).collect();
-            for buf in held.drain(..) {
-                machine.give_scratch(buf);
-            }
-            at.sort_unstable();
-            at
-        };
-
-        let first = addresses(&machine);
-        assert_eq!(
-            first.iter().collect::<std::collections::HashSet<_>>().len(),
-            3,
-            "three buffers held at once are three buffers"
-        );
-        assert!(
-            machine.scratch_retained() >= 3 * held,
-            "three buffers of {held} bytes came back and are being kept"
-        );
-
-        let decoys: Vec<Vec<u8>> = (0..3).map(|_| vec![0u8; held]).collect();
-        let second = addresses(&machine);
-        assert_eq!(
-            decoys.len(),
-            3,
-            "the decoys are alive across the second round or they bait nothing"
-        );
-        assert_eq!(
-            second, first,
-            "the second round is the same three allocations, so it allocated \
-             nothing"
-        );
-        assert!(
-            machine.scratch_retained() >= 3 * held,
-            "and they are still in the pool afterwards"
-        );
-        assert!(machine.scratch_retained() <= SCRATCH_BUFFERS * SCRATCH_BYTES);
-    }
+    // A section here held the scratch pool to its bound: a buffer at the
+    // capacity cap kept and one byte over dropped, five buffers going in and
+    // four staying, a read far larger than either cap leaving the pool inside
+    // it, and three nested reads taking three distinct buffers that a second
+    // round took back without allocating. The pool is gone — ADR 0064's
+    // `String.indexOf` migration took `operand::with_text`'s last caller, and
+    // with it the last caller of `Machine::take_scratch` — so what those cases
+    // watched is not there to watch. See `vm::intrinsics::text`'s note.
 }

@@ -35,9 +35,9 @@
 //! and the doc comment says so rather than rooting it twice.
 
 use cove_ir::{Layout, LayoutId, Program, Shape};
-use cove_schema::builtins::{
-    ERROR, ERR_CASE, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT, SOME_CASE,
-};
+use cove_schema::builtins::{ERROR, ERR_CASE, MESSAGE_FIELD, OK_CASE, RESULT};
+#[cfg(test)]
+use cove_schema::builtins::{NONE_CASE, OPTION, SOME_CASE};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::{Machine, Wrapper};
@@ -185,15 +185,45 @@ fn case_words(
 }
 
 /// `None`, in the `Option` the destination was declared to hold.
+///
+/// **A test helper, not a builder any intrinsic reaches.** It and [`some`]
+/// below built the answer of `String.indexOf`, and ADR 0064 has moved that
+/// into `std.string`: an `Option` a Cove body builds is the lowering's own
+/// case construction over a layout it chose, and no intrinsic answers an
+/// `Option` any more — [`cove_ir::Intrinsic::signature`] names none. What
+/// still wants them is `equal` and `key`, whose cases compare `Option` values
+/// and have to make one somehow, and this file's own case about which family
+/// a payload picks.
+///
+/// So the case index is looked up rather than memoised through
+/// [`Wrapper`](crate::vm::exec::Wrapper): the memo has one slot per wrapper a
+/// *run* builds, and a run builds neither of these.
+#[cfg(test)]
 pub(super) fn none(machine: &mut Machine, dest: Dest) -> Result<(), RuntimeError> {
-    let case = machine.case_index(dest.layout(), Wrapper::None, OPTION.name, NONE_CASE.name)?;
+    let case = found(machine, dest, OPTION.name, NONE_CASE.name)?;
     case_words(machine, dest, case, &[])
 }
 
-/// `Some(words)`, in the `Option` the destination was declared to hold.
+/// `Some(words)`, in the `Option` the destination was declared to hold. See
+/// [`none`]: a test helper.
+#[cfg(test)]
 pub(super) fn some(machine: &mut Machine, dest: Dest, words: &[u64]) -> Result<(), RuntimeError> {
-    let case = machine.case_index(dest.layout(), Wrapper::Some, OPTION.name, SOME_CASE.name)?;
+    let case = found(machine, dest, OPTION.name, SOME_CASE.name)?;
     case_words(machine, dest, case, &[words])
+}
+
+/// The index of `case` in the enum `dest` holds, searched for rather than
+/// remembered — [`Machine::case_index`](crate::vm::exec::Machine::case_index)
+/// without the memo, for the two builders above that no run reaches.
+#[cfg(test)]
+fn found(machine: &Machine, dest: Dest, family: &str, case: &str) -> Result<u32, RuntimeError> {
+    machine
+        .program()
+        .layouts
+        .get(dest.layout().index())
+        .filter(|held| matches!(held.shape, Shape::Enum { .. }))
+        .and_then(|held| held.case(case))
+        .ok_or_else(|| operand::unknown_family(family))
 }
 
 /// `Ok(words)`, in the `Result` the destination was declared to hold.

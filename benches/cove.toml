@@ -187,6 +187,20 @@ allow = ["console", "clock"]
 entry = "contains.main"
 allow = ["console", "clock"]
 
+# What turning a byte offset into a character position costs — ADR 0064's
+# fifth Phase 1 migration, `String.indexOf`. The search under it is
+# `benches/contains`' subject and is measured there; what this package adds is
+# the walk of the text in front of what the search found. Every row is run
+# twice over the same receiver and needle, once as `indexOf` and once as
+# `contains`, which make the same `Inst::RunFind` and differ only in the walk
+# and the `Option` around its answer — so the conversion is a difference of
+# two columns rather than a column, which is the only way to read it apart
+# from the search.
+
+[run.indexof]
+entry = "indexof.main"
+allow = ["console", "clock"]
+
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
 # #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,

@@ -1481,31 +1481,22 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Str(text.trim().into())))
             }
-            // `contains`, `startsWith` and `endsWith` used to answer here,
-            // one `text.contains(needle)`, one `text.starts_with(prefix)` and
-            // one `text.ends_with(suffix)`. None of the three reaches this arm
-            // any more: `Interpreter::eval_method_call` resolves each to a
-            // call into `std.string` before this function is ever asked about
-            // it. The two comparisons are Cove loops over bytes (ADR 0064) —
-            // the suffix one needs UTF-8's self-synchronization to justify the
-            // offset it starts at, the prefix one starts at 0 and needs
-            // nothing. The search is a Cove body over `core.stringFind`
-            // (ADR 0065), which is `crate::find` above: a bounded run search
-            // rather than a loop, because its work is proportional to a
-            // haystack the caller did not size.
-            "indexOf" => {
-                let args = expect_args("String.indexOf", args, 1, span)?;
-                let needle = expect_str("String.indexOf", "text", &args[0], span)?;
-                Ok(match text.find(needle) {
-                    // `find` answers a byte offset; the characters before it
-                    // are counted to convert that into the character index
-                    // `length()` already counts in.
-                    Some(byte_index) => {
-                        Value::some(Value(Repr::Int(text[..byte_index].chars().count() as i64)))
-                    }
-                    None => Value::none(),
-                })
-            }
+            // `contains`, `indexOf`, `startsWith` and `endsWith` used to
+            // answer here — one `text.contains(needle)`, one `text.find(needle)`
+            // with `chars().count()` over the prefix, one
+            // `text.starts_with(prefix)` and one `text.ends_with(suffix)`. None
+            // of the four reaches this arm any more:
+            // `Interpreter::eval_method_call` resolves each to a call into
+            // `std.string` before this function is ever asked about it. The two
+            // comparisons are Cove loops over bytes (ADR 0064) — the suffix one
+            // needs UTF-8's self-synchronization to justify the offset it starts
+            // at, the prefix one starts at 0 and needs nothing. The two searches
+            // are Cove bodies over `core.stringFind` (ADR 0065), which is
+            // `crate::find` above: a bounded run search rather than a loop,
+            // because their work is proportional to a haystack the caller did
+            // not size. `indexOf` then walks the prefix's lead bytes to turn
+            // the byte offset that search answers into a character position —
+            // the half of the old arm that was never a search at all.
             "replace" => {
                 let args = expect_args("String.replace", args, 2, span)?;
                 let old = expect_str("String.replace", "old", &args[0], span)?;

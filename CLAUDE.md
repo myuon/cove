@@ -107,11 +107,40 @@ The last one is not a repetition: the test that asserts the two arms answer
 identically on the same IR compiles only when both features are on, so a pass
 over each arm alone never runs it.
 
-CI runs exactly those, in one step, for the same reason it runs the other
-five: a run there and a run here are the same run. Cranelift is about twenty
+CI runs those seven in one step, for the same reason it runs the other five:
+a run there and a run here are the same run. Cranelift is about twenty
 seconds of compilation the first time and nothing after, so this is cheap to
 run and cheap to forget — and forgetting it is a green gate over an untested
 code generator.
+
+**Those seven are not the whole of the native gate.** `.github/workflows/ci.yml`
+has a *second* native step, and it is the one that drives the tier through the
+runtime:
+
+```console
+$ for f in cranelift template cranelift,template; do
+    cargo clippy -p cove-runtime -p cove-cli -p cove-bench --all-targets \
+      --features "$f" --profile checked -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc -p cove-runtime -p cove-cli --no-deps \
+      --features "$f" --profile checked
+    cargo test -p cove-runtime -p cove-cli --features "$f" --profile checked
+  done
+```
+
+It catches what `-p cove-native` structurally cannot. That crate's suites
+compile the code generators; the cases that *enter* one from the VM live in
+`cove-runtime`, and `crates/cove-runtime/tests/native_tier.rs` is
+`#![cfg(feature = "template")]` — so a default build compiles it to a binary
+with **no tests in it**. `cargo t`, `cargo test --workspace` and all seven
+commands above report it green without running a case; only this step runs one.
+
+This has already been got wrong once, and the shape is what to remember rather
+than the file: a change re-pointed one of that file's fixtures at a new
+operation, every command above passed, and the pull request was red on a loop
+the tier had refused. The subset the tier compiles is much narrower than Cove —
+`crates/cove-native/src/subset.rs` is the whole list, and it admits no float
+constant, comparison or arithmetic — so a fixture is compiled only if someone
+ran the step that compiles it.
 
 ### The five commands are not the whole job
 

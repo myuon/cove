@@ -1195,9 +1195,10 @@ pub(super) fn run_slice_bytes(
 /// space is `O(1)` — seven words of state — so there is no table to hold and
 /// no copy of either run to make, and both are read where they are through a
 /// one-word cache. An earlier version of this instruction used a
-/// Knuth–Morris–Pratt table out of [`Machine::take_scratch`]; see
-/// [`find_in_runs`] for why a table is worse than it looks even when the pool
-/// keeps it.
+/// Knuth–Morris–Pratt table out of a pool of buffers the machine kept; see
+/// [`find_in_runs`] for why a table is worse than it looks even when a pool
+/// keeps it. That pool is gone too — ADR 0064's `String.indexOf` migration
+/// took its last caller — so a table would now be a plain allocation.
 ///
 /// A poll may collect. The collector does not move objects, so the two
 /// addresses read out of the frame stay the addresses of these runs, and both
@@ -3804,7 +3805,6 @@ mod tests {
 
     use super::super::runs::MIN_GROWABLE_BYTES;
     use super::super::tests::{budget, run_words, Build};
-    use super::super::{SCRATCH_BUFFERS, SCRATCH_BYTES};
     use super::*;
 
     /// Every opcode ADR 0041 defines has an implementation.
@@ -4850,35 +4850,12 @@ mod tests {
         }
     }
 
-    /// And nothing is left in the scratch pool either, because nothing was
-    /// taken from it: the search is not one of its callers any more.
-    #[test]
-    fn a_run_find_takes_no_scratch_buffer() {
-        let (program, entry) = find_fixture();
-        let mut machine = Machine::new(&program, 1 << 18);
-        let haystack = run_of(&mut machine, b"a haystack with a needle in it");
-        let needle = run_of(&mut machine, b"needle");
-
-        let primed = 1024;
-        for _ in 0..2 {
-            machine.give_scratch(Vec::with_capacity(primed));
-        }
-        assert_eq!(machine.scratch_retained(), 2 * primed);
-        for _ in 0..3 {
-            assert_eq!(
-                machine
-                    .run(entry, &[haystack, needle, 0], &budget())
-                    .expect("a search answers")[0] as i64,
-                18
-            );
-            assert_eq!(
-                machine.scratch_retained(),
-                2 * primed,
-                "the pool is exactly as the search found it"
-            );
-        }
-        assert!(machine.scratch_retained() <= SCRATCH_BUFFERS * SCRATCH_BYTES);
-    }
+    // A case beside it watched the scratch pool across a search and found it
+    // exactly as the search had left it, because the search is not one of its
+    // callers. There is no pool to watch any more: ADR 0064's `String.indexOf`
+    // migration took `operand::with_text`'s last caller and the pool went with
+    // it. What this instruction allocates is still observed, by the case
+    // above, and by the allocator rather than by a counter.
 
     // --- ADR 0052: bulk work is bounded work -------------------------------
 
