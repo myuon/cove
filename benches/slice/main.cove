@@ -1,0 +1,185 @@
+use console.println
+use clock.now
+
+/// What `String.slice` costs, at the receiver lengths and character widths
+/// that separate one implementation of it from another.
+///
+/// ADR 0064 moved it out of the runtime and into `std.string.slice`: two
+/// comparisons that clamp each **character position** into `0..length()`, one
+/// left-to-right walk of the lead bytes that turns the two positions into the
+/// two byte offsets underneath them, and `core.stringSlice` — the byte
+/// `Inst::RunSlice` `sliceBytes` already stands on — between those offsets.
+/// A migration's own cost is what Decision 8 asks a pull request to record,
+/// and for this one no whole-program figure can supply it at all: the census
+/// measured `String.slice` at **0 static sites and 0 dynamic calls on both**
+/// representative programs, and both are unchanged to the instruction by the
+/// migration. These rows are the operation on its own, and they are the only
+/// measurement it has.
+///
+/// # The receiver's length is the row, because that is where the two
+/// implementations disagree about what the work is
+///
+/// The Rust arm collected the **whole receiver** into a `Vec<char>` and then
+/// collected two of them back out, so taking five characters off the front of
+/// a long string cost the long string. The Cove body walks lead bytes as far
+/// as `to` and no further. So the matrix is receiver length against where in
+/// the receiver the slice is taken from, and the pair that says it is
+/// `long.head` against `short.head`: the same five-character answer, off a
+/// receiver five times as long.
+///
+/// - **short.head** is the ordinary call, five characters out of sixteen;
+/// - **long.head** is the same five characters out of eighty-eight, which is
+///   the row that says whether the cost grows with the receiver;
+/// - **long.tail** is five characters at the far end of the same receiver,
+///   which is what the walk *does* pay for and the `Vec<char>` did not
+///   distinguish;
+/// - **wide.head** and **wide.tail** are the same two on a receiver whose
+///   characters are two, three and four bytes — forty characters in a hundred
+///   and ten bytes — where a character position and a byte offset are
+///   furthest apart;
+/// - **clamp** is both bounds outside the string — `-4` and `Int`'s largest —
+///   which is a whole-string answer reached without either comparison being
+///   a legal position, and is the only row whose answer is the receiver;
+/// - **empty** is `slice(3, 3)`, whose answer is `""`: a zero-length
+///   allocation and no walk past the third character, and the floor every
+///   other row is measured against.
+///
+/// **Expect the allocation to dominate.** Every row allocates a `String`,
+/// including the empty one — a run slice of no bytes is still an object — and
+/// the whole bench is 700,038 allocations whichever build runs it. The last
+/// `Result`-answering measurement in this repository
+/// found a mediated intrinsic costing ~64 ns with ~30 ns of that on the
+/// writing side. A walk of five characters is five loads and five adds. So
+/// what these rows separate is not "how fast is the loop" but "did the loop
+/// replace a proportional cost with a bounded one", which is `long.head`
+/// against `short.head` and nothing else on the page.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is therefore a call to
+/// [`countSlice`], whose body is the loop, and `main` does nothing in a turn
+/// but read a clock either side of it. `benches/startswith` records why that
+/// is only true while the callee is too big to be inlined into [`row`], which
+/// the native tier refuses for the `now()` at its start — so it is **checked
+/// rather than assumed**: `--backend native --boundary` names the compiled
+/// and the refused, and the only two refused are [`row`] and `main` — `row`
+/// for the `now()` at its start and `main` for its own, with the eight
+/// `assertEqual`s below it blocking it a second time. [`countSlice`] is
+/// compiled, and so are the standard-library bodies under it: 3 of 5
+/// reachable functions, where the build that had the intrinsic compiled 1 of
+/// 3 and left one `IntrinsicCall` site in the emitted IR that this one has
+/// none of.
+///
+/// [`countBare`] is the control, the same loop with the call taken out, so
+/// that what each row reports is the call rather than the turn.
+///
+/// [`turns`] is 100,000 rather than the 2,000,000 `benches/arith` uses,
+/// because every turn of seven of these rows allocates a `String` and
+/// `crates/cove-cli/tests/vm_coverage.rs` runs every program in this
+/// repository on the tree-walking interpreter as well as on the linear-memory
+/// backend.
+fn turns() -> Int {
+  100000
+}
+
+/// Sixteen ASCII characters, sixteen bytes.
+fn shortText() -> String {
+  "crates/main.cove"
+}
+
+/// Eighty-eight ASCII characters, eighty-eight bytes.
+fn longText() -> String {
+  "crates/cove-runtime/src/vm/intrinsics/text/deeply/nested/directory/tree/module/main.cove"
+}
+
+/// Forty characters and a hundred and ten bytes: `é` is two, `→` three, `😀`
+/// four, and the group of four repeats ten times.
+fn wideText() -> String {
+  "éé→😀éé→😀éé→😀éé→😀éé→😀éé→😀éé→😀éé→😀éé→😀éé→😀"
+}
+
+/// `rounds` slices and nothing else the loop can be about.
+///
+/// The answer's byte length is summed so that nothing can be folded away and
+/// so that a row which stopped slicing would report a different number rather
+/// than a different time.
+///
+/// No host call in the body, so that the native tier compiles it and the rows
+/// price `slice` on the tier that runs it.
+fn countSlice(text: String, from: Int, to: Int, rounds: Int) -> Int {
+  var bytes = 0
+  var i = 0
+  while i < rounds {
+    bytes = bytes + text.slice(from, to).byteLength()
+    i = i + 1
+  }
+  bytes
+}
+
+/// [`countSlice`]'s loop with the call taken out.
+fn countBare(rounds: Int) -> Int {
+  var bytes = 0
+  var i = 0
+  while i < rounds {
+    bytes = bytes + 1
+    i = i + 1
+  }
+  bytes
+}
+
+/// How long `rounds` turns of [`countSlice`] took, in microseconds, and how
+/// many bytes they answered in all.
+struct Row {
+  micros: Int
+  bytes: Int
+}
+
+fn row(text: String, from: Int, to: Int, rounds: Int) -> Row {
+  let startedAt = now()
+  let bytes = countSlice(text, from, to, rounds)
+  Row(micros: (now() - startedAt).micros(), bytes: bytes)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let shortHead = row(shortText(), 0, 5, rounds)
+  let longHead = row(longText(), 0, 5, rounds)
+  let longTail = row(longText(), 83, 88, rounds)
+  let wideHead = row(wideText(), 0, 5, rounds)
+  let wideTail = row(wideText(), 35, 40, rounds)
+  let clamped = row(longText(), -4, 9223372036854775807, rounds)
+  let emptied = row(longText(), 3, 3, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped slicing would still report a number, and the number
+  // would be of something else.
+  assertEqual(bare, rounds)?
+  assertEqual(shortHead.bytes, rounds * 5)?
+  assertEqual(longHead.bytes, rounds * 5)?
+  assertEqual(longTail.bytes, rounds * 5)?
+  // Five characters off the front of `wideText` is `éé→😀é`, thirteen bytes;
+  // the last five are `😀éé→😀`, fifteen. Neither number is five and neither
+  // is a multiple of anything, which is the point of the row.
+  assertEqual(wideHead.bytes, rounds * 13)?
+  assertEqual(wideTail.bytes, rounds * 15)?
+  assertEqual(clamped.bytes, rounds * 88)?
+  assertEqual(emptied.bytes, 0)?
+
+  println(
+    "bare loop                 {bareMicros * 1000 / rounds} ns/turn ({bare})",
+  )?
+  println("short.head  (16 B, 5 ch)  {(shortHead.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long.head   (88 B, 5 ch)  {(longHead.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long.tail   (88 B, 5 ch)  {(longTail.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("wide.head   (110 B, 5 ch)   {(wideHead.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("wide.tail   (110 B, 5 ch)   {(wideTail.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("clamp       (88 B, all)   {(clamped.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("empty       (88 B, 0 ch)  {(emptied.micros - bareMicros) * 1000 / rounds} ns/call")?
+  Ok(())
+}

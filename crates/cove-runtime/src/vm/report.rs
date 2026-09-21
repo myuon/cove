@@ -434,7 +434,7 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Thirteen of the 21 variants can be non-zero here, which is exactly the
+    /// Twelve of the 20 variants can be non-zero here, which is exactly the
     /// set that declares `Effects::BULK_WORK`; the other eight examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
@@ -448,11 +448,19 @@ pub struct IntrinsicCalls {
     /// fell to ten. Issue #454's Step 2 took `Float.round` and then
     /// `Float.sqrt`, neither of which examines anything either, so the
     /// carriers stayed at thirteen for the third and fourth times running and
-    /// the rest fell to nine and then eight. **Thirteen of twenty-one is the
-    /// highest that fraction has been**, and it is going one way: every
-    /// migration so far has taken an operation that examines nothing, because
-    /// those are the ones a typed scalar instruction can replace. Both are
-    /// measured off `Intrinsic::effects` rather than counted by hand.
+    /// the rest fell to nine and then eight — thirteen of twenty-one, the
+    /// highest that fraction ever got.
+    ///
+    /// **Step 3's `String.slice` is the first migration to take a carrier**,
+    /// and it reverses the direction the paragraph above was describing: the
+    /// carriers fall to twelve and the rest stay at eight. Every migration
+    /// before it took an operation that examines nothing, because those are
+    /// the ones a typed scalar instruction can replace; `slice` walked its
+    /// whole receiver and is a Cove loop now, where the walk is charged an
+    /// instruction at a time by the mechanism that charges every instruction.
+    /// That is the same exchange ADR 0064 made for `String.length`, and it is
+    /// what the remaining twelve are queued up for. Both numbers are measured
+    /// off `Intrinsic::effects` rather than counted by hand.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,

@@ -132,14 +132,23 @@ export fn firstByte(s: String, at: Int) -> Int {
   s.byteAt(held(at))
 }
 
-/// The allocation a collection is forced with. It runs on the VM in every case —
-/// `String.slice` is outside anything a native tier lowers — which is what makes
-/// it a native-to-VM call besides.
+/// The allocation a collection is forced with. It runs on the VM in every case,
+/// which is what makes it a native-to-VM call besides.
+///
+/// **What keeps it on the VM is the tier each case installs, and not the
+/// subset.** Every case below hands `hand(lowered, &[...])` an explicit list of
+/// the functions it compiles, and this one is in none of them. That was worth
+/// saying once ADR 0064 moved `String.slice` into `std.string` over the byte
+/// run slice the tier does lower: `benches/slice` compiles the Cove body and
+/// its walk, so a comment claiming the subset refuses this fixture would have
+/// been false from the day of that migration while every assertion here went on
+/// passing. The one fact these cases need is that `allocates` is not in the
+/// list, and it is a fact about the list.
 ///
 /// It was `sliceBytes` until ADR 0058 moved that into the standard library over
-/// a byte run slice, which the native tier lowers. `slice` counts characters
-/// rather than bytes, and every character of the text it is handed is ASCII, so
-/// the answer is the same number.
+/// a byte run slice. `slice` counts characters rather than bytes, and every
+/// character of the text it is handed is ASCII, so the answer is the same
+/// number.
 export fn allocates(s: String, n: Int) -> Int {
   s.slice(held(0), n).byteLength()
 }
@@ -1688,8 +1697,9 @@ fn a_collection_during_a_direct_chain_keeps_every_reference() {
 /// comes back through all of it.
 ///
 /// `refThroughCollection` is entered directly, calls `echoes` directly, and calls
-/// `allocates` — which the subset refuses, because it reaches `String.slice`
-/// — so that call is the mediated helper and the encoded dispatch loop. Both
+/// `allocates` — which this case's tier does not compile, because its list does
+/// not name it — so that call is the mediated helper and the encoded dispatch
+/// loop. Both
 /// callees answer into destinations in frames the direct path opened.
 ///
 /// The fourth hop — **encoded back into native** — is not in *this* chain, and
@@ -1792,8 +1802,7 @@ fn a_vm_caller_enters_a_compiled_callee() {
 ///
 /// `refThroughCollection` calls `echoes`, `allocates` and `firstByte`. The tier
 /// below compiles `echoes` and `held` and leaves the other two to the VM —
-/// `allocates` reaches `String.sliceBytes`, which nothing native lowers, and
-/// `firstByte` is an `Inst::RunLoad` this file's tier does not walk. So each of the
+/// neither is named in the list `hand` is given. So each of the
 /// four hops is taken by a named call and the counters can be read one by one.
 #[test]
 fn all_four_transitions_are_taken_and_counted() {
@@ -2185,7 +2194,7 @@ fn a_vm_destination_survives_a_reallocation_under_a_native_chain() {
 /// this issue added. The caller is a dispatch-loop frame holding a `String` in a
 /// `Repr::Ref` slot; the callee is compiled and holds the same reference in a slot
 /// of its own; and the allocation inside `allocates` — which runs on the VM,
-/// because `String.sliceBytes` is outside anything native lowers — is what
+/// because this case's tier does not name it — is what
 /// collects while both are live. If either frame's reference were anywhere but the
 /// slot `Function::refs` names, the string would be swept and the byte read would
 /// answer something else.

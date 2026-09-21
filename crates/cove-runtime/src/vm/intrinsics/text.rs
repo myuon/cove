@@ -12,9 +12,15 @@
 //!   moved it to `std.string.length`: a Cove loop that reads each lead byte
 //!   and advances by the width that byte declares. It still agrees with
 //!   `chars()` below, for the same reason it always did.
-//! - **`slice(from, to)` is in character positions.** So is what `indexOf`
-//!   answers, and `indexOf` is no longer here: the byte offset a search finds
-//!   is converted to a character position in `std.string.indexOf`, by walking
+//! - **`slice(from, to)` is not here either, and it was the hardest of the
+//!   three to give up**: its positions are **characters** and the substrate
+//!   is bytes, so it decoded the whole receiver into a `Vec<char>` to take
+//!   two of them. ADR 0064 moved it to `std.string.slice`, where the two
+//!   positions are clamped and then walked into byte offsets by the same
+//!   lead-byte step `length` uses, and the copy beneath is the byte run slice
+//!   `sliceBytes` already stood on. What `indexOf` answers is in characters
+//!   for the same reason and left the same way — the byte offset a search
+//!   finds becomes a character position in `std.string.indexOf`, by walking
 //!   the lead bytes in front of it.
 //! - **`split` and `replace` match bytes**, which for UTF-8 is the same set
 //!   of matches as matching characters and is what Rust's own `str` does.
@@ -40,7 +46,7 @@
 //!
 //! # Every operation here says what it examined, in bytes
 //!
-//! Eight of the operations below walk the whole receiver and one builds its
+//! Seven of the operations below walk the whole receiver and one builds its
 //! answer out of parts, and until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7 every one of them cost the run **one** unit of work — the one
@@ -60,10 +66,15 @@
 //! What is charged is **what was examined**, not what was handed back, and
 //! the two part company in both directions:
 //!
-//! - the eight that walk the receiver — `words`, `chars`, `split`, `slice`,
-//!   `trim`, `replace`, `toUpper`, `toLower` — charge the receiver's own byte
-//!   length, because [`operand::text`] has already decoded the whole of it
-//!   before any of them looks at a single character;
+//! - the seven that walk the receiver — `words`, `chars`, `split`, `trim`,
+//!   `replace`, `toUpper`, `toLower` — charge the receiver's own byte length,
+//!   because [`operand::text`] has already decoded the whole of it before any
+//!   of them looks at a single character. `slice` was an eighth and charged
+//!   the same way — the receiver's bytes and not the answer's, because a
+//!   two-character slice of a megabyte read the megabyte. In `std.string` it
+//!   charges what it *walks*, an instruction a character as far as `to` and
+//!   not one byte further, which is the same trade ADR 0065 made for the
+//!   searches;
 //! - a bullet here used to say that `startsWith` and `endsWith` compare at
 //!   most the needle, so they charge the needle's length capped at the
 //!   receiver's. Neither is an intrinsic any more: ADR 0064 made both of them
@@ -230,34 +241,19 @@ fn elements_of(machine: &Machine, addr: u64) -> Option<(LayoutId, u32)> {
     }
 }
 
-/// `String.slice(from, to) -> String`, in character positions.
-pub(super) fn slice(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    // The **receiver's** bytes rather than the answer's, because that is what
-    // this arm examines: `from` and `to` are character positions, so the line
-    // below collects every character of the receiver before it can take a
-    // range of them. A slice of two characters out of a megabyte reads the
-    // megabyte, and charging the answer's own length would say it did not.
-    machine.examined(text.len() as u64);
-    let from = operand::int(machine, frame, 1);
-    let to = operand::int(machine, frame, 2);
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len() as i64;
-    let from = from.clamp(0, len) as usize;
-    let to = to.clamp(0, len) as usize;
-    let sliced = if to <= from {
-        String::new()
-    } else {
-        chars[from..to].iter().collect()
-    };
-    let word = machine.new_string(&sliced)?;
-    dest.word(machine, word);
-    Ok(())
-}
+// **`slice` is not here any more.** It was `chars().collect()`, two
+// `i64::clamp`s and a re-collection — the whole receiver decoded into a
+// `Vec<char>` so that two of them could be taken — and ADR 0064's Decision 2
+// refuses it twice over: `slice` is a method's name that would have to be
+// renamed the day the method was, and a clamp is a range policy, which ADR
+// 0058's table gives to Cove and keeps the bounded copy below. It is
+// `std.string.slice` now: two comparisons that move each bound into
+// `0..length()`, one left-to-right walk of the lead bytes that turns the two
+// **character positions** into the two **byte offsets** underneath them, and
+// `core.stringSlice` — the byte `Inst::RunSlice` `sliceBytes` already stands
+// on — between those offsets. The clamp is why this file's own doc comment
+// says `slice` parts from `sliceBytes`, and the walk is why the positions
+// stayed characters when the substrate is bytes.
 
 /// `core.refuseByteRange(text, from, to)`: what is wrong with a byte range of
 /// `text` that `std.stringbuilder`'s `appendRange` has already found to be
@@ -580,25 +576,16 @@ mod tests {
         assert_eq!(read(&machine, joined), "a, b");
     }
 
-    /// Character positions, and both bounds clamped, exactly as a sequence
-    /// slice is.
-    #[test]
-    fn slice_is_in_characters_and_clamps_both_bounds() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let sliced = |machine: &mut Machine, from: i64, to: i64| {
-            let word = on(
-                machine,
-                "héllo",
-                "slice",
-                &[(Repr::Int, from as u64), (Repr::Int, to as u64)],
-            );
-            read(machine, word)
-        };
-        assert_eq!(sliced(&mut machine, 1, 3), "él");
-        assert_eq!(sliced(&mut machine, -9, 99), "héllo");
-        assert_eq!(sliced(&mut machine, 3, 1), "");
-    }
+    // A `slice_is_in_characters_and_clamps_both_bounds` case stood here,
+    // asserting that `"héllo".slice(1, 3)` is `él` — a *character* range where
+    // a byte range would have cut `é` in half — and that `(-9, 99)` answers
+    // the whole string and `(3, 1)` the empty one. `slice` is not an arm in
+    // this file any more. What replaced it is `tests/e2e/values_string_slice`,
+    // which asks the same questions of *both* evaluators over sixty-one rows
+    // at three character widths, at both ends of `Int`, and on receivers a run
+    // built rather than a literal — and whose golden a standalone `rustc`
+    // oracle wrote before the harness was run once. An oracle no arm here
+    // supplies, for a body no arm here executes.
 
     #[test]
     fn trim_and_the_case_mappings_are_the_oracles() {
