@@ -2774,6 +2774,211 @@ pub fn a_float_extremum_answers_one_of_its_operands<A: Arm>() {
     }
 }
 
+/// `s1 = round(s0); return s1`, over two `Float` slots.
+///
+/// `dst` is the second slot for [`absolute`]'s reason: so that the case can
+/// assert the operand was not clobbered.
+pub fn rounding() -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Float],
+        FLOAT,
+        vec![Inst::FloatRound { dst: 1, a: 0 }, Inst::Return { src: 1 }],
+    ))
+}
+
+/// `s0 = round(s0); return s0`: the destination *is* the operand.
+pub fn rounding_in_place() -> Program {
+    program(function(
+        vec![Repr::Float],
+        FLOAT,
+        vec![Inst::FloatRound { dst: 0, a: 0 }, Inst::Return { src: 0 }],
+    ))
+}
+
+/// The operands and answers `Inst::FloatRound` is held to, **in bits**.
+///
+/// Stated as `u64` for [`ABSOLUTES`]' reason, and computed by a standalone
+/// `rustc` program calling `f64::round` behind a `black_box`, so that these
+/// are the machine's answers rather than a transcription of an argument about
+/// them.
+///
+/// Four families of row, and each is here because an implementation can pass
+/// the other three without it.
+///
+/// **The halves, of both parities.** Away-from-zero and ties-to-even agree on
+/// `1.5` and `3.5` — both answer `2.0` and `4.0` — and disagree on `0.5`,
+/// `2.5` and `4.5`. So a table whose halves all happened to have an odd floor
+/// would pass a lowering with the wrong tie rule, and the rows that decide are
+/// named above the ones that do not. `2^52 - 1.5` is the same question at the
+/// last magnitude a half can be written at.
+///
+/// **The zeros, and everything whose answer is one.** Every small magnitude
+/// and every subnormal rounds to a zero *of its own sign*, which is what makes
+/// `-0.4` answer `0x8000_0000_0000_0000` and not `0`. A lowering that
+/// truncated the signed value rather than the magnitude would answer `+0.0`
+/// for all of them and pass every other row here: the integer `0` has no sign
+/// to carry back.
+///
+/// **The magnitudes with nothing to round.** From `2^52` upward every double
+/// is already an integer and the answer is the operand unchanged, to the bit —
+/// `MAX` included, which anything that added a half without checking the
+/// magnitude first could overflow to an infinity. `under 2^63` and `2^63` are
+/// on either side of the largest value a `cvttsd2si` has an answer for, and
+/// both are here because the template lowering runs that conversion on every
+/// operand and discards it with a `cmov`.
+///
+/// **The NaNs, which is where this operation differs from the two beside
+/// it.** [`ABSOLUTES`] and [`EXTREMA`] both answer one of their operands
+/// whole, so a signalling NaN comes back signalling; this operation's answer
+/// is *computed*, the computation is an addition, and an addition sets bit 51.
+/// So `+sNaN` answers `0x7ff8_0000_dead_beef` — payload kept, sign kept,
+/// quiet bit **set** — and the two `sNaN` rows are the only ones in the table
+/// whose answer differs from the operand in that bit. A lowering that handed
+/// a NaN straight back, which is the obvious thing for the "nothing to round"
+/// side of the `cmov` to do, fails exactly those two rows and no others.
+///
+/// **None of the three is a hypothetical: each was watched failing, on both
+/// tiers, on exactly the rows named.** Ties-to-even — `round_ties_even` in the
+/// VM arm, `cvtsd2si` with no nudge in the template one — fails `±0.5`,
+/// `±2.5`, `±4.5` and `±(2^52 - 1.5)`, eight rows, and passes `±1.5` and
+/// `±3.5`. A lost zero sign — `x.round() + 0.0` in the VM arm, the conversion
+/// taken over the signed value in the template one — fails `-0.0`, `-0.4`,
+/// `-under 0.5`, `-2^-1074`, `-max subnorm` and `-MIN_POS`, six rows, every
+/// one an operand whose answer is a zero. And the operand handed back where
+/// there is nothing to round fails the two `sNaN` rows — and
+/// `cove-runtime`'s `native_tier.rs` **passes** that break, because a Cove
+/// program cannot build a signalling NaN or see a quiet bit. Those two rows
+/// are the only check on it in the repository.
+pub const ROUNDINGS: &[(&str, u64, u64)] = &[
+    ("+0.0", 0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+    ("-0.0", 0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+    ("+0.4", 0x3fd9_9999_9999_999a, 0x0000_0000_0000_0000),
+    ("-0.4", 0xbfd9_9999_9999_999a, 0x8000_0000_0000_0000),
+    ("+0.6", 0x3fe3_3333_3333_3333, 0x3ff0_0000_0000_0000),
+    ("-0.6", 0xbfe3_3333_3333_3333, 0xbff0_0000_0000_0000),
+    ("+under 0.5", 0x3fdf_ffff_ffff_ffff, 0x0000_0000_0000_0000),
+    ("-under 0.5", 0xbfdf_ffff_ffff_ffff, 0x8000_0000_0000_0000),
+    ("+0.5", 0x3fe0_0000_0000_0000, 0x3ff0_0000_0000_0000),
+    ("-0.5", 0xbfe0_0000_0000_0000, 0xbff0_0000_0000_0000),
+    ("+over 0.5", 0x3fe0_0000_0000_0001, 0x3ff0_0000_0000_0000),
+    ("-over 0.5", 0xbfe0_0000_0000_0001, 0xbff0_0000_0000_0000),
+    ("+1.4", 0x3ff6_6666_6666_6666, 0x3ff0_0000_0000_0000),
+    ("-1.4", 0xbff6_6666_6666_6666, 0xbff0_0000_0000_0000),
+    ("+under 1.5", 0x3ff7_ffff_ffff_ffff, 0x3ff0_0000_0000_0000),
+    ("+1.5", 0x3ff8_0000_0000_0000, 0x4000_0000_0000_0000),
+    ("-1.5", 0xbff8_0000_0000_0000, 0xc000_0000_0000_0000),
+    ("+over 1.5", 0x3ff8_0000_0000_0001, 0x4000_0000_0000_0000),
+    ("+2.4", 0x4003_3333_3333_3333, 0x4000_0000_0000_0000),
+    ("-2.4", 0xc003_3333_3333_3333, 0xc000_0000_0000_0000),
+    ("+under 2.5", 0x4003_ffff_ffff_ffff, 0x4000_0000_0000_0000),
+    ("+2.5", 0x4004_0000_0000_0000, 0x4008_0000_0000_0000),
+    ("-2.5", 0xc004_0000_0000_0000, 0xc008_0000_0000_0000),
+    ("+over 2.5", 0x4004_0000_0000_0001, 0x4008_0000_0000_0000),
+    ("+2.6", 0x4004_cccc_cccc_cccd, 0x4008_0000_0000_0000),
+    ("-2.6", 0xc004_cccc_cccc_cccd, 0xc008_0000_0000_0000),
+    ("+3.5", 0x400c_0000_0000_0000, 0x4010_0000_0000_0000),
+    ("-3.5", 0xc00c_0000_0000_0000, 0xc010_0000_0000_0000),
+    ("+4.5", 0x4012_0000_0000_0000, 0x4014_0000_0000_0000),
+    ("-4.5", 0xc012_0000_0000_0000, 0xc014_0000_0000_0000),
+    ("+2^-1074", 0x0000_0000_0000_0001, 0x0000_0000_0000_0000),
+    ("-2^-1074", 0x8000_0000_0000_0001, 0x8000_0000_0000_0000),
+    ("+max subnorm", 0x000f_ffff_ffff_ffff, 0x0000_0000_0000_0000),
+    ("-max subnorm", 0x800f_ffff_ffff_ffff, 0x8000_0000_0000_0000),
+    ("+MIN_POS", 0x0010_0000_0000_0000, 0x0000_0000_0000_0000),
+    ("-MIN_POS", 0x8010_0000_0000_0000, 0x8000_0000_0000_0000),
+    ("+2^52 - 1.5", 0x432f_ffff_ffff_fffd, 0x432f_ffff_ffff_fffe),
+    ("-2^52 - 1.5", 0xc32f_ffff_ffff_fffd, 0xc32f_ffff_ffff_fffe),
+    ("+2^52 - 0.5", 0x432f_ffff_ffff_ffff, 0x4330_0000_0000_0000),
+    ("-2^52 - 0.5", 0xc32f_ffff_ffff_ffff, 0xc330_0000_0000_0000),
+    ("+2^52", 0x4330_0000_0000_0000, 0x4330_0000_0000_0000),
+    ("-2^52", 0xc330_0000_0000_0000, 0xc330_0000_0000_0000),
+    ("+2^53", 0x4340_0000_0000_0000, 0x4340_0000_0000_0000),
+    ("-2^53", 0xc340_0000_0000_0000, 0xc340_0000_0000_0000),
+    ("+under 2^63", 0x43df_ffff_ffff_ffff, 0x43df_ffff_ffff_ffff),
+    ("-under 2^63", 0xc3df_ffff_ffff_ffff, 0xc3df_ffff_ffff_ffff),
+    ("+2^63", 0x43e0_0000_0000_0000, 0x43e0_0000_0000_0000),
+    ("-2^63", 0xc3e0_0000_0000_0000, 0xc3e0_0000_0000_0000),
+    ("+MAX", 0x7fef_ffff_ffff_ffff, 0x7fef_ffff_ffff_ffff),
+    ("-MAX", 0xffef_ffff_ffff_ffff, 0xffef_ffff_ffff_ffff),
+    ("+inf", 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+    ("-inf", 0xfff0_0000_0000_0000, 0xfff0_0000_0000_0000),
+    ("+qNaN", 0x7ff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+    ("-qNaN", 0xfff8_0000_dead_beef, 0xfff8_0000_dead_beef),
+    ("+sNaN", 0x7ff0_0000_dead_beef, 0x7ff8_0000_dead_beef),
+    ("-sNaN", 0xfff0_0000_dead_beef, 0xfff8_0000_dead_beef),
+];
+
+/// `Inst::FloatRound` answers the nearest integer, a half going away from
+/// zero.
+///
+/// The third of ADR 0064's Decision 2 typed scalar operations, and the one
+/// whose lowering is longest. `encoded.rs`'s `FLOAT_ROUND` arm is
+/// `f64::round` and [`ROUNDINGS`] is what that is, in bits.
+///
+/// **x86-64 has no instruction for it.** `roundsd`'s four modes are
+/// nearest-even, floor, ceiling and truncate, and half-away-from-zero is not
+/// one of them at any mode — it is also SSE4.1, where this code generator is
+/// SSE2. So the template arm is seventeen instructions built on the identity
+/// `rustc -O` uses, and this table is what holds those seventeen to the VM's
+/// answer bit for bit rather than to a reading of what they ought to do.
+///
+/// **Half the rows say something no Cove program can observe and no e2e case
+/// could therefore pin**: that a subnormal's answer is a zero with the
+/// operand's sign rather than merely a number equal to zero, that every
+/// magnitude past `2^52` comes back unchanged in all sixty-four bits, and that
+/// a NaN keeps its payload and its sign while gaining its quiet bit. `-0.0` is
+/// distinguishable from `0.0` in Cove three ways and so is pinned by
+/// `tests/e2e/values_float_round`; the NaN bits are distinguishable no way at
+/// all, and this is where the machine's answer is written down.
+pub fn a_float_rounding_answers_the_nearest_integer<A: Arm>() {
+    for (label, operand, want) in ROUNDINGS {
+        forget_polls();
+        let mut words = vec![*operand, 0];
+        let answer = run::<A>(&rounding(), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "round({label})");
+        assert_eq!(
+            words[1], *want,
+            "round({label}): 0x{operand:016x} answered 0x{:016x}, want 0x{want:016x} — \
+             to the bit, not merely a number equal to it",
+            words[1]
+        );
+        assert_eq!(
+            words[0], *operand,
+            "the operand is not the destination and was not written: round({label})"
+        );
+        assert_eq!(
+            answer.returned[0], *want,
+            "the destination holds what the slot holds: round({label})"
+        );
+    }
+}
+
+/// `Inst::FloatRound` answers the same thing when its destination is its
+/// operand.
+///
+/// [`a_float_absolute_in_place_answers_the_same`]'s case for a longer
+/// sequence, and less of a formality than it is there: this lowering reads its
+/// operand once, into `rax`, and then uses six more registers before it stores
+/// anything, so an arm that had reloaded the slot part-way through would be
+/// caught here and nowhere else.
+pub fn a_float_rounding_in_place_answers_the_same<A: Arm>() {
+    for (label, operand, want) in ROUNDINGS {
+        forget_polls();
+        let mut words = vec![*operand];
+        let answer = run::<A>(&rounding_in_place(), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "round({label}) in place");
+        assert_eq!(
+            words[0], *want,
+            "round({label}) in place: 0x{operand:016x} answered 0x{:016x}, want 0x{want:016x}",
+            words[0]
+        );
+        assert_eq!(
+            answer.returned[0], *want,
+            "the destination holds what the slot holds: round({label}) in place"
+        );
+    }
+}
+
 /// A `Duration` destination renames the overflow, and only for the three
 /// operations that consult the name.
 ///
@@ -4795,7 +5000,7 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// level over:
 ///
 /// - a function with one `intrinsic-call` charges **one site** to that call's
-///   variant and none to the other twenty-three, and a function with no
+///   variant and none to the other twenty-one, and a function with no
 ///   intrinsic call in it charges nothing anywhere — so the count follows the
 ///   IR and not the shape of the body;
 /// - where the bytes are attributed they are **positive and no more than the

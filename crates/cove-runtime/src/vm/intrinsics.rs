@@ -198,10 +198,6 @@ pub(crate) fn call(
 
         // ---- Float -------------------------------------------------------
         Intrinsic::FloatToInt => scalar::float_to_int(machine, frame, dest),
-        Intrinsic::FloatRound => {
-            scalar::float_round(machine, frame, dest);
-            Ok(())
-        }
         Intrinsic::FloatSqrt => {
             scalar::float_sqrt(machine, frame, dest);
             Ok(())

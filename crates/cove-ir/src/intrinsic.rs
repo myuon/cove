@@ -55,7 +55,6 @@ pub enum Intrinsic {
     IntParse,
     IntParseRadix,
     FloatToInt,
-    FloatRound,
     FloatSqrt,
     FloatFormat,
     FloatParse,
@@ -86,7 +85,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
-    Intrinsic::FloatRound,
     Intrinsic::FloatSqrt,
     Intrinsic::FloatFormat,
     Intrinsic::FloatParse,
@@ -134,7 +132,6 @@ impl Intrinsic {
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
-            Intrinsic::FloatRound => "Float",
             Intrinsic::FloatSqrt => "Float",
             Intrinsic::FloatFormat => "Float",
             Intrinsic::FloatParse => "Float",
@@ -163,7 +160,6 @@ impl Intrinsic {
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
-            Intrinsic::FloatRound => "round",
             Intrinsic::FloatSqrt => "sqrt",
             Intrinsic::FloatFormat => "format",
             Intrinsic::FloatParse => "parse",
@@ -235,7 +231,6 @@ impl Intrinsic {
             Intrinsic::IntParse
             | Intrinsic::IntParseRadix
             | Intrinsic::FloatToInt
-            | Intrinsic::FloatRound
             | Intrinsic::FloatSqrt
             | Intrinsic::FloatFormat
             | Intrinsic::FloatParse => Category::Scalar,
@@ -283,7 +278,7 @@ impl Intrinsic {
             Intrinsic::IntParse => fixed(&[C::Str], C::ResultOf(K::Int)),
             Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
-            Intrinsic::FloatRound | Intrinsic::FloatSqrt => fixed(&[C::Float], C::Float),
+            Intrinsic::FloatSqrt => fixed(&[C::Float], C::Float),
             Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
             Intrinsic::AnyEquals => fixed(&[C::Value, C::Value], C::Bool),
@@ -388,9 +383,12 @@ impl Intrinsic {
             // `Inst::Convert` (#378, P5-2).
 
             // A scalar function of its own words, with nothing on the heap to
-            // read and nothing that can fail: IEEE 754 answers every one of
-            // them for every input.
-            Intrinsic::FloatRound | Intrinsic::FloatSqrt => E::NONE,
+            // read and nothing that can fail: IEEE 754 answers it for every
+            // input. **One name and no longer two**: `Float.round` left this
+            // enum for `Inst::FloatRound` in the first of issue #454's Step 2,
+            // and `Float.sqrt` is the last of ADR 0064's Decision 2 list still
+            // here.
+            Intrinsic::FloatSqrt => E::NONE,
             // The three parsers read a `String` receiver's bytes and
             // allocate the message an `Err` carries, and `parseRadix` refuses
             // a radix outside `2..=36`; `format` allocates the `String` it
@@ -657,7 +655,6 @@ mod tests {
             "Int.parse",
             "Int.parseRadix",
             "Float.toInt",
-            "Float.round",
             "Float.sqrt",
             "Float.format",
             "Float.parse",
@@ -731,7 +728,6 @@ mod tests {
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt
-                | Intrinsic::FloatRound
                 | Intrinsic::FloatSqrt
                 | Intrinsic::FloatFormat
                 | Intrinsic::FloatParse
@@ -840,8 +836,8 @@ mod tests {
 
     /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so the
     /// intrinsics no program can be stopped by say so: the `Float` functions
-    /// IEEE 754 answers for every input, and nothing else at all. **Every one
-    /// of the four is infallible in the arithmetic sense rather than in the
+    /// IEEE 754 answers for every input, and nothing else at all. **The one
+    /// left is infallible in the arithmetic sense rather than in the
     /// bookkeeping one**, and that is new. A character count used to head this
     /// list; a suffix test, a prefix test, a whole-haystack search and a
     /// search that answers a position sat under it; none of the five is an
@@ -852,14 +848,16 @@ mod tests {
     /// gone from the vector and a sentence changed, rather than a flag
     /// changed.
     ///
-    /// **`Float.abs` left the vector a fifth way**, and it is the first of
+    /// **`Float.abs` left the vector a fifth way**, and it was the first of
     /// these four to go: it did not become a Cove body over anything, because
     /// there is nothing in Cove to write it over — `crates/cove-native`'s
     /// subset admits no float constant, comparison or arithmetic, so the
     /// obvious `if x < 0.0 { -x } else { x }` would take every caller out of
     /// the compiled set. It became `Inst::FloatAbs`, ADR 0064's Decision 2
-    /// typed scalar operation, and `Float.round` and `Float.sqrt` below it are
-    /// the two the census sends the same way in Phase 3.
+    /// typed scalar operation. **`Float.round` left the same way**, for the
+    /// same reason checked the same way — a `round` written in Cove is refused
+    /// with `CmpBranch(Float, Lt)`, and so is a caller whose own float work is
+    /// one comparison — and this vector is down to `Float.sqrt` alone.
     ///
     /// It is also why `vm::exec`'s `unraisable` no longer has an end-to-end
     /// case: that panic needs an arm that can answer an `Err` while its
@@ -871,7 +869,7 @@ mod tests {
             .copied()
             .filter(|intrinsic| !intrinsic.effects().contains(Effects::MAY_RAISE))
             .collect();
-        assert_eq!(never, vec![Intrinsic::FloatRound, Intrinsic::FloatSqrt]);
+        assert_eq!(never, vec![Intrinsic::FloatSqrt]);
     }
 
     /// No intrinsic is a collection operation: ADR 0058 moved every one into

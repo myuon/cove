@@ -1,0 +1,265 @@
+use console.println
+use clock.now
+
+/// What `Float.round` costs as an instruction against what it cost as a call.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 2 names `round` in its list of typed scalar operations, and this
+/// is the migration that made it one: `Inst::FloatRound` where it was an
+/// `Inst::IntrinsicCall` naming the method and reaching `f64::round` in Rust.
+/// It runs **zero times** on covefmt and on cq, so no whole-program figure
+/// exists to make; this package is the whole of the performance argument, and
+/// it is `benches/floatminmax`' arrangement for `benches/floatminmax`'
+/// reasons.
+///
+/// # The two arms are two binaries over one source
+///
+/// There is no way to write both arms in one process: the intrinsic is gone
+/// and a program cannot ask for the one that is not there. So this file is run
+/// twice — once by a `cove` built at the migration's parent, where `x.round()`
+/// lowers to an `IntrinsicCall`, and once by a `cove` built here, where it
+/// lowers to one instruction — over the **same bytes of the same package**.
+///
+/// # The control is the loop, and the rows are taken from it by difference
+///
+/// [`countBare`] is [`countRound`] with the call taken out and **nothing** put
+/// in its place, which is the correction `benches/floatabs` had to make: a
+/// copy of the receiver is an `Inst::Copy` and is dearer than the instruction
+/// it was standing in for, so every row came out negative.
+///
+/// # Five rows, because the sequence has a `cmov` in it
+///
+/// The native lowering is seventeen instructions, and the interesting thing
+/// about it is that it is **branch-free**: the answer for a magnitude below
+/// `2^52` and the answer for one at or above it are both computed and one of
+/// them is selected with a `cmov`. The rows are arranged to say whether that
+/// is true of the timings as well as of the code:
+///
+/// - `small` is `-0.4`, whose answer is `-0.0` — the shortest path through
+///   the conversion and the one place the sign of a zero is restored;
+/// - `tie` is `2.5`, the half the operation's *rule* is about;
+/// - `plain` is `2.4`, an ordinary value either side of no boundary;
+/// - `big` is `2^53`, where every double is already an integer and the `cmov`
+///   goes the other way;
+/// - `nan` is a NaN, which takes `big`'s side of the `cmov` and is the one
+///   input whose answer comes out of the addition rather than the conversion.
+///
+/// If those five agree then the lowering costs the same whatever it is handed,
+/// which is a claim about the code and not a formality.
+///
+/// # No float constant, comparison or arithmetic below `main`
+///
+/// `crates/cove-native/src/subset.rs` admits none of the three, so a counting
+/// callee that folded its answer or tested it against a literal would be
+/// **refused** and the column headed `native` would be a second VM column.
+/// The operand arrives as a parameter, the loop counts in `Int`, and the
+/// `Float` leaves as the function's answer. Checked rather than assumed:
+/// `--backend native --boundary` names the compiled and the refused, and the
+/// only refusals are the timing rows and `main`, each for the `now()` or the
+/// literal in it.
+///
+/// # The loop is in a callee, and it is padded
+///
+/// `benches/floatabs`' arrangement, for its reason: the outermost frame is
+/// always encoded, so a loop written in `main` is a VM measurement even under
+/// `--backend native`. Each row is a call to a counting callee whose body is
+/// the loop, and every counting callee opens with [`ballast`] — a block the
+/// parameter's sign makes unreachable and nothing can fold away, sized past
+/// `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight — so that it is not
+/// expanded into [`roundRow`].
+fn turns() -> Int {
+  1000000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller, which the native tier refuses.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// `rounds` calls of `Float.round`, and nothing else in the loop.
+fn countRound(x: Float, rounds: Int) -> Float {
+  var guard = ballast(rounds)
+  var out = x
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x.round()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// [`countRound`]'s loop with the operation taken out and **nothing** put in
+/// its place.
+fn countBare(x: Float, rounds: Int) -> Float {
+  var guard = ballast(rounds)
+  var out = x
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// How long `rounds` turns took, in microseconds, and the last value the loop
+/// wrote.
+struct Row {
+  micros: Int
+  witness: Float
+}
+
+fn roundRow(x: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countRound(x, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn bareRow(x: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countBare(x, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one call cost, in picoseconds, over `rounds` turns of which `bare`
+/// microseconds were the loop itself.
+///
+/// Picoseconds rather than nanoseconds for `benches/floatabs`' reason: the
+/// subject is one instruction, and at a million turns a nanosecond figure
+/// would be three significant digits of integer division away from the truth.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000000 / rounds
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+  let small = -0.4
+  let tie = 2.5
+  let plain = 2.4
+  let big = 9007199254740992.0
+  let nan = 0.0 / 0.0
+
+  let bare = bareRow(plain, rounds)
+  let smallRow = roundRow(small, rounds)
+  let tieRow = roundRow(tie, rounds)
+  let plainRow = roundRow(plain, rounds)
+  let bigRow = roundRow(big, rounds)
+  let nanRow = roundRow(nan, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row whose loop stopped writing would still report a number, and the
+  // number would be of something else. The bare row's witness is its operand
+  // untouched, which is what "nothing in the loop" means. The NaN row is
+  // checked through the reciprocal of its own inequality rather than through
+  // `assertEqual`, because a NaN equals nothing.
+  assertEqual(bare.witness, plain)?
+  assertEqual(smallRow.witness, -0.0)?
+  assertEqual(tieRow.witness, 3.0)?
+  assertEqual(plainRow.witness, 2.0)?
+  assertEqual(bigRow.witness, big)?
+  assertEqual(nanRow.witness == nanRow.witness, false)?
+
+  // And the zero the `small` row answers is the *negative* one, which
+  // `assertEqual` above cannot see: `-0.0 == 0.0`.
+  assertEqual(1.0 / smallRow.witness, -1.0 / 0.0)?
+
+  println("witness {bare.witness} {smallRow.witness} {tieRow.witness} {bigRow.witness} {nanRow.witness}")?
+  println("operands {small} {tie} {plain} {big} {nan}")?
+  println("")?
+  println("bare loop                     {bare.micros * 1000000 / rounds} ps/turn over {rounds} turn(s)")?
+  println("")?
+  println("row                 ps/call")?
+  println("round.small         {perCall(smallRow.micros, bare.micros, rounds)}")?
+  println("round.tie           {perCall(tieRow.micros, bare.micros, rounds)}")?
+  println("round.plain         {perCall(plainRow.micros, bare.micros, rounds)}")?
+  println("round.big           {perCall(bigRow.micros, bare.micros, rounds)}")?
+  println("round.nan           {perCall(nanRow.micros, bare.micros, rounds)}")?
+  Ok(())
+}

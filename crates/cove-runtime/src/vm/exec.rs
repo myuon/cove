@@ -501,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// thirteen of the 23 variants declare
+    /// thirteen of the 22 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -5366,6 +5366,121 @@ pub(crate) mod tests {
             assert_eq!(
                 answered, *want,
                 "|{label}| in place: 0x{operand:016x} answered 0x{answered:016x}, \
+                 want 0x{want:016x}"
+            );
+        }
+    }
+
+    /// `Op::FloatRound` answers the nearest integer, a half going away from
+    /// zero.
+    ///
+    /// The encoded arm of ADR 0064's third Decision 2 typed scalar operation,
+    /// held to the same table `cove-native`'s `tests/suite`'s `ROUNDINGS`
+    /// holds the native lowering to — deliberately duplicated rather than
+    /// shared, for `ABSOLUTES`' reason.
+    ///
+    /// **The halves come in both parities on purpose.** Away-from-zero and
+    /// ties-to-even agree on `1.5` and `3.5` and disagree on `0.5`, `2.5` and
+    /// `4.5`, so a table whose halves all had an odd floor would pass an arm
+    /// with the wrong rule.
+    ///
+    /// **The signalling rows say the opposite of what the two tables above
+    /// say.** `Op::FloatAbs` and `Op::FloatMinMax` hand an operand back whole
+    /// and a signalling NaN stays signalling; this arm's answer is computed,
+    /// the computation goes through an addition, and an addition sets bit 51.
+    /// So `+sNaN` answers `0x7ff8_0000_dead_beef`, and a native lowering that
+    /// handed a NaN straight back — which is the obvious thing for its
+    /// "nothing to round" path to do — fails exactly these two rows.
+    #[test]
+    fn a_float_rounding_answers_the_nearest_integer() {
+        const ROUNDINGS: &[(&str, u64, u64)] = &[
+            ("+0.0", 0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+            ("-0.0", 0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+            ("+0.4", 0x3fd9_9999_9999_999a, 0x0000_0000_0000_0000),
+            ("-0.4", 0xbfd9_9999_9999_999a, 0x8000_0000_0000_0000),
+            ("+0.6", 0x3fe3_3333_3333_3333, 0x3ff0_0000_0000_0000),
+            ("-0.6", 0xbfe3_3333_3333_3333, 0xbff0_0000_0000_0000),
+            ("+under 0.5", 0x3fdf_ffff_ffff_ffff, 0x0000_0000_0000_0000),
+            ("-under 0.5", 0xbfdf_ffff_ffff_ffff, 0x8000_0000_0000_0000),
+            ("+0.5", 0x3fe0_0000_0000_0000, 0x3ff0_0000_0000_0000),
+            ("-0.5", 0xbfe0_0000_0000_0000, 0xbff0_0000_0000_0000),
+            ("+over 0.5", 0x3fe0_0000_0000_0001, 0x3ff0_0000_0000_0000),
+            ("-over 0.5", 0xbfe0_0000_0000_0001, 0xbff0_0000_0000_0000),
+            ("+1.4", 0x3ff6_6666_6666_6666, 0x3ff0_0000_0000_0000),
+            ("-1.4", 0xbff6_6666_6666_6666, 0xbff0_0000_0000_0000),
+            ("+under 1.5", 0x3ff7_ffff_ffff_ffff, 0x3ff0_0000_0000_0000),
+            ("+1.5", 0x3ff8_0000_0000_0000, 0x4000_0000_0000_0000),
+            ("-1.5", 0xbff8_0000_0000_0000, 0xc000_0000_0000_0000),
+            ("+over 1.5", 0x3ff8_0000_0000_0001, 0x4000_0000_0000_0000),
+            ("+2.4", 0x4003_3333_3333_3333, 0x4000_0000_0000_0000),
+            ("-2.4", 0xc003_3333_3333_3333, 0xc000_0000_0000_0000),
+            ("+under 2.5", 0x4003_ffff_ffff_ffff, 0x4000_0000_0000_0000),
+            ("+2.5", 0x4004_0000_0000_0000, 0x4008_0000_0000_0000),
+            ("-2.5", 0xc004_0000_0000_0000, 0xc008_0000_0000_0000),
+            ("+over 2.5", 0x4004_0000_0000_0001, 0x4008_0000_0000_0000),
+            ("+2.6", 0x4004_cccc_cccc_cccd, 0x4008_0000_0000_0000),
+            ("-2.6", 0xc004_cccc_cccc_cccd, 0xc008_0000_0000_0000),
+            ("+3.5", 0x400c_0000_0000_0000, 0x4010_0000_0000_0000),
+            ("-3.5", 0xc00c_0000_0000_0000, 0xc010_0000_0000_0000),
+            ("+4.5", 0x4012_0000_0000_0000, 0x4014_0000_0000_0000),
+            ("-4.5", 0xc012_0000_0000_0000, 0xc014_0000_0000_0000),
+            ("+2^-1074", 0x0000_0000_0000_0001, 0x0000_0000_0000_0000),
+            ("-2^-1074", 0x8000_0000_0000_0001, 0x8000_0000_0000_0000),
+            ("+max subnorm", 0x000f_ffff_ffff_ffff, 0x0000_0000_0000_0000),
+            ("-max subnorm", 0x800f_ffff_ffff_ffff, 0x8000_0000_0000_0000),
+            ("+MIN_POS", 0x0010_0000_0000_0000, 0x0000_0000_0000_0000),
+            ("-MIN_POS", 0x8010_0000_0000_0000, 0x8000_0000_0000_0000),
+            ("+2^52 - 1.5", 0x432f_ffff_ffff_fffd, 0x432f_ffff_ffff_fffe),
+            ("-2^52 - 1.5", 0xc32f_ffff_ffff_fffd, 0xc32f_ffff_ffff_fffe),
+            ("+2^52 - 0.5", 0x432f_ffff_ffff_ffff, 0x4330_0000_0000_0000),
+            ("-2^52 - 0.5", 0xc32f_ffff_ffff_ffff, 0xc330_0000_0000_0000),
+            ("+2^52", 0x4330_0000_0000_0000, 0x4330_0000_0000_0000),
+            ("-2^52", 0xc330_0000_0000_0000, 0xc330_0000_0000_0000),
+            ("+2^53", 0x4340_0000_0000_0000, 0x4340_0000_0000_0000),
+            ("-2^53", 0xc340_0000_0000_0000, 0xc340_0000_0000_0000),
+            ("+under 2^63", 0x43df_ffff_ffff_ffff, 0x43df_ffff_ffff_ffff),
+            ("-under 2^63", 0xc3df_ffff_ffff_ffff, 0xc3df_ffff_ffff_ffff),
+            ("+2^63", 0x43e0_0000_0000_0000, 0x43e0_0000_0000_0000),
+            ("-2^63", 0xc3e0_0000_0000_0000, 0xc3e0_0000_0000_0000),
+            ("+MAX", 0x7fef_ffff_ffff_ffff, 0x7fef_ffff_ffff_ffff),
+            ("-MAX", 0xffef_ffff_ffff_ffff, 0xffef_ffff_ffff_ffff),
+            ("+inf", 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+            ("-inf", 0xfff0_0000_0000_0000, 0xfff0_0000_0000_0000),
+            ("+qNaN", 0x7ff8_0000_dead_beef, 0x7ff8_0000_dead_beef),
+            ("-qNaN", 0xfff8_0000_dead_beef, 0xfff8_0000_dead_beef),
+            ("+sNaN", 0x7ff0_0000_dead_beef, 0x7ff8_0000_dead_beef),
+            ("-sNaN", 0xfff0_0000_dead_beef, 0xfff8_0000_dead_beef),
+        ];
+
+        let mut build = Build::default();
+        let float = build.scalar(Repr::Float);
+        let apart = build.function(
+            "apart",
+            &[float],
+            &[Repr::Float, Repr::Float],
+            float,
+            vec![Inst::FloatRound { dst: 1, a: 0 }, Inst::Return { src: 1 }],
+        );
+        let in_place = build.function(
+            "inPlace",
+            &[float],
+            &[Repr::Float],
+            float,
+            vec![Inst::FloatRound { dst: 0, a: 0 }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+
+        for (label, operand, want) in ROUNDINGS {
+            let answered = run(&program, apart, &[*operand]).unwrap();
+            assert_eq!(
+                answered, *want,
+                "round({label}): 0x{operand:016x} answered 0x{answered:016x}, \
+                 want 0x{want:016x}"
+            );
+            let answered = run(&program, in_place, &[*operand]).unwrap();
+            assert_eq!(
+                answered, *want,
+                "round({label}) in place: 0x{operand:016x} answered 0x{answered:016x}, \
                  want 0x{want:016x}"
             );
         }

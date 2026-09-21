@@ -144,6 +144,16 @@ fn a_float_extremum_answers_one_of_its_operands() {
 }
 
 #[test]
+fn a_float_rounding_answers_the_nearest_integer() {
+    suite::a_float_rounding_answers_the_nearest_integer::<Template>();
+}
+
+#[test]
+fn a_float_rounding_in_place_answers_the_same() {
+    suite::a_float_rounding_in_place_answers_the_same::<Template>();
+}
+
+#[test]
 fn an_immediate_operand_fails_the_same_way() {
     suite::an_immediate_operand_fails_the_same_way::<Template>();
 }

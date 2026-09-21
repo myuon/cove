@@ -62,11 +62,13 @@ const MAX_RUN_WORDS: u32 = 16;
 /// whose function will be refused anyway.
 ///
 /// [`Repr::Float`] is admitted although almost no float *operation* is
-/// lowered — [`Inst::FloatAbs`] and [`Inst::FloatMinMax`] are the two, and
-/// neither is arithmetic: one is a mask and the other picks one of its two
-/// operands whole. A float slot that is only copied is a run of bits like any
-/// other, and refusing the whole function because one of its frame slots is a
-/// `Float` would refuse it for a reason that is not true.
+/// lowered — [`Inst::FloatAbs`], [`Inst::FloatMinMax`] and
+/// [`Inst::FloatRound`] are the three, and none of them is float *arithmetic*
+/// in the sense this slice refuses: one is a mask, one picks one of its two
+/// operands whole, and the third is a fixed sequence whose only addition is of
+/// a constant it writes itself. A float slot that is only copied is a run of
+/// bits like any other, and refusing the whole function because one of its
+/// frame slots is a `Float` would refuse it for a reason that is not true.
 fn is_lowered(repr: Repr) -> bool {
     match repr {
         Repr::Unit
@@ -834,6 +836,40 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // a standalone program calling `f64::min` and `f64::max` — is what
         // holds it to the bit.
         Inst::FloatMinMax { dst, a, b, .. } => slot(*dst) && slot(*a) && slot(*b),
+        // `encoded.rs`'s `FLOAT_ROUND` arm, and the **third** float operation
+        // this slice lowers. Here for the other two's reason — ADR 0065's
+        // Decision 5, that a refused instruction refuses the whole function
+        // and takes every caller back to the VM — and **not** because it is
+        // cheap. It is the longest sequence in `template.rs` that is still one
+        // instruction of IR: seventeen instructions and eighty-seven bytes,
+        // where `FloatAbs` is three and `FloatMinMax` nine.
+        //
+        // That it is long is the finding rather than an accident.
+        // **x86-64 has no instruction for this**: `roundsd`'s four modes are
+        // nearest-even, floor, ceiling and truncate, half-away-from-zero is
+        // not among them, and `roundsd` is SSE4.1 where this code generator is
+        // SSE2 with no feature test in front of it. So the arm spells out what
+        // `rustc -O` emits for `f64::round` — `trunc(|x| + nextdown(0.5))` with
+        // the truncation done by a `cvttsd2si`/`cvtsi2sd` pair in place of the
+        // `roundsd` it has not got, and a magnitude test for the range where
+        // that pair has no answer.
+        //
+        // **Seventeen inlined instructions still beat the alternative by a
+        // factor of thirty-five**, which is the number the decision was made
+        // on rather than a judgement about length: the alternative to
+        // inlining a long sequence is a runtime helper, which is the same
+        // native-to-runtime crossing the mediated intrinsic call already was,
+        // and `benches/floatround` measures that crossing at **32.1 ns**
+        // against **0.91 ns** for the sequence. It costs the program 43 bytes
+        // — 87 emitted where a mediated call site was 44 — and takes
+        // 5,000,000 native-to-runtime crossings to nought.
+        //
+        // What holds it to the bit is `tests/suite`'s `ROUNDINGS` — computed
+        // by a standalone program calling `f64::round`, and carrying the NaN
+        // payload and quiet bit no Cove program can see — with
+        // `cove-runtime`'s `native_tier.rs` against the VM for the part one
+        // can.
+        Inst::FloatRound { dst, a } => slot(*dst) && slot(*a),
         // ---- places ---------------------------------------------------------
         //
         // Six of the eight, and the two that are missing are missing on purpose.
@@ -934,11 +970,12 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // `encoded.rs`'s `NEG_INT` arm, which is `checked_neg` and nothing else.
         //
         // `Num::Float` is not here and falls to `Reason::Instruction`, the same
-        // division `Inst::Arith` above makes. `Inst::FloatAbs` and
-        // `Inst::FloatMinMax` *are* lowered, so the rule is no longer "no
-        // float operation": it is that a float operation is lowered when it
-        // has been asked for, and a negation has not been. `NEG_FLOAT` cannot raise at all, so the two arms here are
-        // not one arm with a flag.
+        // division `Inst::Arith` above makes. `Inst::FloatAbs`,
+        // `Inst::FloatMinMax` and `Inst::FloatRound` *are* lowered, so the
+        // rule is no longer "no float operation": it is that a float operation
+        // is lowered when it has been asked for, and a negation has not been.
+        // `NEG_FLOAT` cannot raise at all, so the two arms here are not one arm
+        // with a flag.
         Inst::Neg {
             num: Num::Int,
             dst,

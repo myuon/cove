@@ -294,7 +294,8 @@ impl Check<'_> {
                 }
                 Inst::Convert { dst, .. }
                 | Inst::FloatAbs { dst, .. }
-                | Inst::FloatMinMax { dst, .. } => {
+                | Inst::FloatMinMax { dst, .. }
+                | Inst::FloatRound { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -702,9 +703,12 @@ impl Check<'_> {
                 self.expect(at, dst, &[into]);
             }
             // One `Float` in and one `Float` out, and nothing else to check:
-            // ADR 0064's Decision 2 typed scalar operation is total over
-            // every bit pattern its operand can hold.
-            Inst::FloatAbs { dst, a } => {
+            // two of ADR 0064's Decision 2 typed scalar operations, each total
+            // over every bit pattern its operand can hold. One arm and not
+            // two, because there is nothing here that tells them apart — a
+            // mask and a rounding differ in what they compute and not in what
+            // a verifier can ask about them.
+            Inst::FloatAbs { dst, a } | Inst::FloatRound { dst, a } => {
                 self.expect(at, a, &[Repr::Float]);
                 self.expect(at, dst, &[Repr::Float]);
             }
@@ -2321,6 +2325,7 @@ fn admitted_in_a_window(inst: &Inst, written: bool) -> bool {
                     | Inst::Convert { .. }
                     | Inst::FloatAbs { .. }
                     | Inst::FloatMinMax { .. }
+                    | Inst::FloatRound { .. }
                     | Inst::LoadField { .. }
                     | Inst::LoadElem { .. }
                     | Inst::RunLoad { .. }

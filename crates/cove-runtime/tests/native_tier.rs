@@ -160,6 +160,20 @@ export fn callsExtremes(x: Float, y: Float, floor: Float, n: Int) -> Float {
   extremes(x, y, floor, n)
 }
 
+/// `Float.round`, so that `Inst::FloatRound` runs as machine code.
+///
+/// `counts(n)` is `magnitudes`' guard and is here for its reason.
+export fn rounds(x: Float, n: Int) -> Float {
+  let guard = counts(n)
+  x.round()
+}
+
+/// A refused caller, so the rounding is reached across the boundary.
+export fn callsRounds(x: Float, n: Int) -> Float {
+  let nothing = Shared(0).lock(fn(v) { v })
+  rounds(x, n)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -1442,6 +1456,75 @@ fn a_float_absolute_runs_as_machine_code() {
         assert!(
             answered.tiers.vm_to_native >= 1,
             "the crossing into the compiled absolute was taken: {:?}",
+            answered.tiers
+        );
+        assert_eq!(
+            answered.tiers.native_to_vm, 0,
+            "and nothing went back the other way: {:?}",
+            answered.tiers
+        );
+    }
+}
+
+/// `Float.round` is compiled, and answers what the VM answers.
+///
+/// The first of issue #454's Step 2, and the only case that runs
+/// `Inst::FloatRound` as machine code entered from the VM. **It is the one
+/// float instruction whose lowering is not obviously right by inspection**:
+/// `abs` is a `btr` and `min` is `minsd` and a blend, where this is seventeen
+/// instructions that reproduce `f64::round` without any instruction that
+/// rounds — x86-64's `roundsd` cannot round a half away from zero at any of
+/// its four modes, and is SSE4.1 besides. So the rows below are chosen to
+/// cross every path the `cmov` in the middle of that sequence selects
+/// between.
+///
+/// - `2.5` and `4.5` are the halves that separate away-from-zero from
+///   ties-to-even; `1.5` is the half that does not, and it is here so the
+///   file records that it would have passed a wrong rule.
+/// - `-0.4` is the row a Cove program can see and a bitwise-wrong body would
+///   get wrong: the answer is `-0.0` and renders `-0.0`, where a lowering that
+///   truncated the signed value rather than the magnitude would render `0.0`.
+/// - `0.49999999999999994` is the input that `trunc(x + 0.5)` answers `1.0`
+///   for and the operation answers `0.0` for.
+/// - `2^53` and the infinities take the other side of the `cmov`, where the
+///   operand has nothing to round and comes back whole.
+///
+/// What the language cannot see — a NaN's payload, its sign and the quiet bit
+/// the addition sets — is pinned in `cove-native`'s own suite, where the
+/// assertions can be in bits.
+#[test]
+fn a_float_rounding_runs_as_machine_code() {
+    on_each_tier(&["rounds"], &["callsRounds"]);
+
+    for (x, expected) in [
+        (2.5f64, "3.0"),
+        (-2.5, "-3.0"),
+        (4.5, "5.0"),
+        (1.5, "2.0"),
+        (-0.4, "-0.0"),
+        (0.4, "0.0"),
+        (0.49999999999999994, "0.0"),
+        (-0.49999999999999994, "-0.0"),
+        (4503599627370495.5, "4503599627370496.0"),
+        (9007199254740992.0, "9007199254740992.0"),
+        (f64::INFINITY, "inf"),
+        (f64::NEG_INFINITY, "-inf"),
+        (f64::MIN_POSITIVE, "0.0"),
+        (-f64::MIN_POSITIVE, "-0.0"),
+    ] {
+        let answered = both("callsRounds", vec![Value::float(x), Value::int(0)]);
+        assert_eq!(
+            answered.vm,
+            Ok(expected.to_string()),
+            "round({x}) on the VM"
+        );
+        assert_eq!(
+            answered.native, answered.vm,
+            "and compiled code answers the same: round({x})"
+        );
+        assert!(
+            answered.tiers.vm_to_native >= 1,
+            "the crossing into the compiled rounding was taken: {:?}",
             answered.tiers
         );
         assert_eq!(

@@ -108,10 +108,28 @@ const HEAP_SPARE: u8 = R15;
 // The SSE registers this arm uses, which are scratch in the same sense the
 // integer scratch registers are: nothing lives in one between two
 // instructions, because every value of a frame lives in the frame. Only
-// `Inst::Convert(IntToFloat)` and `Inst::FloatMinMax` touch them at all.
+// `Inst::Convert(IntToFloat)`, `Inst::FloatMinMax` and `Inst::FloatRound`
+// touch them at all.
 const XMM0: u8 = 0;
 const XMM2: u8 = 2;
 const XMM3: u8 = 3;
+
+// The two constants `Inst::FloatRound` needs, as the bits of the doubles they
+// are, because this arm has no constant pool to put them in — see
+// [`Emit::mov_imm64`]'s callers.
+//
+// `ROUND_NUDGE` is **`nextdown(0.5)` and not `0.5`**, which is the whole of
+// why `trunc(|x| + nudge)` is `round(|x|)`: `0.49999999999999994 + 0.5` rounds
+// up to `1.0` and would truncate to `1` where the answer is `0`, and adding
+// the double below a half instead makes that one input come out at exactly
+// `1 - 2^-53` and truncate to `0`. Every half still carries: `0.5 + nudge` is
+// `1 - 2^-54`, which is a tie the default rounding mode takes to the even
+// neighbour `1.0`. It is the constant `rustc -O` uses, read out of its output
+// rather than reasoned to.
+const ROUND_NUDGE: i64 = 0x3fdf_ffff_ffff_ffff_u64 as i64;
+/// The biased exponent of `2^52`, which is the first magnitude at which every
+/// double is already an integer.
+const ROUND_EXPONENT: i32 = 0x433;
 
 // The three SSE2 packed logicals the min/max blend is built from, and the
 // `cmpsd` predicate that drives it.
@@ -759,6 +777,102 @@ impl<'a> Emit<'a> {
                 self.packed_logic(ANDNPD, XMM3, XMM0);
                 self.packed_logic(ORPD, XMM2, XMM3);
                 self.movsd_store(FRAME, dst_at, XMM2);
+            }
+            // `encoded.rs`'s `FLOAT_ROUND`, ADR 0064's third typed scalar
+            // operation, and the longest sequence in this file that is still
+            // one instruction of IR.
+            //
+            // **x86-64 has no instruction for this, and that is not a
+            // subtlety about which one to pick.** `roundsd`'s `imm8` selects
+            // nearest-even, floor, ceiling or truncate; half-**away**-from-
+            // zero is not one of the four, so the instruction named after the
+            // operation cannot perform it at any rounding mode. It is also
+            // SSE4.1, where nothing else in this file needs anything past
+            // SSE2 and there is no feature test to put in front of one.
+            //
+            // So the sequence is the identity `rustc -O` uses — read out of
+            // its output rather than invented — with the truncation done by
+            // the SSE2 pair this arm does have:
+            //
+            // ```text
+            // round(x) = copysign(trunc(|x| + nextdown(0.5)), x),  |x| < 2^52
+            //          = x,                                        otherwise
+            // ```
+            //
+            // Seventeen instructions and eighty-seven bytes:
+            //
+            // ```text
+            // mov       rax, [frame+a]       ; bits(x)
+            // mov       rcx, rax
+            // btr       rcx, 63              ; bits(|x|)
+            // xor       rax, rcx             ; the sign bit of x, alone
+            // movq      xmm0, rcx            ; |x|
+            // shr       rcx, 52              ; the biased exponent of |x|
+            // movabs    rdx, 0x3fdfffffffffffff
+            // movq      xmm2, rdx            ; nextdown(0.5)
+            // addsd     xmm0, xmm2           ; y = |x| + nextdown(0.5)
+            // cvttsd2si rdx, xmm0            ; i = trunc(y), as an i64
+            // cvtsi2sd  xmm2, rdx            ; and back to a double
+            // movq      rdx, xmm0            ; bits(y)
+            // movq      rsi, xmm2            ; bits((double) i)
+            // cmp       rcx, 0x433           ; the exponent of 2^52
+            // cmovb     rdx, rsi             ; |x| < 2^52 -> the converted one
+            // or        rax, rdx             ; the sign back on
+            // mov       [frame+dst], rax
+            // ```
+            //
+            // Three things in it are load-bearing and none is obvious.
+            //
+            // **The `cmov`'s other side is `y` and not `x`.** For a finite
+            // magnitude at or past `2^52` the addition is exact — `nextdown`
+            // of a half is below half an ulp there — so `y` *is* `x`; for an
+            // infinity it is that infinity; and for a NaN it is that NaN with
+            // its payload and its sign kept and its quiet bit **set**, which
+            // is what `f64::round` answers and what `ROUNDINGS`' signalling
+            // rows are the check on. Taking `x` there instead would pass every
+            // other row in that table and hand a signalling NaN back
+            // unquieted.
+            //
+            // **The magnitude test is on the exponent field and not on the
+            // value**, so it needs no second float constant and no `ucomisd`:
+            // `|x| < 2^52` is exactly `biased exponent < 0x433`, a NaN and an
+            // infinity are `0x7ff` and land on the other side of it, and a
+            // subnormal is `0` and lands on this one.
+            //
+            // **The conversion is over `|x|` rather than over `x`**, so
+            // `cvtsi2sd` always answers a non-negative double and the
+            // operand's sign goes back on with one `or`. That is what makes
+            // `(-0.4).round()` answer `-0.0` rather than `+0.0` — the row Cove
+            // can see three ways, and the one a `cvttsd2si` of the signed
+            // value would get wrong, because the integer `0` has no sign to
+            // carry it.
+            //
+            // `cvttsd2si` is handed an out-of-range operand on the path the
+            // `cmov` discards, and answers the "integer indefinite" for it.
+            // Nothing reads that; what it does set is `MXCSR`'s invalid flag,
+            // which is masked, unobserved by Cove, and set by `f64::round`'s
+            // own sequence on the same inputs.
+            //
+            // `dst` may be `a`: the operand is loaded into `rax` before
+            // anything is written, so in place is the same sequence.
+            Inst::FloatRound { dst, a } => {
+                self.load_slot(RAX, *a);
+                self.mov_rr(RCX, RAX);
+                self.btr_imm8(RCX, 63);
+                self.xor_rr(RAX, RCX);
+                self.movq_to_xmm(XMM0, RCX);
+                self.shr_imm8(RCX, 52);
+                self.mov_imm64(RDX, ROUND_NUDGE);
+                self.movq_to_xmm(XMM2, RDX);
+                self.addsd_rr(XMM0, XMM2);
+                self.cvttsd2si(RDX, XMM0);
+                self.cvtsi2sd(XMM2, RDX);
+                self.movq_from_xmm(RDX, XMM0);
+                self.movq_from_xmm(RSI, XMM2);
+                self.cmp_imm32(RCX, ROUND_EXPONENT);
+                self.cmov(CC_B, RDX, RSI);
+                self.or_rr(RAX, RDX);
+                self.store_slot(*dst, RAX);
             }
             Inst::Len { dst, obj } => self.len_of(*dst, *obj),
             Inst::LoadElem {
@@ -3125,6 +3239,81 @@ impl<'a> Emit<'a> {
         self.rex(false, dst, src);
         self.byte(0x0f);
         self.byte(opcode);
+        self.modrm_reg(dst, src);
+    }
+
+    /// `movq xmm, r64`: a whole word moved into the low half of an SSE
+    /// register, with the high half zeroed and no conversion of any kind.
+    ///
+    /// The one caller is [`Inst::FloatRound`](cove_ir::Inst::FloatRound),
+    /// which forms both its operand and its constant in integer registers —
+    /// the operand because clearing the sign bit is `btr`, and the constant
+    /// because this arm has no constant pool to load one out of.
+    fn movq_to_xmm(&mut self, dst: u8, src: u8) {
+        self.byte(0x66);
+        self.rex(true, dst, src);
+        self.byte(0x0f);
+        self.byte(0x6e);
+        self.modrm_reg(dst, src);
+    }
+
+    /// `movq r64, xmm`: [`Emit::movq_to_xmm`] the other way.
+    fn movq_from_xmm(&mut self, dst: u8, src: u8) {
+        self.byte(0x66);
+        self.rex(true, src, dst);
+        self.byte(0x0f);
+        self.byte(0x7e);
+        self.modrm_reg(src, dst);
+    }
+
+    /// `addsd xmm, xmm`.
+    ///
+    /// The **one** float arithmetic instruction this file emits, and it is
+    /// emitted against a constant the same template just wrote rather than
+    /// against a value the program named: `crate::subset`'s `supported`
+    /// admits no `Inst::Arith` over `Num::Float`.
+    fn addsd_rr(&mut self, dst: u8, src: u8) {
+        self.byte(0xf2);
+        self.rex(false, dst, src);
+        self.byte(0x0f);
+        self.byte(0x58);
+        self.modrm_reg(dst, src);
+    }
+
+    /// `cvttsd2si r64, xmm`: a double truncated toward zero to a signed
+    /// 64-bit integer.
+    ///
+    /// Out of range — which includes every NaN and both infinities — it
+    /// answers `i64::MIN`, the "integer indefinite", and sets `MXCSR`'s
+    /// invalid flag. Its one caller discards that answer with a `cmov`.
+    fn cvttsd2si(&mut self, dst: u8, src: u8) {
+        self.byte(0xf2);
+        self.rex(true, dst, src);
+        self.byte(0x0f);
+        self.byte(0x2c);
+        self.modrm_reg(dst, src);
+    }
+
+    /// `cvtsi2sd xmm, r64`: [`Emit::cvttsd2si`] the other way, and exact for
+    /// every magnitude its one caller hands it.
+    fn cvtsi2sd(&mut self, dst: u8, src: u8) {
+        self.byte(0xf2);
+        self.rex(true, dst, src);
+        self.byte(0x0f);
+        self.byte(0x2a);
+        self.modrm_reg(dst, src);
+    }
+
+    /// `cmovcc r64, r64`.
+    ///
+    /// A select rather than a branch, for the reason the `Inst::FloatMinMax`
+    /// arm blends rather than branches: a template with no branch in it costs
+    /// the same whatever it is handed, and `benches/floatround`'s five rows
+    /// are what say the timings agree with the code.
+    fn cmov(&mut self, cc: u8, dst: u8, src: u8) {
+        self.rex(true, dst, src);
+        self.byte(0x0f);
+        self.byte(0x40 | cc);
         self.modrm_reg(dst, src);
     }
 

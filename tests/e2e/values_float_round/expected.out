@@ -1,0 +1,80 @@
+tie.half 1.0 -1.0
+tie.two 3.0 -3.0
+tie.four 5.0 -5.0
+tie.one 2.0 -2.0
+tie.three 4.0 -4.0
+tie.half.recip 1.0 -1.0
+tie.half.format 1.0 -1.0
+tie.huge 4503599627370495.0
+tie.huge.neg -4503599627370495.0
+edge.under 0.0 -0.0
+edge.under.recip inf -inf
+edge.over 1.0 -1.0
+edge.one.under 1.0 -1.0
+edge.one.over 2.0 -2.0
+edge.two.under 2.0 -2.0
+edge.two.over 3.0 -3.0
+zero.small -0.0 0.0
+zero.small.format -0.00 0.00
+zero.small.recip -inf inf
+zero.self -0.0 0.0
+zero.self.format -0.00 0.00
+zero.self.recip -inf inf
+zero.last -0.0 0.0
+zero.last.recip -inf inf
+zero.blind.eq true true
+zero.blind.order false true
+zero.blind.zero true true
+zero.blind.toInt Ok(0) Ok(0)
+zero.made.recip -inf -inf
+sub.tiny 0.0 -0.0
+sub.tiny.recip inf -inf
+sub.largest 0.0 -0.0
+sub.largest.recip inf -inf
+sub.normal.recip inf -inf
+sub.tiny.format -0.000 0.000
+nan.round NaN
+nan.round.twice NaN
+nan.round.isNaN false false
+nan.round.format NaN
+nan.round.toInt Err(`Float.toInt` cannot convert `NaN`, which is not a number)
+nan.made NaN NaN NaN NaN
+inf.round inf -inf
+inf.round.same true true
+inf.round.recip 0.0 -0.0
+inf.round.toInt Err(`Float.toInt` cannot convert `inf`, which has no truncation) Err(`Float.toInt` cannot convert `-inf`, which has no truncation)
+inf.round.twice inf -inf
+mag.2p52 4503599627370496.0 -4503599627370496.0
+mag.2p53 9007199254740992.0 -9007199254740992.0
+mag.frac 4503599627370496.0 -4503599627370496.0
+mag.frac.same true
+mag.max 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0
+mag.max.neg -179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0
+mag.max.same true true
+mag.big.same true true
+plain.low 0.0 1.0 -0.0 -1.0
+plain.one 1.0 2.0 -1.0 -2.0
+plain.two 2.0 3.0 -2.0 -3.0
+plain.doc 3.0 -3.0 -4.0 4.0 5.0
+plain.whole 2.0 -2.0 1.0
+plain.big 1235.0 -1235.0 100.0
+format 3.000 -0.0 2
+toInt Ok(3) Ok(-3) Ok(-1)
+id.halfUp 1.0 1.0 1.0 1.0 1.0
+id.halfDown -1.0 -1.0 -1.0 -1.0 -1.0
+id.twoHalf 3.0 3.0 3.0 0.3333333333333333 0.3333333333333333
+id.fourHalf -5.0 -5.0 -5.0 -0.2 -0.2
+id.small -0.0 -0.0 -0.0 -inf -inf
+id.smallPos 0.0 0.0 0.0 inf inf
+id.zero -0.0 -0.0 -0.0 -inf -inf
+id.edge 0.0 0.0 0.0 inf inf
+id.edgeNeg -0.0 -0.0 -0.0 -inf -inf
+id.huge 4503599627370496.0 4503599627370496.0 4503599627370496.0 0.0000000000000002220446049250313 0.0000000000000002220446049250313
+id.inf inf inf inf 0.0 0.0
+id.sub -0.0 -0.0 -0.0 -inf -inf
+run.sum 2.5 3.0 -3.0
+run.tenths 0.30000000000000004 0.0 inf
+run.zero.recip inf -inf
+run.flushed 0.0 inf -inf
+run.overflowed inf -inf
+run.nan NaN false

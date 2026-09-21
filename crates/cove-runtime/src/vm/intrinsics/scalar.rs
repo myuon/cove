@@ -91,12 +91,6 @@ pub(super) fn float_to_int(
     make::ok(machine, dest, &[truncated as i64 as u64])
 }
 
-/// `Float.round() -> Float`.
-pub(super) fn float_round(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
-    let x = operand::float(machine, frame, 0);
-    dest.word(machine, x.round().to_bits());
-}
-
 /// `Float.sqrt() -> Float`.
 ///
 /// IEEE 754 requires a correctly-rounded square root, so this is the one
@@ -216,18 +210,19 @@ mod tests {
         );
     }
 
-    /// `min` and `max` are not here any more: ADR 0064's last two Phase 1
-    /// migrations made them `Inst::FloatMinMax`, an instruction rather than a
-    /// runtime call, so there is no arm of this module left to ask. What they
-    /// answer is asserted in bits, on all three tiers, by
-    /// `vm::exec`'s `a_float_extremum_answers_one_of_its_operands` and
-    /// `cove-native`'s `EXTREMA`.
+    /// `round`, `min` and `max` are not here any more: ADR 0064's last two
+    /// Phase 1 migrations made the pair `Inst::FloatMinMax` and issue #454's
+    /// Step 2 made `round` `Inst::FloatRound`, instructions rather than
+    /// runtime calls, so there is no arm of this module left to ask. What
+    /// they answer is asserted in bits, on both tiers, by `vm::exec`'s
+    /// `a_float_extremum_answers_one_of_its_operands` and
+    /// `a_float_rounding_answers_the_nearest_integer` and by `cove-native`'s
+    /// `EXTREMA` and `ROUNDINGS`.
     #[test]
-    fn a_float_rounds_and_formats() {
+    fn a_float_formats() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let x = (-2.5f64).to_bits();
-        assert_eq!(float_of(&mut machine, "round", &[(Repr::Float, x)]), -3.0);
 
         let text = word(
             &mut machine,

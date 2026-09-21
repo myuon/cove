@@ -119,6 +119,31 @@ fn @m.f(Float Float) -> Float
     );
 }
 
+/// `Float.round` is one instruction and not a runtime call.
+///
+/// The third of ADR 0064's Decision 2 typed scalar operations, and the
+/// listing says the same thing the two above it say: **no `intrinsic-call` at
+/// all**, where the same function held one before, and the same two-slot
+/// frame `Float.abs` has.
+///
+/// That the *lowering* is one instruction and the *machine code* is seventeen
+/// is the whole point of the migration and not a tension in it: what the call
+/// cost was a crossing, and `benches/floatround` is where the two are
+/// measured against each other.
+#[test]
+fn a_float_rounding_is_one_instruction() {
+    assert_eq!(
+        listing("fn f(x: Float) -> Float { x.round() }", "f"),
+        "\
+fn @m.f(Float) -> Float
+  frame 2: s0!:float s1:float
+  local x -> s0:Float [0, 2)
+     0  round.float s1:float s0:float
+     1  return s1:Float
+"
+    );
+}
+
 /// `Int.toFloat` is the conversion instruction the IR has always had, and
 /// not a runtime call.
 #[test]

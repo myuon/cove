@@ -1,0 +1,345 @@
+use console.println
+
+/// `Float.round` at every edge, and the attempts that decide which of those
+/// edges a Cove program can see at all.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line
+/// of a reimplementation. `Float.round` is `f64::round` today, reached
+/// through one `Inst::IntrinsicCall`, and this is that corpus.
+///
+/// # The tie rule is the row this file exists for
+///
+/// `f64::round` rounds a half **away from zero**, and its documentation says
+/// so in its first sentence — "If a value is half-way between two integers,
+/// round away from `0.0`" — and adds "This function always returns the
+/// precise result". The rival rule is ties-to-even, which is what every
+/// machine's default rounding mode does, what x86-64's `roundsd` offers and
+/// what `f64::round_ties_even` is.
+///
+/// **The two do not disagree on every half, which is the thing to get right
+/// when choosing the rows.** Ties-to-even answers `1.5` and `3.5` with `2.0`
+/// and `4.0`, exactly as away-from-zero does; it is the halves whose floor is
+/// *even* that separate them. So `0.5`, `2.5` and `4.5` are the rows that
+/// decide, `1.5` and `3.5` are the rows that would pass a wrong
+/// implementation, and both kinds are here so the file records which is
+/// which. `4503599627370494.5` is the same question at the far end of the
+/// range, where it is also the last magnitude a half can be written at.
+///
+/// # A zero keeps its sign, and that is observable
+///
+/// `(-0.4).round()` answers `-0.0` rather than `+0.0`, and the documentation
+/// does not say so — "the nearest integer to `self`" names `0` and not which
+/// of the two zeros. A Cove program can tell them apart three ways, which is
+/// the survey `tests/e2e/values_float_abs` established: interpolation renders
+/// the sign (`cove_runtime::value`'s `write_float` writes `-0.0`), `format`
+/// renders it (`-0.00`), and `1.0 / x` answers `-inf` against `inf`. All
+/// three are asked here of every input whose answer is a zero — the small
+/// negatives, both zeros themselves, and every subnormal. `==`, `<`, `<=` and
+/// `toInt()` are printed beside them and see nothing, which is why none of
+/// them could have pinned this.
+///
+/// # What a Cove program cannot ask
+///
+/// Whether a NaN keeps its sign, its payload or its quiet bit. A program can
+/// make a NaN five ways and cannot make two it can tell apart: there is no
+/// bit access to a `Float` and every NaN renders as the literal `NaN`. So
+/// `nan.round()` is pinned as `NaN` here and the bits are pinned in the tests
+/// beside each tier, not in this file.
+///
+/// Every expected value was computed by a standalone `rustc` program calling
+/// `f64::round` and reproducing `write_float`, and the harness was watched
+/// failing on a corrupted `expected.out` before the file was put back.
+export fn main() -> Result<Unit, Error> {
+  ties()?
+  edges()?
+  zeros()?
+  subnormals()?
+  nans()?
+  infinities()?
+  magnitudes()?
+  ordinary()?
+  identities()?
+  computed()?
+  Ok(())
+}
+
+/// Every half this file can write, in both directions, at five magnitudes.
+///
+/// The second column of each line is the negative of the first, so a rule
+/// that rounded toward positive infinity rather than away from zero would
+/// show on every `tie.*.neg` column and on none of the others.
+fn ties() -> Result<Unit, Error> {
+  // Away-from-zero: 1.0, 3.0, 5.0. Ties-to-even: 0.0, 2.0, 4.0. These three
+  // rows are the whole disagreement between the two rules.
+  println("tie.half {(0.5).round()} {(-0.5).round()}")?
+  println("tie.two {(2.5).round()} {(-2.5).round()}")?
+  println("tie.four {(4.5).round()} {(-4.5).round()}")?
+
+  // And these two agree under both rules, which is exactly why they are
+  // written down: an implementation with the tie backwards passes them.
+  println("tie.one {(1.5).round()} {(-1.5).round()}")?
+  println("tie.three {(3.5).round()} {(-3.5).round()}")?
+
+  // The reciprocal of the `0.5` row, because ties-to-even's answer there is
+  // a zero and `-0.5` would give the *negative* one — a difference the
+  // rendering shows and this says a second way.
+  println("tie.half.recip {1.0 / (0.5).round()} {1.0 / (-0.5).round()}")?
+  println(
+    "tie.half.format {(0.5).round().format(1)} {(-0.5).round().format(1)}",
+  )?
+
+  // A half at the last magnitude one can be written at: `2^52 - 1.5`, whose
+  // neighbours are a whole unit apart. Ties-to-even answers
+  // `4503599627370494.0` here.
+  println("tie.huge {(4503599627370494.5).round()}")?
+  println("tie.huge.neg {(-4503599627370494.5).round()}")?
+  Ok(())
+}
+
+/// The ulp either side of a half, where the obvious implementation is wrong.
+///
+/// `trunc(x + 0.5)` is the sequence a reader reaches for and it is wrong on
+/// exactly one input: `0.49999999999999994`, the double below `0.5`, whose
+/// sum with `0.5` rounds *up* to `1.0` and truncates to `1`. The answer is
+/// `0.0`. Its negative is the same mistake and answers `-0.0`, so the
+/// reciprocal is asked as well as the rendering.
+fn edges() -> Result<Unit, Error> {
+  println("edge.under {(0.49999999999999994).round()} {(-0.49999999999999994).round()}")?
+  println("edge.under.recip {1.0 / (0.49999999999999994).round()} {1.0 / (-0.49999999999999994).round()}")?
+  println(
+    "edge.over {(0.5000000000000001).round()} {(-0.5000000000000001).round()}",
+  )?
+  println("edge.one.under {(1.4999999999999998).round()} {(-1.4999999999999998).round()}")?
+  println("edge.one.over {(1.5000000000000002).round()} {(-1.5000000000000002).round()}")?
+  println("edge.two.under {(2.4999999999999996).round()} {(-2.4999999999999996).round()}")?
+  println("edge.two.over {(2.5000000000000004).round()} {(-2.5000000000000004).round()}")?
+  Ok(())
+}
+
+/// Every input whose answer is a zero, through the three observers that can
+/// tell the two zeros apart and the four that cannot.
+fn zeros() -> Result<Unit, Error> {
+  let nz = -0.0
+  let pz = 0.0
+
+  // A small negative rounds to `-0.0` and a small positive to `+0.0`. The
+  // sign of the answer is the sign of the operand, and nothing in the
+  // documentation says so.
+  println("zero.small {(-0.4).round()} {(0.4).round()}")?
+  println(
+    "zero.small.format {(-0.4).round().format(2)} {(0.4).round().format(2)}",
+  )?
+  println("zero.small.recip {1.0 / (-0.4).round()} {1.0 / (0.4).round()}")?
+
+  // The two zeros themselves, which round to themselves.
+  println("zero.self {nz.round()} {pz.round()}")?
+  println("zero.self.format {nz.round().format(2)} {pz.round().format(2)}")?
+  println("zero.self.recip {1.0 / nz.round()} {1.0 / pz.round()}")?
+
+  // The last input on each side whose answer is still a zero, which is the
+  // boundary the tie rule draws: `-0.49999999999999994` answers `-0.0` and
+  // `-0.5` answers `-1.0`.
+  println("zero.last {(-0.49999999999999994).round()} {(0.49999999999999994).round()}")?
+  println("zero.last.recip {1.0 / (-0.49999999999999994).round()} {1.0 / (0.49999999999999994).round()}")?
+
+  // The attempts that see nothing. Every one of these answers the same
+  // whichever zero came back, which is why the lines above are the pin and
+  // these are the record of what would not have been.
+  println("zero.blind.eq {(-0.4).round() == (0.4).round()} {nz.round() == pz.round()}")?
+  println("zero.blind.order {(-0.4).round() < (0.4).round()} {(-0.4).round() <= (0.4).round()}")?
+  println("zero.blind.zero {(-0.4).round() == 0.0} {nz.round() == 0.0}")?
+  println("zero.blind.toInt {(-0.4).round().toInt()} {(0.4).round().toInt()}")?
+
+  // A negative zero nothing wrote down as a literal, in case a literal is
+  // the one shape something could fold.
+  let made = 0.0 * -1.0
+  println("zero.made.recip {1.0 / made} {1.0 / made.round()}")?
+  Ok(())
+}
+
+/// The subnormals, every one of which rounds to a zero — of its own sign.
+///
+/// They are here because an implementation that went through an arithmetic
+/// operation could flush one, and because they are the inputs furthest from
+/// their answer that still have one.
+fn subnormals() -> Result<Unit, Error> {
+  println("sub.tiny {(5.0e-324).round()} {(-5.0e-324).round()}")?
+  println(
+    "sub.tiny.recip {1.0 / (5.0e-324).round()} {1.0 / (-5.0e-324).round()}",
+  )?
+  println("sub.largest {(2.2250738585072009e-308).round()} {(-2.2250738585072009e-308).round()}")?
+  println("sub.largest.recip {1.0 / (2.2250738585072009e-308).round()} {1.0 / (-2.2250738585072009e-308).round()}")?
+  println("sub.normal.recip {1.0 / (2.2250738585072014e-308).round()} {1.0 / (-2.2250738585072014e-308).round()}")?
+  println("sub.tiny.format {(-5.0e-324).round().format(3)} {(5.0e-324).round().format(3)}")?
+  Ok(())
+}
+
+/// A NaN in, a NaN out — and the record of everything about that NaN this
+/// file cannot ask.
+fn nans() -> Result<Unit, Error> {
+  let nan = 0.0 / 0.0
+
+  println("nan.round {nan.round()}")?
+  println("nan.round.twice {nan.round().round()}")?
+  // A NaN compares equal to nothing, itself included, which is the second
+  // way of saying the answer is one.
+  println("nan.round.isNaN {nan.round() == nan.round()} {nan.round() == nan}")?
+  println("nan.round.format {nan.round().format(2)}")?
+  println("nan.round.toInt {nan.round().toInt()}")?
+
+  // A NaN made four other ways, so that no line above is answered by a fold
+  // of `0.0 / 0.0` in particular. The negated one is where a sign *would*
+  // show if `write_float` rendered it, and it does not: every NaN is `NaN`.
+  let other = (-1.0).sqrt()
+  let negated = -(0.0 / 0.0)
+  let parsed = Float.parse("nan").unwrapOr(0.0)
+  let subtracted = 1.0 / 0.0 - 1.0 / 0.0
+  println("nan.made {other.round()} {negated.round()} {parsed.round()} {subtracted.round()}")?
+  Ok(())
+}
+
+/// Both infinities, which round to themselves.
+fn infinities() -> Result<Unit, Error> {
+  let pos = 1.0 / 0.0
+  let neg = -1.0 / 0.0
+
+  println("inf.round {pos.round()} {neg.round()}")?
+  println("inf.round.same {pos.round() == pos} {neg.round() == neg}")?
+  // The reciprocals are the signed zeros again, from the other end.
+  println("inf.round.recip {1.0 / pos.round()} {1.0 / neg.round()}")?
+  println("inf.round.toInt {pos.round().toInt()} {neg.round().toInt()}")?
+  println("inf.round.twice {pos.round().round()} {neg.round().round()}")?
+  Ok(())
+}
+
+/// The magnitudes at which every `f64` is already an integer, where `round`
+/// is the identity and has to be exactly that.
+fn magnitudes() -> Result<Unit, Error> {
+  // `2^52` is the first magnitude whose neighbours are a whole unit apart,
+  // and `2^53` the first whose neighbours are two.
+  println(
+    "mag.2p52 {(4503599627370496.0).round()} {(-4503599627370496.0).round()}",
+  )?
+  println(
+    "mag.2p53 {(9007199254740992.0).round()} {(-9007199254740992.0).round()}",
+  )?
+
+  // `2^52 - 0.5` is the largest magnitude with a fractional part at all, and
+  // its answer is `2^52` — the one place where rounding a value still below
+  // `2^52` lands exactly on it.
+  println(
+    "mag.frac {(4503599627370495.5).round()} {(-4503599627370495.5).round()}",
+  )?
+  println("mag.frac.same {(4503599627370495.5).round() == 4503599627370496.0}")?
+
+  // `f64::MAX`, which anything that added a half to it could overflow to an
+  // infinity.
+  println("mag.max {(1.7976931348623157e308).round()}")?
+  println("mag.max.neg {(-1.7976931348623157e308).round()}")?
+  println("mag.max.same {(1.7976931348623157e308).round() == 1.7976931348623157e308} {(-1.7976931348623157e308).round() == -1.7976931348623157e308}")?
+  println(
+    "mag.big.same {(1.0e300).round() == 1.0e300} {(1.0e16).round() == 1.0e16}",
+  )?
+  Ok(())
+}
+
+/// The ordinary cases either side of a half, which is what nearly every call
+/// in a real program looks like.
+fn ordinary() -> Result<Unit, Error> {
+  println("plain.low {(0.4).round()} {(0.6).round()} {(-0.4).round()} {(-0.6).round()}")?
+  println("plain.one {(1.4).round()} {(1.6).round()} {(-1.4).round()} {(-1.6).round()}")?
+  println("plain.two {(2.4).round()} {(2.6).round()} {(-2.4).round()} {(-2.6).round()}")?
+  // The five the documentation's own examples use.
+  println("plain.doc {(3.3).round()} {(-3.3).round()} {(-3.7).round()} {(3.5).round()} {(4.5).round()}")?
+  println("plain.whole {(2.0).round()} {(-2.0).round()} {(1.0).round()}")?
+  println("plain.big {(1234.5678).round()} {(-1234.5678).round()} {(99.99999).round()}")?
+  println("format {(2.5).round().format(3)} {(-0.4).round().format(1)} {(1.6).round().format(0)}")?
+  println("toInt {(2.5).round().toInt()} {(-2.5).round().toInt()} {(-0.6).round().toInt()}")?
+  Ok(())
+}
+
+/// `round(-x) == -round(x)`, and `round` is idempotent.
+///
+/// Both are worth having on the record because signed zeros are exactly the
+/// thing that could break them: the reciprocals are printed beside the
+/// renderings so that a disagreement only a zero's sign could show is visible
+/// as well as one the rendering would show.
+fn identities() -> Result<Unit, Error> {
+  identity("halfUp", 0.5)?
+  identity("halfDown", -0.5)?
+  identity("twoHalf", 2.5)?
+  identity("fourHalf", -4.5)?
+  identity("small", -0.4)?
+  identity("smallPos", 0.4)?
+  identity("zero", -0.0)?
+  identity("edge", 0.49999999999999994)?
+  identity("edgeNeg", -0.49999999999999994)?
+  identity("huge", 4503599627370495.5)?
+  identity("inf", 1.0 / 0.0)?
+  identity("sub", -5.0e-324)?
+  Ok(())
+}
+
+/// One row of [`identities`], with the operand arriving as a parameter so
+/// that nothing on the line is a fold of a literal.
+///
+/// `-(-x).round()` is `-((-x).round())`: a method call binds tighter than the
+/// unary minus, and the formatter takes the parentheses that said so away.
+fn identity(name: String, x: Float) -> Result<Unit, Error> {
+  let once = x.round()
+  let twice = once.round()
+  let negated = -(-x).round()
+  println("id.{name} {once} {twice} {negated} {1.0 / once} {1.0 / negated}")?
+  Ok(())
+}
+
+/// The same questions over values built by a loop, so that no line above is
+/// the only answer to its question.
+fn computed() -> Result<Unit, Error> {
+  // Five halves make a tie nothing wrote down.
+  var total = 0.0
+  var i = 0
+  while i < 5 {
+    total = total + 0.5
+    i += 1
+  }
+  println("run.sum {total} {total.round()} {(-total).round()}")?
+
+  // A tenth three times is the classic near-miss, and it is not a tie.
+  var tenths = 0.0
+  var n = 0
+  while n < 3 {
+    tenths = tenths + 0.1
+    n += 1
+  }
+  println("run.tenths {tenths} {tenths.round()} {1.0 / tenths.round()}")?
+
+  let zero = total - total
+  let negZero = zero * -1.0
+  println("run.zero.recip {1.0 / zero.round()} {1.0 / negZero.round()}")?
+
+  // Halved past the smallest subnormal: a zero, whose sign the round keeps.
+  var tiny = 1.0
+  var steps = 0
+  while steps < 1100 {
+    tiny = tiny / 2.0
+    steps += 1
+  }
+  println(
+    "run.flushed {tiny.round()} {1.0 / tiny.round()} {1.0 / (-tiny).round()}",
+  )?
+
+  // Doubled past `f64::MAX`: an infinity, which rounds to itself.
+  var huge = 1.0
+  var doubled = 0
+  while doubled < 1100 {
+    huge = huge * 2.0
+    doubled += 1
+  }
+  println("run.overflowed {huge.round()} {(-huge).round()}")?
+
+  let madeNan = huge - huge
+  println("run.nan {madeNan.round()} {madeNan.round() == madeNan.round()}")?
+  Ok(())
+}
