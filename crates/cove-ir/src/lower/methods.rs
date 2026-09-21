@@ -943,8 +943,16 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
 /// `Duration.micros` through `Duration.hours` are not here for the same
 /// reason their reader halves are not in [`MACHINE_METHODS`]: they moved to
 /// `std.duration`. Only `Duration.nanos` is still the machine's.
+///
+/// `String.fromCodePoint` is not here either, and it is the first entry to
+/// leave that was not a `Duration`: ADR 0064 moved it to
+/// `std.string.fromCodePoint`, where the range of Unicode and the surrogate
+/// hole are decided in Cove over a `std.stringbuilder` run. `String` has no
+/// operation left on this table, which is what makes `String.fromCodePoint`'s
+/// row in `cove_schema::builtins::STANDARD_LIBRARY` the only thing that says
+/// how the call is answered at all — resolved by [`Body::call_associated`]
+/// before it ever reaches here.
 const ASSOCIATED: &[(&str, &str)] = &[
-    ("String", "fromCodePoint"),
     ("Int", "parse"),
     ("Int", "parseRadix"),
     ("Float", "parse"),
@@ -1031,18 +1039,31 @@ fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> Opti
 /// `cove_schema::builtins::standard_associated_binding` already answers for
 /// one receiver and one name, the same specificity `ASSOCIATED` gets from
 /// its `match` below.
+///
+/// **A schema-bound builder does not always answer its own receiver**, and
+/// `String.fromCodePoint` is the first one that does not. Every schema-bound
+/// associated function before it — `Set.of`, `Map.of`, and the five
+/// `Duration` builders — answers the type it is written on, so asking
+/// [`receiver_name`] of the settled type was the whole test. A code point may
+/// name no character, so `String.fromCodePoint` answers
+/// `Result<String, Error>` and `receiver_name` of that is `"Result"`. The
+/// `Duration` precedent does not cover it: that is the one lowering piece
+/// ADR 0064's `fromCodePoint` migration had to add, and it is two lines
+/// rather than a path of its own, because [`answers`] is the test
+/// [`ASSOCIATED`]'s own arm already used for the three parsers.
 pub(super) fn associated(head: &str, name: &str, ty: &Ty) -> bool {
     if ASSOCIATED.contains(&(head, name)) {
         return match head {
             "Duration" => matches!(ty, Ty::Duration),
             "Int" => answers(ty, &Ty::Int),
             "Float" => answers(ty, &Ty::Float),
-            "String" => answers(ty, &Ty::Str),
             _ => false,
         };
     }
-    receiver_name(ty) == Some(head)
-        && cove_schema::builtins::standard_associated_binding(head, name).is_some()
+    if cove_schema::builtins::standard_associated_binding(head, name).is_none() {
+        return false;
+    }
+    receiver_name(ty) == Some(head) || (head == "String" && answers(ty, &Ty::Str))
 }
 
 /// Whether `ty` is the `Result<ok, Error>` a builtin parser answers.

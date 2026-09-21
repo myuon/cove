@@ -347,9 +347,32 @@ mod tests {
     /// into a destination sized for the other, and in a real program it ran
     /// off the end of the frame. `cq.json` hit it: `String.sliceBytes`
     /// answered `Result<String, Error>` in a module that also has
-    /// `Result<String, cq.diag.Detail>`. `sliceBytes` has since moved into the
-    /// standard library, and `String.fromCodePoint` is the builtin that still
-    /// answers that `Result`.
+    /// `Result<String, cq.diag.Detail>`.
+    ///
+    /// **Both of the builtins that have stood here have since left**, and the
+    /// hazard has not. `sliceBytes` moved into the standard library, and
+    /// `String.fromCodePoint` — which took its place here — moved there too
+    /// in ADR 0064's `fromCodePoint` migration, so **no builtin answers a
+    /// `Result<String, _>` at all any more**.
+    ///
+    /// Re-pointing the fixture at `Result<Int, _>` and driving it with
+    /// `Int.parse` was tried and does not work, and the reason is worth
+    /// keeping: an `Ok` carrying an `Int` and an `Err` carrying an `Error`
+    /// cannot share the payload region's first word, because one is a scalar
+    /// and one is an address, so `Result<Int, Error>` is three words — the
+    /// same three `Result<Int, Point>` is — and the ambiguity this test needs
+    /// is gone. Two references pack and two `Int`s do not, so a `String` in
+    /// `Ok` is the one payload in `world()` whose two `Result`s differ in
+    /// width at all — which the new `narrow.1 < wide.1` below now asserts, so
+    /// that the next person to re-point this fails loudly rather than
+    /// silently running a test with nothing left to catch.
+    ///
+    /// So the driver is [`ok`] itself rather than an intrinsic that reaches
+    /// it. Nothing is lost: what the bug was is a *builder* searching the
+    /// layout table for a family instead of reading the destination it was
+    /// handed, `in_frame`'s guard words after the destination are what catch
+    /// one that wrote too far, and neither of those is anything the
+    /// `IntrinsicCall` in front of it contributed.
     #[test]
     fn a_builtin_answers_the_result_its_instruction_declares() {
         let program = world();
@@ -364,17 +387,23 @@ mod tests {
             .expect("a `Result` carrying a `String`");
         assert_ne!(narrow.0, wide.0, "the fixture has to be ambiguous");
         assert!(
+            narrow.1 < wide.1,
+            "and ambiguous by width, not only by name"
+        );
+        assert!(
             wide.0.index() < narrow.0.index(),
             "the wide one is found first"
         );
 
         let mut machine = Machine::new(&program, 1 << 14);
-        let held = crate::vm::intrinsics::tests::answering(
+        let held = crate::vm::intrinsics::tests::in_frame(
             &mut machine,
-            "String",
-            "fromCodePoint",
+            &[],
             narrow.0,
-            &[(scalar(&program, Repr::Int), &[104])],
+            |machine, _frame, dest| {
+                let word = machine.new_string("h")?;
+                ok(machine, dest, &[word])
+            },
         )
         .unwrap();
         assert_eq!(

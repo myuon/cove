@@ -834,7 +834,59 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2598;
+/// **The thirty-seventh rise is one new row and nothing else.** 2598 to 2624,
+/// 170 programs to 171, and all twenty-six are
+/// `tests/e2e:values_string_from_code_point` — ten in the `prod` column and
+/// sixteen in the `ret` column. The overlap between the two sub-totals is 49
+/// before and after, so nothing moved between the columns. The check the
+/// paragraphs above prescribe says the rest: the survey with that directory
+/// removed is **2598 exactly**, over the same 170 programs, the same 17,055
+/// functions and the same 286,867 instructions the row before it left, and the
+/// twenty-five programs this table prints are identical line for line.
+///
+/// The program is ADR 0064's Decision 6 corpus for `String.fromCodePoint`,
+/// issue #454's Step 3, landed before a line of the reimplementation. Unlike
+/// the row before it, it comes without a benchmark of its own: the benchmark
+/// lands with the migration rather than with the corpus, because a corpus
+/// commit that also added rows to `benches/` would put two ratchet rises in
+/// one place and the pair could not be told apart afterwards.
+///
+/// The `prod` column of ten is the highest any e2e corpus in this table has
+/// had, and it is the one thing about this row worth reading twice. It is not
+/// a `match`: it is `bytesOf`, whose loop binds `text.byteLength()` and each
+/// `text.byteAt(at)` before it interpolates them, and the `zero` and
+/// `roundTrip` blocks, which bind the answered `String` before asking it four
+/// questions. Every corpus before this one printed what it computed in one
+/// expression; this one has to hold a string still to read its bytes out, and
+/// that is what a corpus for an operation that *builds* a string looks like.
+///
+/// **The thirty-eighth rise is the first one that is mostly not a new row.**
+/// 2624 to 2808, 171 programs to 172, and only **13** of the 184 are
+/// `benches:frompoint`, three in the `prod` column and ten in the `ret`
+/// column. The other **171 are one copy in each of the 171 programs**, and
+/// they are `std.string.refuseCodePoint`'s `return Err(Error(message))` — a
+/// copy into the answer a `return` names, which is what every arm of
+/// `refuseRange` already is and what this survey counts once per program
+/// because it lowers a *package*. The check the paragraphs above prescribe
+/// separates the two: the survey with `benches/frompoint` removed is **2795**
+/// over 171 programs, so the bench is 13 and the migration is 171, and the
+/// overlap between the two sub-totals is 49 at 2624, at 2795 and at 2808.
+///
+/// **No shipped program carries any of the 171.** `cove run --boundary`
+/// reports covefmt at 11,278 instructions in 109 functions and cq at 6,355 in
+/// 74 before and after, to the instruction, with every other counter identical
+/// too; on the native tier the one line that moves in either is `further
+/// declaration(s) are stubs no path in this slice reaches`, 772 to 774 on
+/// covefmt and 810 to 812 on cq — the two new standard-library bodies, which
+/// #441's sweep keeps out of every program that does not name them. So this is
+/// a rise in a survey and in nothing a program runs, and it is worth saying
+/// out loud because the row before it said the opposite: `String.slice` added
+/// two functions and 37 instructions per program and **nought** copies, where
+/// this adds two functions, 284 instructions and one copy. The
+/// difference is that `slice` answers a `String` and this answers a `Result`,
+/// and an `Err` built in one branch and returned from another is the shape
+/// this column exists to count.
+const FORWARDABLE_COPIES: usize = 2808;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

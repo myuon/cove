@@ -1,0 +1,61 @@
+width.zero 0 ok chars 1 bytes 1 [0]
+width.one.low 1 ok chars 1 bytes 1 [1]
+width.one.mid 65 ok chars 1 bytes 1 [65]
+width.one.high 127 ok chars 1 bytes 1 [127]
+width.two.low 128 ok chars 1 bytes 2 [194 128]
+width.two.mid 233 ok chars 1 bytes 2 [195 169]
+width.two.high 2047 ok chars 1 bytes 2 [223 191]
+width.three.low 2048 ok chars 1 bytes 3 [224 160 128]
+width.three.mid 12354 ok chars 1 bytes 3 [227 129 130]
+width.three.high 65535 ok chars 1 bytes 3 [239 191 191]
+width.four.low 65536 ok chars 1 bytes 4 [240 144 128 128]
+width.four.mid 128512 ok chars 1 bytes 4 [240 159 152 128]
+width.four.high 1114111 ok chars 1 bytes 4 [244 143 191 191]
+width.past 1114112 err `1114112` is not a Unicode code point
+hole.below.two 55294 ok chars 1 bytes 3 [237 159 190]
+hole.below 55295 ok chars 1 bytes 3 [237 159 191]
+hole.low 55296 err `55296` is a surrogate half, which is not a character on its own
+hole.low.next 55297 err `55297` is a surrogate half, which is not a character on its own
+hole.lead.high 56319 err `56319` is a surrogate half, which is not a character on its own
+hole.trail.low 56320 err `56320` is a surrogate half, which is not a character on its own
+hole.high.prev 57342 err `57342` is a surrogate half, which is not a character on its own
+hole.high 57343 err `57343` is a surrogate half, which is not a character on its own
+hole.above 57344 ok chars 1 bytes 3 [238 128 128]
+hole.above.two 57345 ok chars 1 bytes 3 [238 128 129]
+range.negative.one -1 err `-1` is not a Unicode code point
+range.negative.byte -128 err `-128` is not a Unicode code point
+range.negative.max -1114111 err `-1114111` is not a Unicode code point
+range.past.one 1114112 err `1114112` is not a Unicode code point
+range.past.two 1114113 err `1114113` is not a Unicode code point
+range.past.u32 4294967295 err `4294967295` is not a Unicode code point
+range.past.u32.next 4294967296 err `4294967296` is not a Unicode code point
+range.int.max 9223372036854775807 err `9223372036854775807` is not a Unicode code point
+range.int.min -9223372036854775808 err `-9223372036854775808` is not a Unicode code point
+zero.chars 1
+zero.bytes 1
+zero.byte 0
+zero.isEmpty false
+zero.sameAsEmpty false
+zero.emptyBytes 0
+zero.codePoint Some(0)
+render.one [a]
+render.two [é]
+render.three [あ]
+render.four [😀]
+round.one 97 back Some(97) agree true bytes 1
+round.two 233 back Some(233) agree true bytes 2
+round.three 12354 back Some(12354) agree true bytes 3
+round.four 128512 back Some(128512) agree true bytes 4
+round.nul 0 back Some(0) agree true bytes 1
+round.newline 10 back Some(10) agree true bytes 1
+round.literal.one true
+round.literal.two true
+round.literal.three true
+round.literal.four true
+result.ok Ok(A)
+result.wide Ok(😀)
+result.surrogate Err(`55296` is a surrogate half, which is not a character on its own)
+result.past Err(`1114112` is not a Unicode code point)
+result.negative Err(`-1` is not a Unicode code point)
+result.unwrapOr fallback
+result.isOk true false true

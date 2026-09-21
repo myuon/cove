@@ -174,7 +174,6 @@ pub(crate) fn call(
         Intrinsic::StringReplace => text::replace(machine, frame, dest),
         Intrinsic::StringToUpper => text::to_upper(machine, frame, dest),
         Intrinsic::StringToLower => text::to_lower(machine, frame, dest),
-        Intrinsic::StringFromCodePoint => text::from_code_point(machine, frame, dest),
         // Not a method of `String` a program can call: the refusal
         // `std.stringbuilder`'s `appendRange` reaches once its own range check
         // has failed. It never answers, so there is nothing to write into
@@ -733,9 +732,23 @@ mod tests {
         // A `Result` whose `Ok` carries a `String` and whose `Err` is two
         // words, declared *before* the `Result<String, Error>` below and
         // indistinguishable from it by name and by what `Ok` holds. It is
-        // here so that a builtin answering the narrow one has a wider wrong
+        // here so that a builder answering the narrow one has a wider wrong
         // answer to find — see
         // `a_builtin_answers_the_result_its_instruction_declares`.
+        //
+        // **The payload has to be a reference for the pair to differ in
+        // width at all**, which is the payload-agreement rule and not a
+        // choice. `Ok` carrying an `Int` and `Err` carrying an `Error` cannot
+        // share the region's first word — one is a scalar and one is an
+        // address — so `Result<Int, Error>` is already three words, exactly
+        // what `Result<Int, Point>` is, and the two would be
+        // indistinguishable by width as well as by name. Two references pack
+        // into one word and a `Point`'s two `Int`s do not, so `String` is the
+        // one `Ok` payload in this fixture whose two `Result`s differ in
+        // width at all.
+        // That is why re-pointing this pair at `Int.parse` when
+        // `String.fromCodePoint` left does not work, and why the test below
+        // drives `make::ok` rather than an intrinsic.
         build.enumeration("Result", &[("Ok", vec![string]), ("Err", vec![point])]);
         for ok in [int, float, string] {
             build.enumeration("Result", &[("Ok", vec![ok]), ("Err", vec![error])]);
@@ -963,13 +976,10 @@ mod tests {
             ("String", "indexOf") => ints(),
             ("Int", "parse" | "parseRadix") | ("Float", "toInt") => ints(),
             ("Float", "parse") => word_layout(program, Repr::Float),
-            ("String", "fromCodePoint") => Some(program.str_layout),
             _ => None,
         };
         let (family, carrier) = match (receiver, operation) {
-            ("Int", "parse" | "parseRadix")
-            | ("Float", "parse" | "toInt")
-            | ("String", "fromCodePoint") => ("Result", "Ok"),
+            ("Int", "parse" | "parseRadix") | ("Float", "parse" | "toInt") => ("Result", "Ok"),
             _ => ("Option", "Some"),
         };
         payload

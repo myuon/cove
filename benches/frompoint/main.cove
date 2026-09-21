@@ -1,0 +1,163 @@
+use console.println
+use clock.now
+
+/// What `String.fromCodePoint` costs, at each of the four widths it encodes to
+/// and on each of the two ways it refuses.
+///
+/// ADR 0064 moved it out of the runtime and into `std.string.fromCodePoint`:
+/// three range guards, a width test, `StringBuilder.withCapacity` at the exact
+/// width, one `appendByte` per byte, and `finish()`. A migration's own cost is
+/// what Decision 8 asks a pull request to record, and for this one no
+/// whole-program figure can supply it: the census measured
+/// `String.fromCodePoint` at **0 static sites and 0 dynamic calls on both**
+/// representative programs, and both are unchanged to the instruction by the
+/// migration. These rows are the operation on its own, and they are the only
+/// measurement it has.
+///
+/// # The width is the row, because the width is the whole of the work
+///
+/// Unlike `benches/slice`, there is no receiver here and nothing proportional
+/// to one: the argument is an `Int` word and the answer is one to four bytes.
+/// So the matrix is the encoding width and nothing else, and what the four
+/// rows separate is the fixed cost of a call that allocates from the marginal
+/// cost of a byte.
+///
+/// - **one** is `A`, one byte, the row with no division in it at all;
+/// - **two** is `é`, two bytes and one division;
+/// - **three** is `あ`, three bytes and two divisions;
+/// - **four** is `😀`, four bytes and three divisions — and it is also the
+///   only row whose `finish()` cannot take the ASCII fast path twice over,
+///   which the paragraph below is about;
+/// - **surrogate** is `0xD800`, refused, and **past** is `0x110000`, refused.
+///   A refusal allocates **two** objects as an answer does, and they are not
+///   the same two: the answer's are a builder's owner and store, and a
+///   refusal's are the run `std.int.renderInto` interpolates the number into
+///   and nothing else — an `Error` is its one `String` field inline, so the
+///   `Err` around the message is words in a frame. Both refused rows are
+///   slower than any answered one, which is what an interpolation costs where
+///   the Rust arm had a `format!`.
+///
+/// # `finish()` validates, and the rows say what that costs
+///
+/// `core.bytesFinish` is `Inst::RunFinish` with `Validation::Utf8`, so the
+/// bytes this body just encoded are decoded again before the run may be
+/// relabelled a `String`. That is not skippable and should not be: `verify.rs`
+/// statically faults a `RunFinish` into `str_layout` without it, and the
+/// invariant it establishes — a `String` is valid UTF-8 — is what every reader
+/// in `std.string` leans on, including the decode directly above this
+/// function's source.
+///
+/// What it costs is visible in **one** against **two**. The validator reads a
+/// word at a time and takes an ASCII fast path when no byte has its high bit
+/// set; a one-byte answer takes it, and every multi-byte answer fails it and
+/// falls through to copying the live prefix into a `Vec<u8>` and handing it to
+/// `str::from_utf8`. So the step from `one` to `two` is one `appendByte`, one
+/// division, and a validator that changes strategy — and the step from `two`
+/// to `three` to `four` is one `appendByte` and one division each, with the
+/// strategy already changed. Three intervals, one of which carries the
+/// validator's cliff and two of which do not, is what lets the rows separate
+/// it from the encoding.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is therefore a call to
+/// [`countPoint`], whose body is the loop, and `main` does nothing in a turn
+/// but read a clock either side of it. Which functions the tier actually
+/// compiled is **checked rather than assumed** — `--backend native --boundary`
+/// names the compiled and the refused.
+///
+/// [`countBare`] is the control, the same loop with the call taken out, so
+/// that what each row reports is the call rather than the turn.
+///
+/// [`turns`] is 100,000 rather than the 2,000,000 `benches/arith` uses,
+/// because every turn of every row allocates and
+/// `crates/cove-cli/tests/vm_coverage.rs` runs every program in this
+/// repository on the tree-walking interpreter as well as on the linear-memory
+/// backend.
+fn turns() -> Int {
+  100000
+}
+
+/// `rounds` encodes and nothing else the loop can be about.
+///
+/// The answer's byte length is summed so that nothing can be folded away and
+/// so that a row which stopped encoding would report a different number rather
+/// than a different time. `unwrapOr("")` is what makes a refused row summable
+/// beside an answered one, and it allocates nothing on either path: the
+/// refusal's own allocation is the message and the `Error`, which happened
+/// before this saw it.
+///
+/// No host call in the body, so that the native tier compiles it and the rows
+/// price `fromCodePoint` on the tier that runs it.
+fn countPoint(point: Int, rounds: Int) -> Int {
+  var bytes = 0
+  var i = 0
+  while i < rounds {
+    bytes = bytes + String.fromCodePoint(point).unwrapOr("").byteLength()
+    i = i + 1
+  }
+  bytes
+}
+
+/// [`countPoint`]'s loop with the call taken out.
+fn countBare(rounds: Int) -> Int {
+  var bytes = 0
+  var i = 0
+  while i < rounds {
+    bytes = bytes + 1
+    i = i + 1
+  }
+  bytes
+}
+
+/// How long `rounds` turns of [`countPoint`] took, in microseconds, and how
+/// many bytes they answered in all.
+struct Row {
+  micros: Int
+  bytes: Int
+}
+
+fn row(point: Int, rounds: Int) -> Row {
+  let startedAt = now()
+  let bytes = countPoint(point, rounds)
+  Row(micros: (now() - startedAt).micros(), bytes: bytes)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let one = row(65, rounds)
+  let two = row(233, rounds)
+  let three = row(12354, rounds)
+  let four = row(128512, rounds)
+  let surrogate = row(55296, rounds)
+  let past = row(1114112, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped encoding would still report a number, and the number
+  // would be of something else. The two refused rows answer nought bytes,
+  // which is `unwrapOr("")` and is also the assertion that they refused.
+  assertEqual(bare, rounds)?
+  assertEqual(one.bytes, rounds)?
+  assertEqual(two.bytes, rounds * 2)?
+  assertEqual(three.bytes, rounds * 3)?
+  assertEqual(four.bytes, rounds * 4)?
+  assertEqual(surrogate.bytes, 0)?
+  assertEqual(past.bytes, 0)?
+
+  println(
+    "bare loop              {bareMicros * 1000 / rounds} ns/turn ({bare})",
+  )?
+  println("one         (1 B, A)   {(one.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("two         (2 B, é)   {(two.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("three       (3 B, あ)  {(three.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("four        (4 B, 😀)  {(four.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("surrogate   (refused)  {(surrogate.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("past        (refused)  {(past.micros - bareMicros) * 1000 / rounds} ns/call")?
+  Ok(())
+}

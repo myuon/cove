@@ -328,7 +328,15 @@ clamped into the string and then walked into the two byte offsets the run
 slice under `sliceBytes` copies between. Both are the two index spaces
 converted in the one place that has to know both, and `slice` is where the
 conversion is a *policy* as well: it clamps where `sliceBytes` refuses,
-because a position has no such thing as inside a character. A code point is an `Int` and there is no `Char`. It also settles two of the
+because a position has no such thing as inside a character. A code point is an
+`Int` and there is no `Char`, and `String.fromCodePoint` — the operation that
+turns one into the other — moved to `std.string` after them: the range of
+Unicode and the surrogate hole in the middle of it are a policy over a
+representation the same way a clamp is, and underneath them is
+`std.stringbuilder`, so it is the first of these migrations to *build* a string
+rather than read one. It cost the one thing the others did not: ADR 0052's
+growable is a stable owner over a replaceable store, so a built string is two
+allocations where the Rust arm's was one. It also settles two of the
 methods that were waiting on it by measuring them: a Cove `contains` is 101×
 the builtin, so `contains`, `startsWith` and `endsWith` stayed primitive,
 while a Cove `Int.parse` is 6.3× and reads as arithmetic. All three predicates

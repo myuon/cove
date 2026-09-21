@@ -1,0 +1,225 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// The answer a code point names is a run of one to four bytes, and the bytes
+/// are what this file pins rather than what they render as. A rendered
+/// character would be the same question asked through the terminal's encoder,
+/// and for `fromCodePoint(0)` it would be a NUL in a golden file; a list of
+/// numbers is the encoding itself, and `é` at `195 169` is a fact no display
+/// layer can be blamed for.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// One `String.fromCodePoint` call, printed as its bytes or as its refusal.
+///
+/// The counts are both here for the reason `values_string_slice`'s are: a
+/// character count and a byte count separate the two readings of an answer,
+/// and every row past `width.one.high` has them differ.
+fn show(label: String, point: Int) -> Result<Unit, Error> {
+  match String.fromCodePoint(point) {
+    Ok(text) => println("{label} {point} ok chars {text.length()} bytes {text.byteLength()} [{bytesOf(text)}]")?
+    Err(error) => println("{label} {point} err {error.message}")?
+  }
+  Ok(())
+}
+
+/// Pins every answer `String.fromCodePoint` gives before it moves out of the
+/// runtime, so the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation, and this is `String.fromCodePoint`'s. Today it is a
+/// `u32::try_from`, a `char::from_u32` and a `char::to_string` in Rust, reached
+/// through one `Inst::IntrinsicCall`; the census measured it at **0 static
+/// sites and 0 dynamic calls on both representative programs**, so nothing here
+/// is a hot path and this file is the only thing that will notice when the body
+/// becomes Cove.
+///
+/// It is issue #454's Step 3, third item, and it is the first migration whose
+/// operation **builds** a string rather than reading one. Everything before it
+/// stood on `RunSlice` or `RunLoad`; this one has to stand on ADR 0062's
+/// ensure/store/commit, which is `std.stringbuilder`.
+///
+/// # The two refusals, and why their order cannot be observed
+///
+/// A number names no character in exactly two ways, and the runtime asks the
+/// surrogate question first:
+///
+/// - `0xD800` through `0xDFFF` is **a surrogate half**, which UTF-8 has no
+///   encoding for. It gets a sentence of its own because it is the refusal a
+///   caller can usually do something about — a format that writes a code point
+///   in sixteen bits writes anything past `0xFFFF` as a *pair* of them, so a
+///   program that arrived here with a `0xD800` holds half of a character rather
+///   than a bad one, and the other half is still to come;
+/// - anything below `0` or above `0x10FFFF` is **not a code point at all**.
+///
+/// The order the two are asked in changes no answer, because the two sets are
+/// disjoint: the hole is strictly inside `0 ..= 0x10FFFF`, so no input is both.
+/// That is worth writing down rather than pinning, since no row could tell an
+/// implementation that asked them the other way round from this one. What the
+/// rows below do pin is that **both ends of the hole and both neighbours of
+/// each end** answer the way they should, which is the test an implementation
+/// with an off-by-one in either bound fails.
+///
+/// # Every width boundary, and the neighbour on the other side of it
+///
+/// UTF-8 changes width four times, and each change is a row and its neighbour:
+/// `0x7F`/`0x80`, `0x7FF`/`0x800`, `0xFFFF`/`0x10000`, and the last one is not
+/// a width at all — `0x10FFFF`/`0x110000` is the end of Unicode. The byte lists
+/// are the encoding written out, so a row is wrong if a single bit of the
+/// continuation pattern is.
+///
+/// # Zero
+///
+/// `fromCodePoint(0)` answers a `String` of **one** character and **one** byte,
+/// holding a NUL. `zero.*` is that stated three ways, because `byteLength()` is
+/// the only way a Cove program can tell a NUL string from an empty one: they
+/// render the same, `isEmpty()` separates them, and `== ""` separates them, and
+/// all three are here so that an implementation which answered `""` for `0` —
+/// the obvious way to get it wrong, by treating a zero length as an empty
+/// write — fails on every one of them.
+export fn main() -> Result<Unit, Error> {
+  widths()?
+  hole()?
+  outOfRange()?
+  zero()?
+  renders()?
+  roundTrips()?
+  results()?
+  Ok(())
+}
+
+/// Every encoding-width boundary and the neighbour on the other side of it.
+fn widths() -> Result<Unit, Error> {
+  show("width.zero", 0)?
+  show("width.one.low", 1)?
+  show("width.one.mid", 65)?
+  show("width.one.high", 127)?
+  show("width.two.low", 128)?
+  show("width.two.mid", 233)?
+  show("width.two.high", 2047)?
+  show("width.three.low", 2048)?
+  show("width.three.mid", 12354)?
+  show("width.three.high", 65535)?
+  show("width.four.low", 65536)?
+  show("width.four.mid", 128512)?
+  show("width.four.high", 1114111)?
+  show("width.past", 1114112)?
+  Ok(())
+}
+
+/// Both ends of the surrogate hole, and both neighbours of each end.
+fn hole() -> Result<Unit, Error> {
+  show("hole.below.two", 55294)?
+  show("hole.below", 55295)?
+  show("hole.low", 55296)?
+  show("hole.low.next", 55297)?
+  show("hole.lead.high", 56319)?
+  show("hole.trail.low", 56320)?
+  show("hole.high.prev", 57342)?
+  show("hole.high", 57343)?
+  show("hole.above", 57344)?
+  show("hole.above.two", 57345)?
+  Ok(())
+}
+
+/// Below zero and past the end, including both ends of `Int`.
+///
+/// The implementation narrows to `u32` before it asks Unicode anything, so
+/// `-1` and `2^32 - 1` fail for two different reasons and say the same
+/// sentence. Both ends of `Int` are rows because a range check written as a
+/// comparison has to hold at `-2^63` and at `2^63 - 1` too, and because a
+/// narrowing one has to refuse rather than wrap.
+fn outOfRange() -> Result<Unit, Error> {
+  show("range.negative.one", -1)?
+  show("range.negative.byte", -128)?
+  show("range.negative.max", -1114111)?
+  show("range.past.one", 1114112)?
+  show("range.past.two", 1114113)?
+  show("range.past.u32", 4294967295)?
+  show("range.past.u32.next", 4294967296)?
+  show("range.int.max", 9223372036854775807)?
+  show("range.int.min", -9223372036854775807 - 1)?
+  Ok(())
+}
+
+/// What `fromCodePoint(0)` answers, and the three ways a program can see it.
+fn zero() -> Result<Unit, Error> {
+  let nul = String.fromCodePoint(0).unwrapOr("unreached")
+  println("zero.chars {nul.length()}")?
+  println("zero.bytes {nul.byteLength()}")?
+  println("zero.byte {nul.byteAt(0)}")?
+  println("zero.isEmpty {nul.isEmpty()}")?
+  println("zero.sameAsEmpty {nul == ""}")?
+  println("zero.emptyBytes {"".byteLength()}")?
+  println("zero.codePoint {nul.codePointAtByte(0)}")?
+  Ok(())
+}
+
+/// The character itself, at each of the four widths.
+///
+/// `bytesOf` is what every other section pins, and this is the one place the
+/// answer is printed as text: a byte list that happened to be right for the
+/// wrong reason would still have to render as these four characters.
+fn renders() -> Result<Unit, Error> {
+  println("render.one [{String.fromCodePoint(97).unwrapOr("?")}]")?
+  println("render.two [{String.fromCodePoint(233).unwrapOr("?")}]")?
+  println("render.three [{String.fromCodePoint(12354).unwrapOr("?")}]")?
+  println("render.four [{String.fromCodePoint(128512).unwrapOr("?")}]")?
+  Ok(())
+}
+
+/// `fromCodePoint` against `codePointAtByte`, and against ADR 0047's character
+/// literals, at one value of each width.
+///
+/// `'a'` is an `Int` — there is no `Char` in Cove — so the literal and the
+/// number are the same value written two ways, and `fromCodePoint` is the one
+/// operation that turns either into text. `codePointAtByte` reads it back, so
+/// the pair is a round trip and `agree` is the whole of it.
+fn roundTrips() -> Result<Unit, Error> {
+  roundTrip("round.one", 'a')?
+  roundTrip("round.two", 'é')?
+  roundTrip("round.three", 'あ')?
+  roundTrip("round.four", '😀')?
+  roundTrip("round.nul", '\0')?
+  roundTrip("round.newline", '\n')?
+  println("round.literal.one {'a' == 97}")?
+  println("round.literal.two {'é' == 233}")?
+  println("round.literal.three {'あ' == 12354}")?
+  println("round.literal.four {'😀' == 128512}")?
+  Ok(())
+}
+
+/// One round trip: a code point to text and back.
+fn roundTrip(label: String, point: Int) -> Result<Unit, Error> {
+  let text = String.fromCodePoint(point).unwrapOr("unreached")
+  let back = text.codePointAtByte(0)
+  println("{label} {point} back {back} agree {back.unwrapOr(-1) == point} bytes {text.byteLength()}")?
+  Ok(())
+}
+
+/// The rendered `Result` itself, which is what a program that does not match
+/// on it sees.
+fn results() -> Result<Unit, Error> {
+  println("result.ok {String.fromCodePoint(65)}")?
+  println("result.wide {String.fromCodePoint(128512)}")?
+  println("result.surrogate {String.fromCodePoint(55296)}")?
+  println("result.past {String.fromCodePoint(1114112)}")?
+  println("result.negative {String.fromCodePoint(-1)}")?
+  println("result.unwrapOr {String.fromCodePoint(55296).unwrapOr("fallback")}")?
+  println("result.isOk {String.fromCodePoint(1114111).isOk()} {String.fromCodePoint(57343).isOk()} {String.fromCodePoint(57344).isOk()}")?
+  Ok(())
+}

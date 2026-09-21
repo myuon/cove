@@ -385,45 +385,10 @@ pub(super) fn to_lower(
     Ok(())
 }
 
-/// `String.fromCodePoint(codePoint) -> Result<String, Error>`.
-///
-/// The surrogates are told apart from the other refusals because they are the
-/// one a caller can usually do something about: a format that writes a code
-/// point in sixteen bits writes anything past `0xFFFF` as a pair of them, so
-/// a program that reached here with a `0xD800` has half of a character rather
-/// than a bad one.
-pub(super) fn from_code_point(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let code_point = operand::int(machine, frame, 0);
-    if (0xD800..=0xDFFF).contains(&code_point) {
-        let message =
-            format!("`{code_point}` is a surrogate half, which is not a character on its own");
-        return make::failed(machine, dest, &message);
-    }
-    match u32::try_from(code_point).ok().and_then(char::from_u32) {
-        Some(character) => {
-            let text = machine.new_string(&character.to_string())?;
-            // Nothing allocates between the string and the `Ok` around it,
-            // because a `Result` is words: the case is built out of the
-            // layout table and the word it was just handed.
-            make::ok(machine, dest, &[text])
-        }
-        None => {
-            let message = format!("`{code_point}` is not a Unicode code point");
-            make::failed(machine, dest, &message)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::intrinsics::tests::{
-        elements, message_of, read, result_of, run, word, words_of, world,
-    };
+    use crate::vm::intrinsics::tests::{elements, read, run, word, words_of, world};
     use cove_ir::Repr;
 
     /// The parts of an `Array<String>` a builtin answered.
@@ -458,6 +423,16 @@ mod tests {
     // reason and since ADR 0058: it is `std.string.isEmpty`, and it is
     // `cove-sema`'s and `cove-ir`'s tests that check it rather than a word
     // read off the machine here.
+    //
+    // `fromCodePoint` had a test here too — `é`, a surrogate half, and one
+    // code point past the end — until ADR 0064 moved the encode into
+    // `std.string.fromCodePoint`. `tests/e2e/values_string_from_code_point`
+    // replaced it with 61 rows on both evaluators, and the difference is not
+    // the count: the golden was written by a standalone `rustc` oracle, so
+    // every width boundary, both ends of the surrogate hole and both ends of
+    // `Int` are checked against an implementation this repository does not
+    // ship, where the three cases here were checked against the arm that
+    // answered them.
 
     #[test]
     fn chars_and_words_take_a_string_apart() {
@@ -641,40 +616,6 @@ mod tests {
         assert_eq!(
             error.help.as_deref(),
             Some("`old` is the text to look for, and an empty `old` names none")
-        );
-    }
-
-    /// A code point that names a character, and the two ways one does not.
-    #[test]
-    fn from_code_point_answers_a_character_or_says_why_not() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let string = program.str_layout;
-        let of = |machine: &mut Machine, point: i64| {
-            run(
-                machine,
-                "String",
-                "fromCodePoint",
-                &[(Repr::Int, point as u64)],
-            )
-            .unwrap()
-        };
-        let words = of(&mut machine, 0x00E9);
-        let (case, payload) = result_of(&program, string, &words);
-        assert_eq!(
-            (case.as_str(), read(&machine, payload[0]).as_str()),
-            ("Ok", "é")
-        );
-
-        let words = of(&mut machine, 0xD800);
-        assert_eq!(
-            message_of(&machine, string, &words),
-            "`55296` is a surrogate half, which is not a character on its own"
-        );
-        let words = of(&mut machine, 0x11_0000);
-        assert_eq!(
-            message_of(&machine, string, &words),
-            "`1114112` is not a Unicode code point"
         );
     }
 
