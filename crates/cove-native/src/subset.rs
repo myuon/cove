@@ -792,9 +792,14 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // Phase 5 (#378, P5-2) took them off the intrinsic boundary, and a
         // function this admits would otherwise have been refused at the call.
         //
-        // `FloatToInt` is not here and falls to `Reason::Instruction`: no
-        // lowering emits it, and its saturating truncation is not the one
-        // `cvttsd2si` answers out of range.
+        // **This is every member of the family, which it was not before issue
+        // #454's Step 2 deleted `Convert::FloatToInt`.** The arm used to name
+        // three of four and say why the fourth was refused — no lowering
+        // emitted it, and its saturating truncation was not the one
+        // `cvttsd2si` answers out of range. Now there is no fourth, and the
+        // pattern lists the whole enum rather than a subset of it, so a
+        // conversion added later is a compile error here instead of a silent
+        // refusal.
         Inst::Convert {
             to: Convert::IntToFloat | Convert::DurationToInt | Convert::IntToDuration,
             dst,

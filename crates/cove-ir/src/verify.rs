@@ -696,7 +696,6 @@ impl Check<'_> {
             Inst::Convert { to, dst, a } => {
                 let (from, into) = match to {
                     crate::inst::Convert::IntToFloat => (Repr::Int, Repr::Float),
-                    crate::inst::Convert::FloatToInt => (Repr::Float, Repr::Int),
                     crate::inst::Convert::DurationToInt => (Repr::Duration, Repr::Int),
                     crate::inst::Convert::IntToDuration => (Repr::Int, Repr::Duration),
                 };

@@ -143,12 +143,34 @@ pub enum CmpOp {
 /// locations of one layout, and they are here rather than intrinsics because
 /// ADR 0058's Phase 5 (#378, P5-2) keeps a runtime call for work, not for a
 /// word that does not change.
+///
+/// **Every member here is total, and that is now a property of the family
+/// rather than an accident of it.** There was a `FloatToInt` until issue
+/// #454's Step 2, and it was the one conversion with inputs it had no answer
+/// for: a NaN, an infinity, and every magnitude at or past `2^63`. Its arm in
+/// the VM was Rust's `x as i64`, which answers `0` for a NaN and clamps at
+/// each end rather than refusing, where `Float.toInt` answers
+/// `Result<Int, Error>` and names which of the three stopped it. ADR 0064's
+/// Decision 6 refuses that pair in as many words — "its bare `as` cast
+/// disagrees with the intrinsic's checked `Result`. Phase 3 either gives it
+/// the checked semantics or deletes it; leaving a second, wrong answer in the
+/// IR is not an option" — and this is the second of those two. No lowering
+/// ever emitted it, so nothing written in Cove could reach either answer.
+///
+/// Giving it the checked semantics instead was the other branch and is not
+/// available to a one-word conversion: a checked conversion has **two**
+/// answers, the value and which of the three refusals applies, and this
+/// family's whole shape is one word in and one word out. The instruction that
+/// eventually carries `Float.toInt` will not be a member here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Convert {
     /// `Int` to `Float`, as `as`-style widening: `Int.toFloat()`.
+    ///
+    /// Total, and lossy only by rounding: every `i64` has a nearest `f64` and
+    /// `i64 as f64` is that one. It is the only `as` cast left in this family
+    /// and it is not the kind Decision 6 refused — it has no input it
+    /// declines and no answer a caller has to check.
     IntToFloat,
-    /// `Float` to `Int`, truncating toward zero.
-    FloatToInt,
     /// A `Duration`'s count of nanoseconds, as an `Int`: `d.nanos()`.
     DurationToInt,
     /// A count of nanoseconds, as a `Duration`: `Duration.nanos(n)`.
@@ -167,7 +189,7 @@ pub enum Convert {
 /// instructions write it twice per tier and give a reader two places to keep
 /// in agreement. The bytecode is unaffected either way — [`Op::FloatMinMax`]
 /// is two opcodes exactly as two instructions would be, the way
-/// [`Op::Convert`] is four.
+/// [`Op::Convert`] is three.
 ///
 /// [`Op::FloatMinMax`]: crate::bytecode::Op::FloatMinMax
 /// [`Op::Convert`]: crate::bytecode::Op::Convert
@@ -481,8 +503,10 @@ pub enum Inst {
     /// absolute value is not this operation: `Int.abs` raises at `Int.MIN`,
     /// where two's complement has no answer, and it is `std.int.abs` in Cove
     /// for that reason. A `Num::Int` arm here would be the second, wrong
-    /// answer in the IR that Decision 6 refuses of
-    /// [`Convert::FloatToInt`].
+    /// answer in the IR that Decision 6 refuses — the refusal that issue
+    /// #454's Step 2 acted on when it deleted [`Convert`]'s float-to-int
+    /// member, whose `x as i64` disagreed with `Float.toInt`'s checked
+    /// `Result` in every direction it could.
     ///
     /// The native tier lowers it: `btr` clears bit 63 on an integer register,
     /// five bytes, the word never reaching an SSE register at all.
