@@ -696,13 +696,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// a `Result<Unit, Error>` has — and whose `prod` column is small because the
 /// lines are interpolations rather than bindings.
 ///
+/// **The thirtieth rise is one new row again, and the migration beside it
+/// moved nothing at all — for the second time running.** 2477 to 2493, 162
+/// programs to 163, and all sixteen are `benches:floatminmax` — seven in the
+/// `prod` column and thirteen in the `ret` column, four copies counted in
+/// both. The survey with that directory removed is **2477 exactly**, over the
+/// same 162 programs, the same 15,962 functions and the same 262,283
+/// instructions. That last figure is the one worth reading: ADR 0064's last
+/// two Phase 1 migrations replaced `Float.min`'s and `Float.max`'s
+/// `Inst::IntrinsicCall` with one `Inst::FloatMinMax` each, one instruction
+/// for one instruction, so **no program in the corpus holds a different
+/// number of anything** — including the 89-line e2e corpus committed just
+/// before them, which calls one or the other on nearly every line.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2477;
+const FORWARDABLE_COPIES: usize = 2493;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

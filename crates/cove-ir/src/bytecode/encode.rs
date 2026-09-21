@@ -216,6 +216,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::Not { dst, a } => build(Op::Not, slot(dst)?, slot(a)?, 0, 0),
         Inst::Convert { to, dst, a } => build(Op::Convert(to), slot(dst)?, slot(a)?, 0, 0),
         Inst::FloatAbs { dst, a } => build(Op::FloatAbs, slot(dst)?, slot(a)?, 0, 0),
+        Inst::FloatMinMax { op, dst, a, b } => {
+            build(Op::FloatMinMax(op), slot(dst)?, slot(a)?, slot(b)?, 0)
+        }
 
         // ---- control flow --------------------------------------------------
         Inst::Jump { to } => build(Op::Jump, 0, 0, 0, displacement(pc, to)? as u64),
@@ -614,7 +617,7 @@ mod tests {
     use super::*;
     use crate::bytecode::decode::decode;
     use crate::bytecode::op::Op;
-    use crate::inst::{ArithOp, CmpOp, Compare, Convert, Num};
+    use crate::inst::{ArithOp, CmpOp, Compare, Convert, MinMax, Num};
     use crate::layout::LayoutId;
     use crate::{ArgsId, FunctionId, HostOpId, SiteId, StrId, TableId};
 
@@ -847,6 +850,17 @@ mod tests {
             held.push((0, Inst::Convert { to, dst: 1, a: 2 }));
         }
         held.push((0, Inst::FloatAbs { dst: 1, a: 2 }));
+        for op in [MinMax::Min, MinMax::Max] {
+            held.push((
+                0,
+                Inst::FloatMinMax {
+                    op,
+                    dst: 1,
+                    a: 2,
+                    b: 3,
+                },
+            ));
+        }
         held.extend([
             // A forward jump, a backward one, and one to the instruction
             // after this — the displacement zero a fall-through would have.

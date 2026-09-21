@@ -54,7 +54,9 @@ pub mod repr;
 pub mod verify;
 
 pub use bytecode::{EncodedInst, MAX_FRAME_WORDS};
-pub use inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Pc, Slot, Storage, Validation};
+pub use inst::{
+    ArithOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, Pc, Slot, Storage, Validation,
+};
 pub use intrinsic::{Carried, Category, Class, Effects, Intrinsic, Signature};
 pub use layout::{
     enum_layout, finishes_as_keyed_run_of, is_entry_of, reads_as_units_of, struct_layout, Case,

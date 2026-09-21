@@ -53,8 +53,9 @@ const MAX_RUN_WORDS: u32 = 16;
 /// whose function will be refused anyway.
 ///
 /// [`Repr::Float`] is admitted although almost no float *operation* is
-/// lowered — [`Inst::FloatAbs`] is the one, and it is a mask rather than
-/// arithmetic. A float slot that is only copied is a run of bits like any
+/// lowered — [`Inst::FloatAbs`] and [`Inst::FloatMinMax`] are the two, and
+/// neither is arithmetic: one is a mask and the other picks one of its two
+/// operands whole. A float slot that is only copied is a run of bits like any
 /// other, and refusing the whole function because one of its frame slots is a
 /// `Float` would refuse it for a reason that is not true.
 fn is_lowered(repr: Repr) -> bool {
@@ -800,6 +801,24 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // intrinsic call it replaces, which crosses once and leaves its caller
         // compiled.
         Inst::FloatAbs { dst, a } => slot(*dst) && slot(*a),
+        // `encoded.rs`'s `FLOAT_MIN` and `FLOAT_MAX` arms, and the **second**
+        // float operation this slice lowers. Here for `FloatAbs`' reason and
+        // not for arithmetic's: the answer is one of the two operands, whole,
+        // so nothing rounds, nothing signals, nothing quiets a signalling NaN
+        // and there is no `Raise`.
+        //
+        // It is the one instruction in this file whose two arms had to be
+        // *written against the VM* rather than handed to the obvious machine
+        // operation, because both obvious operations are the wrong ones.
+        // x86-64's `minsd` answers its second operand when the two compare
+        // equal and when either is a NaN, which is `f64::min`'s tie rule but
+        // not its NaN rule; Cranelift's `fmin` is IEEE 754-2019's `minimum`
+        // and *propagates* a NaN where `f64::min` absorbs one. So the template
+        // arm is `minsd` and a blend that puts the absorbed case back, and the
+        // Cranelift arm is three `select`s over `fcmp` and never names `fmin`
+        // at all. `tests/agree.rs` over `tests/suite`'s `EXTREMA` is what
+        // holds the two to the same bits.
+        Inst::FloatMinMax { dst, a, b, .. } => slot(*dst) && slot(*a) && slot(*b),
         // ---- places ---------------------------------------------------------
         //
         // Six of the eight, and the two that are missing are missing on purpose.
@@ -900,10 +919,10 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // `encoded.rs`'s `NEG_INT` arm, which is `checked_neg` and nothing else.
         //
         // `Num::Float` is not here and falls to `Reason::Instruction`, the same
-        // division `Inst::Arith` above makes. `Inst::FloatAbs` *is* lowered, so
-        // the rule is no longer "no float operation": it is that a float
-        // operation is lowered when it has been asked for, and a negation has
-        // not been. `NEG_FLOAT` cannot raise at all, so the two arms here are
+        // division `Inst::Arith` above makes. `Inst::FloatAbs` and
+        // `Inst::FloatMinMax` *are* lowered, so the rule is no longer "no
+        // float operation": it is that a float operation is lowered when it
+        // has been asked for, and a negation has not been. `NEG_FLOAT` cannot raise at all, so the two arms here are
         // not one arm with a flag.
         Inst::Neg {
             num: Num::Int,

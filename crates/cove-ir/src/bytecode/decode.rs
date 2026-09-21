@@ -161,6 +161,12 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
         Op::Not => Inst::Not { dst: a, a: b },
         Op::Convert(to) => Inst::Convert { to, dst: a, a: b },
         Op::FloatAbs => Inst::FloatAbs { dst: a, a: b },
+        Op::FloatMinMax(op) => Inst::FloatMinMax {
+            op,
+            dst: a,
+            a: b,
+            b: c,
+        },
         Op::Jump => Inst::Jump {
             to: target(pc, code.payload() as i64)?,
         },

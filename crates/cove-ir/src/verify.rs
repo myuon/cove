@@ -292,7 +292,9 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                Inst::Convert { dst, .. } | Inst::FloatAbs { dst, .. } => {
+                Inst::Convert { dst, .. }
+                | Inst::FloatAbs { dst, .. }
+                | Inst::FloatMinMax { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -704,6 +706,13 @@ impl Check<'_> {
             // every bit pattern its operand can hold.
             Inst::FloatAbs { dst, a } => {
                 self.expect(at, a, &[Repr::Float]);
+                self.expect(at, dst, &[Repr::Float]);
+            }
+            // The other one, and total for the same reason: every pairing of
+            // two bit patterns has an answer and the answer is one of them.
+            Inst::FloatMinMax { dst, a, b, .. } => {
+                self.expect(at, a, &[Repr::Float]);
+                self.expect(at, b, &[Repr::Float]);
                 self.expect(at, dst, &[Repr::Float]);
             }
             Inst::Jump { to } => self.target(at, to),
@@ -2311,6 +2320,7 @@ fn admitted_in_a_window(inst: &Inst, written: bool) -> bool {
                     | Inst::Not { .. }
                     | Inst::Convert { .. }
                     | Inst::FloatAbs { .. }
+                    | Inst::FloatMinMax { .. }
                     | Inst::LoadField { .. }
                     | Inst::LoadElem { .. }
                     | Inst::RunLoad { .. }

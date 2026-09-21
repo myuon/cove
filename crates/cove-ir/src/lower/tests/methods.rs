@@ -81,6 +81,44 @@ fn @m.f(Float) -> Float
     );
 }
 
+/// `Float.min` and `Float.max` are one instruction each and not runtime
+/// calls, and the printer tells them apart.
+///
+/// The other half of ADR 0064's Decision 2 typed scalar operation, and the
+/// listing is what says the pair became an instruction rather than being
+/// renamed: **no `intrinsic-call` at all**, where the same function held one
+/// before, and the three-slot frame a two-operand instruction has.
+///
+/// Both members, because they are one `Inst` with a flag: a lowering that
+/// resolved `max` to `MinMax::Min` would answer the same frame, the same
+/// slots and the same opcode count, and `min.float` against `max.float` in
+/// the listing is the only thing here that would notice.
+#[test]
+fn a_float_extremum_is_one_instruction() {
+    assert_eq!(
+        listing("fn f(x: Float, y: Float) -> Float { x.min(y) }", "f"),
+        "\
+fn @m.f(Float Float) -> Float
+  frame 3: s0!:float s1!:float s2:float
+  local x -> s0:Float [0, 2)
+  local y -> s1:Float [0, 2)
+     0  min.float s2:float s0:float s1:float
+     1  return s2:Float
+"
+    );
+    assert_eq!(
+        listing("fn f(x: Float, y: Float) -> Float { x.max(y) }", "f"),
+        "\
+fn @m.f(Float Float) -> Float
+  frame 3: s0!:float s1!:float s2:float
+  local x -> s0:Float [0, 2)
+  local y -> s1:Float [0, 2)
+     0  max.float s2:float s0:float s1:float
+     1  return s2:Float
+"
+    );
+}
+
 /// `Int.toFloat` is the conversion instruction the IR has always had, and
 /// not a runtime call.
 #[test]

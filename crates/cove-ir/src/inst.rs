@@ -155,6 +155,30 @@ pub enum Convert {
     IntToDuration,
 }
 
+/// Which end of the pair an [`Inst::FloatMinMax`] answers.
+///
+/// A flag rather than two instructions, which is the opposite of what
+/// [`Inst::FloatAbs`] decided one migration earlier, and the difference is
+/// that these two exist. `abs` declined a `FloatUnary { op }` because it would
+/// have had one member and two guesses in it; `min` and `max` arrive together,
+/// share a nine-instruction sequence on the template arm and a three-select
+/// sequence on the Cranelift one, and differ in a single opcode byte and a
+/// single condition code. A flag writes that sequence once per tier; two
+/// instructions write it twice per tier and give a reader two places to keep
+/// in agreement. The bytecode is unaffected either way — [`Op::FloatMinMax`]
+/// is two opcodes exactly as two instructions would be, the way
+/// [`Op::Convert`] is four.
+///
+/// [`Op::FloatMinMax`]: crate::bytecode::Op::FloatMinMax
+/// [`Op::Convert`]: crate::bytecode::Op::Convert
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinMax {
+    /// `Float.min`.
+    Min,
+    /// `Float.max`.
+    Max,
+}
+
 /// How many elements an [`Inst::Alloc`] asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Len {
@@ -460,6 +484,71 @@ pub enum Inst {
     /// 0065's Decision 5 applied again, and is why this route is available at
     /// all: a refusal would take every caller back to the VM.
     FloatAbs { dst: Slot, a: Slot },
+    /// `dst = min(a, b)` or `dst = max(a, b)`, on two IEEE-754 doubles — and
+    /// **neither of them is the IEEE 754 operation of that name.**
+    ///
+    /// The contract, which is what the two code generators are written against
+    /// and what three tiers of tests hold them to:
+    ///
+    /// ```text
+    /// min(a, b) = b is NaN -> a | a is NaN -> b | a < b -> a | otherwise b
+    /// max(a, b) = b is NaN -> a | a is NaN -> b | a > b -> a | otherwise b
+    /// ```
+    ///
+    /// Three things in that are worth saying in words, because all three are
+    /// places an implementation goes wrong while passing every ordinary case.
+    ///
+    /// **It absorbs a NaN, it does not propagate one.** `min(NaN, x)` is `x`
+    /// and `min(x, NaN)` is `x`, which is IEEE 754-2008's `minNum` rather than
+    /// IEEE 754-2019's `minimum`. Cranelift's own `fmin` is the *2019*
+    /// operation and propagates, so the Cranelift arm may not use it; that is
+    /// not a subtlety, it is the whole reason that arm is three `select`s.
+    ///
+    /// **On operands that compare equal the answer is the second one.**
+    /// `-0.0 == 0.0` is true, so `min(-0.0, +0.0)` is `+0.0` and
+    /// `min(+0.0, -0.0)` is `-0.0` — and `max` answers those same two, which
+    /// is *not* what IEEE 754's `maxNum` gives. Rust's documentation declines
+    /// to decide this ("either input may be returned non-deterministically"),
+    /// so what makes it a contract is that a Cove program can see it: a zero's
+    /// sign is observable three ways, and `tests/e2e/values_float_min_max`
+    /// pins all three in both argument orders. x86-64's `minsd` has exactly
+    /// this tie rule, which is not a coincidence — it is where the behaviour
+    /// comes from.
+    ///
+    /// **The answer is bit-identical to one of the two operands, always.**
+    /// Nothing here rounds, and nothing here **quiets** a signalling NaN: both
+    /// arms select a whole word rather than computing one. A route through
+    /// arithmetic — a subtraction to compare with, a multiply by one to move
+    /// with — would set bit 51 on a signalling operand, and the signalling
+    /// rows of `cove-native`'s `tests/suite`'s `EXTREMA` are what catch it.
+    /// All three tiers are held to that one table: the encoded VM in
+    /// `vm::exec`'s `a_float_extremum_answers_one_of_its_operands`, each code
+    /// generator in its own file, and the two against each other in
+    /// `tests/agree.rs`.
+    ///
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 2 admits "a typed scalar operation that maps to a CPU or
+    /// backend operation" below the standard library and refuses one named
+    /// after a method, and this is that. `Float.min` and `Float.max` were
+    /// `Inst::IntrinsicCall`s carrying the methods' own names until this
+    /// replaced them; ADR 0064's census proposed "Cove over typed compare"
+    /// instead, and that route is **blocked** — the body is four instructions
+    /// of float comparison and `crates/cove-native/src/subset.rs` admits
+    /// none of them, so a caller of it is refused and taken back to the VM.
+    /// Checked rather than assumed: a caller whose own float work is nothing
+    /// at all is refused with `CmpBranch(Float, Ne) at pc 4, also blocked by:
+    /// CmpBranch(Float, Lt) x1`, while the same caller over the operation
+    /// below it compiles, in the same program in the same run.
+    ///
+    /// **There is no `Num` on it**, for [`Inst::FloatAbs`]'s reason: `Int.min`
+    /// and `Int.max` are `std.int.min` and `std.int.max`, Cove over `<`, and
+    /// they need no tie rule and no NaN rule because an `Int` has neither.
+    FloatMinMax {
+        op: MinMax,
+        dst: Slot,
+        a: Slot,
+        b: Slot,
+    },
 
     // ---- control flow --------------------------------------------------
     /// Continue at `to`.

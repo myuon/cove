@@ -21,6 +21,7 @@
 use std::rc::Rc;
 
 use cove_diag::Span;
+use cove_ir::MinMax;
 use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY};
 
 use crate::error::RuntimeError;
@@ -1616,19 +1617,37 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Float(x.sqrt())))
             }
+            // `crate::float::extremum` rather than `f64::min`, and the bit
+            // casts on both sides are the point of it: the answer is one of
+            // the two operands handed back *whole*, so a winning signalling
+            // NaN stays signalling here exactly as it does in the encoded VM
+            // and in both code generators. `f64::min`'s own documentation
+            // declines to decide the tie — "either input may be returned
+            // non-deterministically" — and this operation's tie is decided, so
+            // the tier that is the **semantic oracle** for the other three is
+            // the last one that should be inheriting the answer from whichever
+            // `rustc` built the binary. See that function for the whole of it.
             "min" => {
                 let args = expect_args("Float.min", args, 1, span)?;
                 let Value(Repr::Float(other)) = &args[0] else {
                     return Err(type_error("Float.min", "other", "Float", &args[0], span));
                 };
-                Ok(Value(Repr::Float(x.min(*other))))
+                Ok(Value(Repr::Float(f64::from_bits(crate::float::extremum(
+                    x.to_bits(),
+                    other.to_bits(),
+                    MinMax::Min,
+                )))))
             }
             "max" => {
                 let args = expect_args("Float.max", args, 1, span)?;
                 let Value(Repr::Float(other)) = &args[0] else {
                     return Err(type_error("Float.max", "other", "Float", &args[0], span));
                 };
-                Ok(Value(Repr::Float(x.max(*other))))
+                Ok(Value(Repr::Float(f64::from_bits(crate::float::extremum(
+                    x.to_bits(),
+                    other.to_bits(),
+                    MinMax::Max,
+                )))))
             }
             "format" => {
                 let args = expect_args("Float.format", args, 1, span)?;

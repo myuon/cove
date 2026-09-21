@@ -93,8 +93,8 @@ use cove_diag::Span;
 
 use cove_ir::bytecode::{disasm, encode_program, verify, Encoded, EncodedInst, Op};
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, Num, Program, Repr,
-    Shape, SiteId, Slot, Storage, StrId, TableId, Validation,
+    ArgsId, ArithOp, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, MinMax, Num, Program,
+    Repr, Shape, SiteId, Slot, Storage, StrId, TableId, Validation,
 };
 
 use crate::budget::Meter;
@@ -129,6 +129,8 @@ const CLEAR: u8 = Op::Clear.number();
 const NEG_INT: u8 = Op::Neg(Num::Int).number();
 const NEG_FLOAT: u8 = Op::Neg(Num::Float).number();
 const FLOAT_ABS: u8 = Op::FloatAbs.number();
+const FLOAT_MIN: u8 = Op::FloatMinMax(MinMax::Min).number();
+const FLOAT_MAX: u8 = Op::FloatMinMax(MinMax::Max).number();
 
 const ADD_INT: u8 = Op::Arith(Num::Int, ArithOp::Add).number();
 const SUB_INT: u8 = Op::Arith(Num::Int, ArithOp::Sub).number();
@@ -354,6 +356,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::Not
         | Op::Convert(_)
         | Op::FloatAbs
+        | Op::FloatMinMax(_)
         | Op::Jump
         | Op::BranchFalse
         | Op::CmpBranch(_, _)
@@ -2990,6 +2993,32 @@ pub(super) fn dispatch<'s, 'a>(
                 machine
                     .mem
                     .set_word_at(base_at + (a!()) as usize, x.abs().to_bits());
+            }
+
+            // ADR 0064's other typed scalar operation, and the one whose
+            // answer is *chosen* rather than computed: it hands back one of
+            // its two operands, whole. `Inst::FloatMinMax`'s doc is where the
+            // three ways that differs from the IEEE 754 operation of the same
+            // name are written out, and `crate::float::extremum` — which
+            // spells the contract out rather than calling `f64::min`, says at
+            // length why, and is the same function the tree-walking
+            // interpreter answers with — is what this tier answers with.
+            //
+            // Two arms and not one with a flag read out of the payload, for
+            // `NEG_INT` and `NEG_FLOAT`'s reason: the opcode is already the
+            // flag by the time the dispatch has branched on it, and reading it
+            // back would be reading what the branch just decided.
+            FLOAT_MIN => {
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                let y = machine.mem.word_at(base_at + (c!() as usize));
+                let answer = crate::float::extremum(x, y, MinMax::Min);
+                machine.mem.set_word_at(base_at + (a!()) as usize, answer);
+            }
+            FLOAT_MAX => {
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                let y = machine.mem.word_at(base_at + (c!() as usize));
+                let answer = crate::float::extremum(x, y, MinMax::Max);
+                machine.mem.set_word_at(base_at + (a!()) as usize, answer);
             }
 
             ADD_INT => int_op!(ArithOp::Add),

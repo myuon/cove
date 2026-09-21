@@ -42,7 +42,7 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START};
 use super::{Body, Dest, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Num, Slot, Storage};
+use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, MinMax, Num, Slot, Storage};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::IntrinsicSite;
@@ -369,25 +369,46 @@ impl Body<'_> {
             return dst;
         }
 
-        // A typed scalar operation is one instruction over one operand too,
-        // and for a reason of its own rather than a conversion's: ADR 0064's
-        // Decision 2 admits "a typed scalar operation that maps to a CPU or
-        // backend operation" below the standard library, and refuses the
-        // runtime call that named the method instead. `Float.abs` is the
-        // first, and it always has a receiver.
-        if scalar_operation(receiver, operation, base.is_some()) {
+        // A typed scalar operation is one instruction over its operands
+        // too, and for a reason of its own rather than a conversion's: ADR
+        // 0064's Decision 2 admits "a typed scalar operation that maps to a
+        // CPU or backend operation" below the standard library, and refuses
+        // the runtime call that named the method instead. All three of them
+        // — `Float.abs`, `Float.min` and `Float.max` — always have a
+        // receiver.
+        if let Some(scalar) = scalar_operation(receiver, operation, base.is_some()) {
             let Some(base) = base else {
                 return self.gap(&format!("`{receiver}.{operation}`"), expr);
             };
             let operand = self.expr(base);
+            // `min` and `max` take the one argument the checker has settled
+            // they take; `abs` takes none.
+            let other = match (scalar, args) {
+                (ScalarOp::Abs, []) => None,
+                (ScalarOp::MinMax(_), [arg]) => Some(self.expr(&arg.value)),
+                _ => {
+                    self.release(operand, expr.span);
+                    return self.gap(&format!("`{receiver}.{operation}`"), expr);
+                }
+            };
             let dst = self.answer_at(want, result);
-            self.emit(
-                Inst::FloatAbs {
+            let inst = match (scalar, &other) {
+                (ScalarOp::Abs, _) => Inst::FloatAbs {
                     dst: dst.slot,
                     a: operand.slot,
                 },
-                expr.span,
-            );
+                (ScalarOp::MinMax(op), Some(other)) => Inst::FloatMinMax {
+                    op,
+                    dst: dst.slot,
+                    a: operand.slot,
+                    b: other.slot,
+                },
+                (ScalarOp::MinMax(_), None) => unreachable!("the arm above bound one argument"),
+            };
+            self.emit(inst, expr.span);
+            if let Some(other) = other {
+                self.release(other, expr.span);
+            }
             self.release(operand, expr.span);
             return dst;
         }
@@ -876,7 +897,9 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// are not intrinsics: [`conversion`] names each as the [`Convert`] it
 /// lowers to. `Float.abs` is in them on the same footing and for a rule of its
 /// own: [`scalar_operation`] names it as the [`Inst::FloatAbs`] it lowers to,
-/// ADR 0064's Decision 2 typed scalar operation. **A pair leaves this table
+/// ADR 0064's Decision 2 typed scalar operation, and names `Float.min` and
+/// `Float.max` as the two halves of the [`Inst::FloatMinMax`] they lower to.
+/// **A pair leaves this table
 /// when the *method* leaves the machine, not when the intrinsic does** — an
 /// entry here is what says the lowering answers the call at all, and the three
 /// ways it can answer are an instruction, a conversion and a runtime call.
@@ -934,28 +957,43 @@ fn conversion(receiver: &str, operation: &str, has_receiver: bool) -> Option<Con
     }
 }
 
-/// Whether `receiver.operation(...)` is a typed scalar operation this
-/// lowering emits as one instruction rather than as a runtime call.
+/// The typed scalar operation a machine method is, where it is one: an
+/// instruction over one or two `Float` words rather than a runtime call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScalarOp {
+    /// [`Inst::FloatAbs`].
+    Abs,
+    /// [`Inst::FloatMinMax`], which end of the pair it answers.
+    MinMax(MinMax),
+}
+
+/// Which typed scalar operation `receiver.operation(...)` is, where it is one.
 ///
 /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 /// Decision 2 names "a typed scalar operation that maps to a CPU or backend
 /// operation (`sqrt`, `abs`, `round`, a checked typed conversion)" in the
 /// vocabulary a primitive may be written in, and refuses one named after a
-/// method. `Float.abs` was `Intrinsic::FloatAbs` — `f64::abs` in Rust, reached
-/// through an `Inst::IntrinsicCall` that carried the method's own name — and
-/// is [`Inst::FloatAbs`] since Phase 1's sixth migration.
+/// method. Each of these three was an `Intrinsic` — `f64::abs`, `f64::min` and
+/// `f64::max` in Rust, reached through an `Inst::IntrinsicCall` that carried
+/// the method's own name. `Float.abs` left in Phase 1's sixth migration and
+/// the other two in its last.
 ///
-/// It answers a `bool` rather than an operation, because there is one and
-/// [`Inst::FloatAbs`]'s doc says at length why there is not a family. When
-/// `Float.round` and `Float.sqrt` follow it in Phase 3 this becomes what
-/// [`conversion`] is: a `match` answering which one.
+/// It answers a `match` rather than the `bool` it answered while `abs` was
+/// alone, which is what that function's doc said would happen when a second
+/// operation arrived — though it arrived from Phase 1 rather than from Phase
+/// 3, and `Float.round` and `Float.sqrt` are still ahead of it.
 ///
 /// `has_receiver` is asked for [`conversion`]'s reason. There is no
-/// `Float.abs(x)` written on the type's name — `ASSOCIATED` does not name one
-/// — so the `false` arm is a pair this lowering does not emit rather than a
-/// pair it emits differently.
-fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> bool {
-    matches!((receiver, operation, has_receiver), ("Float", "abs", true))
+/// `Float.min(a, b)` written on the type's name — `ASSOCIATED` names none of
+/// the three — so the `false` arm is a pair this lowering does not emit rather
+/// than a pair it emits differently.
+fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> Option<ScalarOp> {
+    match (receiver, operation, has_receiver) {
+        ("Float", "abs", true) => Some(ScalarOp::Abs),
+        ("Float", "min", true) => Some(ScalarOp::MinMax(MinMax::Min)),
+        ("Float", "max", true) => Some(ScalarOp::MinMax(MinMax::Max)),
+        _ => None,
+    }
 }
 
 /// Whether `head.name(...)` is an associated function this lowering knows
@@ -1050,7 +1088,7 @@ mod tests {
         let named = |receiver, operation, has_receiver| {
             Intrinsic::from_names(receiver, operation).is_some()
                 || conversion(receiver, operation, has_receiver).is_some()
-                || scalar_operation(receiver, operation, has_receiver)
+                || scalar_operation(receiver, operation, has_receiver).is_some()
         };
         for &(receiver, operation) in MACHINE_METHODS {
             assert!(
