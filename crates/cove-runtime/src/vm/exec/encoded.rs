@@ -2985,7 +2985,7 @@ pub(super) fn dispatch<'s, 'a>(
             // promises little about NaN bit patterns, so what makes this a
             // contract rather than an observation is the table in
             // `a_float_absolute_clears_the_sign_bit_and_nothing_else`, which
-            // is the same table both code generators are held to — and which
+            // is the same table the native lowering is held to — and which
             // was watched failing on its signalling rows, and on no others,
             // with this arm's answer quieted when it is a NaN.
             FLOAT_ABS => {

@@ -83,66 +83,59 @@ sets the variable and so does `pages.yml`. This has already been got wrong
 once, on a link to a private item from another module, and the failure mode is
 the worst kind: a gate that passes and a pull request that is red.
 
-### `cove-native` is behind two features, so the five commands do not reach it
+### `cove-native` is behind a feature, so the five commands do not reach it
 
-`crates/cove-native` — the native execution tier of ADR 0055 — has each of its
-code generators behind a feature that is **off by default**, because the ADR's
+`crates/cove-native` — the native execution tier of ADR 0055 — has its code
+generator behind a feature that is **off by default**, because the ADR's
 adoption gate asks that "a build without the native feature has no
 executable-memory dependency" and that is a fact about the dependency graph
 rather than about which functions compile. So `--workspace` builds it as a
-crate of ABI declarations, `cargo t` runs two of its tests, and neither
-lowering is compiled by any of the five commands.
+crate of ABI declarations, `cargo t` runs two of its tests, and the lowering
+is compiled by none of the five commands.
 
-There are two arms, and they compile the same subset of the IR, so that a
-measurement of one against the other is a measurement of the code generator:
-
-- `cranelift` is the code generator ADR 0055 names. It was called `native`
-  while it was the only one.
-- `template` is a hand-written x86-64 template compiler whose only dependency
-  is `libc`. It is x86-64 only, and refuses every other host explicitly.
+There is one arm. `template` is a hand-written x86-64 template compiler whose
+only dependency is `libc`; it is x86-64 only, and refuses every other host
+explicitly. ADR 0056 chose it over Cranelift on a measured comparison and
+[ADR 0066](docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md)
+retired the loser, so a new IR instruction is lowered **once**. If you find
+yourself writing a second lowering, or a `cranelift` feature, read ADR 0066
+first — it is the decision you would be reversing.
 
 So, after a change under `crates/cove-native/`:
 
 ```console
-$ cargo clippy -p cove-native --all-targets --features cranelift --profile checked -- -D warnings
-$ RUSTDOCFLAGS="-D warnings" cargo doc -p cove-native --no-deps --features cranelift --profile checked
-$ cargo test -p cove-native --features cranelift --profile checked
 $ cargo clippy -p cove-native --all-targets --features template --profile checked -- -D warnings
 $ RUSTDOCFLAGS="-D warnings" cargo doc -p cove-native --no-deps --features template --profile checked
 $ cargo test -p cove-native --features template --profile checked
-$ cargo test -p cove-native --features cranelift,template --profile checked
 ```
 
-The last one is not a repetition: the test that asserts the two arms answer
-identically on the same IR compiles only when both features are on, so a pass
-over each arm alone never runs it.
+CI runs those three in one step, for the same reason it runs the other five:
+a run there and a run here are the same run. They are seconds now that the
+Cranelift dependency graph is gone, so this is cheap to run and cheap to
+forget — and forgetting it is a green gate over an untested code generator.
 
-CI runs those seven in one step, for the same reason it runs the other five:
-a run there and a run here are the same run. Cranelift is about twenty
-seconds of compilation the first time and nothing after, so this is cheap to
-run and cheap to forget — and forgetting it is a green gate over an untested
-code generator.
-
-**Those seven are not the whole of the native gate.** `.github/workflows/ci.yml`
+**Those three are not the whole of the native gate.** `.github/workflows/ci.yml`
 has a *second* native step, and it is the one that drives the tier through the
 runtime:
 
 ```console
-$ for f in cranelift template cranelift,template; do
-    cargo clippy -p cove-runtime -p cove-cli -p cove-bench --all-targets \
-      --features "$f" --profile checked -- -D warnings
-    RUSTDOCFLAGS="-D warnings" cargo doc -p cove-runtime -p cove-cli --no-deps \
-      --features "$f" --profile checked
-    cargo test -p cove-runtime -p cove-cli --features "$f" --profile checked
-  done
+$ cargo clippy -p cove-runtime -p cove-cli --all-targets \
+    --features template --profile checked -- -D warnings
+$ RUSTDOCFLAGS="-D warnings" cargo doc -p cove-runtime -p cove-cli --no-deps \
+    --features template --profile checked
+$ cargo test -p cove-runtime -p cove-cli --features template --profile checked
 ```
 
-It catches what `-p cove-native` structurally cannot. That crate's suites
-compile the code generators; the cases that *enter* one from the VM live in
+It catches what `-p cove-native` structurally cannot. That crate's suite
+compiles the code generator; the cases that *enter* it from the VM live in
 `cove-runtime`, and `crates/cove-runtime/tests/native_tier.rs` is
 `#![cfg(feature = "template")]` — so a default build compiles it to a binary
-with **no tests in it**. `cargo t`, `cargo test --workspace` and all seven
+with **no tests in it**. `cargo t`, `cargo test --workspace` and all three
 commands above report it green without running a case; only this step runs one.
+**Since ADR 0066 it is also the only place a cross-implementation check on
+machine code happens at all** — every case in it runs the same entry on
+`Vm::new` and on `Vm::with_native` and asserts they agree — so it is worth more
+than it was when a second code generator was the other check.
 
 This has already been got wrong once, and the shape is what to remember rather
 than the file: a change re-pointed one of that file's fixtures at a new
@@ -197,19 +190,19 @@ clock says nothing, so what is asserted is that the two tiers printed the same
 bytes and both exited zero.
 
 What it catches that nothing above it can is a **native tier that compiles and
-answers wrongly on a real program**. The seven `-p cove-native` commands hold
-each code generator to fixtures; the second native step runs the tier from the
-runtime, on fixtures again. This is the only place either generator is asked
-to compile 103 of covefmt's 109 functions and produce 905 KB of formatted Cove
-— and it is the only place a wrong answer has a *right* answer sitting beside
-it to be diffed against, because the encoded VM ran the same program in the
-same command. A code generator that lowered an instruction to the wrong bits
-would pass every fixture that did not happen to cover that bit and fail here
-on the first file.
+answers wrongly on a real program**. The three `-p cove-native` commands hold
+the code generator to fixtures; the second native step runs the tier from the
+runtime, on fixtures again. This is the only place the generator is asked to
+compile 103 of covefmt's 109 functions and produce 905 KB of formatted Cove —
+and it is the only place a wrong answer has a *right* answer sitting beside it
+to be diffed against, because the encoded VM ran the same program in the same
+command. A code generator that lowered an instruction to the wrong bits would
+pass every fixture that did not happen to cover that bit and fail here on the
+first file.
 
 It is cheap: the build is a feature flag on a workspace that is already warm,
-and the two runs are about two and five seconds. Run it after touching either
-generator, `subset.rs`, or any instruction they lower.
+and the two runs are about two and five seconds. Run it after touching the
+code generator, `subset.rs`, or any instruction it lowers.
 
 ### What the gate costs, measured
 

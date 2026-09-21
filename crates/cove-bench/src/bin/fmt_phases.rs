@@ -9,9 +9,8 @@
 //! parsing, formatting and comparing together.
 //!
 //! So this is the Rust arm's phase table, and it is a bin of its own rather
-//! than a flag on `cove fmt` for the reason `native_compare.rs` is one: it is a
-//! measurement with no baseline and no gate, and `cove fmt` is a command a user
-//! runs. Adding `--timings` there would put a benchmark's output in a
+//! than a flag on `cove fmt`: it is a measurement with no baseline and no gate,
+//! and `cove fmt` is a command a user runs. Adding `--timings` there would put a benchmark's output in a
 //! formatter's interface for the sake of one table.
 //!
 //! # It is timed the same way the Cove bench is timed, and that is the point

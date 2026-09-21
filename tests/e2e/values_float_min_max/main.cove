@@ -15,8 +15,8 @@ use console.println
 ///
 /// **It absorbs a NaN rather than propagating one.** `min(NaN, x)` is `x` and
 /// `min(x, NaN)` is `x`, which is IEEE 754-2008's `minNum` and **not** IEEE
-/// 754-2019's `minimum`. Cranelift's `fmin` is the 2019 operation and would
-/// disagree on every line of `nans` below.
+/// 754-2019's `minimum`. The retired Cranelift arm's `fmin` was the 2019
+/// operation and would have disagreed on every line of `nans` below.
 ///
 /// **Its answer on equal inputs is not determined by its documentation.**
 /// Rust says in as many words: "if the inputs compare equal (such as for the

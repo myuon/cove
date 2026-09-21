@@ -1,9 +1,11 @@
 //! One [`Function`] to one run of x86-64 machine code, by hand.
 //!
-//! The second arm of the comparison ADR 0055's code-generator choice needs: the
-//! same [`crate::abi`] entry point, over the same frame, compiling exactly the
-//! subset `crate::subset`'s `supported` admits — which is the same predicate
-//! Cranelift's arm asks — and emitting the bytes itself.
+//! What ADR 0055's code-generator choice needs: the same [`crate::abi`]
+//! entry point, over the same frame, compiling exactly the subset
+//! `crate::subset`'s `supported` admits, and emitting the bytes itself. ADR
+//! 0056 chose this design after measuring it against a Cranelift-based
+//! alternative; ADR 0066 later retired that comparison and made this the
+//! only code generator.
 //!
 //! # It is a template compiler, and it stays one
 //!
@@ -40,8 +42,8 @@ use crate::subset::{
 };
 use crate::{IntrinsicCode, Unavailable, WindowCode};
 
-// The `NativeCtx` field offsets, read from the declaration rather than written
-// out, exactly as the Cranelift arm reads them.
+// The `NativeCtx` field offsets, read from the declaration rather than
+// written out, so that they cannot drift from `NativeCtx` itself.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
@@ -85,8 +87,8 @@ const FRAME: u8 = R14;
 // `RBP` because the other callee-saved registers are taken. Nothing here keeps a
 // frame pointer in it — this arm addresses the machine stack only through `push`
 // and `pop` — so what it costs is that a profiler unwinding by frame pointers
-// cannot walk through a compiled Cove frame, which is already true of the
-// Cranelift arm's frames and of neither arm's Cove semantics.
+// cannot walk through a compiled Cove frame, and it costs Cove semantics
+// nothing.
 const RETURN_BYTES: u8 = RBP;
 
 // The three registers a heap word's address is formed in, which is the one
@@ -132,8 +134,8 @@ const CC_G: u8 = 0xf;
 
 /// A function this code generator has compiled.
 ///
-/// The same shape as the Cranelift arm's, so that a caller — a test, or the
-/// comparison harness — reads the two the same way.
+/// A small, `Copy`able summary, so that a caller — a test — can read or
+/// compare its fields directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Compiled {
     /// Which mapping of its [`Jit`] this is.
@@ -160,7 +162,8 @@ pub struct Compiled {
     /// private and an intra-doc link to it fails `cargo doc` — lays a whole call
     /// sequence down contiguously, so the charge is the difference of two code
     /// lengths taken across it. [`IntrinsicCode`] is where the property is
-    /// written out, and where the reason the other arm answers `None` is.
+    /// written out, along with why a generator that cannot attribute it
+    /// answers `None`.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub intrinsics: IntrinsicCode,
@@ -248,9 +251,8 @@ fn page_size() -> usize {
 ///
 /// One of these owns every page it has written, so it must outlive every
 /// [`Entry`] taken out of it. Dropping it leaks the pages rather than freeing
-/// them, which is the safe direction and the same choice the Cranelift arm
-/// makes: a freed page under a running Cove frame is not a bug anything could
-/// diagnose.
+/// them, which is the safe direction: a freed page under a running Cove
+/// frame is not a bug anything could diagnose.
 pub struct Jit {
     helpers: Helpers,
     code: Vec<Mapping>,
@@ -270,8 +272,8 @@ pub struct Jit {
 
 /// The helper addresses, as the numbers a `movabs` carries.
 ///
-/// This arm's equivalent of the Cranelift arm's relocations: there is no linker
-/// here, so a helper's address is an immediate in the instruction stream.
+/// There is no linker here, so a helper's address is an immediate in the
+/// instruction stream.
 #[derive(Clone, Copy)]
 struct Helpers {
     safepoint: usize,
@@ -328,7 +330,7 @@ impl Jit {
     /// is the contract either way. Every function compiled after
     /// this answers is emitted the new way; nothing already compiled changes, so
     /// a caller that wants one of each compiles the slice twice over two `Jit`s,
-    /// which is what the comparison harness does.
+    /// which is what `tests/template.rs`'s `Jit` and `TemplateDirect` arms do.
     pub fn calling_directly(mut self) -> Self {
         self.direct = true;
         self
@@ -568,10 +570,10 @@ impl<'a> Emit<'a> {
 
     /// Adds a block's static instruction count to the work accumulator.
     ///
-    /// One add per block, at block entry, which is what the Cranelift arm does
-    /// and for the same reason: a block with two predecessors is reached having
-    /// done two different amounts of work, so the accumulator is a run-time
-    /// value and only the charge is a constant.
+    /// One add per block, at block entry, because a block with two
+    /// predecessors is reached having done two different amounts of work, so
+    /// the accumulator is a run-time value and only the charge is a
+    /// constant.
     fn charge(&mut self, instructions: u32) {
         self.add_imm32(WORK, instructions as i32);
     }
@@ -691,10 +693,13 @@ impl<'a> Emit<'a> {
             // clears the sign bit and bit 63 *is* the sign bit, so `btr` says
             // the whole operation in five bytes — where a round trip through
             // `xmm0` and an `andpd` against a constant in memory would need a
-            // constant pool this arm does not have. The Cranelift arm names
-            // `fabs` and gets the mask; this arm writes the mask and skips the
-            // name, and `tests/agree.rs` is what holds the two to the same
-            // answer.
+            // constant pool this arm does not have, so it writes the mask
+            // itself rather than naming an intrinsic. `tests/suite/mod.rs`'s
+            // `ABSOLUTES` table — whose NaN and signalling rows pin the
+            // payload and the quiet bit — and
+            // `crates/cove-runtime/tests/native_tier.rs`'s
+            // `a_float_absolute_runs_as_machine_code`, against the VM, are
+            // what hold this to the right bits.
             Inst::FloatAbs { dst, a } => {
                 self.load_slot(RAX, *a);
                 self.btr_imm8(RAX, 63);
@@ -869,9 +874,9 @@ impl<'a> Emit<'a> {
             },
             // ADR 0065's `run-find`: the same helper, reading two runs a
             // bounded step at a time and writing the answer into the row's
-            // `dst`. Lowered rather than refused for `compile.rs`' reason — a
-            // refusal is of the whole function, and this instruction's caller
-            // is expanded at every site of `String.contains`.
+            // `dst`. Lowered rather than refused: a refusal is of the whole
+            // function, and this instruction's caller is expanded at every
+            // site of `String.contains`.
             Inst::RunFind {
                 args,
                 storage: Storage::PackedBytes,
@@ -1052,11 +1057,10 @@ impl<'a> Emit<'a> {
     ///
     /// **Eleven instructions, and the table is re-loaded from the context every
     /// time.** That is this arm being a template compiler rather than an
-    /// oversight: the Cranelift arm computes the index once and loads the table
-    /// once for all three words of a `load-elem` of a `Token`, because it has a
-    /// value graph to common those loads out of, and this has a sequence of
-    /// templates. The difference is real code and is one of the things the
-    /// comparison is for.
+    /// oversight: a template compiler has a sequence of templates rather than
+    /// a value graph, so it has nothing to common the loads of a `load-elem`
+    /// of a `Token`'s three words out of, and re-loading for each of them is
+    /// a known, measured cost of the design, recorded in ADR 0056.
     ///
     /// `reg` must not be one of the three heap scratch registers, which every
     /// caller below satisfies by using `RAX`, `RCX` or `RDX`.
@@ -1473,8 +1477,8 @@ impl<'a> Emit<'a> {
     /// 518,034 B). So the issue's "size/admission threshold" is the option that
     /// makes a large program larger: a threshold declines the windows it thinks
     /// expensive, and what a declined window emits is the more expensive of the
-    /// two. `a_window_is_less_code_than_its_rows` holds that ordering for all
-    /// five patterns on both arms, so it cannot silently invert.
+    /// two. `a_window_is_less_code_than_its_rows` holds that ordering for
+    /// all five patterns, so it cannot silently invert.
     ///
     /// **The copy is already outlined**, which removes the issue's other two
     /// options at once. The append arm below emits an unconditional call to the
@@ -2458,9 +2462,8 @@ impl<'a> Emit<'a> {
 
     /// A poll: test the stride, and only then hand the runtime the unpaid work.
     ///
-    /// Emitted on every backedge, with the same accumulated static work count
-    /// the Cranelift arm hands the same helper, so the two arms pay the same
-    /// runtime cost at the same places.
+    /// Emitted on every backedge, with the accumulated static work count
+    /// handed to the helper.
     ///
     /// Two instructions stand in front of the hand-over and they are the whole
     /// of what a turn of a loop pays when the poll is not due:
@@ -2517,15 +2520,14 @@ impl<'a> Emit<'a> {
     ///
     /// A compare chain, which is what a template compiler has: there is no jump
     /// table here, and building one would be choosing between two encodings from
-    /// the shape of the table, which is the peephole this arm does not have. See
-    /// `compile.rs`'s `switch` for the `br_table` the other arm emits, and the
-    /// harness's report for what the difference measured.
+    /// the shape of the table, which is the peephole this arm does not have.
+    /// ADR 0056 measured this class of cost before choosing this design.
     ///
     /// It needs no range check, and that is a property of the comparison rather
     /// than an omission: `cmp r64, imm32` compares the whole word against a small
     /// non-negative case index, so a word larger than any case — including one
-    /// above `u32::MAX`, which is what forces the other arm's check — equals none
-    /// of them and falls through to the default.
+    /// above `u32::MAX` — equals none of them and falls through to the
+    /// default.
     fn switch(&mut self, on: Slot, table: cove_ir::TableId) {
         let table = self.program.table(table);
         let targets: Vec<u32> = table.targets.clone();
@@ -2764,13 +2766,13 @@ impl<'a> Emit<'a> {
     /// `encoded.rs`'s `RETURN` arm, whole: the answer's words into the
     /// destination, and then leave.
     ///
-    /// ADR 0057, and see the Cranelift arm's `ret` for the three things this
-    /// shape is: the address comes from `NativeCtx::words` re-read here rather
-    /// than from [`FRAME`], because the destination is not this frame; a
-    /// zero-width return emits nothing, not even the address, because a width-0
-    /// destination may name a slot the caller's frame does not have; and the
-    /// loads and stores interleave, because the destination is the caller's frame
-    /// and so cannot overlap this one — which is the difference between this and
+    /// ADR 0057. Three things about this shape: the address comes from
+    /// `NativeCtx::words` re-read here rather than from [`FRAME`], because
+    /// the destination is not this frame; a zero-width return emits nothing,
+    /// not even the address, because a width-0 destination may name a slot
+    /// the caller's frame does not have; and the loads and stores
+    /// interleave, because the destination is the caller's frame and so
+    /// cannot overlap this one — which is the difference between this and
     /// [`Emit::copy`].
     fn ret(&mut self, src: Slot) {
         self.store(CTX, OFF_PENDING_WORK, WORK);

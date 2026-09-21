@@ -161,9 +161,9 @@ pub enum Convert {
 /// [`Inst::FloatAbs`] decided one migration earlier, and the difference is
 /// that these two exist. `abs` declined a `FloatUnary { op }` because it would
 /// have had one member and two guesses in it; `min` and `max` arrive together,
-/// share a nine-instruction sequence on the template arm and a three-select
-/// sequence on the Cranelift one, and differ in a single opcode byte and a
-/// single condition code. A flag writes that sequence once per tier; two
+/// share a nine-instruction sequence in the native lowering, and differ in a
+/// single opcode byte and a single condition code. A flag writes that sequence
+/// once per tier; two
 /// instructions write it twice per tier and give a reader two places to keep
 /// in agreement. The bytecode is unaffected either way — [`Op::FloatMinMax`]
 /// is two opcodes exactly as two instructions would be, the way
@@ -438,12 +438,12 @@ pub enum Inst {
     /// on a signalling one: measured at run time, `0.0 - x`, `-1.0 * x` and
     /// `x + 0.0` each turn `0xfff0_0000_dead_beef` into
     /// `0xfff8_0000_dead_beef` where this answers
-    /// `0x7ff0_0000_dead_beef`. All three tiers are held to
-    /// the same table of bit patterns, signalling rows included: the encoded
-    /// VM in `vm::exec`'s
-    /// `a_float_absolute_clears_the_sign_bit_and_nothing_else`, and both code
-    /// generators in `cove-native`'s `tests/suite`'s `ABSOLUTES`, which
-    /// `tests/agree.rs` then runs on both at once.
+    /// `0x7ff0_0000_dead_beef`. Both tiers are held to the same table of bit
+    /// patterns, signalling rows included: the encoded VM in `vm::exec`'s
+    /// `a_float_absolute_clears_the_sign_bit_and_nothing_else`, and the native
+    /// lowering in `cove-native`'s `tests/suite`'s `ABSOLUTES`. They are run
+    /// against *each other* by `cove-runtime`'s `native_tier.rs`, on real Cove
+    /// source rather than on hand-built IR.
     ///
     /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 2 admits "a typed scalar operation that maps to a CPU or
@@ -476,19 +476,20 @@ pub enum Inst {
     /// answer in the IR that Decision 6 refuses of
     /// [`Convert::FloatToInt`].
     ///
-    /// Both code generators lower it, by two different routes to the same
-    /// bits: the template arm clears bit 63 with `btr` on an integer register,
-    /// five bytes, the word never reaching an SSE register at all; Cranelift
-    /// is asked for `fabs` and lowers that to the mask itself. `tests/agree.rs`
-    /// is what holds the two together. That both of them lower it is ADR
-    /// 0065's Decision 5 applied again, and is why this route is available at
-    /// all: a refusal would take every caller back to the VM.
+    /// The native tier lowers it: `btr` clears bit 63 on an integer register,
+    /// five bytes, the word never reaching an SSE register at all.
+    /// `cove-native`'s `tests/suite`'s `ABSOLUTES` holds it to the bit — a
+    /// NaN's payload and its quiet bit included, which no Cove program can
+    /// see — and `cove-runtime`'s `native_tier.rs` holds it against the VM for
+    /// what one can. That it is lowered rather than refused is ADR 0065's
+    /// Decision 5 applied again, and is why this route is available at all: a
+    /// refusal would take every caller back to the VM.
     FloatAbs { dst: Slot, a: Slot },
     /// `dst = min(a, b)` or `dst = max(a, b)`, on two IEEE-754 doubles — and
     /// **neither of them is the IEEE 754 operation of that name.**
     ///
-    /// The contract, which is what the two code generators are written against
-    /// and what three tiers of tests hold them to:
+    /// The contract, which is what the native lowering is written against and
+    /// what three tiers of tests hold it to:
     ///
     /// ```text
     /// min(a, b) = b is NaN -> a | a is NaN -> b | a < b -> a | otherwise b
@@ -500,9 +501,11 @@ pub enum Inst {
     ///
     /// **It absorbs a NaN, it does not propagate one.** `min(NaN, x)` is `x`
     /// and `min(x, NaN)` is `x`, which is IEEE 754-2008's `minNum` rather than
-    /// IEEE 754-2019's `minimum`. Cranelift's own `fmin` is the *2019*
-    /// operation and propagates, so the Cranelift arm may not use it; that is
-    /// not a subtlety, it is the whole reason that arm is three `select`s.
+    /// IEEE 754-2019's `minimum`. That is not a subtlety, and it is why this
+    /// contract is written out here rather than delegated to whatever a
+    /// machine or a back end calls `fmin`: the retired Cranelift arm's `fmin`
+    /// *was* the 2019 operation, so that arm could not use the instruction
+    /// named after the operation and was three `select`s over `fcmp` instead.
     ///
     /// **On operands that compare equal the answer is the second one.**
     /// `-0.0 == 0.0` is true, so `min(-0.0, +0.0)` is `+0.0` and
@@ -516,15 +519,16 @@ pub enum Inst {
     /// comes from.
     ///
     /// **The answer is bit-identical to one of the two operands, always.**
-    /// Nothing here rounds, and nothing here **quiets** a signalling NaN: both
-    /// arms select a whole word rather than computing one. A route through
-    /// arithmetic — a subtraction to compare with, a multiply by one to move
-    /// with — would set bit 51 on a signalling operand, and the signalling
-    /// rows of `cove-native`'s `tests/suite`'s `EXTREMA` are what catch it.
-    /// All three tiers are held to that one table: the encoded VM in
-    /// `vm::exec`'s `a_float_extremum_answers_one_of_its_operands`, each code
-    /// generator in its own file, and the two against each other in
-    /// `tests/agree.rs`.
+    /// Nothing here rounds, and nothing here **quiets** a signalling NaN:
+    /// every tier selects a whole word rather than computing one. A route
+    /// through arithmetic — a subtraction to compare with, a multiply by one
+    /// to move with — would set bit 51 on a signalling operand, and the
+    /// signalling rows of `cove-native`'s `tests/suite`'s `EXTREMA` are what
+    /// catch it. Both tiers are held to that one table: the encoded VM in
+    /// `vm::exec`'s `a_float_extremum_answers_one_of_its_operands` and the
+    /// native lowering in `cove-native`'s `tests/template.rs`. They are run
+    /// against *each other* by `cove-runtime`'s `native_tier.rs`, on real Cove
+    /// source rather than on hand-built IR.
     ///
     /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 2 admits "a typed scalar operation that maps to a CPU or
@@ -1343,8 +1347,8 @@ pub enum Inst {
     /// image, and a rule is the most expensive thing this IR can grow, because
     /// every backend has to be held to it. Against that: there is exactly one
     /// producer, `Body::core_vector_truncate` from `core.vectorTruncate`, whose
-    /// only callers are `Vector.pop` and `Vector.remove`; neither code generator
-    /// emits a fast path for it, both hand it to the runtime whole; and ADR
+    /// only callers are `Vector.pop` and `Vector.remove`; the code generator
+    /// emits no fast path for it and hands it to the runtime whole; and ADR
     /// 0062's window optimizer has no window here, so there would be nothing
     /// for the new relation to prove anything about. Two instructions and a
     /// rule, read by nobody, is not a simplification.

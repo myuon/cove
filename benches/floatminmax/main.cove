@@ -43,10 +43,10 @@ use clock.now
 ///   template arm's blend exists for and the only path through it that the
 ///   other three do not take.
 ///
-/// If those four agree then both lowerings are branch-free over their whole
-/// input domain, which is a claim about the code and not a formality: the
-/// template arm is `minsd` and three SSE2 logicals, and the Cranelift arm is
-/// three `select`s, and neither is supposed to have a branch in it.
+/// If those four agree then the lowering is branch-free over its whole input
+/// domain, which is a claim about the code and not a formality: the template
+/// arm is `minsd` and three SSE2 logicals, and it is not supposed to have a
+/// branch in it.
 ///
 /// # No float constant, comparison or arithmetic below `main`
 ///

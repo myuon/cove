@@ -35,23 +35,23 @@ use cove_ir::MinMax;
 /// program is seen depending on it, through the three observers that can tell
 /// the zeros apart, in both argument orders.
 ///
-/// **Four implementations, one specification, and this is it.** Both code
-/// generators spell these four cases out because neither machine operation has
+/// **Three implementations, one specification, and this is it.** The native
+/// code generator spells these four cases out because no machine operation has
 /// them — x86-64's `minsd` answers its second operand when *either* operand is
-/// a NaN, where this absorbs one, and Cranelift's `fmin` is IEEE 754-2019's
-/// `minimum` and propagates. This function is the other two callers: the
-/// encoded VM's `FLOAT_MIN` and `FLOAT_MAX` arms, and **the tree-walking
-/// interpreter's `Float.min` and `Float.max`, which is the semantic oracle the
-/// other three are differentially tested against**. An oracle that inherited
-/// its answer from whichever `rustc` built the binary would be an oracle that
-/// could not say the others were wrong; `crates/cove-native`'s `tests/suite`'s
-/// `EXTREMA` holds all of them to one table of bits, and
-/// `crates/cove-cli/tests/e2e.rs` runs the corpus on both evaluators against
-/// one golden file.
+/// a NaN, where this absorbs one, and an IEEE 754-2019 `minimum`, which is what
+/// a compiler back end's `fmin` usually is and what the retired Cranelift arm's
+/// was, propagates one. This function is the other two callers: the encoded
+/// VM's `FLOAT_MIN` and `FLOAT_MAX` arms, and **the tree-walking interpreter's
+/// `Float.min` and `Float.max`, which is the semantic oracle the other two are
+/// differentially tested against**. An oracle that inherited its answer from
+/// whichever `rustc` built the binary would be an oracle that could not say the
+/// others were wrong; `crates/cove-native`'s `tests/suite`'s `EXTREMA` holds
+/// them to one table of bits, and `crates/cove-cli/tests/e2e.rs` runs the
+/// corpus on both evaluators against one golden file.
 ///
 /// The alternative — letting each tier ask `f64::min` — is not stable even in
-/// principle. A future `rustc` is entitled to flip the tie, and then the two
-/// delegating tiers would move while the two that spell it out would not. That
+/// principle. A future `rustc` is entitled to flip the tie, and then the tiers
+/// that delegate would move while the one that spells it out would not. That
 /// is the complaint [ADR 0064]'s Decision 5 makes about the Unicode tables: a
 /// behaviour that is a fact about which compiler built the binary, with
 /// nothing in the repository able to say which answer is right.

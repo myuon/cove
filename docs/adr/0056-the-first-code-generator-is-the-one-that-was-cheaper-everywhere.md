@@ -1,6 +1,12 @@
 # ADR 0056: The first code generator is the one that was cheaper everywhere
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0066](0066-a-comparison-ends-when-its-question-is-answered.md), which
+  withdraws **"the Cranelift arm may be deleted, and the comparison and its
+  harness are kept"** and nothing else decided here. The choice of the
+  hand-written template compiler as the native tier's code generator, and every
+  measurement below that justified it, stand as written
 - Date: 2026-09-13
 - Decides: which code generator the native tier uses first, now that both
   candidates have been measured on the same IR

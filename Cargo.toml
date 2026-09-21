@@ -7,9 +7,9 @@ members = [
   "crates/cove-sema",
   "crates/cove-ir",
   # The native execution tier of [ADR 0055]. A workspace member, so `cargo t`
-  # and `cargo clippy --all-targets` see it — but its Cranelift dependencies
-  # are an optional feature that is off by default, so the ordinary build
-  # compiles a crate of ABI declarations and nothing else. See its manifest.
+  # and `cargo clippy --all-targets` see it — but its code generator is an
+  # optional feature that is off by default, so the ordinary build compiles a
+  # crate of ABI declarations and nothing else. See its manifest.
   "crates/cove-native",
   "crates/cove-runtime",
   "crates/cove-cli",

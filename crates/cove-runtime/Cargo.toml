@@ -6,19 +6,16 @@ license.workspace = true
 
 # The native tier's code generator, off by default.
 #
-# One feature per `cove-native` arm, forwarded rather than re-decided, because
-# ADR 0055's adoption gate — "a build without the native feature has no
-# executable-memory dependency" — is a fact about the whole graph and not about
-# one crate in it. Default off, so the ordinary `cargo t` and `cargo build` of
-# this workspace map no executable page.
+# `cove-native`'s feature, forwarded rather than re-decided, because ADR 0055's
+# adoption gate — "a build without the native feature has no executable-memory
+# dependency" — is a fact about the whole graph and not about one crate in it.
+# Default off, so the ordinary `cargo t` and `cargo build` of this workspace map
+# no executable page.
 #
-# `template` is the arm ADR 0056 adopted and the one `native::compile` uses.
-# `cranelift` is kept because ADR 0056 keeps the comparison, and it forwards the
-# feature without making a second tier owner: a run selects the tier ADR 0056
-# decided, not one of two.
+# `template` is the arm ADR 0056 adopted, the one `native::compile` uses, and
+# since ADR 0066 the only one there is.
 [features]
 default = []
-cranelift = ["cove-native/cranelift"]
 template = ["cove-native/template"]
 
 [dependencies]
