@@ -57,8 +57,6 @@ pub enum Intrinsic {
     FloatToInt,
     FloatRound,
     FloatSqrt,
-    FloatMin,
-    FloatMax,
     FloatFormat,
     FloatParse,
     AnyEquals,
@@ -90,8 +88,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::FloatToInt,
     Intrinsic::FloatRound,
     Intrinsic::FloatSqrt,
-    Intrinsic::FloatMin,
-    Intrinsic::FloatMax,
     Intrinsic::FloatFormat,
     Intrinsic::FloatParse,
     Intrinsic::AnyEquals,
@@ -140,8 +136,6 @@ impl Intrinsic {
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatRound => "Float",
             Intrinsic::FloatSqrt => "Float",
-            Intrinsic::FloatMin => "Float",
-            Intrinsic::FloatMax => "Float",
             Intrinsic::FloatFormat => "Float",
             Intrinsic::FloatParse => "Float",
             Intrinsic::AnyEquals => "Any",
@@ -171,8 +165,6 @@ impl Intrinsic {
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatRound => "round",
             Intrinsic::FloatSqrt => "sqrt",
-            Intrinsic::FloatMin => "min",
-            Intrinsic::FloatMax => "max",
             Intrinsic::FloatFormat => "format",
             Intrinsic::FloatParse => "parse",
             Intrinsic::AnyEquals => "equals",
@@ -245,8 +237,6 @@ impl Intrinsic {
             | Intrinsic::FloatToInt
             | Intrinsic::FloatRound
             | Intrinsic::FloatSqrt
-            | Intrinsic::FloatMin
-            | Intrinsic::FloatMax
             | Intrinsic::FloatFormat
             | Intrinsic::FloatParse => Category::Scalar,
             // Rendering is a walk directed by whatever layout the piece has,
@@ -294,7 +284,6 @@ impl Intrinsic {
             Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatRound | Intrinsic::FloatSqrt => fixed(&[C::Float], C::Float),
-            Intrinsic::FloatMin | Intrinsic::FloatMax => fixed(&[C::Float, C::Float], C::Float),
             Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
             Intrinsic::AnyEquals => fixed(&[C::Value, C::Value], C::Bool),
@@ -401,10 +390,7 @@ impl Intrinsic {
             // A scalar function of its own words, with nothing on the heap to
             // read and nothing that can fail: IEEE 754 answers every one of
             // them for every input.
-            Intrinsic::FloatRound
-            | Intrinsic::FloatSqrt
-            | Intrinsic::FloatMin
-            | Intrinsic::FloatMax => E::NONE,
+            Intrinsic::FloatRound | Intrinsic::FloatSqrt => E::NONE,
             // The three parsers read a `String` receiver's bytes and
             // allocate the message an `Err` carries, and `parseRadix` refuses
             // a radix outside `2..=36`; `format` allocates the `String` it
@@ -673,8 +659,6 @@ mod tests {
             "Float.toInt",
             "Float.round",
             "Float.sqrt",
-            "Float.min",
-            "Float.max",
             "Float.format",
             "Float.parse",
             "Any.equals",
@@ -749,8 +733,6 @@ mod tests {
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatRound
                 | Intrinsic::FloatSqrt
-                | Intrinsic::FloatMin
-                | Intrinsic::FloatMax
                 | Intrinsic::FloatFormat
                 | Intrinsic::FloatParse
                 | Intrinsic::AnyEquals
@@ -889,15 +871,7 @@ mod tests {
             .copied()
             .filter(|intrinsic| !intrinsic.effects().contains(Effects::MAY_RAISE))
             .collect();
-        assert_eq!(
-            never,
-            vec![
-                Intrinsic::FloatRound,
-                Intrinsic::FloatSqrt,
-                Intrinsic::FloatMin,
-                Intrinsic::FloatMax,
-            ]
-        );
+        assert_eq!(never, vec![Intrinsic::FloatRound, Intrinsic::FloatSqrt]);
     }
 
     /// No intrinsic is a collection operation: ADR 0058 moved every one into

@@ -206,14 +206,6 @@ pub(crate) fn call(
             scalar::float_sqrt(machine, frame, dest);
             Ok(())
         }
-        Intrinsic::FloatMin => {
-            scalar::float_min(machine, frame, dest);
-            Ok(())
-        }
-        Intrinsic::FloatMax => {
-            scalar::float_max(machine, frame, dest);
-            Ok(())
-        }
         Intrinsic::FloatFormat => scalar::float_format(machine, frame, dest),
         Intrinsic::FloatParse => scalar::float_parse(machine, frame, dest),
 

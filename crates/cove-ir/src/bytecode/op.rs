@@ -1,4 +1,4 @@
-//! The hundred and seventy-nine opcodes, and what each one makes of the four
+//! The hundred and eighty-one opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -21,7 +21,9 @@
 //!   alone;
 //! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] four;
 //!   [`Inst::FloatAbs`](crate::Inst::FloatAbs) one, because it is not a
-//!   family — see the instruction's own doc for why it is not;
+//!   family — see the instruction's own doc for why it is not — and
+//!   [`Inst::FloatMinMax`](crate::Inst::FloatMinMax) two, [`MinMax`], because
+//!   it is;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
 //!   form, so no discriminant is stored anywhere.
 //!
@@ -43,7 +45,7 @@
 
 use std::sync::LazyLock;
 
-use crate::inst::{ArithOp, CmpOp, Compare, Convert, Num};
+use crate::inst::{ArithOp, CmpOp, Compare, Convert, MinMax, Num};
 use crate::legalize::Pattern;
 use crate::repr::Repr;
 
@@ -87,13 +89,16 @@ const CONVERTS: [Convert; 4] = [
     Convert::IntToDuration,
 ];
 
+/// Every [`MinMax`], in opcode order.
+const MIN_MAXES: [MinMax; 2] = [MinMax::Min, MinMax::Max];
+
 /// Where each family's opcodes begin.
 ///
 /// Each base is the one before it plus that family's size, so no number is
 /// written down twice and inserting a family renumbers the ones after it —
 /// which ADR 0041 permits, because opcode numbers are explicitly not stable.
 mod base {
-    use super::{ARITH_OPS, CMP_OPS, COMPARES, CONVERTS, NUMS};
+    use super::{ARITH_OPS, CMP_OPS, COMPARES, CONVERTS, MIN_MAXES, NUMS};
 
     pub const CONST_UNIT: u8 = 0;
     pub const CONST_BOOL: u8 = CONST_UNIT + 1;
@@ -219,8 +224,14 @@ mod base {
     /// like, for `CMP_ORDER`'s reason: adding it renumbered nothing already
     /// there.
     pub const FLOAT_ABS: u8 = RUN_FIND_BYTES + 1;
+    /// [`crate::Inst::FloatMinMax`], ADR 0064's other typed scalar operation —
+    /// two opcodes, one per [`MinMax`], which is what a flag on the
+    /// instruction costs the bytecode and is the same two a pair of
+    /// instructions would have cost. Last, for `CMP_ORDER`'s reason: adding
+    /// them renumbered nothing already there.
+    pub const FLOAT_MIN_MAX: u8 = FLOAT_ABS + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = FLOAT_ABS + 1;
+    pub const END: u8 = FLOAT_MIN_MAX + MIN_MAXES.len() as u8;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -287,6 +298,8 @@ pub enum Op {
     RunFindBytes,
     /// [`crate::Inst::FloatAbs`]: one `Float` in, one `Float` out.
     FloatAbs,
+    /// [`crate::Inst::FloatMinMax`]: two `Float`s in, one `Float` out.
+    FloatMinMax(MinMax),
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
     GrowableAllocBytes,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::Words`], whose
@@ -632,6 +645,7 @@ impl Op {
             Op::RunFindBytes,
             Op::FloatAbs,
         ]);
+        all.extend(MIN_MAXES.map(Op::FloatMinMax));
         all
     }
 
@@ -697,6 +711,7 @@ impl Op {
             Op::RunSliceWords => base::RUN_SLICE_WORDS,
             Op::RunFindBytes => base::RUN_FIND_BYTES,
             Op::FloatAbs => base::FLOAT_ABS,
+            Op::FloatMinMax(op) => base::FLOAT_MIN_MAX + index_of!(MIN_MAXES, op),
             Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
             Op::GrowableAllocWords => base::GROWABLE_ALLOC_WORDS,
             Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
@@ -1003,6 +1018,14 @@ impl Op {
                 NONE,
                 Payload::Empty,
             ),
+            // `Op::Arith(Num::Float, _)`'s shape exactly, and nothing in the
+            // payload: two `Float`s in, one `Float` out.
+            Op::FloatMinMax(_) => fields(
+                Operand::Word(FLOAT),
+                Operand::Word(FLOAT),
+                Operand::Word(FLOAT),
+                Payload::Empty,
+            ),
             // No `Half::Layout` on either of the two allocating buffer
             // opcodes, for the reason `Op::Str` carries none, twice over: an
             // owner is always `Program::buffer_layout` and its store is always
@@ -1203,15 +1226,20 @@ mod tests {
     /// once ADR 0065's run search brought one — one and not two, because the
     /// instruction has a single storage — and a hundred and seventy-nine once
     /// ADR 0064's typed scalar operation brought one for `Float.abs`, which is
-    /// one and not a family for the reason `crate::Inst::FloatAbs` gives. What the
+    /// one and not a family for the reason `crate::Inst::FloatAbs` gives, and a
+    /// hundred and eighty-one once the same ADR's last two Phase 1 migrations
+    /// brought `Float.min` and `Float.max` — two opcodes and **one**
+    /// instruction, for the reason `crate::MinMax` gives, which is the first
+    /// time this file has been asked to say that those are different
+    /// questions. What the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventy_nine_opcodes() {
-        assert_eq!(Op::all().len(), 179);
-        assert_eq!(OPCODES, 179);
+    fn there_are_a_hundred_and_eighty_one_opcodes() {
+        assert_eq!(Op::all().len(), 181);
+        assert_eq!(OPCODES, 181);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1276,6 +1304,9 @@ mod tests {
         // Not a family, deliberately: ADR 0064's Decision 2 typed scalar
         // operation is one operation, and `Inst::FloatAbs` says why.
         assert_eq!(count(|op| matches!(op, Op::FloatAbs)), 1);
+        // A family of two, equally deliberately, and `Inst::MinMax` says why:
+        // one instruction with a flag is still one opcode per member here.
+        assert_eq!(count(|op| matches!(op, Op::FloatMinMax(_))), 2);
         assert_eq!(
             count(|op| matches!(op, Op::AllocFixed | Op::AllocImm | Op::AllocSlot)),
             3

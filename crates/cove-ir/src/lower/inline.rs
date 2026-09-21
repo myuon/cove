@@ -813,6 +813,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Not { dst, .. }
             | Inst::Convert { dst, .. }
             | Inst::FloatAbs { dst, .. }
+            | Inst::FloatMinMax { dst, .. }
             | Inst::Arith { dst, .. }
             | Inst::Cmp { dst, .. }
             | Inst::ArithImm { dst, .. }
@@ -1442,7 +1443,9 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
             vec![dst, a]
         }
         Inst::ArithImm { dst, a, .. } | Inst::CmpImm { dst, a, .. } => vec![dst, a],
-        Inst::Arith { dst, a, b, .. } | Inst::Cmp { dst, a, b, .. } => vec![dst, a, b],
+        Inst::Arith { dst, a, b, .. }
+        | Inst::Cmp { dst, a, b, .. }
+        | Inst::FloatMinMax { dst, a, b, .. } => vec![dst, a, b],
         Inst::CmpImmBranch { dst, a, .. } => vec![dst, a],
         Inst::CmpBranch { dst, a, b, .. } => vec![dst, a, b],
         Inst::BranchFalse { cond, .. } => vec![cond],

@@ -48,7 +48,9 @@
 
 use std::fmt::Write as _;
 
-use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Slot, Storage, Validation};
+use crate::inst::{
+    ArithOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, Slot, Storage, Validation,
+};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 
@@ -194,6 +196,16 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             s(*a)
         ),
         Inst::FloatAbs { dst, a } => format!("abs.float {} {}", s(*dst), s(*a)),
+        Inst::FloatMinMax { op, dst, a, b } => format!(
+            "{}.float {} {} {}",
+            match op {
+                MinMax::Min => "min",
+                MinMax::Max => "max",
+            },
+            s(*dst),
+            s(*a),
+            s(*b)
+        ),
         Inst::Jump { to } => format!("jump {to}"),
         Inst::BranchFalse { cond, to } => format!("branch-false {} {to}", s(*cond)),
         // A fused comparison prints as the comparison it is, with `.branch`

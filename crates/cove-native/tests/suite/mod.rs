@@ -34,7 +34,8 @@ use std::sync::Arc;
 use cove_diag::{FileId, Span};
 use cove_ir::{
     Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
-    Len, Num, Program, RefMap, Repr, SiteId, Slot, Storage, StrId, Table, TableId, Validation,
+    Len, MinMax, Num, Program, RefMap, Repr, SiteId, Slot, Storage, StrId, Table, TableId,
+    Validation,
 };
 use cove_native::{
     Entry, GrowableOp, IntrinsicCode, IntrinsicProtocol, NativeCtx, NativeHelpers, Opened, Outcome,
@@ -2192,6 +2193,412 @@ pub fn a_float_absolute_in_place_answers_the_same<A: Arm>() {
     }
 }
 
+/// `s2 = min(s0, s1); return s2`, or `max` — the destination apart from both
+/// operands.
+pub fn extremum(op: MinMax) -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Float, Repr::Float],
+        FLOAT,
+        vec![
+            Inst::FloatMinMax {
+                op,
+                dst: 2,
+                a: 0,
+                b: 1,
+            },
+            Inst::Return { src: 2 },
+        ],
+    ))
+}
+
+/// `s0 = min(s0, s1); return s0`: the destination *is* the first operand.
+pub fn extremum_over_a(op: MinMax) -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Float],
+        FLOAT,
+        vec![
+            Inst::FloatMinMax {
+                op,
+                dst: 0,
+                a: 0,
+                b: 1,
+            },
+            Inst::Return { src: 0 },
+        ],
+    ))
+}
+
+/// `s1 = min(s0, s1); return s1`: the destination *is* the second operand.
+///
+/// The second aliasing shape and not a repetition of the first: the template
+/// arm reads `a` into a register and `b` through a **memory operand**, so the
+/// two operands are read at different points in the sequence and only this
+/// shape says the later read still saw the operand rather than a destination
+/// already written.
+pub fn extremum_over_b(op: MinMax) -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Float],
+        FLOAT,
+        vec![
+            Inst::FloatMinMax {
+                op,
+                dst: 1,
+                a: 0,
+                b: 1,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
+}
+
+/// The operand pairs and answers `Inst::FloatMinMax` is held to, **in bits**:
+/// `(label, a, b, min, max)`.
+///
+/// Stated as `u64` for [`ABSOLUTES`]' reason, and with more of it riding on
+/// that here: three of the five columns of the NaN rows cannot be written as
+/// decimal literals at all, and a signalling NaN is a bit pattern Rust is
+/// entitled to quiet the moment it passes through an arithmetic operation.
+///
+/// **Every asymmetric pair appears twice, once in each order**, because the
+/// operation is not symmetric and its asymmetry is the whole of what is
+/// interesting about it. Two facts fall out of the table and neither is what a
+/// reader of "min" would guess:
+///
+/// - **on operands that compare equal the answer is the second one.**
+///   `min(-0.0, +0.0)` is `+0.0` and `min(+0.0, -0.0)` is `-0.0`, and `max`
+///   answers those same two. Rust's own documentation declines to decide this
+///   ("either input may be returned non-deterministically"); this table is
+///   where the decision is written down, and
+///   `tests/e2e/values_float_min_max` is where a Cove program can be seen
+///   making it.
+/// - **a NaN is absorbed, not propagated.** `min(NaN, x)` is `x` and
+///   `min(x, NaN)` is `x` — IEEE 754-2008's `minNum` rather than IEEE
+///   754-2019's `minimum`. Cranelift's `fmin` *is* the 2019 operation, so an
+///   arm written on it fails sixteen of these rows.
+///
+/// Every answer in the table is **bit-identical to one of the two operands**,
+/// on all 33 rows and both columns. That is not a coincidence and it is the
+/// strongest single statement the table makes: nothing here computes a value,
+/// both arms select a word, and so nothing can round and nothing can quiet.
+/// The `sNaN` rows are what make it failable — `sNaN, qNaN` answers
+/// `0xfff0_0000_dead_beef` on both columns, sign, payload and *clear* quiet
+/// bit intact, where anything that moved the value through an addition or a
+/// multiplication would answer `0xfff8_0000_dead_beef`.
+///
+/// The whole table was computed by a standalone `rustc` program calling
+/// `f64::min` and `f64::max` behind a `black_box`, so that these are the
+/// machine's answers rather than a transcription of an argument about them.
+pub const EXTREMA: &[(&str, u64, u64, u64, u64)] = &[
+    (
+        "-0.0, +0.0",
+        0x8000_0000_0000_0000,
+        0x0000_0000_0000_0000,
+        0x0000_0000_0000_0000,
+        0x0000_0000_0000_0000,
+    ),
+    (
+        "+0.0, -0.0",
+        0x0000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ),
+    (
+        "-0.0, -0.0",
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ),
+    (
+        "+0.0, +0.0",
+        0x0000_0000_0000_0000,
+        0x0000_0000_0000_0000,
+        0x0000_0000_0000_0000,
+        0x0000_0000_0000_0000,
+    ),
+    (
+        "1.0, 2.0",
+        0x3ff0_0000_0000_0000,
+        0x4000_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        0x4000_0000_0000_0000,
+    ),
+    (
+        "2.0, 1.0",
+        0x4000_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        0x4000_0000_0000_0000,
+    ),
+    (
+        "1.5, 1.5",
+        0x3ff8_0000_0000_0000,
+        0x3ff8_0000_0000_0000,
+        0x3ff8_0000_0000_0000,
+        0x3ff8_0000_0000_0000,
+    ),
+    (
+        "-1.5, 1.5",
+        0xbff8_0000_0000_0000,
+        0x3ff8_0000_0000_0000,
+        0xbff8_0000_0000_0000,
+        0x3ff8_0000_0000_0000,
+    ),
+    (
+        "1.5, -1.5",
+        0x3ff8_0000_0000_0000,
+        0xbff8_0000_0000_0000,
+        0xbff8_0000_0000_0000,
+        0x3ff8_0000_0000_0000,
+    ),
+    (
+        "+inf, -inf",
+        0x7ff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+        0x7ff0_0000_0000_0000,
+    ),
+    (
+        "-inf, +inf",
+        0xfff0_0000_0000_0000,
+        0x7ff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+        0x7ff0_0000_0000_0000,
+    ),
+    (
+        "+inf, MAX",
+        0x7ff0_0000_0000_0000,
+        0x7fef_ffff_ffff_ffff,
+        0x7fef_ffff_ffff_ffff,
+        0x7ff0_0000_0000_0000,
+    ),
+    (
+        "MAX, +inf",
+        0x7fef_ffff_ffff_ffff,
+        0x7ff0_0000_0000_0000,
+        0x7fef_ffff_ffff_ffff,
+        0x7ff0_0000_0000_0000,
+    ),
+    (
+        "MIN, -inf",
+        0xffef_ffff_ffff_ffff,
+        0xfff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+        0xffef_ffff_ffff_ffff,
+    ),
+    (
+        "-inf, MIN",
+        0xfff0_0000_0000_0000,
+        0xffef_ffff_ffff_ffff,
+        0xfff0_0000_0000_0000,
+        0xffef_ffff_ffff_ffff,
+    ),
+    (
+        "-2^-1074, 2^-1074",
+        0x8000_0000_0000_0001,
+        0x0000_0000_0000_0001,
+        0x8000_0000_0000_0001,
+        0x0000_0000_0000_0001,
+    ),
+    (
+        "2^-1074, -2^-1074",
+        0x0000_0000_0000_0001,
+        0x8000_0000_0000_0001,
+        0x8000_0000_0000_0001,
+        0x0000_0000_0000_0001,
+    ),
+    (
+        "qNaN, 1.0",
+        0x7ff8_0000_dead_beef,
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+    ),
+    (
+        "1.0, qNaN",
+        0x3ff0_0000_0000_0000,
+        0x7ff8_0000_dead_beef,
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+    ),
+    (
+        "sNaN, 1.0",
+        0xfff0_0000_dead_beef,
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+    ),
+    (
+        "1.0, sNaN",
+        0x3ff0_0000_0000_0000,
+        0xfff0_0000_dead_beef,
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+    ),
+    (
+        "qNaN, sNaN",
+        0x7ff8_0000_dead_beef,
+        0xfff0_0000_dead_beef,
+        0x7ff8_0000_dead_beef,
+        0x7ff8_0000_dead_beef,
+    ),
+    (
+        "sNaN, qNaN",
+        0xfff0_0000_dead_beef,
+        0x7ff8_0000_dead_beef,
+        0xfff0_0000_dead_beef,
+        0xfff0_0000_dead_beef,
+    ),
+    (
+        "sNaN, sNaN",
+        0xfff0_0000_dead_beef,
+        0xfff0_0000_dead_beef,
+        0xfff0_0000_dead_beef,
+        0xfff0_0000_dead_beef,
+    ),
+    (
+        "+sNaN, -sNaN",
+        0x7ff0_0000_dead_beef,
+        0xfff0_0000_dead_beef,
+        0x7ff0_0000_dead_beef,
+        0x7ff0_0000_dead_beef,
+    ),
+    (
+        "qNaN, +inf",
+        0x7ff8_0000_dead_beef,
+        0x7ff0_0000_0000_0000,
+        0x7ff0_0000_0000_0000,
+        0x7ff0_0000_0000_0000,
+    ),
+    (
+        "+inf, qNaN",
+        0x7ff0_0000_0000_0000,
+        0x7ff8_0000_dead_beef,
+        0x7ff0_0000_0000_0000,
+        0x7ff0_0000_0000_0000,
+    ),
+    (
+        "qNaN, -inf",
+        0x7ff8_0000_dead_beef,
+        0xfff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+    ),
+    (
+        "-inf, qNaN",
+        0xfff0_0000_0000_0000,
+        0x7ff8_0000_dead_beef,
+        0xfff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+    ),
+    (
+        "qNaN, -0.0",
+        0x7ff8_0000_dead_beef,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ),
+    (
+        "-0.0, qNaN",
+        0x8000_0000_0000_0000,
+        0x7ff8_0000_dead_beef,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ),
+    (
+        "sNaN, -0.0",
+        0xfff0_0000_dead_beef,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ),
+    (
+        "-0.0, sNaN",
+        0x8000_0000_0000_0000,
+        0xfff0_0000_dead_beef,
+        0x8000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ),
+];
+
+/// `Inst::FloatMinMax` answers one of its two operands, to the bit.
+///
+/// The other of ADR 0064's two typed scalar operations, and the one whose two
+/// arms are furthest from the instruction that shares its name. `encoded.rs`'s
+/// `FLOAT_MIN` and `FLOAT_MAX` arms are `f64::min` and `f64::max`, and
+/// [`EXTREMA`] is what those are, in bits.
+///
+/// **Neither arm may use the obvious machine operation.** x86-64's `minsd`
+/// answers its *second* operand when either operand is a NaN, where `f64::min`
+/// absorbs one; Cranelift's `fmin` *propagates* a NaN, where `f64::min`
+/// absorbs one. So the template arm is `minsd` plus a blend that puts the
+/// absorbed case back, and the Cranelift arm is three `select`s over `fcmp`
+/// and never names `fmin`. Two very different sequences, one table — which is
+/// the arrangement `tests/agree.rs` then makes say something.
+///
+/// Three shapes per row per operation: the destination apart from both
+/// operands, the destination that *is* the first operand, and the destination
+/// that is the second. The second and third are not the same case on the
+/// template arm, whose two operands are read by different addressing modes at
+/// different points in a nine-instruction sequence.
+pub fn a_float_extremum_answers_one_of_its_operands<A: Arm>() {
+    for (op, name) in [(MinMax::Min, "min"), (MinMax::Max, "max")] {
+        for (label, a, b, min, max) in EXTREMA {
+            let want = match op {
+                MinMax::Min => *min,
+                MinMax::Max => *max,
+            };
+            assert!(
+                want == *a || want == *b,
+                "|{name} {label}|: the table's own answer is neither operand"
+            );
+
+            forget_polls();
+            let mut words = vec![*a, *b, 0];
+            let answer = run::<A>(&extremum(op), &mut words, 0);
+            assert_eq!(answer.outcome, Outcome::Returned, "|{name} {label}|");
+            assert_eq!(
+                words[2], want,
+                "|{name} {label}|: 0x{a:016x}, 0x{b:016x} answered 0x{:016x}, \
+                 want 0x{want:016x} — to the bit, not merely a number equal to it",
+                words[2]
+            );
+            assert_eq!(
+                (words[0], words[1]),
+                (*a, *b),
+                "neither operand is the destination and neither was written: |{name} {label}|"
+            );
+            assert_eq!(
+                answer.returned[0], want,
+                "the destination holds what the slot holds: |{name} {label}|"
+            );
+
+            forget_polls();
+            let mut words = vec![*a, *b];
+            let answer = run::<A>(&extremum_over_a(op), &mut words, 0);
+            assert_eq!(answer.outcome, Outcome::Returned, "|{name} {label}| over a");
+            assert_eq!(
+                words[0], want,
+                "|{name} {label}| over a: answered 0x{:016x}, want 0x{want:016x}",
+                words[0]
+            );
+            assert_eq!(answer.returned[0], want, "|{name} {label}| over a");
+
+            forget_polls();
+            let mut words = vec![*a, *b];
+            let answer = run::<A>(&extremum_over_b(op), &mut words, 0);
+            assert_eq!(answer.outcome, Outcome::Returned, "|{name} {label}| over b");
+            assert_eq!(
+                words[1], want,
+                "|{name} {label}| over b: answered 0x{:016x}, want 0x{want:016x}",
+                words[1]
+            );
+            assert_eq!(answer.returned[0], want, "|{name} {label}| over b");
+        }
+    }
+}
+
 /// A `Duration` destination renames the overflow, and only for the three
 /// operations that consult the name.
 ///
@@ -4213,7 +4620,7 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// level over:
 ///
 /// - a function with one `intrinsic-call` charges **one site** to that call's
-///   variant and none to the other twenty-five, and a function with no
+///   variant and none to the other twenty-three, and a function with no
 ///   intrinsic call in it charges nothing anywhere — so the count follows the
 ///   IR and not the shape of the body;
 /// - where the bytes are attributed they are **positive and no more than the

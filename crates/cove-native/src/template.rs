@@ -26,8 +26,8 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, Num, Program, Slot,
-    Storage, StrId,
+    ArgsId, ArithOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, MinMax, Num,
+    Program, Slot, Storage, StrId,
 };
 
 use crate::abi::{
@@ -102,6 +102,22 @@ const RETURN_BYTES: u8 = RBP;
 const HEAP_TABLE: u8 = RSI;
 const HEAP_INDEX: u8 = RDI;
 const HEAP_SPARE: u8 = R15;
+
+// The SSE registers this arm uses, which are scratch in the same sense the
+// integer scratch registers are: nothing lives in one between two
+// instructions, because every value of a frame lives in the frame. Only
+// `Inst::Convert(IntToFloat)` and `Inst::FloatMinMax` touch them at all.
+const XMM0: u8 = 0;
+const XMM2: u8 = 2;
+const XMM3: u8 = 3;
+
+// The three SSE2 packed logicals the min/max blend is built from, and the
+// `cmpsd` predicate that drives it.
+const ANDPD: u8 = 0x54;
+const ANDNPD: u8 = 0x55;
+const ORPD: u8 = 0x56;
+/// `UNORD_Q`, the quiet unordered predicate: `cmpsd`'s `imm8` of 3.
+const UNORDERED: u8 = 3;
 
 // Condition codes, as the low nibble of a `jcc`/`setcc` opcode.
 const CC_NO: u8 = 0x1;
@@ -683,6 +699,61 @@ impl<'a> Emit<'a> {
                 self.load_slot(RAX, *a);
                 self.btr_imm8(RAX, 63);
                 self.store_slot(*dst, RAX);
+            }
+            // ADR 0064's other typed scalar operation, and the longest
+            // sequence in this file that is still one instruction of IR.
+            //
+            // **`minsd` alone is not `f64::min`, and that is the whole of the
+            // difficulty.** `minsd dst, src` answers `src` when the two
+            // compare equal *and* when either of them is a NaN. The first half
+            // is exactly `f64::min`'s tie rule — `min(-0.0, +0.0)` is `+0.0`,
+            // the second operand — and the second half is not: `f64::min`
+            // **absorbs** a NaN, so `min(x, NaN)` is `x` where `minsd` answers
+            // the NaN. The two disagree on precisely one case, `b` a NaN, and
+            // the rest of this sequence is putting that case back.
+            //
+            // Nine instructions, which is the price and is worth stating:
+            //
+            // ```text
+            // movsd      xmm0, [frame+a]   ; a
+            // movapd     xmm2, xmm0        ; keep a
+            // minsd      xmm0, [frame+b]   ; m = minsd(a, b)
+            // movapd     xmm3, xmm0
+            // cmpunordsd xmm3, xmm3        ; mask = m is a NaN, which is b is a NaN
+            // andpd      xmm2, xmm3        ;  mask & a
+            // andnpd     xmm3, xmm0        ; ~mask & m
+            // orpd       xmm2, xmm3
+            // movsd      [frame+dst], xmm2
+            // ```
+            //
+            // `m` is a NaN exactly when `b` is one — if `a` is the NaN then
+            // `minsd` already answered `b` — so the mask is the one case to
+            // repair and the blend is the repair. It is the same shape LLVM
+            // emits for `f64::min` on this target, checked against `rustc -O`
+            // rather than reasoned about, except that LLVM has SSE4.1 and uses
+            // `blendvpd` where this uses the three SSE2 logicals: nothing else
+            // in this arm needs anything past SSE2 and one instruction is not
+            // a reason to start.
+            //
+            // The blend is bitwise, so the answer is one of the two operands
+            // **to the bit** — a signalling NaN that is chosen stays
+            // signalling, and `EXTREMA`'s last rows are what say so. `dst` may
+            // be `a` or `b`; both operands are read before anything is
+            // written, so in place is the same sequence.
+            Inst::FloatMinMax { op, dst, a, b } => {
+                self.frame();
+                let a_at = slot_offset(*a).expect("`supported` bounded every slot");
+                let b_at = slot_offset(*b).expect("`supported` bounded every slot");
+                let dst_at = slot_offset(*dst).expect("`supported` bounded every slot");
+                self.movsd_load(XMM0, FRAME, a_at);
+                self.movapd_rr(XMM2, XMM0);
+                self.min_max_sd(*op, XMM0, FRAME, b_at);
+                self.movapd_rr(XMM3, XMM0);
+                self.cmpunordsd_rr(XMM3, XMM3);
+                self.packed_logic(ANDPD, XMM2, XMM3);
+                self.packed_logic(ANDNPD, XMM3, XMM0);
+                self.packed_logic(ORPD, XMM2, XMM3);
+                self.movsd_store(FRAME, dst_at, XMM2);
             }
             Inst::Len { dst, obj } => self.len_of(*dst, *obj),
             Inst::LoadElem {
@@ -2977,6 +3048,82 @@ impl<'a> Emit<'a> {
         self.byte(0xba);
         self.modrm_reg(6, dst);
         self.byte(bit);
+    }
+
+    /// `movsd xmm, [base + disp]`: one double loaded, the upper half of the
+    /// register zeroed.
+    fn movsd_load(&mut self, dst: u8, base: u8, disp: i32) {
+        self.byte(0xf2);
+        self.rex(false, dst, base);
+        self.byte(0x0f);
+        self.byte(0x10);
+        self.modrm_mem(dst, base, disp);
+    }
+
+    /// `movsd [base + disp], xmm`: the low double stored, eight bytes.
+    fn movsd_store(&mut self, base: u8, disp: i32, src: u8) {
+        self.byte(0xf2);
+        self.rex(false, src, base);
+        self.byte(0x0f);
+        self.byte(0x11);
+        self.modrm_mem(src, base, disp);
+    }
+
+    /// `movapd xmm, xmm`: a whole register copied.
+    ///
+    /// Register to register, so the alignment `movapd` requires of a *memory*
+    /// operand is not in question.
+    fn movapd_rr(&mut self, dst: u8, src: u8) {
+        self.byte(0x66);
+        self.rex(false, dst, src);
+        self.byte(0x0f);
+        self.byte(0x28);
+        self.modrm_reg(dst, src);
+    }
+
+    /// `minsd`/`maxsd xmm, [base + disp]`.
+    ///
+    /// The two differ in one opcode byte, which is the concrete half of why
+    /// [`MinMax`] is a flag on one instruction rather than two instructions.
+    /// Neither is `f64::min` or `f64::max` on its own; see the
+    /// [`Inst::FloatMinMax`] arm for what the other eight instructions are
+    /// for.
+    fn min_max_sd(&mut self, op: MinMax, dst: u8, base: u8, disp: i32) {
+        self.byte(0xf2);
+        self.rex(false, dst, base);
+        self.byte(0x0f);
+        self.byte(match op {
+            MinMax::Min => 0x5d,
+            MinMax::Max => 0x5f,
+        });
+        self.modrm_mem(dst, base, disp);
+    }
+
+    /// `cmpunordsd xmm, xmm`: all ones when the operands are unordered, all
+    /// zeroes otherwise.
+    ///
+    /// Against itself it is "is a NaN", the one predicate true of a NaN and of
+    /// nothing else. Predicate `3` is `UNORD_Q`, the **quiet** form, which is
+    /// what LLVM emits here — a signalling operand sets the invalid flag in
+    /// `MXCSR` either way and no register but the destination is touched, so
+    /// the bits this sequence carries are unaffected.
+    fn cmpunordsd_rr(&mut self, dst: u8, src: u8) {
+        self.byte(0xf2);
+        self.rex(false, dst, src);
+        self.byte(0x0f);
+        self.byte(0xc2);
+        self.modrm_reg(dst, src);
+        self.byte(UNORDERED);
+    }
+
+    /// `andpd`, `andnpd` or `orpd`, register to register — the SSE2 blend, in
+    /// place of the one SSE4.1 `blendvpd` LLVM has.
+    fn packed_logic(&mut self, opcode: u8, dst: u8, src: u8) {
+        self.byte(0x66);
+        self.rex(false, dst, src);
+        self.byte(0x0f);
+        self.byte(opcode);
+        self.modrm_reg(dst, src);
     }
 
     /// `and r64, r64`

@@ -501,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// thirteen of the 25 variants declare
+    /// thirteen of the 23 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -4861,7 +4861,8 @@ fn no_segment_left() -> RuntimeError {
 pub(crate) mod tests {
     use super::*;
     use cove_ir::{
-        Arg, ArgsId, Capture, Compare, Function, Inst, Layout, Len, Num, RefMap, Table, TableId,
+        Arg, ArgsId, Capture, Compare, Function, Inst, Layout, Len, MinMax, Num, RefMap, Table,
+        TableId,
     };
     use std::sync::Arc;
 
@@ -5367,6 +5368,345 @@ pub(crate) mod tests {
                 "|{label}| in place: 0x{operand:016x} answered 0x{answered:016x}, \
                  want 0x{want:016x}"
             );
+        }
+    }
+
+    /// `Op::FloatMin` and `Op::FloatMax` answer one of their two operands, to
+    /// the bit.
+    ///
+    /// The encoded arm of ADR 0064's other typed scalar operation, held to the
+    /// same table `cove-native`'s `tests/suite`'s `EXTREMA` holds both code
+    /// generators to — deliberately duplicated rather than shared, for
+    /// `ABSOLUTES`' reason: this crate and that one do not depend on each
+    /// other, and a table read from one place by one tier would be a table the
+    /// other tier could drift away from silently.
+    ///
+    /// **Both facts it pins are facts Rust does not promise.** `f64::min`'s
+    /// documentation says that on operands which compare equal "either input
+    /// may be returned non-deterministically", and the rows say it is the
+    /// *second*; and it absorbs a NaN rather than propagating one, which is
+    /// IEEE 754-2008's `minNum` and not the `minimum` of the 2019 revision
+    /// that a reader — or a code generator — would reach for.
+    ///
+    /// The signalling rows are what say the answer is **selected** and not
+    /// computed: `sNaN, qNaN` answers `0xfff0_0000_dead_beef` on both columns,
+    /// quiet bit clear, where anything that moved the value through an
+    /// arithmetic operation would answer `0xfff8_0000_dead_beef`.
+    #[test]
+    fn a_float_extremum_answers_one_of_its_operands() {
+        const EXTREMA: &[(&str, u64, u64, u64, u64)] = &[
+            (
+                "-0.0, +0.0",
+                0x8000_0000_0000_0000,
+                0x0000_0000_0000_0000,
+                0x0000_0000_0000_0000,
+                0x0000_0000_0000_0000,
+            ),
+            (
+                "+0.0, -0.0",
+                0x0000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+            ),
+            (
+                "-0.0, -0.0",
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+            ),
+            (
+                "+0.0, +0.0",
+                0x0000_0000_0000_0000,
+                0x0000_0000_0000_0000,
+                0x0000_0000_0000_0000,
+                0x0000_0000_0000_0000,
+            ),
+            (
+                "1.0, 2.0",
+                0x3ff0_0000_0000_0000,
+                0x4000_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+                0x4000_0000_0000_0000,
+            ),
+            (
+                "2.0, 1.0",
+                0x4000_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+                0x4000_0000_0000_0000,
+            ),
+            (
+                "1.5, 1.5",
+                0x3ff8_0000_0000_0000,
+                0x3ff8_0000_0000_0000,
+                0x3ff8_0000_0000_0000,
+                0x3ff8_0000_0000_0000,
+            ),
+            (
+                "-1.5, 1.5",
+                0xbff8_0000_0000_0000,
+                0x3ff8_0000_0000_0000,
+                0xbff8_0000_0000_0000,
+                0x3ff8_0000_0000_0000,
+            ),
+            (
+                "1.5, -1.5",
+                0x3ff8_0000_0000_0000,
+                0xbff8_0000_0000_0000,
+                0xbff8_0000_0000_0000,
+                0x3ff8_0000_0000_0000,
+            ),
+            (
+                "+inf, -inf",
+                0x7ff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+            ),
+            (
+                "-inf, +inf",
+                0xfff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+            ),
+            (
+                "+inf, MAX",
+                0x7ff0_0000_0000_0000,
+                0x7fef_ffff_ffff_ffff,
+                0x7fef_ffff_ffff_ffff,
+                0x7ff0_0000_0000_0000,
+            ),
+            (
+                "MAX, +inf",
+                0x7fef_ffff_ffff_ffff,
+                0x7ff0_0000_0000_0000,
+                0x7fef_ffff_ffff_ffff,
+                0x7ff0_0000_0000_0000,
+            ),
+            (
+                "MIN, -inf",
+                0xffef_ffff_ffff_ffff,
+                0xfff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0xffef_ffff_ffff_ffff,
+            ),
+            (
+                "-inf, MIN",
+                0xfff0_0000_0000_0000,
+                0xffef_ffff_ffff_ffff,
+                0xfff0_0000_0000_0000,
+                0xffef_ffff_ffff_ffff,
+            ),
+            (
+                "-2^-1074, 2^-1074",
+                0x8000_0000_0000_0001,
+                0x0000_0000_0000_0001,
+                0x8000_0000_0000_0001,
+                0x0000_0000_0000_0001,
+            ),
+            (
+                "2^-1074, -2^-1074",
+                0x0000_0000_0000_0001,
+                0x8000_0000_0000_0001,
+                0x8000_0000_0000_0001,
+                0x0000_0000_0000_0001,
+            ),
+            (
+                "qNaN, 1.0",
+                0x7ff8_0000_dead_beef,
+                0x3ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+            ),
+            (
+                "1.0, qNaN",
+                0x3ff0_0000_0000_0000,
+                0x7ff8_0000_dead_beef,
+                0x3ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+            ),
+            (
+                "sNaN, 1.0",
+                0xfff0_0000_dead_beef,
+                0x3ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+            ),
+            (
+                "1.0, sNaN",
+                0x3ff0_0000_0000_0000,
+                0xfff0_0000_dead_beef,
+                0x3ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+            ),
+            (
+                "qNaN, sNaN",
+                0x7ff8_0000_dead_beef,
+                0xfff0_0000_dead_beef,
+                0x7ff8_0000_dead_beef,
+                0x7ff8_0000_dead_beef,
+            ),
+            (
+                "sNaN, qNaN",
+                0xfff0_0000_dead_beef,
+                0x7ff8_0000_dead_beef,
+                0xfff0_0000_dead_beef,
+                0xfff0_0000_dead_beef,
+            ),
+            (
+                "sNaN, sNaN",
+                0xfff0_0000_dead_beef,
+                0xfff0_0000_dead_beef,
+                0xfff0_0000_dead_beef,
+                0xfff0_0000_dead_beef,
+            ),
+            (
+                "+sNaN, -sNaN",
+                0x7ff0_0000_dead_beef,
+                0xfff0_0000_dead_beef,
+                0x7ff0_0000_dead_beef,
+                0x7ff0_0000_dead_beef,
+            ),
+            (
+                "qNaN, +inf",
+                0x7ff8_0000_dead_beef,
+                0x7ff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+            ),
+            (
+                "+inf, qNaN",
+                0x7ff0_0000_0000_0000,
+                0x7ff8_0000_dead_beef,
+                0x7ff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+            ),
+            (
+                "qNaN, -inf",
+                0x7ff8_0000_dead_beef,
+                0xfff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+            ),
+            (
+                "-inf, qNaN",
+                0xfff0_0000_0000_0000,
+                0x7ff8_0000_dead_beef,
+                0xfff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+            ),
+            (
+                "qNaN, -0.0",
+                0x7ff8_0000_dead_beef,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+            ),
+            (
+                "-0.0, qNaN",
+                0x8000_0000_0000_0000,
+                0x7ff8_0000_dead_beef,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+            ),
+            (
+                "sNaN, -0.0",
+                0xfff0_0000_dead_beef,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+            ),
+            (
+                "-0.0, sNaN",
+                0x8000_0000_0000_0000,
+                0xfff0_0000_dead_beef,
+                0x8000_0000_0000_0000,
+                0x8000_0000_0000_0000,
+            ),
+        ];
+
+        let mut build = Build::default();
+        let float = build.scalar(Repr::Float);
+        let mut named = Vec::new();
+        for (op, name) in [(MinMax::Min, "min"), (MinMax::Max, "max")] {
+            // A destination the operands are not, and then each of the two
+            // operands in turn: three shapes, because an arm that read a
+            // slot after writing it would be caught by the last two and by
+            // nothing else.
+            named.push((
+                op,
+                name,
+                build.function(
+                    name,
+                    &[float, float],
+                    &[Repr::Float, Repr::Float, Repr::Float],
+                    float,
+                    vec![
+                        Inst::FloatMinMax {
+                            op,
+                            dst: 2,
+                            a: 0,
+                            b: 1,
+                        },
+                        Inst::Return { src: 2 },
+                    ],
+                ),
+                build.function(
+                    &format!("{name}OverA"),
+                    &[float, float],
+                    &[Repr::Float, Repr::Float],
+                    float,
+                    vec![
+                        Inst::FloatMinMax {
+                            op,
+                            dst: 0,
+                            a: 0,
+                            b: 1,
+                        },
+                        Inst::Return { src: 0 },
+                    ],
+                ),
+                build.function(
+                    &format!("{name}OverB"),
+                    &[float, float],
+                    &[Repr::Float, Repr::Float],
+                    float,
+                    vec![
+                        Inst::FloatMinMax {
+                            op,
+                            dst: 1,
+                            a: 0,
+                            b: 1,
+                        },
+                        Inst::Return { src: 1 },
+                    ],
+                ),
+            ));
+        }
+        let program = build.done();
+
+        for (op, name, apart, over_a, over_b) in &named {
+            for (label, a, b, min, max) in EXTREMA {
+                let want = match op {
+                    MinMax::Min => *min,
+                    MinMax::Max => *max,
+                };
+                assert!(
+                    want == *a || want == *b,
+                    "|{name} {label}|: every answer is one of the two operands"
+                );
+                for (shape, f) in [("", apart), (" over a", over_a), (" over b", over_b)] {
+                    let answered = run(&program, *f, &[*a, *b]).unwrap();
+                    assert_eq!(
+                        answered, want,
+                        "|{name} {label}|{shape}: 0x{a:016x}, 0x{b:016x} answered \
+                         0x{answered:016x}, want 0x{want:016x}"
+                    );
+                }
+            }
         }
     }
 
@@ -9454,10 +9794,10 @@ pub(crate) mod tests {
     /// nonetheless decoded its receiver, so a receiver whose bytes are not
     /// UTF-8 — an object no checked program can build — made it answer an
     /// `Err`. ADR 0064 moved that operation into `std.string`, and then took
-    /// `Float.abs` out of the enum altogether — it is `Inst::FloatAbs` now, an
-    /// instruction rather than a call — so the **four** variants left without
-    /// `MAY_RAISE` are `Float.round`, `sqrt`, `min` and `max`, whose arms
-    /// answer `()` and have no `Err` to construct. There is no pair of a fallible arm and an infallible
+    /// `Float.abs`, `Float.min` and `Float.max` out of the enum altogether —
+    /// all three are instructions rather than calls now — so the **two**
+    /// variants left without `MAY_RAISE` are `Float.round` and `Float.sqrt`,
+    /// whose arms answer `()` and have no `Err` to construct. There is no pair of a fallible arm and an infallible
     /// declaration left to build a program out of, which is the state
     /// `cove_ir::intrinsic`'s `raising_is_language_level` asserts from the
     /// other side.

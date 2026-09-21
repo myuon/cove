@@ -18,7 +18,7 @@
 #![cfg(all(feature = "cranelift", feature = "template"))]
 
 use cove_ir::{
-    ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, Storage, StrId, Validation,
+    ArithOp, CmpOp, FunctionId, Inst, Len, MinMax, Num, Program, Repr, Storage, StrId, Validation,
 };
 use cove_native::{Entry, NativeHelpers, Outcome, HEAP_CHUNK_WORDS};
 
@@ -482,6 +482,43 @@ fn both_arms_answer_the_same_thing() {
             &[*operand],
             0,
         );
+    }
+
+    // The other float operation, and the row where "the two arms are furthest
+    // apart" stops being a figure of speech: the template arm is `minsd` and
+    // an SSE2 blend, nine instructions, and the Cranelift arm is three
+    // `select`s over `fcmp` and never names `fmin` — because Cranelift's
+    // `fmin` propagates a NaN where `f64::min` absorbs one, and x86-64's
+    // `minsd` answers its second operand where `f64::min` absorbs one. Both
+    // obvious instructions are wrong, in *different* ways, so lowered naively
+    // the two arms would disagree with the VM and with each other. This is
+    // where that is made impossible.
+    //
+    // `suite::EXTREMA` whole, both operations, and all three aliasing shapes
+    // — the destination apart, over `a`, and over `b`. The NaN rows carry the
+    // payload and the quiet bit no Cove program can see, and the signalling
+    // ones say the answer was *selected* rather than computed.
+    for (label, a, b, _, _) in suite::EXTREMA {
+        for (op, name) in [(MinMax::Min, "min"), (MinMax::Max, "max")] {
+            agree(
+                &format!("{name} |{label}|"),
+                &suite::extremum(op),
+                &[*a, *b, 0],
+                0,
+            );
+            agree(
+                &format!("{name} |{label}| over a"),
+                &suite::extremum_over_a(op),
+                &[*a, *b],
+                0,
+            );
+            agree(
+                &format!("{name} |{label}| over b"),
+                &suite::extremum_over_b(op),
+                &[*a, *b],
+                0,
+            );
+        }
     }
 
     // The covefmt slice: a heap read, a bound, a byte, a tag and a switch. Both

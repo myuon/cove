@@ -14,6 +14,11 @@ pub mod files;
 // slice and the linear-memory backend over the heap, a bounded step at a
 // time.
 mod find;
+// Private: the float operations Cove decides for itself rather than inheriting
+// from `f64`, shared by the two evaluators for `find`'s reason and one more —
+// the native tier's two code generators spell the same contract out below one
+// of them, so this is one specification with four implementations.
+mod float;
 pub mod heap;
 pub mod host;
 pub mod http;

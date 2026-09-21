@@ -34,10 +34,10 @@
 use std::mem::offset_of;
 
 use cove_ir::{
-    ArithOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage,
-    StrId,
+    ArithOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, MinMax, Num, Program, Slot,
+    Storage, StrId,
 };
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature,
 };
@@ -872,6 +872,47 @@ impl<'a, 'f> Lower<'a, 'f> {
                     .ins()
                     .bitcast(types::I64, MemFlagsData::new(), cleared);
                 self.store_slot(*dst, bits);
+                false
+            }
+            // ADR 0064's other typed scalar operation, and the one place this
+            // arm may **not** name the Cranelift instruction of the same name.
+            // `fmin` and `fmax` are IEEE 754-2019's `minimum` and `maximum`,
+            // which *propagate* a NaN; `f64::min` and `f64::max` are IEEE
+            // 754-2008's `minNum` and `maxNum`, which **absorb** one. An arm
+            // written on `fmin` would disagree with the VM on every NaN row of
+            // `tests/suite`'s `EXTREMA` and with the template arm besides.
+            //
+            // So the contract is built out of what Cranelift *does* define
+            // exactly: three comparisons and three selects, in the order
+            // `Inst::FloatMinMax`'s doc states them. The selects are over the
+            // **integer** words rather than over the floats, which costs
+            // nothing — the words are already in registers — and buys the
+            // whole of the bit-level contract: a `select` moves a word, so the
+            // answer is one of the two operands to the bit, payload and quiet
+            // bit included, and a signalling NaN that is chosen stays
+            // signalling. Only the comparisons see an `f64` at all, and a
+            // comparison writes no float.
+            Inst::FloatMinMax { op, dst, a, b } => {
+                let x = self.load_slot(*a);
+                let y = self.load_slot(*b);
+                let fx = self.b.ins().bitcast(types::F64, MemFlagsData::new(), x);
+                let fy = self.b.ins().bitcast(types::F64, MemFlagsData::new(), y);
+                // `Unordered` against itself is "is a NaN", which is the one
+                // predicate that is true of a NaN and of nothing else.
+                let a_is_nan = self.b.ins().fcmp(FloatCC::Unordered, fx, fx);
+                let b_is_nan = self.b.ins().fcmp(FloatCC::Unordered, fy, fy);
+                // Strictly, so that operands which compare equal — `+0.0` and
+                // `-0.0` — fall through to the second operand, which is what
+                // `f64::min` answers and what `minsd` does.
+                let ordered = match op {
+                    MinMax::Min => FloatCC::LessThan,
+                    MinMax::Max => FloatCC::GreaterThan,
+                };
+                let a_wins = self.b.ins().fcmp(ordered, fx, fy);
+                let by_order = self.b.ins().select(a_wins, x, y);
+                let absorbed = self.b.ins().select(a_is_nan, y, by_order);
+                let answer = self.b.ins().select(b_is_nan, x, absorbed);
+                self.store_slot(*dst, answer);
                 false
             }
             Inst::Len { dst, obj } => {

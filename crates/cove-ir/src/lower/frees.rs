@@ -360,6 +360,7 @@ impl<'p> Flow<'p> {
             | Inst::CmpImmBranch { dst, .. }
             | Inst::Convert { dst, .. }
             | Inst::FloatAbs { dst, .. }
+            | Inst::FloatMinMax { dst, .. }
             | Inst::RunLoad { dst, .. }
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
@@ -485,7 +486,10 @@ impl<'p> Flow<'p> {
             | Inst::CmpImmBranch { a, .. }
             | Inst::Convert { a, .. }
             | Inst::FloatAbs { a, .. } => f(a, 1),
-            Inst::Arith { a, b, .. } | Inst::Cmp { a, b, .. } | Inst::CmpBranch { a, b, .. } => {
+            Inst::Arith { a, b, .. }
+            | Inst::Cmp { a, b, .. }
+            | Inst::CmpBranch { a, b, .. }
+            | Inst::FloatMinMax { a, b, .. } => {
                 f(a, 1);
                 f(b, 1);
             }

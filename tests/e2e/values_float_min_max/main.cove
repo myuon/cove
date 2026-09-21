@@ -1,0 +1,326 @@
+use console.println
+
+/// `Float.min` and `Float.max` at every edge, and the attempts that decide
+/// which of those edges a Cove program can see at all.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line
+/// of a reimplementation, and names these two operations in particular:
+/// "`Float.min`/`max` NaN and signed-zero behaviour ... pinned by a test
+/// before the arm that implements them is touched". They are `f64::min` and
+/// `f64::max` in Rust today, reached through one `Inst::IntrinsicCall` each,
+/// and neither is the IEEE 754 operation a reader would guess.
+///
+/// # Two things about `f64::min` that a naive reimplementation gets wrong
+///
+/// **It absorbs a NaN rather than propagating one.** `min(NaN, x)` is `x` and
+/// `min(x, NaN)` is `x`, which is IEEE 754-2008's `minNum` and **not** IEEE
+/// 754-2019's `minimum`. Cranelift's `fmin` is the 2019 operation and would
+/// disagree on every line of `nans` below.
+///
+/// **Its answer on equal inputs is not determined by its documentation.**
+/// Rust says in as many words: "if the inputs compare equal (such as for the
+/// case of `+0.0` and `-0.0`), either input may be returned
+/// non-deterministically". `-0.0 == 0.0` is true, so `min(-0.0, +0.0)` and
+/// `min(+0.0, -0.0)` are both undetermined by the documentation — and both
+/// are observable from Cove, because `1.0 / x` tells the zeros apart. **What
+/// this file records is what the implementation answers, and that is the
+/// contract from here on**, in both argument orders, whether or not the two
+/// orders agree.
+///
+/// Both zeros are asked three ways, which is the survey
+/// `tests/e2e/values_float_abs` established: interpolation renders the sign
+/// (`cove_runtime::value`'s `write_float` writes `-0.0`), `format` renders it
+/// (`-0.00`), and `1.0 / x` answers `-inf` against `inf`. `==`, `<` and `<=`
+/// are printed beside them and see nothing, which is why none of them could
+/// have pinned this.
+///
+/// # What a Cove program cannot ask
+///
+/// When **both** operands are NaN the answer is a NaN, and which of the two
+/// it is cannot be asked here: a program can make a NaN five ways and cannot
+/// make two it can tell apart — there is no bit access to a `Float` and every
+/// NaN renders as the literal `NaN`. A NaN's payload, its sign and its quiet
+/// bit are pinned in bits, in the tests beside each tier, and not here.
+///
+/// # The pair identity
+///
+/// `min(a, b) == -max(-a, -b)` is the identity worth having on the record,
+/// because NaN absorption and signed zeros are exactly the two things that
+/// could break it. `identities` checks it rather than assuming it, over every
+/// awkward pair this file has, through the rendering *and* the reciprocal.
+///
+/// Every expected value was computed by a standalone `rustc` program calling
+/// `f64::min` and `f64::max` and reproducing `write_float`, and the harness
+/// was watched failing on a corrupted `expected.out` before the file was put
+/// back.
+export fn main() -> Result<Unit, Error> {
+  zeros()?
+  nans()?
+  infinities()?
+  magnitudes()?
+  ordinary()?
+  identities()?
+  computed()?
+  Ok(())
+}
+
+/// The two zeros, in both orders, through the three observers that can tell
+/// them apart and the three that cannot.
+fn zeros() -> Result<Unit, Error> {
+  let nz = -0.0
+  let pz = 0.0
+
+  // Which zero comes back. The first column of each line is `(-0.0, +0.0)`
+  // and the second is `(+0.0, -0.0)`, so a line whose two columns differ is
+  // an operation that answers by position rather than by value.
+  println("zero.min {nz.min(pz)} {pz.min(nz)}")?
+  println("zero.min.format {nz.min(pz).format(2)} {pz.min(nz).format(2)}")?
+  println("zero.min.recip {1.0 / nz.min(pz)} {1.0 / pz.min(nz)}")?
+  println("zero.max {nz.max(pz)} {pz.max(nz)}")?
+  println("zero.max.format {nz.max(pz).format(2)} {pz.max(nz).format(2)}")?
+  println("zero.max.recip {1.0 / nz.max(pz)} {1.0 / pz.max(nz)}")?
+
+  // Both operands the same zero: nothing to choose, and the answer is that
+  // zero either way.
+  println("zero.same.min {1.0 / nz.min(nz)} {1.0 / pz.min(pz)}")?
+  println("zero.same.max {1.0 / nz.max(nz)} {1.0 / pz.max(pz)}")?
+
+  // The attempts that see nothing. Every one of these answers the same
+  // whichever zero came back, which is why the three lines above are the
+  // pin and these three are the record of what would not have been.
+  println("zero.blind.eq {nz.min(pz) == pz.min(nz)} {nz.max(pz) == pz.max(nz)}")?
+  println(
+    "zero.blind.order {nz.min(pz) < pz.min(nz)} {nz.max(pz) <= pz.max(nz)}",
+  )?
+  println("zero.blind.zero {nz.min(pz) == 0.0} {nz.max(pz) == 0.0}")?
+
+  // A zero against an ordinary value, which is the ordering question and not
+  // the sign one.
+  println("zero.ordered.min {nz.min(1.0)} {(1.0).min(nz)} {nz.min(-1.0)} {(-1.0).min(nz)}")?
+  println("zero.ordered.max {nz.max(1.0)} {(1.0).max(nz)} {nz.max(-1.0)} {(-1.0).max(nz)}")?
+
+  // A negative zero nothing wrote down as a literal, in case a literal is
+  // the one shape something could fold.
+  let made = 0.0 * -1.0
+  println(
+    "zero.made.recip {1.0 / made} {1.0 / made.min(pz)} {1.0 / pz.min(made)}",
+  )?
+  println("zero.made.max.recip {1.0 / made.max(pz)} {1.0 / pz.max(made)}")?
+  Ok(())
+}
+
+/// A NaN in each position, against each kind of operand, and the two ways a
+/// program can ask which operand came back.
+fn nans() -> Result<Unit, Error> {
+  let nan = 0.0 / 0.0
+  let inf = 1.0 / 0.0
+  let neg = -1.0 / 0.0
+
+  // Against a finite value that can be told apart from a NaN and from the
+  // other operand. Absorption says both columns are `3.5`; propagation says
+  // both are `NaN`; an ordering that treated a NaN as large or small says one
+  // of each.
+  println("nan.min {nan.min(3.5)} {(3.5).min(nan)}")?
+  println("nan.max {nan.max(3.5)} {(3.5).max(nan)}")?
+  println("nan.min.neg {nan.min(-3.5)} {(-3.5).min(nan)}")?
+  println("nan.max.neg {nan.max(-3.5)} {(-3.5).max(nan)}")?
+
+  // Both operands a NaN, made two different ways. The answer is a NaN, and
+  // *which* NaN is the question this file cannot ask: nothing a Cove program
+  // can do tells two NaNs apart.
+  let other = (-1.0).sqrt()
+  println("nan.both.min {nan.min(other)} {other.min(nan)}")?
+  println("nan.both.max {nan.max(other)} {other.max(nan)}")?
+  println("nan.both.same {nan.min(nan)} {nan.max(nan)}")?
+
+  // Against the infinities. An implementation that ordered a NaN at either
+  // end of the range would answer an infinity on two of these eight columns.
+  println(
+    "nan.inf.min {nan.min(inf)} {inf.min(nan)} {nan.min(neg)} {neg.min(nan)}",
+  )?
+  println(
+    "nan.inf.max {nan.max(inf)} {inf.max(nan)} {nan.max(neg)} {neg.max(nan)}",
+  )?
+
+  // Against the zeros, where absorption has to hand back a zero *with its
+  // sign*, so the reciprocal is the observer again.
+  println("nan.zero.min {1.0 / nan.min(-0.0)} {1.0 / (-0.0).min(nan)}")?
+  println("nan.zero.min.pos {1.0 / nan.min(0.0)} {1.0 / (0.0).min(nan)}")?
+  println("nan.zero.max {1.0 / nan.max(-0.0)} {1.0 / (-0.0).max(nan)}")?
+  println("nan.zero.max.pos {1.0 / nan.max(0.0)} {1.0 / (0.0).max(nan)}")?
+
+  // Absorption as a predicate, which is the same claim a second way: the
+  // answer is not merely rendered as `3.5`, it compares equal to it — and a
+  // NaN compares equal to nothing, itself included.
+  println("nan.absorbs.min {nan.min(3.5) == 3.5} {(3.5).min(nan) == 3.5}")?
+  println("nan.absorbs.max {nan.max(3.5) == 3.5} {(3.5).max(nan) == 3.5}")?
+  println("nan.both.isNaN {nan.min(other) == nan.min(other)} {nan.max(other) == nan.max(other)}")?
+
+  // A NaN reached without a literal in it at all, so no line above is
+  // answered by a fold.
+  let parsed = Float.parse("nan").unwrapOr(0.0)
+  println("nan.parsed {parsed.min(3.5)} {(3.5).max(parsed)}")?
+  Ok(())
+}
+
+/// Both infinities, in both orders, against each other and against finite
+/// values.
+fn infinities() -> Result<Unit, Error> {
+  let pos = 1.0 / 0.0
+  let neg = -1.0 / 0.0
+
+  println("inf.pair.min {pos.min(neg)} {neg.min(pos)}")?
+  println("inf.pair.max {pos.max(neg)} {neg.max(pos)}")?
+  println("inf.same.min {pos.min(pos)} {neg.min(neg)}")?
+  println("inf.same.max {pos.max(pos)} {neg.max(neg)}")?
+
+  // Against the largest finite magnitudes, which is the pair a saturating
+  // implementation would get wrong.
+  println("inf.finite.min {pos.min(1.7976931348623157e308)} {neg.min(-1.7976931348623157e308)}")?
+  println("inf.finite.max {pos.max(1.7976931348623157e308)} {neg.max(-1.7976931348623157e308)}")?
+  println("inf.finite.min.rev {(1.7976931348623157e308).min(pos)} {(-1.7976931348623157e308).min(neg)}")?
+  println("inf.finite.max.rev {(1.7976931348623157e308).max(pos)} {(-1.7976931348623157e308).max(neg)}")?
+
+  // Against the zeros, where the answer is a zero on half the columns and
+  // the sign of it is the question.
+  println("inf.zero.min.recip {1.0 / pos.min(-0.0)} {1.0 / (-0.0).min(pos)}")?
+  println("inf.zero.max.recip {1.0 / neg.max(-0.0)} {1.0 / (-0.0).max(neg)}")?
+
+  println("inf.compare {pos.min(neg) == neg} {neg.max(pos) == pos} {pos.min(pos) == pos}")?
+  Ok(())
+}
+
+/// The subnormals and the finite extremes: the values where an implementation
+/// that subtracted, added or went through an `Int` would round, overflow or
+/// flush.
+fn magnitudes() -> Result<Unit, Error> {
+  // The smallest positive value there is, `2^-1074`, and its negation — a
+  // pair whose difference is below every rounding an arithmetic route has.
+  println("sub.min.min {(-5.0e-324).min(5.0e-324)} {(5.0e-324).min(-5.0e-324)}")?
+  println("sub.min.max {(-5.0e-324).max(5.0e-324)} {(5.0e-324).max(-5.0e-324)}")?
+
+  // The largest subnormal against the smallest normal, which is the one step
+  // the exponent field changes across.
+  println(
+    "sub.step.min {(2.2250738585072009e-308).min(2.2250738585072014e-308)}",
+  )?
+  println(
+    "sub.step.max {(2.2250738585072009e-308).max(2.2250738585072014e-308)}",
+  )?
+
+  // A subnormal against a zero, in both orders and both signs.
+  println("sub.zero.min {(5.0e-324).min(0.0)} {(0.0).min(5.0e-324)}")?
+  println("sub.zero.max {(-5.0e-324).max(-0.0)} {(-0.0).max(-5.0e-324)}")?
+
+  // The largest finite magnitudes and the values one unit inside them.
+  println("fin.max.min {(1.7976931348623157e308).min(1.7976931348623155e308)}")?
+  println("fin.max.max {(1.7976931348623157e308).max(1.7976931348623155e308)}")?
+  println(
+    "fin.min.min {(-1.7976931348623157e308).min(-1.7976931348623155e308)}",
+  )?
+  println(
+    "fin.min.max {(-1.7976931348623157e308).max(-1.7976931348623155e308)}",
+  )?
+  println(
+    "fin.span.min {(-1.7976931348623157e308).min(1.7976931348623157e308)}",
+  )?
+  println(
+    "fin.span.max {(-1.7976931348623157e308).max(1.7976931348623157e308)}",
+  )?
+  Ok(())
+}
+
+/// The ordinary cases: ordering both ways, equal values, and the shapes a
+/// reader would check first.
+fn ordinary() -> Result<Unit, Error> {
+  println("plain.min {(1.0).min(2.0)} {(2.0).min(1.0)} {(-1.5).min(1.5)} {(1.5).min(-1.5)}")?
+  println("plain.max {(1.0).max(2.0)} {(2.0).max(1.0)} {(-1.5).max(1.5)} {(1.5).max(-1.5)}")?
+  println("equal.min {(1.5).min(1.5)} {(-1.5).min(-1.5)} {(0.1).min(0.1)}")?
+  println("equal.max {(1.5).max(1.5)} {(-1.5).max(-1.5)} {(0.1).max(0.1)}")?
+  println("near.min {(0.1).min(0.10000000000000002)} {(0.10000000000000002).min(0.1)}")?
+  println("near.max {(0.1).max(0.10000000000000002)} {(0.10000000000000002).max(0.1)}")?
+  println("whole.min {(-2.0).min(3.0)} {(3.0).min(-2.0)} {(-2.0).min(-3.0)}")?
+  println("whole.max {(-2.0).max(3.0)} {(3.0).max(-2.0)} {(-2.0).max(-3.0)}")?
+  println("nested.min {(1.0).min(2.0).min(0.5)} {(1.0).min((2.0).min(0.5))}")?
+  println("nested.max {(1.0).max(2.0).max(0.5)} {(1.0).max((2.0).max(0.5))}")?
+  println("idempotent {(1.5).min(1.5).min(1.5)} {(1.5).max(1.5).max(1.5)}")?
+  println("format {(1.0).min(2.0).format(3)} {(-2.0).max(-3.0).format(1)}")?
+  println("toInt {(1.9).min(2.5).toInt()} {(1.9).max(2.5).toInt()}")?
+  Ok(())
+}
+
+/// `min(a, b)` against `-max(-a, -b)`, over every awkward pair above.
+///
+/// Both are printed, and so is the reciprocal of each, so a disagreement that
+/// only the signed zeros could show is visible as well as one the rendering
+/// would show. The two columns agreeing on every row is what says the
+/// identity holds for the answers this implementation actually gives — which
+/// is not a thing NaN absorption and a positional tie rule make obvious.
+fn identities() -> Result<Unit, Error> {
+  identity("zeros", -0.0, 0.0)?
+  identity("zeros.rev", 0.0, -0.0)?
+  identity("ordinary", 1.0, 2.0)?
+  identity("ordinary.rev", 2.0, 1.0)?
+  identity("equal", 1.5, 1.5)?
+  identity("signs", -1.5, 1.5)?
+  identity("nanFirst", 0.0 / 0.0, 3.5)?
+  identity("nanSecond", 3.5, 0.0 / 0.0)?
+  identity("nanBoth", 0.0 / 0.0, (-1.0).sqrt())?
+  identity("nanZero", 0.0 / 0.0, -0.0)?
+  identity("infPair", 1.0 / 0.0, -1.0 / 0.0)?
+  identity("infZero", -1.0 / 0.0, -0.0)?
+  identity("subnormal", -5.0e-324, 5.0e-324)?
+  identity("extremes", -1.7976931348623157e308, 1.7976931348623157e308)?
+  Ok(())
+}
+
+/// One row of [`identities`], with both operands arriving as parameters so
+/// that nothing on the line is a fold of a literal.
+///
+/// `-(-a).max(-b)` is `-((-a).max(-b))`: a method call binds tighter than the
+/// unary minus, and the formatter takes the parentheses that said so away.
+fn identity(name: String, a: Float, b: Float) -> Result<Unit, Error> {
+  let left = a.min(b)
+  let right = -(-a).max(-b)
+  println("id.{name} {left} {right} {1.0 / left} {1.0 / right}")?
+  Ok(())
+}
+
+/// The same questions over values built by a loop, so that no line above is
+/// the only answer to its question.
+fn computed() -> Result<Unit, Error> {
+  var total = 0.0
+  var i = 0
+  while i < 5 {
+    total = total - 1.5
+    i += 1
+  }
+  println("run.sum {total.min(-3.0)} {total.max(-3.0)} {(-3.0).min(total)} {(-3.0).max(total)}")?
+
+  let zero = total - total
+  let negZero = zero * -1.0
+  println("run.zero.recip {1.0 / zero} {1.0 / negZero}")?
+  println("run.zero.min {1.0 / negZero.min(zero)} {1.0 / zero.min(negZero)}")?
+  println("run.zero.max {1.0 / negZero.max(zero)} {1.0 / zero.max(negZero)}")?
+
+  var tiny = 1.0
+  var steps = 0
+  while steps < 1100 {
+    tiny = tiny / 2.0
+    steps += 1
+  }
+  println("run.flushed {tiny.min(0.0)} {1.0 / tiny.min(-0.0)} {tiny.max(0.0)}")?
+
+  var huge = 1.0
+  var doubled = 0
+  while doubled < 1100 {
+    huge = huge * 2.0
+    doubled += 1
+  }
+  println("run.overflowed {huge.min(1.0e308)} {huge.max(1.0e308)} {(-huge).min(-1.0e308)}")?
+
+  let madeNan = huge - huge
+  println("run.nan {madeNan.min(2.5)} {(2.5).min(madeNan)} {madeNan.max(2.5)} {(2.5).max(madeNan)}")?
+  Ok(())
+}

@@ -144,6 +144,22 @@ export fn callsMagnitudes(x: Float, n: Int) -> Float {
   magnitudes(x, n)
 }
 
+/// `Float.min` and `Float.max`, so that `Inst::FloatMinMax` runs as machine
+/// code — both members, because a flag on one instruction is two opcodes and
+/// two lowered sequences.
+///
+/// `counts(n)` is `magnitudes`' guard and is here for its reason.
+export fn extremes(x: Float, y: Float, floor: Float, n: Int) -> Float {
+  let guard = counts(n)
+  x.min(y).max(floor)
+}
+
+/// A refused caller, so the extrema are reached across the boundary.
+export fn callsExtremes(x: Float, y: Float, floor: Float, n: Int) -> Float {
+  let nothing = Shared(0).lock(fn(v) { v })
+  extremes(x, y, floor, n)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -1427,6 +1443,76 @@ fn a_float_absolute_runs_as_machine_code() {
         assert!(
             answered.tiers.vm_to_native >= 1,
             "the crossing into the compiled absolute was taken: {:?}",
+            answered.tiers
+        );
+        assert_eq!(
+            answered.tiers.native_to_vm, 0,
+            "and nothing went back the other way: {:?}",
+            answered.tiers
+        );
+    }
+}
+
+/// `Float.min` and `Float.max` are compiled, and answer what the VM answers.
+///
+/// ADR 0064's last two Phase 1 migrations, and the only case that runs
+/// `Inst::FloatMinMax` as machine code entered from the VM. Both members of
+/// the flag, in one body, so that a code generator that lowered one and got
+/// the other's opcode wrong is caught here as well as in `cove-native`'s own
+/// suite.
+///
+/// **The operands are the ones the two obvious machine instructions get
+/// wrong.** `minsd` answers its second operand when either is a NaN and
+/// Cranelift's `fmin` propagates one, where `f64::min` absorbs one — so a NaN
+/// row is where a naively lowered arm would disagree with the VM, and it is
+/// the first row below. The signed zeros are the other: `min(-0.0, +0.0)` is
+/// `+0.0` and the reverse is `-0.0`, which Cove renders and so this case can
+/// read. The bits a Cove program cannot see — a NaN's payload and its quiet
+/// bit — are pinned in `cove-native`'s own suite, where the assertions can be
+/// in bits.
+///
+/// The trailing `.max(floor)` is what makes the answer carry the `min`
+/// through a second instruction rather than out of the frame, and `floor` is a
+/// **parameter** rather than a `-1.0` because `subset.rs` admits no
+/// `ConstFloat` and no float arithmetic: either a literal or a `0.0 - 1.0`
+/// below `main` refuses the function and turns this into a second VM column.
+/// Which is not a guess — it was written the second way first and the tier
+/// refused it.
+#[test]
+fn a_float_extremum_runs_as_machine_code() {
+    on_each_tier(&["extremes"], &["callsExtremes"]);
+
+    for (x, y, expected) in [
+        (f64::NAN, 2.5f64, "2.5"),
+        (2.5, f64::NAN, "2.5"),
+        (-0.0, 0.0, "0.0"),
+        (0.0, -0.0, "-0.0"),
+        (1.5, 2.5, "1.5"),
+        (2.5, 1.5, "1.5"),
+        (f64::NEG_INFINITY, 2.5, "-1.0"),
+        (f64::INFINITY, f64::INFINITY, "inf"),
+    ] {
+        let answered = both(
+            "callsExtremes",
+            vec![
+                Value::float(x),
+                Value::float(y),
+                Value::float(-1.0),
+                Value::int(0),
+            ],
+        );
+        assert_eq!(
+            answered.vm,
+            Ok(expected.to_string()),
+            "|{x}, {y}| on the VM"
+        );
+        assert_eq!(
+            answered.native, answered.vm,
+            "and compiled code answers the same: |{x}, {y}|"
+        );
+        assert!(
+            answered.tiers.vm_to_native >= 1,
+            "the crossing into the compiled extremum was taken: {:?}",
             answered.tiers
         );
         assert_eq!(

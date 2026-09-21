@@ -213,6 +213,16 @@ allow = ["console", "clock"]
 entry = "floatabs.main"
 allow = ["console", "clock"]
 
+# `Float.min` and `Float.max` as an instruction against the same two as a
+# call, which is ADR 0064's last two Phase 1 migrations. `benches/floatabs`'
+# arrangement — the loop in a padded callee, the control with nothing in it,
+# two binaries over one source — with four operand pairs per operation
+# instead of three operands, because this operation chooses between its
+# operands and the rows are what say the choice is branch-free.
+[run.floatminmax]
+entry = "floatminmax.main"
+allow = ["console", "clock"]
+
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
 # #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,

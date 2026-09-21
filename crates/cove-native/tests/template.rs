@@ -125,6 +125,11 @@ fn a_float_absolute_in_place_answers_the_same() {
 }
 
 #[test]
+fn a_float_extremum_answers_one_of_its_operands() {
+    suite::a_float_extremum_answers_one_of_its_operands::<Template>();
+}
+
+#[test]
 fn an_immediate_operand_fails_the_same_way() {
     suite::an_immediate_operand_fails_the_same_way::<Template>();
 }

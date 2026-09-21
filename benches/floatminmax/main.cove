@@ -1,0 +1,326 @@
+use console.println
+use clock.now
+
+/// What `Float.min` and `Float.max` cost as an instruction against what they
+/// cost as a call.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// last two Phase 1 migrations made the pair one `Inst::FloatMinMax` —
+/// Decision 2's "typed scalar operation that maps to a CPU or backend
+/// operation" — where each was an `Inst::IntrinsicCall` naming a method and
+/// reaching `f64::min` or `f64::max` in Rust. Both run **zero times** on
+/// covefmt and on cq, so no whole-program figure exists to make; this package
+/// is the whole of the performance argument, and it is `benches/floatabs`'
+/// arrangement for `benches/floatabs`' reasons.
+///
+/// # The two arms are two binaries over one source
+///
+/// There is no way to write both arms in one process: the intrinsics are gone
+/// and a program cannot ask for the one that is not there. So this file is run
+/// twice — once by a `cove` built at the migration's parent, where `x.min(y)`
+/// lowers to an `IntrinsicCall`, and once by a `cove` built here, where it
+/// lowers to one instruction — over the **same bytes of the same package**.
+///
+/// # The control is the loop, and the rows are taken from it by difference
+///
+/// [`countBare`] is [`countMin`] with the call taken out and **nothing** put
+/// in its place, which is the correction `benches/floatabs` had to make: a
+/// copy of the receiver is an `Inst::Copy` and is dearer than the instruction
+/// it was standing in for, so every row came out negative. Both loops are
+/// otherwise the same: an `Int` counter, two `Float` parameters, and a `Float`
+/// that leaves as the answer.
+///
+/// # Four rows, because this operation *chooses*
+///
+/// `Float.abs` is branch-free at both ends of its migration and its three rows
+/// agreed to within 2%. This one is not so obviously so, and the rows are
+/// arranged to say whether it is:
+///
+/// - `ordered` is `min(1.5, 2.5)`, where the first operand wins;
+/// - `reversed` is `min(2.5, 1.5)`, where the second does;
+/// - `equal` is `min(2.5, 2.5)`, the tie the answer's *rule* is about;
+/// - `absorbed` has a NaN as its second operand, which is the one case the
+///   template arm's blend exists for and the only path through it that the
+///   other three do not take.
+///
+/// If those four agree then both lowerings are branch-free over their whole
+/// input domain, which is a claim about the code and not a formality: the
+/// template arm is `minsd` and three SSE2 logicals, and the Cranelift arm is
+/// three `select`s, and neither is supposed to have a branch in it.
+///
+/// # No float constant, comparison or arithmetic below `main`
+///
+/// `crates/cove-native/src/subset.rs` admits none of the three, so a counting
+/// callee that folded its answer or tested it against a literal would be
+/// **refused** and the column headed `native` would be a second VM column.
+/// Both operands arrive as parameters, the loop counts in `Int`, and the
+/// `Float` leaves as the function's answer. Checked rather than assumed:
+/// `--backend native --boundary` names the compiled and the refused, and the
+/// only refusals are the timing rows and `main`, each for the `now()` or the
+/// literal in it.
+///
+/// # The loops are in callees, and they are padded
+///
+/// `benches/floatabs`' arrangement, for its reason: the outermost frame is
+/// always encoded, so a loop written in `main` is a VM measurement even under
+/// `--backend native`. Each row is a call to a counting callee whose body is
+/// the loop, and every counting callee opens with [`ballast`] — a block the
+/// parameter's sign makes unreachable and nothing can fold away, sized past
+/// `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight — so that it is not
+/// expanded into [`row`].
+fn turns() -> Int {
+  1000000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller, which the native tier refuses.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// `rounds` calls of `Float.min`, and nothing else in the loop.
+fn countMin(x: Float, y: Float, rounds: Int) -> Float {
+  var guard = ballast(rounds)
+  var out = x
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x.min(y)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// `rounds` calls of `Float.max`, and nothing else in the loop.
+fn countMax(x: Float, y: Float, rounds: Int) -> Float {
+  var guard = ballast(rounds)
+  var out = x
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x.max(y)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// [`countMin`]'s loop with the operation taken out and **nothing** put in its
+/// place.
+fn countBare(x: Float, y: Float, rounds: Int) -> Float {
+  var guard = ballast(rounds)
+  var out = x
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// How long `rounds` turns took, in microseconds, and the last value the loop
+/// wrote.
+struct Row {
+  micros: Int
+  witness: Float
+}
+
+fn minRow(x: Float, y: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countMin(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn maxRow(x: Float, y: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countMax(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn bareRow(x: Float, y: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countBare(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one call cost, in picoseconds, over `rounds` turns of which `bare`
+/// microseconds were the loop itself.
+///
+/// Picoseconds rather than nanoseconds for `benches/floatabs`' reason: the
+/// subject is one instruction, and at a million turns a nanosecond figure
+/// would be three significant digits of integer division away from the truth.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000000 / rounds
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+  let low = 1.5
+  let high = 2.5
+  let nan = 0.0 / 0.0
+
+  let bare = bareRow(low, high, rounds)
+  let orderedMin = minRow(low, high, rounds)
+  let reversedMin = minRow(high, low, rounds)
+  let equalMin = minRow(high, high, rounds)
+  let absorbedMin = minRow(high, nan, rounds)
+  let orderedMax = maxRow(low, high, rounds)
+  let reversedMax = maxRow(high, low, rounds)
+  let equalMax = maxRow(high, high, rounds)
+  let absorbedMax = maxRow(high, nan, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row whose loop stopped writing would still report a number, and the
+  // number would be of something else. The bare row's witness is its first
+  // operand untouched, which is what "nothing in the loop" means.
+  assertEqual(bare.witness, low)?
+  assertEqual(orderedMin.witness, low)?
+  assertEqual(reversedMin.witness, low)?
+  assertEqual(equalMin.witness, high)?
+  assertEqual(absorbedMin.witness, high)?
+  assertEqual(orderedMax.witness, high)?
+  assertEqual(reversedMax.witness, high)?
+  assertEqual(equalMax.witness, high)?
+  assertEqual(absorbedMax.witness, high)?
+
+  println("witness {bare.witness} {orderedMin.witness} {absorbedMin.witness} {absorbedMax.witness}")?
+  println("operands {low} {high} {nan}")?
+  println("")?
+  println("bare loop                     {bare.micros * 1000000 / rounds} ps/turn over {rounds} turn(s)")?
+  println("")?
+  println("row                 ps/call")?
+  println(
+    "min.ordered         {perCall(orderedMin.micros, bare.micros, rounds)}",
+  )?
+  println(
+    "min.reversed        {perCall(reversedMin.micros, bare.micros, rounds)}",
+  )?
+  println("min.equal           {perCall(equalMin.micros, bare.micros, rounds)}")?
+  println(
+    "min.absorbed        {perCall(absorbedMin.micros, bare.micros, rounds)}",
+  )?
+  println(
+    "max.ordered         {perCall(orderedMax.micros, bare.micros, rounds)}",
+  )?
+  println(
+    "max.reversed        {perCall(reversedMax.micros, bare.micros, rounds)}",
+  )?
+  println("max.equal           {perCall(equalMax.micros, bare.micros, rounds)}")?
+  println(
+    "max.absorbed        {perCall(absorbedMax.micros, bare.micros, rounds)}",
+  )?
+  Ok(())
+}
