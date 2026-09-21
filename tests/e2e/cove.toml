@@ -380,6 +380,10 @@ allow = ["console"]
 entry = "values_string_slice.main"
 allow = ["console"]
 
+[run.values_string_from_code_point]
+entry = "values_string_from_code_point.main"
+allow = ["console"]
+
 [run.values_string_builder]
 entry = "values_string_builder.main"
 allow = ["console"]
