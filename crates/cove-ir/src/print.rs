@@ -411,6 +411,16 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 format!("run-slice.words {} ({})", l(*elem), args_of(program, *args))
             }
         },
+        // ADR 0065's run search. Only the byte member exists — `crate::verify`
+        // refuses the word storage — and the storage is still in the name, so
+        // the day a word member is decided the printed form does not change
+        // shape.
+        Inst::RunFind { args, storage } => match storage {
+            Storage::PackedBytes => format!("run-find.bytes ({})", args_of(program, *args)),
+            Storage::Words(elem) => {
+                format!("run-find.words {} ({})", l(*elem), args_of(program, *args))
+            }
+        },
         // The growable family, named the way `run-copy` is: the storage an
         // encoding splits by, in the name.
         Inst::GrowableAlloc {

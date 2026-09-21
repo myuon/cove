@@ -238,7 +238,6 @@ pub(super) fn with_text<R>(
 ) -> Result<R, RuntimeError> {
     let addr = string(machine, frame, at);
     let mut buf = machine.take_scratch();
-    buf.clear();
     machine.string_bytes_into(addr, &mut buf);
     let answer = match core::str::from_utf8(&buf) {
         Ok(text) => f(machine, text),

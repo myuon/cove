@@ -796,8 +796,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             Inst::IntrinsicCall { dst, site, .. } => {
                 mark(dst, width(program.intrinsic_site(site).result))
             }
-            // The first entry of its row is the one frame word it writes.
-            Inst::RunSlice { args, .. } => {
+            // The first entry of either row is the one frame word it writes.
+            Inst::RunSlice { args, .. } | Inst::RunFind { args, .. } => {
                 if let Some(dst) = program.arg_list(args).first() {
                     mark(dst.slot, 1)
                 }
@@ -1245,6 +1245,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
             Inst::IntrinsicCall { args, .. }
             | Inst::RunCopy { args, .. }
             | Inst::RunSlice { args, .. }
+            | Inst::RunFind { args, .. }
                 if args.0 >= PLACED =>
             {
                 *args = crate::ArgsId(listed + (args.0 - PLACED));
@@ -1329,12 +1330,13 @@ fn relocated(
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
-        // `Inst::RunCopy` and `Inst::RunSlice` are the non-call
-        // instructions that also name one — each is the list relocated into a
-        // list of its own.
+        // `Inst::RunCopy`, `Inst::RunSlice` and `Inst::RunFind` are the
+        // non-call instructions that also name one — each is the list
+        // relocated into a list of its own.
         Inst::IntrinsicCall { args, .. }
         | Inst::RunCopy { args, .. }
-        | Inst::RunSlice { args, .. } => {
+        | Inst::RunSlice { args, .. }
+        | Inst::RunFind { args, .. } => {
             lists.push(
                 program
                     .arg_list(*args)
@@ -1471,7 +1473,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
         // `Inst::IntrinsicCall`.
-        Inst::RunCopy { .. } | Inst::RunSlice { .. } => Vec::new(),
+        Inst::RunCopy { .. } | Inst::RunSlice { .. } | Inst::RunFind { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],

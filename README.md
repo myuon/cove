@@ -322,12 +322,22 @@ back, named so in every signature, rather than a way to index a `String`. A
 code point is an `Int` and there is no `Char`. It also settles two of the
 methods that were waiting on it by measuring them: a Cove `contains` is 101×
 the builtin, so `contains`, `startsWith` and `endsWith` stayed primitive,
-while a Cove `Int.parse` is 6.3× and reads as arithmetic. ADR 0064 has since
-taken `endsWith` and `startsWith` back — each is a bounded loop over these
-very byte primitives, comparing a needle whose length is known, and what that
-costs is not what scanning a whole haystack for a substring costs. `contains`
-is the one of the three still primitive, and it is the one the 101× was
-measured on.
+while a Cove `Int.parse` is 6.3× and reads as arithmetic. All three predicates
+have since been taken back, and the two halves went different ways. ADR 0064
+made `endsWith` and `startsWith` Cove loops over these very byte primitives,
+each comparing a needle whose length is known — and what that costs is not
+what scanning a whole haystack for a substring costs.
+[ADR 0065](docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)
+took `contains`, the one the 101× was actually measured on, and the reason it
+needed an ADR of its own is that a Cove loop was not enough for it: its work
+is proportional to a haystack the caller did not size, and a Cove scan pays a
+VM dispatch per byte of one where an instruction pays one for the whole
+search. So the method is Cove — `std.string.contains` — over a new run
+instruction underneath it, `run-find`, a bounded byte search chunked, charged
+and polled the way a run copy is. The 101× itself did not survive the
+measurement either: the intrinsic it was against was copying both operands
+before it looked at them, and the honest figure once that was removed is
+about 17×.
 [ADR 0047](docs/adr/0047-a-code-point-is-written-as-a-character-and-is-an-int.md)
 adds the way to write one: `'a'` is a literal whose type is `Int` and whose
 value is a Unicode scalar value, holding exactly one — `''`, `'ab'` and an

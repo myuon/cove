@@ -132,6 +132,9 @@ impl Body<'_> {
             ("stringSlice", [text, from, count]) => {
                 self.core_string_slice(expr, &text.value, &from.value, &count.value, want)
             }
+            ("stringFind", [text, needle, from]) => {
+                self.core_string_find(expr, &text.value, &needle.value, &from.value, want)
+            }
             ("bytesAllocate", [capacity]) => self.core_bytes_allocate(expr, &capacity.value, want),
             ("refuseByteRange", [text, from, to]) => {
                 self.core_refuse_byte_range(expr, &text.value, [&from.value, &to.value], want)
@@ -867,6 +870,52 @@ impl Body<'_> {
         self.release(many, expr.span);
         self.release(at, expr.span);
         self.release(src, expr.span);
+        dst
+    }
+
+    /// `core.stringFind(text, needle, from)`: the first byte offset at or
+    /// after `from` where `needle` occurs in `text`, or -1.
+    ///
+    /// One [`Inst::RunFind`] over [`Storage::PackedBytes`], whose row's `dst`
+    /// is [`shapes::INT`] — the answer is an offset and not a run, which is
+    /// the one way this row differs from [`Inst::RunSlice`]'s. Both lengths
+    /// come from the two objects' headers, so the row is four operands and
+    /// carries no count.
+    ///
+    /// `std.string.contains` is the only caller today and passes zero for
+    /// `from`, which is why the instruction may treat a `from` outside the
+    /// text as a broken invariant rather than as an answer.
+    fn core_string_find(
+        &mut self,
+        expr: &Expr,
+        text: &Expr,
+        needle: &Expr,
+        from: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let haystack = self.expr(text);
+        let sought = self.expr(needle);
+        let at = self.expr(from);
+        let dst = self.answer_at(want, shapes::INT);
+        let row = self.pool.args.intern(vec![
+            Operand {
+                slot: dst.slot,
+                layout: shapes::INT,
+            },
+            haystack.arg(),
+            sought.arg(),
+            at.arg(),
+        ]);
+        self.emit(
+            Inst::RunFind {
+                args: row,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
+        self.release(at, expr.span);
+        self.release(sought, expr.span);
+        self.release(haystack, expr.span);
         dst
     }
 

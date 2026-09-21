@@ -989,15 +989,19 @@ export fn countsTheBoundary(s: String, n: Int) -> Int {
   measuresAndPushes(s, v, n) * 1000 + cut
 }
 
-/// `String.contains` in a compiled loop: an intrinsic whose declared effects
+/// `String.indexOf` in a compiled loop: an intrinsic whose declared effects
 /// neither allocate nor raise, so the call is a plain one — no work published,
 /// no program counter, no outcome tested, and the frame pointer kept across it.
 /// `counts(0)` for the reason it is in every fixture above.
-export fn containsIn(s: String, n: Int) -> Int {
+///
+/// It was `String.contains` until ADR 0065 made that a Cove body over
+/// `Inst::RunFind`, which is a helper call and not an intrinsic call. `indexOf`
+/// is the same effect class and is what is left of it.
+export fn indexOfIn(s: String, n: Int) -> Int {
   var found = counts(0)
   var at = 0
   while at < n {
-    if s.contains(\"needle\") {
+    if s.indexOf(\"needle\").isSome() {
       found = found + 1
     }
     at = at + 1
@@ -1006,9 +1010,9 @@ export fn containsIn(s: String, n: Int) -> Int {
 }
 
 /// A refused caller, so the loop is reached across the boundary.
-export fn callsContainsIn(s: String, n: Int) -> Int {
+export fn callsIndexOfIn(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
-  containsIn(s, n)
+  indexOfIn(s, n)
 }
 
 /// `String.split` over a separator the caller chose: an intrinsic that may raise,
@@ -1903,16 +1907,16 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
 /// **An intrinsic that neither allocates nor raises is a plain call from compiled
 /// code, and answers what the VM answers.**
 ///
-/// `String.contains` carries neither `MAY_ALLOCATE`/`MAY_COLLECT` nor
+/// `String.indexOf` carries neither `MAY_ALLOCATE`/`MAY_COLLECT` nor
 /// `MAY_RAISE`, so both code generators emit the call with nothing around it —
 /// see `cove_native::IntrinsicProtocol`. Under `debug_assertions`, which this
 /// suite runs with, the runtime's helper also asserts the promise that makes that
 /// sound: the stack did not move and the heap did not collect.
 #[test]
 fn a_plain_intrinsic_call_from_compiled_code_agrees_with_the_vm() {
-    on_each_tier(&["containsIn"], &["callsContainsIn"]);
+    on_each_tier(&["indexOfIn"], &["callsIndexOfIn"]);
     for text in ["hay needle hay", "haystack", ""] {
-        let both = both("callsContainsIn", vec![Value::string(text), Value::int(7)]);
+        let both = both("callsIndexOfIn", vec![Value::string(text), Value::int(7)]);
         assert!(both.vm.is_ok(), "`{text}`: {:?}", both.vm);
         assert_eq!(both.native, both.vm, "`{text}`: compiled code agrees");
         assert!(both.tiers.vm_to_native >= 1, "`{text}`: {:?}", both.tiers);

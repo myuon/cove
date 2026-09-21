@@ -782,6 +782,15 @@ impl<'a> Emit<'a> {
                 Storage::PackedBytes => self.run_copy(args.0, RunOp::SliceBytes, 0),
                 Storage::Words(elem) => self.run_copy(args.0, RunOp::SliceWords, elem.0),
             },
+            // ADR 0065's `run-find`: the same helper, reading two runs a
+            // bounded step at a time and writing the answer into the row's
+            // `dst`. Lowered rather than refused for `compile.rs`' reason — a
+            // refusal is of the whole function, and this instruction's caller
+            // is expanded at every site of `String.contains`.
+            Inst::RunFind {
+                args,
+                storage: Storage::PackedBytes,
+            } => self.run_copy(args.0, RunOp::FindBytes, 0),
             Inst::Alloc { dst, layout, len } => self.allocate(*dst, layout.0, *len),
             Inst::Switch { on, table } => self.switch(*on, *table),
             // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is

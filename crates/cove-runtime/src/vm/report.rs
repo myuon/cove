@@ -183,7 +183,7 @@ impl HelperCalls {
 pub const GROWABLE_OPS: usize = 10;
 
 /// How many [`RunOp`]s there are, for [`GROWABLE_OPS`]' reason.
-pub const RUN_OPS: usize = 4;
+pub const RUN_OPS: usize = 5;
 
 /// How many [`Decline`]s there are, for [`GROWABLE_OPS`]' reason: the length of
 /// [`Decline::ALL`], so that a reason added to the enum without a column here
@@ -434,12 +434,12 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Fifteen of the 28 variants can be non-zero here, which is exactly the
+    /// Fourteen of the 27 variants can be non-zero here, which is exactly the
     /// set that declares `Effects::BULK_WORK`; the other thirteen examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
-    /// `String.startsWith` out of the enum, and both numbers fall as the enum
-    /// does.
+    /// `String.startsWith` out of the enum, and ADR 0065 took `String.contains`
+    /// out of it in turn — both numbers fall as the enum does.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,
@@ -1245,26 +1245,34 @@ mod tests {
     }
 
     /// A loop that calls an intrinsic that allocates (`String.join` builds
-    /// the string it answers) and one that does not (`String.contains`
-    /// searches its receiver and answers a `Bool`), each several times over,
-    /// so both [`Counting`]'s wiring and the reconciliation test below have
-    /// more than one call and more than one site to work with.
+    /// the string it answers) and one that does not (`String.indexOf`
+    /// searches its receiver and answers an inline `Option<Int>`), each
+    /// several times over, so both [`Counting`]'s wiring and the
+    /// reconciliation test below have more than one call and more than one
+    /// site to work with.
     ///
-    /// The reading one was `String.length` until ADR 0064 moved the count
-    /// into `std.string.length`, where it is no longer an `IntrinsicCall` at
-    /// all. `String.contains` is what is left of that shape: it reads the
-    /// receiver, charges what it examined, and allocates nothing.
-    const JOIN_AND_CONTAINS: &str = "
+    /// **The reading one has moved twice, and each move is a migration.** It
+    /// was `String.length` until ADR 0064 made the count `std.string.length`;
+    /// it was then `String.contains` until ADR 0065 gave that a run search to
+    /// stand on and made it `std.string.contains`. `String.indexOf` is what is
+    /// left of the shape, and it is the right sample for the same three
+    /// reasons each of the others was: it reads its receiver, it charges the
+    /// bytes it examined, and it allocates nothing — its `Option` is words
+    /// written into a destination the caller already owns, not an object. It
+    /// is also the *last* of them, because ADR 0065 says `indexOf` rides on
+    /// its decision, so the next migration here will be a rewrite rather than
+    /// a substitution.
+    const JOIN_AND_SEARCH: &str = "
 export fn main() -> Int {
   var total = 0
   var i = 0
   while i < 50 {
     let text = \"n={i}\"
-    if text.contains(\"=\") {
+    if text.indexOf(\"=\").isSome() {
       total = total + 1
     }
     let joined = \",\".join([\"a\", \"b\", \"c\"])
-    if joined.contains(\"b\") {
+    if joined.indexOf(\"b\").isSome() {
       total = total + 1
     }
     i = i + 1
@@ -1277,7 +1285,7 @@ export fn main() -> Int {
     /// attributed per variant, and this is the property worth pinning about
     /// that attribution: it is not just present, it tells two operations
     /// apart. `String.join` allocates the string it hands back, and
-    /// `String.contains` only reads the bytes it is given, so a run of both
+    /// `String.indexOf` only reads the bytes it is given, so a run of both
     /// must show one row with allocations and one row without — from the
     /// real machinery in `Machine::call_intrinsic`, not from calling
     /// [`Counting::intrinsic_allocated`] directly, which would only prove the
@@ -1288,7 +1296,7 @@ export fn main() -> Int {
     fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
         use crate::vm::debug::tests::World;
 
-        let world = World::new(JOIN_AND_CONTAINS);
+        let world = World::new(JOIN_AND_SEARCH);
         let mut vm = world.plain();
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
@@ -1309,12 +1317,12 @@ export fn main() -> Int {
         assert!(join.words <= vm.allocated_words(), "{join:?}");
 
         let searched = boundary
-            .intrinsic(Intrinsic::StringContains)
-            .expect("the program calls String.contains");
+            .intrinsic(Intrinsic::StringIndexOf)
+            .expect("the program calls String.indexOf");
         assert!(searched.calls() > 0, "{searched:?}");
         assert_eq!(
             searched.allocations, 0,
-            "String.contains reads its receiver and answers a Bool: {searched:?}"
+            "String.indexOf reads its receiver and answers an inline `Option`: {searched:?}"
         );
         assert_eq!(searched.words, 0, "{searched:?}");
     }
@@ -1343,7 +1351,7 @@ export fn main() -> Int {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::new(JOIN_AND_CONTAINS);
+        let world = World::new(JOIN_AND_SEARCH);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();
@@ -1399,12 +1407,13 @@ export fn main() -> Int {
     /// the two runs would then differ in more than the receiver's length.
     ///
     /// It was `String.length` until ADR 0064 moved the count out of the
-    /// intrinsics. `contains` charges the receiver's whole length as an upper
-    /// bound — `str::find` does not report where it stopped — so a needle
-    /// that is nowhere in the haystack makes that bound exact, which is what
-    /// lets the two assertions below name a multiple rather than an
-    /// inequality.
-    fn contains_over(characters: usize) -> String {
+    /// intrinsics, and `String.contains` until ADR 0065 gave that a run search
+    /// and moved it into `std.string`. `indexOf` charges the receiver's whole
+    /// length as an upper bound — `str::find` does not report where it stopped
+    /// — so a needle that is nowhere in the haystack makes that bound exact,
+    /// which is what lets the two assertions below name a multiple rather than
+    /// an inequality.
+    fn search_over(characters: usize) -> String {
         let text = "a".repeat(characters);
         format!(
             "
@@ -1413,7 +1422,7 @@ export fn main() -> Int {{
   var total = 0
   var i = 0
   while i < 10 {{
-    if text.contains(\"z\") {{
+    if text.indexOf(\"z\").isSome() {{
       total = total + 1
     }}
     i = i + 1
@@ -1432,9 +1441,11 @@ export fn main() -> Int {{
     /// 10,000 `String.length` calls over ten characters and over 100,000
     /// characters spent `fuel_spent` 160,027 against 160,026 — the same fuel
     /// for 383 times the wall clock. That measurement was taken while
-    /// `String.length` was still an intrinsic; ADR 0064 has since moved it
-    /// into `std.string`, so the case below is `String.contains`, which is
-    /// the same shape and is charged the same way.
+    /// `String.length` was still an intrinsic; ADR 0064 moved it into
+    /// `std.string` and this case became `String.contains`, and ADR 0065 has
+    /// since moved that one too. The case below is `String.indexOf`, which is
+    /// the same shape and is charged the same way — a reading,
+    /// non-allocating search whose charge is the receiver's byte length.
     ///
     /// Two runs of the same shape over receivers a hundred times apart,
     /// making the same number of calls, from the real machinery. The call
@@ -1454,12 +1465,12 @@ export fn main() -> Int {{
             vm.run_entry("m", "main", Vec::new()).expect("it answers");
             vm.boundary()
                 .expect("count_boundary was called")
-                .intrinsic(Intrinsic::StringContains)
-                .expect("the program calls String.contains")
+                .intrinsic(Intrinsic::StringIndexOf)
+                .expect("the program calls String.indexOf")
         };
 
-        let short = row(&contains_over(10));
-        let long = row(&contains_over(1_000));
+        let short = row(&search_over(10));
+        let long = row(&search_over(1_000));
 
         assert_eq!(
             short.calls(),

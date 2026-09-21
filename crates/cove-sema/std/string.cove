@@ -168,6 +168,64 @@ export fn endsWith(text: String, suffix: String) -> Bool {
   return true
 }
 
+/// Whether `needle` occurs anywhere in this string.
+///
+/// One `core.stringFind`, which is `Inst::RunFind` — a bounded search over a
+/// run of packed bytes — and a comparison of its answer against -1. The
+/// instruction answers the first byte offset at or after 0 where the needle's
+/// bytes occur, or -1 for a needle that does not occur; an empty needle
+/// occurs at 0, and a needle longer than the text does not occur at all, both
+/// answered before a byte of either is read.
+///
+/// **It is a match of bytes, and that it is also a match of characters is the
+/// argument this body owes.** It is [`endsWith`]' argument at every offset
+/// rather than at one. UTF-8 is self-synchronizing: a continuation byte is
+/// `10xxxxxx`, 128 through 191, and no character begins with one, while a
+/// `String` is valid UTF-8 in its shortest form and nothing makes one from
+/// anything else. So the needle's own first byte is a lead byte. If the
+/// needle's bytes appear at offset `i` of the text, the byte at `i` equals
+/// that lead byte and so is one, and a lead byte in valid UTF-8 begins a
+/// character — the match starts at a character boundary, whatever `i` is. The
+/// far end is [`startsWith`]' half of the same argument: the needle's bytes
+/// are whole characters and end at a boundary of its own, so reading the text
+/// from `i` takes the same lead bytes and the same widths and lands on `i + m`
+/// — a boundary too. A byte match is a character match at both ends, and a
+/// character-by-character search would find exactly what this finds.
+///
+/// The converse also holds and is what makes the answer complete rather than
+/// merely sound: every character match is a byte match, since the characters'
+/// encodings are the bytes. So neither a false positive nor a false negative
+/// is possible, and no boundary check is needed anywhere.
+///
+/// **Why this one has an instruction underneath it when the other two do
+/// not.** [`startsWith`] and [`endsWith`] compare at an offset their own
+/// argument bounds — covefmt's `endsWith` reads 2,209 bytes over 1,159 calls,
+/// because three quarters of them end after one byte — so a dispatch per unit
+/// of that costs little, and both are Cove loops over `byteAt`. `contains`
+/// must touch a haystack the caller did not size, and a Cove loop pays a VM
+/// dispatch per unit of proportional work where an instruction pays one for
+/// the whole of it. That is ADR 0065's rule and its measurement: seven
+/// instructions a byte in Cove against one instruction for a search of any
+/// length. It is not a claim about complexity — a Cove KMP would be `O(n + m)`
+/// too, and would still turn its loop once a byte.
+///
+/// It was `str::contains` in Rust reached through one `IntrinsicCall`, which
+/// is what ADR 0064's Decision 2 refuses: `contains` is a method's name and
+/// would have to be renamed the day the method was. What is underneath it now
+/// is named for the machine — find a byte run inside a byte run from an offset
+/// — and answers a byte offset that this body turns into the `Bool` its API
+/// promises, while `indexOf` will turn the same answer into a character
+/// position.
+///
+/// Each question is an `if` of its own and the answer is a `return`, for the
+/// reasons [`sliceBytes`] gives.
+export fn contains(text: String, needle: String) -> Bool {
+  if core.stringFind(text, needle, 0) < 0 {
+    return false
+  }
+  return true
+}
+
 /// How many bytes this string's UTF-8 encoding is.
 ///
 /// Bytes and not characters: a two-byte character counts two here and one in

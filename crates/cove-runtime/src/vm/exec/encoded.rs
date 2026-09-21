@@ -99,6 +99,7 @@ use cove_ir::{
 
 use crate::budget::Meter;
 use crate::error::RuntimeError;
+use crate::find::Matcher;
 use crate::vm::cell;
 use crate::vm::mem::{header_layout, header_len, Overflow};
 // `Outcome` here is the window census's — what became of one fused window —
@@ -284,6 +285,7 @@ const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
 const RUN_SLICE_BYTES: u8 = Op::RunSliceBytes.number();
 const RUN_SLICE_WORDS: u8 = Op::RunSliceWords.number();
+const RUN_FIND_BYTES: u8 = Op::RunFindBytes.number();
 const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
 const GROWABLE_ALLOC_WORDS: u8 = Op::GrowableAllocWords.number();
 const GROWABLE_TRUNCATE_WORDS: u8 = Op::GrowableTruncateWords.number();
@@ -369,6 +371,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::RunCopyWords
         | Op::RunSliceBytes
         | Op::RunSliceWords
+        | Op::RunFindBytes
         | Op::GrowableAllocBytes
         | Op::GrowableAllocWords
         | Op::GrowableTruncateWords
@@ -1126,6 +1129,242 @@ pub(super) fn run_slice_bytes(
     }
     machine.mem.set_slot(base, args[0].slot, fresh);
     Ok(())
+}
+
+/// [`Inst::RunFind`] over [`cove_ir::Storage::PackedBytes`]:
+/// [ADR 0065](../../../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md)'s
+/// run search, checked, then prepared and consumed in bounded steps.
+///
+/// Out of line and out of the dispatch loop's body for [`run_copy_bytes`]'
+/// reason.
+///
+/// # What is checked, and in which order
+///
+/// Neither run is null and both are a `String` — a run under construction is
+/// not admitted, as it is not a [`run_slice_bytes`] source — and `from` is in
+/// `0 ..= haystack_len`. Each is a broken invariant of the lowering rather
+/// than a program's mistake: `std.string.contains` passes zero, and a future
+/// `split` computes `from` from a previous answer and a needle length, both
+/// already in range.
+///
+/// **Nothing about the bytes is validated and no character is decoded.** The
+/// comparison is bitwise, and whether a byte match is also a character match
+/// is `std.string.contains`' question, argued there. The two runs may alias:
+/// this only reads, so there is no order in which a write could be seen.
+///
+/// # The two answers that charge nothing
+///
+/// An empty needle answers `from`, and a needle longer than
+/// `haystack_len - from` answers -1 — both before any preparation begins,
+/// because there is no needle to prepare in the first and nothing to search in
+/// the second, and neither examines a unit. The instruction's own single unit
+/// of fuel is unchanged, so a fast path is one fuel and nothing else. That is
+/// the accounting `std.string.endsWith`' length refusal already has.
+///
+/// # The steps, and what they are charged
+///
+/// [`Matcher`] takes at most [`SAFEPOINT_STRIDE`] turns a step, and a turn is
+/// one comparison of one pair of units. After each step the turns taken since
+/// the last one are charged, and if the answer is not in yet, a safepoint
+/// runs. So the uninterruptible span is a stride of comparisons — and
+/// therefore at most two strides of units examined — whatever `n` and `m` are
+/// and whichever phase the matcher is in, which is
+/// [ADR 0040](../../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
+/// `S + T` for this instruction.
+///
+/// **The charge is an upper bound on the work done, not an equality**, which
+/// is what a fuel bound asks for and is what the intrinsic this replaces
+/// charged too — "the receiver's whole length as an upper bound", because
+/// `str::find` does not report how far it got. Here it is a count of
+/// comparisons, and `crate::find` derives the bound it obeys from the
+/// algorithm: `5m + 2(n - from)`.
+///
+/// The poll is unconditional rather than [`in_chunks`]' `work() -
+/// charged_work >= SAFEPOINT_STRIDE`, and the difference is the phase change.
+/// A step may spend part of its turns finishing the needle and the rest
+/// starting the search, so the units a step consumes are not a fixed chunk and
+/// a test against a fixed chunk would let two short steps run back to back. A
+/// step that finishes the search does not poll at all, so the common case —
+/// covefmt's longest `String` operand is 71 bytes — pays one step, no poll and
+/// no extra safepoint.
+///
+/// # It allocates nothing
+///
+/// Not "little", and not "nothing after the first call": nothing, on every
+/// path, for every needle. The matcher is Crochemore–Perrin, whose auxiliary
+/// space is `O(1)` — seven words of state — so there is no table to hold and
+/// no copy of either run to make, and both are read where they are through a
+/// one-word cache. An earlier version of this instruction used a
+/// Knuth–Morris–Pratt table out of [`Machine::take_scratch`]; see
+/// [`find_in_runs`] for why a table is worse than it looks even when the pool
+/// keeps it.
+///
+/// A poll may collect. The collector does not move objects, so the two
+/// addresses read out of the frame stay the addresses of these runs, and both
+/// are rooted by the slots they were read from; the buffers are Rust memory
+/// and no collection reaches them.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_find_bytes(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    budget: &Meter,
+    base: u64,
+    args: &[cove_ir::Arg],
+    id: FunctionId,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
+    let haystack = machine.mem.slot(base, args[1].slot);
+    let needle = machine.mem.slot(base, args[2].slot);
+    let from = machine.mem.slot(base, args[3].slot) as i64;
+    if haystack == 0 || needle == 0 {
+        return Err(refuse(machine, null_object()));
+    }
+    for (addr, role) in [(haystack, "haystack"), (needle, "needle")] {
+        if !matches!(
+            program.layout(machine.mem.object_layout(addr)).shape,
+            Shape::Str
+        ) {
+            return Err(refuse(
+                machine,
+                RuntimeError::new(format!("`runFind`'s {role} is not a `String`")),
+            ));
+        }
+    }
+    let n = machine.mem.object_len(haystack) as i64;
+    let m = machine.mem.object_len(needle) as i64;
+    if from < 0 || from > n {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`runFind` starts at {from} of a haystack of {n} byte(s), and a search starts \
+                 at 0 to that length"
+            )),
+        ));
+    }
+    // The two answers reached before any preparation, neither of which
+    // examines a unit.
+    if m == 0 {
+        machine.mem.set_slot(base, args[0].slot, from as u64);
+        return Ok(());
+    }
+    if m > n - from {
+        machine.mem.set_slot(base, args[0].slot, -1i64 as u64);
+        return Ok(());
+    }
+    let answer = find_in_runs(
+        machine,
+        budget,
+        haystack,
+        needle,
+        n as usize,
+        m as usize,
+        from as usize,
+        id,
+        pc,
+    )?;
+    machine.mem.set_slot(base, args[0].slot, answer as u64);
+    Ok(())
+}
+
+/// The payload word of the string at `addr` that holds unit `at`, through a
+/// one-word cache.
+///
+/// A run's payload is eight bytes to a word, and both of this instruction's
+/// readers ask for units close to the ones they last asked for: preparation
+/// compares two positions of the needle that walk upwards together, and an
+/// attempt compares the needle forwards from its critical position and then
+/// backwards to it. So the word a read landed in is very often the word the
+/// next read wants, and the cache turns a payload read a unit into one a word.
+///
+/// This is all the reading the instruction does. There is no copy of either
+/// run and no buffer: [`Matcher`] holds seven words of state and reads
+/// everything through these two closures, which is why
+/// [`run_find_bytes`] allocates nothing on any path.
+///
+/// A `String` is immutable and the collector does not move it, so a word held
+/// across a safepoint is still that run's word.
+#[inline]
+fn cached_word(machine: &Machine<'_>, addr: u64, at: usize, cache: &mut (u32, u64)) -> u64 {
+    let want = (at / 8) as u32;
+    if cache.0 != want {
+        *cache = (want, machine.mem.payload(addr, want));
+    }
+    cache.1
+}
+
+/// The unit at `at`, out of [`cached_word`]: the needle's reader.
+///
+/// One cached word and not two, which was measured rather than assumed. A
+/// maximal-suffix scan compares `needle[at + offset]` against
+/// `needle[start + offset]`, two positions as far apart as the suffix it has
+/// found, so a one-word cache misses on nearly every read of a long needle and
+/// a two-entry one would hold both. It does — and it made no row of
+/// `benches/contains` faster and several slower, because the extra test costs
+/// more than the payload reads it saves. The needle's reads are not where a
+/// search's time is.
+#[inline]
+fn cached_byte(machine: &Machine<'_>, addr: u64, at: usize, cache: &mut (u32, u64)) -> u8 {
+    ((cached_word(machine, addr, at, cache) >> ((at % 8) * 8)) & 0xFF) as u8
+}
+
+/// The units from `at` to the end of the payload word it lies in, least
+/// significant first — the haystack's reader, which answers a comparison and a
+/// skip from one read.
+///
+/// One payload read and never two: the matcher takes at most `8 - at % 8`
+/// units of what this answers, so a window never straddles a word. Units past
+/// the run's length sit in the high end of the last word and are whatever the
+/// heap left there; the matcher masks them off, and a comparison reads only
+/// the low one.
+#[inline]
+fn cached_window(machine: &Machine<'_>, addr: u64, at: usize, cache: &mut (u32, u64)) -> u64 {
+    cached_word(machine, addr, at, cache) >> ((at % 8) * 8)
+}
+
+/// [`run_find_bytes`]' loop: the matcher, driven a step at a time.
+///
+/// **Nothing is allocated here, on any path**, which is the property ADR
+/// 0065's Decision 4 turned out to rest on rather than merely to prefer. A
+/// matcher with a table has to put it somewhere, and a table appended to one
+/// entry at a time reallocates and copies its whole contents when its capacity
+/// runs out — an unbounded `memcpy` inside a phase whose entire purpose is
+/// that no step exceeds a stride, and one no counter in this repository can
+/// see, because a Rust-side allocation is exactly what `--boundary`'s `allocs`
+/// column does not count (#442). Crochemore–Perrin needs no table, so there is
+/// nothing to bound: the state is [`Matcher`]'s seven words and the two runs
+/// are read where they are.
+#[allow(clippy::too_many_arguments)]
+fn find_in_runs(
+    machine: &mut Machine<'_>,
+    budget: &Meter,
+    haystack: u64,
+    needle: u64,
+    n: usize,
+    m: usize,
+    from: usize,
+    id: FunctionId,
+    pc: usize,
+) -> Result<i64, RuntimeError> {
+    let mut matcher = Matcher::new(n, m, from);
+    let mut charged = 0u64;
+    let mut needle_cache = (u32::MAX, 0u64);
+    let mut haystack_cache = (u32::MAX, 0u64);
+    loop {
+        let found = matcher.run(
+            SAFEPOINT_STRIDE,
+            |at| cached_byte(machine, needle, at, &mut needle_cache),
+            |at| cached_window(machine, haystack, at, &mut haystack_cache),
+        );
+        machine.bulk_work += matcher.charge() - charged;
+        charged = matcher.charge();
+        if let Some(answer) = found {
+            return Ok(answer);
+        }
+        machine.safepoint(budget, id, pc)?;
+        machine.next_check = machine.next_question();
+    }
 }
 
 /// One of [ADR 0062]'s window instructions — `GROWABLE_ENSURE_*`,
@@ -3175,6 +3414,15 @@ pub(super) fn dispatch<'s, 'a>(
                 let elem = LayoutId(held.hi());
                 run_slice_words(machine, program, budget, base, args, elem, id, pc - 1)?;
             }
+            // ADR 0065's run search, one arm and one call for
+            // `RUN_COPY_BYTES`' reason, and one opcode rather than two because
+            // it has one storage. `dst`, `haystack`, `needle` and `from` are
+            // the row, and `dst` is the only one of the four it writes.
+            RUN_FIND_BYTES => {
+                machine.sync(pc - 1);
+                let args = program.arg_list(ArgsId(held.lo()));
+                run_find_bytes(machine, program, budget, base, args, id, pc - 1)?;
+            }
             // ADR 0058's growable family over bytes, and its finish — ADR 0052's
             // four. Each arm is a read of its operands and one call,
             // for `RUN_COPY_BYTES`' reason: the checks, the capacity arithmetic and
@@ -3556,6 +3804,7 @@ mod tests {
 
     use super::super::runs::MIN_GROWABLE_BYTES;
     use super::super::tests::{budget, run_words, Build};
+    use super::super::{SCRATCH_BUFFERS, SCRATCH_BYTES};
     use super::*;
 
     /// Every opcode ADR 0041 defines has an implementation.
@@ -3987,6 +4236,648 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- ADR 0065: a run search ------------------------------------------
+
+    /// `find(haystack, needle, from) -> Int`: one byte `run-find` and a
+    /// return, so every case below runs the instruction and nothing else.
+    ///
+    /// The row is `dst`, `haystack`, `needle`, `from` — `dst` first and
+    /// written, as a run slice's is, and an `Int` rather than a reference,
+    /// because the answer is an offset and not a run.
+    fn find_fixture() -> (Program, FunctionId) {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let text = build.string_layout();
+        let row = build.args(&[(3, int), (0, text), (1, text), (2, int)]);
+        let entry = build.function(
+            "find",
+            &[text, text, int],
+            &[Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            int,
+            vec![
+                Inst::RunFind {
+                    args: row,
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 3 },
+            ],
+        );
+        (build.done(), entry)
+    }
+
+    /// A `String` object holding exactly `bytes`, whatever they are.
+    ///
+    /// `Machine::new_string` takes a `&str` and so cannot make one of these.
+    /// The instruction is defined over **bytes** and has no notion of a
+    /// character, so the corpus it is tested against has to be able to hold a
+    /// `0x00`, a lone `0x80` and an `0xff` — the byte patterns a valid
+    /// `String`'s payload is full of *inside* its characters, and the ones an
+    /// implementation that quietly decoded would answer differently for.
+    fn run_of(machine: &mut Machine<'_>, bytes: &[u8]) -> u64 {
+        let addr = machine
+            .new_string_of(bytes.len() as i64)
+            .expect("the heap has room");
+        for (at, chunk) in bytes.chunks(8).enumerate() {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            machine
+                .mem
+                .set_payload(addr, at as u32, u64::from_le_bytes(word));
+        }
+        addr
+    }
+
+    /// What the instruction must answer, by `str::find`'s rule over bytes:
+    /// the first offset at or after `from` where the needle occurs, or -1.
+    fn want_find(haystack: &[u8], needle: &[u8], from: usize) -> i64 {
+        if needle.is_empty() {
+            return from as i64;
+        }
+        if from > haystack.len() || needle.len() > haystack.len() - from {
+            return -1;
+        }
+        haystack[from..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .map_or(-1, |at| (at + from) as i64)
+    }
+
+    /// One search, run through the machine.
+    fn found(
+        program: &Program,
+        entry: FunctionId,
+        haystack: &[u8],
+        needle: &[u8],
+        from: i64,
+    ) -> i64 {
+        let mut machine = Machine::new(program, 1 << 20);
+        let hay = run_of(&mut machine, haystack);
+        let sought = run_of(&mut machine, needle);
+        machine
+            .run(entry, &[hay, sought, from as u64], &budget())
+            .expect("a search answers")[0] as i64
+    }
+
+    /// The haystacks and needles every differential case is drawn from.
+    ///
+    /// Bytes rather than text, and deliberately: `0x00`, `0x80` and `0xff`
+    /// are all in here, because the run this instruction searches is a run of
+    /// bytes and the day one of them is read as a character is the day this
+    /// suite has to notice.
+    fn find_corpus() -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = vec![
+            b"".to_vec(),
+            b"a".to_vec(),
+            b"ab".to_vec(),
+            b"aaaa".to_vec(),
+            b"abab".to_vec(),
+            b"aabaab".to_vec(),
+            b"aaab".to_vec(),
+            b"abcabcabd".to_vec(),
+            b"abcabd".to_vec(),
+            b"banana banana bandana".to_vec(),
+            b"the quick brown fox".to_vec(),
+            vec![0x00, 0x01, 0x00, 0x00, 0x01],
+            vec![0xff, 0x80, 0xc3, 0xa9, 0xe3, 0x81, 0x82, 0x00],
+            vec![0x80; 20],
+            vec![0x00; 9],
+        ];
+        // Many near misses and a long repeated prefix: the shape a quadratic
+        // scan takes quadratic time on and a wrong shift answers wrongly on.
+        let mut near = Vec::new();
+        for _ in 0..40 {
+            near.extend_from_slice(b"aaaaaaab");
+        }
+        near.extend_from_slice(b"aaaaaaaa");
+        out.push(near);
+        // A needle far longer than one safepoint step, and a haystack that
+        // holds it at the last offset it fits at.
+        let long: Vec<u8> = (0..(SAFEPOINT_STRIDE as u32 * 3 + 7))
+            .map(|at| (at % 251) as u8)
+            .collect();
+        let mut with_long = vec![0x7fu8; SAFEPOINT_STRIDE as usize * 2 + 3];
+        with_long.extend_from_slice(&long);
+        out.push(long);
+        out.push(with_long);
+        out
+    }
+
+    /// **The instruction answers what `str::find` answers, for every pair of
+    /// the corpus.**
+    ///
+    /// The matcher under `run-find` is written by hand, so this is the case
+    /// that matters most: a corpus crossing haystacks against needles,
+    /// including periodic needles, needles equal to their haystack, needles
+    /// at offset 0 and at the last offset they fit at, haystacks full of near
+    /// misses, and a needle three safepoint steps long.
+    #[test]
+    fn run_find_bytes_answers_what_rust_answers() {
+        let (program, entry) = find_fixture();
+        let corpus = find_corpus();
+        for haystack in &corpus {
+            for needle in &corpus {
+                assert_eq!(
+                    found(&program, entry, haystack, needle, 0),
+                    want_find(haystack, needle, 0),
+                    "haystack {} byte(s), needle {} byte(s)",
+                    haystack.len(),
+                    needle.len()
+                );
+            }
+        }
+    }
+
+    /// **And for every `from` in range**, on the pairs where a start offset
+    /// can move the answer.
+    ///
+    /// `from == haystack_len` is in the range and is not an error: it answers
+    /// -1, or `from` itself for an empty needle.
+    #[test]
+    fn run_find_bytes_answers_from_every_start() {
+        let (program, entry) = find_fixture();
+        let haystacks: Vec<Vec<u8>> = vec![
+            b"aaaaaaaaaa".to_vec(),
+            b"abababababab".to_vec(),
+            b"banana banana".to_vec(),
+            b"abcabcabd".to_vec(),
+            vec![0x00, 0x80, 0x00, 0x80, 0x00],
+        ];
+        let needles: Vec<Vec<u8>> = vec![
+            b"".to_vec(),
+            b"a".to_vec(),
+            b"aa".to_vec(),
+            b"aaaa".to_vec(),
+            b"abab".to_vec(),
+            b"aabaab".to_vec(),
+            b"abcabd".to_vec(),
+            b"ana".to_vec(),
+            vec![0x80, 0x00],
+        ];
+        for haystack in &haystacks {
+            for needle in &needles {
+                for from in 0..=haystack.len() {
+                    assert_eq!(
+                        found(&program, entry, haystack, needle, from as i64),
+                        want_find(haystack, needle, from),
+                        "haystack {haystack:?}, needle {needle:?}, from {from}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The needle and the haystack the bound cases share: `m` and `n` bytes
+    /// that agree nowhere, so the search runs to the end and every turn of
+    /// both phases moves its counter — which makes the units the test names
+    /// the units the instruction consumes.
+    fn straight_scan(m: usize, n: usize) -> (Vec<u8>, Vec<u8>) {
+        (vec![b'B'; n], vec![b'A'; m])
+    }
+
+    /// The machine and the budget a bound case runs one search under.
+    fn under_fuel(
+        program: &Program,
+        entry: FunctionId,
+        haystack: &[u8],
+        needle: &[u8],
+        from: i64,
+        fuel: u64,
+    ) -> (u64, u64, crate::trace::RunOutcome) {
+        let budget = crate::budget::Budget::new(crate::budget::Limits {
+            fuel: Some(fuel),
+            ..crate::budget::Limits::default()
+        });
+        let mut machine = Machine::new(program, 1 << 20);
+        let hay = run_of(&mut machine, haystack);
+        let sought = run_of(&mut machine, needle);
+        let error = machine
+            .run(entry, &[hay, sought, from as u64], &budget.meter())
+            .expect_err("a search past its fuel is stopped");
+        (machine.bulk_work, budget.fuel_spent(), error.outcome)
+    }
+
+    /// **A needle far longer than one step is prepared in steps, and a fuel
+    /// bound stops the run *during the preparation*.**
+    ///
+    /// This is the case the window rule got wrong and the reason ADR 0065's
+    /// Decision 4 was rewritten: a rule stated over a window of
+    /// `max(SAFEPOINT_STRIDE, m)` made the preparation of a long needle
+    /// uninterruptible before the first window even began. The bound is over
+    /// *work done*, so preparation is charged a unit per unit of the needle
+    /// and polls between steps like everything else.
+    #[test]
+    fn a_run_find_stops_inside_a_long_needles_preparation() {
+        const M: usize = SAFEPOINT_STRIDE as usize * 5;
+        const N: usize = SAFEPOINT_STRIDE as usize * 20;
+        let (program, entry) = find_fixture();
+        let (haystack, needle) = straight_scan(M, N);
+        for fuel in [1u64, 1_500, 3_000] {
+            let (charged, spent, outcome) =
+                under_fuel(&program, entry, &haystack, &needle, 0, fuel);
+            assert_eq!(outcome, crate::trace::RunOutcome::Fuel);
+            assert!(
+                charged < M as u64,
+                "a fuel limit of {fuel} left {charged} unit(s) charged, which is the whole \
+                 {M}-unit preparation or past it"
+            );
+            assert!(
+                spent <= fuel + 2 * SAFEPOINT_STRIDE,
+                "a fuel limit of {fuel} spent {spent}, past one step of units and the stride \
+                 the loop gathers before it looks"
+            );
+        }
+    }
+
+    /// **With fuel enough to finish preparing and not to search, the run
+    /// stops during the first stretch of the search** — and within the same
+    /// bound, because the step is the same step whichever phase it is in.
+    #[test]
+    fn a_run_find_stops_inside_the_first_stretch_of_the_search() {
+        // Not a multiple of the stride, so the step that finishes the needle
+        // is also the step that starts the search: the budget is one span of
+        // turns whichever phase it is spent in, which is the property that
+        // makes the bound hold at the phase change too.
+        const M: usize = SAFEPOINT_STRIDE as usize * 5 + 5;
+        const N: usize = SAFEPOINT_STRIDE as usize * 20;
+        let (program, entry) = find_fixture();
+        let (haystack, needle) = straight_scan(M, N);
+        let fuel = M as u64 + SAFEPOINT_STRIDE / 8;
+        let (charged, spent, outcome) = under_fuel(&program, entry, &haystack, &needle, 0, fuel);
+        assert_eq!(outcome, crate::trace::RunOutcome::Fuel);
+        assert!(
+            charged >= M as u64,
+            "{charged} unit(s) charged, so the needle was not finished"
+        );
+        assert!(
+            charged <= M as u64 + SAFEPOINT_STRIDE,
+            "{charged} unit(s) charged, which is past the first stretch of the search"
+        );
+        assert!(
+            spent <= fuel + 2 * SAFEPOINT_STRIDE,
+            "a fuel limit of {fuel} spent {spent}"
+        );
+    }
+
+    /// **A search is charged an upper bound on the work it did, and the bound
+    /// is `5m + 2(n - from)`.**
+    ///
+    /// This asked for `m + (n - from)` **exactly** until the matcher under it
+    /// was rewritten, and the equality is the reason it had to be: only a
+    /// matcher whose phases have counters running `0..m` and `from..n` can
+    /// charge a count, which meant Knuth–Morris–Pratt, which meant a table of
+    /// `m` entries, which meant a `Vec` that reallocates and copies itself
+    /// whole in the middle of the phase whose whole purpose is that no step
+    /// exceeds a stride — and invisibly, because a Rust-side allocation is
+    /// what `--boundary`'s `allocs` column does not count (#442).
+    ///
+    /// Fuel is an upper bound on work done and not an equality. The intrinsic
+    /// this instruction replaces charged "the receiver's whole length as an
+    /// upper bound" and said so. So the charge is the comparisons the matcher
+    /// made, and `crate::find` derives what those are bounded by from the
+    /// algorithm rather than from this measurement. Checked here at four
+    /// starts, and again on every pair of that module's corpus.
+    ///
+    /// The charge is still **proportional and non-trivial**, which the second
+    /// assertion is for: a bound a matcher meets by charging one would be a
+    /// bound that says nothing.
+    #[test]
+    fn a_whole_scan_is_charged_within_its_bound() {
+        const M: usize = SAFEPOINT_STRIDE as usize * 2 + 5;
+        const N: usize = SAFEPOINT_STRIDE as usize * 7 + 11;
+        let (program, entry) = find_fixture();
+        let (haystack, needle) = straight_scan(M, N);
+        for from in [0usize, 1, 3_000, N - M] {
+            let mut machine = Machine::new(&program, 1 << 20);
+            let hay = run_of(&mut machine, &haystack);
+            let sought = run_of(&mut machine, &needle);
+            let answer = machine
+                .run(entry, &[hay, sought, from as u64], &budget())
+                .expect("a search answers");
+            assert_eq!(answer[0] as i64, -1, "the two runs agree nowhere");
+            let bound = crate::find::Matcher::bound(N, M, from);
+            assert!(
+                machine.bulk_work <= bound,
+                "from {from}: {} charged, past the bound of {bound}",
+                machine.bulk_work
+            );
+            assert!(
+                machine.bulk_work >= (N - from) as u64 / 2,
+                "from {from}: {} charged for a scan of {} unit(s), which is not \
+                 proportional to anything",
+                machine.bulk_work,
+                N - from
+            );
+        }
+    }
+
+    /// **A match that straddles the point a poll fell at is still found.**
+    ///
+    /// The matcher carries its position and its partial match across the
+    /// safepoint, so a needle lying across a step boundary is one the search
+    /// finds without going back. Every offset in a window around the first
+    /// two boundaries is tried, because which offset *is* the boundary is an
+    /// arithmetic a reader should not have to reproduce to trust the case.
+    #[test]
+    fn a_match_across_a_poll_is_still_found() {
+        let (program, entry) = find_fixture();
+        let needle = b"needle!!".to_vec();
+        let n = SAFEPOINT_STRIDE as usize * 4;
+        for boundary in [SAFEPOINT_STRIDE as usize, SAFEPOINT_STRIDE as usize * 2] {
+            for at in (boundary - needle.len() - 2)..(boundary + 2) {
+                let mut haystack = vec![b'.'; n];
+                haystack[at..at + needle.len()].copy_from_slice(&needle);
+                assert_eq!(
+                    found(&program, entry, &haystack, &needle, 0),
+                    at as i64,
+                    "a match at {at}, around the boundary at {boundary}"
+                );
+            }
+        }
+    }
+
+    /// **A cancellation stops a search the way a fuel bound does**, at the
+    /// next poll rather than at the end of the haystack.
+    #[test]
+    fn a_cancelled_run_find_stops_at_a_poll() {
+        const M: usize = SAFEPOINT_STRIDE as usize * 2;
+        const N: usize = SAFEPOINT_STRIDE as usize * 400;
+        let (program, entry) = find_fixture();
+        let (haystack, needle) = straight_scan(M, N);
+        let stop = crate::budget::Cancellation::new();
+        stop.cancel();
+        let budget = crate::budget::Budget::with_cancellation(
+            crate::budget::Limits::default(),
+            stop.clone(),
+        );
+        let mut machine = Machine::new(&program, 1 << 22);
+        let hay = run_of(&mut machine, &haystack);
+        let sought = run_of(&mut machine, &needle);
+        let error = machine
+            .run(entry, &[hay, sought, 0], &budget.meter())
+            .expect_err("a cancelled search is stopped");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Cancelled);
+        assert!(
+            machine.bulk_work <= SAFEPOINT_STRIDE,
+            "{} unit(s) charged before the first poll looked",
+            machine.bulk_work
+        );
+    }
+
+    /// **A deadline stops one too**, and at the same place: the poll between
+    /// two steps is where all three bounds are asked.
+    #[test]
+    fn a_run_find_past_its_deadline_stops_at_a_poll() {
+        const M: usize = SAFEPOINT_STRIDE as usize * 2;
+        const N: usize = SAFEPOINT_STRIDE as usize * 400;
+        let (program, entry) = find_fixture();
+        let (haystack, needle) = straight_scan(M, N);
+        let budget = crate::budget::Budget::new(crate::budget::Limits {
+            deadline: Some(std::time::Duration::ZERO),
+            ..crate::budget::Limits::default()
+        });
+        let mut machine = Machine::new(&program, 1 << 22);
+        let hay = run_of(&mut machine, &haystack);
+        let sought = run_of(&mut machine, &needle);
+        let error = machine
+            .run(entry, &[hay, sought, 0], &budget.meter())
+            .expect_err("a search past its deadline is stopped");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Deadline);
+        assert!(
+            machine.bulk_work <= SAFEPOINT_STRIDE,
+            "{} unit(s) charged before the first poll looked",
+            machine.bulk_work
+        );
+    }
+
+    /// **The two fast paths answer while charging no bulk work at all.**
+    ///
+    /// On a haystack large enough that examining a hundredth of it would show
+    /// in the charge, which is what makes the zero a statement rather than a
+    /// rounding: an empty needle answers `from` and an over-long needle
+    /// answers -1, both before any preparation begins. The instruction's own
+    /// single unit of fuel is unchanged, so a fast path is one fuel and
+    /// nothing else.
+    #[test]
+    fn the_two_fast_paths_charge_no_bulk_work() {
+        const N: usize = SAFEPOINT_STRIDE as usize * 40;
+        let (program, entry) = find_fixture();
+        let haystack = vec![b'B'; N];
+        let cases: [(&[u8], i64, i64); 4] = [
+            (&[], 0, 0),
+            (&[], 17, 17),
+            (&[], N as i64, N as i64),
+            (&[b'A'; 3], N as i64 - 2, -1),
+        ];
+        for (needle, from, want) in cases {
+            let mut machine = Machine::new(&program, 1 << 20);
+            let hay = run_of(&mut machine, &haystack);
+            let sought = run_of(&mut machine, needle);
+            let answer = machine
+                .run(entry, &[hay, sought, from as u64], &budget())
+                .expect("a fast path answers");
+            assert_eq!(answer[0] as i64, want, "needle {needle:?} from {from}");
+            assert_eq!(
+                machine.bulk_work, 0,
+                "needle {needle:?} from {from}: a fast path examines no unit"
+            );
+        }
+    }
+
+    /// A null run stops the run, on either side.
+    #[test]
+    fn run_find_bytes_refuses_a_null_run() {
+        let (program, entry) = find_fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let text = run_of(&mut machine, b"haystack");
+        for args in [[0, text, 0], [text, 0, 0]] {
+            let error = machine.run(entry, &args, &budget()).unwrap_err();
+            assert_eq!(error.message, null_object().message);
+        }
+    }
+
+    /// A `from` outside `0 ..= haystack_len` stops the run: it is a broken
+    /// invariant of the lowering and never a program's mistake, which is the
+    /// rule a run slice's range is held to as well.
+    #[test]
+    fn run_find_bytes_refuses_a_start_outside_the_haystack() {
+        let (program, entry) = find_fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let text = run_of(&mut machine, b"haystack");
+        let needle = run_of(&mut machine, b"stack");
+        for from in [-1i64, 9, 1 << 40] {
+            let error = machine
+                .run(entry, &[text, needle, from as u64], &budget())
+                .unwrap_err();
+            assert!(
+                error.message.contains("runFind") && error.message.contains("starts at"),
+                "from {from}: {}",
+                error.message
+            );
+        }
+        // And the one that is in range at its very edge answers rather than
+        // refusing.
+        assert_eq!(
+            machine
+                .run(entry, &[text, needle, 8], &budget())
+                .expect("`from == haystack_len` is legal")[0] as i64,
+            -1
+        );
+    }
+
+    /// A run under construction is not a haystack and not a needle: both
+    /// operands are fixed runs, for the reason a run slice's source is.
+    #[test]
+    fn run_find_bytes_refuses_a_run_under_construction() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let text = build.string_layout();
+        let bytes = build.bytes_layout();
+        let row = build.args(&[(3, int), (0, text), (1, text), (2, int)]);
+        let entry = build.function(
+            "find",
+            &[bytes, bytes, int],
+            &[Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            int,
+            vec![
+                Inst::RunFind {
+                    args: row,
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 3 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let store = machine.allocate(program.bytes_layout, 8).unwrap();
+        let string = run_of(&mut machine, b"haystack");
+        for (args, role) in [
+            ([store, string, 0], "haystack"),
+            ([string, store, 0], "needle"),
+        ] {
+            let error = machine.run(entry, &args, &budget()).unwrap_err();
+            assert!(
+                error.message.contains(role) && error.message.contains("`String`"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    /// **The two runs may alias**, which is stated in the instruction because
+    /// a run copy's rules are not this one's: a search only reads, so there is
+    /// no order in which a write could be seen.
+    #[test]
+    fn run_find_bytes_admits_the_same_run_on_both_sides() {
+        let (program, entry) = find_fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let text = run_of(&mut machine, b"abcabc");
+        assert_eq!(
+            machine
+                .run(entry, &[text, text, 0], &budget())
+                .expect("a run may be its own needle")[0] as i64,
+            0
+        );
+        assert_eq!(
+            machine
+                .run(entry, &[text, text, 1], &budget())
+                .expect("a run may be its own needle")[0] as i64,
+            -1
+        );
+    }
+
+    /// **The search allocates nothing, at every needle length, observed by
+    /// the allocator rather than argued from a counter.**
+    ///
+    /// This replaces a case that asserted the matcher gave its scratch buffers
+    /// back, and the replacement is the point: there are no buffers. The
+    /// matcher before this one held a Knuth–Morris–Pratt table of `m` entries
+    /// out of `Machine::scratch`, appended one entry at a time, and a `Vec`
+    /// appended to reallocates and copies its whole contents when its capacity
+    /// runs out — an unbounded `memcpy` inside a phase whose whole purpose is
+    /// that no step exceeds a stride. **No counter in this repository could
+    /// see it**: `--boundary`'s `allocs` and `words` count Cove's heap, and a
+    /// Rust-side allocation is exactly the blind spot
+    /// [#442](https://github.com/myuon/cove/issues/442) was about. So the zero
+    /// is observed here by `crate::find::counting`, a global allocator the
+    /// test binary installs, rather than inferred from columns that cannot
+    /// see it.
+    ///
+    /// The lengths are chosen to be the capacity boundaries the old design
+    /// would have crossed — a table of `4m` bytes doubling through 1 KiB and
+    /// 4 KiB, and `SCRATCH_BYTES` itself — plus one far past every cap. With
+    /// no buffer there is nothing to cross, which is what the case says.
+    ///
+    /// `find_in_runs` is called directly rather than through `Machine::run`
+    /// because a run answers a `Vec` of words and so allocates once for
+    /// reasons that have nothing to do with the search.
+    #[test]
+    fn a_run_find_allocates_nothing_at_any_needle_length() {
+        let (program, entry) = find_fixture();
+        let budget = budget();
+        for m in [
+            1usize, 7, 255, 256, 1_023, 1_024, 1_025, 4_096, 4_097, 40_000,
+        ] {
+            let mut machine = Machine::new(&program, 1 << 22);
+            let needle = vec![b'A'; m];
+            let mut haystack = vec![b'B'; m * 3 + 17];
+            // At the very end, so the search walks the whole haystack and
+            // every phase of the matcher runs.
+            let at = haystack.len() - m;
+            haystack[at..].copy_from_slice(&needle);
+            let n = haystack.len();
+            let hay = run_of(&mut machine, &haystack);
+            let sought = run_of(&mut machine, &needle);
+
+            let (answer, allocations) = crate::find::counting::while_counting(|| {
+                find_in_runs(&mut machine, &budget, hay, sought, n, m, 0, entry, 0)
+            });
+            assert_eq!(
+                answer.expect("a search answers"),
+                at as i64,
+                "a needle of {m} unit(s) at {at}"
+            );
+            assert_eq!(
+                allocations, 0,
+                "a needle of {m} unit(s) allocated {allocations} time(s)"
+            );
+            assert!(
+                machine.bulk_work <= crate::find::Matcher::bound(n, m, 0),
+                "a needle of {m} unit(s) charged {}",
+                machine.bulk_work
+            );
+        }
+    }
+
+    /// And nothing is left in the scratch pool either, because nothing was
+    /// taken from it: the search is not one of its callers any more.
+    #[test]
+    fn a_run_find_takes_no_scratch_buffer() {
+        let (program, entry) = find_fixture();
+        let mut machine = Machine::new(&program, 1 << 18);
+        let haystack = run_of(&mut machine, b"a haystack with a needle in it");
+        let needle = run_of(&mut machine, b"needle");
+
+        let primed = 1024;
+        for _ in 0..2 {
+            machine.give_scratch(Vec::with_capacity(primed));
+        }
+        assert_eq!(machine.scratch_retained(), 2 * primed);
+        for _ in 0..3 {
+            assert_eq!(
+                machine
+                    .run(entry, &[haystack, needle, 0], &budget())
+                    .expect("a search answers")[0] as i64,
+                18
+            );
+            assert_eq!(
+                machine.scratch_retained(),
+                2 * primed,
+                "the pool is exactly as the search found it"
+            );
+        }
+        assert!(machine.scratch_retained() <= SCRATCH_BUFFERS * SCRATCH_BYTES);
     }
 
     // --- ADR 0052: bulk work is bounded work -------------------------------

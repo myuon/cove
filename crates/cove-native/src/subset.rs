@@ -1206,6 +1206,25 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
+        // [ADR 0065]'s run search, the same helper with [`RunOp::FindBytes`].
+        // Bounded as the slice is — four one-word operands the frame has —
+        // and over packed bytes alone, which `cove_ir::verify` is what holds:
+        // a word storage reaching here would be a program that did not
+        // verify, and is refused rather than lowered to a helper that has no
+        // arm for it.
+        //
+        // [`RunOp::FindBytes`]: crate::abi::RunOp::FindBytes
+        // [ADR 0065]: ../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md
+        Inst::RunFind {
+            args,
+            storage: Storage::PackedBytes,
+        } => {
+            let list = program.arg_list(*args);
+            list.len() == 4
+                && list
+                    .iter()
+                    .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
+        }
         _ => return Some(Reason::Instruction),
     };
     (!inside).then_some(Reason::Operands)

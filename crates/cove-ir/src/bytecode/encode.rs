@@ -437,6 +437,15 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::PackedBytes => build(Op::RunSliceBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunSliceWords, 0, 0, 0, halves(args.0, elem.0)),
         },
+        // ADR 0065's run search, which has one storage and so one opcode: the
+        // four-operand row in the payload's low half, and the high half free.
+        // A word storage is `crate::verify`'s refusal rather than an encoding
+        // this format has no room for, so it is named here as one the encoder
+        // has no opcode for.
+        Inst::RunFind { args, storage } => match storage {
+            Storage::PackedBytes => build(Op::RunFindBytes, 0, 0, 0, halves(args.0, 0)),
+            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+        },
         // One opcode per storage, the word member's element layout in the
         // payload's low half as `Op::GrowableTruncateWords`' is — and only the
         // element, because the owner and the store are derived from it at run
@@ -986,6 +995,13 @@ mod tests {
             (
                 0,
                 Inst::RunSlice {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
+                Inst::RunFind {
                     args: ArgsId(1),
                     storage: Storage::PackedBytes,
                 },

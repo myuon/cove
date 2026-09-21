@@ -158,14 +158,18 @@ pub(crate) fn call(
         Intrinsic::StringJoin => text::join(machine, frame, dest),
         Intrinsic::StringSlice => text::slice(machine, frame, dest),
         Intrinsic::StringTrim => text::trim(machine, frame, dest),
-        Intrinsic::StringContains => text::contains(machine, frame, dest),
-        // Neither `String.startsWith` nor `String.endsWith` is here: ADR 0064
-        // made both of them Cove loops over `core.byteLength` and `byteAt`,
-        // one comparing the receiver's first bytes against the prefix's and
-        // one its last against the suffix's. `String.contains` above is the
-        // shape they used to be, and is what is left of the three predicates
-        // ADR 0046 measured together — a whole-haystack search rather than a
-        // comparison of a known length.
+        // None of the three predicates ADR 0046 measured together is here any
+        // more, and the third left differently from the first two.
+        // `String.startsWith` and `String.endsWith` became Cove loops over
+        // `core.byteLength` and `byteAt` (ADR 0064), one comparing the
+        // receiver's first bytes against the prefix's and one its last against
+        // the suffix's — a bounded comparison needs nothing underneath it.
+        // `String.contains` could not be written that way for nothing: its
+        // work is proportional to a haystack the caller did not size, and a
+        // Cove scan pays a VM dispatch per byte of one. So ADR 0065 added
+        // `Inst::RunFind`, a bounded search over a run of packed bytes, and
+        // `std.string.contains` is a comparison of its answer against -1.
+        // `indexOf` below is what is left, and rides on the same decision.
         Intrinsic::StringIndexOf => text::index_of(machine, frame, dest),
         Intrinsic::StringReplace => text::replace(machine, frame, dest),
         Intrinsic::StringToUpper => text::to_upper(machine, frame, dest),

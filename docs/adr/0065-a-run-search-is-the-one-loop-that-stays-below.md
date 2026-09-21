@@ -248,11 +248,12 @@ uninterruptible before the first window even began. Both are corrected here.
 - **So the uninterruptible span is `SAFEPOINT_STRIDE` units, always**, whatever
   `n` and `m` are and whichever phase the instruction is in. That is the
   property ADR 0040's `S + T` asks for, and the one the window rule lost.
-- **Work is charged as it is consumed**, in the same coordinate `RunCopy` is
-  charged in — a word is the unit of work whatever the unit of the run is —
-  and it is charged for *both* phases: preparing an `m`-byte needle is `m`
-  units of work and is paid for, not free because it happens before the
-  search.
+- **Work is charged as it is done, and as an upper bound on it**, for *both*
+  phases: preparation is charged, not free because it happens before the
+  search. The charge is the matcher's own comparisons, one unit each, and the
+  implementation states the bound its algorithm obeys. It is a **bound and not
+  an equality** — see "Why the charge is a bound" below, which is the one
+  thing in this decision that has changed since it was written.
 
 **The instruction is therefore a resumable matcher, and that is a real
 constraint on the implementation.** It rules out calling `str::find` once,
@@ -267,11 +268,47 @@ needle is prepared once and each unit of the haystack is consumed a bounded
 number of times. The two-way algorithm — which is what `str::find`, and
 therefore the intrinsic this replaces, already uses — has all three properties
 this decision needs: linear time, **`O(1)` auxiliary space**, and a state
-small enough to carry across a poll. An implementation that instead wants a
-table proportional to the needle may have one, but then the allocation is
-stated in the pull request and charged, because Decision 8 gates on
-allocations and a search that quietly allocates `m` words is not what the
-intrinsic it replaces did.
+small enough to carry across a poll.
+
+An implementation that instead wants a table proportional to the needle may
+**not** have one. This decision said it might, provided the allocation was
+stated and charged; that permission is withdrawn, and the next section is why.
+
+### Why the charge is a bound
+
+This decision asked for an *exact* charge — "preparing an `m`-byte needle is
+`m` units of work", and the adoption gate's "the work charged … is
+`m + (n - from)` units" — and that was wrong in a way worth leaving on the
+record, because it was wrong by being too precise rather than too loose.
+
+Only a matcher whose two phases have counters running `0..m` and `from..n` can
+charge a *count*. The two-way algorithm has no such counter: its critical
+factorization is two maximal-suffix scans whose progress measure falls
+whenever a scan restarts. Knuth–Morris–Pratt has both counters, so an exact
+charge selects KMP — and KMP needs a table of `m` entries, and a table has to
+be built somewhere. Built the obvious way, one entry at a time, it reallocates
+and copies its whole contents when its capacity runs out: **an unbounded
+`memcpy` in the middle of the phase whose entire purpose is that no step
+exceeds `SAFEPOINT_STRIDE`.** Decision 4 was broken by the allocator rather
+than by the loop, and it was broken by Decision 4's own wording.
+
+Worse, the break was invisible. A table is a *Rust-side* allocation, so
+`--boundary`'s `allocs` and `words` columns — which count Cove's heap — read
+byte-identical with it and without it, and that identity was then cited as
+evidence that nothing had been allocated. That is exactly
+[issue #442](https://github.com/myuon/cove/issues/442)'s blind spot,
+reintroduced by the work that exists to have closed it.
+
+So the charge is an upper bound on work done, which is what fuel is for and
+what the operation this replaces already did: `String.contains` as an
+intrinsic charged "the receiver's whole length as an upper bound", in those
+words, because `str::find` does not report how far it got. The implementation
+charges one unit per comparison and states the bound its algorithm obeys —
+`5m + 2(n - from)` for the two-way matcher that shipped, every term of it
+derived from the algorithm — and a test pins it. With the charge stated as a
+bound, the matcher may be the one with `O(1)` space and no table at all, and
+the blind spot closes by construction rather than by a counter that cannot see
+it.
 
 `GrowableAlloc` and `RunFinish` are the family's exceptions — not chunked,
 because their bulk work is inside an allocator's zeroing and inside one
@@ -446,8 +483,11 @@ plus three of this ADR's own:
    - with fuel enough to finish preparing but not to search, it stops
      **during the first stretch of the search**, within the same bound;
    - the work charged for a search that runs to the end of the haystack is
-     `m + (n - from)` units, so preparation is charged and no unit is charged
-     twice.
+     inside the bound the implementation states and is proportional to what it
+     walked rather than a constant, so preparation is charged and the charge
+     is not a stand-in for one. This asked for `m + (n - from)` **exactly**
+     until an exact charge was found to force a table and a table to break
+     Decision 4's own bound; see "Why the charge is a bound".
 
    And, independently of needle size: a match found across the point at which a
    poll happened to fall is still found; a cancellation and a deadline stop the
