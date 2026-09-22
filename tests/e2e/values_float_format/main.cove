@@ -1,0 +1,213 @@
+use console.println
+
+/// `Float.format` at every digit count it takes, at every tie its rounding
+/// has to break, and on every value that is not a number.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 asks for "every supported precision argument" and says the rest
+/// of what this file is for in one sentence: **"a formatting change is not
+/// accepted because the output parses back to the same number. The bytes are
+/// the contract."** So every row here is bytes, and
+/// `tests/e2e/values_float_roundtrip` — which is the weaker check — is a
+/// separate file so that the two can never be mistaken for one another.
+///
+/// `Float.format(digits)` is `format!("{:.*}", digits, x)` today, reached
+/// through one `Inst::IntrinsicCall`. Before this file the repository held it
+/// to **two** rows — `a_float_formats` in
+/// `crates/cove-runtime/src/vm/intrinsics/scalar.rs` asks `1.5` at three
+/// digits and then asks for eighteen — plus whatever other corpora happened
+/// to print along the way.
+///
+/// # The oracle
+///
+/// Every expected byte was computed by a standalone `rustc` program that does
+/// not call `format!("{:.*}")`. It takes the 64 bits apart into `m * 2^e`,
+/// computes `m * 10^digits * 5^-e` exactly over a base-10^9 bignum — which
+/// turns the division by a power of two into a decimal shift — and decides
+/// the last digit by comparing the discarded tail against a half, ties to
+/// even. No Rust float formatting is involved at any point, and the
+/// arithmetic was shaken out against 199,892 random binary64 values at
+/// random digit counts before it was pointed at a row of this file.
+///
+/// **Ties to even was the oracle's hypothesis, written before the binary was
+/// asked, and it is what the binary answers.** `tie.half`, `tie.one.half`
+/// and `tie.two.half` are the three rows that say so on their own: `0.5`,
+/// `1.5` and `2.5` at nought digits are `0`, `2` and `2`. Round-half-up
+/// answers `1`, `2`, `3`; round-half-away-from-zero the same; truncation
+/// answers `0`, `1`, `2`. None of the three agrees with this file.
+///
+/// That is worth one more sentence, because `Float.round` does **not** do
+/// this. `Float.round`'s tie rule is half-away-from-zero — `(2.5).round()`
+/// is `3.0`, pinned in `tests/e2e/values_float_round` — and
+/// `(2.5).format(0)` is `2`. Two operations in the same namespace break a
+/// tie two different ways, and a reimplementation that shares a rounding
+/// helper between them is wrong on one of the two.
+///
+/// # What is not here
+///
+/// A `digits` outside `0..=17`, which **raises** rather than answering:
+/// `crates/cove-runtime/src/vm/intrinsics/operand.rs`'s `format_digits`
+/// builds `` `Float.format` cannot use `18` digits ``. A raise ends the run,
+/// so it is a case of its own —
+/// `tests/e2e/fail_float_format_digits` — and it is also what blocks this
+/// operation's migration: a Cove body has no way to raise
+/// ([issue #461](https://github.com/myuon/cove/issues/461)), the same wall
+/// `String.split`, `String.replace`, `Int.parseRadix`,
+/// `String.refuseByteRange` and `Value.refuseDuplicate` are behind.
+export fn main() -> Result<Unit, Error> {
+  everyDigit()?
+  ties()?
+  carry()?
+  special()?
+  extremes()?
+  Ok(())
+}
+
+/// One `format` call, printed with the digit count that produced it.
+fn fmt(label: String, x: Float, digits: Int) -> Result<Unit, Error> {
+  println("{label} {digits} {x.format(digits)}")?
+  Ok(())
+}
+
+/// The same value at every digit count `Float.format` accepts.
+///
+/// Nought through seventeen, in a loop, so that the argument arrives as a
+/// value rather than as a literal at each of the eighteen calls.
+fn everyDigits(label: String, x: Float) -> Result<Unit, Error> {
+  var digits = 0
+  while digits <= 17 {
+    fmt(label, x, digits)?
+    digits += 1
+  }
+  Ok(())
+}
+
+/// Six values at all eighteen digit counts.
+///
+/// `1.0 / 3.0` and `2.0 / 3.0` round up at nearly every position and
+/// `2.0 / 3.0` carries at several; `3.141592653589793` and
+/// `1.2345678901234567` have an arbitrary digit at each place;
+/// `9.999999999999998` is the one that carries all the way into the units
+/// column, and it does so at a different digit count from any of the others.
+/// `0.1` is the value whose exact expansion is famously not `0.1` — at
+/// seventeen digits this file prints the `0.10000000000000001` that says so,
+/// which is the single clearest row in the group about what `format` is
+/// doing: it is the exact binary value written in decimal, not the decimal
+/// somebody typed.
+///
+/// The digit count arrives through a `var` in a loop rather than as
+/// eighteen literals, so nothing here can be folded at lowering time.
+fn everyDigit() -> Result<Unit, Error> {
+  everyDigits("all.third", 1.0 / 3.0)?
+  everyDigits("all.twoThirds", 2.0 / 3.0)?
+  everyDigits("all.pi", 3.141592653589793)?
+  everyDigits("all.tenth", 0.1)?
+  everyDigits("all.wide", 1.2345678901234567)?
+  everyDigits("all.nine", 9.999999999999998)?
+  Ok(())
+}
+
+/// Exact binary fractions at the digit count that makes each one a tie.
+///
+/// Every value in this group is exactly representable, so the half it sits
+/// on is a real half and not an artefact of the binary expansion — which is
+/// what makes these rows an oracle for the rounding rule rather than for the
+/// value. `0.5`, `1.5`, `2.5`, `3.5` and `4.5` at nought digits alternate
+/// between down and up, and that alternation is round-half-to-even and is
+/// what no other rule produces.
+///
+/// The negatives are there because half-to-even and half-away-from-zero
+/// agree on `1.5` and disagree on `-1.5` only through the sign, and a body
+/// that took the magnitude and put the sign back would still have to get
+/// `-2.5` right.
+fn ties() -> Result<Unit, Error> {
+  fmt("tie.half", 0.5, 0)?
+  fmt("tie.one.half", 1.5, 0)?
+  fmt("tie.two.half", 2.5, 0)?
+  fmt("tie.three.half", 3.5, 0)?
+  fmt("tie.four.half", 4.5, 0)?
+  fmt("tie.neg.half", -0.5, 0)?
+  fmt("tie.neg.one.half", -1.5, 0)?
+  fmt("tie.neg.two.half", -2.5, 0)?
+  fmt("tie.eighth", 0.125, 2)?
+  fmt("tie.three.eighths", 0.375, 2)?
+  fmt("tie.five.eighths", 0.625, 2)?
+  fmt("tie.seven.eighths", 0.875, 2)?
+  fmt("tie.sixteenth", 0.0625, 3)?
+  fmt("tie.one.sixteenth", 1.0625, 3)?
+  fmt("tie.quarter", 0.25, 1)?
+  fmt("tie.three.quarters", 0.75, 1)?
+  fmt("tie.neg.quarter", -0.25, 1)?
+  fmt("tie.big", 4503599627370496.5, 0)?
+  Ok(())
+}
+
+/// Rounding that carries, including out of the last digit it was given.
+///
+/// `9.9999` at three digits is `10.000`, which is one more character than
+/// the input had before the point, and `0.9999999999999999` at fifteen is
+/// `1.000000000000000`. A body that rounded the digits in place and never
+/// grew the buffer fails both. `carry.neg.small` is the other direction:
+/// `-0.0001` at two digits is `-0.00`, a negative nought that is not
+/// `-0.0`.
+fn carry() -> Result<Unit, Error> {
+  fmt("carry.nines", 9.9999, 3)?
+  fmt("carry.nines.zero", 9.5, 0)?
+  fmt("carry.ninety", 99.95, 1)?
+  fmt("carry.small", 0.09999, 3)?
+  fmt("carry.all", 0.9999999999999999, 15)?
+  fmt("carry.all.16", 0.9999999999999999, 16)?
+  fmt("carry.neg", -9.5, 0)?
+  fmt("carry.neg.small", -0.0001, 2)?
+  fmt("carry.tiny", 0.0001, 2)?
+  fmt("carry.tiny.3", 0.0001, 3)?
+  Ok(())
+}
+
+/// The values that are not numbers, and the two that are nought.
+///
+/// `inf` and `NaN` ignore the digit count entirely — `format(17)` on an
+/// infinity is three characters — and `-0.0` keeps its sign through
+/// `format`, which is how `tests/e2e/values_float_min_max` reads a signed
+/// zero out of `min` in the first place. `special.zero.made` reaches the
+/// negative nought by arithmetic rather than by a literal.
+fn special() -> Result<Unit, Error> {
+  fmt("special.inf.0", 1.0 / 0.0, 0)?
+  fmt("special.inf.3", 1.0 / 0.0, 3)?
+  fmt("special.inf.17", 1.0 / 0.0, 17)?
+  fmt("special.inf.neg", -1.0 / 0.0, 2)?
+  fmt("special.nan.0", 0.0 / 0.0, 0)?
+  fmt("special.nan.2", 0.0 / 0.0, 2)?
+  fmt("special.nan.sqrt", (-1.0).sqrt(), 5)?
+  fmt("special.zero.0", 0.0, 0)?
+  fmt("special.zero.2", 0.0, 2)?
+  fmt("special.zero.neg.0", -0.0, 0)?
+  fmt("special.zero.neg.2", -0.0, 2)?
+  fmt("special.zero.neg.17", -0.0, 17)?
+  fmt("special.zero.made", 0.0 * -1.0, 3)?
+  Ok(())
+}
+
+/// The subnormals and the finite extremes, in fixed point.
+///
+/// `5.0e-324` at seventeen digits is seventeen zeros: the least positive
+/// `Float` is too small for fixed-point notation to show at all, which is a
+/// fact about `format`'s contract and not a defect, and it is exactly what
+/// `tests/e2e/values_float_roundtrip` then finds unrecoverable. At the other
+/// end `1.7976931348623157e308` at nought digits is 309 characters, and a
+/// body that sized its buffer from the digit count rather than from the
+/// exponent fails on that row alone.
+fn extremes() -> Result<Unit, Error> {
+  fmt("ext.sub.0", 5.0e-324, 0)?
+  fmt("ext.sub.17", 5.0e-324, 17)?
+  fmt("ext.dblmin.17", 2.2250738585072014e-308, 17)?
+  fmt("ext.max.0", 1.7976931348623157e308, 0)?
+  fmt("ext.max.2", 1.7976931348623157e308, 2)?
+  fmt("ext.e308.0", 1.0e308, 0)?
+  fmt("ext.e308.1", 1.0e308, 1)?
+  fmt("ext.e22.0", 1.0e22, 0)?
+  fmt("ext.e23.0", 1.0e23, 0)?
+  fmt("ext.int53.0", 9007199254740993.0, 0)?
+  fmt("ext.neg.max.0", -1.7976931348623157e308, 0)?
+  Ok(())
+}

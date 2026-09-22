@@ -1,0 +1,587 @@
+use console.println
+
+/// `Float.parse` at every edge a correctly-rounded decimal-to-binary64
+/// conversion has, and the grammar it will and will not read.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 asks for this file by name: parse and format are "pinned by a
+/// corpus written before they move", covering "finite boundary values,
+/// subnormals, infinities, NaN, both zeros, halfway-rounding cases, exponent
+/// extremes, invalid syntax, every supported precision argument, and
+/// round-trip". Nothing in the repository held `Float.parse` to more than
+/// four rows before this file; `crates/cove-runtime/tests/builtin_schema.rs`
+/// has a decimal, a refusal, a digit separator and `inf`, and that is all
+/// there was.
+///
+/// `Float.parse` is `str::parse::<f64>` today, reached through one
+/// `Inst::IntrinsicCall`. What is written down here is **what the
+/// implementation answers**, which is the contract from here on whether or
+/// not anybody decided it.
+///
+/// # The oracle
+///
+/// Every `ok` line was computed by a standalone `rustc` program that does not
+/// call `str::parse::<f64>` at all. It reads the decimal into an exact
+/// integer pair `n / q` over a base-10^9 bignum, binary-searches the 63 bits
+/// of a positive binary64 for the largest one whose exact value `m * 2^e`
+/// does not exceed it, and decides between that one and its successor by
+/// comparing the target against their exact midpoint — ties to even. The
+/// answer it produces is 64 bits, and nothing about the subject went into
+/// producing them.
+///
+/// **The one Rust primitive the oracle uses is `Display`**, and it uses it on
+/// bits it has already decided: `cove_runtime::value`'s `write_float` is
+/// `{x:.1}` for a whole number and `{x}` otherwise, so the oracle reproduces
+/// those two calls to spell the 64 bits it computed. That spelling is
+/// `ValueRenderInto`'s business and not `Float.parse`'s, it is unchanged by
+/// this operation's migration, and shortest-round-trip is injective on
+/// binary64 — so a row still catches every wrong bit. Rust's `Display` for
+/// `f64` never uses exponent notation, which is why a subnormal takes 325
+/// columns here.
+///
+/// The oracle's arithmetic was shaken out against 199,892 random binary64
+/// values before it was pointed at a single row of this file, and the rows
+/// themselves were written before the binary was asked anything.
+///
+/// # What a `{value}` row pins
+///
+/// The 64 bits, exactly. Every group below prints the answer that way rather
+/// than comparing it against a literal, because a comparison is only as good
+/// as the literal beside it and a rendering is the whole number.
+///
+/// The zeros and the infinities are asked through `1.0 / value` as well,
+/// which is what `tests/e2e/values_float_min_max` established: `-0.0` and
+/// `0.0` compare equal and render apart, and the reciprocal is the third
+/// observer that neither the rendering nor `==` can be mistaken for.
+///
+/// # What this file does not ask
+///
+/// Which NaN. A program can make a NaN five ways and cannot make two it can
+/// tell apart, so `word.nan`'s payload and quiet bit are pinned in bits
+/// beside each tier and not here.
+export fn main() -> Result<Unit, Error> {
+  ties()?
+  classic()?
+  subnormals()?
+  extremes()?
+  wide()?
+  clinger()?
+  signedZeros()?
+  words()?
+  syntax()?
+  messageBytes()?
+  ordinary()?
+  Ok(())
+}
+
+/// One `Float.parse` call, printed as its value or as its refusal.
+///
+/// The refusal is printed **verbatim**. `Float.parse`'s message quotes the
+/// text it was handed and nothing else — it renders no `Float` at all — which
+/// is the one fact about it that `Float.toInt`'s message does not share, and
+/// the reason issue #459 does not reach this operation.
+fn show(label: String, text: String) -> Result<Unit, Error> {
+  match Float.parse(text) {
+    Ok(value) => println("{label} ok {value}")?
+    Err(error) => println("{label} err {error.message}")?
+  }
+  Ok(())
+}
+
+/// The same, with the reciprocal beside the value.
+///
+/// `1.0 / value` is how a zero says which zero it is and how an infinity says
+/// which infinity: `-0.0` renders as `-0.0` and compares equal to `0.0`, and
+/// the reciprocal is `-inf` against `inf`.
+fn showRecip(label: String, text: String) -> Result<Unit, Error> {
+  match Float.parse(text) {
+    Ok(value) => println("{label} ok {value} {1.0 / value}")?
+    Err(error) => println("{label} err {error.message}")?
+  }
+  Ok(())
+}
+
+/// The refusal message of `text`, as bytes.
+///
+/// `tests/e2e/values_int_parse`'s helper, here for its reason: this corpus'
+/// refusal quotes its input, so a row whose text holds a NUL, a tab or a
+/// newline puts that byte into the sentence the golden file compares. A list
+/// of numbers is the encoding itself. A row that is `Ok` has no message and
+/// prints `-`, which no byte list can be.
+fn showMessageBytes(label: String, text: String) -> Result<Unit, Error> {
+  match Float.parse(text) {
+    Ok(_) => println("{label} msg -")?
+    Err(error) => println("{label} msg [{bytesOf(error.message)}]")?
+  }
+  Ok(())
+}
+
+/// The bytes of `text`, as decimal values separated by spaces.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// `count` zero characters.
+///
+/// The rows that need 307 or 696 of them are built rather than spelled, which
+/// is not only for the line length: a text this function returns is not a
+/// literal any constant folding could have read, so the row is a run of
+/// `Float.parse` over bytes assembled at run time.
+fn zeros(count: Int) -> String {
+  var out: Vector<String> = Vector.of()
+  var made = 0
+  while made < count {
+    out.push("0")
+    made += 1
+  }
+  "".join(out.freeze())
+}
+
+/// The string the code points `points` name, in order.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// The halfway cases: a decimal that sits exactly between two binary64
+/// values, and the two decimals a single unit of the last place either side
+/// of it.
+///
+/// This is the group a reimplementation fails first and the one a corpus of
+/// ordinary numbers cannot see. Each `.exact` row is the *exact* decimal
+/// expansion of `(v + next(v)) / 2`, which is always finite and which is
+/// computed here rather than guessed; `.below` is that expansion with its
+/// final `5` made a `4`, and `.above` is the same expansion with one more
+/// digit appended. So the three rows differ by less than one unit in the
+/// 54th significant digit and must answer two different `Float`s.
+///
+/// A tie answers the neighbour with the **even** mantissa, which is why
+/// `tie.one.exact` is `1.0` and `tie.odd.exact` — whose lower neighbour has
+/// an odd mantissa — is the *upper* one. Those two rows together are what
+/// says the rule is round-half-to-even rather than round-half-up or
+/// round-half-down; either of the other two agrees with one of them.
+///
+/// `tie.int53.*` is the same question in integers, where it is legible:
+/// `9007199254740993` is `2^53 + 1`, which no binary64 holds, and it is
+/// exactly between two that do.
+fn ties() -> Result<Unit, Error> {
+  show(
+    "tie.one.exact",
+    "1.00000000000000011102230246251565404236316680908203125",
+  )?
+  show(
+    "tie.one.below",
+    "1.00000000000000011102230246251565404236316680908203124",
+  )?
+  show(
+    "tie.one.above",
+    "1.000000000000000111022302462515654042363166809082031251",
+  )?
+  show(
+    "tie.two.exact",
+    "2.0000000000000002220446049250313080847263336181640625",
+  )?
+  show(
+    "tie.two.below",
+    "2.0000000000000002220446049250313080847263336181640624",
+  )?
+  show(
+    "tie.two.above",
+    "2.00000000000000022204460492503130808472633361816406251",
+  )?
+  show(
+    "tie.odd.exact",
+    "1.00000000000000033306690738754696212708950042724609375",
+  )?
+  show(
+    "tie.odd.below",
+    "1.00000000000000033306690738754696212708950042724609374",
+  )?
+  show(
+    "tie.odd.above",
+    "1.000000000000000333066907387546962127089500427246093751",
+  )?
+  show("tie.int53.lo", "9007199254740993")?
+  show("tie.int53.hi", "9007199254740995")?
+  show("tie.int53.under", "9007199254740992.9")?
+  show("tie.int53.over", "9007199254740993.1")?
+  show("tie.int53.exact", "9007199254740992")?
+  show("tie.int54", "18014398509481985")?
+  show(
+    "tie.sub.exact",
+    "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024703282292062327208828439643411068618252990130716238221279284125033775363510437593264991818081799618989828234772285886546332835517796989819938739800539093906315035659515570226392290858392449105184435931802849936536152500319370457678249219365623669863658480757001585769269903706311928279558551332927834338409351978015531246597263579574622766465272827220056374006485499977096599470454020828166226237857393450736339007967761930577506740176324673600968951340535537458516661134223766678604162159680461914467291840300530057530849048765391711386591646239524912623653881879636239373280423891018672348497668235089863388587925628302755995657524455507255189313690836254779186948667994968324049705821028513185451396213837722826145437693412532098591327667236328125",
+  )?
+  show(
+    "tie.sub.below",
+    "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024703282292062327208828439643411068618252990130716238221279284125033775363510437593264991818081799618989828234772285886546332835517796989819938739800539093906315035659515570226392290858392449105184435931802849936536152500319370457678249219365623669863658480757001585769269903706311928279558551332927834338409351978015531246597263579574622766465272827220056374006485499977096599470454020828166226237857393450736339007967761930577506740176324673600968951340535537458516661134223766678604162159680461914467291840300530057530849048765391711386591646239524912623653881879636239373280423891018672348497668235089863388587925628302755995657524455507255189313690836254779186948667994968324049705821028513185451396213837722826145437693412532098591327667236328124",
+  )?
+  show(
+    "tie.sub.above",
+    "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000247032822920623272088284396434110686182529901307162382212792841250337753635104375932649918180817996189898282347722858865463328355177969898199387398005390939063150356595155702263922908583924491051844359318028499365361525003193704576782492193656236698636584807570015857692699037063119282795585513329278343384093519780155312465972635795746227664652728272200563740064854999770965994704540208281662262378573934507363390079677619305775067401763246736009689513405355374585166611342237666786041621596804619144672918403005300575308490487653917113865916462395249126236538818796362393732804238910186723484976682350898633885879256283027559956575244555072551893136908362547791869486679949683240497058210285131854513962138377228261454376934125320985913276672363281251",
+  )?
+  show(
+    "tie.sub.next.exact",
+    "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000074109846876186981626485318930233205854758970392148714663837852375101326090531312779794975454245398856969484704316857659638998506553390969459816219401617281718945106978546710679176872575177347315553307795408549809608457500958111373034747658096871009590975442271004757307809711118935784838675653998783503015228055934046593739791790738723868299395818481660169122019456499931289798411362062484498678713572180352209017023903285791732520220528974020802906854021606612375549983402671300035812486479041385743401875520901590172592547146296175134159774938718574737870961645638908718119841271673056017045493004705269590165763776884908267986972573366521765567941072508764337560846003984904972149117463085539556354188641513168478436313080237596295773983001708984375",
+  )?
+  show(
+    "tie.sub.next.above",
+    "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000741098468761869816264853189302332058547589703921487146638378523751013260905313127797949754542453988569694847043168576596389985065533909694598162194016172817189451069785467106791768725751773473155533077954085498096084575009581113730347476580968710095909754422710047573078097111189357848386756539987835030152280559340465937397917907387238682993958184816601691220194564999312897984113620624844986787135721803522090170239032857917325202205289740208029068540216066123755499834026713000358124864790413857434018755209015901725925471462961751341597749387185747378709616456389087181198412716730560170454930047052695901657637768849082679869725733665217655679410725087643375608460039849049721491174630855395563541886415131684784363130802375962957739830017089843751",
+  )?
+  Ok(())
+}
+
+/// `2.2250738585072011e-308` and `2.2250738585072012e-308`, which are the
+/// two decimals that hung PHP and Java.
+///
+/// They straddle the midpoint between the largest subnormal and the smallest
+/// normal `Float` — `2.2250738585072011360...e-308` — so the first answers a
+/// subnormal and the second answers `DBL_MIN`, and a loop that converged on
+/// the wrong side of it never terminated. Seven consecutive 17-digit
+/// decimals are asked so the step between the two answers is visible rather
+/// than asserted.
+///
+/// `classic.long` is the same number written out in full, as
+/// `0.` and 307 zeros and the digits — the shape the historical bug reports
+/// used. The zeros are built by [`zeros`] at run time.
+fn classic() -> Result<Unit, Error> {
+  show("classic.09", "2.2250738585072009e-308")?
+  show("classic.10", "2.2250738585072010e-308")?
+  show("classic.11", "2.2250738585072011e-308")?
+  show("classic.12", "2.2250738585072012e-308")?
+  show("classic.13", "2.2250738585072013e-308")?
+  show("classic.14", "2.2250738585072014e-308")?
+  show("classic.15", "2.2250738585072015e-308")?
+  show("classic.long", "0.{zeros(307)}22250738585072011")?
+  show("classic.long.12", "0.{zeros(307)}22250738585072012")?
+  Ok(())
+}
+
+/// Below `DBL_MIN`, where the exponent stops falling and the mantissa
+/// starts.
+///
+/// `5e-324` is the least positive `Float` there is, `2^-1074`, and this
+/// repository already knows it: covefmt's number scanner was fixed for that
+/// literal in issue #458. `sub.least.exact` is its exact decimal expansion,
+/// 751 significant digits after 323 zeros, which is the widest mantissa this
+/// file hands the operation outside the `wide` group.
+///
+/// `sub.least.25` is `2.5e-324`, just above the midpoint between nought and
+/// the least subnormal, and `sub.e400` is where underflow answers a zero
+/// rather than a refusal.
+fn subnormals() -> Result<Unit, Error> {
+  show("sub.least", "5e-324")?
+  show(
+    "sub.least.exact",
+    "0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004940656458412465441765687928682213723650598026143247644255856825006755072702087518652998363616359923797965646954457177309266567103559397963987747960107818781263007131903114045278458171678489821036887186360569987307230500063874091535649843873124733972731696151400317153853980741262385655911710266585566867681870395603106249319452715914924553293054565444011274801297099995419319894090804165633245247571478690147267801593552386115501348035264934720193790268107107491703332226844753335720832431936092382893458368060106011506169809753078342277318329247904982524730776375927247874656084778203734469699533647017972677717585125660551199131504891101451037862738167250955837389733598993664809941164205702637090279242767544565229087538682506419718265533447265625",
+  )?
+  show("sub.least.49", "4.9e-324")?
+  show("sub.least.25", "2.5e-324")?
+  show("sub.least.74", "7.4e-324")?
+  show("sub.least.75", "7.5e-324")?
+  show("sub.e323", "1e-323")?
+  show("sub.largest", "2.225073858507201e-308")?
+  show(
+    "sub.largest.exact",
+    "0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022250738585072008890245868760858598876504231122409594654935248025624400092282356951787758888037591552642309780950434312085877387158357291821993020294379224223559819827501242041788969571311791082261043971979604000454897391938079198936081525613113376149842043271751033627391549782731594143828136275113838604094249464942286316695429105080201815926642134996606517803095075913058719846423906068637102005108723282784678843631944515866135041223479014792369585208321597621066375401613736583044193603714778355306682834535634005074073040135602968046375918583163124224521599262546494300836851861719422417646455137135420132217031370496583210154654068035397417906022589503023501937519773030945763173210852507299305089761582519159720757232455434770912461317493580281734466552734375",
+  )?
+  show("sub.step", "2.2250738585072009e-308")?
+  show("sub.neg", "-5e-324")?
+  show("sub.neg.25", "-2.5e-324")?
+  show("sub.e400", "1e-400")?
+  show("sub.e400.neg", "-1e-400")?
+  show("sub.e1000", "1e-1000")?
+  Ok(())
+}
+
+/// The largest finite `Float`, and where a decimal stops being one.
+///
+/// Overflow is a rounding decision and not a range check, and
+/// `max.half.exact` is the row that says so: the exact midpoint between the
+/// largest finite `Float` and `2^1024` is a 309-digit whole number, and a
+/// decimal *at* it answers `inf` — because the tie rule picks the even
+/// mantissa and `2^1024`'s is the even one. `max.half.below` is that integer
+/// minus one and answers the largest finite value. So the boundary is exact
+/// to the unit, and `max.159` — which is past it — is `inf` while
+/// `max.158` — which is not — is not.
+///
+/// `max.near.lo` and `max.near.hi` are the 65-digit truncations either side,
+/// and both answer the finite value: 65 significant digits are not enough to
+/// reach the midpoint, which is worth having on the record beside the exact
+/// pair.
+///
+/// `max.huge.exp` is an exponent no `Int` holds. It is decided by its sign.
+fn extremes() -> Result<Unit, Error> {
+  show("max.157", "1.7976931348623157e308")?
+  show("max.158", "1.7976931348623158e308")?
+  show("max.159", "1.7976931348623159e308")?
+  show(
+    "max.near.lo",
+    "1.7976931348623158079372897140530341507993413271003782693562408184e308",
+  )?
+  show(
+    "max.near.hi",
+    "1.7976931348623158079372897140530341507993413271003782693562408185e308",
+  )?
+  show(
+    "max.half.exact",
+    "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792",
+  )?
+  show(
+    "max.half.below",
+    "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497791",
+  )?
+  show(
+    "max.half.above",
+    "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792.5",
+  )?
+  show("max.e308", "1e308")?
+  show("max.e309", "1e309")?
+  show("max.e309.neg", "-1e309")?
+  show("max.e400", "1e400")?
+  show("max.huge.exp", "1e1000000000000000000000")?
+  show("max.huge.exp.neg", "1e-1000000000000000000000")?
+  Ok(())
+}
+
+/// The same `Float` reached from a 17-digit decimal and from a 750-digit
+/// one.
+///
+/// `wide.17` is the shortest decimal that round-trips, `wide.exact` is that
+/// value's exact 53-digit expansion, and `wide.mid` is the exact midpoint to
+/// its successor. The three 750-digit rows are that midpoint padded to 750
+/// significant digits: at it, one unit above it, and one unit below it. The
+/// tie and the one above answer the same `Float` and the one below answers
+/// the other, which is the tie rule again at a width no fast path reaches.
+///
+/// A digit 750 places from the decimal point changes the answer. That is the
+/// property that makes this conversion a whole-number problem rather than an
+/// arithmetic one, and it is why the `clinger` group below is only a box and
+/// not a method.
+fn wide() -> Result<Unit, Error> {
+  show("wide.17", "1.2345678901234567")?
+  show("wide.exact", "1.2345678901234566904321354741114191710948944091796875")?
+  show("wide.mid", "1.23456789012345680145443793662707321345806121826171875")?
+  show(
+    "wide.mid.750",
+    "1.23456789012345680145443793662707321345806121826171875{zeros(696)}",
+  )?
+  show(
+    "wide.up.750",
+    "1.23456789012345680145443793662707321345806121826171875{zeros(695)}1",
+  )?
+  show(
+    "wide.down.750",
+    "1.23456789012345680145443793662707321345806121826171874{zeros(696)}",
+  )?
+  Ok(())
+}
+
+/// The Clinger fast path, at every edge of its box.
+///
+/// `m * 10^e` is exactly the correctly-rounded answer when `m` fits in 53
+/// bits and `|e| <= 22`, because both operands are then exactly
+/// representable and one IEEE multiply or divide is correctly rounded. Past
+/// either edge it is two roundings and can be wrong. The rows are on both
+/// sides of both edges: `1e22` against `1e23`, `1e-22` against `1e-23`,
+/// `9007199254740992e22` (`m = 2^53`) against `9007199254740993e22`
+/// (`m = 2^53 + 1`).
+///
+/// What this group pins is the *answers*. Which of them a Cove body could
+/// reach with `Int.toFloat` and `Float` multiplication is measured in
+/// `crates/cove-runtime/tests/clinger_box.rs`, which sweeps the box rather
+/// than reasoning about it.
+fn clinger() -> Result<Unit, Error> {
+  show("clinger.p22", "1e22")?
+  show("clinger.p23", "1e23")?
+  show("clinger.n22", "1e-22")?
+  show("clinger.n23", "1e-23")?
+  show("clinger.m.in.p22", "9007199254740992e22")?
+  show("clinger.m.out.p22", "9007199254740993e22")?
+  show("clinger.m.in.n22", "9007199254740992e-22")?
+  show("clinger.m.out.n22", "9007199254740993e-22")?
+  show("clinger.m.max.p22", "9007199254740991e22")?
+  show("clinger.m.in.p23", "9007199254740992e23")?
+  show("clinger.m.in.n23", "9007199254740992e-23")?
+  show("clinger.wide.m", "123456789012345678e22")?
+  Ok(())
+}
+
+/// Both zeros, from every spelling that makes one.
+///
+/// `-0.0` and `0.0` compare equal, so the reciprocal is the observer:
+/// `-inf` against `inf`. What the rows ask is whether the sign survives a
+/// mantissa of nothing but zeros (`-0.0000`), an exponent (`-0e10`), and an
+/// underflow that reached zero from a nonzero decimal (`-1e-400`).
+fn signedZeros() -> Result<Unit, Error> {
+  showRecip("zero.plain", "0")?
+  showRecip("zero.dot", "0.0")?
+  showRecip("zero.minus", "-0")?
+  showRecip("zero.minus.dot", "-0.0")?
+  showRecip("zero.plus", "+0.0")?
+  showRecip("zero.exp", "0e10")?
+  showRecip("zero.minus.exp", "-0e10")?
+  showRecip("zero.minus.many", "-0.0000")?
+  showRecip("zero.minus.exp.neg", "-0.00e-5")?
+  showRecip("zero.under", "1e-400")?
+  showRecip("zero.under.neg", "-1e-400")?
+  showRecip("zero.trailing.dot", "0.")?
+  showRecip("zero.leading.dot", ".0")?
+  showRecip("zero.minus.leading.dot", "-.0")?
+  Ok(())
+}
+
+/// `nan`, `inf` and `infinity` as text, in every case, with every sign, and
+/// the near misses.
+///
+/// This is where a reimplementation silently differs. Rust's `f64::from_str`
+/// accepts three words and accepts them case-insensitively, `infinity` as
+/// well as `inf`, and with a leading sign — so `-Infinity` is a `Float` and
+/// `infinit` is not. A parser that recognised only the lowercase spellings
+/// would pass every numeric row in this file.
+///
+/// The infinities carry their reciprocal so the sign is checked as well as
+/// the word.
+fn words() -> Result<Unit, Error> {
+  showRecip("word.nan", "nan")?
+  showRecip("word.NaN", "NaN")?
+  showRecip("word.NAN", "NAN")?
+  showRecip("word.nAn", "nAn")?
+  showRecip("word.nan.minus", "-nan")?
+  showRecip("word.nan.plus", "+nan")?
+  showRecip("word.inf", "inf")?
+  showRecip("word.INF", "INF")?
+  showRecip("word.Inf", "Inf")?
+  showRecip("word.infinity", "infinity")?
+  showRecip("word.Infinity", "Infinity")?
+  showRecip("word.INFINITY", "INFINITY")?
+  showRecip("word.inf.minus", "-inf")?
+  showRecip("word.infinity.minus", "-Infinity")?
+  showRecip("word.inf.plus", "+inf")?
+  show("word.infinit", "infinit")?
+  show("word.infinityy", "infinityy")?
+  show("word.na", "na")?
+  show("word.nann", "nann")?
+  show("word.inff", "inff")?
+  show("word.nan.dot", "nan.0")?
+  show("word.inf.dot", "inf.0")?
+  show("word.nan.space", "nan ")?
+  Ok(())
+}
+
+/// The grammar, and the verbatim refusal for everything outside it.
+///
+/// Rust's `f64::from_str` reads
+/// `Sign? ( 'inf' | 'infinity' | 'nan' | Number )` where a `Number` is
+/// `( Digit+ | Digit+ '.' Digit* | Digit* '.' Digit+ ) ( 'e' Sign? Digit+ )?`
+/// — so `1.` and `.5` are both `Float`s, `1e` is not, and there is no
+/// whitespace, no digit separator and no hexadecimal form anywhere in it.
+/// Cove inherits every one of those, and `1_000.0` is refused although
+/// `1_000.0` is a legal `Float` *literal* in Cove source, which is the one
+/// disagreement between the two readers worth knowing about and the same one
+/// `Int.parse` has.
+///
+/// **Every refusal is printed as it is worded.** `Float.parse` quotes the
+/// text it was given and names no value, so the sentence is evidence about
+/// the interpolation as well as about the verdict — and it is a sentence a
+/// Cove body could build, because the only thing in it came in as a
+/// parameter.
+fn syntax() -> Result<Unit, Error> {
+  let zero = fromPoints([0])?
+  show("syn.plus", "+1.0")?
+  show("syn.plus.int", "+1")?
+  show("syn.space.lead", " 1.0")?
+  show("syn.space.trail", "1.0 ")?
+  show("syn.tab.lead", "\t1.0")?
+  show("syn.newline.trail", "1.0\n")?
+  show("syn.underscore", "1_000.0")?
+  show("syn.underscore.frac", "1.0_0")?
+  show("syn.trailing.dot", "1.")?
+  show("syn.leading.dot", ".5")?
+  show("syn.dot.only", ".")?
+  show("syn.double.dot", "1.0.0")?
+  show("syn.e.empty", "1e")?
+  show("syn.e.plus", "1e+")?
+  show("syn.e.minus", "1e-")?
+  show("syn.e.only", "e5")?
+  show("syn.e.dot", ".e5")?
+  show("syn.hex", "0x1p3")?
+  show("syn.hex.plain", "0x10")?
+  show("syn.empty", "")?
+  show("syn.plus.only", "+")?
+  show("syn.minus.only", "-")?
+  show("syn.double.minus", "--1")?
+  show("syn.plus.minus", "+-1")?
+  show("syn.comma", "1,0")?
+  show("syn.space.mid", "1 000")?
+  show("syn.exp.upper", "1E5")?
+  show("syn.exp.plus", "1e+5")?
+  show("syn.exp.minus", "1e-5")?
+  show("syn.exp.zeros", "1e005")?
+  show("syn.lead.zeros", "00012")?
+  show("syn.big.exp", "1e99999999999999999999")?
+  show("syn.percent", "1.0%")?
+  show("syn.tick", "`")?
+  show("syn.d.suffix", "1d5")?
+  show("syn.f.suffix", "1.0f")?
+  show("syn.fullwidth", fromPoints([65297, 65298])?)?
+  show("syn.wide", fromPoints([49, 233, 50])?)?
+  show("syn.nul.alone", zero)?
+  show("syn.nul.middle", "1{zero}2")?
+  Ok(())
+}
+
+/// The refusal message as bytes, for the rows whose text a terminal would
+/// not show.
+///
+/// A NUL, a newline, a tab, a code point that is two bytes and one that is
+/// three, a backtick that collides with the quoting the message itself uses,
+/// and the empty string. `msg.ok` is the control: a row that is `Ok` prints
+/// `-`, so a body that started answering `Ok` where the golden says `Err`
+/// fails here as well as on its own line.
+fn messageBytes() -> Result<Unit, Error> {
+  let zero = fromPoints([0])?
+  showMessageBytes("msg.nul", "1{zero}2")?
+  showMessageBytes("msg.newline", "1.0\n")?
+  showMessageBytes("msg.tab", "\t1.0")?
+  showMessageBytes("msg.wide", fromPoints([49, 233, 50])?)?
+  showMessageBytes("msg.fullwidth", fromPoints([65297, 65298])?)?
+  showMessageBytes("msg.tick", "`")?
+  showMessageBytes("msg.empty", "")?
+  showMessageBytes("msg.ok", "1.0")?
+  Ok(())
+}
+
+/// The numbers a program actually hands this operation.
+///
+/// cq reads 60,000 of them out of JSON on every run, and they look like
+/// these: a price, a temperature, a short decimal fraction. Nothing in this
+/// group is hard. It is here so that a change which fixes the hard rows by
+/// breaking the easy ones cannot pass.
+fn ordinary() -> Result<Unit, Error> {
+  show("num.tenth", "0.1")?
+  show("num.pi", "3.141592653589793")?
+  show("num.price", "1234.56")?
+  show("num.neg", "-273.15")?
+  show("num.exp", "1e10")?
+  show("num.big", "12345678901234567890")?
+  show("num.small", "0.000001")?
+  show("num.money", "19.99")?
+  show("num.tiny", "0.000000000000000000001")?
+  show("num.third", "0.3333333333333333")?
+  show("num.round", "1.0000000000000002")?
+  Ok(())
+}

@@ -1,0 +1,11 @@
+error[cove::runtime]: `Float.format` cannot use `18` digits
+ --> <e2e>/fail_float_format_digits/main.cove:8:3
+  |
+8 |   x.format(digits)
+  |   ^^^^^^^^^^^^^^^^
+  --> <e2e>/fail_float_format_digits/main.cove:44:11
+   |
+44 |   println(written(1.5, 18))?
+   |           ^^^^^^^^^^^^^^^^ called from here
+  rule: A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17.
+1 error(s)
