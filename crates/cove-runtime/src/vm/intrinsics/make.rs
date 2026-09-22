@@ -11,7 +11,7 @@
 //! guess. There is one `Option` layout per payload layout, one `Array` layout
 //! per element layout, one `Vector` layout per element layout; and the
 //! element layout a builtin needs is one it can read — out of the receiver's
-//! own layout for `Array.get`, or fixed by the operation for `String.chars`,
+//! own layout for `Array.get`, or fixed by the operation for `String.words`,
 //! whose answer is an `Array<String>` whatever it was called on.
 //!
 //! # An `Option` is words, not an object
@@ -27,7 +27,7 @@
 //!
 //! An allocation can collect, and a collection walks the frames and the
 //! temporary roots and nothing else. A word this module was handed may name
-//! an object that *nothing* walks — the string `String.chars` just made, the
+//! an object that *nothing* walks — the part `String.split` just made, the
 //! element `Vector.pop` just took out of a store it then cleared — so it is
 //! pushed as a temporary root before the allocation that would otherwise free
 //! it, and released once the object that will own it exists. Where a word

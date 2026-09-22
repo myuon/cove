@@ -1115,6 +1115,31 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "join",
     },
+    // `chars` is the first binding whose body builds a **collection**, and it
+    // is the one place in this table where the migration is a deletion of a
+    // decoder rather than a move of a policy. What the Rust arm did was
+    // `text.chars().map(String::from).collect()` — Rust's UTF-8 decoder
+    // turning bytes into scalars and then scalars back into bytes, to answer
+    // strings whose bytes were already sitting in the receiver in the right
+    // order. What is here instead is the walk `length` already does, and
+    // `core.stringSlice` per character, which copies those bytes where they
+    // are. A character is one to four bytes and a lead byte says which, so
+    // nothing in the answer needs decoding to be found — which is ADR 0064's
+    // Decision 2 from the other side: this was never an operation of the
+    // machine, it was a *representation* being decoded and re-encoded for no
+    // reader.
+    //
+    // The run is sized by `charactersBefore`, the private walk under
+    // `String.length`, so the vector is allocated once at exactly its length
+    // and grows nought times. That was measured against the unsized form
+    // rather than assumed; `std.string.chars`' own doc holds the numbers.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "chars",
+        module: "std.string",
+        function: "chars",
+    },
     // The fourth predicate, and the one that needed something underneath it.
     // `startsWith` and `endsWith` compare at an offset the caller's own
     // argument bounds, so a Cove loop over `byteAt` is the whole of each;

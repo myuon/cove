@@ -915,7 +915,6 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// ways it can answer are an instruction, a conversion and a runtime call.
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "words"),
-    ("String", "chars"),
     ("String", "split"),
     ("String", "trim"),
     ("String", "replace"),

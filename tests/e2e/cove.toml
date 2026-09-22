@@ -443,3 +443,7 @@ allow = ["console"]
 [run.values_string_join]
 entry = "values_string_join.main"
 allow = ["console"]
+
+[run.values_string_chars]
+entry = "values_string_chars.main"
+allow = ["console"]

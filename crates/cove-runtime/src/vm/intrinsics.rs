@@ -153,7 +153,6 @@ pub(crate) fn call(
         // character — and `cove_schema::builtins::standard_binding` resolves
         // each before lowering ever looks for an intrinsic.
         Intrinsic::StringWords => text::words(machine, frame, dest),
-        Intrinsic::StringChars => text::chars(machine, frame, dest),
         Intrinsic::StringSplit => text::split(machine, frame, dest),
         Intrinsic::StringTrim => text::trim(machine, frame, dest),
         // None of the four searches and predicates ADR 0046 measured together

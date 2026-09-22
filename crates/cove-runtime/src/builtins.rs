@@ -1402,14 +1402,15 @@ pub fn call_method(
                         .collect(),
                 )))
             }
-            "chars" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    text.chars()
-                        .map(|c| Value(Repr::Str(one_character(c))))
-                        .collect(),
-                )))
-            }
+            // `chars` used to answer here, by collecting a one-character Rust
+            // `String` per `char` of the receiver. It does not reach this arm
+            // any more: `Interpreter::eval_method_call` resolves it to
+            // `std.string.chars` first, which sizes a `Vector` with the walk
+            // under `std.string.length` and then fills it with one
+            // `core.stringSlice` per character. ADR 0064's Decision 2 — where
+            // a character begins is a fact about a *representation*, and this
+            // arm read it out of Rust's decoder — and issue #454's Step 3,
+            // which is where the measurement of what the move cost lives.
             "split" => {
                 let args = expect_args("String.split", args, 1, span)?;
                 let separator = expect_str("String.split", "separator", &args[0], span)?;
@@ -2040,27 +2041,24 @@ fn wrong_byte_range(text: &str, from: i64, to: i64) -> String {
     }
 }
 
-/// The one-character string `character` spells.
-///
-/// An ASCII character answers a string this thread already made, because
-/// `chars()` is how a program takes text apart and a scanner asks for every
-/// character of every line it reads. Allocating one string per character made
-/// that the largest single source of allocation in `examples/cq`, and a
-/// character's string is immutable and interchangeable, so there is no way for
-/// a program to tell a shared one from a fresh one (issue #104).
-///
-/// The table is per thread rather than global because `Rc` is not shareable
-/// across threads, which is the same reason `Value` uses `Rc` at all.
-fn one_character(character: char) -> Rc<str> {
-    thread_local! {
-        static ASCII: [Rc<str>; 128] =
-            std::array::from_fn(|byte| Rc::from((byte as u8 as char).to_string().as_str()));
-    }
-    if character.is_ascii() {
-        return ASCII.with(|table| table[character as usize].clone());
-    }
-    character.to_string().into()
-}
+// `one_character` stood here: a per-thread table of the 128 ASCII
+// one-character `Rc<str>`s, so that `chars()` on this backend handed out a
+// shared string per ASCII character rather than allocating one. Issue #104 put
+// it here because `chars()` was how a program took text apart and that made it
+// the largest single source of allocation in `examples/cq`; issue #454's Step 3
+// took its one caller away, and `std.string.chars` allocates a fresh string per
+// character on this backend as it does on the other one.
+//
+// **Nothing observable changed and something unobservable did.** Issue #104's
+// own argument is why the deletion is safe — "a character's string is immutable
+// and interchangeable, so there is no way for a program to tell a shared one
+// from a fresh one" — and it is also why the interning could never move into
+// Cove: `core.stringSlice` answers a run of the receiver's bytes, and a Cove
+// body has nothing to consult a table with. So the tree-walking interpreter
+// allocates more per `chars()` call than it did. That is a cost on the
+// *oracle*, which ADR 0034 keeps as the definition of what a Cove program
+// means rather than as something anything is timed on, and the linear-memory
+// backend never had the table.
 
 /// Reads `value` as a `String`, or reports the type `method` declares for
 /// `parameter` instead.

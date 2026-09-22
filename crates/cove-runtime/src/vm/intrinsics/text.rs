@@ -10,8 +10,19 @@
 //!   characters is a policy over a representation rather than an operation of
 //!   the machine, so [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)
 //!   moved it to `std.string.length`: a Cove loop that reads each lead byte
-//!   and advances by the width that byte declares. It still agrees with
-//!   `chars()` below, for the same reason it always did.
+//!   and advances by the width that byte declares.
+//! - **`chars()` is not here either, and it is the one whose departure the
+//!   bullet above predicted.** `length` agreed with it because both counted
+//!   the same thing; issue #454's Step 3 made them the *same loop*.
+//!   `std.string.chars` sizes its run with the private walk under
+//!   `std.string.length` and then walks the bytes again taking a
+//!   `core.stringSlice` per character, so the two can no longer disagree
+//!   about where a character begins — where this file had two readings of
+//!   that question and an argument that they matched. What left with it is a
+//!   decode: the arm here was `text.chars().map(String::from).collect()`,
+//!   which ran Rust's UTF-8 decoder over the receiver to produce scalars and
+//!   then encoded every scalar back into bytes, to answer strings whose bytes
+//!   were already in the receiver in the right order.
 //! - **`slice(from, to)` is not here either, and it was the hardest of the
 //!   three to give up**: its positions are **characters** and the substrate
 //!   is bytes, so it decoded the whole receiver into a `Vec<char>` to take
@@ -123,22 +134,16 @@ pub(super) fn words(
     Ok(())
 }
 
-/// `String.chars() -> Array<String>`.
-///
-/// A character in Cove is a `String` of length 1; there is no `Character`
-/// type for this to answer instead.
-pub(super) fn chars(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    machine.examined(text.len() as u64);
-    let parts: Vec<String> = text.chars().map(String::from).collect();
-    let array = make::strings(machine, &parts)?;
-    dest.word(machine, array);
-    Ok(())
-}
+// `chars` was here, between `words` and `split`, and it was the only arm in
+// this file that *decoded*. It collected `text.chars().map(String::from)` — a
+// `char` per character out of Rust's UTF-8 decoder, then a fresh heap
+// `String` per `char` out of Rust's encoder — and handed the vector to
+// `make::strings`. `std.string.chars` answers the same array by walking lead
+// bytes and taking one `core.stringSlice` per character, which copies the
+// bytes where they already are and never forms a scalar at all; issue #454's
+// Step 3. A character in Cove is a `String` of length 1 either way — there is
+// no `Character` type for this to answer instead — and the module's header
+// says what moving it settled about where a character begins.
 
 /// `String.split(separator) -> Array<String>`.
 pub(super) fn split(
@@ -379,12 +384,19 @@ mod tests {
     // ship, where the three cases here were checked against the arm that
     // answered them.
 
+    /// `chars` had the first line of this test — `"hé"` into `["h", "é"]` —
+    /// until issue #454's Step 3 moved it to `std.string.chars`.
+    /// `tests/e2e/values_string_chars` replaced it with 41 calls on both
+    /// evaluators against a golden a standalone `rustc` oracle wrote, and
+    /// the difference is not the count: the oracle has its own UTF-8 encoder
+    /// and its own lead-byte splitter, so every width boundary, a NUL, and
+    /// nine rows of combining marks, joiners and modifiers are checked
+    /// against an implementation this repository does not ship, where the one
+    /// case here was checked against the arm that answered it.
     #[test]
-    fn chars_and_words_take_a_string_apart() {
+    fn words_splits_on_ascii_whitespace() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
-        let word = on(&mut machine, "hé", "chars", &[]);
-        assert_eq!(parts(&machine, word), vec!["h", "é"]);
         // ASCII whitespace, and runs of it collapse.
         let word = on(&mut machine, "  one  two ", "words", &[]);
         assert_eq!(parts(&machine, word), vec!["one", "two"]);
@@ -496,21 +508,40 @@ mod tests {
         );
     }
 
-    /// The array a `chars()` builds is a root while it is being filled: the
+    /// The array a `split()` builds is a root while it is being filled: the
     /// heap is full of dead objects, so a string made partway through the
     /// walk collects, and an unrooted array would be freed under it.
+    ///
+    /// **It was `chars()` that asked this, and the question outlived it.**
+    /// Issue #454's Step 3 moved that operation into `std.string.chars`,
+    /// where the array under construction is a `Vector` the frame holds and
+    /// the collector finds through the frame rather than through
+    /// `make::strings`' temporary root. What is left below this file that
+    /// fills an array a word at a time is `words` and `split`, so `split` asks
+    /// it now — and it asks it harder, because it allocates a string per part
+    /// *and* the array, where `chars` allocated one string per character of a
+    /// receiver that was already on the heap. Ten one-character parts, which
+    /// is the fixture `chars` had, spelled as a separator run.
     #[test]
-    fn chars_holds_the_array_it_is_filling() {
+    fn split_holds_the_array_it_is_filling() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 12);
-        let source = machine.new_string("abcdefghij").unwrap();
+        let source = machine.new_string("a,b,c,d,e,f,g,h,i,j").unwrap();
         machine.push_temp(source);
+        let comma = machine.new_string(",").unwrap();
+        machine.push_temp(comma);
         while machine.heap_words() + 2 <= 1 << 12 {
             machine.new_string("dead").unwrap();
         }
         let before = machine.collected().collections;
 
-        let items = word(&mut machine, "String", "chars", &[(Repr::Ref, source)]).unwrap();
+        let items = word(
+            &mut machine,
+            "String",
+            "split",
+            &[(Repr::Ref, source), (Repr::Ref, comma)],
+        )
+        .unwrap();
         assert!(
             machine.collected().collections > before,
             "the fixture did not force a collection"

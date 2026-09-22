@@ -927,7 +927,59 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// 111 functions against 11,278 in 109, which is the two new bodies arriving
 /// and seventeen `IntrinsicCall` sites leaving, and cq at 6,429 in 75 against
 /// 6,355 in 74.
-const FORWARDABLE_COPIES: usize = 2845;
+///
+/// **The forty-first rise is one new row and nothing else.** 2845 to 2872,
+/// 174 programs to 175, and all twenty-seven are
+/// `tests/e2e:values_string_chars` — seven in the `prod` column and twenty in
+/// the `ret` column. The check the paragraphs above prescribe says the rest:
+/// the survey with that directory removed is **2845 exactly**, over the same
+/// 174 programs, the same 17,970 functions and the same 356,268 instructions
+/// the row before it left.
+///
+/// The program is ADR 0064's Decision 6 corpus for `String.chars`, issue
+/// #454's Step 3, landed before a line of the reimplementation. Its `ret`
+/// column is twenty again and its `prod` column is the highest an e2e corpus
+/// here has had, and the two numbers have the same cause: this operation
+/// answers an `Array<String>`, so every helper *produces* a collection and
+/// then holds it still while it asks it four questions. `fromPoints`,
+/// `repeated` and `cycled` each build a `Vector` and answer
+/// `Ok("".join(out.freeze()))` — a produce, a copy and a `return` in one
+/// expression — and `show` and `digest` bind the answered array before they
+/// count anything in it.
+///
+/// **The forty-second rise is two things at once, and they were separated by
+/// measurement rather than by a second commit.** 2872 to 2891, 175 programs to
+/// 176. `String.chars`' migration and its benchmark land together here, where
+/// `join`'s were a commit apart, because the benchmark this operation needed
+/// **already existed**: `benches/chars` is one of `cove-bench`'s nine timed
+/// rows and has been since issue #292, so there was no new directory to add
+/// and the row could not be isolated by removing one. What was added is a
+/// second *entry* of that package, `[run.chars_rows]`, which is the
+/// length-against-width matrix beside the single receiver the timed row uses.
+///
+/// Removing that entry from `benches/cove.toml` and surveying again splits the
+/// rise exactly:
+///
+/// - **the migration is +5**, 2872 to 2877, over the same 175 programs. Its
+///   real footprint is the function and the instruction count — 18,077
+///   functions and 359,419 instructions become 18,265 and 365,549 — which is
+///   `std.string.chars` appearing in a survey that lowers a *package* rather
+///   than an entry, and `charactersBefore` surviving the sweep in the handful
+///   of programs that call `chars` without calling `length`. Five copies over
+///   175 programs is close to `std.string.slice`'s nought and far from
+///   `std.string.fromCodePoint`'s one-per-program, and for `slice`'s reason:
+///   the body answers an `Array<String>` rather than a `Result`, so there is
+///   no `Err` built in one branch and returned from another for this column to
+///   count;
+/// - **the new entry is +14**, 2877 to 2891, 175 programs to 176, with 106
+///   functions and 1,888 instructions.
+///
+/// No shipped program carries the migration's 188 either — `cove run
+/// --boundary` reports covefmt at 11,219 instructions in 111 functions on both
+/// sides, byte for byte, because #441's sweep keeps a body nothing names out
+/// of a program; and cq at 6,429 in 75 against 6,475 in 76, which is the one
+/// new body arriving and two `IntrinsicCall` sites leaving.
+const FORWARDABLE_COPIES: usize = 2891;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

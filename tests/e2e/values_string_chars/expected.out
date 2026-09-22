@@ -1,0 +1,156 @@
+lit.empty bytes 0 chars 0 parts 0 same true round true
+lit.one bytes 1 chars 1 parts 1 same true round true
+lit.one.0 len 1 bytes 1 at0 97 [97]
+lit.ascii bytes 3 chars 3 parts 3 same true round true
+lit.ascii.0 len 1 bytes 1 at0 97 [97]
+lit.ascii.1 len 1 bytes 1 at0 98 [98]
+lit.ascii.2 len 1 bytes 1 at0 99 [99]
+lit.hello bytes 13 chars 13 parts 13 same true round true
+lit.hello.0 len 1 bytes 1 at0 72 [72]
+lit.hello.1 len 1 bytes 1 at0 101 [101]
+lit.hello.2 len 1 bytes 1 at0 108 [108]
+lit.hello.3 len 1 bytes 1 at0 108 [108]
+lit.hello.4 len 1 bytes 1 at0 111 [111]
+lit.hello.5 len 1 bytes 1 at0 44 [44]
+lit.hello.6 len 1 bytes 1 at0 32 [32]
+lit.hello.7 len 1 bytes 1 at0 119 [119]
+lit.hello.8 len 1 bytes 1 at0 111 [111]
+lit.hello.9 len 1 bytes 1 at0 114 [114]
+lit.hello.10 len 1 bytes 1 at0 108 [108]
+lit.hello.11 len 1 bytes 1 at0 100 [100]
+lit.hello.12 len 1 bytes 1 at0 33 [33]
+lit.digits bytes 10 chars 10 parts 10 same true round true
+lit.digits.0 len 1 bytes 1 at0 48 [48]
+lit.digits.1 len 1 bytes 1 at0 49 [49]
+lit.digits.2 len 1 bytes 1 at0 50 [50]
+lit.digits.3 len 1 bytes 1 at0 51 [51]
+lit.digits.4 len 1 bytes 1 at0 52 [52]
+lit.digits.5 len 1 bytes 1 at0 53 [53]
+lit.digits.6 len 1 bytes 1 at0 54 [54]
+lit.digits.7 len 1 bytes 1 at0 55 [55]
+lit.digits.8 len 1 bytes 1 at0 56 [56]
+lit.digits.9 len 1 bytes 1 at0 57 [57]
+lit.mixed bytes 10 chars 4 parts 4 same true round true
+lit.mixed.0 len 1 bytes 1 at0 97 [97]
+lit.mixed.1 len 1 bytes 2 at0 195 [195 169]
+lit.mixed.2 len 1 bytes 3 at0 226 [226 134 146]
+lit.mixed.3 len 1 bytes 4 at0 240 [240 159 152 128]
+lit.jp bytes 15 chars 5 parts 5 same true round true
+lit.jp.0 len 1 bytes 3 at0 227 [227 129 147]
+lit.jp.1 len 1 bytes 3 at0 227 [227 130 147]
+lit.jp.2 len 1 bytes 3 at0 227 [227 129 171]
+lit.jp.3 len 1 bytes 3 at0 227 [227 129 161]
+lit.jp.4 len 1 bytes 3 at0 227 [227 129 175]
+lit.accents bytes 5 chars 4 parts 4 same true round true
+lit.accents.0 len 1 bytes 1 at0 99 [99]
+lit.accents.1 len 1 bytes 1 at0 97 [97]
+lit.accents.2 len 1 bytes 1 at0 102 [102]
+lit.accents.3 len 1 bytes 2 at0 195 [195 169]
+w.one.low bytes 1 chars 1 parts 1 same true round true
+w.one.low.0 len 1 bytes 1 at0 1 [1]
+w.one.high bytes 1 chars 1 parts 1 same true round true
+w.one.high.0 len 1 bytes 1 at0 127 [127]
+w.two.low bytes 2 chars 1 parts 1 same true round true
+w.two.low.0 len 1 bytes 2 at0 194 [194 128]
+w.two.high bytes 2 chars 1 parts 1 same true round true
+w.two.high.0 len 1 bytes 2 at0 223 [223 191]
+w.three.low bytes 3 chars 1 parts 1 same true round true
+w.three.low.0 len 1 bytes 3 at0 224 [224 160 128]
+w.three.high bytes 3 chars 1 parts 1 same true round true
+w.three.high.0 len 1 bytes 3 at0 239 [239 191 191]
+w.four.low bytes 4 chars 1 parts 1 same true round true
+w.four.low.0 len 1 bytes 4 at0 240 [240 144 128 128]
+w.four.high bytes 4 chars 1 parts 1 same true round true
+w.four.high.0 len 1 bytes 4 at0 244 [244 143 191 191]
+w.hole.below bytes 3 chars 1 parts 1 same true round true
+w.hole.below.0 len 1 bytes 3 at0 237 [237 159 191]
+w.hole.above bytes 3 chars 1 parts 1 same true round true
+w.hole.above.0 len 1 bytes 3 at0 238 [238 128 128]
+mix.all bytes 10 chars 4 parts 4 same true round true
+mix.all.0 len 1 bytes 1 at0 97 [97]
+mix.all.1 len 1 bytes 2 at0 195 [195 169]
+mix.all.2 len 1 bytes 3 at0 226 [226 134 146]
+mix.all.3 len 1 bytes 4 at0 240 [240 159 152 128]
+mix.desc bytes 10 chars 4 parts 4 same true round true
+mix.desc.0 len 1 bytes 4 at0 240 [240 159 152 128]
+mix.desc.1 len 1 bytes 3 at0 226 [226 134 146]
+mix.desc.2 len 1 bytes 2 at0 195 [195 169]
+mix.desc.3 len 1 bytes 1 at0 97 [97]
+mix.alt bytes 14 chars 6 parts 6 same true round true
+mix.alt.0 len 1 bytes 2 at0 195 [195 169]
+mix.alt.1 len 1 bytes 1 at0 97 [97]
+mix.alt.2 len 1 bytes 4 at0 240 [240 159 152 128]
+mix.alt.3 len 1 bytes 3 at0 226 [226 134 146]
+mix.alt.4 len 1 bytes 1 at0 97 [97]
+mix.alt.5 len 1 bytes 3 at0 224 [224 160 128]
+mix.pairs bytes 10 chars 4 parts 4 same true round true
+mix.pairs.0 len 1 bytes 4 at0 240 [240 159 152 128]
+mix.pairs.1 len 1 bytes 4 at0 240 [240 159 152 128]
+mix.pairs.2 len 1 bytes 1 at0 97 [97]
+mix.pairs.3 len 1 bytes 1 at0 97 [97]
+zero.tells empty false eq false bytes 1 chars 1
+zero.alone bytes 1 chars 1 parts 1 same true round true
+zero.alone.0 len 1 bytes 1 at0 0 [0]
+zero.two bytes 2 chars 2 parts 2 same true round true
+zero.two.0 len 1 bytes 1 at0 0 [0]
+zero.two.1 len 1 bytes 1 at0 0 [0]
+zero.lead bytes 3 chars 3 parts 3 same true round true
+zero.lead.0 len 1 bytes 1 at0 0 [0]
+zero.lead.1 len 1 bytes 1 at0 97 [97]
+zero.lead.2 len 1 bytes 1 at0 98 [98]
+zero.mid bytes 3 chars 3 parts 3 same true round true
+zero.mid.0 len 1 bytes 1 at0 97 [97]
+zero.mid.1 len 1 bytes 1 at0 0 [0]
+zero.mid.2 len 1 bytes 1 at0 98 [98]
+zero.tail bytes 3 chars 3 parts 3 same true round true
+zero.tail.0 len 1 bytes 1 at0 97 [97]
+zero.tail.1 len 1 bytes 1 at0 98 [98]
+zero.tail.2 len 1 bytes 1 at0 0 [0]
+zero.wide bytes 6 chars 3 parts 3 same true round true
+zero.wide.0 len 1 bytes 1 at0 0 [0]
+zero.wide.1 len 1 bytes 4 at0 240 [240 159 152 128]
+zero.wide.2 len 1 bytes 1 at0 0 [0]
+cl.combining bytes 3 chars 2 parts 2 same true round true
+cl.combining.0 len 1 bytes 1 at0 101 [101]
+cl.combining.1 len 1 bytes 2 at0 204 [204 129]
+cl.combining.two bytes 5 chars 3 parts 3 same true round true
+cl.combining.two.0 len 1 bytes 1 at0 97 [97]
+cl.combining.two.1 len 1 bytes 2 at0 204 [204 129]
+cl.combining.two.2 len 1 bytes 2 at0 204 [204 167]
+cl.hangul bytes 6 chars 2 parts 2 same true round true
+cl.hangul.0 len 1 bytes 3 at0 225 [225 132 128]
+cl.hangul.1 len 1 bytes 3 at0 225 [225 133 161]
+cl.zwj.couple bytes 11 chars 3 parts 3 same true round true
+cl.zwj.couple.0 len 1 bytes 4 at0 240 [240 159 145 168]
+cl.zwj.couple.1 len 1 bytes 3 at0 226 [226 128 141]
+cl.zwj.couple.2 len 1 bytes 4 at0 240 [240 159 145 169]
+cl.zwj.family bytes 18 chars 5 parts 5 same true round true
+cl.zwj.family.0 len 1 bytes 4 at0 240 [240 159 145 168]
+cl.zwj.family.1 len 1 bytes 3 at0 226 [226 128 141]
+cl.zwj.family.2 len 1 bytes 4 at0 240 [240 159 145 169]
+cl.zwj.family.3 len 1 bytes 3 at0 226 [226 128 141]
+cl.zwj.family.4 len 1 bytes 4 at0 240 [240 159 145 167]
+cl.skin bytes 8 chars 2 parts 2 same true round true
+cl.skin.0 len 1 bytes 4 at0 240 [240 159 145 141]
+cl.skin.1 len 1 bytes 4 at0 240 [240 159 143 191]
+cl.flag bytes 8 chars 2 parts 2 same true round true
+cl.flag.0 len 1 bytes 4 at0 240 [240 159 135 175]
+cl.flag.1 len 1 bytes 4 at0 240 [240 159 135 181]
+cl.vs16 bytes 6 chars 2 parts 2 same true round true
+cl.vs16.0 len 1 bytes 3 at0 226 [226 157 164]
+cl.vs16.1 len 1 bytes 3 at0 239 [239 184 143]
+cl.crlf bytes 2 chars 2 parts 2 same true round true
+cl.crlf.0 len 1 bytes 1 at0 13 [13]
+cl.crlf.1 len 1 bytes 1 at0 10 [10]
+long.ascii bytes 2048 chars 2048 parts 2048 same true round true
+long.ascii.shape ones 2048 widths 2048 0 0 0 weighted 162601070
+long.ascii.ends first [65] last [84]
+long.three bytes 6144 chars 2048 parts 2048 same true round true
+long.three.shape ones 2048 widths 0 0 2048 0 weighted 476285952
+long.three.ends first [227 129 128] last [227 129 191]
+long.four bytes 4096 chars 1024 parts 1024 same true round true
+long.four.shape ones 1024 widths 0 0 0 1024 weighted 125952000
+long.four.ends first [240 159 152 128] last [240 159 152 143]
+long.mixed bytes 5120 chars 2048 parts 2048 same true round true
+long.mixed.shape ones 2048 widths 512 512 512 512 weighted 397722112
+long.mixed.ends first [97] last [240 159 152 128]

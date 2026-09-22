@@ -1,0 +1,319 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_from_code_point`'s helper, and here for its reason: a
+/// rendered character is the same question asked through the terminal's
+/// encoder, and this file has a row whose one character is a **NUL**. A list of
+/// numbers is the encoding itself, so `é` at `195 169` is a fact no display
+/// layer can be blamed for.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// `part.byteAt(0)`, or `-1` where there is no byte 0.
+///
+/// Every element `chars()` answers holds a character, and no character is
+/// nought bytes, so this is `byteAt(0)` at every row below and the guard is
+/// never taken. It is here so that an implementation which answered an
+/// **empty** element — the one wrong answer this corpus is most likely to see,
+/// because it is what a walk that advanced by nought would produce — prints
+/// `at0 -1` on the row that holds it rather than raising out of the run and
+/// taking every row after it with it. A refusal would fail the suite too; it
+/// would just fail it without saying which element was empty.
+fn leadOf(part: String) -> Int {
+  if part.byteLength() == 0 {
+    return -1
+  }
+  part.byteAt(0)
+}
+
+/// The string the code points `points` name, in order.
+///
+/// Every row this file builds out of code points rather than out of a source
+/// literal is built here, and that is what lets the oracle be independent: the
+/// oracle holds the same list of numbers and encodes it with an encoder of its
+/// own, where a literal would make both sides read the same UTF-8 out of two
+/// files and prove only that the files matched.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// `points` repeated `times` over.
+fn repeated(points: Array<Int>, times: Int) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  var round = 0
+  while round < times {
+    for point in points {
+      out.push(String.fromCodePoint(point)?)
+    }
+    round += 1
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// `count` characters, walking `base` through `base + span - 1` and round.
+fn cycled(base: Int, span: Int, count: Int) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  var i = 0
+  while i < count {
+    out.push(String.fromCodePoint(base + i % span)?)
+    i += 1
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// One `String.chars()` call, element by element.
+///
+/// The summary line is the four numbers that can disagree — the receiver's
+/// bytes, the receiver's characters, the array's length, and whether the last
+/// two are equal — followed by whether `"".join(text.chars())` is `text`
+/// again. `same` and `round` are both printed as words rather than left to be
+/// read off the two counts, so a row that is wrong is wrong *on the line*.
+///
+/// Then a line an element: its `length()`, which must be 1 at every row in
+/// this file; its `byteLength()`, which must be 1, 2, 3 or 4 and is the only
+/// number here that varies; its first byte, which must be a UTF-8 **lead**
+/// byte and never a continuation one; and its bytes written out.
+fn show(label: String, text: String) -> Result<Unit, Error> {
+  let parts = text.chars()
+  let rejoined = "".join(parts)
+  println("{label} bytes {text.byteLength()} chars {text.length()} parts {parts.length()} same {text.length() == parts.length()} round {rejoined == text}")?
+  var i = 0
+  while i < parts.length() {
+    let part = parts.get(i).unwrapOr("")
+    println("{label}.{i} len {part.length()} bytes {part.byteLength()} at0 {leadOf(part)} [{bytesOf(part)}]")?
+    i += 1
+  }
+  Ok(())
+}
+
+/// [`show`] for a row too long to print an element of.
+///
+/// The same summary line, and then the whole array reduced to numbers that no
+/// wrong answer can hit by accident: how many elements have `length() == 1`
+/// (all of them, or the row is wrong), how many are one, two, three and four
+/// bytes wide, and a position-weighted sum of the lead bytes. The weight is
+/// what makes the sum an ordering check as well as a multiset check — an
+/// implementation that answered the right characters in the wrong order keeps
+/// every other number on this line and moves this one.
+///
+/// Both ends are printed as bytes as well, because a walk that lost its first
+/// or its last character would keep the widths' *shape* and lose a count, and
+/// the two lines together say which end.
+fn digest(label: String, text: String) -> Result<Unit, Error> {
+  let parts = text.chars()
+  let rejoined = "".join(parts)
+  var ones = 0
+  var w1 = 0
+  var w2 = 0
+  var w3 = 0
+  var w4 = 0
+  var weighted = 0
+  var i = 0
+  while i < parts.length() {
+    let part = parts.get(i).unwrapOr("")
+    if part.length() == 1 {
+      ones += 1
+    }
+    let width = part.byteLength()
+    if width == 1 {
+      w1 += 1
+    } else if width == 2 {
+      w2 += 1
+    } else if width == 3 {
+      w3 += 1
+    } else if width == 4 {
+      w4 += 1
+    }
+    weighted += (i + 1) * leadOf(part)
+    i += 1
+  }
+  println("{label} bytes {text.byteLength()} chars {text.length()} parts {parts.length()} same {text.length() == parts.length()} round {rejoined == text}")?
+  println(
+    "{label}.shape ones {ones} widths {w1} {w2} {w3} {w4} weighted {weighted}",
+  )?
+  let first = parts.get(0).unwrapOr("")
+  let last = parts.get(parts.length() - 1).unwrapOr("")
+  println("{label}.ends first [{bytesOf(first)}] last [{bytesOf(last)}]")?
+  Ok(())
+}
+
+/// Pins every answer `String.chars()` gives before it moves out of the
+/// runtime, so that the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation, and this is `String.chars()`'s. Today it is
+/// `text.chars().map(String::from).collect()` in Rust — Rust's own UTF-8
+/// decoder, one heap `String` a character and one `Array<String>` around them
+/// — reached through one `Inst::IntrinsicCall`. Issue #454's Step 3, eleventh
+/// item.
+///
+/// **The census says no shipped program runs it.** Measured at `b2fe2f9`:
+/// `examples/covefmt` has **0 static sites and 0 dynamic calls**, and
+/// `examples/cq` has **2 static sites and 0 dynamic calls** — both in
+/// `cq/json/json.cove`, on paths the `revenue-summary` program does not take.
+/// So this file and `benches/chars` are the whole of what will notice when the
+/// body becomes Cove, and the corpus is what says the *answers* did not move.
+///
+/// # What `chars()` splits by, and the rows that say so
+///
+/// It splits by **code point**, and not by grapheme cluster. That is not a
+/// thing the operation's name settles and it is not a thing its signature
+/// settles, so it is pinned rather than assumed, and it was read off the
+/// **binary** rather than off the Rust: `clusters()` is nine rows of text a
+/// reader sees as fewer characters than this answers. A combining acute is an
+/// element of its own; a ZWJ family of three people and two joiners is
+/// **five**; a thumb with a skin-tone modifier is **two**; a regional-indicator
+/// flag is **two**; a variation selector is an element; and `CRLF` is two.
+/// An implementation that segmented clusters would answer 2, 1, 1, 1, 1 and 1
+/// and fail every one of them.
+///
+/// It is worth being plain about why the corpus takes the side it does: what
+/// `chars()` does today is what the Cove body has to do, whatever either of us
+/// would have chosen. ADR 0064's Decision 8 gates a migration on the
+/// observable answer being unchanged, and these rows are the observation.
+///
+/// # A character is a `String` of length 1
+///
+/// There is no `Character` type for this to answer instead, so every element
+/// is a `String` whose `length()` is 1 and whose `byteLength()` is 1, 2, 3 or
+/// 4. Both counts are on every element line, because they are the two readings
+/// of "how long is this", and the whole of the difference between `chars()` and
+/// a byte loop is that they disagree.
+///
+/// # Zero
+///
+/// `fromCodePoint(0)` is a `String` of one character and one byte, and
+/// `chars()` of it is **one** element and not none. `zero.*` is that stated
+/// five ways, because a NUL is where an implementation that reached for a
+/// C-string or for a zero-terminated length gets it wrong, and because
+/// [#462](https://github.com/myuon/cove/issues/462)'s round found the same
+/// assumption sitting in the brief it was handed. `zero.tells` is the one
+/// line here that does not call `chars()` at all: it is `isEmpty()` and
+/// `== ""` on that string, so that the row which says a NUL string is not an
+/// empty one is beside the row that takes it apart.
+export fn main() -> Result<Unit, Error> {
+  literals()?
+  widths()?
+  mixed()?
+  zero()?
+  clusters()?
+  longs()?
+  Ok(())
+}
+
+/// Rows whose text is a **source literal**, which is how a program writes one.
+fn literals() -> Result<Unit, Error> {
+  show("lit.empty", "")?
+  show("lit.one", "a")?
+  show("lit.ascii", "abc")?
+  show("lit.hello", "Hello, world!")?
+  show("lit.digits", "0123456789")?
+  show("lit.mixed", "aé→😀")?
+  show("lit.jp", "こんにちは")?
+  show("lit.accents", "café")?
+  Ok(())
+}
+
+/// Every UTF-8 width, at both ends of its range of code points.
+///
+/// The lead byte alone says how wide a character is — `std.string`'s walk
+/// leans on it and so does the oracle — so the rows that matter are the ones
+/// where the lead byte changes bracket: `0x7F`/`0x80`, `0x7FF`/`0x800`,
+/// `0xFFFF`/`0x10000`, and `0x10FFFF`, which is the end of Unicode and the
+/// only single-character row in this file whose one character is **four**
+/// bytes. `hole.*` is the two code points either side of the surrogate gap,
+/// which are three bytes each and are here because a walk that tried to decode
+/// rather than to measure could notice the gap and nothing here should.
+fn widths() -> Result<Unit, Error> {
+  show("w.one.low", fromPoints([1])?)?
+  show("w.one.high", fromPoints([127])?)?
+  show("w.two.low", fromPoints([128])?)?
+  show("w.two.high", fromPoints([2047])?)?
+  show("w.three.low", fromPoints([2048])?)?
+  show("w.three.high", fromPoints([65535])?)?
+  show("w.four.low", fromPoints([65536])?)?
+  show("w.four.high", fromPoints([1114111])?)?
+  show("w.hole.below", fromPoints([55295])?)?
+  show("w.hole.above", fromPoints([57344])?)?
+  Ok(())
+}
+
+/// Strings whose characters are not all the same width.
+///
+/// `mix.all` is one character of each width in ascending order, `mix.desc` the
+/// same four descending, and `mix.alt` alternates so that no two neighbours
+/// are the same width. The three together are what says the walk's step comes
+/// from the byte it is *at* rather than from the byte it started at: an
+/// implementation that advanced by the previous character's width answers
+/// `mix.all` with garbage and `w.*` correctly.
+fn mixed() -> Result<Unit, Error> {
+  show("mix.all", fromPoints([97, 233, 8594, 128512])?)?
+  show("mix.desc", fromPoints([128512, 8594, 233, 97])?)?
+  show("mix.alt", fromPoints([233, 97, 128512, 8594, 97, 2048])?)?
+  show("mix.pairs", fromPoints([128512, 128512, 97, 97])?)?
+  Ok(())
+}
+
+/// The NUL character, alone and in every position.
+fn zero() -> Result<Unit, Error> {
+  let nul = fromPoints([0])?
+  println("zero.tells empty {nul.isEmpty()} eq {nul == ""} bytes {nul.byteLength()} chars {nul.length()}")?
+  show("zero.alone", nul)?
+  show("zero.two", fromPoints([0, 0])?)?
+  show("zero.lead", fromPoints([0, 97, 98])?)?
+  show("zero.mid", fromPoints([97, 0, 98])?)?
+  show("zero.tail", fromPoints([97, 98, 0])?)?
+  show("zero.wide", fromPoints([0, 128512, 0])?)?
+  Ok(())
+}
+
+/// Text a reader sees as fewer characters than `chars()` answers.
+fn clusters() -> Result<Unit, Error> {
+  show("cl.combining", fromPoints([101, 769])?)?
+  show("cl.combining.two", fromPoints([97, 769, 807])?)?
+  show("cl.hangul", fromPoints([4352, 4449])?)?
+  show("cl.zwj.couple", fromPoints([128104, 8205, 128105])?)?
+  show("cl.zwj.family", fromPoints([128104, 8205, 128105, 8205, 128103])?)?
+  show("cl.skin", fromPoints([128077, 127999])?)?
+  show("cl.flag", fromPoints([127471, 127477])?)?
+  show("cl.vs16", fromPoints([10084, 65039])?)?
+  show("cl.crlf", fromPoints([13, 10])?)?
+  Ok(())
+}
+
+/// Rows long enough that no fast path, no capacity guess and no small-string
+/// shortcut is left untaken.
+///
+/// Two thousand and forty-eight characters is past every threshold in this
+/// repository's allocator and past the point at which a run sized by a guess
+/// has had to grow several times. The four rows vary the **encoding width**
+/// independently of the length: all one byte, all three, all four, and the
+/// four-way cycle whose 2,048 characters are 5,120 bytes. `long.ascii` and
+/// `long.four` are the same character count and a factor of four apart in
+/// bytes, which is the pair that separates a cost per character from a cost
+/// per byte.
+fn longs() -> Result<Unit, Error> {
+  digest("long.ascii", cycled(65, 26, 2048)?)?
+  digest("long.three", cycled(12352, 64, 2048)?)?
+  digest("long.four", cycled(128512, 16, 1024)?)?
+  digest("long.mixed", repeated([97, 233, 8594, 128512], 512)?)?
+  Ok(())
+}

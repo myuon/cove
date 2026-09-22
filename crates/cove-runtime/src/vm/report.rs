@@ -434,7 +434,7 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Eleven of the 18 variants can be non-zero here, which is exactly the
+    /// Ten of the 17 variants can be non-zero here, which is exactly the
     /// set that declares `Effects::BULK_WORK`; the other seven examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
@@ -480,8 +480,20 @@ pub struct IntrinsicCalls {
     /// whole-program measurement can see rather than a change to a table. What
     /// it charged was the bytes of the answer it built; what charges them now
     /// is the `Inst::RunCopy` under each `StringBuilder.append`, plus an
-    /// instruction a part for the sum that sizes the builder. Both numbers are
-    /// measured off `Intrinsic::effects` rather than counted by hand.
+    /// instruction a part for the sum that sizes the builder.
+    ///
+    /// **Step 3's `String.chars` is the third carrier to go**, so the carriers
+    /// fall to ten and the rest stay at seven. It is the mirror of `join` and
+    /// the reading it was paired with all along: `join` charged the bytes of
+    /// the answer it built out of an array, and this charged the bytes of the
+    /// receiver it took apart into one. Both are `Inst::RunCopy` now — one per
+    /// character here, where `join` has one per part — and what sizes the run
+    /// is a walk of the same lead bytes, charged an instruction at a time.
+    /// Unlike `join`, **no shipped program calls it**: covefmt has no site at
+    /// all and cq has two that never fire, so this row going to nought is a
+    /// change to a table and to `benches/chars`, and to nothing a whole-program
+    /// measurement of `examples/` can see. Both numbers are measured off
+    /// `Intrinsic::effects` rather than counted by hand.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,

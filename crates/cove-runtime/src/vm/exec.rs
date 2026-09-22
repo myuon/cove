@@ -501,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// eleven of the 18 variants declare
+    /// ten of the 17 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -1334,7 +1334,7 @@ impl<'a> Machine<'a> {
     /// total once the arm has returned and charges it. So an arm adds this
     /// line where it has read the thing it is about to walk, and the question
     /// of what a charge *does* is asked in exactly one place rather than in
-    /// eighteen.
+    /// seventeen.
     ///
     /// `units` is in the unit of the run the arm walked, which for a
     /// `String` is **bytes** — see [`Machine::examined`](Self::examined)'s

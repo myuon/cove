@@ -307,3 +307,15 @@ allow = ["console", "clock"]
 [run.join]
 entry = "join.main"
 allow = ["console", "clock"]
+
+# `chars`'s decomposition — issue #454's Step 3, which moved `String.chars`
+# into `std.string.chars`. `[run.chars]` above is one receiver at 32,000
+# rounds and is one of `cove-bench`'s nine timed rows; this is the matrix of
+# receiver length against encoding width beside it, which is what separates a
+# cost per character from a cost per byte. It is a second entry of the same
+# package for the reason `bytescan_call` is: the two ask one question between
+# them and the row `cove-bench` reports must not move when the second arrives.
+
+[run.chars_rows]
+entry = "chars.rows"
+allow = ["console", "clock"]
