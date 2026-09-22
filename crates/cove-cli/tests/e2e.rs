@@ -38,6 +38,10 @@
 //!   <case>/args               optional: one program argument per line
 //!   <case>/command            optional: the `cove` subcommand and flags to
 //!                             run instead of `run <case>`, one per line
+//!   <case>/both_backends      optional, and only meaningful beside a
+//!                             `command`: run that command a second time
+//!                             with `--backend ast` and require the two runs
+//!                             to agree
 //!   <case>/env                optional: KEY=VALUE per line, or a bare KEY
 //!                             to remove that variable from the child
 //!   <case>/stdin              optional: what the child reads on stdin
@@ -73,7 +77,15 @@
 //!
 //! A case with a `command` file names its own invocation and is run once.
 //! That is how a case that is *about* one of them — `backend_vm`,
-//! `backend_ast` — says so, and it is the only way to opt out.
+//! `backend_ast` — says so, and it is the way to opt out.
+//!
+//! It is the way to opt out and not the whole story, because a `command` is
+//! not always a statement about a backend. `cove test` is the one that is
+//! not: it is there to reach a suite of `test fn`s, and a suite that pins
+//! *refusals* is exactly what both evaluators should be held to — they word
+//! a runtime refusal in two different modules, so the agreement is a fact
+//! about the language. Such a case puts an empty `both_backends` file beside
+//! its `command` and is compared like any other.
 //!
 //! The rules this harness enforces:
 //!
@@ -338,9 +350,30 @@ impl Case {
     }
 
     /// Whether this case is compared across both backends: one that named
-    /// neither a command of its own nor, therefore, a backend.
+    /// neither a command of its own nor, therefore, a backend — or one that
+    /// named a command and [asked for the comparison
+    /// anyway](Case::asks_for_both_backends).
     fn compares_both_backends(&self) -> bool {
-        !self.names_its_own_command && self.runs_an_entry()
+        (!self.names_its_own_command && self.runs_an_entry()) || self.asks_for_both_backends()
+    }
+
+    /// Whether a `both_backends` file asks for the comparison a `command`
+    /// otherwise opts out of.
+    ///
+    /// The rule above reads a command as a statement about which backend the
+    /// case is about, and for `cove run --backend ast` that is exactly what
+    /// it is. `cove test` is the case where it is not: the command is there
+    /// to reach a suite of `test fn`s rather than to choose a backend, and a
+    /// suite of refusals is precisely the thing worth running on both — the
+    /// two evaluators word a runtime refusal in two different places
+    /// (`cove_runtime::builtins` and `cove_runtime::vm::intrinsics`), so
+    /// agreement between them is a fact about the language and not about the
+    /// harness.
+    ///
+    /// The flag is appended the same way the other comparison appends it, so
+    /// a case that opts in must take `--backend`.
+    fn asks_for_both_backends(&self) -> bool {
+        self.dir.join("both_backends").exists()
     }
 
     /// Runs the real `cove` binary, from `run_dir`, with this case's command.

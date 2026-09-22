@@ -1,0 +1,254 @@
+error[cove::runtime]: test `duplicates.aBoolElement` failed: `Set.of` was given the element `true` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:277:13
+    |
+277 |   let bad = Set.of(true, true)
+    |             ^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aBoxedElementIsNamedByWhatIsInTheBox` failed: `Set.of` was given the element `Cat(tag: 1)` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:371:13
+    |
+371 |   let bad = Set.of(one, other)
+    |             ^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aDuplicateAtTheEnd` failed: `Set.of` was given the element `3` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:197:13
+    |
+197 |   let bad = Set.of(1, 2, 3, 3)
+    |             ^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aDuplicateAtTheStart` failed: `Set.of` was given the element `4` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:204:13
+    |
+204 |   let bad = Set.of(4, 4, 1, 2)
+    |             ^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aDurationRendersInTheUnitThatDividesIt` failed: `Set.of` was given the element `1h` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:295:13
+    |
+295 |   let bad = Set.of(3600s, 3600s)
+    |             ^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aGenericStructIsNamedByItsDeclaredName` failed: `Set.of` was given the element `Held(v: 1)` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:381:13
+    |
+381 |   let bad = Set.of(Held(v: 1), Held(v: 1))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aMapAsAnElement` failed: `Set.of` was given the element `{a: 1}` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:343:13
+    |
+343 |   let bad = Set.of(
+    |             ^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aMapNamesAStringKeyAsItsBytes` failed: `Map.of` was given the key `a` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:234:13
+    |
+234 |   let bad = Map.of(MapEntry(key: "a", value: 1), MapEntry(key: "a", value: 2))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/map.cove:49:7
+   |
+49 |       core.refuseDuplicate(entry.key, "Map.of", "key")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different key
+error[cove::runtime]: test `duplicates.aMapNamesTheKeyAndNotTheValue` failed: `Map.of` was given the key `1` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:225:13
+    |
+225 |   let bad = Map.of(MapEntry(key: 1, value: "x"), MapEntry(key: 1, value: "y"))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/map.cove:49:7
+   |
+49 |       core.refuseDuplicate(entry.key, "Map.of", "key")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different key
+error[cove::runtime]: test `duplicates.aNestedFieldDecidesWhichKeyIsNamed` failed: `Set.of` was given the element `Outer(i: Inner(v: 1), n: 0)` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:266:13
+    |
+266 |   let bad = Set.of(
+    |             ^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aRangeRendersAsTheOperatorItWasWrittenWith` failed: `Set.of` was given the element `1..3` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:302:13
+    |
+302 |   let bad = Set.of(1..3, 1..3)
+    |             ^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aSetOfSetsIgnoresTheOrderTheyWereWrittenIn` failed: `Set.of` was given the element `{1, 2}` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:336:13
+    |
+336 |   let bad = Set.of(Set.of(1, 2), Set.of(2, 1))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.aUnitElement` failed: `Set.of` was given the element `()` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:284:13
+    |
+284 |   let bad = Set.of((), ())
+    |             ^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.anArrayElement` failed: `Set.of` was given the element `[1, 2, 3]` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:325:13
+    |
+325 |   let bad = Set.of([1, 2, 3], [1, 2, 3])
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.anEnumCaseWithParts` failed: `Set.of` was given the element `Pair(3, 4)` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:318:13
+    |
+318 |   let bad = Set.of(Mark.Pair(3, 4), Mark.Pair(3, 4))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.anEnumCaseWithoutParts` failed: `Set.of` was given the element `Plain` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:311:13
+    |
+311 |   let bad = Set.of(Mark.Plain, Mark.Plain)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.anErrorRendersAsItsMessageAlone` failed: `Set.of` was given the element `boom` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:357:13
+    |
+357 |   let bad = Set.of(Error(message: "boom"), Error(message: "boom"))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.nothingQuotesOrEscapesTheKeyThatIsNamed` failed: `Set.of` was given the element `a`b
+c` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:396:13
+    |
+396 |   let bad = Set.of(odd, odd)
+    |             ^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.stringsAreEqualByTheirBytesAndNotByIdentity` failed: `Set.of` was given the element `ab` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:245:13
+    |
+245 |   let bad = Set.of("ab", "{a}b")
+    |             ^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.structsAreEqualFieldByField` failed: `Set.of` was given the element `Point(x: 1, y: ab)` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:256:13
+    |
+256 |   let bad = Set.of(Point(x: 1, y: "ab"), Point(x: 1, y: "{a}b"))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.theAdmissionRefusesAFloatBeforeADuplicateIsLookedFor` failed: `Set.of` cannot use a `Float` as a set element
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:424:13
+    |
+424 |   let bad = Set.of(1.5, 1.5)
+    |             ^^^^^^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.
+  help: convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`
+error[cove::runtime]: test `duplicates.theDeepestNestingTwoKeysStillCompareAt` failed: `Set.of` was given the element `Link(42, [Link(41, [Link(40, [Link(39, [Link(38, [Link(37, [Link(36, [Link(35, [Link(34, [Link(33, [Link(32, [Link(31, [Link(30, [Link(29, [Link(28, [Link(27, [Link(26, [Link(25, [Link(24, [Link(23, [Link(22, [Link(21, [Link(20, [Link(19, [Link(18, [Link(17, [Link(16, [Link(15, [Link(14, [Link(13, [Link(12, [Link(11, [Link(10, [Link(9, [Link(8, [Link(7, [Link(6, [Link(5, [Link(4, [Link(3, [Link(2, [Link(1, [Stop])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])])` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:408:13
+    |
+408 |   let bad = Set.of(chain(42), chain(42))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element
+error[cove::runtime]: test `duplicates.twoDuplicatesNameTheFirstFoundAgain` failed: `Set.of` was given the element `4` more than once
+   --> <e2e>/values_value_refuse_duplicate/duplicates/duplicates.cove:215:13
+    |
+215 |   let bad = Set.of(7, 4, 4, 7)
+    |             ^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different element

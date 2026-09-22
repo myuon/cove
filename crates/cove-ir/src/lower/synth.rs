@@ -129,6 +129,55 @@
 //! can write. Issue #461 is about the other kind. `Value.order`'s two are not
 //! it, and `Value.admitKey`'s — which carry a rule and a help — are not it
 //! either, for a reason next to it rather than in it.
+//!
+//! # The fifth operation is not here, and it is not waiting
+//!
+//! Decision 3 names five, and four of them are [`Operation`]'s variants. The
+//! fifth — `Value.refuseDuplicate`, which `std.set.of` and `std.map.of` reach
+//! when a literal holds one element twice — **is not a walk this module can
+//! compose, and the reason is not one a later change unblocks.** It is
+//! written down here rather than left as a gap, because a gap reads as work
+//! outstanding and this is a finding.
+//!
+//! Three things about it, in the order they settle the question.
+//!
+//! **There is no decision left to make.** The other four answer something a
+//! call site asked: a `Bool`, an `Int`, a decision-`Bool`, an appended `()`.
+//! `core.refuseDuplicate` answers nothing — it *always raises* — and it is
+//! reached only from inside `if at >= 0` in `std.set.of` and `std.map.of`,
+//! where `seekPlaced` has already found the duplicate **in Cove**. So the
+//! split [`Operation::Admission`] uses does not apply: a `refuses<L>(L) ->
+//! Bool` for this operation would be `return true`, no layout read and no
+//! call avoided. What that split bought for the admission was the *admitting*
+//! path, which is every path a working program takes. There is no
+//! corresponding path here, because this operation has no path that continues.
+//!
+//! **The one thing in it that is layout-directed is the sentence.** The
+//! refusal is `` `{method}` was given the {role} `{key}` more than once `` —
+//! and `{key}` is the key **as it renders**. The method and the role are
+//! `String` literals at both call sites, the rule is one constant sentence,
+//! and the help is the role again; the only part a layout decides is the
+//! rendering, which is [`Operation::Rendering`]'s walk pointed at a
+//! diagnostic instead of at a buffer.
+//!
+//! **And that sentence cannot be raised from IR, twice over.**
+//! [`Inst::Trap`] carries one [`crate::StrId`] and a refusal is three
+//! strings, which is the wall `Value.admitKey` met; and the first of the
+//! three quotes a value computed at run time, which is issue #461's own wall.
+//! `Value.refuseDuplicate` is the only one of `Intrinsic`'s twelve survivors
+//! that meets both. Rendering being composable IR since
+//! [`Operation::Rendering`] landed does not help: a walk can now *build* the
+//! text, and there is still no instruction that raises a message, a rule and
+//! a help out of a `String` a frame holds.
+//!
+//! What it costs to leave it here is nothing that runs. On `examples/covefmt`
+//! and `examples/cq` it is **0 static sites and 0 dynamic calls**, and that
+//! is not those two programs being unrepresentative: a program that reaches
+//! this intrinsic stops. Its whole execution history, in any program that
+//! completes, is empty.
+//!
+//! `tests/e2e/values_value_refuse_duplicate` is the corpus that pins what a
+//! migration would have to keep, and issue #432 carries the argument.
 
 use std::sync::Arc;
 
@@ -154,10 +203,16 @@ pub(super) const MODULE: &str = "<synth>";
 
 /// One layout-directed operation ADR 0064's Decision 3 names.
 ///
-/// One of the five is still to come — `ValueRefuseDuplicate` is an error
-/// construction blocked on issue #461 — and the key of the memo is the
-/// *pair* rather than the layout so that adding one is a variant here and an
-/// arm in [`Synth::body`] rather than a second memo.
+/// **Four of the five, and the fifth is not pending.** Decision 3 names
+/// `ValueRefuseDuplicate` too, and this module's header says why it is not a
+/// variant here and why no later change makes it one: it decides nothing —
+/// `std.set.of` and `std.map.of` have already found the duplicate in Cove —
+/// and the refusal it raises is three sentences of which the first quotes the
+/// key as it renders.
+///
+/// The key of the memo is still the *pair* rather than the layout, so that
+/// adding an operation is a variant here and an arm in [`Synth::body`] rather
+/// than a second memo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Operation {
     /// `a == b`: whether two values of one layout are the same value.

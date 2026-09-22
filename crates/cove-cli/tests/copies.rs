@@ -1438,6 +1438,22 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// at 28 — up three, not down — and its instructions go 6832 to 8854, for the
 /// reason in the paragraph above. A prediction written down is a prediction
 /// that can be checked, and this one was wrong.
+///
+/// **The row that added a corpus and moved nothing**, which is the first of
+/// those and is worth a line because the reason is about this survey rather
+/// than about the corpus. ADR 0064 Decision 3's fifth operation landed
+/// `tests/e2e/values_value_refuse_duplicate`, twenty-nine `test fn`s over
+/// four hundred lines, and the number below did not move: **206 programs and
+/// 9227 both with that directory and with it held out**, measured both ways.
+/// The four-row float corpus above moved it by 157 and this one by 0, and
+/// what separates them is that a survey enumerates `[run.<name>]` tables —
+/// [`support::cases_of`] — and a package whose programs are reached by `cove
+/// test` declares none. So a `test fn`-only package is outside this survey,
+/// `bytecode_corpus.rs`, `vm_coverage.rs` and `differential.rs` alike. It is
+/// not a gap in what that corpus checks, which the `e2e` harness runs on both
+/// evaluators; it is a gap in what *these* four see, and the decomposition
+/// `CLAUDE.md` asks for answers itself here: all of the nothing is the new
+/// program, and there was no lowering change to attribute the rest to.
 const FORWARDABLE_COPIES: usize = 9227;
 
 #[test]

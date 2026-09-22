@@ -1311,6 +1311,23 @@ impl Body<'_> {
 
     /// `core.refuseDuplicate(key, method, role)`: one [`Inst::IntrinsicCall`]
     /// of [`Intrinsic::ValueRefuseDuplicate`], which always raises.
+    ///
+    /// **It stays one, where the four operations beside it became walks.**
+    /// ADR 0064's Decision 3 names five layout-directed operations and this
+    /// is the fifth; `super::synth`'s header carries the argument, and the
+    /// half of it that belongs at the call site is this. There is nothing
+    /// here to put a `branch-false` in front of, the way
+    /// [`Self::admit_by_walk`] puts one in front of `Value.admitKey`: the
+    /// decision this refusal follows from was made in Cove, by
+    /// `std.set.of`'s and `std.map.of`'s `seekPlaced(out, element) >= 0`, and
+    /// the lowering is reached only inside that `if`. A walk asked to decide
+    /// would answer `true` every time it was called.
+    ///
+    /// So the intrinsic is emitted unconditionally, and the thing that keeps
+    /// it from running is a branch in the standard library rather than a
+    /// table in this crate. That is why it is **0 dynamic calls on every
+    /// program that finishes** — including both gated ones — rather than 0
+    /// because a layout settled it.
     fn core_refuse_duplicate(
         &mut self,
         expr: &Expr,
