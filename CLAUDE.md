@@ -68,6 +68,28 @@ formatter does not supply. Every variant reparses a whole file, so the work is
 quadratic in file size, and it grows with the corpus: **78.6s over the cores**
 as of 2026-09-22, against 9s when this paragraph was written.
 
+### Adding a program to the repository trips a ratchet in `cargo t`
+
+`crates/cove-cli/tests/copies.rs` surveys **every program in the repository**
+and asserts a total, so a new directory under `tests/e2e/` or `benches/` moves
+that number whether or not it has anything to do with your change. It is not
+one of the two `#[ignore]`d ratchets above — it runs in a plain `cargo t`, and
+it is the one most likely to fail a gate you thought you had not touched.
+
+Two things about it are worth knowing before you reach for the constant.
+
+**Decompose the rise; do not accept it.** The interesting question is how much
+came from the *lowering* and how much from the new program merely existing, and
+the two are separable: run the survey with the new directories removed, then
+add them back. Every migration in ADR 0064's series has done this, and it has
+paid — #475's lowering moved the total by **−7**, the first fall in the file's
+history, which a bare "it went up by 94" would have hidden entirely; #477's rise
+of 98 was 63 the new program and 35 the lowering, and the 35 were one
+pre-existing standard-library copy appearing at more expansion sites.
+
+**A new program also needs its row in `tests/e2e/cove.toml`.** Forgetting it
+fails somewhere that does not name the file you added.
+
 Before pushing, the full gate is what CI runs, and CI runs all of it under
 `--profile checked`: `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --profile checked -- -D warnings`,
