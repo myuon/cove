@@ -1738,6 +1738,23 @@ impl Check<'_> {
     /// [`one_admission_boundary`], a pass of its own for a reason that is the
     /// operation's rather than this rule's; see there.
     ///
+    /// # `Value.refuseDuplicate` has no line here, and cannot have one
+    ///
+    /// It is the fifth of Decision 3's five and the one whose producer is
+    /// **not** migrated and will not be; `crate::lower::synth`'s header
+    /// carries the argument. It is named in the `match` below rather than
+    /// falling into the catch-all anonymously, because the point of this
+    /// rule being a *list* is that a variant absent on purpose should say so.
+    ///
+    /// What it would be a rule about does not exist. This one catches the
+    /// cheap way out of a migration — hand an awkward layout to the intrinsic
+    /// and every answer stays right — and there is no walk here to take that
+    /// way out of: `lower::core::core_refuse_duplicate` emits the intrinsic
+    /// for every layout, by design, because the refusal it raises quotes the
+    /// key as it renders and [`Inst::Trap`](crate::Inst::Trap) carries one
+    /// [`crate::StrId`]. A line for it would have to admit every layout, and
+    /// a rule that admits everything asserts nothing.
+    ///
     /// # `Value.renderInto` is reached from more than a box, and that is a
     /// widening rather than a reading
     ///
@@ -1784,6 +1801,11 @@ impl Check<'_> {
         let values = match intrinsic {
             crate::Intrinsic::AnyEquals | crate::Intrinsic::ValueOrder => 2,
             crate::Intrinsic::ValueRenderInto => 1,
+            // `Value.admitKey` is checked by [`one_admission_boundary`], and
+            // `Value.refuseDuplicate` by nothing at all — see this
+            // function's doc comment, which says why rather than leaving the
+            // fifth of Decision 3's five to be read out of this arm.
+            crate::Intrinsic::ValueAdmitKey | crate::Intrinsic::ValueRefuseDuplicate => return,
             _ => return,
         };
         if args.index() >= self.program.args.len() {

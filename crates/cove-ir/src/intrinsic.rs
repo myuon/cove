@@ -375,6 +375,15 @@ impl Intrinsic {
             Intrinsic::ValueOrder | Intrinsic::ValueAdmitKey => {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
+            // It renders a key of any depth and still declares no
+            // `BULK_WORK`, which reads like an omission and is not. That flag
+            // is a *cancellation* obligation — ADR 0040 asks generated code
+            // to poll in bounded chunks rather than run the call as one
+            // uninterruptible step — and there is nothing to return to here:
+            // this arm has no path that answers. It is the one intrinsic
+            // whose every execution is its program's last, which is also why
+            // ADR 0064's Decision 3 leaves it whole where it made walks of
+            // the four operations beside it (`lower::synth`'s header).
             Intrinsic::ValueRefuseDuplicate => raise.union(E::READS_MEMORY),
         }
     }
