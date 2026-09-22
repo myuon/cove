@@ -1,0 +1,280 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_chars`' helper, and here for its reason: a rendered part is
+/// the same question asked through the terminal's encoder, and this file has
+/// rows whose separator is a **NUL** and rows whose parts are empty. A list of
+/// numbers is the encoding itself, so `é` at `195 169` is a fact no display
+/// layer can be blamed for, and an empty part prints `[]` rather than nothing
+/// at all.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// `part.byteAt(0)`, or `-1` where there is no byte 0.
+///
+/// Unlike `values_string_chars`' `leadOf`, the guard here is **taken**, and
+/// often: an empty part is what every adjacent-separator row produces and is
+/// the whole point of half this file. `-1` is what says so on the line.
+fn leadOf(part: String) -> Int {
+  if part.byteLength() == 0 {
+    return -1
+  }
+  part.byteAt(0)
+}
+
+/// The string the code points `points` name, in order.
+///
+/// Every row this file builds out of code points rather than out of a source
+/// literal is built here, and that is what lets the oracle be independent: the
+/// oracle holds the same list of numbers and encodes it with an encoder of its
+/// own, where a literal would make both sides read the same UTF-8 out of two
+/// files and prove only that the files matched.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// `points` repeated `times` over.
+fn repeated(points: Array<Int>, times: Int) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  var round = 0
+  while round < times {
+    for point in points {
+      out.push(String.fromCodePoint(point)?)
+    }
+    round += 1
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// One `String.split()` call, part by part.
+///
+/// The summary line is the five numbers and two words that can disagree: the
+/// receiver's bytes, the separator's bytes, how many parts came back, the
+/// parts' bytes summed, whether that sum plus one separator per **gap**
+/// accounts for the receiver exactly, and whether the separator joins the
+/// parts back into the receiver.
+///
+/// `fits` is the arithmetic this operation is: `n` parts have `n - 1` gaps, so
+/// `sum + (n - 1) * sep` must be the receiver's byte length at every row in
+/// this file. An implementation that dropped a separator, wrote one per part,
+/// or lost a byte off an end keeps `round` honest only by accident and moves
+/// this. `round` is the same statement made through `join`, which is the
+/// operation that reads this one's answer.
+///
+/// Then a line a part: its `length()` in characters, its `byteLength()`, its
+/// first byte — `-1` where it is empty — and its bytes written out.
+fn show(label: String, text: String, separator: String) -> Result<Unit, Error> {
+  let parts = text.split(separator)
+  var sum = 0
+  var i = 0
+  while i < parts.length() {
+    sum += parts.get(i).unwrapOr("").byteLength()
+    i += 1
+  }
+  let gaps = (parts.length() - 1) * separator.byteLength()
+  let rejoined = separator.join(parts)
+  println("{label} text {text.byteLength()} sep {separator.byteLength()} parts {parts.length()} sum {sum} fits {sum + gaps == text.byteLength()} round {rejoined == text}")?
+  i = 0
+  while i < parts.length() {
+    let part = parts.get(i).unwrapOr("")
+    println("{label}.{i} len {part.length()} bytes {part.byteLength()} at0 {leadOf(part)} [{bytesOf(part)}]")?
+    i += 1
+  }
+  Ok(())
+}
+
+/// [`show`] for a row with too many parts to print one of.
+///
+/// The same summary line, and then the whole array reduced to numbers no wrong
+/// answer hits by accident: how many parts are empty, the narrowest and the
+/// widest part in bytes, and a **position-weighted** sum of the parts' first
+/// bytes, which makes the digest an ordering check as well as a multiset
+/// check — an implementation that answered the right parts in the wrong order
+/// keeps every other number on this line and moves that one.
+///
+/// Both ends are written out as bytes as well, because a walk that lost its
+/// first or its last part keeps the shape and loses a count, and the two lines
+/// together say which end.
+fn digest(
+  label: String,
+  text: String,
+  separator: String,
+) -> Result<Unit, Error> {
+  let parts = text.split(separator)
+  var sum = 0
+  var empty = 0
+  var min = -1
+  var max = -1
+  var weighted = 0
+  var i = 0
+  while i < parts.length() {
+    let part = parts.get(i).unwrapOr("")
+    let width = part.byteLength()
+    sum += width
+    if width == 0 {
+      empty += 1
+    }
+    if min < 0 || width < min {
+      min = width
+    }
+    if width > max {
+      max = width
+    }
+    weighted += (i + 1) * leadOf(part)
+    i += 1
+  }
+  let gaps = (parts.length() - 1) * separator.byteLength()
+  let rejoined = separator.join(parts)
+  println("{label} text {text.byteLength()} sep {separator.byteLength()} parts {parts.length()} sum {sum} fits {sum + gaps == text.byteLength()} round {rejoined == text}")?
+  println("{label}.shape empty {empty} min {min} max {max} weighted {weighted}")?
+  let first = parts.get(0).unwrapOr("")
+  let last = parts.get(parts.length() - 1).unwrapOr("")
+  println("{label}.ends first [{bytesOf(first)}] last [{bytesOf(last)}]")?
+  Ok(())
+}
+
+/// Pins every answer `String.split()` gives before it moves out of the
+/// runtime, so that the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation, and this is `String.split()`'s. Today it is
+/// `text.split(&separator).collect()` in Rust — `str::split`'s own matcher over
+/// the receiver and one heap `String` a part — reached through one
+/// `Inst::IntrinsicCall`. Issue #454's Step 3, twelfth item.
+///
+/// **No shipped program calls it.** Measured at `282dfe1` on a pristine root
+/// with `--boundary --stats`: `examples/covefmt` has 0 static sites and 0
+/// dynamic calls, and `examples/cq` has 0 static sites. So this file is the
+/// whole of what will notice when the body becomes Cove, and there is no
+/// whole-program improvement to claim from the move.
+///
+/// # Every occurrence separates, and that is the whole contract
+///
+/// `crates/cove-schema/src/builtins.rs` states it: *"Every occurrence of
+/// `separator` separates, so adjacent separators produce an empty part and text
+/// with none produces one part that is the whole text."* Each clause of that
+/// sentence is a row here and none of them is left to be obvious:
+///
+/// - **a leading separator produces an empty first part** and a trailing one an
+///   empty last part, so `,abc,` is **three** parts and not one;
+/// - **adjacent separators produce an empty part between them**, so `a,,b` is
+///   three;
+/// - **text with no occurrence is one part**, which is the receiver itself;
+/// - **the empty text is one part**, which is `""` — an empty *array* would be
+///   the other defensible answer and it is not the one;
+/// - **a separator that is the whole text** is two empty parts, which is the
+///   row that tells "every occurrence separates" from "split into the pieces
+///   that are there".
+///
+/// # Matching does not overlap, and the direction is left to right
+///
+/// `aaa` split by `aa` is **two** parts, `""` and `"a"`: the match at byte 0
+/// consumes two bytes and the search resumes after it, so the match at byte 1
+/// is never seen. `aaaa` is three empty parts and `aaaaa` is `""`, `""`, `"a"`.
+/// `ababa` split by `aba` is `""` and `"ba"` for the same reason. Nothing about
+/// the method's name settles that, so it is pinned; the intrinsic's answer is
+/// the contract and a Cove body has to reproduce it.
+///
+/// # A match cannot start inside a character, and the rows say so twice
+///
+/// A `String` is valid UTF-8, so a needle that is itself valid UTF-8 begins
+/// with a lead byte and ends at a character boundary — a byte search over the
+/// receiver can only land on a boundary, and cannot cut a character in half.
+/// That is UTF-8 being self-synchronizing and it is why this operation may be
+/// a **byte** search at all.
+///
+/// Two rows put it under load rather than leaving it to the argument.
+/// `w.near` splits by `é` a text that also holds `è`, whose first byte is the
+/// same `195`: an implementation that matched a lead byte and stopped answers
+/// four parts where this answers three. `w.ascii` splits a text with no ASCII
+/// byte in it at all by an ASCII separator and gets one part, because every
+/// byte of a multi-byte character is 128 or above and no ASCII byte can occur
+/// inside one.
+///
+/// # The round trip is the other half of the pin
+///
+/// `round` on every row is `separator.join(text.split(separator)) == text`,
+/// and `fits` is the same statement made in bytes. `join` moved into Cove one
+/// migration ago; if both move and both are wrong in the same direction, these
+/// two words stay `true` — which is why every part's bytes are written out as
+/// well, and why the long rows carry a position-weighted digest.
+export fn main() -> Result<Unit, Error> {
+  // Every clause of the schema's sentence, on one-byte text.
+  show("lit.basic", "a,b,c", ",")?
+  show("lit.lead", ",abc", ",")?
+  show("lit.trail", "abc,", ",")?
+  show("lit.both", ",abc,", ",")?
+  show("lit.adjacent", "a,,b", ",")?
+  show("lit.whole", ",", ",")?
+  show("lit.whole.two", ",,", ",")?
+  show("lit.none", "abc", ",")?
+  show("lit.empty", "", ",")?
+  show("lit.is.sep", "abc", "abc")?
+  show("lit.sep.longer", "ab", "abc")?
+  show("lit.one", "a", ",")?
+  show("lit.run", ",,,", ",")?
+  show("lit.space", "a b  c", " ")?
+
+  // A separator of more than one byte, which is where an off-by-one in the
+  // resume offset shows: `a::::b` is three parts and not four.
+  show("lit.multi", "a::b::c", "::")?
+  show("lit.multi.adjacent", "a::::b", "::")?
+  show("lit.multi.lead", "::ab", "::")?
+  show("lit.multi.trail", "ab::", "::")?
+  show("lit.multi.odd", "a:::b", "::")?
+
+  // Matching does not overlap and runs left to right.
+  show("lap.three", "aaa", "aa")?
+  show("lap.four", "aaaa", "aa")?
+  show("lap.five", "aaaaa", "aa")?
+  show("lap.aba", "ababa", "aba")?
+  show("lap.abab", "abababa", "abab")?
+
+  // A NUL is a byte and a character like any other, on both sides of the
+  // question: as a separator, and inside a part.
+  show("zero.sep", fromPoints([97, 0, 98])?, fromPoints([0])?)?
+  show("zero.part", fromPoints([97, 0, 98, 44, 99])?, ",")?
+
+  // Separators of two, three and four bytes, and parts of each width.
+  show("w.two", fromPoints([97, 233, 98, 233, 99])?, fromPoints([233])?)?
+  show("w.near", fromPoints([97, 232, 233, 98, 233])?, fromPoints([233])?)?
+  show("w.three", fromPoints([97, 8594, 98, 8594, 99])?, fromPoints([8594])?)?
+  show("w.four", fromPoints([97, 128512, 98])?, fromPoints([128512])?)?
+  show("w.four.run", fromPoints([128512, 128512])?, fromPoints([128512])?)?
+  show("w.ascii", fromPoints([233, 8594, 128512])?, ",")?
+  show("w.mixed", fromPoints([97, 233, 8594, 44, 128512, 44, 233])?, ",")?
+  show(
+    "w.sep.wide",
+    fromPoints([97, 233, 8594, 128512, 8594, 122])?,
+    fromPoints([8594])?,
+  )?
+
+  // Rows long enough that no fast path is left untaken, and each varies one
+  // thing: how many parts there are, how wide they are, and how wide the
+  // separator is.
+  digest("long.none", repeated([97], 2048)?, ",")?
+  digest("long.eight", repeated([97, 97, 97, 97, 97, 97, 97, 44], 256)?, ",")?
+  digest("long.every", repeated([97, 44], 1024)?, ",")?
+  digest("long.run", repeated([44], 1024)?, ",")?
+  digest("long.wide", repeated([128512, 8594], 512)?, fromPoints([8594])?)?
+  digest("long.cycle", repeated([97, 233, 8594, 128512, 44], 512)?, ",")?
+  Ok(())
+}

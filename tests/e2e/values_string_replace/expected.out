@@ -1,0 +1,54 @@
+lit.basic text 5 old 1 new 1 out 5 chars 5 delta 0 left false [97 59 98 59 99]
+lit.longer text 2 old 1 new 3 out 6 chars 6 delta 4 left false [98 98 98 98 98 98]
+lit.shorter text 3 old 2 new 1 out 2 chars 2 delta -1 left false [98 97]
+lit.same text 3 old 1 new 1 out 3 chars 3 delta 0 left false [97 122 99]
+lit.empty.new text 3 old 1 new 0 out 2 chars 2 delta -1 left false [97 99]
+lit.empty.all text 3 old 1 new 0 out 0 chars 0 delta -3 left false []
+lit.none text 3 old 1 new 1 out 3 chars 3 delta 0 left false [97 98 99]
+lit.empty.text text 0 old 1 new 1 out 0 chars 0 delta 0 left false []
+lit.whole text 3 old 3 new 1 out 1 chars 1 delta -2 left false [122]
+lit.old.longer text 2 old 3 new 1 out 2 chars 2 delta 0 left false [97 98]
+lit.lead text 4 old 1 new 1 out 4 chars 4 delta 0 left false [59 97 98 99]
+lit.trail text 4 old 1 new 1 out 4 chars 4 delta 0 left false [97 98 99 59]
+lit.adjacent text 4 old 1 new 1 out 4 chars 4 delta 0 left false [97 59 59 98]
+lit.run text 3 old 1 new 1 out 3 chars 3 delta 0 left false [59 59 59]
+self.one text 2 old 1 new 2 out 4 chars 4 delta 2 left true [97 97 97 97]
+self.three text 3 old 1 new 2 out 6 chars 6 delta 3 left true [97 97 97 97 97 97]
+self.around text 2 old 1 new 2 out 3 chars 3 delta 1 left true [98 97 98]
+self.whole text 2 old 2 new 4 out 4 chars 4 delta 2 left true [97 98 97 98]
+lit.multi text 7 old 2 new 1 out 5 chars 5 delta -2 left false [97 45 98 45 99]
+lit.multi.adjacent text 6 old 2 new 1 out 4 chars 4 delta -2 left false [97 45 45 98]
+lit.multi.odd text 5 old 2 new 1 out 4 chars 4 delta -1 left false [97 45 58 98]
+lap.three text 3 old 2 new 1 out 2 chars 2 delta -1 left false [98 97]
+lap.four text 4 old 2 new 1 out 2 chars 2 delta -2 left false [98 98]
+lap.five text 5 old 2 new 1 out 3 chars 3 delta -2 left false [98 98 97]
+lap.aba text 5 old 3 new 1 out 3 chars 3 delta -2 left false [120 98 97]
+lap.abab text 7 old 4 new 1 out 4 chars 4 delta -3 left false [120 97 98 97]
+zero.old text 3 old 1 new 1 out 3 chars 3 delta 0 left false [97 44 98]
+zero.new text 3 old 1 new 1 out 3 chars 3 delta 0 left false [97 0 98]
+w.two text 6 old 2 new 1 out 4 chars 4 delta -2 left false [97 101 98 101]
+w.near text 8 old 2 new 1 out 6 chars 5 delta -2 left false [97 195 168 33 98 33]
+w.three text 5 old 3 new 2 out 4 chars 4 delta -1 left false [97 45 62 98]
+w.four text 6 old 4 new 2 out 4 chars 4 delta -2 left false [97 58 41 98]
+w.widen text 3 old 1 new 4 out 6 chars 3 delta 3 left false [97 240 159 152 128 99]
+w.narrow text 8 old 4 new 1 out 2 chars 2 delta -6 left false [120 120]
+w.ascii text 9 old 1 new 1 out 9 chars 3 delta 0 left false [195 169 226 134 146 240 159 152 128]
+w.equal text 4 old 2 new 2 out 4 chars 3 delta 0 left false [97 195 168 98]
+long.none text 2048 old 1 new 1 out 2048 chars 2048 delta 0 left false
+long.none.shape weighted 203523072
+long.none.ends head [97 97 97 97 97 97 97 97 97 97 97 97 97 97 97 97] tail [97 97 97 97 97 97 97 97 97 97 97 97 97 97 97 97]
+long.every text 2048 old 1 new 2 out 4096 chars 4096 delta 2048 left false
+long.every.shape weighted 822284288
+long.every.ends head [98 98 98 98 98 98 98 98 98 98 98 98 98 98 98 98] tail [98 98 98 98 98 98 98 98 98 98 98 98 98 98 98 98]
+long.shrink text 2048 old 2 new 1 out 1024 chars 1024 delta -1024 left false
+long.shrink.shape weighted 51430400
+long.shrink.ends head [98 98 98 98 98 98 98 98 98 98 98 98 98 98 98 98] tail [98 98 98 98 98 98 98 98 98 98 98 98 98 98 98 98]
+long.eight text 2048 old 1 new 1 out 2048 chars 2048 delta 0 left false
+long.eight.shape weighted 193522688
+long.eight.ends head [97 97 97 97 97 97 97 59 97 97 97 97 97 97 97 59] tail [97 97 97 97 97 97 97 59 97 97 97 97 97 97 97 59]
+long.wide text 3584 old 3 new 1 out 2560 chars 1024 delta -1024 left false
+long.wide.shape weighted 474450432
+long.wide.ends head [240 159 152 128 45 240 159 152 128 45 240 159 152 128 45 240] tail [45 240 159 152 128 45 240 159 152 128 45 240 159 152 128 45]
+long.self text 1024 old 1 new 2 out 2048 chars 2048 delta 1024 left true
+long.self.shape weighted 203523072
+long.self.ends head [97 97 97 97 97 97 97 97 97 97 97 97 97 97 97 97] tail [97 97 97 97 97 97 97 97 97 97 97 97 97 97 97 97]

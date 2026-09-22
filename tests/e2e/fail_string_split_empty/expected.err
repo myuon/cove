@@ -1,0 +1,12 @@
+error[cove::runtime]: `String.split` cannot use an empty `separator`
+ --> <e2e>/fail_string_split_empty/main.cove:8:3
+  |
+8 |   text.split(separator)
+  |   ^^^^^^^^^^^^^^^^^^^^^
+  --> <e2e>/fail_string_split_empty/main.cove:35:15
+   |
+35 |   let parts = pieces("a,b,c", "")
+   |               ^^^^^^^^^^^^^^^^^^^ called from here
+  rule: An empty separator or search string would match between every character, rather than answer the question the method asks.
+  help: use `chars()` to take a string apart character by character
+1 error(s)

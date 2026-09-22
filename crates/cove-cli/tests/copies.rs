@@ -979,7 +979,35 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// sides, byte for byte, because #441's sweep keeps a body nothing names out
 /// of a program; and cq at 6,429 in 75 against 6,475 in 76, which is the one
 /// new body arriving and two `IntrinsicCall` sites leaving.
-const FORWARDABLE_COPIES: usize = 2891;
+///
+/// **The forty-third rise is four new rows and no lowering at all.** 2891 to
+/// 2940, 176 programs to 180. `String.split` and `String.replace` did **not**
+/// move out of the runtime — issue
+/// [#461](https://github.com/myuon/cove/issues/461) holds them, because both
+/// refuse an empty needle by *raising* and a Cove body has nothing to raise
+/// with — so nothing here is a standard-library body appearing in the survey,
+/// and the function and instruction totals over the shared 176 programs do not
+/// move. What landed is the Decision 6 corpus that waits for the migration.
+///
+/// The survey with the four directories removed is **2891 exactly**, and each
+/// added back alone splits the rise with nothing left over:
+///
+/// - `tests/e2e:values_string_split` is **+21**, the largest single e2e row
+///   this table has taken. It has `values_string_chars`' cause and one more of
+///   it: the operation answers an `Array<String>`, so `show` and `digest` bind
+///   the answered array before they count anything in it, and `fromPoints` and
+///   `repeated` each build a `Vector` and answer `Ok("".join(out.freeze()))` —
+///   a produce, a copy and a `return` in one expression. The one more is
+///   `separator.join(parts)`, which every row computes for its round trip;
+/// - `tests/e2e:values_string_replace` is **+14**. Seven fewer than `split` for
+///   the reason `slice`'s row is smaller than `chars`': the operation answers a
+///   `String` rather than a collection, so a row holds one value where a row of
+///   `split` holds an array and asks it four questions;
+/// - `tests/e2e:fail_string_split_empty` and
+///   `tests/e2e:fail_string_replace_empty` are **+7 each**, which is the floor
+///   a three-function program sits at — the two are the same shape and differ
+///   only in which sentence they pin.
+const FORWARDABLE_COPIES: usize = 2940;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

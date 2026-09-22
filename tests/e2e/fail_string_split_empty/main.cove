@@ -1,0 +1,38 @@
+use console.println
+
+/// Splits `text` by a separator its caller chose. Not the standard library: an
+/// ordinary Cove function with a caller, between `main` and the operation that
+/// refuses, so that the diagnostic below has a frame to blame that is neither
+/// the entry point nor the machine.
+fn pieces(text: String, separator: String) -> Array<String> {
+  text.split(separator)
+}
+
+/// Pins `String.split`'s refusal of an empty separator, word for word.
+///
+/// An empty separator would match between every character rather than answer
+/// the question the method asks, so the operation refuses it and says which
+/// operation, which parameter, why, and what to reach for instead. The
+/// `chars()` in the help is the operation that actually means "take this apart
+/// character by character", and it is a real method with a corpus of its own.
+///
+/// This is the half of `String.split`'s contract that `values_string_split`
+/// cannot hold, because a refusal stops the run and takes every row after it:
+/// one case, one refusal. [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 8 gates a migration on the diagnostic being unchanged, and this
+/// file is where "unchanged" is written down.
+///
+/// **What it will catch is the thing issue
+/// [#461](https://github.com/myuon/cove/issues/461) is about.** Today the
+/// refusal is raised inside `Intrinsic::StringSplit`, so the blame lands on the
+/// call in `pieces` and there is no standard-library frame. A Cove body cannot
+/// raise at all — `ExprKind` has no such form, `Inst::Trap` carries a `StrId`
+/// and not a slot, and it carries no `rule` and no `help` — so the day this
+/// operation moves, both the mechanism and the three lines below have to be
+/// settled first. See `tests/e2e/fail_stringbuilder_byte_range/expected.err`
+/// for what a refusal raised from inside `std/` looks like instead.
+export fn main() -> Result<Unit, Error> {
+  let parts = pieces("a,b,c", "")
+  println("{parts.length()}")?
+  Ok(())
+}

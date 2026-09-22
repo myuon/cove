@@ -447,3 +447,19 @@ allow = ["console"]
 [run.values_string_chars]
 entry = "values_string_chars.main"
 allow = ["console"]
+
+[run.values_string_split]
+entry = "values_string_split.main"
+allow = ["console"]
+
+[run.values_string_replace]
+entry = "values_string_replace.main"
+allow = ["console"]
+
+[run.fail_string_split_empty]
+entry = "fail_string_split_empty.main"
+allow = ["console"]
+
+[run.fail_string_replace_empty]
+entry = "fail_string_replace_empty.main"
+allow = ["console"]

@@ -1,0 +1,12 @@
+error[cove::runtime]: `String.replace` cannot use an empty `old`
+ --> <e2e>/fail_string_replace_empty/main.cove:8:3
+  |
+8 |   text.replace(old, new)
+  |   ^^^^^^^^^^^^^^^^^^^^^^
+  --> <e2e>/fail_string_replace_empty/main.cove:30:13
+   |
+30 |   let out = rewritten("a,b,c", "", ";")
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here
+  rule: An empty separator or search string would match between every character, rather than answer the question the method asks.
+  help: `old` is the text to look for, and an empty `old` names none
+1 error(s)
