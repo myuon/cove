@@ -1,0 +1,33 @@
+use console.println
+
+/// Four cases, of which exactly one holds a value the language refuses as a
+/// key.
+///
+/// So whether a `Mark` may be a set element is decided by the *value* and not
+/// by the type: `Plain` and `Count(3)` are keys and `Weight(1.5)` is not.
+enum Mark {
+  Plain
+  Count(Int)
+  Weight(Float)
+}
+
+/// Asks an empty `Set<Array<Mark>>` whether it holds an array whose second
+/// element is in the one case that holds a `Float`.
+///
+/// The first element is in an admitted case, so the refusal has to be reached
+/// by reading a discriminant and not by looking at the type — and the path
+/// names the position in the array and the part of the case, which is what
+/// `[1](0)` is.
+///
+/// The path is rooted at an array rather than at the enum itself, because a
+/// value at the root names itself by its type, and the two evaluators name a
+/// type differently there — the VM by its layout name, the oracle by its
+/// qualified one. `fail_key_nested_float` says the same of a struct.
+export fn main() -> Result<Unit, Error> {
+  let seen: Set<Array<Mark>> = Set.of()
+  println("about to search an empty set for marks holding a Float")?
+  let wanted = [Mark.Count(3), Mark.Weight(1.5)]
+  let found = seen.contains(wanted)
+  println("never printed {found}")?
+  Ok(())
+}

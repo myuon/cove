@@ -408,6 +408,14 @@ allow = ["console"]
 entry = "fail_key_duplicate_set.main"
 allow = ["console"]
 
+[run.fail_key_enum_case]
+entry = "fail_key_enum_case.main"
+allow = ["console"]
+
+[run.fail_key_map_value]
+entry = "fail_key_map_value.main"
+allow = ["console"]
+
 [run.fail_key_float_empty_map]
 entry = "fail_key_float_empty_map.main"
 allow = ["console"]
@@ -506,4 +514,8 @@ allow = ["console"]
 
 [run.values_value_order]
 entry = "values_value_order.main"
+allow = ["console"]
+
+[run.values_value_admit_key]
+entry = "values_value_admit_key.main"
 allow = ["console"]

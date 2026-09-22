@@ -1,0 +1,12 @@
+error[cove::runtime]: `Set.contains` cannot use a `Float` inside `[1](0)` as a set element
+  --> <e2e>/fail_key_enum_case/main.cove:30:15
+   |
+30 |   let found = seen.contains(wanted)
+   |               ^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:19:3
+   |
+19 |   core.admitKey(element, "Set.contains", "set element")
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  rule: A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.
+  help: convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`
+1 error(s)

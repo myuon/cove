@@ -1,0 +1,22 @@
+use console.println
+
+/// Asks an empty `Set<Map<Int, Float>>` whether it holds a map whose *value*
+/// is a `Float`.
+///
+/// A map's keys are keys by construction — it could not have been built
+/// otherwise — so only its values are asked, and the first that cannot be one
+/// is why nesting a `Map` as a key can still fail. The path names the entry by
+/// its key, exactly as that key would render anywhere else, which is what
+/// `[7]` is.
+///
+/// An empty `Map<Int, Float>` is a key, because the value that would be
+/// refused is not there; `values_value_admit_key`'s `float.map.empty` row is
+/// the other side of this one.
+export fn main() -> Result<Unit, Error> {
+  let seen: Set<Map<Int, Float>> = Set.of()
+  println("about to search an empty set for a map whose value is a Float")?
+  let wanted = Map.of(MapEntry(key: 7, value: 1.5))
+  let found = seen.contains(wanted)
+  println("never printed {found}")?
+  Ok(())
+}

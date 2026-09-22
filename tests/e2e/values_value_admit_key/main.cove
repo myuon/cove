@@ -1,0 +1,365 @@
+use console.println
+
+/// Which values the language admits as a map key or a set element, family by
+/// family.
+///
+/// `Value.admitKey` is one of the five layout-directed walks
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 specialises at lowering time, and neither `covefmt` nor `cq`
+/// executes it once: every key either program uses is a `String` or an `Int`,
+/// which the lowering already answers without asking anything. So there is no
+/// program in this repository whose behaviour would change if the admission
+/// were wrong, and this file is written to be that program.
+///
+/// # What a row asks, and why it asks it nine times
+///
+/// ADR 0001 admits a key built only from immutable parts: the scalars, a
+/// `String`, a range, a struct, an enum case, an `Array`, a `Set` and a `Map`.
+/// It refuses a `Float`, whose `NaN` is not equal to itself and so has no
+/// total order, and a `Vector` and everything holding one, because a key's
+/// equality must not change while a collection holds it.
+///
+/// `std.map` and `std.set` ask that question at **nine** call sites — `Map.get`,
+/// `Map.contains`, `Map.of`, `Map.inserted`, `Map.removed`, `Set.contains`,
+/// `Set.of`, `Set.inserted`, `Set.removed` — and every one of them is
+/// monomorphised per key type, so a row here is nine lowerings of the
+/// admission over one layout. [`admits`] runs all nine and prints what the
+/// collections answered, which is observable only because the key was
+/// admitted: a refusal ends the run.
+///
+/// # The rows are the oracle, and they were written before anything ran
+///
+/// Every `want` below follows from the specification of `Set` and `Map` and
+/// not from what any implementation printed:
+///
+/// - `Set.of(one).inserted(other)` holds **two** members when the two values
+///   differ and **one** when they do not, because `inserted` answers the
+///   receiver unchanged for an element already there;
+/// - `contains(one)` is `true` at every row;
+/// - `removed(one)` leaves one member where they differ and none where they
+///   do not;
+/// - `Map.of(MapEntry(key: one, value: 1))` holds one entry, and `get(other)`
+///   finds it only where the two values are equal;
+/// - `inserted(other, 2)` makes it two entries where they differ and replaces
+///   the one where they do not, and `removed(one)` takes one away either way.
+///
+/// So every distinct row prints the same eight answers and every equal row
+/// prints the same eight, and which of the two a row prints is decided by the
+/// `want` written beside it rather than by anything the admission does. A walk
+/// that admitted a key it should have refused would be caught by the `fail_`
+/// cases beside this one, not here; what *this* file catches is the opposite —
+/// a walk that refuses a key the language admits stops the run and prints
+/// nothing further.
+///
+/// # The families that are not one answer for the whole layout
+///
+/// `Mark` is the reason this file is not a rewrite of `values_any_equals` with
+/// different rows. Its `Weight` case holds a `Float` and its other three do
+/// not, so whether a `Mark` may be a key is decided by the *value* and not by
+/// the type — and a layout-directed walk has to look at the discriminant to
+/// answer. Every `mark` row below is a value in an admitted case of a type
+/// that has a refused one; `fail_key_enum_case` is the other side.
+///
+/// An empty `Array<Float>` and an empty `Map<Int, Float>` are the same finding
+/// at the other end: the element that would be refused is not there, so there
+/// is nothing to refuse, and both are keys.
+///
+/// # The depth rows stop at 30
+///
+/// The runtime's walk refuses a key nested deeper than 128 steps and a
+/// synthesized one is bounded by ADR 0040's call depth instead. The two agree
+/// everywhere short of 128, so the rows here stop at 30 — deep enough that a
+/// walk has to recurse, and short of a bound this file is not pinning.
+/// Three fields whose words are an `Int`, a reference and a `Bool`.
+///
+/// The middle field is what makes a wrong offset visible: a walk that read the
+/// `Bool` from word 1 would be reading the `String`'s address.
+struct Mixed {
+  first: Int
+  middle: String
+  last: Bool
+}
+
+/// A struct whose field is itself a walk.
+struct Pair {
+  left: Mixed
+  right: Mixed
+}
+
+/// Two cases with no payload.
+enum Flag {
+  On
+  Off
+}
+
+/// Four cases, of which exactly one holds a value the language refuses as a
+/// key.
+///
+/// So `Mark.Plain`, `Mark.Count(3)` and `Mark.Named("a")` are keys and
+/// `Mark.Weight(1.5)` is not, and nothing about the *type* decides it. This is
+/// the layout the admission cannot answer without reading a discriminant.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+  Weight(Float)
+}
+
+/// A struct holding one of those, so that the discriminant is read through a
+/// field offset rather than at the root.
+struct Holder {
+  id: Int
+  mark: Mark
+  label: String
+}
+
+/// A value type that reaches itself through a reference, which is the only way
+/// [ADR 0035](../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+/// admits.
+struct Node {
+  tag: Int
+  kids: Array<Node>
+}
+
+/// A value that can summarise itself, so that `dyn Summary` erases one.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// One erasable value.
+struct Booking {
+  id: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+/// The nine places the standard library admits a key, asked of one value, and
+/// what the collections answered afterwards.
+///
+/// One generic function rather than one per type, which is also what makes
+/// every row go through the same nine lowerings: the call is monomorphised, so
+/// `admits<Mixed>` and `admits<Array<Int>>` are separate functions over
+/// separate layouts and each of them asks the admission its own way.
+///
+/// `distinct` is what the caller says about its two values, and every answer
+/// printed follows from it.
+fn admits<T>(
+  label: String,
+  one: T,
+  other: T,
+  distinct: Bool,
+) -> Result<Unit, Error> {
+  let held = Set.of(one).inserted(other)
+  let has = held.contains(one)
+  let fewer = held.removed(one)
+  let mapped = Map.of(MapEntry(key: one, value: 1))
+  let got = mapped.get(other)
+  let known = mapped.contains(one)
+  let more = mapped.inserted(other, 2)
+  let less = more.removed(one)
+  println("{label} set {held.length()} has {has} fewer {fewer.length()} map {mapped.length()} got {got.isSome()} known {known} more {more.length()} less {less.length()} distinct {distinct}")?
+  Ok(())
+}
+
+/// A chain of `depth` nodes, each the only child of the one above, ending in a
+/// leaf whose tag is `last`.
+fn chain(depth: Int, last: Int) -> Node {
+  var held = Node(tag: last, kids: [])
+  var at = 0
+  while at < depth {
+    held = Node(tag: at, kids: [held])
+    at += 1
+  }
+  held
+}
+
+/// Every scalar family, and the range.
+fn scalars() -> Result<Unit, Error> {
+  admits("unit", (), (), false)?
+  admits("bool", false, true, true)?
+  admits("bool.same", true, true, false)?
+  admits("int", 1, 2, true)?
+  admits("int.neg", -1, 0, true)?
+  admits("int.same", 7, 7, false)?
+  admits("duration", 1ms, 2s, true)?
+  admits("duration.same", 2s, 2000ms, false)?
+  admits("string", "a", "b", true)?
+  admits("string.empty", "", "a", true)?
+  admits("range", 1..3, 1..4, true)?
+  admits("range.same", 0..0, 0..0, false)?
+  Ok(())
+}
+
+/// Structs, flat and nested, every field of which is admitted.
+fn structures() -> Result<Unit, Error> {
+  admits(
+    "struct",
+    Mixed(first: 1, middle: "x", last: true),
+    Mixed(first: 2, middle: "x", last: true),
+    true,
+  )?
+  admits(
+    "struct.middle",
+    Mixed(first: 1, middle: "x", last: true),
+    Mixed(first: 1, middle: "y", last: true),
+    true,
+  )?
+  admits(
+    "struct.last",
+    Mixed(first: 1, middle: "x", last: false),
+    Mixed(first: 1, middle: "x", last: true),
+    true,
+  )?
+  admits(
+    "struct.same",
+    Mixed(first: 1, middle: "x", last: true),
+    Mixed(first: 1, middle: "x", last: true),
+    false,
+  )?
+  admits(
+    "struct.nested",
+    Pair(
+      left: Mixed(first: 1, middle: "x", last: true),
+      right: Mixed(first: 2, middle: "y", last: false),
+    ),
+    Pair(
+      left: Mixed(first: 1, middle: "x", last: true),
+      right: Mixed(first: 3, middle: "y", last: false),
+    ),
+    true,
+  )?
+  Ok(())
+}
+
+/// Enum cases, with a payload and without, and the two the language declares.
+fn enums() -> Result<Unit, Error> {
+  admits("flag", Flag.On, Flag.Off, true)?
+  admits("flag.same", Flag.On, Flag.On, false)?
+  admits("option", Some(1), None, true)?
+  let absent: Option<Int> = None
+  admits("option.none", absent, absent, false)?
+  admits("option.nested", Some(Some(1)), Some(None), true)?
+  admits("result", Ok(1), Err("e"), true)?
+  let ok: Result<Int, String> = Ok(1)
+  admits("result.same", ok, ok, false)?
+  Ok(())
+}
+
+/// Runs: an array of scalars, of structs, of arrays, and the empty one.
+fn runs() -> Result<Unit, Error> {
+  admits("array", [1, 2], [1, 3], true)?
+  admits("array.length", [1], [1, 2], true)?
+  admits("array.same", [1, 2], [1, 2], false)?
+  admits("array.string", ["a"], ["b"], true)?
+  admits(
+    "array.struct",
+    [Mixed(first: 1, middle: "x", last: true)],
+    [Mixed(first: 2, middle: "x", last: true)],
+    true,
+  )?
+  admits("array.nested", [[1], [2]], [[1], [3]], true)?
+  let none: Array<Int> = []
+  admits("array.empty", none, [1], true)?
+  Ok(())
+}
+
+/// Keyed collections as keys: a set of sets and a map of maps.
+fn keyed() -> Result<Unit, Error> {
+  admits("set", Set.of(1), Set.of(2), true)?
+  admits("set.same", Set.of(1, 2), Set.of(2, 1), false)?
+  let empty: Set<Int> = Set.of()
+  admits("set.empty", empty, Set.of(1), true)?
+  admits(
+    "map",
+    Map.of(MapEntry(key: 1, value: "a")),
+    Map.of(MapEntry(key: 1, value: "b")),
+    true,
+  )?
+  let bare: Map<Int, String> = Map.of()
+  admits("map.empty", bare, Map.of(MapEntry(key: 1, value: "a")), true)?
+  Ok(())
+}
+
+/// The families whose admission is decided by the value and not by the type.
+///
+/// Every value here is in a case, or at a length, that holds no `Float` — so
+/// every one of them is a key, of a type that has values which are not.
+fn valued() -> Result<Unit, Error> {
+  admits("mark.plain", Mark.Plain, Mark.Count(1), true)?
+  admits("mark.count", Mark.Count(1), Mark.Count(2), true)?
+  admits("mark.named", Mark.Named("a"), Mark.Named("b"), true)?
+  admits("mark.same", Mark.Plain, Mark.Plain, false)?
+  admits(
+    "mark.holder",
+    Holder(id: 1, mark: Mark.Plain, label: "a"),
+    Holder(id: 1, mark: Mark.Count(2), label: "a"),
+    true,
+  )?
+  admits(
+    "mark.array",
+    [Mark.Plain, Mark.Count(1)],
+    [Mark.Plain, Mark.Count(2)],
+    true,
+  )?
+  let bare: Array<Mark> = []
+  admits("mark.array.empty", bare, [Mark.Plain], true)?
+  admits("mark.option", Some(Mark.Plain), None, true)?
+  admits("mark.set", Set.of(Mark.Plain), Set.of(Mark.Count(1)), true)?
+  admits(
+    "mark.map",
+    Map.of(MapEntry(key: 1, value: Mark.Plain)),
+    Map.of(MapEntry(key: 1, value: Mark.Count(2))),
+    true,
+  )?
+  let weights: Array<Float> = []
+  admits("float.array.empty", weights, weights, false)?
+  let floats: Map<Int, Float> = Map.of()
+  admits("float.map.empty", floats, floats, false)?
+  Ok(())
+}
+
+/// A value that reaches itself, at a depth a walk has to recurse to.
+fn recursion() -> Result<Unit, Error> {
+  admits("deep.leaf", chain(0, 9), chain(0, 8), true)?
+  admits("deep.six", chain(6, 9), chain(6, 8), true)?
+  admits("deep.thirty", chain(30, 9), chain(30, 8), true)?
+  admits("deep.same", chain(6, 9), chain(6, 9), false)?
+  admits(
+    "deep.wide",
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 2)]),
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 3)]),
+    true,
+  )?
+  Ok(())
+}
+
+/// The one case a layout cannot be read off the source: an erased value, whose
+/// family is a word in its own header.
+///
+/// ADR 0064's Decision 4 admits exactly one dynamic-layout fallback per
+/// operation, and a box is where it is reached from.
+fn erased() -> Result<Unit, Error> {
+  let one: dyn Summary = Booking(id: 1)
+  let two: dyn Summary = Booking(id: 2)
+  admits("boxed", one, two, true)?
+  admits("boxed.same", one, one, false)?
+  admits("boxed.array", [one, two], [one, one], true)?
+  admits("boxed.option", Some(one), None, true)?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  scalars()?
+  structures()?
+  enums()?
+  runs()?
+  keyed()?
+  valued()?
+  recursion()?
+  erased()?
+  Ok(())
+}
