@@ -1,0 +1,195 @@
+use console.println
+use clock.now
+
+/// What `String.join` costs, at the part counts, part widths and separators
+/// that separate one implementation of it from another.
+///
+/// Issue #454's Step 3 moved it out of the runtime and into `std.string.join`:
+/// the parts' byte lengths summed, plus the separator's times one fewer than
+/// the parts, one `core.bytesAllocate` at exactly that size, and ADR 0062's
+/// ensure/store/commit per part. The Rust arm did the same arithmetic — a sum,
+/// one `new_string_of`, a run of `copy_string_bytes` — which is why this
+/// migration was possible at all, and why what these rows price is the *loop*
+/// rather than a different algorithm.
+///
+/// **Unlike every bench that came before it in this series, this one is not
+/// the whole of the measurement.** `String.slice` and `String.fromCodePoint`
+/// ran nought times on both representative programs, so a bench was all they
+/// had; `examples/covefmt` calls this 8,742 times over 1,465,687 parts. The
+/// whole-program figures are in the commit that moved it, and these rows are
+/// what decomposes them.
+///
+/// # The rows
+///
+/// The cost of a join is a fixed part — the array's length, the allocation,
+/// the `finish` that validates — and a part-proportional one, which is the sum
+/// loop and the append loop. So the matrix is the part **count** against what
+/// is in a part:
+///
+/// - **empty** is the array with nothing in it, which returns `""` before
+///   anything is allocated. It is the floor: a `len`, a comparison and a
+///   `return`;
+/// - **one** is the row where the separator is not used at all, and it is the
+///   fixed cost with exactly one part's worth of loop on top;
+/// - **two**, **eight** and **sixtyfour** are the same five-byte part at four
+///   counts, so the slope between them is what one part costs and the
+///   intercept is what a call costs;
+/// - **eight.none** and **sixtyfour.none** are the same two under the **empty**
+///   separator, which is the shape every one of covefmt's calls has and which
+///   takes a loop of its own below. The difference between each pair is one
+///   append per gap;
+/// - **eight.ascii** and **eight.utf8** are eight parts of **forty bytes
+///   each**, one ASCII and one not, and they are the pair that prices the
+///   `finish`. Both answer 334 bytes; only the second falls off the
+///   validator's ASCII word-scan. Nothing else about the two rows differs.
+///
+/// **Expect the append loop to dominate at every count past one.** Each part
+/// is a `load-elem`, a `len` and an `add` in the sum loop and an
+/// ensure/copy/commit window in the append loop, which is about twenty
+/// instructions a part; the fixed cost is one `growable-alloc.bytes` and one
+/// `run-finish.bytes`. So `sixtyfour` against `two` is what says whether the
+/// slope is what this body's instruction count predicts, and `empty` against
+/// `one` is the whole of the fixed cost on its own.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is therefore a call to
+/// [`countJoin`], whose body is the loop, and `main` does nothing in a turn but
+/// read a clock either side of it. It is **checked rather than assumed**:
+/// `--backend native --boundary` names the compiled and the refused.
+///
+/// [`countBare`] is the control, the same loop with the call taken out, so that
+/// what each row reports is the call rather than the turn.
+///
+/// [`turns`] is 10,000 rather than the 2,000,000 `benches/arith` uses, because
+/// every turn of every row but `empty` allocates twice and appends once a part
+/// — 1,550,000 appends over the nine rows — and
+/// `crates/cove-cli/tests/vm_coverage.rs` runs every program in this repository
+/// on the tree-walking interpreter as well as on the linear-memory backend.
+fn turns() -> Int {
+  10000
+}
+
+/// Five ASCII bytes, the ordinary part.
+fn piece() -> String {
+  "alpha"
+}
+
+/// Forty ASCII bytes.
+fn asciiPiece() -> String {
+  "crates/cove-runtime/src/vm/intrinsics.rs"
+}
+
+/// Forty bytes that are not ASCII: `é` is two, `→` three and `😀` four, so the
+/// group of four is eleven and three of them plus `éé→` is forty exactly.
+///
+/// Fifteen characters where [`asciiPiece`] is forty, which is deliberate and
+/// is not what the row is about: the join copies **bytes** and the two rows
+/// copy the same number of them. What differs is that `finish` validates this
+/// one off its word-scan.
+fn widePiece() -> String {
+  "éé→😀éé→😀éé→😀éé→"
+}
+
+/// An array of `count` copies of `part`.
+///
+/// Built once per row, outside the timed loop, so that no row prices the
+/// building of its own argument.
+fn parts(count: Int, part: String) -> Array<String> {
+  var out: Vector<String> = Vector.of()
+  var i = 0
+  while i < count {
+    out.push(part)
+    i = i + 1
+  }
+  out.freeze()
+}
+
+/// `rounds` joins and nothing else the loop can be about.
+///
+/// The answer's byte length is summed so that nothing can be folded away and
+/// so that a row which stopped joining would report a different number rather
+/// than a different time.
+///
+/// No host call in the body, so that the native tier compiles it and the rows
+/// price `join` on the tier that runs it.
+fn countJoin(separator: String, items: Array<String>, rounds: Int) -> Int {
+  var bytes = 0
+  var i = 0
+  while i < rounds {
+    bytes = bytes + separator.join(items).byteLength()
+    i = i + 1
+  }
+  bytes
+}
+
+/// [`countJoin`]'s loop with the call taken out.
+fn countBare(rounds: Int) -> Int {
+  var bytes = 0
+  var i = 0
+  while i < rounds {
+    bytes = bytes + 1
+    i = i + 1
+  }
+  bytes
+}
+
+/// How long `rounds` turns of [`countJoin`] took, in microseconds, and how
+/// many bytes they answered in all.
+struct Row {
+  micros: Int
+  bytes: Int
+}
+
+fn row(separator: String, items: Array<String>, rounds: Int) -> Row {
+  let startedAt = now()
+  let bytes = countJoin(separator, items, rounds)
+  Row(micros: (now() - startedAt).micros(), bytes: bytes)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let none: Array<String> = []
+  let emptied = row(", ", none, rounds)
+  let one = row(", ", parts(1, piece()), rounds)
+  let two = row(", ", parts(2, piece()), rounds)
+  let eight = row(", ", parts(8, piece()), rounds)
+  let sixtyfour = row(", ", parts(64, piece()), rounds)
+  let eightNone = row("", parts(8, piece()), rounds)
+  let sixtyfourNone = row("", parts(64, piece()), rounds)
+  let eightAscii = row(", ", parts(8, asciiPiece()), rounds)
+  let eightUtf8 = row(", ", parts(8, widePiece()), rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped joining would still report a number, and the number
+  // would be of something else. Each is `parts * width + separator * (parts -
+  // 1)`, which is the arithmetic the body decides, written out here by hand.
+  assertEqual(bare, rounds)?
+  assertEqual(emptied.bytes, 0)?
+  assertEqual(one.bytes, rounds * 5)?
+  assertEqual(two.bytes, rounds * 12)?
+  assertEqual(eight.bytes, rounds * 54)?
+  assertEqual(sixtyfour.bytes, rounds * 446)?
+  assertEqual(eightNone.bytes, rounds * 40)?
+  assertEqual(sixtyfourNone.bytes, rounds * 320)?
+  assertEqual(eightAscii.bytes, rounds * 334)?
+  assertEqual(eightUtf8.bytes, rounds * 334)?
+
+  println("bare loop                    {bareMicros * 1000 / rounds} ns/turn ({bare})")?
+  println("empty        (0 parts)       {(emptied.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("one          (1 x 5 B)       {(one.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("two          (2 x 5 B)       {(two.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("eight        (8 x 5 B)       {(eight.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("sixtyfour    (64 x 5 B)      {(sixtyfour.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("eight.none   (8 x 5 B, \"\")   {(eightNone.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("sixtyfour.none (64 x 5 B, \"\") {(sixtyfourNone.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("eight.ascii  (8 x 40 B)      {(eightAscii.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("eight.utf8   (8 x 40 B, wide) {(eightUtf8.micros - bareMicros) * 1000 / rounds} ns/call")?
+  Ok(())
+}

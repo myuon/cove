@@ -292,3 +292,18 @@ allow = ["console", "clock"]
 [run.frompoint]
 entry = "frompoint.main"
 allow = ["console", "clock"]
+
+# `String.join` at four part counts, two separators and two part widths — ADR
+# 0064 and issue #454's Step 3. **This is the first package in the series whose
+# operation a representative program runs**, so unlike `slice`, `frompoint` and
+# the six `Float` rows above it these rows are not the whole of the
+# measurement: `examples/covefmt` calls `join` 8,742 times over 1,465,687
+# parts, and the whole-program figures are in the commit that moved it. What
+# these rows add is the decomposition — `sixtyfour` against `two` is the slope
+# a part costs, `empty` against `one` is the fixed cost on its own, and
+# `eight.ascii` against `eight.utf8` is `finish()`'s UTF-8 validation falling
+# off its word-scan over the same 334 bytes.
+
+[run.join]
+entry = "join.main"
+allow = ["console", "clock"]

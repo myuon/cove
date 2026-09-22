@@ -172,12 +172,19 @@ fn the_run_writes_the_recording_a_run_writes() {
     // own" is 58 bytes, so a header and eight payload words; "` is not a
     // Unicode code point" is 29, so a header and four. Nine and five is the
     // fourteen this row rose by.
+    //
+    // It is 53 since issue #454's Step 3 moved `String.join` into
+    // `std.string`, and the one word is the smallest this row can rise by:
+    // `join`'s answer for an empty array is the literal `""`, which is a
+    // header and **no** payload word at all. Nothing else in that body is a
+    // literal — the arithmetic is on `Int`s and the refusals do not exist,
+    // because this is the one operation in the migration that cannot fail.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(52), capacity_words: Some(52) }"
+            "HeapSummary { collections: 0, allocated_words: Some(53), capacity_words: Some(53) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

@@ -434,7 +434,7 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Twelve of the 19 variants can be non-zero here, which is exactly the
+    /// Eleven of the 18 variants can be non-zero here, which is exactly the
     /// set that declares `Effects::BULK_WORK`; the other seven examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
@@ -471,8 +471,17 @@ pub struct IntrinsicCalls {
     /// `Float.toInt` and `Float.format` are the only arms left of that shape —
     /// a word in, an allocation out, nothing read off the heap — so they are
     /// the only two a migration could take without moving the carriers again.
-    /// Both numbers are measured off `Intrinsic::effects` rather than counted
-    /// by hand.
+    ///
+    /// **Step 3's `String.join` is the second carrier to go**, so the
+    /// carriers fall to eleven and the rest stay at seven. It is the first
+    /// migration of the series that a shipped program *runs* — `examples/
+    /// covefmt` called it 8,742 times — and so the first whose charge moving
+    /// out of this column and into the instruction count is a change a
+    /// whole-program measurement can see rather than a change to a table. What
+    /// it charged was the bytes of the answer it built; what charges them now
+    /// is the `Inst::RunCopy` under each `StringBuilder.append`, plus an
+    /// instruction a part for the sum that sizes the builder. Both numbers are
+    /// measured off `Intrinsic::effects` rather than counted by hand.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,
@@ -1187,7 +1196,7 @@ mod tests {
             },
             intrinsics: vec![
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::StringJoin,
+                    intrinsic: Intrinsic::StringSplit,
                     sites: 1,
                     encoded: 1_000,
                     native: 7,
@@ -1269,7 +1278,7 @@ mod tests {
         );
         assert!(text.contains(
             "           1,000              7       1       1,007        5,035        128,440  \
-             String.join"
+             String.split"
         ));
         assert!(text.contains(
             "               0              0       3           0            0              0  \
@@ -1277,11 +1286,12 @@ mod tests {
         ));
     }
 
-    /// A loop that calls an intrinsic that allocates (`String.join` builds
-    /// the string it answers) and one that does not (`Any.equals` walks two
-    /// values together and answers one `Bool` word), each several times over,
-    /// so both [`Counting`]'s wiring and the reconciliation test below have
-    /// more than one call and more than one site to work with.
+    /// A loop that calls an intrinsic that allocates (`String.split` builds
+    /// the array it answers and a string per part) and one that does not
+    /// (`Any.equals` walks two values together and answers one `Bool` word),
+    /// each several times over, so both [`Counting`]'s wiring and the
+    /// reconciliation test below have more than one call and more than one
+    /// site to work with.
     ///
     /// **The reading one has moved three times, and each move is a
     /// migration.** It was `String.length` until ADR 0064 made the count
@@ -1293,7 +1303,15 @@ mod tests {
     /// `Any.equals`, which is the shape for the same three reasons each of the
     /// others was: it reads the values it was handed, it charges what it
     /// walked, and it allocates nothing, because the answer is one word.
-    const JOIN_AND_COMPARE: &str = "
+    ///
+    /// **The allocating one has now moved once too**, and for the first time
+    /// the reason is not that a reader found a run instruction to stand on: it
+    /// was `String.join` until issue #454's Step 3 wrote that over a
+    /// `StringBuilder` in Cove. `String.split` takes its place, and it is the
+    /// stronger sample of the two — it allocates the array it answers *and* a
+    /// string per part, so a row that attributed only the outermost object
+    /// would still be caught here.
+    const SPLIT_AND_COMPARE: &str = "
 export fn main() -> Int {
   let left = [1, 2, 3]
   let right = [1, 2, 3]
@@ -1307,8 +1325,8 @@ export fn main() -> Int {
     if left == other {
       total = total + 1
     }
-    let joined = \",\".join([\"a\", \"b\", \"c\"])
-    total = total + joined.byteLength()
+    let parts = \"a,b,c\".split(\",\")
+    total = total + parts.length()
     i = i + 1
   }
   total
@@ -1318,8 +1336,9 @@ export fn main() -> Int {
     /// [ADR 0064]'s Decision 7 asks that allocations and allocated words be
     /// attributed per variant, and this is the property worth pinning about
     /// that attribution: it is not just present, it tells two operations
-    /// apart. `String.join` allocates the string it hands back, and
-    /// `Any.equals` only reads the values it is given, so a run of both
+    /// apart. `String.split` allocates the array it hands back and a string
+    /// per part, and `Any.equals` only reads the values it is given, so a run
+    /// of both
     /// must show one row with allocations and one row without — from the
     /// real machinery in `Machine::call_intrinsic`, not from calling
     /// [`Counting::intrinsic_allocated`] directly, which would only prove the
@@ -1330,25 +1349,25 @@ export fn main() -> Int {
     fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
         use crate::vm::debug::tests::World;
 
-        let world = World::new(JOIN_AND_COMPARE);
+        let world = World::new(SPLIT_AND_COMPARE);
         let mut vm = world.plain();
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
         let boundary = vm.boundary().expect("count_boundary was called");
 
-        let join = boundary
-            .intrinsic(Intrinsic::StringJoin)
-            .expect("the program calls String.join");
-        assert!(join.calls() > 0, "{join:?}");
+        let split = boundary
+            .intrinsic(Intrinsic::StringSplit)
+            .expect("the program calls String.split");
+        assert!(split.calls() > 0, "{split:?}");
         assert!(
-            join.allocations > 0,
-            "String.join allocates the string it answers: {join:?}"
+            split.allocations > 0,
+            "String.split allocates the array it answers and a string per part: {split:?}"
         );
-        assert!(join.words > 0, "{join:?}");
+        assert!(split.words > 0, "{split:?}");
         // The per-variant total is a subset of the whole run's, never past
         // it — the sanity Decision 7's own measurement leans on.
-        assert!(join.allocations <= vm.allocations(), "{join:?}");
-        assert!(join.words <= vm.allocated_words(), "{join:?}");
+        assert!(split.allocations <= vm.allocations(), "{split:?}");
+        assert!(split.words <= vm.allocated_words(), "{split:?}");
 
         let compared = boundary
             .intrinsic(Intrinsic::AnyEquals)
@@ -1385,7 +1404,7 @@ export fn main() -> Int {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::new(JOIN_AND_COMPARE);
+        let world = World::new(SPLIT_AND_COMPARE);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();
@@ -1424,7 +1443,7 @@ export fn main() -> Int {
             assert_eq!(work, row.work, "{:?}: {row:?}", row.intrinsic);
         }
         // And the work is not vacuously nought on both sides: this program
-        // calls `String.contains` and `String.join`, and both walk bytes.
+        // calls `Any.equals` and `String.split`, and both walk bytes.
         assert!(
             boundary.intrinsics.iter().any(|row| row.work > 0),
             "a program that walks strings examines something: {:?}",

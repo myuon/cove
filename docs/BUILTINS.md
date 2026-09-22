@@ -208,7 +208,7 @@ written as a namespace.
 | `words() -> Array<String>` |  |  |  | `machine` |
 | `chars() -> Array<String>` |  |  |  | `machine` |
 | `split(separator: String) -> Array<String>` |  |  |  | `machine` |
-| `join(parts: Array<String>) -> String` |  |  |  | `machine` |
+| `join(parts: Array<String>) -> String` |  |  |  | `std.string.join` |
 | `slice(from: Int, to: Int) -> String` |  |  |  | `std.string.slice` |
 | `trim() -> String` |  |  |  | `machine` |
 | `contains(text: String) -> Bool` |  |  |  | `std.string.contains` |

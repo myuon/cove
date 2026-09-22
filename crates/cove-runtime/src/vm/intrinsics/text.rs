@@ -89,16 +89,20 @@
 //!   bound on it, because a resumable matcher knows where it stopped and
 //!   `str::find` does not. That is the difference an instruction buys over a
 //!   call, in the one coordinate this bullet was about;
-//! - `join` charges the bytes of the answer it builds, parts and separators
-//!   together, which is what it copies and is unrelated to the length of the
-//!   array it was handed.
+//! - a bullet here used to say that `join` charges the bytes of the answer
+//!   it builds, parts and separators together, rather than the length of the
+//!   array it was handed. It is not an arm in this file any more either: issue
+//!   #454's Step 3 made it `std.string.join`, which sums the parts, sizes a
+//!   `StringBuilder` by that sum and appends into it — so every byte it copies
+//!   is charged by the `Inst::RunCopy` that copies it, and the sum and the
+//!   loop around it are charged an instruction at a time. That is the same
+//!   exchange `length`, `slice` and the four predicates above made, on the one
+//!   operation here that *built* its answer rather than reading one.
 //!
 //! The charge is made as soon as the receiver has been read, which is before
 //! `split` and `replace` refuse an empty needle: a call that raises still
 //! walked what it walked, and a bound a program could slip under by failing
 //! would not be one.
-
-use cove_ir::{LayoutId, Shape};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
@@ -160,86 +164,27 @@ pub(super) fn split(
     Ok(())
 }
 
-/// `String.join(parts) -> String`, where the receiver is the separator.
-pub(super) fn join(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let separator_addr = operand::string(machine, frame, 0);
-    let addr = frame.word(machine, 1);
-    // An `Array<String>` is what the verifier held `parts` to (#378, P5-3),
-    // so its element layout is not asked again: it is a run of one-word
-    // references, collected without asking each of them what it is.
-    debug_assert!(
-        elements_of(machine, addr).is_some(),
-        "an operand verified to be an `Array<String>`"
-    );
-    let len = machine.object_len(addr);
-    let mut parts = Vec::with_capacity(len as usize);
-    for at in 0..len {
-        let part = machine.payload(addr, at);
-        // A null part is refused rather than joined as the empty string. No
-        // array a program builds holds one.
-        if part == 0 {
-            return Err(operand::null_value());
-        }
-        parts.push(part);
-    }
-    let joined = joined_bytes(machine, separator_addr, &parts)?;
-    dest.word(machine, joined);
-    Ok(())
-}
-
-/// `parts` joined by the string at `separator`, as one allocation and a run
-/// of copies.
-///
-/// The lengths are summed before anything is allocated, so the answer is
-/// allocated once at exactly its size and no part is ever copied twice. The
-/// previous shape of this read every part into a Rust `String`, validating
-/// UTF-8 it had itself written, appended it to a buffer that grew as it went,
-/// and then packed the whole thing back into a Cove object — four passes over
-/// the bytes where this has one.
-///
-/// Summing in `i64` and handing the total to `new_string_of` is what refuses
-/// a join too long to have a length, through the error an exhausted heap
-/// already raises.
-fn joined_bytes(machine: &mut Machine, separator: u64, parts: &[u64]) -> Result<u64, RuntimeError> {
-    let width = |addr: u64| machine.object_len(addr) as i64;
-    let separator_len = width(separator);
-    let mut total = separator_len * (parts.len() as i64 - 1).max(0);
-    for part in parts {
-        total += width(*part);
-    }
-    // The bytes this builds, which is what it copies: every part once and
-    // every separator between two of them. It is not the length of the array
-    // it was handed, and it is not the receiver — the receiver is the
-    // separator, and a join of one part copies none of it.
-    machine.examined(total.max(0) as u64);
-    let result = machine.new_string_of(total)?;
-    let mut at = 0usize;
-    for (index, part) in parts.iter().enumerate() {
-        if index > 0 && separator_len > 0 {
-            machine.copy_string_bytes(result, at, separator, 0, separator_len as usize);
-            at += separator_len as usize;
-        }
-        let len = machine.object_len(*part) as usize;
-        machine.copy_string_bytes(result, at, *part, 0, len);
-        at += len;
-    }
-    Ok(result)
-}
-
-/// The element layout and length of the `Array` at `addr`.
-fn elements_of(machine: &Machine, addr: u64) -> Option<(LayoutId, u32)> {
-    match machine.program().layout(machine.object_layout(addr)).shape {
-        Shape::Elements {
-            elem,
-            growable: false,
-        } => Some((elem, machine.object_len(addr))),
-        _ => None,
-    }
-}
+// `join` was here, and it was the only arm in this file that *built* a
+// string rather than reading one. It summed the parts' lengths and the
+// separator's times one fewer than the parts, allocated the answer once at
+// exactly that size with `new_string_of`, and copied each part and each
+// separator into it with `copy_string_bytes` — one pass over the bytes where
+// the shape before it had four. `std.string.join` is that same arithmetic in
+// Cove over a `StringBuilder` sized by it, which is why the answer's
+// allocation is still made once and at its exact length; issue #454's Step 3.
+//
+// `joined_bytes` and `elements_of` went with it. `elements_of` was a
+// `debug_assert!`'s helper, checking that `join`'s second operand really was
+// the non-growable run of one-word references the verifier had already held it
+// to (#378, P5-3), and nothing else in this file ever asked. A `for` loop in
+// Cove asks the same question of the same object through `Inst` bounds
+// checking, every time rather than in a debug build.
+//
+// So did the null-part refusal. `join`'s loop declined a payload word of zero
+// with `operand::null_value()`, under a comment saying no array a program
+// builds holds one — which was true, and is why the path was unreachable from
+// Cove and is not reproduced in the Cove body. `tests/e2e/values_string_join`
+// is where the reachable behaviour lives now, on both evaluators.
 
 // **`slice` is not here any more.** It was `chars().collect()`, two
 // `i64::clamp`s and a re-collection — the whole receiver decoded into a
@@ -388,7 +333,7 @@ pub(super) fn to_lower(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::intrinsics::tests::{elements, read, run, word, words_of, world};
+    use crate::vm::intrinsics::tests::{read, run, word, words_of, world};
     use cove_ir::Repr;
 
     /// The parts of an `Array<String>` a builtin answered.
@@ -472,84 +417,16 @@ mod tests {
         );
     }
 
-    /// The receiver is the separator and the argument is the parts, which is
-    /// the way round the schema declares it.
-    /// A join sizes its answer by summing the parts, so every part and every
-    /// separator lands at an offset the previous ones decided. A separator
-    /// whose length is not a multiple of eight is what makes those offsets
-    /// unaligned, and that is the case worth walking.
-    #[test]
-    fn join_agrees_with_rust_at_every_separator_width() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 18);
-        let layout = elements(&program, program.str_layout, false);
-        let cases: &[&[&str]] = &[
-            &[],
-            &[""],
-            &["a"],
-            &["", ""],
-            &["a", ""],
-            &["", "b"],
-            &["one", "two", "three"],
-            &["12345678", "12345678"],
-            &["1234567", "123456789"],
-            &["h\u{e9}llo", "w\u{f6}rld", "\u{1f600}"],
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
-        ];
-        for separator in ["", " ", ", ", "--", "1234567", "12345678", "123456789"] {
-            for parts in cases {
-                let items = machine.new_object(layout, parts.len() as u32).unwrap();
-                for (at, part) in parts.iter().enumerate() {
-                    let word = machine.new_string(part).unwrap();
-                    machine.set_payload(items, at as u32, word);
-                }
-                let joined = on(&mut machine, separator, "join", &[(Repr::Ref, items)]);
-                assert_eq!(
-                    read(&machine, joined),
-                    parts.join(separator),
-                    "{parts:?} joined by {separator:?}"
-                );
-            }
-        }
-    }
-
-    /// An `Array<String>` holding a null is refused rather than joined as if
-    /// the part were empty.
-    #[test]
-    fn a_join_over_a_null_part_is_refused_as_it_was() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let layout = elements(&program, program.str_layout, false);
-        let items = machine.new_object(layout, 1).unwrap();
-        machine.set_payload(items, 0, 0);
-        let self_ = machine.new_string(", ").unwrap();
-        let error = run(
-            &mut machine,
-            "String",
-            "join",
-            &[(Repr::Ref, self_), (Repr::Ref, items)],
-        )
-        .unwrap_err();
-        assert!(
-            !error.message.is_empty(),
-            "a null part is refused rather than joined as an empty string"
-        );
-    }
-
-    #[test]
-    fn join_puts_the_receiver_between_the_parts() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let layout = elements(&program, program.str_layout, false);
-        let items = machine.new_object(layout, 2).unwrap();
-        let a = machine.new_string("a").unwrap();
-        let b = machine.new_string("b").unwrap();
-        machine.set_payload(items, 0, a);
-        machine.set_payload(items, 1, b);
-
-        let joined = on(&mut machine, ", ", "join", &[(Repr::Ref, items)]);
-        assert_eq!(read(&machine, joined), "a, b");
-    }
+    // Three `join` cases stood here — one comparing against `[&str]::join`
+    // at every separator width and every alignment of a part boundary, one
+    // over a null part, and one asserting the receiver goes *between* the
+    // parts. `join` is not an arm in this file any more. What replaced the
+    // first and the third is `tests/e2e/values_string_join`, which asks the
+    // same questions of *both* evaluators over twenty-nine rows against a
+    // golden a standalone `rustc` oracle wrote, including the separator count
+    // isolated on parts that are all empty; the second had no replacement to
+    // need, because a null part was unreachable from Cove and the checker is
+    // what kept it so.
 
     // A `slice_is_in_characters_and_clamps_both_bounds` case stood here,
     // asserting that `"héllo".slice(1, 3)` is `él` — a *character* range where

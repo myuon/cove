@@ -44,7 +44,6 @@ pub enum Intrinsic {
     StringWords,
     StringChars,
     StringSplit,
-    StringJoin,
     StringTrim,
     StringReplace,
     StringToUpper,
@@ -71,7 +70,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringWords,
     Intrinsic::StringChars,
     Intrinsic::StringSplit,
-    Intrinsic::StringJoin,
     Intrinsic::StringTrim,
     Intrinsic::StringReplace,
     Intrinsic::StringToUpper,
@@ -115,7 +113,6 @@ impl Intrinsic {
             Intrinsic::StringWords => "String",
             Intrinsic::StringChars => "String",
             Intrinsic::StringSplit => "String",
-            Intrinsic::StringJoin => "String",
             Intrinsic::StringTrim => "String",
             Intrinsic::StringReplace => "String",
             Intrinsic::StringToUpper => "String",
@@ -140,7 +137,6 @@ impl Intrinsic {
             Intrinsic::StringWords => "words",
             Intrinsic::StringChars => "chars",
             Intrinsic::StringSplit => "split",
-            Intrinsic::StringJoin => "join",
             Intrinsic::StringTrim => "trim",
             Intrinsic::StringReplace => "replace",
             Intrinsic::StringToUpper => "toUpper",
@@ -208,7 +204,6 @@ impl Intrinsic {
             Intrinsic::StringWords
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
-            | Intrinsic::StringJoin
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
@@ -250,7 +245,6 @@ impl Intrinsic {
             Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
             Intrinsic::StringWords | Intrinsic::StringChars => fixed(&[C::Str], C::Strings),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
-            Intrinsic::StringJoin => fixed(&[C::Str, C::Strings], C::Str),
             Intrinsic::StringTrim | Intrinsic::StringToUpper | Intrinsic::StringToLower => {
                 fixed(&[C::Str], C::Str)
             }
@@ -316,7 +310,6 @@ impl Intrinsic {
             Intrinsic::StringWords
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
-            | Intrinsic::StringJoin
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
@@ -412,10 +405,11 @@ impl Intrinsic {
 /// Three, and not one of them a collection: ADR 0058's Phase 5 makes "a new
 /// collection `IntrinsicCall` a verification failure", and this is the half of
 /// that rule a verifier can read. A `Text` or `Scalar` intrinsic whose operand
-/// is a collection is refused by `crate::verify` — the one exception is the
-/// `Array<String>` [`Class::Strings`] names, which `String.join` reads as the
-/// input of a bulk text operation (#378, Q18) rather than as a collection it
-/// manages.
+/// is a collection is refused by `crate::verify`, and there is no longer an
+/// exception: the `Array<String>` [`Class::Strings`] names was `String.join`'s
+/// operand, read as the input of a bulk text operation (#378, Q18) rather than
+/// as a collection it managed, and issue #454's Step 3 made that join Cove. No
+/// operand of any variant left is a collection at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
     /// Reads or builds text: Unicode, searching, splitting, case mapping.
@@ -629,7 +623,6 @@ mod tests {
             "String.words",
             "String.chars",
             "String.split",
-            "String.join",
             "String.trim",
             "String.replace",
             "String.toUpper",
@@ -699,7 +692,6 @@ mod tests {
                 | Intrinsic::StringWords
                 | Intrinsic::StringChars
                 | Intrinsic::StringSplit
-                | Intrinsic::StringJoin
                 | Intrinsic::StringTrim
                 | Intrinsic::StringReplace
                 | Intrinsic::StringToUpper
@@ -769,7 +761,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::StringJoin.to_string(), "String.join");
+        assert_eq!(Intrinsic::StringSplit.to_string(), "String.split");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 
@@ -882,10 +874,13 @@ mod tests {
     /// No intrinsic is a collection operation: ADR 0058 moved every one into
     /// run instructions and the standard library, and Phase 5 makes a new one
     /// a verification failure. No receiver is a collection, no category is
-    /// one — [`Category`] has none to be — and the two collections an operand
-    /// may be are `String.join`'s `Array<String>`, which is text work's input,
-    /// and the `ByteBuffer` a rendering appends to, which is text work's
-    /// output.
+    /// one — [`Category`] has none to be — and the one collection an operand
+    /// may still be is the `ByteBuffer` a rendering appends to, which is text
+    /// work's output. It was two until issue #454's Step 3: `String.join` took
+    /// an `Array<String>`, text work's *input*, and this test carried the
+    /// exception that said so. `std.string.join` walks that array with a
+    /// `for` loop now, so the exception is gone and the assertion below is
+    /// unconditional.
     #[test]
     fn no_intrinsic_is_a_collection_operation() {
         const COLLECTIONS: &[&str] = &[
@@ -904,8 +899,9 @@ mod tests {
             let signature = intrinsic.signature();
             for class in signature.operands {
                 assert!(
-                    *class != Class::Strings || *intrinsic == Intrinsic::StringJoin,
-                    "`{intrinsic}` takes an `Array<String>`, which only `String.join` may"
+                    *class != Class::Strings,
+                    "`{intrinsic}` takes an `Array<String>`, and nothing here may: \
+                     `String.join` was the one that did, and it is Cove now"
                 );
                 assert!(
                     *class != Class::Buffer || intrinsic.operation() == "renderInto",

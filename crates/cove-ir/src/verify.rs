@@ -1437,8 +1437,11 @@ impl Check<'_> {
     /// It is also where ADR 0058's Phase 5 makes "a new collection
     /// `IntrinsicCall` a verification failure": a `Text` or `Scalar` intrinsic
     /// handed a collection is refused as that, by name, whatever its
-    /// signature says — `String.join`'s `Array<String>` is the one collection
-    /// a signature names, and it names it exactly.
+    /// signature says. `String.join`'s `Array<String>` was the one collection
+    /// a signature named; issue #454's Step 3 made that join Cove, so no
+    /// signature names one now and the check below has nothing left to
+    /// excuse — which is why `intrinsic.rs`'
+    /// `no_intrinsic_is_a_collection_operation` asserts it unconditionally.
     fn check_signature(
         &mut self,
         at: Option<usize>,
@@ -3150,25 +3153,16 @@ mod tests {
             ]
         );
 
-        // `Array<Int>` is not the `Array<String>` `join` names.
-        let held = calling(
-            crate::Intrinsic::StringJoin,
-            STR,
-            vec![Repr::Ref, Repr::Ref, Repr::Ref],
-            vec![
-                Arg {
-                    slot: 1,
-                    layout: STR,
-                },
-                array(2),
-            ],
-        );
-        assert_eq!(
-            faults(&held),
-            vec![
-                "operand 1 of `String.join` is `Array<Int>`, where its signature has Array<String>"
-            ]
-        );
+        // A case stood here holding `String.join` — the one intrinsic whose
+        // signature named `Class::Strings` — to an `Array<Int>` in that
+        // position, so that "not the `Array<String>` `join` names" was a fault
+        // with its own wording. Issue #454's Step 3 made that join Cove, and no
+        // variant left declares a `Strings` operand at all, so there is nothing
+        // to construct the case out of. The check below it is still here and
+        // still runs: `Class::Strings` remains a *result* class, for `words`,
+        // `chars` and `split`, and `intrinsic.rs`'
+        // `no_intrinsic_is_a_collection_operation` now asserts unconditionally
+        // that no operand is one.
 
         let held = calling(
             crate::Intrinsic::ValueOrder,

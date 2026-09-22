@@ -1427,26 +1427,16 @@ pub fn call_method(
                         .collect(),
                 )))
             }
-            "join" => {
-                let args = expect_args("String.join", args, 1, span)?;
-                let Value(Repr::Array(parts)) = &args[0] else {
-                    return Err(type_error(
-                        "String.join",
-                        "parts",
-                        "Array<String>",
-                        &args[0],
-                        span,
-                    ));
-                };
-                let mut joined = String::new();
-                for (index, part) in parts.iter().enumerate() {
-                    if index > 0 {
-                        joined.push_str(text);
-                    }
-                    joined.push_str(expect_str("String.join", "parts", part, span)?);
-                }
-                Ok(Value(Repr::Str(joined.into())))
-            }
+            // `join` used to answer here, by pushing each part onto a Rust
+            // `String` with the receiver between them and handing the whole
+            // thing back. It does not reach this arm any more:
+            // `Interpreter::eval_method_call` resolves it to `std.string.join`
+            // first, which sums the parts' byte lengths and the separator's
+            // times one fewer than the parts, sizes a `StringBuilder` by that
+            // sum and appends into it. ADR 0064's Decision 2 — the count of
+            // separators is an arithmetic policy over a representation, and
+            // `join` is a method's name — and issue #454's Step 3, which is
+            // where the measurement of what the move cost lives.
             // `slice` used to answer here, by collecting the whole receiver
             // into a `Vec<char>`, clamping each bound into it and collecting
             // the middle back again. It does not reach this arm any more:
