@@ -1241,6 +1241,28 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.int",
         function: "abs",
     },
+    // `Int`'s first **associated** binding, and the second of any receiver:
+    // it is written on the type's name rather than on a value, so
+    // `cove_ir`'s `Body::call_associated` resolves it and not
+    // `Body::call_builtin_method`. What counts as a number is a policy over a
+    // representation, which is ADR 0064's Decision 2; what is under it is
+    // `core.byteLength` and one `byteAt` a byte, with an accumulator that runs
+    // *negative* so that neither end of `Int` needs a magnitude `Int` has not
+    // got. `Intrinsic::IntParse` is gone in the same change.
+    //
+    // `Int.parseRadix` is **not** here beside it, and the order issue #454
+    // planned — the general one in Cove, this one a radix-10 wrapper over it —
+    // is not available: `parseRadix` refuses a radix outside `2..=36` by
+    // raising, and a Cove body has nothing to raise with (issue #461). This
+    // one never raises. When #461 is decided the wrapper is written and the
+    // two rows here become one.
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Int",
+        method: "parse",
+        module: "std.int",
+        function: "parse",
+    },
     // `Duration.nanos` is not here: it is the one primitive left, and both
     // its forms — the reader and the builder — stay in the machine. Each of
     // its five neighbours is bound twice, once as the method that reads it

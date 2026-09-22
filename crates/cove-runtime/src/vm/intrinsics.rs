@@ -189,7 +189,15 @@ pub(crate) fn call(
         // `Int.min`, `Int.max`, and `Int.abs` are not here: they are
         // `std.int.min`, `std.int.max`, and `std.int.abs` — see
         // `cove_schema::builtins::standard_binding`.
-        Intrinsic::IntParse => scalar::int_parse(machine, frame, dest),
+        // `Int.parse` is not here either, and it is the first of this
+        // receiver's *associated* functions to go: `std.int.parse` reads the
+        // receiver's bytes with `core.byteLength` and one `byteAt` a byte,
+        // into an accumulator that runs negative because Cove traps on
+        // overflow and the least `Int` has a magnitude the greatest has not.
+        // `parseRadix` below it cannot follow until issue #461 is decided —
+        // it refuses a radix outside `2..=36` by raising, and a Cove body has
+        // nothing to raise with — and when it is, `parse` becomes its
+        // radix-10 wrapper and this arm goes with it.
         Intrinsic::IntParseRadix => scalar::int_parse_radix(machine, frame, dest),
 
         // ---- Float -------------------------------------------------------

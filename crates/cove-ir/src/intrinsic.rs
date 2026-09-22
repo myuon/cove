@@ -48,7 +48,6 @@ pub enum Intrinsic {
     StringToUpper,
     StringToLower,
     StringRefuseByteRange,
-    IntParse,
     IntParseRadix,
     FloatToInt,
     FloatFormat,
@@ -73,7 +72,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
     Intrinsic::StringRefuseByteRange,
-    Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
     Intrinsic::FloatFormat,
@@ -115,7 +113,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
             Intrinsic::StringRefuseByteRange => "String",
-            Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatFormat => "Float",
@@ -138,7 +135,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
-            Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatFormat => "format",
@@ -204,8 +200,7 @@ impl Intrinsic {
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower
             | Intrinsic::StringRefuseByteRange => Category::Text,
-            Intrinsic::IntParse
-            | Intrinsic::IntParseRadix
+            Intrinsic::IntParseRadix
             | Intrinsic::FloatToInt
             | Intrinsic::FloatFormat
             | Intrinsic::FloatParse => Category::Scalar,
@@ -247,7 +242,6 @@ impl Intrinsic {
             // The text and the two offsets a refusal is worded with, in the
             // order `String.sliceBytes` names them.
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
-            Intrinsic::IntParse => fixed(&[C::Str], C::ResultOf(K::Int)),
             Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
@@ -361,16 +355,24 @@ impl Intrinsic {
             // both. See `every_intrinsic_left_can_be_refused` for the form
             // that takes as a test and for what it costs `cove-native`.
             //
-            // The three parsers read a `String` receiver's bytes and
+            // The two parsers left read a `String` receiver's bytes and
             // allocate the message an `Err` carries, and `parseRadix` refuses
             // a radix outside `2..=36`; `format` allocates the `String` it
             // always answers and refuses a digit count past 17. None of the
             // four is proportional to anything past the one receiver or the
             // one answer, which is short enough that this backend does not
             // charge it as bulk work.
-            Intrinsic::IntParse | Intrinsic::IntParseRadix | Intrinsic::FloatParse => {
-                allocate.union(E::READS_MEMORY)
-            }
+            //
+            // There were three parsers until issue #454's Step 4, and
+            // `Int.parse` is the one that left: it is `std.int.parse` now, a
+            // `core.byteLength` and one `byteAt` a byte with an accumulator
+            // that runs negative so that neither end of `Int` needs a
+            // magnitude `Int` has not got. `parseRadix` stays for the reason
+            // this comment's other half names — it *refuses* — and `parse`
+            // could go because every failure it has is an `Err` value it
+            // builds. That is the line issue #461 draws through six of the
+            // arms below, and the only reason the two are now apart.
+            Intrinsic::IntParseRadix | Intrinsic::FloatParse => allocate.union(E::READS_MEMORY),
             Intrinsic::FloatToInt | Intrinsic::FloatFormat => allocate,
 
             // `==` on anything wider than a word walks both operands
@@ -621,7 +623,6 @@ mod tests {
             "String.toUpper",
             "String.toLower",
             "String.refuseByteRange",
-            "Int.parse",
             "Int.parseRadix",
             "Float.toInt",
             "Float.format",
@@ -689,7 +690,6 @@ mod tests {
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
                 | Intrinsic::StringRefuseByteRange
-                | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatFormat

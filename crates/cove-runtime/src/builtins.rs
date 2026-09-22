@@ -1160,7 +1160,7 @@ fn core_index(shown: &str, index: &Value, len: usize, span: Span) -> Result<usiz
     }
 }
 
-/// `Vector.of(...)` and `Int.parse(...)`.
+/// `Vector.of(...)` and `Int.parseRadix(...)`.
 pub fn call_associated(
     host: &mut dyn Callable,
     type_name: &str,
@@ -1191,23 +1191,23 @@ pub fn call_associated(
             };
             Ok(Value(Repr::Duration(*count)))
         }
-        ("Int", "parse") => {
-            let args = expect_args("Int.parse", args, 1, span)?;
-            let Value(Repr::Str(text)) = &args[0] else {
-                return Err(type_error("Int.parse", "text", "String", &args[0], span));
-            };
-            Ok(match text.parse::<i64>() {
-                Ok(value) => Value::ok(Value(Repr::Int(value))),
-                Err(_) => Value::err(Value::error(format!("`{text}` is not an Int"))),
-            })
-        }
         // `Int.parse` in a base other than ten. A `radix` outside `2..=36`
         // names no notation, so it stops the run the way an empty
         // `String.split` separator does; text that is not a number in a
         // radix that does exist is the data's failure and answers `Err`,
         // which is the same line `Int.parse` draws. Rust's
         // `i64::from_str_radix` reads a leading `+` or `-` and no digit
-        // separators, exactly as `parse::<i64>` above does.
+        // separators.
+        //
+        // **`Int.parse` sat above this and is `std.int.parse` now**, reached
+        // the way `String.fromCodePoint` is: through
+        // `cove_schema::builtins::standard_associated_binding`, before this
+        // function is asked. What counts as a number is a policy over a
+        // representation (ADR 0064's Decision 2), and the reading under it is
+        // `core.byteLength` with one `byteAt` a byte. The two could not go
+        // together — the `return Err` below raises, and a Cove body has
+        // nothing to raise with (issue #461) — which is why this receiver has
+        // one arm here and one binding there.
         ("Int", "parseRadix") => {
             let args = expect_args("Int.parseRadix", args, 2, span)?;
             let Value(Repr::Str(text)) = &args[0] else {

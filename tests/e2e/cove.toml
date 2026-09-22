@@ -332,6 +332,10 @@ allow = ["console"]
 entry = "values_int.main"
 allow = ["console"]
 
+[run.values_int_parse]
+entry = "values_int_parse.main"
+allow = ["console"]
+
 [run.values_interpolation]
 entry = "values_interpolation.main"
 allow = ["console"]

@@ -22,28 +22,23 @@ use crate::vm::intrinsics::{make, operand};
 
 // --- Int -------------------------------------------------------------------
 
-/// `Int.parse(text) -> Result<Int, Error>`.
-///
-/// Rust's `str::parse::<i64>` reads a leading `+` or `-` and no digit
-/// separators, which is why a `1_000` that a literal may be written with is
-/// an `Err` here.
-pub(super) fn int_parse(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    match text.parse::<i64>() {
-        Ok(value) => make::ok(machine, dest, &[value as u64]),
-        Err(_) => make::failed(machine, dest, &format!("`{text}` is not an Int")),
-    }
-}
-
 /// `Int.parseRadix(text, radix) -> Result<Int, Error>`.
 ///
 /// A `radix` outside `2..=36` names no notation, so it stops the run the way
 /// an empty `String.split` separator does; text that is not a number in a
 /// radix that does exist is the data's failure and answers `Err`.
+///
+/// **`Int.parse` used to sit above this, and does not any more.** It was
+/// `text.parse::<i64>()`, and issue #454's Step 4 made it `std.int.parse`: a
+/// `core.byteLength` and one `byteAt` a byte, with an accumulator that runs
+/// negative so that `-9223372036854775808` — whose magnitude no `Int` holds —
+/// is read without a trap and `9223372036854775808` answers `Err` without
+/// one. The two variants could not move together and the order issue #454
+/// planned is inverted, because of the `return Err` two lines into the body
+/// below: a radix outside the range *raises*, and a Cove body has nothing to
+/// raise with. That is issue
+/// [#461](https://github.com/myuon/cove/issues/461), and when it is decided
+/// this arm goes too and `parse` becomes a radix-10 call into it.
 pub(super) fn int_parse_radix(
     machine: &mut Machine,
     frame: Frame<'_>,
@@ -133,27 +128,24 @@ mod tests {
 
     /// Text that is not a number is the *data's* failure and answers `Err`; a
     /// radix that names no notation is the *call's* and stops the run.
+    ///
+    /// **It asked the same pair of `Int.parse` until issue #454's Step 4**,
+    /// which moved that one to `std.int.parse` — and the half it took with it
+    /// is the half this arm could not follow. `parse`'s refusals are all
+    /// `Err` values, so a Cove body builds every one of them; `parseRadix`'s
+    /// radix refusal is a *raise*, which a Cove body has nothing to make
+    /// (issue #461). So the distinction this test is named for now lives
+    /// entirely inside one variant, which is why the `Int.parse` rows are
+    /// gone rather than repointed: what answers them is
+    /// `tests/e2e/values_int_parse`, 103 golden lines against an independent
+    /// oracle.
     #[test]
     fn parsing_an_int_separates_bad_data_from_a_bad_call() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let int = scalar(&program, Repr::Int);
-        let parse = |machine: &mut Machine, text: &str| {
-            let word = machine.new_string(text).unwrap();
-            run(machine, "Int", "parse", &[(Repr::Ref, word)]).unwrap()
-        };
         // A `Result` is a run of words — `[disc, Int]` — and not an object,
         // so what the answer is read out of is the words themselves.
-        let words = parse(&mut machine, "-12");
-        assert_eq!(
-            result_of(&program, int, &words),
-            ("Ok".to_string(), vec![-12i64 as u64])
-        );
-        // Rust's `parse` reads no digit separators, which a literal may be
-        // written with.
-        let words = parse(&mut machine, "1_000");
-        assert_eq!(message_of(&machine, int, &words), "`1_000` is not an Int");
-
         let text = machine.new_string("ff").unwrap();
         let words = run(
             &mut machine,

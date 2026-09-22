@@ -243,6 +243,15 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "<tag>",
             "Bytes",
             "ByteBuffer",
+            // `std.int.parse` answers a `Result<Int, Error>`, and `lower`
+            // lowers the whole standard library attached to every package, so
+            // its two layouts are declared here: the `Error`, and then the
+            // `Result` around it. Issue #454's Step 4 put them at the head of
+            // this run — before Step 4 the first library signature to name
+            // either was `std.string.sliceBytes`, four rows further down, and
+            // the pair sat there instead.
+            "Error",
+            "Result",
             // `std.string.join` takes an `Array<String>` and `std.string.chars`
             // answers one, and they are the only non-generic library functions
             // whose *signature* names a collection at all — `std.array`'s are
@@ -257,11 +266,14 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // first non-generic library function that does, so whole-package
             // lowering declares it before anything else can.
             "Option",
-            // `std.string.sliceBytes` answers a `Result<String, Error>`, and
-            // `lower` lowers the whole standard library attached to every
-            // package, so its two layouts are declared here too: the `Error`,
-            // and then the `Result` around it.
-            "Error",
+            // `std.string.sliceBytes`' `Result<String, Error>`, which is a
+            // **second** `Result` row and not the one above: a `Result`'s
+            // layout is the words it holds, and an `Ok` that is an `Int` is a
+            // different run from an `Ok` that is a reference. The `Error` it
+            // carries is the row already interned above it, which is the whole
+            // of what `a_parser_answers_a_result_and_interns_the_error_it_may_carry`
+            // is about — the `Result` describes its `Err` words without saying
+            // what declared them.
             "Result",
             // The one *declaration* in this list, and it is here because
             // `lower` lowers a whole package: `std.stringbuilder` is attached

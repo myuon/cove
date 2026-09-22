@@ -950,8 +950,17 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
 /// row in `cove_schema::builtins::STANDARD_LIBRARY` the only thing that says
 /// how the call is answered at all — resolved by [`Body::call_associated`]
 /// before it ever reaches here.
+///
+/// **`Int.parse` is not here, and `Int.parseRadix` is**, which is the one
+/// place this table shows a receiver split between the two mechanisms. Issue
+/// #454's Step 4 moved `parse` to `std.int.parse` — what counts as a number is
+/// a policy over a representation, and the accumulator that reads it runs
+/// negative so that neither end of `Int` needs a magnitude `Int` has not got —
+/// and could not move `parseRadix` with it, because that one refuses a radix
+/// outside `2..=36` by *raising* and a Cove body has nothing to raise with
+/// (issue [#461](https://github.com/myuon/cove/issues/461)). The split is
+/// temporary and the row below is what will go when #461 is decided.
 const ASSOCIATED: &[(&str, &str)] = &[
-    ("Int", "parse"),
     ("Int", "parseRadix"),
     ("Float", "parse"),
     ("Duration", "nanos"),
@@ -1049,6 +1058,13 @@ fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> Opti
 /// ADR 0064's `fromCodePoint` migration had to add, and it is two lines
 /// rather than a path of its own, because [`answers`] is the test
 /// [`ASSOCIATED`]'s own arm already used for the three parsers.
+///
+/// **`Int.parse` is the second one that does not**, and it needed the same two
+/// lines with `Ty::Int` in them rather than a generalisation of the first: the
+/// `String` arm was written for one receiver and says so. A third would be the
+/// point to ask what a `Result`'s `ok` type is instead of naming each receiver
+/// here; two is not, and an arm that names its type is a line a reader
+/// finishes rather than a helper they go and look up.
 pub(super) fn associated(head: &str, name: &str, ty: &Ty) -> bool {
     if ASSOCIATED.contains(&(head, name)) {
         return match head {
@@ -1061,7 +1077,9 @@ pub(super) fn associated(head: &str, name: &str, ty: &Ty) -> bool {
     if cove_schema::builtins::standard_associated_binding(head, name).is_none() {
         return false;
     }
-    receiver_name(ty) == Some(head) || (head == "String" && answers(ty, &Ty::Str))
+    receiver_name(ty) == Some(head)
+        || (head == "String" && answers(ty, &Ty::Str))
+        || (head == "Int" && answers(ty, &Ty::Int))
 }
 
 /// Whether `ty` is the `Result<ok, Error>` a builtin parser answers.
