@@ -42,7 +42,6 @@ use std::fmt;
 pub enum Intrinsic {
     ValueRenderInto,
     StringWords,
-    StringChars,
     StringSplit,
     StringTrim,
     StringReplace,
@@ -68,7 +67,6 @@ pub enum Intrinsic {
 pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRenderInto,
     Intrinsic::StringWords,
-    Intrinsic::StringChars,
     Intrinsic::StringSplit,
     Intrinsic::StringTrim,
     Intrinsic::StringReplace,
@@ -111,7 +109,6 @@ impl Intrinsic {
         match self {
             Intrinsic::ValueRenderInto => "Value",
             Intrinsic::StringWords => "String",
-            Intrinsic::StringChars => "String",
             Intrinsic::StringSplit => "String",
             Intrinsic::StringTrim => "String",
             Intrinsic::StringReplace => "String",
@@ -135,7 +132,6 @@ impl Intrinsic {
         match self {
             Intrinsic::ValueRenderInto => "renderInto",
             Intrinsic::StringWords => "words",
-            Intrinsic::StringChars => "chars",
             Intrinsic::StringSplit => "split",
             Intrinsic::StringTrim => "trim",
             Intrinsic::StringReplace => "replace",
@@ -202,7 +198,6 @@ impl Intrinsic {
     pub const fn category(self) -> Category {
         match self {
             Intrinsic::StringWords
-            | Intrinsic::StringChars
             | Intrinsic::StringSplit
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
@@ -243,7 +238,7 @@ impl Intrinsic {
             // The piece first, then the buffer it is appended to: the value
             // is the receiver, as it is of every other operation here.
             Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
-            Intrinsic::StringWords | Intrinsic::StringChars => fixed(&[C::Str], C::Strings),
+            Intrinsic::StringWords => fixed(&[C::Str], C::Strings),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
             Intrinsic::StringTrim | Intrinsic::StringToUpper | Intrinsic::StringToLower => {
                 fixed(&[C::Str], C::Str)
@@ -308,7 +303,6 @@ impl Intrinsic {
             // and allocates the array or string it answers. `split` and
             // `replace` also refuse an empty needle.
             Intrinsic::StringWords
-            | Intrinsic::StringChars
             | Intrinsic::StringSplit
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
@@ -621,7 +615,6 @@ mod tests {
         const MIGRATED_BUT_STILL_HERE: &[&str] = &[
             "Value.renderInto",
             "String.words",
-            "String.chars",
             "String.split",
             "String.trim",
             "String.replace",
@@ -690,7 +683,6 @@ mod tests {
             match intrinsic {
                 Intrinsic::ValueRenderInto
                 | Intrinsic::StringWords
-                | Intrinsic::StringChars
                 | Intrinsic::StringSplit
                 | Intrinsic::StringTrim
                 | Intrinsic::StringReplace

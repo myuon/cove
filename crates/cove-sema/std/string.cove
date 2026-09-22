@@ -973,3 +973,193 @@ export fn join(separator: String, parts: Array<String>) -> String {
   }
   core.bytesFinish(buffer)
 }
+
+/// This string's characters, one one-character `String` each.
+///
+/// A character in Cove is a `String` of `length()` 1 — there is no `Character`
+/// type for this to answer instead — so the answer is an `Array<String>`
+/// whose length is the receiver's `length()`, and whose elements are 1, 2, 3
+/// or 4 bytes each. The empty string answers an **empty** array and not a
+/// one-element one, and a NUL is a character like any other: one element, one
+/// byte.
+///
+/// **It splits by code point and not by grapheme cluster**, which neither the
+/// name nor the signature settles, so `tests/e2e/values_string_chars` pins it:
+/// a combining acute is an element of its own, a ZWJ family of three people
+/// and two joiners is five, a skin-tone modifier is an element, a
+/// regional-indicator flag is two, and `CRLF` is two.
+///
+/// It was `text.chars().map(String::from).collect()` in Rust, one
+/// `IntrinsicCall` per call. ADR 0064 moves it here, and what left with it is
+/// a **decode**: that arm ran Rust's UTF-8 decoder over the receiver to
+/// produce a `char` per character and then ran Rust's encoder over every
+/// `char` to put the same bytes back into a fresh heap string. Nothing about
+/// the answer needed a scalar — the bytes were already in the receiver in the
+/// right order, and a lead byte says how many of them a character is. So this
+/// is `core.stringSlice` per character over the walk [`length`] already does,
+/// and no code point is ever formed.
+///
+/// # The two walks, and why the first one is not free
+///
+/// The run is sized before it is filled: [`charactersBefore`], the private
+/// walk under [`length`], counts the characters, and
+/// `core.vectorWithCapacity` allocates the store at exactly that many
+/// elements. Then the fill walk reads each lead byte again, slices the
+/// character out and appends it with ADR 0062's ensure/store/commit.
+///
+/// **The sizing walk costs about 7.1 instructions a character and the fill
+/// loop is about 40 — so this is a 17% tax where `join`'s equivalent was
+/// 1%**, and that difference is structural rather than incidental. `join`'s
+/// sum loop is proportional to the number of *parts*; this one is
+/// proportional to the same thing the fill loop is, because both walk the
+/// whole receiver. It is paid anyway, and the reason is the allocation gate.
+///
+/// **Three sizings were measured rather than reasoned about**, against the
+/// intrinsic they replace. `benches/chars` is 32,000 calls on a 61-character
+/// ASCII line and `benches/chars_rows` is 4,000 calls each on six receivers
+/// whose widths run 1 to 4 bytes:
+///
+/// ```text
+///   benches/chars           intrinsic      this  grown  byteLength
+///     instructions         48,256,019   96.19 M    82.27 M    82.24 M
+///     allocations           2,016,006 2,048,006  2,208,006 2,048,006
+///     allocated words       5,984,025 6,080,025  8,224,025 6,080,025
+///     growths                       0         0    160,000         0
+///
+///   benches/chars_rows      intrinsic      this  grown  byteLength
+///     instructions            190,849   40.94 M    28.66 M    28.64 M
+///     allocations           1,624,062 1,648,062  1,736,062 1,648,062
+///     allocated words       4,824,682 4,896,682  6,504,682 7,248,682
+///     growths                      13        13     88,013        13
+/// ```
+///
+/// **Growing the run** — `core.vectorWithCapacity(0)` and let the store
+/// double — saves 13,920,000 instructions on `benches/chars` (14.5% of it)
+/// and costs **160,000 growths, 160,000 allocations and +2,144,000 allocated
+/// words, +37.4%**. Refused on the second number.
+///
+/// **Sizing by `core.byteLength`** is the interesting one, and it is refused
+/// on a row that a measurement of ASCII alone would never have shown. A
+/// character is at least one byte, so the byte length is an upper bound on the
+/// character count and one header load rather than a walk — and on
+/// `benches/chars` it is **exactly** the walk's answer, so that arm is
+/// identical to this one on every allocation figure and 14.5% cheaper. Then
+/// `benches/chars_rows` puts a four-byte character in it: the store is
+/// allocated at four times the elements it holds, `core.vectorFinish`
+/// relabels the store in place and keeps it, and allocated words go to
+/// **7,248,682 — +50.2% against the intrinsic**. ADR 0064's Decision 8 says
+/// allocations and allocated words may not regress at all without a reason
+/// accepted in the pull request, and "it is free on ASCII" is not one.
+///
+/// So the exact count is what is here, at **+1.49% allocated words and +1.48%
+/// allocations** against the intrinsic on the width matrix, and the same two
+/// figures at +1.60% and +1.59% on the ASCII row. Both are the `Vector`'s
+/// owner: `Inst::GrowableAlloc` makes ADR 0052's owner as well as its store,
+/// where `make::strings` made one object. Growths are **nought** either way,
+/// which is what sizing buys.
+///
+/// # The slice is taken before the reservation opens, and it has to be
+///
+/// `core.stringSlice` allocates, and the window between `core.vectorEnsure`
+/// and `core.vectorCommit` "admits only what neither calls, allocates,
+/// branches nor writes the heap" — the verifier says so by name, and it said
+/// so to the first draft of this body. So the character is sliced into a local
+/// first and the window is the three instructions that publish it. The local
+/// is a frame slot, so the collector finds the fresh string across the
+/// `vectorEnsure` that may grow the store, which is ADR 0062's protocol
+/// working as written rather than an accident.
+///
+/// # Sharing the width decision was measured and refused, for the third time
+///
+/// What this shares with [`charactersBefore`] is that walk itself, for the
+/// sizing. What it does **not** share is the four-way width `if`, and the rule
+/// is [`startsWith`]'s: a factoring is taken only if the lowered sequence at
+/// the *existing* caller's sites is unchanged. Extracting a
+/// `characterWidth(lead)` that [`charactersBefore`], [`boundaryAfter`] and
+/// this body all call costs `examples/covefmt` **+1,702,626 instructions**,
+/// 1,019,881,586 against 1,021,584,212, with allocations, allocated words,
+/// growths and collections identical — the inliner expands it, but the
+/// expansion lands the width in a slot of its own and adds it, where the copy
+/// written out lowers to `add.int.imm`. [`boundaryAfter`] refused the same
+/// factoring at +1,623,612 on a smaller corpus and `matchesAt` was refused in
+/// the [`startsWith`] round at +2,178. This body needs the width as a *value*
+/// anyway — `core.stringSlice` takes a count — so the `if` here is an
+/// expression rather than four `+=`s, and that is the whole of the difference.
+///
+/// # No shipped program calls this
+///
+/// Measured at `b2fe2f9`: `examples/covefmt` has **0 static sites and 0
+/// dynamic calls**, and `examples/cq` has 2 static sites and **0 dynamic
+/// calls**, both in `cq/json/json.cove` on paths `revenue-summary` does not
+/// take. So covefmt is **count-identical** across this migration — 11,219
+/// emitted instructions in 111 functions, 1,019,881,586 encoded instructions,
+/// 959,307,452 dispatches, 4,855,264 allocations, 61,227,046 allocated words,
+/// 621,730 growths and 15 collections on both sides, and #441's sweep is why
+/// the body does not even appear in it — and cq moves only statically: 6,429
+/// instructions in 75 functions with 21 `IntrinsicCall` sites become 6,475 in
+/// 76 with **19**, and every runtime counter is identical to the digit.
+///
+/// That makes this the first Step 3 migration whose *representative programs
+/// are its own control*, and it is also why no whole-program improvement is
+/// claimed for it. What this operation costs is in `benches/chars`, which is
+/// `examples/cq`'s scanner loop reduced to the mechanism.
+///
+/// # What it costs on the clock, and the multiple ADR 0064 asks for
+///
+/// Nine samples a row of `benches/chars_rows`, medians in nanoseconds a call,
+/// two binaries interleaved and pointed at one tree:
+///
+/// ```text
+///   row                    VM intrinsic   VM Cove     x    native both     x
+///   empty                            97       174  1.79      96 -> 126  1.31
+///   short.ascii  (8 x 1 B)        1,013     1,549  1.53     980 -> 1,070 1.09
+///   long.ascii   (128 x 1 B)     12,200    21,334  1.75  12,318 -> 15,071 1.22
+///   short.mixed  (8 ch, 20 B)     1,111     1,658  1.49   1,117 -> 1,229 1.10
+///   long.mixed   (128 ch, 320 B) 12,831    22,839  1.78  12,729 -> 16,687 1.31
+///   four         (128 x 4 B)     16,683    26,447  1.59  16,864 -> 19,649 1.17
+/// ```
+///
+/// **The operation's own multiple is 1.49x to 1.79x on the VM arm**, which is
+/// inside Decision 8's 2x, and **1.09x to 1.31x compiled**. The native tier
+/// runs every one of these rows faster than the VM does — 0.69 to 0.74 of the
+/// VM's time — which is the flip nine of the ten migrations before this one
+/// showed and [#464](https://github.com/myuon/cove/issues/464) recorded `join`
+/// failing.
+///
+/// **Nothing here validates, and the rows say so from the other side.**
+/// `join`'s round found `core.bytesFinish` re-validating the UTF-8 its body had
+/// just written, at +560 ns on 334 non-ASCII bytes. This body cannot pay that:
+/// `core.stringSlice` "validates nothing" by its own schema — a run of valid
+/// UTF-8 cut at two character boundaries is valid UTF-8 — and
+/// `core.vectorFinish` is a word-run relabel. The evidence is `long.ascii`
+/// against `four`, the same 128 characters at one byte and at four: the
+/// intrinsic widens by **+37%** and this body by **+24%**, so the wide row is
+/// where the Cove arm does *relatively best*, which is the opposite of what a
+/// per-element validation would do.
+export fn chars(text: String) -> Array<String> {
+  let length = core.byteLength(text)
+  let parts: Vector<String> = core.vectorWithCapacity(charactersBefore(
+    text,
+    length,
+  ))
+  var at = 0
+  while at < length {
+    let lead = text.byteAt(at)
+    let width = if lead < 128 {
+      1
+    } else if lead < 224 {
+      2
+    } else if lead < 240 {
+      3
+    } else {
+      4
+    }
+    let part = core.stringSlice(text, at, width)
+    let index = core.vectorLength(parts)
+    core.vectorEnsure(parts, 1)
+    core.vectorStore(parts, index, part)
+    core.vectorCommit(parts, 1)
+    at += width
+  }
+  core.vectorFinish(parts)
+}

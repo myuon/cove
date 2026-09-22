@@ -206,7 +206,7 @@ written as a namespace.
 | `length() -> Int` |  |  |  | `std.string.length` |
 | `isEmpty() -> Bool` |  |  |  | `std.string.isEmpty` |
 | `words() -> Array<String>` |  |  |  | `machine` |
-| `chars() -> Array<String>` |  |  |  | `machine` |
+| `chars() -> Array<String>` |  |  |  | `std.string.chars` |
 | `split(separator: String) -> Array<String>` |  |  |  | `machine` |
 | `join(parts: Array<String>) -> String` |  |  |  | `std.string.join` |
 | `slice(from: Int, to: Int) -> String` |  |  |  | `std.string.slice` |

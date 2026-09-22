@@ -1,3 +1,6 @@
+use console.println
+use clock.now
+
 /// Takes one line apart and scans it, the way a parser does.
 ///
 /// This is the shape `examples/cq` spends 99% of its time in, reduced to the
@@ -20,5 +23,191 @@ export fn main() -> Result<Unit, Error> {
     round += 1
   }
   assertEqual(quotes, 32000 * 12)?
+  Ok(())
+}
+
+/// What `String.chars()` costs, at the receiver lengths and encoding widths
+/// that separate one implementation of it from another.
+///
+/// [`main`] above is the shape `examples/cq` spends its time in and is one of
+/// `cove-bench`'s nine rows; it prices `chars()` at exactly one receiver. This
+/// is the decomposition beside it — issue #454's Step 3, which moved the
+/// operation out of the runtime and into `std.string.chars`: the walk under
+/// `String.length` to size the run, then a lead byte, a `core.stringSlice` and
+/// ADR 0062's ensure/store/commit per character. The Rust arm ran Rust's UTF-8
+/// decoder over the receiver and encoded every scalar it produced back into a
+/// fresh heap `String`, which is why these rows price a *different algorithm*
+/// rather than the same loop written twice — and why the width rows matter at
+/// all: a decoder's cost follows the scalar and a slice's follows the bytes.
+///
+/// # The rows
+///
+/// The cost of a `chars()` is a fixed part — the count walk's call, the
+/// vector's allocation, the `vectorFinish` relabel — and a
+/// character-proportional one, which is the fill loop. **Length and width vary
+/// independently**, which is the whole point of the matrix: `short.*` against
+/// `long.*` is the slope per character at a fixed width, and `*.ascii` against
+/// `*.mixed` against `four` is what a *wider* character costs at a fixed
+/// count.
+///
+/// - **empty** is the receiver with nothing in it. It is the floor, and it is
+///   the one row where the answer is an empty array: a `byteLength`, a count
+///   walk that does not turn, a `vectorWithCapacity(0)` and a `vectorFinish`;
+/// - **short.ascii** and **long.ascii** are eight and 128 one-byte characters,
+///   so the slope between them is what an ASCII character costs;
+/// - **short.mixed** and **long.mixed** are eight and 128 characters of
+///   [`mixedPiece`]'s four-way cycle, which averages two and a half bytes.
+///   Against the ASCII pair at the same *count* they price the width, and the
+///   two slopes together say whether the cost follows characters or bytes;
+/// - **four** is 128 four-byte characters, the widest a UTF-8 character gets
+///   and the row where a per-scalar decoder and a per-run slice are furthest
+///   apart. It is the same character count as **long.ascii** and four times
+///   the bytes.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is therefore a call to
+/// [`countChars`], whose body is the loop, and [`rows`] does nothing in a turn
+/// but read a clock either side of it. It is **checked rather than assumed**:
+/// `--backend native --boundary` names the compiled and the refused.
+///
+/// [`countBare`] is the control, the same loop with the call taken out, so that
+/// what each row reports is the call rather than the turn.
+///
+/// [`turns`] is 4,000 rather than the 32,000 [`main`] uses, because every turn
+/// of a `long.*` row allocates 129 objects — one a character and one for the
+/// array — which is about 1.5 million allocations over the six rows, and
+/// `crates/cove-cli/tests/vm_coverage.rs` runs every program in this
+/// repository on the tree-walking interpreter as well as on the linear-memory
+/// backend.
+fn turns() -> Int {
+  4000
+}
+
+/// Eight ASCII characters.
+fn shortAscii() -> String {
+  "bookings"
+}
+
+/// 128 ASCII characters: sixteen copies of an eight-byte piece.
+fn longAscii() -> String {
+  var out: Vector<String> = Vector.of()
+  var i = 0
+  while i < 16 {
+    out.push(shortAscii())
+    i = i + 1
+  }
+  "".join(out.freeze())
+}
+
+/// Four characters, one of each UTF-8 width: ten bytes, two and a half each.
+fn mixedPiece() -> String {
+  "aé→😀"
+}
+
+/// Eight characters of [`mixedPiece`]'s cycle: twenty bytes.
+fn shortMixed() -> String {
+  "{mixedPiece()}{mixedPiece()}"
+}
+
+/// 128 characters of [`mixedPiece`]'s cycle: 320 bytes.
+fn longMixed() -> String {
+  var out: Vector<String> = Vector.of()
+  var i = 0
+  while i < 32 {
+    out.push(mixedPiece())
+    i = i + 1
+  }
+  "".join(out.freeze())
+}
+
+/// 128 four-byte characters: 512 bytes, the same character count as
+/// [`longAscii`] and four times its bytes.
+fn allFour() -> String {
+  var out: Vector<String> = Vector.of()
+  var i = 0
+  while i < 128 {
+    out.push("😀")
+    i = i + 1
+  }
+  "".join(out.freeze())
+}
+
+/// `rounds` calls of `chars()` and nothing else the loop can be about.
+///
+/// The answer's length is summed so that nothing can be folded away and so
+/// that a row which stopped taking the receiver apart would report a different
+/// number rather than a different time.
+///
+/// No host call in the body, so that the native tier compiles it and the rows
+/// price `chars` on the tier that runs it.
+fn countChars(text: String, rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + text.chars().length()
+    i = i + 1
+  }
+  total
+}
+
+/// [`countChars`]' loop with the call taken out.
+fn countBare(rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + 1
+    i = i + 1
+  }
+  total
+}
+
+/// How long `rounds` turns of [`countChars`] took, in microseconds, and how
+/// many characters they answered in all.
+struct Row {
+  micros: Int
+  characters: Int
+}
+
+fn row(text: String, rounds: Int) -> Row {
+  let startedAt = now()
+  let characters = countChars(text, rounds)
+  Row(micros: (now() - startedAt).micros(), characters: characters)
+}
+
+/// The decomposition this file's doc describes, one line a row.
+export fn rows() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let emptied = row("", rounds)
+  let shortA = row(shortAscii(), rounds)
+  let longA = row(longAscii(), rounds)
+  let shortM = row(shortMixed(), rounds)
+  let longM = row(longMixed(), rounds)
+  let four = row(allFour(), rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row that stopped taking its receiver apart would still report a number,
+  // and the number would be of something else.
+  assertEqual(bare, rounds)?
+  assertEqual(emptied.characters, 0)?
+  assertEqual(shortA.characters, rounds * 8)?
+  assertEqual(longA.characters, rounds * 128)?
+  assertEqual(shortM.characters, rounds * 8)?
+  assertEqual(longM.characters, rounds * 128)?
+  assertEqual(four.characters, rounds * 128)?
+
+  println("bare loop                     {bareMicros * 1000 / rounds} ns/turn ({bare})")?
+  println("empty        (0 chars)        {(emptied.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("short.ascii  (8 x 1 B)        {(shortA.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long.ascii   (128 x 1 B)      {(longA.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("short.mixed  (8 chars, 20 B)  {(shortM.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("long.mixed   (128 chars, 320 B) {(longM.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("four         (128 x 4 B)      {(four.micros - bareMicros) * 1000 / rounds} ns/call")?
   Ok(())
 }

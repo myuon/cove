@@ -65,9 +65,17 @@ fn a_family_that_lives_in_the_heap_is_one_reference() {
     // both declared where a value of the type is met, because growth
     // replaces the store and the only thing that says what a new one looks
     // like is this table.
+    //
+    // **Four, not two, and the other two are not this program's.** Issue
+    // #454's Step 3 gave `std.string.chars` a `Vector<String>` of its own, and
+    // `lower` lowers the whole standard library attached to every package, so
+    // a header and a store for *that* instantiation are declared here whatever
+    // the program under test says. What the assertion is about is unchanged and
+    // is the loop below rather than the count: every one of them is **one
+    // reference wide**, which is what "lives in the heap" means as a layout.
     let held = layouts("fn f(v: Vector<Int>) -> Int { v.length() }");
     let vectors: Vec<&Layout> = held.iter().filter(|it| &*it.name == "Vector").collect();
-    assert_eq!(vectors.len(), 2);
+    assert_eq!(vectors.len(), 4);
     for layout in vectors {
         assert_eq!(layout.words, vec![Repr::Ref]);
     }
@@ -235,6 +243,16 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "<tag>",
             "Bytes",
             "ByteBuffer",
+            // `std.string.join` takes an `Array<String>` and `std.string.chars`
+            // answers one, and they are the only non-generic library functions
+            // whose *signature* names a collection at all — `std.array`'s are
+            // generic and are interned only where a program instantiates one.
+            // The run of one-word references is a family, so `Array<String>`
+            // and `Array<Int>` are one layout and this row is every array a
+            // program will ever have. It sat below `Result` until issue #454's
+            // Step 3 added `chars`, and moved up because that signature is
+            // interned before the bodies that name the three below it.
+            "Array",
             // `std.string.codePointAtByte` answers an `Option<Int>` and is the
             // first non-generic library function that does, so whole-package
             // lowering declares it before anything else can.
@@ -245,20 +263,24 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // and then the `Result` around it.
             "Error",
             "Result",
-            // `std.string.join` takes an `Array<String>`, and it is the first
-            // non-generic library function whose *signature* names a
-            // collection at all — `std.array`'s are generic and are interned
-            // only where a program instantiates one. Issue #454's Step 3 put
-            // it here: the run of one-word references is a family, so
-            // `Array<String>` and `Array<Int>` are one layout and this row is
-            // every array a program will ever have.
-            "Array",
             // The one *declaration* in this list, and it is here because
             // `lower` lowers a whole package: `std.stringbuilder` is attached
             // to every package, and a method of it names its own receiver, so
             // the wrapper's layout is interned however little the program under
             // test has to do with it.
             "std.stringbuilder.StringBuilder",
+            // Two rows and one type: `std.string.chars` builds its answer in a
+            // `Vector<String>`, and a vector is a header and the store beneath
+            // it, which are two layouts for the reason
+            // `a_family_that_lives_in_the_heap_is_one_reference` gives —
+            // growth replaces the store and the only thing that says what a new
+            // one looks like is this table. Issue #454's Step 3 put them here,
+            // and they are the first `Vector` rows a program that names no
+            // vector has ever had: `std.map`, `std.set` and `std.vector` all
+            // deal in a `Vector<T>` whose `T` is a parameter, and a generic
+            // signature interns nothing until a program instantiates it.
+            "Vector",
+            "Vector",
         ]
     );
 }
