@@ -914,9 +914,7 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// entry here is what says the lowering answers the call at all, and the three
 /// ways it can answer are an instruction, a conversion and a runtime call.
 const MACHINE_METHODS: &[(&str, &str)] = &[
-    ("String", "words"),
     ("String", "split"),
-    ("String", "trim"),
     ("String", "replace"),
     ("String", "toUpper"),
     ("String", "toLower"),

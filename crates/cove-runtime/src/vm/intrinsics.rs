@@ -152,9 +152,16 @@ pub(crate) fn call(
         // 0064, a Cove loop over `core.byteLength` and one byte load a
         // character — and `cove_schema::builtins::standard_binding` resolves
         // each before lowering ever looks for an intrinsic.
-        Intrinsic::StringWords => text::words(machine, frame, dest),
+        // `String.words` and `String.trim` are not here either, and issue
+        // #454's Step 5 moved them together for a reason that turned out to be
+        // the opposite of a shared substrate: `trim` removes Unicode's
+        // twenty-five `White_Space` code points and `words` splits on five
+        // ASCII bytes, and `U+000B` is in one set and not the other. Each is a
+        // `std.string` body over `core.byteLength`, `byteAt` and one
+        // `core.stringSlice` a part — and `trim`'s table is written out in
+        // Cove with its Unicode version stated, which is ADR 0064's Decision 5
+        // and the thing `str::trim` was quietly inheriting from the toolchain.
         Intrinsic::StringSplit => text::split(machine, frame, dest),
-        Intrinsic::StringTrim => text::trim(machine, frame, dest),
         // None of the four searches and predicates ADR 0046 measured together
         // is here any more, and they did not all leave the same way.
         // `String.startsWith` and `String.endsWith` became Cove loops over
@@ -1370,17 +1377,24 @@ mod tests {
         assert_eq!(text, "-1234567".repeat(20));
     }
 
-    /// An answer may be written over one of its own operands: `x = x.trim()`
-    /// lowers to a call whose destination is `x`, and since the operands are
-    /// read where they are rather than copied out first, every arm reads all
-    /// of them before it writes (#378, Q5.2).
+    /// An answer may be written over one of its own operands:
+    /// `x = x.toUpper()` lowers to a call whose destination is `x`, and since
+    /// the operands are read where they are rather than copied out first,
+    /// every arm reads all of them before it writes (#378, Q5.2).
+    ///
+    /// **It was `x.trim()` until issue #454's Step 5**, which is the same
+    /// shape to the letter — one `String` operand read off the heap, one
+    /// `String` answer allocated, and a destination slot that is the operand's
+    /// — and the reason the swap changes nothing this asserts: what is under
+    /// test is `Dest::word`'s order against `operand::text`'s, which is the
+    /// same order for every arm in `text.rs`.
     #[test]
     fn an_answer_may_be_written_over_its_own_operand() {
-        let mut build = Build::default().strings(&["  ha  "]);
+        let mut build = Build::default().strings(&["ha"]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
-        let trimmed = build.args(&[(0, str_layout)]);
-        let trim = site(&mut build.program, "String", "trim", str_layout);
+        let raised = build.args(&[(0, str_layout)]);
+        let to_upper = site(&mut build.program, "String", "toUpper", str_layout);
         let f = build.function(
             "f",
             &[],
@@ -1393,8 +1407,8 @@ mod tests {
                 },
                 Inst::IntrinsicCall {
                     dst: 0,
-                    site: trim,
-                    args: trimmed,
+                    site: to_upper,
+                    args: raised,
                 },
                 Inst::Return { src: 0 },
             ],
@@ -1404,7 +1418,7 @@ mod tests {
         let word = machine.run(f, &[], &budget()).unwrap();
         assert_eq!(
             String::from_utf8(machine.string_bytes(word[0])).unwrap(),
-            "ha"
+            "HA"
         );
     }
 

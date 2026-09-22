@@ -1083,7 +1083,29 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// Neither is a builder in the sense `values_string_chars` was, so neither
 /// approaches that file's row; both are readers whose corpora happen to be
 /// large, which is what a differential corpus for a reader looks like.
-const FORWARDABLE_COPIES: usize = 4227;
+/// **The forty-seventh rise is 265, and 184 of them are one line of Cove.**
+/// 4227 to 4492, 184 programs to 187, and the split is exact:
+///
+/// - **the migration is +184 over the same 184 programs, one each**, and it
+///   is `std.string.trim`'s `return text` — the line that hands a receiver
+///   with nothing to trim back instead of copying it. A survey lowers a
+///   *package*, so every program carries the body; `examples:cq` goes 122 to
+///   123 in the `ret` column with `prod` unchanged, and so does everything
+///   else. Nothing else in either new body adds one: `words` ends in
+///   `core.vectorFinish` rather than in a `return`, and the dozen `return`s in
+///   `whiteSpaceWidthAt` and `separates` all answer a *literal*, which is
+///   built in the answer's slot and never copied into it;
+/// - **the three new entries are +81**, 27 each. They are `[run.trimwords]`,
+///   `[run.trim_rows]` and `[run.words_rows]` on the new `benches/trimwords`,
+///   and they are the case `[run.chars_rows]` and `[run.parse_rows]` were:
+///   entries of one package this table surveys once per entry.
+///
+/// The 184 is worth stating as a *price* rather than as a number, because it
+/// is the one this file measures and the pull request bought something
+/// specific with it: `examples/cq` allocates **100,000 fewer objects and
+/// 2,217,999 fewer words** for that line. One static copy a program, against
+/// a hundred thousand allocations that are not made.
+const FORWARDABLE_COPIES: usize = 4492;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

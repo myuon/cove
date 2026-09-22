@@ -205,12 +205,12 @@ written as a namespace.
 | --- | --- | --- | --- | --- |
 | `length() -> Int` |  |  |  | `std.string.length` |
 | `isEmpty() -> Bool` |  |  |  | `std.string.isEmpty` |
-| `words() -> Array<String>` |  |  |  | `machine` |
+| `words() -> Array<String>` |  |  |  | `std.string.words` |
 | `chars() -> Array<String>` |  |  |  | `std.string.chars` |
 | `split(separator: String) -> Array<String>` |  |  |  | `machine` |
 | `join(parts: Array<String>) -> String` |  |  |  | `std.string.join` |
 | `slice(from: Int, to: Int) -> String` |  |  |  | `std.string.slice` |
-| `trim() -> String` |  |  |  | `machine` |
+| `trim() -> String` |  |  |  | `std.string.trim` |
 | `contains(text: String) -> Bool` |  |  |  | `std.string.contains` |
 | `startsWith(prefix: String) -> Bool` |  |  |  | `std.string.startsWith` |
 | `endsWith(suffix: String) -> Bool` |  |  |  | `std.string.endsWith` |

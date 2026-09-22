@@ -5017,7 +5017,7 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 
 /// One intrinsic of each effect class that still has a member, as the pair of
 /// names that resolves to it: a raise (`Any.equals`: a walk too deep to
-/// finish) and a safepoint (`String.trim`: allocates the string it answers).
+/// finish) and a safepoint (`String.toUpper`: allocates the string it answers).
 ///
 /// **There were three, and the third has no member left.** A *plain call* —
 /// neither a safepoint nor a raise, so no publish, no program counter, no
@@ -5034,7 +5034,14 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 ///
 /// The double does not read the argument list, so the synthesized call hands
 /// it `String` operands either way and nothing here depends on that.
-pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Any", "equals"), ("String", "trim")];
+/// **The safepoint member was `String.trim` until issue #454's Step 5**, and
+/// `String.toUpper` is the same class to the letter: one `String` operand, a
+/// `String` answer, and `MAY_ALLOCATE | MAY_COLLECT | MAY_RAISE |
+/// READS_MEMORY | BULK_WORK` — the arm `trim` shared with it, which is why
+/// both were written on one line of `Intrinsic::effects`. So what the case
+/// below checks is unchanged: it is a call whose protocol publishes the
+/// unpaid work before the hand-over and tests the outcome after it.
+pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Any", "equals"), ("String", "toUpper")];
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///

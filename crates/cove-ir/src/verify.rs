@@ -3045,34 +3045,43 @@ mod tests {
         let int = |slot| Arg { slot, layout: INT };
         // Slot 0 holds the answer and slot 3 is the `Int` an operand fault is
         // made of. The one-operand sample below was `String.length` until ADR
-        // 0064 moved it into `std.string`; `String.trim` is the same shape
-        // with a `String` answer instead of an `Int` one, which is why slot 0
-        // is a reference here. Nothing this test asserts is about the answer's
-        // class — `Int.parse` below is what checks that — so the swap costs
+        // 0064 moved it into `std.string`, and then `String.trim` until issue
+        // #454's Step 5 moved that one too. `String.toUpper` is what it names
+        // now, and it is the **same signature to the letter** — one `String`
+        // operand and a `String` answer, `fixed(&[C::Str], C::Str)`, the arm
+        // `trim` shared with it — so all three faults below are the faults
+        // that were being checked before: the count, the operand class, and a
+        // call that is right. Nothing this test asserts is about the answer's
+        // class — `Float.parse` below is what checks that — so the swap costs
         // the case nothing.
         let reprs = || vec![Repr::Ref, Repr::Ref, Repr::Ref, Repr::Int];
 
-        // `String.trim` over one `String`, answering a `String`: nothing.
-        let held = calling(crate::Intrinsic::StringTrim, STR, reprs(), vec![string(1)]);
+        // `String.toUpper` over one `String`, answering a `String`: nothing.
+        let held = calling(
+            crate::Intrinsic::StringToUpper,
+            STR,
+            reprs(),
+            vec![string(1)],
+        );
         assert_eq!(faults(&held), Vec::<String>::new());
 
         // One operand too many.
         let held = calling(
-            crate::Intrinsic::StringTrim,
+            crate::Intrinsic::StringToUpper,
             STR,
             reprs(),
             vec![string(1), string(2)],
         );
         assert_eq!(
             faults(&held),
-            vec!["`String.trim` takes 1 operand(s), and this call passes 2"]
+            vec!["`String.toUpper` takes 1 operand(s), and this call passes 2"]
         );
 
         // An `Int` where a `String` goes.
-        let held = calling(crate::Intrinsic::StringTrim, STR, reprs(), vec![int(3)]);
+        let held = calling(crate::Intrinsic::StringToUpper, STR, reprs(), vec![int(3)]);
         assert_eq!(
             faults(&held),
-            vec!["operand 0 of `String.trim` is `Int`, where its signature has String"]
+            vec!["operand 0 of `String.toUpper` is `Int`, where its signature has String"]
         );
 
         // The answer a `Float.parse` writes is a `Result<Float>`, and the
@@ -3144,7 +3153,7 @@ mod tests {
             layout: ARRAY_INT,
         };
         let held = calling(
-            crate::Intrinsic::StringTrim,
+            crate::Intrinsic::StringToUpper,
             STR,
             vec![Repr::Ref, Repr::Ref],
             vec![array(1)],
@@ -3152,9 +3161,9 @@ mod tests {
         assert_eq!(
             faults(&held),
             vec![
-                "operand 0 of `String.trim` is the collection `Array<Int>`, and a Text intrinsic \
-                 takes none: a collection operation is a run instruction or the standard \
-                 library's, not an intrinsic (ADR 0058)"
+                "operand 0 of `String.toUpper` is the collection `Array<Int>`, and a Text \
+                 intrinsic takes none: a collection operation is a run instruction or the \
+                 standard library's, not an intrinsic (ADR 0058)"
             ]
         );
 

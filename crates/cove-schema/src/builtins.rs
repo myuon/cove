@@ -1140,6 +1140,39 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "chars",
     },
+    // `trim` and `words` are issue #454's Step 5, and they are the pair that
+    // says a shared substrate was not what they had in common. `trim` removes
+    // Unicode's `White_Space` — twenty-five code points — and `words` splits on
+    // five ASCII bytes, so twenty of `trim`'s set are ordinary characters to
+    // `words` and `U+000B` is in one and not the other. A single whitespace
+    // predicate under both entries would be wrong for one of them, and the two
+    // Cove bodies have none in common.
+    //
+    // What moved with `trim` is a **version**. It was `str::trim`, so the set
+    // was whatever Unicode table the Rust toolchain was built against, and
+    // nothing here recorded which — ADR 0064's Decision 5 asks that Cove own
+    // that, and `std.string.trim`'s table is written out as bytes with each
+    // code point named and the version stated.
+    // `crates/cove-runtime/tests/unicode.rs` sweeps all of `0 ..= 0x10FFFF` and
+    // holds the two Cove sets to the toolchain's, so a table that drifts is a
+    // failing test rather than a silent change of meaning. `toUpper` and
+    // `toLower` are the half of Step 5 this could not be written for: their
+    // tables are the full case mappings, one-to-many ones included, and need
+    // the generated asset that decision describes.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "trim",
+        module: "std.string",
+        function: "trim",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "words",
+        module: "std.string",
+        function: "words",
+    },
     // The fourth predicate, and the one that needed something underneath it.
     // `startsWith` and `endsWith` compare at an offset the caller's own
     // argument bounds, so a Cove loop over `byteAt` is the whole of each;
