@@ -4,8 +4,11 @@
 //! Decision 3: for the five operations that are *walks of a layout* rather
 //! than algorithms over a representation, **lowering synthesizes one private
 //! function per `(operation, layout)` actually reached, composed
-//! structurally.** This module is that producer, and `Any.equals` is its
-//! first user.
+//! structurally.** This module is that producer. `Any.equals` was its first
+//! user and `Value.order` is its second, which is also the first pair to
+//! share it: what differs between the two is the shape of the control flow
+//! and not the table being walked, so the memo is keyed by the *pair* and
+//! each operation is a variant of [`Operation`] and an arm of [`Synth::body`].
 //!
 //! # Why a producer and not a Cove declaration
 //!
