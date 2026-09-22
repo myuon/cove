@@ -1039,19 +1039,22 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
   snapshotsWhileCollecting(n)
 }
 
-/// A refused caller making `n` calls to `String.toUpper`, which nothing
+/// A refused caller making `n` calls to `String.replace`, which nothing
 /// lowers, before handing the same `n` to the compiled loop above.
 ///
-/// It was `String.indexOf` until ADR 0064 moved that into `std.string`. What
-/// the case below wants of it is only that it is an intrinsic called `n` times
-/// from a frame the tier refused, so that the mediated calls land on the
-/// encoded side of the report and nowhere else.
+/// It was `String.indexOf` until ADR 0064 moved that into `std.string`, and
+/// `String.toUpper` until issue #454's Step 5 moved that one. What the case
+/// below wants of it is only that it is an intrinsic called `n` times from a
+/// frame the tier refused, so that the mediated calls land on the encoded side
+/// of the report and nowhere else — and that its answer has a `byteLength` the
+/// loop can sum. The needle is a character `hello` does not hold, so the
+/// answer is still five bytes and every figure below is the number it was.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   var cut = 0
   var at = 0
   while at < n {
-    cut = cut + s.toUpper().byteLength()
+    cut = cut + s.replace(\"z\", \"y\").byteLength()
     at = at + 1
   }
   var v = Vector.of(7)
@@ -3531,7 +3534,7 @@ fn counted_run(
     assert_eq!(
         answered,
         Ok(format!("{}", n * 1000 + 5 * n)),
-        "the loop's counter, then five bytes per `toUpper` of `hello`"
+        "the loop's counter, then five bytes per `replace` of `hello`"
     );
     vm.boundary()
 }
@@ -3541,12 +3544,12 @@ fn counted_run(
 /// ADR 0058's Phase 1 asks for "emitted IR, mediated intrinsics, encoded VM
 /// instructions, native-to-VM crossings and native-to-runtime calls" to be
 /// reported separately. `countsTheBoundary` is refused and calls
-/// `toUpper` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
+/// `replace` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
 /// `byteLength` and `push` `n` times each in machine code. So each lands in a
 /// different place, and a report that lumped any two of them together would fail
 /// one of the rows below:
 ///
-/// - `String.toUpper`: `n` from the encoded tier, none from native code;
+/// - `String.replace`: `n` from the encoded tier, none from native code;
 /// - `String.byteLength`: not an intrinsic at all. It is `std.string` over
 ///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
@@ -3614,7 +3617,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .intrinsic(intrinsic)
             .unwrap_or_else(|| panic!("the program names {intrinsic}"))
     };
-    assert_eq!(row(&on_vm, Intrinsic::StringToUpper).sites, 1);
+    assert_eq!(row(&on_vm, Intrinsic::StringReplace).sites, 1);
     assert_eq!(
         on_vm.emitted.intrinsic_sites,
         on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
@@ -3627,9 +3630,9 @@ fn the_boundary_report_counts_each_quantity_apart() {
         let held = row(report, intrinsic);
         (held.encoded, held.native)
     };
-    assert_eq!(calls(&on_vm, Intrinsic::StringToUpper), (n, 0));
+    assert_eq!(calls(&on_vm, Intrinsic::StringReplace), (n, 0));
     for report in [&on_native, &uncounted] {
-        assert_eq!(calls(report, Intrinsic::StringToUpper), (n, 0));
+        assert_eq!(calls(report, Intrinsic::StringReplace), (n, 0));
         // Sorted by dynamic calls, most first.
         assert!(report
             .intrinsics

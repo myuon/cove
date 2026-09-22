@@ -1105,7 +1105,79 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// specific with it: `examples/cq` allocates **100,000 fewer objects and
 /// 2,217,999 fewer words** for that line. One static copy a program, against
 /// a hundred thousand allocations that are not made.
-const FORWARDABLE_COPIES: usize = 4492;
+/// **The forty-eighth rise is 48, and it is two corpora and no code at all.**
+/// 4492 to 4540, 187 programs to 189. The two new rows are
+/// `tests/e2e/values_string_to_upper` and `tests/e2e/values_string_to_lower`,
+/// and they are **identical to each other**: 5,795 instructions, 573 copies, 4
+/// `prod` and 20 `ret` apiece, which is 24 each and 48 between them. That the
+/// two agree to the instruction is a fact about the files rather than a
+/// coincidence — they are the same program with one method name changed, which
+/// is what a differential corpus for a *pair* of operations looks like.
+///
+/// They are long in copies and short in both ratchet columns, and the ratio is
+/// the sharpest in the file: 573 copies of which 24 are forwardable, where
+/// `values_string_trim` is 337 of which 37 are. The reason is the sweep.
+/// `band` calls `show` once per code point over 391 of them, and a call in a
+/// loop is a copy into an argument slot that no `return` and no producer
+/// names; the 94 hand rows are the same shape. What *is* forwardable is the
+/// dozen `Ok(())`s at the bottom of `main`, `band` and `roundTrip`, which is
+/// issue #302's opening case again and nothing new.
+///
+/// Neither file is a builder. `bytesOf` accumulates a string by interpolation,
+/// which is a `Inst::GrowableAlloc` and not a copy, and `fromPoints` pushes
+/// into a `Vector` — so these sit with `values_string_trim` among the readers
+/// rather than with `values_string_chars`.
+/// **The forty-ninth rise is 3,735, which is the largest in this file by a
+/// factor of fourteen, and it splits exactly two ways.** 4540 to 8275, 189
+/// programs to 192.
+///
+/// - **the migration is +3,591 over the same 189 programs, 19 each**, and
+///   every one of them carries it because a survey lowers a *package*;
+/// - **the three new entries are +144**, 48 each. They are `[run.casemap]`,
+///   `[run.upper_rows]` and `[run.lower_rows]` on the new `benches/casemap`,
+///   and they are the case `[run.trimwords]`'s three were.
+///
+/// **Eighteen of the nineteen are `prod`, not `ret`, and that is the whole
+/// story.** `tests/e2e:values_string_trim` goes 6 `prod` and 31 `ret` to **24
+/// and 32**; `examples:cq` goes to 104 and 124. The aggregate splits 4,255
+/// `prod` against 4,069 `ret`, where before this change `ret` was the larger
+/// column by four to one.
+///
+/// A `prod` is a value a producer wrote into a temporary that a `let` then
+/// copied into a named slot, and this migration is **thirteen new functions**'
+/// worth of them where the last four added two to four each: `let runs =
+/// upperRuns()`, `let length = core.byteLength(text)`, `let width =
+/// characterWidth(lead)`, `let point = pointAt(text, at, lead)`, `let mapping
+/// = caseMappingOf(runs, point)`, `let to = core.bytesLength(buffer)` — a
+/// dozen in each of the two bodies and the rest across the helpers.
+///
+/// **This is the good case for issue #302 rather than the awkward one.** A
+/// destination-forwarding lowering removes a `prod` by telling the producer
+/// where to write, which is exactly what that issue is about; the `ret` column
+/// is the one that needs a `return`'s answer location known before the body is
+/// lowered. The largest rise this file has recorded is also the one most of
+/// which a single optimisation would take back.
+///
+/// **It was not bought down, and the reason is this file's own.** The
+/// `Int.parse` paragraph above refused a single-exit rewrite that traded six
+/// static copies for a test inside a loop. Nothing so expensive is on offer
+/// here — most of the nineteen would go if the `let`s were inlined into their
+/// uses — but the number is "an upper bound and not a promise", and a body
+/// that reads `caseMappingOf(upperRuns(), pointAt(text, at, text.byteAt(at)))`
+/// to save a row in a table nobody reads at run time is not what it is for.
+/// The thirteen functions are a table reader, a binary search, a UTF-8
+/// decoder, a UTF-8 encoder and a final-sigma scan, and each is named because
+/// it is a thing.
+///
+/// What the migration bought is in the pull request rather than here, and for
+/// once it is not an allocation count: `examples/covefmt` and `examples/cq`
+/// call neither method — **0 static sites and 0 dynamic calls on both** — so
+/// this is the first migration of the series whose whole-program counters are
+/// identical by construction, and they were measured to be. What it bought is
+/// that `Intrinsic` is 12, that `Effects::BULK_WORK` has six carriers, and
+/// that Cove now names its own Unicode version in a file a diff can be read
+/// from.
+const FORWARDABLE_COPIES: usize = 8275;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

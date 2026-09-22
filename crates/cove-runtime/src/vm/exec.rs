@@ -501,7 +501,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 7 asks for "proportional-work charges per variant", and
-    /// eight of the 14 variants declare
+    /// six of the 12 variants declare
     /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
     /// *one* unit of [`Machine::work`] — the one every instruction costs —
     /// whatever they examined. So the work was not merely unattributed, it
@@ -1334,7 +1334,7 @@ impl<'a> Machine<'a> {
     /// total once the arm has returned and charges it. So an arm adds this
     /// line where it has read the thing it is about to walk, and the question
     /// of what a charge *does* is asked in exactly one place rather than in
-    /// fourteen.
+    /// twelve.
     ///
     /// `units` is in the unit of the run the arm walked, which for a
     /// `String` is **bytes** — see [`Machine::examined`](Self::examined)'s
@@ -10065,10 +10065,10 @@ pub(crate) mod tests {
     /// surviving variant, chosen because the message has to name *some*
     /// operation and no operation is the right one any more.
     #[test]
-    #[should_panic(expected = "`String.toUpper` answered a `RuntimeError`")]
+    #[should_panic(expected = "`String.split` answered a `RuntimeError`")]
     fn an_intrinsic_that_cannot_raise_must_not_answer_an_error() {
         unraisable(
-            cove_ir::Intrinsic::StringToUpper,
+            cove_ir::Intrinsic::StringSplit,
             &RuntimeError::new("this string's bytes are not valid UTF-8"),
         );
     }

@@ -1,0 +1,238 @@
+use console.println
+use clock.now
+
+/// What `String.toUpper()` and `String.toLower()` cost, at the receiver shapes
+/// that separate one implementation of each from another.
+///
+/// Issue #454's Step 5 moved both out of the runtime and into `std.string`,
+/// over the generated Unicode tables that migration checked in. They are in
+/// one package because they are the same machinery read in two directions,
+/// and the rows are written to separate the three things that machinery can
+/// cost: the **ASCII fast path**, which never touches a table; the **binary
+/// search**, which every non-ASCII character pays; and the **final sigma**,
+/// which only `toLower` has and only at a `U+03A3`.
+///
+/// # The shape this package adds to issue #464's question
+///
+/// [Issue #464](https://github.com/myuon/cove/issues/464) asks which shapes
+/// run faster compiled than encoded. The evidence so far is that readers flip
+/// hard, builders flip normally, and refusals do not flip. **A table lookup is
+/// a new shape**: it is a reader of a *second* run — the receiver and the
+/// table — and its inner loop is a binary search rather than a walk, so the
+/// rows below are the first measurement of that shape on both tiers.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in an entry is a
+/// VM measurement even under `--backend native`. Each row is therefore a call
+/// to [`upperRow`] or [`lowerRow`], whose bodies are the loops, and the
+/// entries do nothing in a turn but read a clock either side.
+///
+/// [`bare`] is the control, the same loop with the call taken out, so that
+/// what each row reports is the call rather than the turn.
+///
+/// [`turns`] is 2,000 for `benches/trimwords`' reason: every turn of a wide
+/// row allocates a fresh string, and `crates/cove-cli/tests/vm_coverage.rs`
+/// runs every program in this repository on the tree-walking interpreter as
+/// well as on the linear-memory backend.
+fn turns() -> Int {
+  2000
+}
+
+/// Eight lowercase ASCII characters.
+fn word() -> String {
+  "bookings"
+}
+
+/// A line of `examples/cq`'s input.
+///
+/// Neither program in the census calls either of these operations, so no row
+/// here is a shipped program's own receiver. This one is the nearest thing to
+/// it: a realistic line of mixed case and punctuation.
+fn line() -> String {
+  "\{\"id\":\"B-000001\",\"property\":\"Ocean View\",\"nights\":5,\"rate\":129.5\}"
+}
+
+/// `U+00DF`, the sharp s, which uppercases to two characters.
+fn sharp() -> String {
+  String.fromCodePoint(223).unwrapOr("")
+}
+
+/// `U+03A3`, the capital sigma, whose lowercase depends on its neighbours.
+fn sigma() -> String {
+  String.fromCodePoint(931).unwrapOr("")
+}
+
+/// `U+0391`, the capital alpha: a cased character with an ordinary mapping.
+fn alpha() -> String {
+  String.fromCodePoint(913).unwrapOr("")
+}
+
+/// `U+65E5`, a CJK ideograph: three bytes, no case mapping either way.
+fn han() -> String {
+  String.fromCodePoint(26085).unwrapOr("")
+}
+
+/// `piece` repeated `count` times.
+fn repeat(piece: String, count: Int) -> String {
+  var out: Vector<String> = Vector.of()
+  var i = 0
+  while i < count {
+    out.push(piece)
+    i = i + 1
+  }
+  "".join(out.freeze())
+}
+
+/// `rounds` calls of `toUpper()` and nothing else the loop can be about.
+///
+/// The answer's byte length is summed so that nothing can be folded away and
+/// so that a row which stopped mapping would report a different number rather
+/// than a different time. It is the right sum for this operation in
+/// particular: an expansion makes the answer *longer*, so `sharp` and `run`
+/// below would be caught by their answers and not only by their clocks.
+fn upperRow(text: String, rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + text.toUpper().byteLength()
+    i = i + 1
+  }
+  total
+}
+
+/// `rounds` calls of `toLower()` and nothing else the loop can be about.
+fn lowerRow(text: String, rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + text.toLower().byteLength()
+    i = i + 1
+  }
+  total
+}
+
+/// [`upperRow`]'s loop with the call taken out.
+fn bare(rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + 1
+    i = i + 1
+  }
+  total
+}
+
+/// How long `rounds` turns took, in microseconds, and what they answered.
+struct Row {
+  micros: Int
+  answer: Int
+}
+
+fn raised(text: String, rounds: Int) -> Row {
+  let startedAt = now()
+  let answer = upperRow(text, rounds)
+  Row(micros: (now() - startedAt).micros(), answer: answer)
+}
+
+fn lowered(text: String, rounds: Int) -> Row {
+  let startedAt = now()
+  let answer = lowerRow(text, rounds)
+  Row(micros: (now() - startedAt).micros(), answer: answer)
+}
+
+fn report(label: String, row: Row, rounds: Int) -> Result<Unit, Error> {
+  println("{label} {row.micros} us, {row.micros * 1000 / rounds} ns/call, answer {row.answer}")?
+  Ok(())
+}
+
+/// One call of each, so that `cove-bench`'s row is a turn of both.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+  let upperTotal = upperRow(line(), rounds)
+  let lowerTotal = lowerRow(line(), rounds)
+  assertEqual(upperTotal, rounds * line().byteLength())?
+  assertEqual(lowerTotal, rounds * line().byteLength())?
+  Ok(())
+}
+
+/// What `String.toUpper()` costs, row by row.
+///
+/// - **empty** is the floor: a `byteLength`, a loop that does not turn, and the
+///   receiver handed back;
+/// - **ascii.done** is already uppercase, so the walk finds nothing to change
+///   and the receiver is handed back **without allocating**. Against
+///   **ascii.short**, which is the same bytes in the other case, it is what the
+///   alias branch is worth;
+/// - **ascii.short**, **ascii.line** and **ascii.long** are the fast path at
+///   eight, at a line, and at 1,024 bytes: no table is read in any of them, so
+///   the slope is one load and two comparisons a byte;
+/// - **latin.one** and **latin.run** are one and sixteen `ß`, which is the
+///   whole of the table read: a binary search, a record decode, and a
+///   `core.bytesCopy` out of the expansion literal. `ß` also **grows**, one
+///   character to two, so these are the rows where the sizing pass and the
+///   fill pass disagree about how many bytes there are;
+/// - **greek.run** is sixteen capital alphas, which map one-to-one: the binary
+///   search without the expansion, against **latin.run** at the same count;
+/// - **han.run** is sixteen CJK ideographs, which map to *nothing*. The search
+///   runs and finds no record, so this is the cost of a table lookup that
+///   answers "unchanged" — and the row that says the alias branch is decided by
+///   a whole walk and not by a first character;
+/// - **mixed** is a line with one non-ASCII character in it, which is what real
+///   prose looks like: the fast path for all but one byte.
+export fn upperRows() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bareAnswer = bare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+  println("bare {bareMicros} us, answer {bareAnswer}")?
+
+  report("empty", raised("", rounds), rounds)?
+  report("ascii.done", raised("BOOKINGS", rounds), rounds)?
+  report("ascii.short", raised(word(), rounds), rounds)?
+  report("ascii.line", raised(line(), rounds), rounds)?
+  report("ascii.long", raised(repeat(word(), 128), rounds), rounds)?
+  report("latin.one", raised(sharp(), rounds), rounds)?
+  report("latin.run", raised(repeat(sharp(), 16), rounds), rounds)?
+  report("greek.run", raised(repeat(alpha(), 16), rounds), rounds)?
+  report("han.run", raised(repeat(han(), 16), rounds), rounds)?
+  report("mixed", raised("{line()}{sharp()}", rounds), rounds)?
+  Ok(())
+}
+
+/// What `String.toLower()` costs, row by row.
+///
+/// The first seven rows mirror [`upperRows`] so that the two directions can be
+/// read against each other at the same receivers. The last three are the
+/// **final sigma**, which is the one thing this direction has and the other
+/// does not:
+///
+/// - **sigma.one** is a lone sigma. Nothing is behind it, so the backward scan
+///   stops at once and the answer is `σ` — the cheap arm of the rule;
+/// - **sigma.word** is a cased character then a sigma, which is the ordinary
+///   case: one step back, one lookup, final;
+/// - **sigma.run** is sixteen sigmas. Every one of them runs a scan in each
+///   direction, and the scans are over the receiver — so this is the row where
+///   the rule's quadratic worst case shows, and the row to read if anyone
+///   proposes making the backward scan incremental.
+export fn lowerRows() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bareAnswer = bare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+  println("bare {bareMicros} us, answer {bareAnswer}")?
+
+  report("empty", lowered("", rounds), rounds)?
+  report("ascii.done", lowered(word(), rounds), rounds)?
+  report("ascii.short", lowered("BOOKINGS", rounds), rounds)?
+  report("ascii.line", lowered(line(), rounds), rounds)?
+  report("ascii.long", lowered(repeat("BOOKINGS", 128), rounds), rounds)?
+  report("greek.run", lowered(repeat(alpha(), 16), rounds), rounds)?
+  report("han.run", lowered(repeat(han(), 16), rounds), rounds)?
+  report("sigma.one", lowered(sigma(), rounds), rounds)?
+  report("sigma.word", lowered("{alpha()}{sigma()}", rounds), rounds)?
+  report("sigma.run", lowered(repeat(sigma(), 16), rounds), rounds)?
+  Ok(())
+}

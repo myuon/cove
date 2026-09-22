@@ -28,7 +28,7 @@ use std::fmt;
 /// One core operation an `IntrinsicCall` may name.
 ///
 /// A variant is named `ReceiverOperation` in upper camel case — `String`'s
-/// `toUpper` is [`Intrinsic::StringToUpper`] — because that pair is
+/// `replace` is [`Intrinsic::StringReplace`] — because that pair is
 /// the language reference's own naming of it: [`Intrinsic::receiver`] and
 /// [`Intrinsic::operation`] answer the two halves back apart, and
 /// [`Display`](fmt::Display) prints them the way `cove-ir`'s printer and
@@ -43,8 +43,6 @@ pub enum Intrinsic {
     ValueRenderInto,
     StringSplit,
     StringReplace,
-    StringToUpper,
-    StringToLower,
     StringRefuseByteRange,
     IntParseRadix,
     FloatToInt,
@@ -65,8 +63,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRenderInto,
     Intrinsic::StringSplit,
     Intrinsic::StringReplace,
-    Intrinsic::StringToUpper,
-    Intrinsic::StringToLower,
     Intrinsic::StringRefuseByteRange,
     Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
@@ -104,8 +100,6 @@ impl Intrinsic {
             Intrinsic::ValueRenderInto => "Value",
             Intrinsic::StringSplit => "String",
             Intrinsic::StringReplace => "String",
-            Intrinsic::StringToUpper => "String",
-            Intrinsic::StringToLower => "String",
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
@@ -124,8 +118,6 @@ impl Intrinsic {
             Intrinsic::ValueRenderInto => "renderInto",
             Intrinsic::StringSplit => "split",
             Intrinsic::StringReplace => "replace",
-            Intrinsic::StringToUpper => "toUpper",
-            Intrinsic::StringToLower => "toLower",
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
@@ -187,8 +179,6 @@ impl Intrinsic {
         match self {
             Intrinsic::StringSplit
             | Intrinsic::StringReplace
-            | Intrinsic::StringToUpper
-            | Intrinsic::StringToLower
             | Intrinsic::StringRefuseByteRange => Category::Text,
             Intrinsic::IntParseRadix
             | Intrinsic::FloatToInt
@@ -224,7 +214,6 @@ impl Intrinsic {
             // is the receiver, as it is of every other operation here.
             Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
-            Intrinsic::StringToUpper | Intrinsic::StringToLower => fixed(&[C::Str], C::Str),
             Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
             // The text and the two offsets a refusal is worded with, in the
             // order `String.sliceBytes` names them.
@@ -250,7 +239,7 @@ impl Intrinsic {
     /// `cove-runtime`'s `vm::intrinsics`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
     /// differently, the way [`Intrinsic::StringRefuseByteRange`] allocates
-    /// nothing and [`Intrinsic::StringToUpper`] does.
+    /// nothing and [`Intrinsic::StringReplace`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // `MAY_RAISE` is language-level failure only (#378, Q5.3). An arm no
@@ -283,10 +272,9 @@ impl Intrinsic {
             // result, so every one of them is proportional to the receiver
             // and allocates the array or string it answers. `split` and
             // `replace` also refuse an empty needle.
-            Intrinsic::StringSplit
-            | Intrinsic::StringReplace
-            | Intrinsic::StringToUpper
-            | Intrinsic::StringToLower => allocate.union(E::READS_MEMORY).union(E::BULK_WORK),
+            Intrinsic::StringSplit | Intrinsic::StringReplace => {
+                allocate.union(E::READS_MEMORY).union(E::BULK_WORK)
+            }
             // No predicate or search of a `String` is here any more, and
             // that is the whole of ADR 0046's four. `startsWith` and
             // `endsWith` left first, for ADR 0064's reason: a bounded byte
@@ -603,8 +591,6 @@ mod tests {
             "Value.renderInto",
             "String.split",
             "String.replace",
-            "String.toUpper",
-            "String.toLower",
             "String.refuseByteRange",
             "Int.parseRadix",
             "Float.toInt",
@@ -668,8 +654,6 @@ mod tests {
                 Intrinsic::ValueRenderInto
                 | Intrinsic::StringSplit
                 | Intrinsic::StringReplace
-                | Intrinsic::StringToUpper
-                | Intrinsic::StringToLower
                 | Intrinsic::StringRefuseByteRange
                 | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt

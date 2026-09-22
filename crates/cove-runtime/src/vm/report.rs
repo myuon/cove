@@ -434,7 +434,7 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Eight of the 14 variants can be non-zero here, which is exactly the
+    /// Six of the 12 variants can be non-zero here, which is exactly the
     /// set that declares `Effects::BULK_WORK`; the other six examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
@@ -528,6 +528,19 @@ pub struct IntrinsicCalls {
     /// same one ADR 0065 made for the searches: a charge for what was walked,
     /// by the mechanism that charges everything else, in place of an upper
     /// bound declared a flag at a time.
+    ///
+    /// **Step 5's `String.toUpper` and `String.toLower` are the sixth and
+    /// seventh carriers to go, and they go together too**, so the carriers
+    /// fall to six and the rest stay at six. Both walked their whole
+    /// receiver once through Rust's own case-mapping tables and answered a
+    /// `String` built out of what they found, the same
+    /// `MAY_ALLOCATE | MAY_COLLECT | MAY_RAISE | READS_MEMORY | BULK_WORK`
+    /// `trim` carried; `std.string.toUpper` and `std.string.toLower` binary-
+    /// search the generated tables `crates/cove-sema/tests/unicase.rs` holds
+    /// byte-identical instead, one instruction a comparison rather than one
+    /// flag for the whole call. Neither `examples/covefmt` nor `examples/cq`
+    /// calls either method, so this is a change to a table rather than one
+    /// either program's own count can see.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,
@@ -1251,7 +1264,7 @@ mod tests {
                     work: 128_440,
                 },
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::StringToUpper,
+                    intrinsic: Intrinsic::StringReplace,
                     sites: 3,
                     encoded: 0,
                     native: 0,
@@ -1328,7 +1341,7 @@ mod tests {
         ));
         assert!(text.contains(
             "               0              0       3           0            0              0  \
-             String.toUpper"
+             String.replace"
         ));
     }
 
@@ -1497,7 +1510,7 @@ export fn main() -> Int {
         );
     }
 
-    /// Ten `String.toUpper` calls over a string of `characters` ASCII
+    /// Ten `String.replace` calls over a string of `characters` ASCII
     /// characters, so that two runs of it differ in exactly the one thing the
     /// charge is supposed to be proportional to.
     ///
@@ -1505,17 +1518,22 @@ export fn main() -> Int {
     /// because anything that built it would call intrinsics of its own and
     /// the two runs would then differ in more than the receiver's length.
     ///
-    /// **The operation has moved three times and this is the first move that
-    /// changed its effect class.** It was `String.length` until ADR 0064 moved
+    /// **The operation has moved four times, and the fourth move is the one
+    /// that ran out of choices.** It was `String.length` until ADR 0064 moved
     /// the count out of the intrinsics, `String.contains` until ADR 0065 gave
-    /// that a run search, and then `String.indexOf` until the migration that
-    /// wrote that over the same search. No reading, non-allocating `Text`
-    /// intrinsic is left, so this is a reading one that *does* allocate —
-    /// which costs the case nothing, because what it pins is the work column
-    /// and not the allocation column. If anything the charge is sharper:
-    /// `toUpper` walks the whole receiver by construction, where `indexOf`
-    /// charged the receiver's length as an upper bound and needed a needle
-    /// that was nowhere in it to make the bound exact.
+    /// that a run search, `String.indexOf` until the migration that wrote that
+    /// over the same search, and `String.toUpper` until issue #454's Step 5.
+    /// **`String.split` and `String.replace` are the whole of the `Text`
+    /// category now**, and `replace` is the one that still answers a `String`,
+    /// so `byteLength()` below reads what it built.
+    ///
+    /// The needle is a character the receiver does not hold, which is what
+    /// makes the charge exact rather than an upper bound: `replace` calls
+    /// `Machine::examined` with the receiver's own length before it looks for
+    /// anything, so what is walked and what is charged are the same bytes
+    /// whether it finds the needle or not — and finding none keeps the answer
+    /// the receiver's length, so the `byteLength()` the loop sums stays a
+    /// function of `characters` alone.
     fn maps_over(characters: usize) -> String {
         let text = "a".repeat(characters);
         format!(
@@ -1525,7 +1543,7 @@ export fn main() -> Int {{
   var total = 0
   var i = 0
   while i < 10 {{
-    total = total + text.toUpper().byteLength()
+    total = total + text.replace(\"z\", \"y\").byteLength()
     i = i + 1
   }}
   total
@@ -1544,9 +1562,10 @@ export fn main() -> Int {{
     /// for 383 times the wall clock. That measurement was taken while
     /// `String.length` was still an intrinsic; ADR 0064 moved it into
     /// `std.string` and this case became `String.contains`, and ADR 0065 has
-    /// since moved that one too, and `String.indexOf` after it. The case below
-    /// is `String.toUpper`, which is charged the same way — a reading whose
-    /// charge is the receiver's byte length.
+    /// since moved that one too, `String.indexOf` after it and
+    /// `String.toUpper` after that. The case below is `String.replace`, which
+    /// is charged the same way — a reading whose charge is the receiver's byte
+    /// length.
     ///
     /// Two runs of the same shape over receivers a hundred times apart,
     /// making the same number of calls, from the real machinery. The call
@@ -1566,8 +1585,8 @@ export fn main() -> Int {{
             vm.run_entry("m", "main", Vec::new()).expect("it answers");
             vm.boundary()
                 .expect("count_boundary was called")
-                .intrinsic(Intrinsic::StringToUpper)
-                .expect("the program calls String.toUpper")
+                .intrinsic(Intrinsic::StringReplace)
+                .expect("the program calls String.replace")
         };
 
         let short = row(&maps_over(10));

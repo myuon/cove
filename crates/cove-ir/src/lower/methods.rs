@@ -916,8 +916,6 @@ fn snapshots_itself(ty: &Ty) -> bool {
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "split"),
     ("String", "replace"),
-    ("String", "toUpper"),
-    ("String", "toLower"),
     ("Int", "toFloat"),
     ("Float", "toInt"),
     ("Float", "round"),

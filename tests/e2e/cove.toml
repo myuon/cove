@@ -475,3 +475,11 @@ allow = ["console"]
 [run.fail_string_replace_empty]
 entry = "fail_string_replace_empty.main"
 allow = ["console"]
+
+[run.values_string_to_upper]
+entry = "values_string_to_upper.main"
+allow = ["console"]
+
+[run.values_string_to_lower]
+entry = "values_string_to_lower.main"
+allow = ["console"]
