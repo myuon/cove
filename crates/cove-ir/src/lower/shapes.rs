@@ -316,6 +316,17 @@ impl Shapes {
         &self.layouts[id.index()]
     }
 
+    /// The whole table, for a question asked of a layout's *reachable* parts
+    /// rather than of the layout itself.
+    ///
+    /// [`super::synth::admission`] is the one such question today, and it is
+    /// over a slice rather than over this table because [`crate::verify`]
+    /// asks it too, of a finished [`crate::Program`] that no longer has one
+    /// of these.
+    pub(super) fn all(&self) -> &[Layout] {
+        &self.layouts
+    }
+
     /// The words a value of `id` occupies.
     pub(super) fn words(&self, id: LayoutId) -> &[Repr] {
         &self.layouts[id.index()].words

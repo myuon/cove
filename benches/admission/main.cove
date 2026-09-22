@@ -1,0 +1,785 @@
+use console.println
+use clock.now
+
+/// What a layout-directed **key admission** costs as a walk the lowering wrote
+/// against what it cost as one call into a walk written in Rust.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 makes `core.admitKey` on a key whose layout says which of its
+/// values are keys a **function lowering synthesizes for that layout**, where
+/// it was one `Inst::IntrinsicCall` of `Value.admitKey` reaching `key::admits`
+/// in the runtime. `benches/equals` and `benches/ordering` are this package's
+/// siblings, written for the same migration's first two operations; this is
+/// the third. A package beside them rather than a row inside one, so that
+/// their published numbers keep the code layout they were measured under.
+///
+/// # Why every row is a lookup, and what that makes the difference
+///
+/// `core.*` is reserved to the standard library, so a Cove program cannot ask
+/// the admission anything directly. What it can do is ask a `Set`, whose
+/// `contains` admits the element and then binary-searches for it. So one turn
+/// here is **one `Set.contains` over eight members**, which is one
+/// `Value.admitKey` — the operation this change moves — and three
+/// `core.order`s, which it does not: the order became a walk in the migration
+/// before this one and is the same code in both builds. The *difference*
+/// between the two binaries is therefore the admission and nothing else.
+///
+/// # The two arms are two binaries over one source
+///
+/// `benches/ordering`'s arrangement, for its reason: after the migration a
+/// program cannot ask for the intrinsic, because nothing in the language names
+/// it. So this file is run twice over the same bytes — once by a `cove` built
+/// at the migration's parent and once by a `cove` built after it.
+///
+/// # Three of the rows are controls, and each controls something different
+///
+/// - `int` is a key **no value of which is ever refused**. `lower::synth`'s
+///   `admission` answers `Always` for it and `core.admitKey` emits *nothing at
+///   all*, in both builds. It is the shape `covefmt` and `cq` have — every key
+///   either program uses is a `String` or an `Int` — and a synthesis that made
+///   a function for every key would show up here as the one regression this
+///   change could cause. It moves by nothing if the short circuit still fires.
+/// - `boxed` is a `Set<dyn Tagged>`, whose element layout is Decision 4's one
+///   dynamic-layout fallback: its family is a word in its own header and no
+///   walk can be composed for it, so it reaches `Value.admitKey` in **both**
+///   builds. It is the rebuild control — the same operation over the same
+///   bytes on both sides — and it is also the row that says the fallback is
+///   still reached, because a rule that nothing may use the intrinsic is
+///   satisfied by deleting the arm.
+/// - `deep` is a value type that reaches itself. A walk composed out of a
+///   layout that holds itself would not be finite, so `admission` answers
+///   `Dynamic` and this one reaches the intrinsic in both builds too — and it
+///   is the row that says the runtime's depth bound still governs the values
+///   that could reach it.
+///
+/// # What the rows are, and why these
+///
+/// Every one of them holds a `Mark`, and `Mark` is the whole point: its
+/// `Weight` case holds a `Float`, so whether a `Mark` may be a key is decided
+/// by the *value* and not by the type, and the admission has to read a
+/// discriminant to answer. No member of any set here is in that case, so every
+/// probe is admitted and the run never stops — which is what makes this a
+/// measurement of the admitting path, the only path a program that works ever
+/// takes.
+///
+/// - `mark`, the enum itself: one `switch` into three arms, of which two are
+///   empty.
+/// - `holder`, a struct whose middle field is one: the same `switch` reached
+///   through a static word offset, with two fields either side that cost
+///   nothing.
+/// - `array`, eight of them: a loop, walked to the end, which is where a walk
+///   written in Cove is most exposed against a loop written in Rust.
+/// - `entries`, a `Map<Int, Mark>`: a loop over the *values* of the entries at
+///   the entry layout's width, since a map's keys are keys by construction.
+///
+/// Every set is eight members and every probe **is** a member, so the search
+/// runs its full three steps rather than stopping early on a miss.
+///
+/// # The loops are in callees, and they are padded
+///
+/// `benches/ordering`'s arrangement and `benches/equals`' before it: the
+/// outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is a call to a counting
+/// callee whose body is the loop, and every counting callee opens with
+/// [`ballast`] — a block the parameter's sign makes unreachable and nothing can
+/// fold away, sized past `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight
+/// — so that it is not expanded into [`Row`]'s maker.
+fn turns() -> Int {
+  50000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller, which the native tier refuses for the `now()` in it.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// Three cases, of which exactly one holds a value the language refuses as a
+/// key.
+///
+/// So `Mark.Plain` and `Mark.Count(3)` are keys and `Mark.Weight(1.5)` is not,
+/// and nothing about the *type* decides it. This is the layout the admission
+/// cannot answer without reading a discriminant.
+enum Mark {
+  Plain
+  Count(Int)
+  Weight(Float)
+}
+
+/// A struct holding one, so that the discriminant is read through a field
+/// offset and the two fields either side cost nothing.
+struct Holder {
+  id: Int
+  mark: Mark
+  label: String
+}
+
+/// A value type that reaches itself through a reference, which is the only way
+/// [ADR 0035](../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+/// admits — and which no finite walk can be composed for.
+struct Node {
+  tag: Int
+  kids: Array<Node>
+}
+
+/// Something to erase, so that the control row has a trait to be a `dyn` of.
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+impl Tagged for Holder {
+  fn tag(self) -> Int {
+    self.id
+  }
+}
+
+/// `rounds` lookups of a member of a `Set<Int>`, and nothing else in the loop.
+fn countInt(items: Set<Int>, probe: Int, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Mark>`, and nothing else in the loop.
+fn countMark(items: Set<Mark>, probe: Mark, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Holder>`, and nothing else in the loop.
+fn countHolder(items: Set<Holder>, probe: Holder, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Array<Mark>>`, and nothing else in the loop.
+fn countArray(
+  items: Set<Array<Mark>>,
+  probe: Array<Mark>,
+  rounds: Int,
+) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Map<Int, Mark>>`, and nothing else in the loop.
+fn countEntries(
+  items: Set<Map<Int, Mark>>,
+  probe: Map<Int, Mark>,
+  rounds: Int,
+) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Node>`, and nothing else in the loop.
+fn countDeep(items: Set<Node>, probe: Node, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<dyn Tagged>`, and nothing else in the loop.
+fn countBoxed(items: Set<dyn Tagged>, probe: dyn Tagged, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// [`countInt`]'s loop with the lookup taken out and nothing put in its place.
+///
+/// A control has to see what it controls, and what these rows control is a
+/// lookup of several hundred instructions — so this one can afford to hold the
+/// turn and nothing else without being dearer than its subject.
+fn countBare(rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = i < 0
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// What one row measured: the microseconds its loop took, and what its last
+/// turn answered.
+///
+/// The witness is checked before any number is read as a timing: a row whose
+/// loop stopped doing the work would still report one.
+struct Row {
+  micros: Int
+  witness: Bool
+}
+
+fn bareRow(rounds: Int) -> Row {
+  let from = now()
+  let witness = countBare(rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn intRow(items: Set<Int>, probe: Int, rounds: Int) -> Row {
+  let from = now()
+  let witness = countInt(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn markRow(items: Set<Mark>, probe: Mark, rounds: Int) -> Row {
+  let from = now()
+  let witness = countMark(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn holderRow(items: Set<Holder>, probe: Holder, rounds: Int) -> Row {
+  let from = now()
+  let witness = countHolder(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn arrayRow(items: Set<Array<Mark>>, probe: Array<Mark>, rounds: Int) -> Row {
+  let from = now()
+  let witness = countArray(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn entriesRow(
+  items: Set<Map<Int, Mark>>,
+  probe: Map<Int, Mark>,
+  rounds: Int,
+) -> Row {
+  let from = now()
+  let witness = countEntries(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn deepRow(items: Set<Node>, probe: Node, rounds: Int) -> Row {
+  let from = now()
+  let witness = countDeep(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn boxedRow(items: Set<dyn Tagged>, probe: dyn Tagged, rounds: Int) -> Row {
+  let from = now()
+  let witness = countBoxed(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one lookup cost, in nanoseconds, over `rounds` turns of which `bare`
+/// microseconds were the loop itself.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000 / rounds
+}
+
+/// A chain of `depth` nodes, each the only child of the one above.
+fn chain(depth: Int, last: Int) -> Node {
+  var held = Node(tag: last, kids: [])
+  var at = 0
+  while at < depth {
+    held = Node(tag: at, kids: [held])
+    at += 1
+  }
+  held
+}
+
+/// One row per arm, each against the same bare loop.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let ints = Set.of(1, 2, 3, 4, 5, 6, 7, 8)
+  let marks = Set.of(
+    Mark.Plain,
+    Mark.Count(1),
+    Mark.Count(2),
+    Mark.Count(3),
+    Mark.Count(4),
+    Mark.Count(5),
+    Mark.Count(6),
+    Mark.Count(7),
+  )
+  let holders = Set.of(
+    Holder(id: 1, mark: Mark.Plain, label: "label"),
+    Holder(id: 2, mark: Mark.Count(2), label: "label"),
+    Holder(id: 3, mark: Mark.Count(3), label: "label"),
+    Holder(id: 4, mark: Mark.Count(4), label: "label"),
+    Holder(id: 5, mark: Mark.Count(5), label: "label"),
+    Holder(id: 6, mark: Mark.Count(6), label: "label"),
+    Holder(id: 7, mark: Mark.Count(7), label: "label"),
+    Holder(id: 8, mark: Mark.Count(8), label: "label"),
+  )
+  let arrays = Set.of(
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(1),
+    ],
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(2),
+    ],
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(3),
+    ],
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(4),
+    ],
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(5),
+    ],
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(6),
+    ],
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(7),
+    ],
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(8),
+    ],
+  )
+  let entries = Set.of(
+    Map.of(MapEntry(key: 1, value: Mark.Count(1))),
+    Map.of(MapEntry(key: 1, value: Mark.Count(2))),
+    Map.of(MapEntry(key: 1, value: Mark.Count(3))),
+    Map.of(MapEntry(key: 1, value: Mark.Count(4))),
+    Map.of(MapEntry(key: 1, value: Mark.Count(5))),
+    Map.of(MapEntry(key: 1, value: Mark.Count(6))),
+    Map.of(MapEntry(key: 1, value: Mark.Count(7))),
+    Map.of(MapEntry(key: 1, value: Mark.Plain)),
+  )
+  let deeps = Set.of(
+    chain(4, 1),
+    chain(4, 2),
+    chain(4, 3),
+    chain(4, 4),
+    chain(4, 5),
+    chain(4, 6),
+    chain(4, 7),
+    chain(4, 8),
+  )
+  let first: dyn Tagged = Holder(id: 1, mark: Mark.Plain, label: "label")
+  let second: dyn Tagged = Holder(id: 2, mark: Mark.Plain, label: "label")
+  let third: dyn Tagged = Holder(id: 3, mark: Mark.Plain, label: "label")
+  let fourth: dyn Tagged = Holder(id: 4, mark: Mark.Plain, label: "label")
+  let fifth: dyn Tagged = Holder(id: 5, mark: Mark.Plain, label: "label")
+  let sixth: dyn Tagged = Holder(id: 6, mark: Mark.Plain, label: "label")
+  let seventh: dyn Tagged = Holder(id: 7, mark: Mark.Plain, label: "label")
+  let eighth: dyn Tagged = Holder(id: 8, mark: Mark.Plain, label: "label")
+  let boxes = Set.of(
+    first,
+    second,
+    third,
+    fourth,
+    fifth,
+    sixth,
+    seventh,
+    eighth,
+  )
+
+  let bare = bareRow(rounds)
+  let xInt = intRow(ints, 5, rounds)
+  let xMark = markRow(marks, Mark.Count(5), rounds)
+  let xHolder = holderRow(
+    holders,
+    Holder(id: 5, mark: Mark.Count(5), label: "label"),
+    rounds,
+  )
+  let xArray = arrayRow(
+    arrays,
+    [
+      Mark.Plain,
+      Mark.Count(1),
+      Mark.Count(2),
+      Mark.Count(3),
+      Mark.Count(4),
+      Mark.Count(5),
+      Mark.Count(6),
+      Mark.Count(5),
+    ],
+    rounds,
+  )
+  let xEntries = entriesRow(
+    entries,
+    Map.of(MapEntry(key: 1, value: Mark.Count(5))),
+    rounds,
+  )
+  let xDeep = deepRow(deeps, chain(4, 5), rounds)
+  let xBoxed = boxedRow(boxes, fifth, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row whose loop stopped writing would still report a number, and the
+  // number would be of something else. Every probe is a member, so every
+  // witness but the bare loop's is `true`.
+  assertEqual(bare.witness, false)?
+  assertEqual(xInt.witness, true)?
+  assertEqual(xMark.witness, true)?
+  assertEqual(xHolder.witness, true)?
+  assertEqual(xArray.witness, true)?
+  assertEqual(xEntries.witness, true)?
+  assertEqual(xDeep.witness, true)?
+  assertEqual(xBoxed.witness, true)?
+
+  println("bare loop           {bare.micros * 1000 / rounds} ns/turn over {rounds} turn(s)")?
+  println("")?
+  println("row                 ns/lookup")?
+  println("int                 {perCall(xInt.micros, bare.micros, rounds)}")?
+  println("mark                {perCall(xMark.micros, bare.micros, rounds)}")?
+  println("holder              {perCall(xHolder.micros, bare.micros, rounds)}")?
+  println("array               {perCall(xArray.micros, bare.micros, rounds)}")?
+  println("entries             {perCall(xEntries.micros, bare.micros, rounds)}")?
+  println("deep                {perCall(xDeep.micros, bare.micros, rounds)}")?
+  println("boxed               {perCall(xBoxed.micros, bare.micros, rounds)}")?
+  Ok(())
+}

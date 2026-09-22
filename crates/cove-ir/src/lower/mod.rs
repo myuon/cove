@@ -83,7 +83,7 @@ mod pattern;
 mod shapes;
 mod stmt;
 mod sweep;
-mod synth;
+pub(crate) mod synth;
 mod tails;
 mod tasks;
 mod walks;
@@ -400,6 +400,18 @@ fn finish(
 ) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(only_once(errors));
+    }
+
+    // ADR 0064's Decision 4 for the admission, asked *here* and not with the
+    // rest of the verifier, because what it checks is what this module chose
+    // and the expansion on the next line is allowed to move it. See
+    // `verify::one_admission_boundary`.
+    if let Err(faults) = crate::verify::one_admission_boundary(&program) {
+        let listing: Vec<String> = faults.iter().map(ToString::to_string).collect();
+        panic!(
+            "the lowering produced a program the verifier rejects:\n  {}",
+            listing.join("\n  ")
+        );
     }
 
     // A call to a small leaf is expanded where it is made, before the two
@@ -2148,4 +2160,12 @@ impl Body<'_> {
         self.errors.push(gap::gap(what, expr.span));
         self.dead(expr)
     }
+}
+
+/// The layout of a `Bool`, which every program declares at a fixed index.
+///
+/// Here so that [`crate::verify`] can name it without reaching into
+/// [`shapes`], which is the lowering's own table and not a program's.
+pub(crate) fn shapes_bool() -> crate::LayoutId {
+    shapes::BOOL
 }
