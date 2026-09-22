@@ -1264,7 +1264,32 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// copy into. Issue #302's two shapes are both about a value arriving
 /// somewhere other than where it is wanted, and a walk composed a part at a
 /// time never has one.
-const FORWARDABLE_COPIES: usize = 8600;
+/// **The fifty-third rise is one new row and no code at all.** 8600 to 8717,
+/// 198 programs to 199. The check the paragraphs above prescribe says the
+/// rest: the survey with the one `[run]` table removed from
+/// `tests/e2e/cove.toml` is **8600 exactly**, over the same 198 programs, the
+/// same 26,152 functions and the same 720,831 instructions the row before it
+/// left.
+///
+/// The one is `tests/e2e:values_value_order` (117) — ADR 0064's Decision 3
+/// corpus for `Value.order`, landed before the layout-directed synthesis it
+/// pins, exactly as `values_any_equals` was. It is the largest program in the
+/// survey by instruction count, at 17,011 in 475 functions, and the reason is
+/// the mechanism rather than the file: [`sign`] and [`law`] are generic and
+/// are instantiated once per key type compared, so a corpus with thirty-odd
+/// key layouts in it is a hundred-odd monomorphisations.
+///
+/// **The split is 46 `prod` against 65 `ret`**, which is the other way round
+/// from `values_any_equals`' 59 against 50, and the difference is what the
+/// two files can observe. An equality is a `Bool` a row can bind and print;
+/// an order is not askable from a Cove program at all — `core.*` is reserved
+/// to the standard library — so every row here reads it off a `Set`, through
+/// `sign`, which is a function *call* per answer and not an expression per
+/// answer. The `prod` half is smaller because the comparisons are inside
+/// `std.set` where the corpus cannot bind them, and the `ret` half is larger
+/// because `sign` has three `return`s of its own on top of the `Ok(())` every
+/// section function ends in.
+const FORWARDABLE_COPIES: usize = 8717;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

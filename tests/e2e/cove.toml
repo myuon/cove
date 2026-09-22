@@ -503,3 +503,7 @@ allow = ["console"]
 [run.values_any_equals]
 entry = "values_any_equals.main"
 allow = ["console"]
+
+[run.values_value_order]
+entry = "values_value_order.main"
+allow = ["console"]
