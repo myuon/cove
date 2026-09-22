@@ -1065,7 +1065,25 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// house style — `std.string.sliceBytes` says "each question is an `if` of its
 /// own and the answer is a `return`", and `std.string.fromCodePoint` is
 /// written that way beside it.
-const FORWARDABLE_COPIES: usize = 4152;
+/// **The forty-sixth rise is two corpora and no code at all**: 4152 to 4227,
+/// 182 programs to 184, and every one of the 75 is in the two new rows.
+/// `tests/e2e/values_string_trim` is 6 `prod` and 30 `ret`, and
+/// `tests/e2e/values_string_words` 9 and 30 — issue #454's Step 5, landed
+/// before the bodies they pin move into `std.string`.
+///
+/// The two are the shape the `Int.parse` paragraph above describes and for the
+/// same reason: **long in `ret`, short in `prod`**. Each file is a dozen
+/// section functions that are a run of `?`-suffixed calls and then an `Ok(())`
+/// — the `Ok` built aside and copied into an answer location decided before
+/// the body was lowered — and each has a `show` and a `sweep` of the same
+/// shape. `values_string_words` carries three more `prod` than
+/// `values_string_trim` because its `digest` accumulates over the parts and its
+/// helpers build a `Vector` where the trim file's answer is one string.
+///
+/// Neither is a builder in the sense `values_string_chars` was, so neither
+/// approaches that file's row; both are readers whose corpora happen to be
+/// large, which is what a differential corpus for a reader looks like.
+const FORWARDABLE_COPIES: usize = 4227;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

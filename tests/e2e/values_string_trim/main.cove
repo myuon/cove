@@ -1,0 +1,351 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_chars`' helper, and here for its reason: a rendered
+/// character is the same question asked through the terminal's encoder, and
+/// this file sweeps a **NUL** and twenty-five kinds of whitespace, several of
+/// which a terminal draws as nothing at all. A list of numbers is the encoding
+/// itself, so `U+00A0` at `194 160` is a fact no display layer can be blamed
+/// for — and it is the only way a row whose answer is "the two spaces at the
+/// front went and the one in the middle stayed" can be read off a line.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// The string the code points `points` name, in order.
+///
+/// Every row this file builds out of code points rather than out of a source
+/// literal is built here, and that is what lets the oracle be independent: the
+/// oracle holds the same numbers and encodes them with an encoder of its own,
+/// where a literal would make both sides read the same UTF-8 out of two files
+/// and prove only that the files matched.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// `points` repeated `times` over.
+fn repeated(points: Array<Int>, times: Int) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  var round = 0
+  while round < times {
+    for point in points {
+      out.push(String.fromCodePoint(point)?)
+    }
+    round += 1
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// One `String.trim()` call, in full.
+///
+/// The receiver's bytes and characters, the answer's bytes and characters,
+/// whether the answer is `==` to the receiver, and the answer's bytes written
+/// out. The `same` field is what makes `"abc".trim() == "abc"` a line of its
+/// own at every row that trims nothing rather than a thing to be inferred from
+/// two equal counts — two strings of the same length are not the same string.
+fn show(label: String, text: String) -> Result<Unit, Error> {
+  let trimmed = text.trim()
+  println("{label} in {text.byteLength()}/{text.length()} out {trimmed.byteLength()}/{trimmed.length()} same {trimmed == text} [{bytesOf(trimmed)}]")?
+  Ok(())
+}
+
+/// [`show`] for a row too long to print the bytes of.
+///
+/// The same four counts, and then the two ends of the answer as bytes: a trim
+/// that stopped one character early or one late keeps every count on the first
+/// half of the line and moves a byte here.
+fn digest(label: String, text: String) -> Result<Unit, Error> {
+  let trimmed = text.trim()
+  let head = trimmed.slice(0, 2)
+  let tail = trimmed.slice(trimmed.length() - 2, trimmed.length())
+  println("{label} in {text.byteLength()}/{text.length()} out {trimmed.byteLength()}/{trimmed.length()} same {trimmed == text}")?
+  println("{label}.ends head [{bytesOf(head)}] tail [{bytesOf(tail)}]")?
+  Ok(())
+}
+
+/// One row of the sweep: the code point `point` on both sides of an `a`.
+///
+/// The one place in this file where the **set** is what is under test rather
+/// than the trimming. The Cove side calls `trim()` and prints what came back;
+/// the oracle decides membership from a list of twenty-five code points it
+/// holds itself. So a row where the two disagree is a code point one of them
+/// thinks is `White_Space` and the other does not, named on the line.
+///
+/// The character is placed on **both** sides of a non-whitespace `a` so that
+/// one row answers three questions at once: whether the head was trimmed,
+/// whether the tail was, and — because `a` survives either way — that the row
+/// did not collapse to nothing for some other reason.
+fn sweep(point: Int) -> Result<Unit, Error> {
+  let one = String.fromCodePoint(point)?
+  let text = "{one}a{one}"
+  let trimmed = text.trim()
+  println("sweep.{point} in {text.byteLength()} out {trimmed.byteLength()} [{bytesOf(trimmed)}]")?
+  Ok(())
+}
+
+/// [`sweep`] over every code point from `from` to `to`.
+fn sweepRange(from: Int, to: Int) -> Result<Unit, Error> {
+  var point = from
+  while point <= to {
+    sweep(point)?
+    point += 1
+  }
+  Ok(())
+}
+
+/// Every code point this repository could plausibly disagree about, and its
+/// neighbours on both sides.
+///
+/// Six bands rather than twenty-five points, because what a wrong
+/// implementation does is include one code point too many or one too few, and
+/// a corpus that only holds the twenty-five cannot see either. Each band
+/// brackets a run of `White_Space` with ordinary characters, so the row above
+/// and the row below every boundary are both in the golden:
+///
+/// - `0 ..= 48` holds `U+0009` through `U+000D` and `U+0020`, and a **NUL** at
+///   its head, which is a character and not whitespace;
+/// - `126 ..= 170` holds `U+0085` NEXT LINE and `U+00A0` NO-BREAK SPACE, the
+///   two that are whitespace and not ASCII;
+/// - `5750 ..= 5770` holds `U+1680` OGHAM SPACE MARK, and `U+180E` is nowhere
+///   near it — that one is in the named rows below, because it *was*
+///   whitespace until Unicode 6.3 and is the oldest wrong answer here;
+/// - `8180 ..= 8300` is the widest band and the one that matters most. It
+///   holds `U+2000` through `U+200A`, `U+2028`, `U+2029`, `U+202F` and
+///   `U+205F` — and, between them, `U+200B` ZERO WIDTH SPACE and `U+2060` WORD
+///   JOINER, which are **not** whitespace and whose names say otherwise;
+/// - `12280 ..= 12296` holds `U+3000` IDEOGRAPHIC SPACE, the last one and the
+///   only three-byte one outside the `U+2000` block;
+/// - `65270 ..= 65290` holds `U+FEFF`, which is not whitespace either and is
+///   the other classic wrong inclusion.
+fn sweeps() -> Result<Unit, Error> {
+  sweepRange(0, 48)?
+  sweepRange(126, 170)?
+  sweepRange(5750, 5770)?
+  sweepRange(8180, 8300)?
+  sweepRange(12280, 12296)?
+  sweepRange(65270, 65290)?
+  Ok(())
+}
+
+/// The strings a reader would write, and the shapes that have nothing to trim.
+fn literals() -> Result<Unit, Error> {
+  show("lit.empty", "")?
+  show("lit.one", "a")?
+  show("lit.plain", "abc")?
+  show("lit.inner", "a b c")?
+  show("lit.punct", "a.b,c")?
+  Ok(())
+}
+
+/// One space, then runs of several, at each end and in the middle.
+///
+/// `run.mid` is the row that says trimming is not squeezing: the three
+/// separators between `a` and `b` are still there in the answer, and a body
+/// that collapsed them would keep every other row in this file.
+fn runs() -> Result<Unit, Error> {
+  show("sp.lead", " abc")?
+  show("sp.tail", "abc ")?
+  show("sp.both", " abc ")?
+  show("sp.mid", "a b")?
+  show("run.lead", "   abc")?
+  show("run.tail", "abc   ")?
+  show("run.both", "   abc   ")?
+  show("run.mid", "a   b")?
+  show("run.mixed", fromPoints([9, 10, 32, 97, 98, 32, 13, 9])?)?
+  show("run.midmixed", fromPoints([97, 32, 9, 10, 13, 98])?)?
+  Ok(())
+}
+
+/// Strings that are whitespace and nothing else.
+///
+/// Each answers `""`, which is the one answer in this file that has no bytes
+/// to print, and `all.every` is the whole `White_Space` set in one string —
+/// twenty-five characters and sixty-one bytes that trim to nought. A body
+/// that missed exactly one of the twenty-five fails here as well as at that
+/// code point's sweep row, and the two together say whether the miss is at an
+/// end or in the middle of the run.
+fn everything() -> Result<Unit, Error> {
+  show("all.one", " ")?
+  show("all.space", "   ")?
+  show("all.tabs", fromPoints([9, 9, 9])?)?
+  show("all.mixed", fromPoints([32, 9, 10, 13, 12, 11])?)?
+  show(
+    "all.every",
+    fromPoints([9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288])?,
+  )?
+  show(
+    "all.reversed",
+    fromPoints([12288, 8287, 8239, 8233, 8232, 8202, 8201, 8200, 8199, 8198, 8197, 8196, 8195, 8194, 8193, 8192, 5760, 160, 133, 32, 13, 12, 11, 10, 9])?,
+  )?
+  Ok(())
+}
+
+/// The four characters whose names promise a space and which are not
+/// `White_Space`.
+///
+/// `U+200B` ZERO WIDTH SPACE and `U+FEFF` ZERO WIDTH NO-BREAK SPACE are the
+/// classic wrong inclusions, `U+2060` WORD JOINER is `U+FEFF`'s replacement,
+/// and `U+180E` MONGOLIAN VOWEL SEPARATOR is the one that *was* whitespace
+/// and stopped being it in Unicode 6.3 — so an implementation built from a
+/// table older than that fails `not.180E.*` and nothing else.
+fn notWhitespace() -> Result<Unit, Error> {
+  for point in [8203, 65279, 8288, 6158] {
+    let one = String.fromCodePoint(point)?
+    show("not.{point}.alone", one)?
+    show("not.{point}.lead", "{one}abc")?
+    show("not.{point}.tail", "abc{one}")?
+    show("not.{point}.both", "{one}abc{one}")?
+    show("not.{point}.spaced", " {one}abc{one} ")?
+  }
+  Ok(())
+}
+
+/// The rows where `trim` and `words` part company, and they are in both files.
+///
+/// `String.trim()` removes the twenty-five code points of Unicode's
+/// `White_Space`; `String.words()` splits on the five bytes of **ASCII**
+/// whitespace. Four characters are in one set and not the other, and each gets
+/// a row here and the same row in `values_string_words`:
+///
+/// - `U+00A0` NO-BREAK SPACE and `U+2028` LINE SEPARATOR are `White_Space` and
+///   not ASCII, so `trim` takes them off the ends and `words` treats them as
+///   ordinary characters inside a word;
+/// - `U+000B` LINE TABULATION — the vertical tab — is `White_Space` **and** an
+///   ASCII byte, and `words` still does not split on it, because the five
+///   bytes `split_ascii_whitespace` uses are `\t \n \x0C \r` and space and the
+///   vertical tab is not among them. It is the sharpest row in either file:
+///   one byte, inside ASCII, and the two operations disagree about it;
+/// - `U+000C` FORM FEED is in both sets, and is here beside `U+000B` so that
+///   the pair says the line is not simply "ASCII control characters".
+///
+/// A single shared whitespace predicate under both bodies would answer every
+/// other row in both files and lose exactly these.
+fn contracts() -> Result<Unit, Error> {
+  show("diff.nbsp", fromPoints([160, 97, 160, 98, 160])?)?
+  show("diff.ls", fromPoints([8232, 97, 8232, 98, 8232])?)?
+  show("diff.vt", fromPoints([11, 97, 11, 98, 11])?)?
+  show("diff.ff", fromPoints([12, 97, 12, 98, 12])?)?
+  show("diff.nel", fromPoints([133, 97, 133, 98, 133])?)?
+  show("diff.ogham", fromPoints([5760, 97, 5760, 98, 5760])?)?
+  show("diff.ideographic", fromPoints([12288, 97, 12288, 98, 12288])?)?
+  Ok(())
+}
+
+/// Multi-byte characters with whitespace on both sides, and whitespace with
+/// multi-byte characters on both sides.
+///
+/// A trim walks in from each end and stops at the first character that is not
+/// whitespace, so the two ways it can be wrong at a width boundary are
+/// stepping *into* a multi-byte character from the outside and stepping over
+/// one from the inside. `wide.kept.*` is the first — the character that stops
+/// the walk is two, three or four bytes wide — and `wide.trimmed.*` is the
+/// second, where the whitespace being removed is itself multi-byte and what
+/// stops the walk is one byte.
+fn widths() -> Result<Unit, Error> {
+  show("wide.kept.two", fromPoints([32, 233, 32])?)?
+  show("wide.kept.three", fromPoints([32, 8594, 32])?)?
+  show("wide.kept.four", fromPoints([32, 128512, 32])?)?
+  show("wide.trimmed.two", fromPoints([160, 97, 160])?)?
+  show("wide.trimmed.three", fromPoints([8195, 97, 8195])?)?
+  show("wide.both.two", fromPoints([160, 233, 160])?)?
+  show("wide.both.three", fromPoints([12288, 8594, 12288])?)?
+  show("wide.both.four", fromPoints([8195, 128512, 8195])?)?
+  show("wide.inner", fromPoints([32, 233, 32, 8594, 32])?)?
+  show("wide.run", fromPoints([160, 32, 8195, 128512, 8195, 32, 160])?)?
+  Ok(())
+}
+
+/// A NUL is a character, and it is not whitespace.
+///
+/// `zero.tells` does not call `trim()` at all: it asks `isEmpty()` and `== ""`
+/// of a one-NUL string, both `false`, so the row saying a NUL string is not an
+/// empty one sits beside the rows that trim around one.
+fn zero() -> Result<Unit, Error> {
+  let nul = fromPoints([0])?
+  println("zero.tells empty {nul.isEmpty()} eq {nul == ""} bytes {nul.byteLength()} chars {nul.length()}")?
+  show("zero.alone", nul)?
+  show("zero.lead", fromPoints([0, 97])?)?
+  show("zero.tail", fromPoints([97, 0])?)?
+  show("zero.spaced", fromPoints([32, 0, 32])?)?
+  show("zero.inner", fromPoints([32, 97, 0, 98, 32])?)?
+  Ok(())
+}
+
+/// Rows long enough that no fast path and no small-string shortcut is left
+/// untaken.
+///
+/// `long.none` has nothing to trim and is the row an implementation that
+/// answers the receiver itself has to get right; `long.ends` has a thousand
+/// characters of whitespace at each end of two thousand of text; `long.all` is
+/// whitespace and nothing else, at a length past every threshold in this
+/// repository's allocator.
+fn longs() -> Result<Unit, Error> {
+  let body = repeated([97, 98, 99, 233], 512)?
+  let pad = repeated([32, 9, 160, 8195], 256)?
+  digest("long.none", body)?
+  digest("long.lead", "{pad}{body}")?
+  digest("long.tail", "{body}{pad}")?
+  digest("long.both", "{pad}{body}{pad}")?
+  show("long.all", "{pad}{pad}")?
+  Ok(())
+}
+
+/// Pins every answer `String.trim()` gives before it moves out of the runtime,
+/// so that the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation, and this is `String.trim()`'s. Today it is `str::trim`
+/// in Rust — Rust's own `char::is_whitespace`, which is Unicode's `White_Space`
+/// property at whatever version the toolchain was built against — reached
+/// through one `Inst::IntrinsicCall`. Issue #454's Step 5.
+///
+/// # What is pinned, and which of it is a decision rather than an obvious
+///
+/// - **the set is Unicode `White_Space` and not ASCII whitespace**, which is
+///   twenty-five code points and not five bytes. [`sweeps`] is where the set
+///   is under test, over six bands that bracket every run of it;
+/// - **`U+200B`, `U+FEFF`, `U+2060` and `U+180E` are not in it**, which is
+///   [`notWhitespace`], and `U+180E` is the row that dates a table;
+/// - **trimming is not squeezing**: what is between the first and the last
+///   non-whitespace character is handed back untouched, runs and all;
+/// - **the empty string trims to the empty string**, and a string that is all
+///   whitespace trims to it too;
+/// - **a receiver with nothing to trim comes back equal to itself**, which the
+///   `same` field on every row says in a word;
+/// - **the answer is measured in bytes and in characters**, because those are
+///   the two counts that can disagree and a trim at a width boundary is where
+///   they would.
+///
+/// The golden was written by a standalone `rustc` oracle with its own UTF-8
+/// encoder and its own twenty-five-point `White_Space` list — not
+/// `char::is_whitespace`, and not `str::trim` — run before this harness was run
+/// once.
+export fn main() -> Result<Unit, Error> {
+  sweeps()?
+  literals()?
+  runs()?
+  everything()?
+  notWhitespace()?
+  contracts()?
+  widths()?
+  zero()?
+  longs()?
+  Ok(())
+}

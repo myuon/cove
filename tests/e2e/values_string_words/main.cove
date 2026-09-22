@@ -1,0 +1,355 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_trim`'s helper and `values_string_chars`' before it, here
+/// for their reason: several of the characters this file separates on, and
+/// most of the ones it refuses to separate on, are drawn as nothing at all. A
+/// list of numbers is the encoding itself, so a part that begins with
+/// `194 160` is a no-break space that stayed inside a word, on the line.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// The string the code points `points` name, in order.
+///
+/// Every row this file builds out of code points rather than out of a source
+/// literal is built here, and that is what lets the oracle be independent: the
+/// oracle holds the same numbers and encodes them with an encoder of its own.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// `points` repeated `times` over.
+fn repeated(points: Array<Int>, times: Int) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  var round = 0
+  while round < times {
+    for point in points {
+      out.push(String.fromCodePoint(point)?)
+    }
+    round += 1
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// One `String.words()` call, part by part.
+///
+/// The summary line is the receiver's bytes and characters and how many parts
+/// came back; then a line a part, with its bytes, its characters and its bytes
+/// written out. No part `words()` answers is empty — runs of separators
+/// collapse and the ends are dropped — so a `bytes 0` on a part line is the
+/// one wrong answer this shape is most likely to see, and it is visible
+/// without counting anything.
+fn show(label: String, text: String) -> Result<Unit, Error> {
+  let parts = text.words()
+  println(
+    "{label} in {text.byteLength()}/{text.length()} parts {parts.length()}",
+  )?
+  var i = 0
+  while i < parts.length() {
+    let part = parts.get(i).unwrapOr("")
+    println("{label}.{i} bytes {part.byteLength()} chars {part.length()} [{bytesOf(part)}]")?
+    i += 1
+  }
+  Ok(())
+}
+
+/// [`show`] for a row too long to print a part of.
+///
+/// The same summary line, and then the parts reduced to numbers no wrong
+/// answer hits by accident: how many bytes they hold between them, the
+/// shortest and the longest, and a position-weighted sum of each part's first
+/// byte. The weight is what makes the sum an ordering check as well as a
+/// multiset check — an implementation that answered the right words in the
+/// wrong order keeps every other number on the line and moves this one.
+fn digest(label: String, text: String) -> Result<Unit, Error> {
+  let parts = text.words()
+  var total = 0
+  var shortest = -1
+  var longest = 0
+  var weighted = 0
+  var i = 0
+  while i < parts.length() {
+    let part = parts.get(i).unwrapOr("")
+    let width = part.byteLength()
+    total += width
+    if shortest < 0 {
+      shortest = width
+    } else if width < shortest {
+      shortest = width
+    }
+    if width > longest {
+      longest = width
+    }
+    if width > 0 {
+      weighted += (i + 1) * part.byteAt(0)
+    }
+    i += 1
+  }
+  println(
+    "{label} in {text.byteLength()}/{text.length()} parts {parts.length()}",
+  )?
+  println("{label}.shape bytes {total} shortest {shortest} longest {longest} weighted {weighted}")?
+  Ok(())
+}
+
+/// One row of the sweep: the code point `point` between two `a`s.
+///
+/// The one place in this file where the **set** is what is under test rather
+/// than the splitting. The Cove side calls `words()` and prints how many parts
+/// came back; the oracle decides membership from a list of five bytes it holds
+/// itself. Two parts means the code point separated; one part means it was an
+/// ordinary character in the middle of a word.
+///
+/// The bands are `values_string_trim`'s, character for character, and that is
+/// the point of running them here as well: every code point the sweep in that
+/// file trims is asked here whether it *separates*, and twenty of the
+/// twenty-five answer no.
+fn sweep(point: Int) -> Result<Unit, Error> {
+  let one = String.fromCodePoint(point)?
+  let text = "a{one}b"
+  let parts = text.words()
+  let first = parts.get(0).unwrapOr("")
+  println("sweep.{point} in {text.byteLength()} parts {parts.length()} first {first.byteLength()} [{bytesOf(first)}]")?
+  Ok(())
+}
+
+/// [`sweep`] over every code point from `from` to `to`.
+fn sweepRange(from: Int, to: Int) -> Result<Unit, Error> {
+  var point = from
+  while point <= to {
+    sweep(point)?
+    point += 1
+  }
+  Ok(())
+}
+
+/// The six bands `values_string_trim` sweeps, asked the other question.
+///
+/// - `0 ..= 48` holds every ASCII separator there is — `U+0009`, `U+000A`,
+///   `U+000C`, `U+000D` and `U+0020` — and, between them, `U+000B` LINE
+///   TABULATION, which is `White_Space` and is **not** one of them;
+/// - `126 ..= 170` holds `U+0085` and `U+00A0`, whitespace that is not ASCII;
+/// - `5750 ..= 5770` holds `U+1680`;
+/// - `8180 ..= 8300` holds `U+2000` through `U+200A`, `U+2028`, `U+2029`,
+///   `U+202F` and `U+205F`, none of which separate here;
+/// - `12280 ..= 12296` holds `U+3000`;
+/// - `65270 ..= 65290` holds `U+FEFF`.
+///
+/// Five rows in the first band answer `parts 2` and every other row in all six
+/// answers `parts 1`. An implementation that split on Unicode whitespace
+/// instead — the one wrong answer this operation's neighbour invites — answers
+/// `parts 2` on twenty-five rows.
+fn sweeps() -> Result<Unit, Error> {
+  sweepRange(0, 48)?
+  sweepRange(126, 170)?
+  sweepRange(5750, 5770)?
+  sweepRange(8180, 8300)?
+  sweepRange(12280, 12296)?
+  sweepRange(65270, 65290)?
+  Ok(())
+}
+
+/// The strings a reader would write.
+fn literals() -> Result<Unit, Error> {
+  show("lit.empty", "")?
+  show("lit.one", "a")?
+  show("lit.plain", "abc")?
+  show("lit.two", "one two")?
+  show("lit.three", "one two three")?
+  show("lit.punct", "a.b, c")?
+  Ok(())
+}
+
+/// Separators at the ends, and runs of them anywhere.
+///
+/// `words()` drops what is at the ends and collapses what is in the middle, so
+/// none of these rows answers an empty part. `run.mid` is three separators
+/// between two words and answers two parts; a body that answered four — two
+/// words and two empties — fails here and nowhere else in this file.
+fn runs() -> Result<Unit, Error> {
+  show("sp.lead", " abc")?
+  show("sp.tail", "abc ")?
+  show("sp.both", " abc ")?
+  show("run.lead", "   abc")?
+  show("run.tail", "abc   ")?
+  show("run.both", "   abc   ")?
+  show("run.mid", "a   b")?
+  show("run.pair", "  one  two  ")?
+  show(
+    "run.mixed",
+    fromPoints([9, 10, 111, 110, 101, 13, 9, 116, 119, 111, 32, 10])?,
+  )?
+  show("run.every", fromPoints([97, 9, 98, 10, 99, 12, 100, 13, 101, 32, 102])?)?
+  Ok(())
+}
+
+/// Strings that are separators and nothing else.
+///
+/// Each answers **no parts at all**, which is the answer a body that emitted a
+/// part per run of separators would get wrong in the most obvious way, and the
+/// summary line carries it with no part lines after it.
+fn everything() -> Result<Unit, Error> {
+  show("all.one", " ")?
+  show("all.space", "   ")?
+  show("all.tabs", fromPoints([9, 9, 9])?)?
+  show("all.mixed", fromPoints([32, 9, 10, 13, 12])?)?
+  show("all.empty", "")?
+  Ok(())
+}
+
+/// The whole `White_Space` set in one string, which is **not** a string of
+/// separators.
+///
+/// Twenty-five characters, five of which separate, so what comes back is the
+/// runs of the other twenty: `set.every` is the single row in either file that
+/// says most of `trim`'s set is ordinary text to `words`, and it says it with
+/// part lines whose bytes are the non-ASCII whitespace that stayed.
+fn wholeSet() -> Result<Unit, Error> {
+  show(
+    "set.every",
+    fromPoints([9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288])?,
+  )?
+  show(
+    "set.reversed",
+    fromPoints([12288, 8287, 8239, 8233, 8232, 8202, 8201, 8200, 8199, 8198, 8197, 8196, 8195, 8194, 8193, 8192, 5760, 160, 133, 32, 13, 12, 11, 10, 9])?,
+  )?
+  Ok(())
+}
+
+/// The rows where `trim` and `words` part company, and they are in both files.
+///
+/// `String.words()` splits on the five bytes of **ASCII** whitespace;
+/// `String.trim()` removes the twenty-five code points of Unicode's
+/// `White_Space`. Each row below is a string whose only candidate separators
+/// are one character repeated, and the two files answer it differently:
+///
+/// - `diff.nbsp` and `diff.ls` are `U+00A0` and `U+2028`, which `trim` removes
+///   from the ends and which are **one word** here;
+/// - `diff.vt` is `U+000B` LINE TABULATION, and it is the sharpest row in
+///   either file: one ASCII byte, `White_Space`, and still not a separator,
+///   because the five bytes this operation uses are tab, line feed, form feed,
+///   carriage return and space and the vertical tab is not among them;
+/// - `diff.ff` is `U+000C` FORM FEED, which **is** among them, and is here
+///   beside `diff.vt` so that the pair says the line is not "ASCII control
+///   characters";
+/// - `diff.nel`, `diff.ogham` and `diff.ideographic` are three more of
+///   `trim`'s set that are one word here.
+///
+/// A single shared whitespace predicate under both bodies would answer every
+/// other row in both files and lose exactly these.
+fn contracts() -> Result<Unit, Error> {
+  show("diff.nbsp", fromPoints([160, 97, 160, 98, 160])?)?
+  show("diff.ls", fromPoints([8232, 97, 8232, 98, 8232])?)?
+  show("diff.vt", fromPoints([11, 97, 11, 98, 11])?)?
+  show("diff.ff", fromPoints([12, 97, 12, 98, 12])?)?
+  show("diff.nel", fromPoints([133, 97, 133, 98, 133])?)?
+  show("diff.ogham", fromPoints([5760, 97, 5760, 98, 5760])?)?
+  show("diff.ideographic", fromPoints([12288, 97, 12288, 98, 12288])?)?
+  Ok(())
+}
+
+/// Multi-byte characters against a separator on both sides.
+///
+/// Every separator here is one ASCII byte, so a part boundary is always at a
+/// character boundary — but a body that stepped through the receiver by
+/// *characters* rather than by bytes, or that advanced by a width it read from
+/// the wrong byte, cuts a multi-byte character in half and answers a part
+/// whose first byte is a continuation byte. The `[...]` on each part line is
+/// where that shows.
+fn widths() -> Result<Unit, Error> {
+  show("wide.two", fromPoints([32, 233, 32])?)?
+  show("wide.three", fromPoints([32, 8594, 32])?)?
+  show("wide.four", fromPoints([32, 128512, 32])?)?
+  show("wide.pair", fromPoints([233, 32, 8594])?)?
+  show("wide.inner", fromPoints([97, 233, 32, 8594, 98])?)?
+  show("wide.nbsp", fromPoints([233, 160, 8594, 32, 128512])?)?
+  show("wide.run", fromPoints([128512, 32, 32, 128512])?)?
+  Ok(())
+}
+
+/// A NUL is a character, and it is not a separator.
+fn zero() -> Result<Unit, Error> {
+  let nul = fromPoints([0])?
+  println("zero.tells empty {nul.isEmpty()} eq {nul == ""} bytes {nul.byteLength()} chars {nul.length()}")?
+  show("zero.alone", nul)?
+  show("zero.inner", fromPoints([97, 0, 98])?)?
+  show("zero.spaced", fromPoints([32, 0, 32])?)?
+  show("zero.word", fromPoints([97, 32, 0, 32, 98])?)?
+  Ok(())
+}
+
+/// Rows long enough that no capacity guess is left untaken, and three shapes
+/// of pathological.
+///
+/// `long.one` is two thousand characters and **no** separator at all, which is
+/// the row a body that sized its run by the receiver's byte length gets right
+/// and pays for; `long.all` is separators and nothing else, which is the row
+/// that answers no parts after reading everything; `long.alternating` is the
+/// other end, a separator between every character, which is the most parts a
+/// string of that length can have.
+fn longs() -> Result<Unit, Error> {
+  digest("long.one", repeated([97, 98, 99, 233], 512)?)?
+  digest("long.words", repeated([97, 98, 99, 32], 512)?)?
+  digest("long.all", repeated([32, 9, 10, 13], 256)?)?
+  digest("long.alternating", repeated([97, 32], 1024)?)?
+  digest("long.mixed", repeated([97, 233, 32, 8594, 128512, 9], 256)?)?
+  Ok(())
+}
+
+/// Pins every answer `String.words()` gives before it moves out of the
+/// runtime, so that the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation, and this is `String.words()`'s. Today it is
+/// `text.split_ascii_whitespace().collect()` in Rust, reached through one
+/// `Inst::IntrinsicCall`. Issue #454's Step 5.
+///
+/// # What is pinned, and which of it is a decision rather than an obvious
+///
+/// - **the set is five ASCII bytes and not Unicode `White_Space`**, which is
+///   what [`sweeps`] is for: the same six bands `values_string_trim` sweeps,
+///   asked the other question, and twenty of the twenty-five code points that
+///   file trims are ordinary characters here;
+/// - **`U+000B` is not one of the five**, which is [`contracts`]' sharpest row
+///   and the one thing about this operation that neither its name nor its
+///   signature settles;
+/// - **runs of separators collapse and the ends are dropped**, so no part is
+///   ever empty and a string that is all separators answers no parts;
+/// - **the empty string answers no parts**, not one part holding `""`;
+/// - **each part is measured in bytes and in characters**, because a body that
+///   cut a multi-byte character in half keeps the byte count and moves the
+///   character count.
+///
+/// The golden was written by a standalone `rustc` oracle with its own UTF-8
+/// encoder and its own five-byte separator test — not `split_ascii_whitespace`
+/// and not `char::is_ascii_whitespace` — run before this harness was run once.
+export fn main() -> Result<Unit, Error> {
+  sweeps()?
+  literals()?
+  runs()?
+  everything()?
+  wholeSet()?
+  contracts()?
+  widths()?
+  zero()?
+  longs()?
+  Ok(())
+}
