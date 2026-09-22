@@ -127,6 +127,14 @@
 //! `Intrinsic::StringRefuseByteRange` stands, and issue #454's Step 3 stops at
 //! seventeen variants rather than the thirteen it planned for.
 //!
+//! **Step 4 found the same wall at a different receiver and went round it.**
+//! `Int.parse` and `Int.parseRadix` were to move together, the general one
+//! first and the decimal one as a radix-10 wrapper over it; `int_parse_radix`
+//! raises on a radix outside `2..=36`, so the order inverted and `parse` alone
+//! became `std.int.parse` — which never raises, because every failure it has
+//! is an `Err` value it builds. Sixteen variants, and #461 now holds six of
+//! them.
+//!
 //! `tests/e2e/values_string_split` and `tests/e2e/values_string_replace` pin
 //! what the two operations answer, and `tests/e2e/fail_string_split_empty` and
 //! `tests/e2e/fail_string_replace_empty` pin what they refuse, word for word —

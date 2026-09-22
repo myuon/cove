@@ -3075,13 +3075,18 @@ mod tests {
             vec!["operand 0 of `String.trim` is `Int`, where its signature has String"]
         );
 
-        // The answer an `Int.parse` writes is a `Result<Int>`, and the
+        // The answer a `Float.parse` writes is a `Result<Float>`, and the
         // fixture's wrapper is an `Option`. It was `String.indexOf` and an
         // `Option<Int>` against the same `Option<String>` until ADR 0064 moved
         // that operation into `std.string`; no intrinsic answers an `Option`
-        // at all now, so the class this arm checks is the other wrapper.
+        // at all now, so the class this arm checks is the other wrapper. It
+        // was then `Int.parse` until issue #454's Step 4 moved *that* one into
+        // `std.int` — which is why this arm names the last parser of a single
+        // operand that is left, rather than `Int.parseRadix`: that one takes
+        // two, so a one-operand fixture would fault on the count before it
+        // ever reached the answer.
         let held = calling(
-            crate::Intrinsic::IntParse,
+            crate::Intrinsic::FloatParse,
             ANSWER,
             vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Ref],
             vec![string(2)],
@@ -3089,7 +3094,7 @@ mod tests {
         assert_eq!(
             faults(&held),
             vec![
-                "the answer of `Int.parse` is `Option`, where its signature has Result<Int, Error>"
+                "the answer of `Float.parse` is `Option`, where its signature has Result<Float, Error>"
             ]
         );
 

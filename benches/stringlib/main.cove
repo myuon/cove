@@ -1,3 +1,6 @@
+use console.println
+use clock.now
+
 /// `contains` and `Int.parse` written in Cove, beside the builtins they would
 /// replace — issue #292.
 ///
@@ -244,4 +247,170 @@ export fn main() -> Result<Unit, Error> {
   assertEqual(parseCove("").unwrapOr(-1), -1)?
   assertEqual(parseCove("12a").unwrapOr(-1), -1)?
   Ok(())
+}
+
+/// What `Int.parse` costs, at the lengths and the verdicts that separate one
+/// implementation of it from another.
+///
+/// [`parseBuiltinRow`] and [`parseCoveRow`] above are ADR 0042's Library test
+/// and price the operation at exactly one input, `-1234567`, which succeeds.
+/// This is the decomposition beside them — issue #454's Step 4, which moved
+/// the operation out of the runtime and into `std.int.parse`. The Rust arm was
+/// `text.parse::<i64>()`, so these rows price a *different algorithm* rather
+/// than the same loop written twice, and the two axes they vary are the two
+/// that algorithm's cost follows.
+///
+/// # The rows
+///
+/// The cost of an `Int.parse` is a fixed part — the call, the sign test, the
+/// `Result` the answer is written into — and a digit-proportional one, which
+/// is the loop. On top of that a **refusal allocates**, because the message
+/// quotes the text, and a success allocates nothing at all. So the rows
+/// separate three things:
+///
+/// - **length.** `one`, `seven`, `most` and `padded` are one, seven, nineteen
+///   and thirty-one digits, all of them `Ok`. The slope through them is what a
+///   digit costs, and `padded` is there because thirty leading zeros are
+///   thirty turns of the loop that no bound check may refuse;
+/// - **the two ends of `Int`.** `most` is `9223372036854775807` and `least` is
+///   `-9223372036854775808`, whose magnitude no `Int` holds. They are the pair
+///   the negative accumulator exists for, and `least` is the one input a body
+///   that built the magnitude positively would **trap** on rather than answer;
+/// - **the failure classes, and where in the text each is found.** `empty` and
+///   `sign` refuse before the loop begins; `alpha.head` refuses on the first
+///   byte of it and `alpha.tail` on the last, which is the pair that says
+///   whether a refusal costs the whole text or only the part read; `wide` is
+///   `１２`, six bytes a reader sees as twelve and this refuses at byte nought;
+///   `over` refuses on the nineteenth digit and `over.long` is a hundred
+///   nines, which refuses on the twentieth and must read no further. Every one
+///   of them allocates one message, so the difference between a failure row
+///   and a success row of the same length is what the interpolation costs.
+///
+/// Each row is `turns()` calls and the bare loop is subtracted, the same way
+/// `benches/chars`' matrix does it.
+export fn parseRows() -> Result<Unit, Error> {
+  let rounds = parseTurns()
+  let least = -9223372036854775807 - 1
+
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let one = parseRow("7", 7, rounds)
+  let seven = parseRow("-1234567", -1234567, rounds)
+  let most = parseRow("9223372036854775807", 9223372036854775807, rounds)
+  let leastRow = parseRow("-9223372036854775808", least, rounds)
+  let padded = parseRow("{zeros()}7", 7, rounds)
+  let emptied = parseRow("", 0, rounds)
+  let sign = parseRow("-", 0, rounds)
+  let alphaHead = parseRow("a1234567", 0, rounds)
+  let alphaTail = parseRow("1234567a", 0, rounds)
+  let wide = parseRow("１２", 0, rounds)
+  let over = parseRow("9223372036854775808", 0, rounds)
+  let overLong = parseRow(nines(), 0, rounds)
+
+  // What each row answered, checked before any of it is read as a timing. A
+  // success row counts `rounds` and a refusal row counts `-rounds`, and the
+  // success rows compared the whole value rather than merely arriving — so a
+  // body that answered `Ok(0)` everywhere, or that answered `Ok` where the
+  // text names no `Int`, fails here rather than reporting a fast number for
+  // something else.
+  assertEqual(bare, rounds)?
+  assertEqual(one.hits, rounds)?
+  assertEqual(seven.hits, rounds)?
+  assertEqual(most.hits, rounds)?
+  assertEqual(leastRow.hits, rounds)?
+  assertEqual(padded.hits, rounds)?
+  assertEqual(emptied.hits, -rounds)?
+  assertEqual(sign.hits, -rounds)?
+  assertEqual(alphaHead.hits, -rounds)?
+  assertEqual(alphaTail.hits, -rounds)?
+  assertEqual(wide.hits, -rounds)?
+  assertEqual(over.hits, -rounds)?
+  assertEqual(overLong.hits, -rounds)?
+
+  println("bare loop                       {bareMicros * 1000 / rounds} ns/turn ({bare})")?
+  println("one          (1 digit,   ok)    {(one.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("seven        (7 digits,  ok)    {(seven.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("most         (19 digits, ok)    {(most.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("least        (19 digits, ok)    {(leastRow.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("padded       (31 digits, ok)    {(padded.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("empty        (0 bytes,   err)   {(emptied.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("sign         (1 byte,    err)   {(sign.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("alpha.head   (8 bytes,   err)   {(alphaHead.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("alpha.tail   (8 bytes,   err)   {(alphaTail.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("wide         (6 bytes,   err)   {(wide.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("over         (19 digits, err)   {(over.micros - bareMicros) * 1000 / rounds} ns/call")?
+  println("over.long    (100 digits, err)  {(overLong.micros - bareMicros) * 1000 / rounds} ns/call")?
+  Ok(())
+}
+
+fn parseTurns() -> Int {
+  20000
+}
+
+/// Thirty leading zeros, which name no digit of the answer and every turn of
+/// the loop.
+fn zeros() -> String {
+  "000000000000000000000000000000"
+}
+
+/// A hundred nines: text that names no `Int` and says so five digits in.
+fn nines() -> String {
+  var out = ""
+  var round = 0
+  while round < 100 {
+    out = "{out}9"
+    round += 1
+  }
+  out
+}
+
+/// How long `rounds` turns of [`parseHits`] took, in microseconds, and what
+/// they counted.
+struct ParseRow {
+  micros: Int
+  hits: Int
+}
+
+fn parseRow(text: String, expected: Int, rounds: Int) -> ParseRow {
+  let startedAt = now()
+  let hits = parseHits(text, expected, rounds)
+  ParseRow(micros: (now() - startedAt).micros(), hits: hits)
+}
+
+/// `rounds` parses of `text`, counting up for each that answered `expected`
+/// and down for each that refused.
+///
+/// The value is compared rather than summed, which is what lets `most` and
+/// `least` be rows at all: twenty thousand `9223372036854775807`s added
+/// together is not a number, and Cove would stop the run rather than wrap.
+fn parseHits(text: String, expected: Int, rounds: Int) -> Int {
+  var hits = 0
+  var round = 0
+  while round < rounds {
+    match Int.parse(text) {
+      Ok(value) => {
+        if value == expected {
+          hits += 1
+        }
+      }
+      Err(_) => {
+        hits -= 1
+      }
+    }
+    round += 1
+  }
+  hits
+}
+
+/// The bare loop every row above is measured against.
+fn countBare(rounds: Int) -> Int {
+  var total = 0
+  var round = 0
+  while round < rounds {
+    total = total + 1
+    round = round + 1
+  }
+  total
 }

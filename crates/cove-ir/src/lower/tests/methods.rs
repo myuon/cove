@@ -282,27 +282,34 @@ fn @m.value(Option Int) -> Int
 /// The machine builds the `Error` carrying a failure's message itself, so
 /// the `Error` layout is interned here as well as the `Result`'s: the
 /// `Result` describes its `Err` words without saying what declared them.
+///
+/// It was `Int.parse` until issue #454's Step 4 made that one
+/// `std.int.parse`, whose `Err` is an ordinary Cove `Error(...)` and so says
+/// nothing about what the *machine* interns. `Float.parse` is the parser that
+/// is still the machine's, and the fact under test is unchanged: a `Result`
+/// the runtime writes describes its `Err` words without naming what declared
+/// them, so the `Error` layout has to be interned beside it.
 #[test]
 fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
     assert_eq!(
         listing(
-            "fn parse(s: String) -> Int { Int.parse(s).unwrapOr(0) }",
+            "fn parse(s: String) -> Float { Float.parse(s).unwrapOr(0.0) }",
             "parse"
         ),
         "\
-fn @m.parse(String) -> Int
-  frame 8: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int s7:int
+fn @m.parse(String) -> Float
+  frame 8: s0!:ref s1:float s2:tag s3:float s4:ref s5:float s6:float s7:float
   local s -> s0:String [0, 10)
-     0  intrinsic-call s2..s4:Result Int.parse (s0:String)
-     1  int s5:int 0
+     0  intrinsic-call s2..s4:Result Float.parse (s0:String)
+     1  float s5:float 0
      2  switch s2:tag [3 6] else 8
-     3  copy s7:Int s3:Int
-     4  copy s1:Int s7:Int
+     3  copy s7:Float s3:Float
+     4  copy s1:Float s7:Float
      5  jump 9
-     6  copy s1:Int s5:Int
+     6  copy s1:Float s5:Float
      7  jump 9
      8  trap \"no `match` arm covers this value\"
-     9  return s1:Int
+     9  return s1:Float
 "
     );
 }
@@ -698,7 +705,7 @@ fn map_error_is_an_ordinary_call_into_the_standard_library() {
 fn @m.f(String) -> Result
   frame 10: s0!:ref s1:tag s2:int s3:tag s4:ref s5:tag s6:int s7:ref s8:ref s9:int
   local t -> s0:String [0, 7)
-     0  intrinsic-call s5..s7:Result Int.parse (s0:String)
+     0  call s5..s7:Result std.int.parse (s0:String)
      1  alloc s8:ref closure m.f#0<closure>
      2  func-ref s9:int @m.f#0
      3  store-field s8:ref +0 s9:Int

@@ -179,12 +179,24 @@ fn the_run_writes_the_recording_a_run_writes() {
     // header and **no** payload word at all. Nothing else in that body is a
     // literal — the arithmetic is on `Int`s and the refusals do not exist,
     // because this is the one operation in the migration that cannot fail.
+    //
+    // It is 56 since issue #454's Step 4 moved `Int.parse` into `std.int`, and
+    // the three words are one literal counted the same way the fourteen above
+    // were. `std.int.refuseInt`'s whole message is ``​`{text}` is not an Int``:
+    // the opening backtick is a one-byte run and is pushed as its byte rather
+    // than placed (#403 again), and "` is not an Int" is fifteen bytes, so a
+    // header and two payload words. **This is also the three words
+    // `examples/cq` gains**, which is worth reading the two rows together for:
+    // cq never calls the operation and its instruction, dispatch and fuel
+    // counts do not move at all, and it still allocates one more object,
+    // because a literal is placed by the program that *emitted* the body and
+    // not by the run that reached it.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(53), capacity_words: Some(53) }"
+            "HeapSummary { collections: 0, allocated_words: Some(56), capacity_words: Some(56) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

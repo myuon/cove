@@ -132,6 +132,14 @@ allow = []
 entry = "stringlib.parseCoveRow"
 allow = []
 
+# The length-and-verdict matrix beside the two single-input rows above, which
+# issue #454's Step 4 added when it moved `Int.parse` into `std.int`. The two
+# above are ADR 0042's Library test and are timed rows of `cove-bench`; this
+# one is not timed and is run by hand, the way `[run.chars_rows]` is.
+[run.parse_rows]
+entry = "stringlib.parseRows"
+allow = ["console", "clock"]
+
 # What one `Inst::IntrinsicCall` costs, decomposed. Three loops over the same
 # 2,000,000 turns as `arith`, each with exactly one builtin in it, and a
 # fourth with none: the difference between the bare loop and one of the others

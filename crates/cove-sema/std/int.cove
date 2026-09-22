@@ -32,6 +32,161 @@ export fn abs(value: Int) -> Int {
   }
 }
 
+/// The `Int` `text` spells in decimal, or an `Error` saying it spells none.
+///
+/// A leading `+` or `-` is read and nothing else is: no digit separator, no
+/// radix prefix, no whitespace at either end, and no digit that is not one of
+/// the ten ASCII ones. So `1_000` — which a Cove *literal* may be written as
+/// — is an `Err` here, because the separator is something the parser of source
+/// knows and this does not; `0x10` is an `Err` because naming a radix in the
+/// text is not naming one, which is what `Int.parseRadix` is for; and `１２`,
+/// U+FF11 and U+FF12, is an `Err` because a reader seeing twelve there is
+/// reading a script this does not read. Every one of those is
+/// `tests/e2e/values_int_parse`, and every one of them is what
+/// `str::parse::<i64>` answered before this body existed.
+///
+/// It was that call, reached through one `Inst::IntrinsicCall`. ADR 0064 moves
+/// it here: what counts as a number is a policy over a representation and not
+/// an operation of the machine, and `parse` is a method's name that would have
+/// to be renamed the day the method was, which is Decision 2's test. What is
+/// left underneath is `core.byteLength` — a header load — with one run load a
+/// byte over it. A loop the native tier compiles, in place of a call it can
+/// only cross back out of.
+///
+/// **`Int.parseRadix` did not come with it, and the order #454 planned is the
+/// other way round.** That variant refuses a radix outside `2..=36` by
+/// *raising*, and a Cove body has nothing to raise with — issue
+/// [#461](https://github.com/myuon/cove/issues/461). This one never raises:
+/// every failure it has is an `Err` value it builds. So `parse` is not
+/// `parseRadix(text, 10)` yet; when #461 is decided it becomes exactly that,
+/// and this body moves under it.
+///
+/// # The accumulator runs negative, and that is the whole of the design
+///
+/// Cove traps on arithmetic overflow, so `value = value * 10 + digit` does not
+/// answer `Err` on text that names no `Int` — it **stops the program**, which
+/// is not this operation's contract. And the least `Int` has a magnitude the
+/// greatest has not, so a positive accumulator cannot hold
+/// `-9223372036854775808` at all, however carefully it is guarded.
+///
+/// Both problems have one answer, and it is the one Rust's own `from_str`
+/// uses: accumulate **downwards**. `value` is nought or below at every step,
+/// every input's magnitude is representable on that side, and the sign is
+/// applied once at the end — where a positive answer is a negation that is
+/// checked, because `-least` is the one negation that does not fit.
+///
+/// # One bound check a digit, and why the exact case is nested under it
+///
+/// `leastTenth` is `least / 10`, which truncates toward zero, so it is
+/// `-922337203685477580`: the last accumulator from which a multiply by ten
+/// still fits. The whole of the check is `value <= leastTenth`, and in the
+/// common case it is false and costs one comparison:
+///
+/// - `value > leastTenth` — so `value` is at least `leastTenth + 1`, so
+///   `value * 10` is at least `-9223372036854775790`, so subtracting a digit
+///   of at most nine leaves at least `-9223372036854775799`, which is above
+///   `least`. **Neither operation can overflow and neither is checked**;
+/// - `value < leastTenth` — the multiply alone would go past `least`, so the
+///   text names no `Int` and the answer is `Err`;
+/// - `value == leastTenth` — the multiply is exactly `-9223372036854775800`
+///   and what is left is whether the digit fits under it. `leastDigit` is that
+///   room, `leastTenth * 10 - least`, which is eight; it is *derived* rather
+///   than written as an 8, because a transcribed constant is a thing to get
+///   wrong and this one is the difference between `-9223372036854775808`
+///   answering `Ok` and answering `Err`.
+///
+/// Two checks a digit — `value < leastTenth` before the multiply and
+/// `scaled < least + digit` after it — is the obvious writing and was the
+/// first one. It is **+12.3%**: 8,420,009 instructions against 7,500,009 on
+/// 60,000 calls over a 7-digit, a 19-digit and a 1-digit input, which is 1.70
+/// instructions a digit for a question the common case does not have to ask.
+///
+/// **A digit-count fast path was measured and refused, and the measurement is
+/// why rather than the taste.** A run of eighteen digits or fewer cannot
+/// overflow at all, so a body could test the length once and then run a second
+/// loop with no bound check in it whatever. On a 7-digit input that is
+/// 2,040,009 instructions against 2,120,009, which is **−3.8%** — the check
+/// costs 0.57 instructions a digit, not the two a reader counts, because a
+/// comparison whose branch is never taken is most of a comparison and none of
+/// a branch. On the mixed 7-, 19- and 1-digit workload above it is
+/// **7,500,009 against 7,500,009**: what the two short calls save, the length
+/// test on all three and the 19-digit call's unchanged slow loop give back
+/// exactly. Two loop bodies for one operation, for nought on any input longer
+/// than a hand-written number — and the census at `652a15c` is **0 dynamic
+/// calls in covefmt and 0 in cq**, so there is no program in this repository
+/// for that complexity to be earned by either. PHILOSOPHY's "earn complexity
+/// through use", on a body whose use is a command line.
+///
+/// # Nothing here allocates on the path that succeeds
+///
+/// [`refuseInt`] is a function of its own for `std.string.refuseRange`'s
+/// reason: the interpolation that builds the message is the only allocation in
+/// this operation, and a body that inlined it would carry it at each of the
+/// six places it is reached. A text that is a number pays for none of them.
+export fn parse(text: String) -> Result<Int, Error> {
+  let end = core.byteLength(text)
+  var at = 0
+  var negative = false
+  if end > 0 {
+    let head = text.byteAt(0)
+    if head == '-' {
+      negative = true
+      at = 1
+    } else if head == '+' {
+      at = 1
+    }
+  }
+  if at >= end {
+    return refuseInt(text)
+  }
+  let least = -9223372036854775807 - 1
+  let leastTenth = least / 10
+  let leastDigit = leastTenth * 10 - least
+  var value = 0
+  while at < end {
+    let byte = text.byteAt(at)
+    if byte < '0' {
+      return refuseInt(text)
+    }
+    if byte > '9' {
+      return refuseInt(text)
+    }
+    let digit = byte - '0'
+    if value <= leastTenth {
+      if value < leastTenth {
+        return refuseInt(text)
+      }
+      if digit > leastDigit {
+        return refuseInt(text)
+      }
+    }
+    value = value * 10 - digit
+    at += 1
+  }
+  if negative {
+    return Ok(value)
+  }
+  if value == least {
+    return refuseInt(text)
+  }
+  Ok(-value)
+}
+
+/// The `Err` that says `text` spells no `Int`, which [`parse`] has already
+/// found that it does not.
+///
+/// One sentence for all six ways of not being a number, which is what the Rust
+/// arm said too: `str::parse` distinguishes an empty string from an invalid
+/// digit from an overflow in its `ParseIntError`, and the arm above it threw
+/// all three away and wrote ``​`{text}` is not an Int``. That is kept exactly,
+/// down to the backticks — a text that is itself a backtick makes three in a
+/// row and nothing escapes any of them, which
+/// `tests/e2e/values_int_parse`'s `tick.*` rows pin rather than leave to be
+/// discovered.
+fn refuseInt(text: String) -> Result<Int, Error> {
+  Err(Error("`{text}` is not an Int"))
+}
+
 /// Appends the decimal text of `value` to `buffer`: what `"{value}"` shows.
 ///
 /// Not exported, and nothing a program can name: the lowering calls it for

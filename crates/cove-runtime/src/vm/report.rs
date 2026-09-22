@@ -434,8 +434,8 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Ten of the 17 variants can be non-zero here, which is exactly the
-    /// set that declares `Effects::BULK_WORK`; the other seven examine
+    /// Ten of the 16 variants can be non-zero here, which is exactly the
+    /// set that declares `Effects::BULK_WORK`; the other six examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
     /// `String.startsWith` out of the enum, ADR 0065 took `String.contains`
@@ -494,6 +494,20 @@ pub struct IntrinsicCalls {
     /// change to a table and to `benches/chars`, and to nothing a whole-program
     /// measurement of `examples/` can see. Both numbers are measured off
     /// `Intrinsic::effects` rather than counted by hand.
+    ///
+    /// **Step 4's `Int.parse` is not a fourth carrier**, so the carriers stay
+    /// at ten for the second time and the rest fall to six. It is the second
+    /// migration of the series whose operation examined nothing because there
+    /// was nothing proportional to charge — `String.fromCodePoint` was the
+    /// first — and it reaches that from the other direction: that one took a
+    /// word and built, this one takes a `String` and answers a word. The
+    /// receiver is on the heap and the body does walk it, so `READS_MEMORY`
+    /// was there and `BULK_WORK` was not, and the reason it was not is written
+    /// into `Intrinsic::effects` beside the arm: a decimal `Int` is nineteen
+    /// digits and change, and text longer than that is not a number, so the
+    /// work is bounded by the *answer's* type rather than by the caller's
+    /// data — the one shape of receiver-reading arm this column was never
+    /// going to catch anything in.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,

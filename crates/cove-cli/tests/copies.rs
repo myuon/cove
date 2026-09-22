@@ -1029,7 +1029,43 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// helper. A corpus for a reader that answers one word looks like this — long
 /// in `ret`, short in `prod` — and a corpus for a builder looks like the two
 /// above it.
-const FORWARDABLE_COPIES: usize = 2970;
+/// **The forty-fifth rise is the largest this table has ever taken, and it is
+/// one standard-library body.** 2970 to 4152, 181 programs to 182, and the two
+/// halves separate the way the paragraphs above prescribe:
+///
+/// - **the migration is +1146**, 2970 to 4116, over the same 181 programs.
+///   `std.int.parse` and `std.int.refuseInt` appear in a survey that lowers a
+///   *package* rather than an entry, so every program carries them: functions
+///   go 18,871 to 19,275 and instructions 378,402 to 430,511, which is 2.2
+///   functions and **288 instructions in each of the 181**;
+/// - **the new entry is +36**, 4116 to 4152, 181 programs to 182. It is
+///   `[run.parse_rows]` on `benches/stringlib`, and it is the same case
+///   `[run.chars_rows]` was: a second entry of a package this table already
+///   surveys, so it adds another whole copy of that package's row rather than
+///   any new code.
+///
+/// **All 1,166 of the migration's copies are in the `ret` column**; `prod`
+/// moves by sixteen. That is the shape of the operation rather than of the
+/// body's size. `Int.parse` has **six ways to say no** — no digits after a
+/// sign, a byte below `'0'`, a byte above `'9'`, an accumulator already past
+/// the bound, a digit that will not fit under it, and a magnitude with no
+/// positive counterpart — and each of them is a `return refuseInt(text)`,
+/// which is a call, a temporary, a copy into the answer location and a
+/// `Return`. That is the case issue #302 opens with, six times over, plus the
+/// two `Ok`s beside them. Six and a half copies a program.
+///
+/// **The single-exit rewrite that would collapse them was refused.** Threading
+/// an `ok` flag through the walk and answering once at the bottom trades six
+/// static copies for a test **inside the digit loop** — the one place in this
+/// body where an instruction is paid per byte of input rather than per call.
+/// This file's own preamble says why that is the wrong way round: the number
+/// here is "an upper bound and not a promise", a measurement of how much there
+/// is for a destination-forwarding lowering to decide about, and buying it
+/// down with run-time work in a loop is not what it is for. It is also the
+/// house style — `std.string.sliceBytes` says "each question is an `if` of its
+/// own and the answer is a `return`", and `std.string.fromCodePoint` is
+/// written that way beside it.
+const FORWARDABLE_COPIES: usize = 4152;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
