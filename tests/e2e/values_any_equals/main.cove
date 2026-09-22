@@ -1,0 +1,449 @@
+use console.println
+
+/// What `==` answers about every family of value the language has, and the
+/// three laws it owes at every row.
+///
+/// `Any.equals` is one of the five layout-directed walks
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 specialises at lowering time, and neither `covefmt` nor `cq`
+/// executes it once. So there is no program in this repository whose answer
+/// would change if the walk were wrong, and this file is written to be that
+/// program: one row per arm of the structural composition — scalars, a
+/// string, a struct, a nested struct, an enum with and without a payload, a
+/// run, a keyed collection, an `Option`, a recursion, and the erased box that
+/// is the one case a layout cannot be read off the source.
+///
+/// # The rows are the oracle, and they were written before anything ran
+///
+/// Every `want` on the right of a line below was written from the language
+/// reference's account of `==` — value equality, structural, field by field
+/// and element by element, a keyed collection in its one canonical order —
+/// and not from what any implementation printed. That is the whole point of
+/// pinning the behaviour before it moves: a golden taken from the subject
+/// records what the subject does, which is the one thing a differential test
+/// must not take on trust.
+///
+/// # Four answers per row, not one
+///
+/// [`law`] prints `a == b`, `b == a`, `a != b` and `a == a` at every row,
+/// because a walk that gets equality wrong rarely gets it wrong symmetrically:
+/// a composition that compares the left value's field against the left
+/// value's field answers `true` for everything and is reflexive and symmetric
+/// while being useless. `want` is what `eq` and `sym` must both be, `ne` is
+/// its negation, and `refl` is `true` at every row but one.
+///
+/// The exception is `float.nan`, and it is the reason `refl` is printed at
+/// all: IEEE-754 says a NaN is equal to nothing, itself included, so a walk
+/// that compares two `Float` words as *words* answers `true` there and is
+/// wrong in the one place a bit pattern and a number disagree. `float.zero`
+/// is the other half of that pair — `-0.0` and `0.0` are two bit patterns and
+/// one number.
+/// One value that is not one word, so that `==` on it is a walk rather than an
+/// instruction.
+///
+/// A `String`, a `Bool` and an `Int` are each compared by one instruction
+/// where they stand alone; inside a struct they are a field of a walk, which
+/// is the arm this file is about.
+struct WrapInt {
+  value: Int
+}
+
+struct WrapBool {
+  value: Bool
+}
+
+struct WrapStr {
+  value: String
+}
+
+struct WrapFloat {
+  value: Float
+}
+
+struct WrapUnit {
+  value: Unit
+}
+
+/// Three fields whose words are an `Int`, a reference and an `Int`.
+///
+/// The middle field is what makes a wrong offset visible: a walk that read
+/// both `Int`s from word 0 would answer `true` for `Mixed(1, "x", 2)` against
+/// `Mixed(2, "x", 1)`, which is the `struct.mixed.swap` row.
+struct Mixed {
+  first: Int
+  middle: String
+  last: Int
+}
+
+/// A struct whose fields are themselves walks.
+struct Pair {
+  left: Mixed
+  right: Mixed
+}
+
+/// An enum with no payload at all: one word, which is its case index.
+enum Flag {
+  On
+  Off
+}
+
+/// Cases with payloads beside one without, and two payloads of different
+/// widths so that a part's offset within the payload region is exercised.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+  Both(Int, String)
+}
+
+/// A value type that reaches itself through a reference, which is the only
+/// way [ADR 0035](../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+/// admits.
+struct Node {
+  tag: Int
+  kids: Array<Node>
+}
+
+/// A value that can summarise itself, so that `dyn Summary` erases one.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Booking {
+  id: Int
+}
+
+struct Receipt {
+  cents: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+impl Summary for Receipt {
+  fn summarize(self) -> String {
+    "receipt {self.cents}c"
+  }
+}
+
+/// `a == b`, `b == a`, `a != b` and `a == a`, written out beside what the
+/// language reference says the first of them is.
+///
+/// One generic function rather than one per type, which is also what makes
+/// every row go through the same three lowerings: the call is monomorphised,
+/// so `law<Mixed>` and `law<Array<Int>>` are separate functions over separate
+/// layouts and each of them asks the question its own way.
+fn law<T>(label: String, a: T, b: T, want: Bool) -> Result<Unit, Error> {
+  let forward = a == b
+  let backward = b == a
+  let differ = a != b
+  let reflexive = a == a
+  println("{label} eq {forward} sym {backward} ne {differ} refl {reflexive} want {want}")?
+  Ok(())
+}
+
+/// A string built a character at a time, so that two equal strings are two
+/// objects.
+///
+/// `"ab" == "ab"` written twice in the source may be one interned literal, and
+/// then the row proves that a pointer equals itself. This one cannot be.
+fn built(parts: Array<String>) -> String {
+  var out = ""
+  for part in parts {
+    out = "{out}{part}"
+  }
+  out
+}
+
+/// A chain of `depth` nodes, each the only child of the one above, ending in a
+/// leaf whose tag is `last`.
+fn chain(depth: Int, last: Int) -> Node {
+  var held = Node(tag: last, kids: [])
+  var at = 0
+  while at < depth {
+    held = Node(tag: at, kids: [held])
+    at += 1
+  }
+  held
+}
+
+/// Every scalar the language has, as the one field of a struct.
+fn scalars() -> Result<Unit, Error> {
+  law("scalar.int.same", WrapInt(value: 7), WrapInt(value: 7), true)?
+  law("scalar.int.diff", WrapInt(value: 7), WrapInt(value: 8), false)?
+  law("scalar.int.zero", WrapInt(value: 0), WrapInt(value: 0), true)?
+  law("scalar.int.neg", WrapInt(value: -1), WrapInt(value: 1), false)?
+  law("scalar.bool.same", WrapBool(value: true), WrapBool(value: true), true)?
+  law("scalar.bool.diff", WrapBool(value: true), WrapBool(value: false), false)?
+  law("scalar.unit.same", WrapUnit(value: ()), WrapUnit(value: ()), true)?
+  law(
+    "scalar.str.same",
+    WrapStr(value: built(["a", "b"])),
+    WrapStr(value: built(["ab"])),
+    true,
+  )?
+  law(
+    "scalar.str.diff",
+    WrapStr(value: built(["a", "b"])),
+    WrapStr(value: built(["a", "c"])),
+    false,
+  )?
+  law("scalar.str.empty", WrapStr(value: built([])), WrapStr(value: ""), true)?
+  law("scalar.str.prefix", WrapStr(value: "ab"), WrapStr(value: "abc"), false)?
+  Ok(())
+}
+
+/// The arm a word comparison gets wrong.
+///
+/// `0.0 / 0.0` is a NaN and `1.0 / 0.0` an infinity, written as divisions so
+/// that neither depends on a literal syntax for them.
+fn floats() -> Result<Unit, Error> {
+  law("float.same", WrapFloat(value: 1.5), WrapFloat(value: 1.5), true)?
+  law("float.diff", WrapFloat(value: 1.5), WrapFloat(value: 1.25), false)?
+  law(
+    "float.nan",
+    WrapFloat(value: 0.0 / 0.0),
+    WrapFloat(value: 0.0 / 0.0),
+    false,
+  )?
+  law(
+    "float.nan.number",
+    WrapFloat(value: 0.0 / 0.0),
+    WrapFloat(value: 1.0),
+    false,
+  )?
+  law("float.zero", WrapFloat(value: 0.0), WrapFloat(value: -0.0), true)?
+  law(
+    "float.inf",
+    WrapFloat(value: 1.0 / 0.0),
+    WrapFloat(value: 1.0 / 0.0),
+    true,
+  )?
+  law(
+    "float.inf.sign",
+    WrapFloat(value: 1.0 / 0.0),
+    WrapFloat(value: -1.0 / 0.0),
+    false,
+  )?
+  Ok(())
+}
+
+/// A struct, and a struct of structs.
+fn structs() -> Result<Unit, Error> {
+  let one = Mixed(first: 1, middle: "x", last: 2)
+  let swapped = Mixed(first: 2, middle: "x", last: 1)
+  let middled = Mixed(first: 1, middle: "y", last: 2)
+  law("struct.mixed.same", one, Mixed(first: 1, middle: "x", last: 2), true)?
+  law("struct.mixed.swap", one, swapped, false)?
+  law("struct.mixed.mid", one, middled, false)?
+  law(
+    "struct.nested.same",
+    Pair(left: one, right: swapped),
+    Pair(left: one, right: swapped),
+    true,
+  )?
+  law(
+    "struct.nested.left",
+    Pair(left: one, right: swapped),
+    Pair(left: middled, right: swapped),
+    false,
+  )?
+  law(
+    "struct.nested.right",
+    Pair(left: one, right: swapped),
+    Pair(left: one, right: middled),
+    false,
+  )?
+  law(
+    "struct.nested.swap",
+    Pair(left: one, right: swapped),
+    Pair(left: swapped, right: one),
+    false,
+  )?
+  Ok(())
+}
+
+/// An enum with no payload, and one with payloads of two shapes.
+fn enums() -> Result<Unit, Error> {
+  law("enum.flag.same", Flag.On, Flag.On, true)?
+  law("enum.flag.diff", Flag.On, Flag.Off, false)?
+  law("enum.mark.plain", Mark.Plain, Mark.Plain, true)?
+  law("enum.mark.count.same", Mark.Count(3), Mark.Count(3), true)?
+  law("enum.mark.count.diff", Mark.Count(3), Mark.Count(4), false)?
+  law("enum.mark.case", Mark.Count(3), Mark.Named("3"), false)?
+  law("enum.mark.plain.case", Mark.Plain, Mark.Count(0), false)?
+  law(
+    "enum.mark.named.same",
+    Mark.Named(built(["a", "b"])),
+    Mark.Named("ab"),
+    true,
+  )?
+  law("enum.mark.named.diff", Mark.Named("ab"), Mark.Named("ac"), false)?
+  law("enum.mark.both.same", Mark.Both(1, "a"), Mark.Both(1, "a"), true)?
+  law("enum.mark.both.first", Mark.Both(1, "a"), Mark.Both(2, "a"), false)?
+  law("enum.mark.both.second", Mark.Both(1, "a"), Mark.Both(1, "b"), false)?
+  law("enum.mark.both.case", Mark.Both(1, "a"), Mark.Count(1), false)?
+  Ok(())
+}
+
+/// An `Array` and a `Vector`: two runs, compared element for element under the
+/// element's own rule.
+fn runs() -> Result<Unit, Error> {
+  law("array.same", [1, 2, 3], [1, 2, 3], true)?
+  law("array.order", [1, 2, 3], [3, 2, 1], false)?
+  law("array.length", [1, 2], [1, 2, 3], false)?
+  let noArray: Array<Int> = []
+  law("array.empty", noArray, [], true)?
+  law("array.empty.one", noArray, [1], false)?
+  law(
+    "array.struct",
+    [Mixed(first: 1, middle: "x", last: 2)],
+    [Mixed(first: 1, middle: "x", last: 2)],
+    true,
+  )?
+  law(
+    "array.struct.diff",
+    [Mixed(first: 1, middle: "x", last: 2)],
+    [Mixed(first: 1, middle: "x", last: 3)],
+    false,
+  )?
+  law("array.nested", [[1], [2, 3]], [[1], [2, 3]], true)?
+  law("array.nested.diff", [[1], [2, 3]], [[1], [2, 4]], false)?
+  law("array.str", ["a", built(["b"])], ["a", "b"], true)?
+
+  let grown: Vector<Int> = Vector.of(1, 2)
+  var pushed: Vector<Int> = Vector.of(1)
+  pushed.push(2)
+  law("vector.same", grown, Vector.of(1, 2), true)?
+  law("vector.grown", grown, pushed, true)?
+  law("vector.order", grown, Vector.of(2, 1), false)?
+  law("vector.length", grown, Vector.of(1), false)?
+  let noVector: Vector<Int> = Vector.of()
+  law("vector.empty", noVector, Vector.of(), true)?
+  Ok(())
+}
+
+/// A `Set` and a `Map`: two runs the language keeps in one canonical order, so
+/// that the order they were written in is not part of the value.
+fn keyed() -> Result<Unit, Error> {
+  law("set.order", Set.of("b", "a", "c"), Set.of("c", "a", "b"), true)?
+  law("set.member", Set.of("b", "a"), Set.of("b", "z"), false)?
+  law("set.length", Set.of("b", "a"), Set.of("b"), false)?
+  let noSet: Set<String> = Set.of()
+  law("set.empty", noSet, Set.of(), true)?
+  law("set.int", Set.of(3, 1, 2), Set.of(2, 3, 1), true)?
+
+  let ages = Map.of(
+    MapEntry(key: "Alice", value: 30),
+    MapEntry(key: "Bob", value: 25),
+  )
+  let reversed = Map.of(
+    MapEntry(key: "Bob", value: 25),
+    MapEntry(key: "Alice", value: 30),
+  )
+  let older = Map.of(
+    MapEntry(key: "Alice", value: 31),
+    MapEntry(key: "Bob", value: 25),
+  )
+  let renamed = Map.of(
+    MapEntry(key: "Alice", value: 30),
+    MapEntry(key: "Carol", value: 25),
+  )
+  law("map.order", ages, reversed, true)?
+  law("map.value", ages, older, false)?
+  law("map.key", ages, renamed, false)?
+  law("map.length", ages, ages.removed("Bob"), false)?
+  let noMap: Map<String, Int> = Map.of()
+  law("map.empty", noMap, Map.of(), true)?
+  Ok(())
+}
+
+/// `Option` and `Result`, which are enums the language declares.
+fn wrappers() -> Result<Unit, Error> {
+  let some: Option<Int> = Some(1)
+  let none: Option<Int> = None
+  law("option.some.same", some, Some(1), true)?
+  law("option.some.diff", some, Some(2), false)?
+  law("option.none.same", none, None, true)?
+  law("option.some.none", some, none, false)?
+  law(
+    "option.struct",
+    Some(Mixed(first: 1, middle: "x", last: 2)),
+    Some(Mixed(first: 1, middle: "x", last: 2)),
+    true,
+  )?
+
+  let ok: Result<Int, String> = Ok(1)
+  let bad: Result<Int, String> = Err("no")
+  law("result.ok.same", ok, Ok(1), true)?
+  law("result.ok.diff", ok, Ok(2), false)?
+  law("result.err.same", bad, Err("no"), true)?
+  law("result.err.diff", bad, Err("nope"), false)?
+  law("result.ok.err", ok, bad, false)?
+  Ok(())
+}
+
+/// A value that reaches itself, at a depth a walk has to recurse to.
+fn recursion() -> Result<Unit, Error> {
+  law("deep.leaf", chain(0, 9), chain(0, 9), true)?
+  law("deep.leaf.diff", chain(0, 9), chain(0, 8), false)?
+  law("deep.six", chain(6, 9), chain(6, 9), true)?
+  law("deep.six.bottom", chain(6, 9), chain(6, 8), false)?
+  law("deep.six.shallow", chain(6, 9), chain(5, 9), false)?
+  law("deep.thirty", chain(30, 9), chain(30, 9), true)?
+  law("deep.thirty.bottom", chain(30, 9), chain(30, 8), false)?
+  law(
+    "deep.wide",
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 2)]),
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 2)]),
+    true,
+  )?
+  law(
+    "deep.wide.diff",
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 2)]),
+    Node(tag: 0, kids: [chain(2, 2), chain(2, 1)]),
+    false,
+  )?
+  Ok(())
+}
+
+/// The one case a layout cannot be read off the source: an erased value, whose
+/// family is a word in its own header.
+///
+/// ADR 0064's Decision 4 admits exactly one dynamic-layout fallback and says
+/// it is reached from here and nowhere else.
+fn erased() -> Result<Unit, Error> {
+  let one: dyn Summary = Booking(id: 1)
+  let same: dyn Summary = Booking(id: 1)
+  let other: dyn Summary = Booking(id: 2)
+  let elsewhere: dyn Summary = Receipt(cents: 1)
+  law("boxed.same", one, same, true)?
+  law("boxed.diff", one, other, false)?
+  law("boxed.declaration", one, elsewhere, false)?
+  law(
+    "boxed.array",
+    [one, elsewhere],
+    [Booking(id: 1), Receipt(cents: 1)],
+    true,
+  )?
+  law("boxed.array.order", [one, elsewhere], [elsewhere, one], false)?
+  law("boxed.option", Some(one), Some(Booking(id: 1)), true)?
+  Ok(())
+}
+
+/// Every section, in the order they are declared above.
+export fn main() -> Result<Unit, Error> {
+  scalars()?
+  floats()?
+  structs()?
+  enums()?
+  runs()?
+  keyed()?
+  wrappers()?
+  recursion()?
+  erased()?
+  Ok(())
+}

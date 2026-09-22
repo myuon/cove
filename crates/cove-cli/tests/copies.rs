@@ -1208,7 +1208,39 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// the largest of the four because it has the most functions, not because it
 /// has the most rows: 173 golden lines against `values_float_format`'s 160,
 /// and eleven sections against five.
-const FORWARDABLE_COPIES: usize = 8432;
+/// **The fifty-first rise is one new row and no code at all.** 8432 to 8541,
+/// 196 programs to 197. The check the paragraphs above prescribe says the
+/// rest: the survey with the one `[run]` table removed from
+/// `tests/e2e/cove.toml` is **8432 exactly**, over the same 196 programs, the
+/// same 25,783 functions and the same 709,009 instructions the row before it
+/// left.
+///
+/// The one is `tests/e2e:values_any_equals` (109) — ADR 0064's Decision 3
+/// corpus for `Any.equals`, landed before the layout-directed synthesis it
+/// pins, and the first program in this repository that executes the operation
+/// at all: `covefmt` and `cq` have 0 static sites and 0 dynamic calls of it,
+/// and so does every other program surveyed here.
+///
+/// **The split is 59 `prod` against 50 `ret`**, and unlike the row before it
+/// the `prod` half is the larger one. The reason is [`law`], the one generic
+/// function every row goes through: it is instantiated once per type
+/// compared, and each instantiation binds `a == b`, `b == a`, `a != b` and
+/// `a == a` into four `let`s before interpolating them. A comparison is a
+/// producer and a `let` is the copy after it, so four `prod` arrive per
+/// instantiation — which is exactly what the file is for. Writing the four
+/// into the interpolation instead would remove them and would also remove the
+/// thing the corpus exists to make readable, which is that the four answers
+/// are named and can be read off a line.
+///
+/// The `ret` half is the shape every corpus in this series has: `law` and the
+/// nine section functions each end in `Ok(())`, and `built` and `chain` each
+/// end in a binding — issue #302's opening case, once per function.
+///
+/// 172 functions and 6,938 instructions for one file is the other number
+/// worth reading: a generic instantiated at twenty-odd layouts is twenty-odd
+/// functions, and that is the mechanism ADR 0064's Decision 3 builds on
+/// rather than a cost the corpus pays by accident.
+const FORWARDABLE_COPIES: usize = 8541;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
