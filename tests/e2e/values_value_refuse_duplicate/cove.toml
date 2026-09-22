@@ -1,0 +1,6 @@
+# A package whose suite is a suite of refusals.
+#
+# Its own package rather than a case of the shared `tests/e2e` one so that
+# `cove test` reaches these `test fn`s and no others, and so that the golden
+# files below are this file's output and not the whole corpus's. `test_fail`
+# is the same arrangement for the same reason.

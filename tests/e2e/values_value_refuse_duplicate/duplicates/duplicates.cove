@@ -1,0 +1,426 @@
+/// What a duplicate in a `Set.of` or a `Map.of` literal is refused with,
+/// family by family, exactly.
+///
+/// `Value.refuseDuplicate` is the fifth and last of the layout-directed
+/// operations
+/// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 names, and the one that stays an intrinsic: see
+/// `crates/cove-ir/src/lower/synth.rs`'s header for why. What it does that
+/// is layout-directed is *render the key it names*, and that rendering ends
+/// up inside a `RuntimeError` with a `rule` and a `help` beside it, which is
+/// three sentences where `Inst::Trap` carries one. So this file is not a
+/// before-and-after for a migration. It is the thing a migration would have
+/// to keep, written down before anyone attempts one again.
+///
+/// # Two implementations, and that is the point of running it twice
+///
+/// The refusal is worded in two places that share no code:
+/// `cove_runtime::builtins`' `duplicate_key_error`, over `MapKey`'s
+/// `Display`, is what the tree-walking oracle raises, and
+/// `cove_runtime::vm::intrinsics::key`'s `duplicate`, over `render_value`,
+/// is what the linear-memory backend raises. Nothing but a corpus holds the
+/// two to the same bytes, so this case carries a `both_backends` file and
+/// every row below is asserted on each of them.
+///
+/// # The rows are the oracle, and they were written before anything ran
+///
+/// Every refusal quoted in a doc comment below was derived from the two Rust
+/// sites named above and from the *specification* of the rendering that
+/// `tests/e2e/values_value_render_into` pins — a `String` as its bytes with
+/// nothing quoted and nothing escaped, an `Error` as its message alone, a
+/// struct as `Name(field: value, ...)` in declaration order, an enum as
+/// `Case` or `Case(part, ...)`, a run in `[]`, a set and a map in `{}`, a
+/// `Duration` in the largest unit that divides it exactly, a range as the
+/// operator it was written with, a box looked through — and not from what
+/// either implementation printed. Each is:
+///
+/// ```text
+/// `{method}` was given the {role} `{key}` more than once
+///   rule: A literal with two identical keys is a mistake, not an intent; ...
+///   help: remove the duplicate, or give it a different {role}
+/// ```
+///
+/// with `{method}` and `{role}` the two `String` literals `std.set.of` and
+/// `std.map.of` pass — `Set.of`/`element` and `Map.of`/`key` — and `{key}`
+/// the rendering of the member found again. The `rule` is one constant
+/// sentence and never varies, which is why the doc comments quote the
+/// message and the `help` alone.
+///
+/// # Why a suite of `test fn`s and not a directory of `fail_` cases
+///
+/// A refusal ends the run that meets it, so a program can produce exactly
+/// one — which is why `fail_key_duplicate_map` and `fail_key_duplicate_set`
+/// are two directories for two rows. `cove test` catches each test's `Err`
+/// and goes on to the next, so twenty-three refusals fit in one file and are
+/// read against each other rather than across directories. The six passing
+/// rows at the top are here for the same reason: what a literal with *no*
+/// duplicate does belongs beside what one with a duplicate does.
+///
+/// # What is not here
+///
+/// A `Float`, a `Vector`, and anything holding one never reach this refusal
+/// at all: `std.set.of` and `std.map.of` ask `core.admitKey` of every
+/// element before they look for a duplicate, so the admission refuses first
+/// and with its own words. `theAdmissionRefusesAFloatBeforeADuplicateIsLookedFor`
+/// is the row that pins that ordering, and it is the one row below whose
+/// refusal is not this operation's.
+///
+/// A key that nests deeper than `theDeepestNestingTwoKeysStillCompareAt`
+/// goes is not here either, and the reason is measured: past 42 links the
+/// *comparison* refuses — the backend's key walk is bounded at 128 steps and
+/// the oracle's is not — so the two evaluators stop disagreeing about the
+/// duplicate and start disagreeing about whether there is one. That is a
+/// pre-existing difference between the evaluators rather than anything this
+/// operation does, and a row that exercised it would be pinning the
+/// disagreement.
+/// A two-field struct, to see a composite key named field by field.
+struct Point {
+  x: Int
+  y: String
+}
+
+/// The inner half of a key one nested field decides.
+struct Inner {
+  v: Int
+}
+
+/// The outer half.
+struct Outer {
+  i: Inner
+  n: Int
+}
+
+/// A generic struct, whose **declared** short name is what a key renders as
+/// and not the monomorphised layout's (#407).
+struct Held<T> {
+  v: T
+}
+
+/// An enum with a case that carries nothing and one that carries two parts.
+enum Mark {
+  Plain
+  Pair(Int, Int)
+}
+
+/// A trait, so that a key can arrive in a box.
+trait Named {
+  fn name(self) -> String
+}
+
+/// One implementor of it.
+struct Cat {
+  tag: Int
+}
+
+impl Named for Cat {
+  fn name(self) -> String {
+    "cat"
+  }
+}
+
+/// A value that nests through a reference, so a row can build a key as deep
+/// as it wants. A value type may not hold itself, so the step is an `Array`.
+enum Chain {
+  Stop
+  Link(Int, Array<Chain>)
+}
+
+/// `n` links deep, innermost first.
+fn chain(n: Int) -> Chain {
+  if n <= 0 {
+    return Chain.Stop
+  }
+  return Chain.Link(n, [chain(n - 1)])
+}
+
+// --- the literals that hold no duplicate, and are not refused ---------------
+
+/// Nothing to be a duplicate of.
+test fn anEmptyLiteralIsNotADuplicate() -> Result<Unit, Error> {
+  let emptySet: Set<Int> = Set.of()
+  let emptyMap: Map<Int, Int> = Map.of()
+  assertEqual(emptySet.length(), 0)?
+  assertEqual(emptyMap.length(), 0)?
+  Ok(())
+}
+
+/// One element is searched for among the none placed before it.
+test fn oneElementIsNotADuplicate() -> Result<Unit, Error> {
+  assertEqual(Set.of(7).length(), 1)?
+  assertEqual(Map.of(MapEntry(key: 7, value: "a")).length(), 1)?
+  Ok(())
+}
+
+/// Distinct elements are all kept, in the order the collection sorts them by
+/// and not the order they were written in.
+test fn distinctElementsAreKeptAndSorted() -> Result<Unit, Error> {
+  assertEqual("{Set.of(3, 1, 2)}", "\{1, 2, 3\}")?
+  assertEqual(
+    "{Map.of(MapEntry(key: 2, value: 20), MapEntry(key: 1, value: 10))}",
+    "\{1: 10, 2: 20\}",
+  )?
+  Ok(())
+}
+
+/// `1..3` and `1..<4` cover the same integers and are two different keys,
+/// because `==` on a range compares the bounds a program wrote.
+test fn twoRangesWrittenWithDifferentOperatorsAreTwoKeys(
+) -> Result<Unit, Error> {
+  assertEqual(Set.of(1..3, 1..<4).length(), 2)?
+  Ok(())
+}
+
+/// One field, one level down, is enough to make two keys two keys.
+test fn oneNestedFieldIsEnoughToTellTwoKeysApart() -> Result<Unit, Error> {
+  assertEqual(
+    Set.of(Outer(i: Inner(v: 1), n: 0), Outer(i: Inner(v: 2), n: 0)).length(),
+    2,
+  )?
+  Ok(())
+}
+
+/// The relation a duplicate is found by, observed without being refused for
+/// it: `inserted` answers the receiver unchanged for an element already
+/// there, so two `String`s with the same bytes make one member.
+test fn anEqualElementInsertedIntoASetIsNotASecondMember(
+) -> Result<Unit, Error> {
+  let a = "a"
+  assertEqual(Set.of("ab").inserted("{a}b").length(), 1)?
+  Ok(())
+}
+
+// --- the refusals -----------------------------------------------------------
+
+/// `Set.of` was given the element `3` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aDuplicateAtTheEnd() -> Result<Unit, Error> {
+  let bad = Set.of(1, 2, 3, 3)
+  Ok(())
+}
+
+/// `Set.of` was given the element `4` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aDuplicateAtTheStart() -> Result<Unit, Error> {
+  let bad = Set.of(4, 4, 1, 2)
+  Ok(())
+}
+
+/// Two elements are each written twice: the one named is the first found
+/// again in argument order, which is `4` — its second copy comes before the
+/// second `7`.
+///
+/// `Set.of` was given the element `4` more than once
+/// help: remove the duplicate, or give it a different element
+test fn twoDuplicatesNameTheFirstFoundAgain() -> Result<Unit, Error> {
+  let bad = Set.of(7, 4, 4, 7)
+  Ok(())
+}
+
+/// A map is keyed by its keys alone, so two entries with one key are a
+/// duplicate however much their values differ, and the value is not shown.
+///
+/// `Map.of` was given the key `1` more than once
+/// help: remove the duplicate, or give it a different key
+test fn aMapNamesTheKeyAndNotTheValue() -> Result<Unit, Error> {
+  let bad = Map.of(MapEntry(key: 1, value: "x"), MapEntry(key: 1, value: "y"))
+  Ok(())
+}
+
+/// A `String` key is named by its bytes, unquoted.
+///
+/// `Map.of` was given the key `a` more than once
+/// help: remove the duplicate, or give it a different key
+test fn aMapNamesAStringKeyAsItsBytes() -> Result<Unit, Error> {
+  let bad = Map.of(MapEntry(key: "a", value: 1), MapEntry(key: "a", value: 2))
+  Ok(())
+}
+
+/// Equal but not identical: one `String` is a literal and the other is built
+/// at run time out of two pieces. They are one key.
+///
+/// `Set.of` was given the element `ab` more than once
+/// help: remove the duplicate, or give it a different element
+test fn stringsAreEqualByTheirBytesAndNotByIdentity() -> Result<Unit, Error> {
+  let a = "a"
+  let bad = Set.of("ab", "{a}b")
+  Ok(())
+}
+
+/// The same, one level up: two structurally equal structs, one of whose
+/// fields was built at run time.
+///
+/// `Set.of` was given the element `Point(x: 1, y: ab)` more than once
+/// help: remove the duplicate, or give it a different element
+test fn structsAreEqualFieldByField() -> Result<Unit, Error> {
+  let a = "a"
+  let bad = Set.of(Point(x: 1, y: "ab"), Point(x: 1, y: "{a}b"))
+  Ok(())
+}
+
+/// Three keys differing only in a nested field, two of them the same: the
+/// refusal names the nested value it walked to.
+///
+/// `Set.of` was given the element `Outer(i: Inner(v: 1), n: 0)` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aNestedFieldDecidesWhichKeyIsNamed() -> Result<Unit, Error> {
+  let bad = Set.of(
+    Outer(i: Inner(v: 1), n: 0),
+    Outer(i: Inner(v: 2), n: 0),
+    Outer(i: Inner(v: 1), n: 0),
+  )
+  Ok(())
+}
+
+/// `Set.of` was given the element `true` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aBoolElement() -> Result<Unit, Error> {
+  let bad = Set.of(true, true)
+  Ok(())
+}
+
+/// `Set.of` was given the element `()` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aUnitElement() -> Result<Unit, Error> {
+  let bad = Set.of((), ())
+  Ok(())
+}
+
+/// A `Duration` renders in the largest of six units that divides it exactly,
+/// so `3600s` is named `1h`. It is one of the families whose text no Cove
+/// body writes today.
+///
+/// `Set.of` was given the element `1h` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aDurationRendersInTheUnitThatDividesIt() -> Result<Unit, Error> {
+  let bad = Set.of(3600s, 3600s)
+  Ok(())
+}
+
+/// `Set.of` was given the element `1..3` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aRangeRendersAsTheOperatorItWasWrittenWith() -> Result<Unit, Error> {
+  let bad = Set.of(1..3, 1..3)
+  Ok(())
+}
+
+/// A case that carries nothing renders as its own name alone.
+///
+/// `Set.of` was given the element `Plain` more than once
+/// help: remove the duplicate, or give it a different element
+test fn anEnumCaseWithoutParts() -> Result<Unit, Error> {
+  let bad = Set.of(Mark.Plain, Mark.Plain)
+  Ok(())
+}
+
+/// `Set.of` was given the element `Pair(3, 4)` more than once
+/// help: remove the duplicate, or give it a different element
+test fn anEnumCaseWithParts() -> Result<Unit, Error> {
+  let bad = Set.of(Mark.Pair(3, 4), Mark.Pair(3, 4))
+  Ok(())
+}
+
+/// `Set.of` was given the element `[1, 2, 3]` more than once
+/// help: remove the duplicate, or give it a different element
+test fn anArrayElement() -> Result<Unit, Error> {
+  let bad = Set.of([1, 2, 3], [1, 2, 3])
+  Ok(())
+}
+
+/// Two sets built from the same members in opposite orders are one value, so
+/// they are one element — and the one named renders in the set's own order
+/// rather than in either literal's.
+///
+/// `Set.of` was given the element `{1, 2}` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aSetOfSetsIgnoresTheOrderTheyWereWrittenIn() -> Result<Unit, Error> {
+  let bad = Set.of(Set.of(1, 2), Set.of(2, 1))
+  Ok(())
+}
+
+/// `Set.of` was given the element `{a: 1}` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aMapAsAnElement() -> Result<Unit, Error> {
+  let bad = Set.of(
+    Map.of(MapEntry(key: "a", value: 1)),
+    Map.of(MapEntry(key: "a", value: 1)),
+  )
+  Ok(())
+}
+
+/// A builtin `Error` renders as the message it carries and not as the struct
+/// it happens to be, so the refusal quotes `boom` and not
+/// `Error(message: boom)`.
+///
+/// `Set.of` was given the element `boom` more than once
+/// help: remove the duplicate, or give it a different element
+test fn anErrorRendersAsItsMessageAlone() -> Result<Unit, Error> {
+  let bad = Set.of(Error(message: "boom"), Error(message: "boom"))
+  Ok(())
+}
+
+/// The boxed path: ADR 0064's Decision 4 admits one dynamic-layout fallback
+/// per operation, and a `dyn Trait` is what reaches it. The box is looked
+/// through both to find the duplicate and to name it, so what is quoted is
+/// the `Cat` inside and not the trait.
+///
+/// `Set.of` was given the element `Cat(tag: 1)` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aBoxedElementIsNamedByWhatIsInTheBox() -> Result<Unit, Error> {
+  let one: dyn Named = Cat(tag: 1)
+  let other: dyn Named = Cat(tag: 1)
+  let bad = Set.of(one, other)
+  Ok(())
+}
+
+/// The declared short name, without the type arguments the instantiation is
+/// identified by (#407).
+///
+/// `Set.of` was given the element `Held(v: 1)` more than once
+/// help: remove the duplicate, or give it a different element
+test fn aGenericStructIsNamedByItsDeclaredName() -> Result<Unit, Error> {
+  let bad = Set.of(Held(v: 1), Held(v: 1))
+  Ok(())
+}
+
+/// The key is quoted between backticks and is otherwise untouched: a key
+/// holding a backtick and a newline puts both in the message, and the
+/// message runs onto a second line. That is the specification rather than an
+/// oversight, and pinning it here is what stops a rewrite from quietly
+/// "fixing" it.
+///
+/// `Set.of` was given the element `a`b
+/// c` more than once
+/// help: remove the duplicate, or give it a different element
+test fn nothingQuotesOrEscapesTheKeyThatIsNamed() -> Result<Unit, Error> {
+  let odd = "a`b\nc"
+  let bad = Set.of(odd, odd)
+  Ok(())
+}
+
+/// Forty-two links is the deepest two keys still compare at: the backend
+/// walks a key 128 steps and a link costs three. One more and the refusal is
+/// the comparison's rather than this one's — see this file's header.
+///
+/// `Set.of` was given the element `Link(42, [Link(41, [ ... [Stop] ... ]])`
+/// more than once
+/// help: remove the duplicate, or give it a different element
+test fn theDeepestNestingTwoKeysStillCompareAt() -> Result<Unit, Error> {
+  let bad = Set.of(chain(42), chain(42))
+  Ok(())
+}
+
+/// The one row whose refusal is not this operation's. `std.set.of` asks
+/// `core.admitKey` of every element before it looks for a duplicate, so a
+/// `Float` — which has no total order, because `NaN` is not equal to itself
+/// — is refused by the admission and never reaches `core.refuseDuplicate`.
+/// Every layout `Value.refuseDuplicate` can name is therefore one
+/// `Value.admitKey` admits, and the row is here to keep that ordering fixed.
+///
+/// `Set.of` cannot use a `Float` as a set element
+/// help: convert it to a stable key first, such as rounding to an `Int` or
+/// formatting it as a `String`
+test fn theAdmissionRefusesAFloatBeforeADuplicateIsLookedFor(
+) -> Result<Unit, Error> {
+  let bad = Set.of(1.5, 1.5)
+  Ok(())
+}
