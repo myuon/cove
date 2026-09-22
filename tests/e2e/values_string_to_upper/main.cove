@@ -1,0 +1,237 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_trim`'s helper, and here for its reason. A case mapping
+/// answers characters a terminal may draw identically — `U+03C3` and
+/// `U+03C2` are both a small sigma to a reader, and the whole of the final
+/// sigma rule is which of the two came back — so the answer is written as the
+/// encoding itself. `962` against `963` is a fact no display layer can be
+/// blamed for.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// The string the code points `points` name, in order.
+///
+/// Every row is built here rather than out of a source literal, and that is
+/// what lets the oracle be independent: the oracle holds the same numbers and
+/// encodes them with an encoder of its own, where a literal would make both
+/// sides read the same UTF-8 out of two files and prove only that the files
+/// matched.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// One `String.toUpper()` call, in full.
+///
+/// The receiver's bytes and characters, the answer's bytes and characters,
+/// whether the answer **is** the receiver, and the answer's bytes written out.
+///
+/// `same` is a line of its own rather than something to infer from two equal
+/// counts, and it is load-bearing twice over: two strings of the same length
+/// are not the same string, and a receiver with nothing to change is the one
+/// case this operation can answer without allocating at all.
+fn show(label: String, text: String) -> Result<Unit, Error> {
+  let answer = text.toUpper()
+  println("{label} in {text.byteLength()}/{text.length()} out {answer.byteLength()}/{answer.length()} same {answer == text} [{bytesOf(answer)}]")?
+  Ok(())
+}
+
+/// Every code point of a band, each shown on its own.
+///
+/// The bands bracket the runs the mapping tables are made of, so the code
+/// point above and the code point below every boundary are both a golden line
+/// and a table that included one too many or one too few is named by the line
+/// it moved.
+fn band(from: Int, to: Int) -> Result<Unit, Error> {
+  var point = from
+  while point < to {
+    if point < 55296 || point > 57343 {
+      show("sweep.{point}", String.fromCodePoint(point)?)?
+    }
+    point += 1
+  }
+  Ok(())
+}
+
+/// `toLower()` and then `toUpper()`, against `toUpper()` alone.
+///
+/// **Round-tripping is not identity.** `U+212A` KELVIN SIGN lowercases to an
+/// ordinary `k`, which uppercases to an ordinary `K` and not back to the sign;
+/// `ß` uppercases to `SS`, which lowercases to `ss`. So the two columns differ
+/// on rows where a mapping is not injective, and `agree` says on which.
+fn roundTrip(label: String, text: String) -> Result<Unit, Error> {
+  let once = text.toUpper()
+  let twice = text.toLower().toUpper()
+  println("{label}.round once [{bytesOf(once)}] twice [{bytesOf(twice)}] agree {once == twice}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  show("empty", "")?
+  show("nul", fromPoints([0])?)?
+  show(
+    "ascii.lower",
+    fromPoints([104, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100])?,
+  )?
+  show(
+    "ascii.upper",
+    fromPoints([72, 69, 76, 76, 79, 44, 32, 87, 79, 82, 76, 68])?,
+  )?
+  show(
+    "ascii.mixed",
+    fromPoints([72, 101, 108, 108, 111, 44, 32, 87, 111, 114, 108, 100, 33, 32, 49, 50, 51])?,
+  )?
+  show("ascii.digits", fromPoints([48, 49, 50, 51, 52, 53, 54, 55, 56, 57])?)?
+  show(
+    "ascii.punct",
+    fromPoints([33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 45, 61, 91, 93, 60, 62, 63, 47, 124, 126, 96])?,
+  )?
+  show("ascii.edges", fromPoints([64, 65, 90, 91, 96, 97, 122, 123])?)?
+  show(
+    "ascii.long",
+    fromPoints([116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 32])?,
+  )?
+  show("sharp.s", fromPoints([115, 116, 114, 97, 223, 101])?)?
+  show("sharp.s.capital", fromPoints([7838])?)?
+  show("sharp.s.run", fromPoints([223, 223, 223])?)?
+  show("accents.upper", fromPoints([201, 192])?)?
+  show("accents.lower", fromPoints([233, 224])?)?
+  show("ligature.ff", fromPoints([64256])?)?
+  show("ligature.fi", fromPoints([64257])?)?
+  show("ligature.fl", fromPoints([64258])?)?
+  show("ligature.ffi", fromPoints([64259])?)?
+  show("ligature.ffl", fromPoints([64260])?)?
+  show("ligature.long.st", fromPoints([64261])?)?
+  show("ligature.st", fromPoints([64262])?)?
+  show("armenian.ech.yiwn", fromPoints([1415])?)?
+  show("armenian.men.now", fromPoints([64275])?)?
+  show("armenian.men.xeh", fromPoints([64279])?)?
+  show("greek.alpha.iota.sub", fromPoints([8064])?)?
+  show("greek.upsilon.dia.tonos", fromPoints([912])?)?
+  show("greek.iota.dia.tonos", fromPoints([944])?)?
+  show("greek.upsilon.psili", fromPoints([8016])?)?
+  show("greek.omega.iota", fromPoints([8188])?)?
+  show("apostrophe.n", fromPoints([329])?)?
+  show("j.caron", fromPoints([496])?)?
+  show("titlecase.dz.upper", fromPoints([452])?)?
+  show("titlecase.dz.title", fromPoints([453])?)?
+  show("titlecase.dz.lower", fromPoints([454])?)?
+  show("turkish.dotted.capital", fromPoints([304])?)?
+  show("turkish.dotless.small", fromPoints([305])?)?
+  show("turkish.i.capital", fromPoints([73])?)?
+  show("turkish.i.small", fromPoints([105])?)?
+  show("turkish.word", fromPoints([73, 115, 116, 97, 110, 98, 117, 108])?)?
+  show("ohm", fromPoints([8486])?)?
+  show("kelvin", fromPoints([8490])?)?
+  show("angstrom", fromPoints([8491])?)?
+  show("ypogegrammeni", fromPoints([837])?)?
+  show("cjk", fromPoints([26085, 26412, 35486])?)?
+  show("emoji", fromPoints([128578])?)?
+  show("hebrew", fromPoints([1513, 1500, 1493, 1501])?)?
+  show("deseret.capital", fromPoints([66560])?)?
+  show("deseret.small", fromPoints([66600])?)?
+  show("adlam.capital", fromPoints([125184])?)?
+  show("adlam.small", fromPoints([125218])?)?
+  show("cherokee.capital", fromPoints([5024])?)?
+  show("cherokee.small", fromPoints([43888])?)?
+  show("warang.citi", fromPoints([71840])?)?
+  show("vithkuqi", fromPoints([66928])?)?
+  show("medefaidrin", fromPoints([93760])?)?
+  show("osage", fromPoints([66736])?)?
+  show("greek.words", fromPoints([913, 914, 915, 32, 945, 946, 947])?)?
+  show("wide.and.narrow", fromPoints([65, 223, 26085, 128578, 122])?)?
+  show("sigma.alone", fromPoints([931])?)?
+  show("sigma.pair", fromPoints([931, 931])?)?
+  show("sigma.triple", fromPoints([931, 931, 931])?)?
+  show("sigma.final", fromPoints([913, 931])?)?
+  show("sigma.initial", fromPoints([931, 913])?)?
+  show("sigma.medial", fromPoints([913, 931, 913])?)?
+  show("sigma.stop", fromPoints([913, 931, 46])?)?
+  show("sigma.space.word", fromPoints([913, 931, 32, 913])?)?
+  show("sigma.digit.before", fromPoints([48, 931])?)?
+  show("sigma.digit.after", fromPoints([931, 48])?)?
+  show("sigma.latin.before", fromPoints([65, 931])?)?
+  show("sigma.latin.after", fromPoints([931, 65])?)?
+  show("sigma.acute.after", fromPoints([913, 931, 769])?)?
+  show("sigma.acute.before", fromPoints([913, 769, 931])?)?
+  show("sigma.apostrophe", fromPoints([913, 931, 39])?)?
+  show("sigma.right.quote", fromPoints([913, 931, 8217])?)?
+  show("sigma.soft.hyphen", fromPoints([913, 931, 173])?)?
+  show("sigma.hyphen", fromPoints([913, 931, 45])?)?
+  show("sigma.underscore", fromPoints([913, 931, 95])?)?
+  show("sigma.zwsp", fromPoints([913, 931, 8203])?)?
+  show("sigma.modifier.before", fromPoints([913, 688, 931])?)?
+  show("sigma.modifier.before.cased.after", fromPoints([913, 688, 931, 97])?)?
+  show("sigma.modifier.after", fromPoints([913, 931, 688])?)?
+  show("sigma.modifier.alone.before", fromPoints([688, 931])?)?
+  show("sigma.superscript.before", fromPoints([913, 7468, 931])?)?
+  show("sigma.ypogegrammeni.before", fromPoints([913, 837, 931])?)?
+  show("sigma.two.words", fromPoints([913, 931, 32, 913, 931])?)?
+  show("sigma.word.pair", fromPoints([931, 913, 931])?)?
+  show("sigma.four", fromPoints([913, 931, 913, 931])?)?
+  show("sigma.after.sharp", fromPoints([223, 931])?)?
+  show("sigma.after.cjk", fromPoints([26085, 931])?)?
+  show("sigma.small", fromPoints([963])?)?
+  show("sigma.small.final", fromPoints([962])?)?
+  show("sigma.mixed", fromPoints([931, 963, 962])?)?
+  show("sigma.nul.after", fromPoints([913, 931, 0])?)?
+  show("sigma.ignorable.run", fromPoints([913, 769, 688, 173, 931, 776, 39])?)?
+
+  band(64, 128)?
+  band(181, 192)?
+  band(222, 226)?
+  band(304, 314)?
+  band(376, 394)?
+  band(452, 460)?
+  band(902, 940)?
+  band(960, 984)?
+  band(7936, 7952)?
+  band(8048, 8064)?
+  band(8486, 8500)?
+  band(64256, 64280)?
+  band(66560, 66576)?
+  band(125184, 125200)?
+  band(7296, 7312)?
+  band(11360, 11376)?
+  band(42560, 42576)?
+  band(66928, 66944)?
+  band(71840, 71856)?
+  band(93760, 93776)?
+  band(66736, 66752)?
+
+  roundTrip("sharp.s", fromPoints([115, 116, 114, 97, 223, 101])?)?
+  roundTrip("sharp.s.capital", fromPoints([7838])?)?
+  roundTrip("turkish.dotted.capital", fromPoints([304])?)?
+  roundTrip("turkish.dotless.small", fromPoints([305])?)?
+  roundTrip("kelvin", fromPoints([8490])?)?
+  roundTrip("ohm", fromPoints([8486])?)?
+  roundTrip("angstrom", fromPoints([8491])?)?
+  roundTrip("ligature.ff", fromPoints([64256])?)?
+  roundTrip("titlecase.dz.title", fromPoints([453])?)?
+  roundTrip("ypogegrammeni", fromPoints([837])?)?
+  roundTrip("sigma.final", fromPoints([913, 931])?)?
+  roundTrip("sigma.alone", fromPoints([931])?)?
+  roundTrip(
+    "ascii.mixed",
+    fromPoints([72, 101, 108, 108, 111, 44, 32, 87, 111, 114, 108, 100, 33, 32, 49, 50, 51])?,
+  )?
+  roundTrip("greek.words", fromPoints([913, 914, 915, 32, 945, 946, 947])?)?
+  Ok(())
+}
