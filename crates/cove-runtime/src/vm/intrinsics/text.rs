@@ -44,9 +44,16 @@
 //!   this bullet is a summary of — the suffix one in full, the prefix one in
 //!   the half it needs, and the search ones at every offset rather than at
 //!   one.
-//! - **`trim()` trims Unicode whitespace** and **`words()` splits on ASCII
-//!   whitespace**, which is the pair the oracle has and is not a distinction
-//!   this file invented.
+//! - **`trim()` trimmed Unicode whitespace** and **`words()` split on ASCII
+//!   whitespace**, which is the pair the oracle had and was not a distinction
+//!   this file invented. Neither is here any more — issue #454's Step 5 made
+//!   both of them `std.string` bodies — and the pair went *together* for that
+//!   difference rather than for anything they shared: twenty of `trim`'s
+//!   twenty-five code points are ordinary characters to `words`, and the
+//!   vertical tab is one ASCII byte that is in one set and not the other. The
+//!   two `std.string` bodies have no predicate in common, and
+//!   `tests/e2e/values_string_trim` and `tests/e2e/values_string_words` sweep
+//!   the same six bands to say so.
 //! - **`toUpper()` and `toLower()` are full Unicode case mappings**, so the
 //!   answer may be longer than what it was called on.
 //!
@@ -57,8 +64,8 @@
 //!
 //! # Every operation here says what it examined, in bytes
 //!
-//! Seven of the operations below walk the whole receiver and one builds its
-//! answer out of parts, and until
+//! Five of the operations below walk the whole receiver — it was seven, and
+//! `trim` and `words` are the two that left most recently — and until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7 every one of them cost the run **one** unit of work — the one
 //! an `add.int` costs. So `"ab".toUpper()` and a `toUpper()` over a hundred
@@ -77,15 +84,22 @@
 //! What is charged is **what was examined**, not what was handed back, and
 //! the two part company in both directions:
 //!
-//! - the seven that walk the receiver — `words`, `chars`, `split`, `trim`,
-//!   `replace`, `toUpper`, `toLower` — charge the receiver's own byte length,
-//!   because [`operand::text`] has already decoded the whole of it before any
-//!   of them looks at a single character. `slice` was an eighth and charged
-//!   the same way — the receiver's bytes and not the answer's, because a
-//!   two-character slice of a megabyte read the megabyte. In `std.string` it
-//!   charges what it *walks*, an instruction a character as far as `to` and
-//!   not one byte further, which is the same trade ADR 0065 made for the
-//!   searches;
+//! - the ones that walk the receiver — `split`, `replace`, `toUpper`,
+//!   `toLower` — charge the receiver's own byte length, because
+//!   [`operand::text`] has already decoded the whole of it before any of them
+//!   looks at a single character. `slice` was one of them and charged the same
+//!   way — the receiver's bytes and not the answer's, because a two-character
+//!   slice of a megabyte read the megabyte. In `std.string` it charges what it
+//!   *walks*, an instruction a character as far as `to` and not one byte
+//!   further, which is the same trade ADR 0065 made for the searches;
+//! - `words` and `chars` walked the receiver too, and both are `std.string`
+//!   now. `trim` is the one whose *charge* the move changed most, and not only
+//!   in which mechanism pays it: the arm here charged the whole receiver's
+//!   length whatever it found, so `"abc".trim()` on a 170-byte line was
+//!   charged 170 bytes of bulk work for reading two. `std.string.trim` walks
+//!   in from each end and stops at the first character that is not whitespace,
+//!   so what it pays for is what it looked at — which on `examples/cq` is
+//!   16,591,749 units of this column replaced by 3,300,000 instructions;
 //! - a bullet here used to say that `startsWith` and `endsWith` compare at
 //!   most the needle, so they charge the needle's length capped at the
 //!   receiver's. Neither is an intrinsic any more: ADR 0064 made both of them
@@ -135,6 +149,13 @@
 //! is an `Err` value it builds. Sixteen variants, and #461 now holds six of
 //! them.
 //!
+//! **Step 5 took two that #461 does not touch**, and that is the whole of why
+//! it could. Neither `trim` nor `words` refuses anything: every input is text
+//! and every answer is text, so a Cove body needs nothing to raise with.
+//! Fourteen variants, and #461 still holds six of them — which is now **six
+//! of fourteen** rather than six of sixteen, and the fraction is the shape of
+//! what is left. What #461 blocks is most of the remainder.
+//!
 //! `tests/e2e/values_string_split` and `tests/e2e/values_string_replace` pin
 //! what the two operations answer, and `tests/e2e/fail_string_split_empty` and
 //! `tests/e2e/fail_string_replace_empty` pin what they refuse, word for word —
@@ -145,19 +166,16 @@ use crate::vm::exec::Machine;
 use crate::vm::intrinsics::operand::{Dest, Frame};
 use crate::vm::intrinsics::{make, operand};
 
-/// `String.words() -> Array<String>`, split on ASCII whitespace.
-pub(super) fn words(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    machine.examined(text.len() as u64);
-    let parts: Vec<&str> = text.split_ascii_whitespace().collect();
-    let array = make::strings(machine, &parts)?;
-    dest.word(machine, array);
-    Ok(())
-}
+// `words` was here, above `split`, and its *contract* was the interesting
+// thing about it rather than its algorithm. It was
+// `text.split_ascii_whitespace().collect()` — five bytes, tab, line feed,
+// form feed, carriage return and space, and **not** the vertical tab, which
+// is what a reader who wrote "the ASCII control characters and a space" would
+// have got wrong. `std.string.words` is a byte scan over `byteAt` with one
+// `core.stringSlice` a part, and it needs no decode at all: a byte below 128
+// is a character of its own in UTF-8, so a scan that compares bytes finds
+// exactly the separators a scan of characters would and every boundary it
+// cuts at is a character boundary. Issue #454's Step 5.
 
 // `chars` was here, between `words` and `split`, and it was the only arm in
 // this file that *decoded*. It collected `text.chars().map(String::from)` — a
@@ -269,18 +287,24 @@ pub(super) fn refuse_byte_range(
     Err(RuntimeError::new(message))
 }
 
-/// `String.trim() -> String`.
-pub(super) fn trim(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    machine.examined(text.len() as u64);
-    let word = machine.new_string(text.trim())?;
-    dest.word(machine, word);
-    Ok(())
-}
+// `trim` was here, and what left with it is a **Unicode version**. It was
+// `str::trim`, so the set it removed was whatever `char::is_whitespace`
+// answered in the Rust toolchain this binary happened to be built with, and
+// nothing in the repository recorded which that was: a toolchain bump that
+// moved a code point would have changed what every Cove program meant, with
+// no diff to see it in. ADR 0064's Decision 5 asks that Cove own its Unicode
+// version, and `std.string.trim` does — the twenty-five `White_Space` code
+// points are written out as UTF-8 byte patterns with each one named and the
+// version stated, `crates/cove-runtime/tests/unicode.rs` sweeps all of
+// `0 ..= 0x10FFFF` and holds that set to the toolchain's, and the failure of
+// that test is what a future bump produces instead of silence.
+//
+// `toUpper` and `toLower` below are the half of issue #454's Step 5 that
+// could not go with it, and the reason is the size of the table rather than
+// anything about the operations: twenty-five code points are written
+// directly, and the full case mappings — the one-to-many ones included, which
+// is why the test at the bottom of this file has `STRASSE` in it — need the
+// generated, checked-in asset Decision 5 describes.
 
 // **Nothing that searches a `String` is here any more**, and the four went
 // out in three different ways. `startsWith` and `endsWith` stood side by side
@@ -409,23 +433,24 @@ mod tests {
     // ship, where the three cases here were checked against the arm that
     // answered them.
 
-    /// `chars` had the first line of this test — `"hé"` into `["h", "é"]` —
-    /// until issue #454's Step 3 moved it to `std.string.chars`.
-    /// `tests/e2e/values_string_chars` replaced it with 41 calls on both
-    /// evaluators against a golden a standalone `rustc` oracle wrote, and
-    /// the difference is not the count: the oracle has its own UTF-8 encoder
-    /// and its own lead-byte splitter, so every width boundary, a NUL, and
-    /// nine rows of combining marks, joiners and modifiers are checked
-    /// against an implementation this repository does not ship, where the one
-    /// case here was checked against the arm that answered it.
-    #[test]
-    fn words_splits_on_ascii_whitespace() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        // ASCII whitespace, and runs of it collapse.
-        let word = on(&mut machine, "  one  two ", "words", &[]);
-        assert_eq!(parts(&machine, word), vec!["one", "two"]);
-    }
+    // `chars` had a line here — `"hé"` into `["h", "é"]` — until issue #454's
+    // Step 3 moved it to `std.string.chars`. `tests/e2e/values_string_chars`
+    // replaced it with 41 calls on both evaluators against a golden a
+    // standalone `rustc` oracle wrote, and the difference is not the count:
+    // the oracle has its own UTF-8 encoder and its own lead-byte splitter, so
+    // every width boundary, a NUL, and nine rows of combining marks, joiners
+    // and modifiers are checked against an implementation this repository does
+    // not ship, where the one case here was checked against the arm that
+    // answered it.
+    //
+    // A `words_splits_on_ascii_whitespace` case stood beside it, asserting
+    // that `"  one  two "` answered `["one", "two"]`. `words` is not an arm in
+    // this file any more either, and what replaced that one case is
+    // `tests/e2e/values_string_words`: 382 golden lines on both evaluators, of
+    // which 274 are a **sweep** that asks every code point in six bands
+    // whether it separates. The case here could not have caught the thing that
+    // sweep is for — the vertical tab is `White_Space` and is not one of the
+    // five bytes — because it held one ASCII string with spaces in it.
 
     #[test]
     fn split_separates_on_the_separator_and_refuses_an_empty_one() {
@@ -476,12 +501,31 @@ mod tests {
     // oracle wrote before the harness was run once. An oracle no arm here
     // supplies, for a body no arm here executes.
 
+    /// **`trim` had the first line of this test and it is gone**, and what it
+    /// asserted is worth writing down beside what replaced it. It was
+    /// `"\u{a0} a \n"` trimming to `"a"` — one row, chosen because a no-break
+    /// space is `White_Space` and is not ASCII, so the line said "this is
+    /// Unicode's set and not ASCII's" and nothing more. Issue #454's Step 5
+    /// made the body `std.string.trim`, and `tests/e2e/values_string_trim`
+    /// replaced the line with 347 golden lines on both evaluators, 274 of them
+    /// a sweep over six bands that brackets every run of `White_Space` with
+    /// ordinary characters — so the set is under test at every boundary rather
+    /// than at one member of it, against a golden a standalone `rustc` oracle
+    /// wrote from a list of its own.
+    ///
+    /// **The two case mappings below are the whole of what is left here, and
+    /// they are still the oracles.** `straße` to `STRASSE` is the row that says
+    /// the answer may be *longer* than the receiver — a one-to-many case
+    /// mapping, six characters out of five — and `ÉÀ` to `éà` that the mapping
+    /// is not ASCII's. Those two are exactly why `toUpper` and `toLower` did
+    /// not move with `trim`: twenty-five code points can be written out in
+    /// Cove and the full case mappings need the generated asset ADR 0064's
+    /// Decision 5 describes. Each asserts here what it always asserted, on the
+    /// arm that still answers it.
     #[test]
-    fn trim_and_the_case_mappings_are_the_oracles() {
+    fn the_case_mappings_are_the_oracles() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
-        // Unicode whitespace, not just ASCII.
-        assert_eq!(text_of(&mut machine, "\u{a0} a \n", "trim"), "a");
         assert_eq!(text_of(&mut machine, "straße", "toUpper"), "STRASSE");
         assert_eq!(text_of(&mut machine, "ÉÀ", "toLower"), "éà");
     }

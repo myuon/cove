@@ -460,6 +460,14 @@ allow = ["console"]
 entry = "values_string_replace.main"
 allow = ["console"]
 
+[run.values_string_trim]
+entry = "values_string_trim.main"
+allow = ["console"]
+
+[run.values_string_words]
+entry = "values_string_words.main"
+allow = ["console"]
+
 [run.fail_string_split_empty]
 entry = "fail_string_split_empty.main"
 allow = ["console"]

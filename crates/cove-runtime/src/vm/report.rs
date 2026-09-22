@@ -434,7 +434,7 @@ pub struct IntrinsicCalls {
     /// column across variants is therefore summing two units, and the row is
     /// the thing to read.
     ///
-    /// Ten of the 16 variants can be non-zero here, which is exactly the
+    /// Eight of the 14 variants can be non-zero here, which is exactly the
     /// set that declares `Effects::BULK_WORK`; the other six examine
     /// nothing proportional and report nought. It was eighteen of 31 before
     /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
@@ -508,6 +508,26 @@ pub struct IntrinsicCalls {
     /// work is bounded by the *answer's* type rather than by the caller's
     /// data — the one shape of receiver-reading arm this column was never
     /// going to catch anything in.
+    ///
+    /// **Step 5's `String.trim` and `String.words` are the fourth and fifth
+    /// carriers to go, and they go together**, so the carriers fall to eight
+    /// and the rest stay at six. They are the first migration of the series to
+    /// take *two* at once, and the first since `join` that a shipped program
+    /// runs: `examples/cq` calls `trim` on every line it reads, which on
+    /// 100,000 records is 100,000 calls, 100,000 allocations, 2,217,999
+    /// allocated words and **16,591,749 units of this column** — the largest
+    /// single figure any migration of the series has moved out of it. `words`
+    /// is the other kind and the one the four migrations before it all were:
+    /// nought sites and nought calls in both representative programs.
+    ///
+    /// What charges those 16.6 million now is the scan in `std.string.trim`,
+    /// an instruction a byte examined — and on cq, *far fewer than that*,
+    /// because the Cove body stops at the first character that is not
+    /// whitespace where the intrinsic charged the whole receiver's length
+    /// whatever it found there. That is the same exchange `slice` made and the
+    /// same one ADR 0065 made for the searches: a charge for what was walked,
+    /// by the mechanism that charges everything else, in place of an upper
+    /// bound declared a flag at a time.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     pub work: u64,

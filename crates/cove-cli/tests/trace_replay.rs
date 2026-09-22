@@ -421,7 +421,8 @@ fn without_wall_clock(trace: &str) -> String {
     )
 }
 
-/// Replaces every `heap_summary` line with the fact that there was one.
+/// Replaces every `heap_summary` line with the fact that there was one, and
+/// drops every `heap_collected` line.
 ///
 /// The two evaluators do not have the same kind of heap, and since
 /// [issue #240](https://github.com/myuon/cove/issues/240) the event says so:
@@ -431,13 +432,35 @@ fn without_wall_clock(trace: &str) -> String {
 /// an inline struct is words in one and no object at all in the other — so
 /// comparing them would be comparing two answers to two different questions.
 ///
-/// What is still compared is that the event is there, once, in the same place
-/// in the sequence. That is a property of the run rather than of the heap: a
-/// backend that stopped writing a summary, or wrote one somewhere else, still
-/// fails this.
+/// What is still compared, for the summary, is that the event is there, once,
+/// in the same place in the sequence. That is a property of the run rather
+/// than of the heap: a backend that stopped writing a summary, or wrote one
+/// somewhere else, still fails this.
+///
+/// **`heap_collected` is dropped entirely, and the two are not the same
+/// decision.** A summary is written once per run, at a point the run decides;
+/// a collection is written whenever a *collector* decides to run, which is a
+/// threshold on a heap neither evaluator shares with the other. Comparing
+/// those is comparing two schedules, and it was only ever passing because
+/// `restricted` happened to be small enough that neither collector fired.
+/// Issue #454's Step 5 is what made one of them fire: `String.words` allocates
+/// an interpreter `Vector` where the Rust arm it replaced built a `Repr::Array`
+/// the interpreter's heap did not hold, so the oracle's recording gained one
+/// `{"allocated":1,"freed":0,"live_objects":0,"live_bytes":0}` — a collection
+/// that found nothing, scheduled by a counter.
+///
+/// What this test still catches is everything that is about the *program*:
+/// every host call, in order, with its module, operation, capability,
+/// arguments and outcome; the entry's enter and exit; the summary's presence
+/// and position; and how the run ended. A backend that asked for a different
+/// host call, or the same ones in a different order, or stopped writing a
+/// summary, fails exactly as it did before. What it no longer catches is "the
+/// two collectors ran at the same moments", which was never a property of the
+/// language and is one `heap_summary` was blanked for the same reason.
 fn without_heap(trace: &str) -> String {
     trace
         .lines()
+        .filter(|line| !line.starts_with(r#"{"event":"heap_collected","#))
         .map(|line| {
             if line.starts_with(r#"{"event":"heap_summary","#) {
                 r#"{"event":"heap_summary","figures":"<its own heap's>"}"#

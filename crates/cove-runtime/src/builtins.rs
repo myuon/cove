@@ -1394,14 +1394,11 @@ pub fn call_method(
             // resolves it to a call into `std.string.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            "words" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    text.split_ascii_whitespace()
-                        .map(|w| Value(Repr::Str(w.into())))
-                        .collect(),
-                )))
-            }
+            // `words` used to answer here, out of `split_ascii_whitespace`.
+            // It does not reach this arm any more: `std.string.words` is a
+            // byte scan over the five separator bytes, and
+            // `Interpreter::eval_method_call` resolves the method to it before
+            // anything looks here. Issue #454's Step 5.
             // `chars` used to answer here, by collecting a one-character Rust
             // `String` per `char` of the receiver. It does not reach this arm
             // any more: `Interpreter::eval_method_call` resolves it to
@@ -1448,10 +1445,12 @@ pub fn call_method(
             // clamp is a range policy and `slice` is a method's name — and ADR
             // 0058's table, which gives ranges to Cove and keeps the bounded
             // copy below.
-            "trim" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Str(text.trim().into())))
-            }
+            // `trim` used to answer here, out of `str::trim`, which is
+            // `char::is_whitespace` and so whatever Unicode table this
+            // *toolchain* was built against. `std.string.trim` is the set
+            // written out in Cove with its version stated, and this backend
+            // runs that body like the other one does. ADR 0064's Decision 5,
+            // and issue #454's Step 5.
             // `contains`, `indexOf`, `startsWith` and `endsWith` used to
             // answer here — one `text.contains(needle)`, one `text.find(needle)`
             // with `chars().count()` over the prefix, one

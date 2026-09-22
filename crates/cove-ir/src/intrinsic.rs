@@ -41,9 +41,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
     ValueRenderInto,
-    StringWords,
     StringSplit,
-    StringTrim,
     StringReplace,
     StringToUpper,
     StringToLower,
@@ -65,9 +63,7 @@ pub enum Intrinsic {
 /// written list like this one goes wrong.
 pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRenderInto,
-    Intrinsic::StringWords,
     Intrinsic::StringSplit,
-    Intrinsic::StringTrim,
     Intrinsic::StringReplace,
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
@@ -106,9 +102,7 @@ impl Intrinsic {
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "Value",
-            Intrinsic::StringWords => "String",
             Intrinsic::StringSplit => "String",
-            Intrinsic::StringTrim => "String",
             Intrinsic::StringReplace => "String",
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
@@ -128,9 +122,7 @@ impl Intrinsic {
     pub const fn operation(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "renderInto",
-            Intrinsic::StringWords => "words",
             Intrinsic::StringSplit => "split",
-            Intrinsic::StringTrim => "trim",
             Intrinsic::StringReplace => "replace",
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
@@ -193,9 +185,7 @@ impl Intrinsic {
     /// category to be.
     pub const fn category(self) -> Category {
         match self {
-            Intrinsic::StringWords
-            | Intrinsic::StringSplit
-            | Intrinsic::StringTrim
+            Intrinsic::StringSplit
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower
@@ -233,11 +223,8 @@ impl Intrinsic {
             // The piece first, then the buffer it is appended to: the value
             // is the receiver, as it is of every other operation here.
             Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
-            Intrinsic::StringWords => fixed(&[C::Str], C::Strings),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
-            Intrinsic::StringTrim | Intrinsic::StringToUpper | Intrinsic::StringToLower => {
-                fixed(&[C::Str], C::Str)
-            }
+            Intrinsic::StringToUpper | Intrinsic::StringToLower => fixed(&[C::Str], C::Str),
             Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
             // The text and the two offsets a refusal is worded with, in the
             // order `String.sliceBytes` names them.
@@ -263,7 +250,7 @@ impl Intrinsic {
     /// `cove-runtime`'s `vm::intrinsics`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
     /// differently, the way [`Intrinsic::StringRefuseByteRange`] allocates
-    /// nothing and [`Intrinsic::StringTrim`] does.
+    /// nothing and [`Intrinsic::StringToUpper`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // `MAY_RAISE` is language-level failure only (#378, Q5.3). An arm no
@@ -296,9 +283,7 @@ impl Intrinsic {
             // result, so every one of them is proportional to the receiver
             // and allocates the array or string it answers. `split` and
             // `replace` also refuse an empty needle.
-            Intrinsic::StringWords
-            | Intrinsic::StringSplit
-            | Intrinsic::StringTrim
+            Intrinsic::StringSplit
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
             | Intrinsic::StringToLower => allocate.union(E::READS_MEMORY).union(E::BULK_WORK),
@@ -616,9 +601,7 @@ mod tests {
     fn the_intrinsic_set_only_shrinks() {
         const MIGRATED_BUT_STILL_HERE: &[&str] = &[
             "Value.renderInto",
-            "String.words",
             "String.split",
-            "String.trim",
             "String.replace",
             "String.toUpper",
             "String.toLower",
@@ -683,9 +666,7 @@ mod tests {
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
                 Intrinsic::ValueRenderInto
-                | Intrinsic::StringWords
                 | Intrinsic::StringSplit
-                | Intrinsic::StringTrim
                 | Intrinsic::StringReplace
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower

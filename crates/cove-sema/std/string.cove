@@ -1163,3 +1163,401 @@ export fn chars(text: String) -> Array<String> {
   }
   core.vectorFinish(parts)
 }
+
+/// This string with every leading and trailing whitespace character removed.
+///
+/// **Whitespace here is Unicode's `White_Space` property, not ASCII's five
+/// bytes**, and that is the one thing about this operation that neither its
+/// name nor its signature settles. [`words`] below takes the other answer and
+/// the two are written beside each other for that reason: twenty of the
+/// twenty-five code points this removes are ordinary characters to that one,
+/// and `U+000B` LINE TABULATION is in this set, is one ASCII byte, and is
+/// still not one of its five. A single shared predicate under both bodies
+/// would be wrong for one of them.
+///
+/// # The version is pinned here, because nothing else pins it
+///
+/// The set is [`whiteSpaceWidthAt`]'s, written out as bytes with each code
+/// point named, and it is **Unicode 17.0.0** — the version `rustc 1.98.1`
+/// reports as `char::UNICODE_VERSION`, which is where the answer came from
+/// while this was `str::trim` in the runtime. ADR 0064's Decision 5 asks that
+/// Cove own its Unicode version rather than inherit whichever one the Rust
+/// toolchain was built against, and until this moved there was nothing in the
+/// repository that recorded which that was: a toolchain bump that changed the
+/// table would have changed what every Cove program meant, silently.
+///
+/// `crates/cove-runtime/tests/unicode.rs` is the other half of that. It runs a
+/// Cove program that asks this body and [`words`] about **every code point
+/// from 0 to `0x10FFFF`** — an exhaustive sweep and not a sample — and asserts
+/// that the two sets are exactly the ones `char::is_whitespace` and
+/// `char::is_ascii_whitespace` answer, printing the toolchain's own
+/// `char::UNICODE_VERSION` when they are not. So a future toolchain whose
+/// table differs is a *failing test naming the code point* rather than a
+/// semantic drift nobody sees. It is the reproducible generator of Decision 5
+/// in miniature: this operation's table is twenty-five code points and is
+/// written directly, where `toUpper` and `toLower` need the full case
+/// mappings and the generated, checked-in asset that decision describes.
+///
+/// # What it builds
+///
+/// One `core.stringSlice`, and nothing else. Both ends walk in by whole
+/// characters — forwards by the width [`whiteSpaceWidthAt`] reports, and
+/// backwards over the continuation bytes to the lead byte that begins the last
+/// character — so what is left is a byte range that begins and ends at a
+/// character boundary, which is exactly `core.stringSlice`'s precondition and
+/// the argument [`sliceBytes`] makes in full.
+///
+/// **A receiver with nothing to trim is handed back, not copied.** That is the
+/// `from == 0` and `to == length` test at the bottom, and it is the one thing
+/// in this body that the intrinsic could not do: `Machine::new_string` built a
+/// fresh object out of `str::trim`'s slice whatever the slice was. A `String`
+/// is immutable and interchangeable — issue #104's own argument for sharing
+/// one, from the other side — so no Cove program can tell the receiver from a
+/// copy of it, and `examples/cq` calls this 100,000 times on lines that have
+/// nothing to trim.
+export fn trim(text: String) -> String {
+  let length = core.byteLength(text)
+  var from = 0
+  while from < length {
+    let width = whiteSpaceWidthAt(text, from)
+    if width == 0 {
+      break
+    }
+    from += width
+  }
+  var to = length
+  while to > from {
+    // Back over the continuation bytes to the lead byte of the last
+    // character. A continuation byte is `10xxxxxx`, 128 through 191; `from`
+    // begins a character, so the walk stops at or before it either way.
+    var start = to - 1
+    while start > from {
+      let byte = text.byteAt(start)
+      if byte < 128 {
+        break
+      }
+      if byte >= 192 {
+        break
+      }
+      start -= 1
+    }
+    if whiteSpaceWidthAt(text, start) == 0 {
+      break
+    }
+    to = start
+  }
+  if from == 0 {
+    if to == length {
+      return text
+    }
+  }
+  core.stringSlice(text, from, to - from)
+}
+
+/// The width in bytes of the `White_Space` character beginning at byte `at` of
+/// `text`, or 0 if the character that begins there is not one.
+///
+/// **Unicode 17.0.0's `White_Space`, written out as UTF-8 byte patterns.**
+/// Twenty-five code points, in five groups by lead byte, each named:
+///
+/// ```text
+///   1 byte   09 CHARACTER TABULATION   0A LINE FEED      0B LINE TABULATION
+///            0C FORM FEED              0D CARRIAGE RETURN
+///            20 SPACE
+///   C2 85    U+0085 NEXT LINE
+///   C2 A0    U+00A0 NO-BREAK SPACE
+///   E1 9A 80 U+1680 OGHAM SPACE MARK
+///   E2 80 80 U+2000 EN QUAD           .. E2 80 8A U+200A HAIR SPACE
+///   E2 80 A8 U+2028 LINE SEPARATOR
+///   E2 80 A9 U+2029 PARAGRAPH SEPARATOR
+///   E2 80 AF U+202F NARROW NO-BREAK SPACE
+///   E2 81 9F U+205F MEDIUM MATHEMATICAL SPACE
+///   E3 80 80 U+3000 IDEOGRAPHIC SPACE
+/// ```
+///
+/// **What is not in it is worth as much as what is.** `E2 80 8B` is `U+200B`
+/// ZERO WIDTH SPACE, one byte past the end of the `U+2000` run and not
+/// whitespace; `EF BB BF` is `U+FEFF`, which is why no lead byte of 239
+/// appears here at all; `E2 81 A0` is `U+2060` WORD JOINER; and `E1 A0 8E` is
+/// `U+180E`, which *was* whitespace until Unicode 6.3 and is the code point
+/// that dates a table. `tests/e2e/values_string_trim` sweeps six bands that
+/// bracket every run above, so each of those four is a golden line.
+///
+/// # Why bytes rather than a code point
+///
+/// [`codePointAtByte`] is right there and would decode the character for this
+/// to compare against a list. It is not used, because the answer this needs is
+/// the **width** as well as the verdict — [`trim`] advances by it — and
+/// because a decode reassembles a number out of bytes that a comparison would
+/// then take apart again. Every question below is a byte already in the
+/// receiver, and the common case, an ASCII character that is not whitespace,
+/// is settled by one load and two comparisons.
+///
+/// The lead bytes are asked in the order a text makes them likely: ASCII
+/// first, then `C2` — `U+00A0` is the one non-ASCII whitespace that appears in
+/// prose people write — then the `U+2000` block, then the two singletons.
+///
+/// A `String` is valid UTF-8 in its shortest form, so a lead byte of `C2` is
+/// followed by one continuation byte and a lead byte of `E1`, `E2` or `E3` by
+/// two. That is why nothing below checks the length before reading `at + 1` or
+/// `at + 2`, and it is [`codePointAtByte`]'s reasoning rather than a new one.
+fn whiteSpaceWidthAt(text: String, at: Int) -> Int {
+  let lead = text.byteAt(at)
+  if lead < 128 {
+    if lead == 32 {
+      return 1
+    }
+    if lead < 9 {
+      return 0
+    }
+    if lead <= 13 {
+      return 1
+    }
+    return 0
+  }
+  // C2 85 is U+0085 NEXT LINE and C2 A0 is U+00A0 NO-BREAK SPACE.
+  if lead == 194 {
+    let second = text.byteAt(at + 1)
+    if second == 133 {
+      return 2
+    }
+    if second == 160 {
+      return 2
+    }
+    return 0
+  }
+  if lead == 226 {
+    let second = text.byteAt(at + 1)
+    if second == 128 {
+      // 80 through 8A is U+2000 EN QUAD through U+200A HAIR SPACE; 8B is
+      // U+200B ZERO WIDTH SPACE, which is not whitespace. Then U+2028 LINE
+      // SEPARATOR, U+2029 PARAGRAPH SEPARATOR and U+202F NARROW NO-BREAK
+      // SPACE.
+      let third = text.byteAt(at + 2)
+      if third <= 138 {
+        return 3
+      }
+      if third == 168 {
+        return 3
+      }
+      if third == 169 {
+        return 3
+      }
+      if third == 175 {
+        return 3
+      }
+      return 0
+    }
+    // E2 81 9F is U+205F MEDIUM MATHEMATICAL SPACE.
+    if second == 129 {
+      if text.byteAt(at + 2) == 159 {
+        return 3
+      }
+    }
+    return 0
+  }
+  // E1 9A 80 is U+1680 OGHAM SPACE MARK.
+  if lead == 225 {
+    if text.byteAt(at + 1) == 154 {
+      if text.byteAt(at + 2) == 128 {
+        return 3
+      }
+    }
+    return 0
+  }
+  // E3 80 80 is U+3000 IDEOGRAPHIC SPACE, the last of the twenty-five.
+  if lead == 227 {
+    if text.byteAt(at + 1) == 128 {
+      if text.byteAt(at + 2) == 128 {
+        return 3
+      }
+    }
+  }
+  return 0
+}
+
+/// This string's words, split on ASCII whitespace.
+///
+/// **Five bytes, not twenty-five code points**: `09` tab, `0A` line feed, `0C`
+/// form feed, `0D` carriage return and `20` space. [`trim`] above takes the
+/// other answer, and `U+000B` LINE TABULATION is the row that separates them —
+/// it is `White_Space`, it is one ASCII byte, and it is not one of these five.
+/// `tests/e2e/values_string_words` sweeps the same six bands
+/// `tests/e2e/values_string_trim` does and answers `parts 1` on twenty of the
+/// twenty-five.
+///
+/// **Nothing here decodes, and nothing here needs to.** Every separator is one
+/// ASCII byte, and a byte below 128 can only be a character of its own in
+/// UTF-8 — a continuation byte is 128 or above and so is every lead byte of a
+/// multi-byte character — so a scan that compares bytes finds exactly the
+/// separators a scan that compared characters would find, and every part
+/// boundary it cuts at is a character boundary. That is [`startsWith`]'s
+/// argument at every offset rather than at one, and it is why this body has no
+/// width `if` where [`chars`] and [`trim`] both do.
+///
+/// Runs of separators collapse and the ends are dropped, so no part this
+/// answers is ever empty and a receiver that is all separators answers no
+/// parts at all.
+///
+/// # The store is sized exactly, and that costs more here than anywhere else
+///
+/// [`wordCount`] is a **second scan of the whole receiver**, and it is there
+/// because the two arms that avoid it both regress what ADR 0064's Decision 8
+/// says may not regress. Measured on `benches/trimwords`' `words_rows`,
+/// against the intrinsic this replaced:
+///
+/// ```text
+///   sizing                     allocations   allocated words   instructions
+///   the intrinsic                3,200,091        10,553,933        559,237
+///   grown from nought            3,448,091        13,993,933    263,919,493
+///   an upper bound of len/2      3,272,091        20,873,933    263,991,493
+///   exact, this body             3,272,091        10,769,933    492,727,512
+/// ```
+///
+/// **The grown arm is +32.6% allocated words** — `core.vectorEnsure` doubles,
+/// and 2.44 growths a call is 176,000 reallocations the exact arm does not
+/// make. **The upper bound is +97.8%**, which is issue #454's Step 3 finding
+/// repeated at a different operation: a store allocated at half the receiver's
+/// byte length for a receiver that holds one word is relabelled in place by
+/// `core.vectorFinish` and kept, so `one.long` pays 512 element slots for one
+/// part. Neither number is one Decision 8 admits, and "it is nearly free on a
+/// string with many short words" is not a reason.
+///
+/// The exact arm is **+2.3% allocations and +2.0% allocated words**, and both
+/// of those are structural rather than sizing: the 72,000 extra allocations
+/// are exactly one per call, `Inst::GrowableAlloc`'s ADR 0052 owner beside its
+/// store where `make::strings` allocated one object. Growths are **nought**.
+///
+/// **The tax is +86.7% instructions, and that is the largest of the series.**
+/// [`chars`]' pre-pass was +17% and `join`'s 1%, and the difference is not the
+/// size of this body: a character count is a lead-byte *walk*, which is
+/// cheaper than the per-character slice it sizes, where a word count is the
+/// **same scan** the fill loop is, byte for byte. So sizing this run exactly
+/// is the scan done twice, and there is no cheaper question to ask.
+///
+/// It is affordable because **no shipped program calls this at all** — nought
+/// static sites and nought dynamic calls in both `examples/covefmt` and
+/// `examples/cq` — so what the tax is paid on is `benches/trimwords` and the
+/// two `.words()` calls in `examples/`, which run once each.
+export fn words(text: String) -> Array<String> {
+  let length = core.byteLength(text)
+  let parts: Vector<String> = core.vectorWithCapacity(wordCount(text, length))
+  var at = 0
+  while at < length {
+    while at < length {
+      let byte = text.byteAt(at)
+      if byte > 32 {
+        break
+      }
+      if !separates(byte) {
+        break
+      }
+      at += 1
+    }
+    if at == length {
+      break
+    }
+    let start = at
+    while at < length {
+      let byte = text.byteAt(at)
+      if byte <= 32 {
+        if separates(byte) {
+          break
+        }
+      }
+      at += 1
+    }
+    // `core.stringSlice` allocates, and the window between `core.vectorEnsure`
+    // and `core.vectorCommit` admits nothing that does — the verifier says so
+    // by name. So the part is sliced into a local first and the window is the
+    // three instructions that publish it, which is [`chars`]' shape and its
+    // reason.
+    let part = core.stringSlice(text, start, at - start)
+    let index = core.vectorLength(parts)
+    core.vectorEnsure(parts, 1)
+    core.vectorStore(parts, index, part)
+    core.vectorCommit(parts, 1)
+  }
+  core.vectorFinish(parts)
+}
+
+/// How many words `text` holds in its first `length` bytes.
+///
+/// [`words`]' own scan with the slicing taken out, so that the `Vector` below
+/// it is allocated once at exactly its length and grows **nought** times. It
+/// is the most expensive pre-pass of the ADR 0064 series and the pull request
+/// that moved this operation has the three arms it was chosen over; the short
+/// of it is that a word count is the *same scan* the fill loop is, where
+/// [`chars`]' count is a lead-byte walk that is cheaper than its own fill.
+///
+/// The two inner loops are [`words`]' two, byte for byte, and the reason they
+/// are copied rather than shared is [`startsWith`]' rule: a factoring is taken
+/// only if the lowered sequence at the existing caller's sites is unchanged,
+/// and a shared "skip to the next separator" body would land its answer in a
+/// slot and return it where the loop written out lowers to a branch.
+fn wordCount(text: String, length: Int) -> Int {
+  var count = 0
+  var at = 0
+  while at < length {
+    while at < length {
+      let byte = text.byteAt(at)
+      if byte > 32 {
+        break
+      }
+      if !separates(byte) {
+        break
+      }
+      at += 1
+    }
+    if at == length {
+      break
+    }
+    count += 1
+    while at < length {
+      let byte = text.byteAt(at)
+      if byte <= 32 {
+        if separates(byte) {
+          break
+        }
+      }
+      at += 1
+    }
+  }
+  count
+}
+
+/// Whether `byte` is one of the five ASCII whitespace bytes [`words`] splits
+/// on.
+///
+/// `09` CHARACTER TABULATION, `0A` LINE FEED, `0C` FORM FEED, `0D` CARRIAGE
+/// RETURN and `20` SPACE. **`0B` LINE TABULATION is not one of them**, and the
+/// `byte == 11` line below is the only line in this file that exists to say
+/// no: it is the difference between this set and [`trim`]'s, and a reader who
+/// assumed "the ASCII control characters and a space" would write it without.
+///
+/// The questions are in the order a text makes them likely rather than in the
+/// order a reader would write them. Every byte of a word is above 32 — letters,
+/// digits, punctuation, and every byte of every multi-byte character — so
+/// `byte > 32` is asked first and settles the common case in one comparison,
+/// where a set written as `byte == 9 || byte == 10 || ...` would ask five. Each
+/// question is an `if` of its own with a `return` for [`sliceBytes`]' reason:
+/// a comparison that is all an `if` branches on is one instruction, and the
+/// arms of `a || b` meet at a shared test that nothing can fuse.
+fn separates(byte: Int) -> Bool {
+  if byte > 32 {
+    return false
+  }
+  if byte == 32 {
+    return true
+  }
+  if byte < 9 {
+    return false
+  }
+  if byte > 13 {
+    return false
+  }
+  if byte == 11 {
+    return false
+  }
+  return true
+}

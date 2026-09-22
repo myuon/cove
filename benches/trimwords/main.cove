@@ -1,0 +1,238 @@
+use console.println
+use clock.now
+
+/// What `String.trim()` and `String.words()` cost, at the receiver shapes that
+/// separate one implementation of each from another.
+///
+/// Issue #454's Step 5 moved both out of the runtime and into `std.string`,
+/// and they are in one package because they are one decision apart: `trim`
+/// removes Unicode's twenty-five `White_Space` code points and `words` splits
+/// on five ASCII bytes, so the same receiver costs each of them something
+/// different and the rows below are written to show it.
+///
+/// **They are also one of each shape.** `trim` is a pure *reader*: it walks in
+/// from both ends and ends in a single `core.stringSlice`, or in no allocation
+/// at all when there is nothing to trim. `words` is a *builder*: ADR 0062's
+/// ensure/store/commit per part, over a store that doubles.
+/// [Issue #464](https://github.com/myuon/cove/issues/464) asks which shapes
+/// run faster compiled than encoded, and this package answers it with one of
+/// each in one measurement.
+///
+/// # The loop is in a callee, and that is not a style choice
+///
+/// The outermost frame is always encoded, so a loop written in an entry is a
+/// VM measurement even under `--backend native`. Each row is therefore a call
+/// to [`trimRow`] or [`wordsRow`], whose bodies are the loops, and the entries
+/// do nothing in a turn but read a clock either side. It is **checked rather
+/// than assumed**: `--backend native --boundary` names the compiled and the
+/// refused.
+///
+/// [`bare`] is the control, the same loop with the call taken out, so that
+/// what each row reports is the call rather than the turn.
+///
+/// [`turns`] is 2,000 rather than the 32,000 a one-receiver row would use, and
+/// that is `benches/chars`' reason: every turn of a `many.short` row publishes
+/// 128 parts, which over the eighteen rows of the two entries is millions of
+/// allocations, and `crates/cove-cli/tests/vm_coverage.rs` runs every program
+/// in this repository on the tree-walking interpreter as well as on the
+/// linear-memory backend. At 8,000 it cost that suite **80 seconds**; at 2,000
+/// the medians below move by less than the spread between two runs of it.
+fn turns() -> Int {
+  2000
+}
+
+/// Eight ASCII characters with nothing to trim and no separator in them.
+fn word() -> String {
+  "bookings"
+}
+
+/// A line of `examples/cq`'s input, which is the receiver that program hands
+/// `trim` 100,000 times.
+fn line() -> String {
+  "\{\"id\":\"B-000001\",\"property\":\"Ocean View\",\"nights\":5,\"rate\":129.5,\"status\":\"confirmed\"\}"
+}
+
+/// The no-break space, `U+00A0`: `White_Space`, not ASCII, and two bytes.
+///
+/// Written as a code point rather than as a literal because Cove has no `\u`
+/// escape and a no-break space in the source is a space a reader cannot see.
+fn nbsp() -> String {
+  String.fromCodePoint(160).unwrapOr("")
+}
+
+/// The ideographic space, `U+3000`: the last of `trim`'s twenty-five and the
+/// widest, at three bytes.
+fn ideographic() -> String {
+  String.fromCodePoint(12288).unwrapOr("")
+}
+
+/// `piece` repeated `count` times.
+fn repeat(piece: String, count: Int) -> String {
+  var out: Vector<String> = Vector.of()
+  var i = 0
+  while i < count {
+    out.push(piece)
+    i = i + 1
+  }
+  "".join(out.freeze())
+}
+
+/// `rounds` calls of `trim()` and nothing else the loop can be about.
+///
+/// The answer's byte length is summed so that nothing can be folded away and
+/// so that a row which stopped trimming would report a different number rather
+/// than a different time.
+fn trimRow(text: String, rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + text.trim().byteLength()
+    i = i + 1
+  }
+  total
+}
+
+/// `rounds` calls of `words()` and nothing else the loop can be about.
+fn wordsRow(text: String, rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + text.words().length()
+    i = i + 1
+  }
+  total
+}
+
+/// [`trimRow`]'s loop with the call taken out.
+fn bare(rounds: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < rounds {
+    total = total + 1
+    i = i + 1
+  }
+  total
+}
+
+/// How long `rounds` turns took, in microseconds, and what they answered.
+struct Row {
+  micros: Int
+  answer: Int
+}
+
+fn trimmed(text: String, rounds: Int) -> Row {
+  let startedAt = now()
+  let answer = trimRow(text, rounds)
+  Row(micros: (now() - startedAt).micros(), answer: answer)
+}
+
+fn split(text: String, rounds: Int) -> Row {
+  let startedAt = now()
+  let answer = wordsRow(text, rounds)
+  Row(micros: (now() - startedAt).micros(), answer: answer)
+}
+
+fn report(label: String, row: Row, rounds: Int) -> Result<Unit, Error> {
+  println("{label} {row.micros} us, {row.micros * 1000 / rounds} ns/call, answer {row.answer}")?
+  Ok(())
+}
+
+/// One call of each, so that `cove-bench`'s row is a turn of both.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+  let trimTotal = trimRow(line(), rounds)
+  let wordsTotal = wordsRow(line(), rounds)
+  assertEqual(trimTotal, rounds * line().byteLength())?
+  assertEqual(wordsTotal, rounds * 5)?
+  Ok(())
+}
+
+/// What `String.trim()` costs, row by row.
+///
+/// - **empty** is the floor: a `byteLength`, two loops that do not turn, and
+///   the receiver handed back;
+/// - **none.short** and **none.line** have nothing to trim. `none.line` is
+///   `examples/cq`'s own receiver, and it is the row that matters most: that
+///   program calls `trim` on 100,000 lines that have nothing to trim;
+/// - **ascii.one** and **ascii.run** are one and eight ASCII spaces at each
+///   end, so the slope between them is what a trimmed ASCII character costs;
+/// - **wide.one** and **wide.run** are the same counts of `U+00A0`, which is
+///   two bytes, and `U+3000`, which is three — what a trimmed *wide* character
+///   costs, against the ASCII pair at the same count;
+/// - **inner** has its whitespace in the middle and none at the ends, so both
+///   walks stop at once and the whole of the receiver is handed back untouched.
+///   Against **none.line** it says whether the answer depends on anything but
+///   the ends;
+/// - **all** is whitespace and nothing else, which is the one row where both
+///   walks run to the middle and the answer is the empty string.
+export fn trimRows() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bareAnswer = bare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+  println("bare {bareMicros} us, answer {bareAnswer}")?
+
+  report("empty", trimmed("", rounds), rounds)?
+  report("none.short", trimmed(word(), rounds), rounds)?
+  report("none.line", trimmed(line(), rounds), rounds)?
+  report("ascii.one", trimmed(" {word()} ", rounds), rounds)?
+  report(
+    "ascii.run",
+    trimmed("{repeat(" ", 8)}{word()}{repeat(" ", 8)}", rounds),
+    rounds,
+  )?
+  report("wide.one", trimmed("{nbsp()}{word()}{nbsp()}", rounds), rounds)?
+  report(
+    "wide.run",
+    trimmed(
+      "{repeat(ideographic(), 8)}{word()}{repeat(ideographic(), 8)}",
+      rounds,
+    ),
+    rounds,
+  )?
+  report("inner", trimmed("one two three four five", rounds), rounds)?
+  report("all", trimmed(repeat(" ", 16), rounds), rounds)?
+  Ok(())
+}
+
+/// What `String.words()` costs, row by row.
+///
+/// The rows vary the two things a split can cost separately: how many **bytes**
+/// are read, and how many **parts** are published. `one.long` and `many.short`
+/// are the two ends — the same bytes read, one part against 128 — and they are
+/// what a sizing arm is judged on.
+///
+/// - **empty** is the floor;
+/// - **one.short**, **one.line** and **one.long** are one part, at eight, at
+///   `examples/cq`'s line length, and at 1,024 bytes. Nothing but the first
+///   `vectorEnsure` allocates in any of them, so the slope is the scan;
+/// - **few** is three parts and **many.short** 128, at a fixed part length, so
+///   the slope between them is what a part costs — which is the whole of what
+///   the store's sizing decides;
+/// - **runs** is `many.short`'s parts with four separators between each rather
+///   than one, so it reads twice the bytes for the same number of parts;
+/// - **all** is separators and nothing else: every byte read, no part
+///   published, and the one row where `core.vectorFinish` relabels a store that
+///   was never written;
+/// - **wide** is 128 parts of multi-byte characters, which this body never
+///   decodes — the row that says so is this one beside `many.short`.
+export fn wordsRows() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let bareFrom = now()
+  let bareAnswer = bare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+  println("bare {bareMicros} us, answer {bareAnswer}")?
+
+  report("empty", split("", rounds), rounds)?
+  report("one.short", split(word(), rounds), rounds)?
+  report("one.line", split(line(), rounds), rounds)?
+  report("one.long", split(repeat("bookings", 128), rounds), rounds)?
+  report("few", split("one two three", rounds), rounds)?
+  report("many.short", split(repeat("ab ", 128), rounds), rounds)?
+  report("runs", split(repeat("ab    ", 128), rounds), rounds)?
+  report("all", split(repeat(" ", 128), rounds), rounds)?
+  report("wide", split(repeat("aé→ ", 128), rounds), rounds)?
+  Ok(())
+}

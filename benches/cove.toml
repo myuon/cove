@@ -327,3 +327,28 @@ allow = ["console", "clock"]
 [run.chars_rows]
 entry = "chars.rows"
 allow = ["console", "clock"]
+
+# `trim` and `words`, issue #454's Step 5, which moved both into `std.string`.
+# They are one package because they are one decision apart — `trim` removes
+# Unicode's twenty-five `White_Space` code points and `words` splits on five
+# ASCII bytes — and because they are **one of each shape**: `trim` is a pure
+# reader that ends in a single `core.stringSlice` or in no allocation at all,
+# and `words` is a builder over ADR 0062's ensure/store/commit. Issue #464 asks
+# which shapes run faster compiled than encoded, and this package has one of
+# each in one measurement.
+#
+# `[run.trimwords]` is the turn `cove-bench` would time; the two `*_rows`
+# entries are the decompositions beside it, for the reason `[run.chars_rows]`
+# is beside `[run.chars]`.
+
+[run.trimwords]
+entry = "trimwords.main"
+allow = ["console", "clock"]
+
+[run.trim_rows]
+entry = "trimwords.trimRows"
+allow = ["console", "clock"]
+
+[run.words_rows]
+entry = "trimwords.wordsRows"
+allow = ["console", "clock"]
