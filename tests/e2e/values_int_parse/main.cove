@@ -1,0 +1,344 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_chars`' helper, and here for a sharper reason than it had
+/// there: this corpus' refusal message **quotes its input**, so a row whose
+/// text holds a NUL, a tab or a newline puts that byte into the sentence the
+/// golden file compares. A list of numbers is the encoding itself, so the
+/// `msg.*` section below can say what a message *is* without asking a
+/// terminal to render it.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// The string the code points `points` name, in order.
+///
+/// Every row this file builds out of code points rather than out of a source
+/// literal is built here, and that is what lets the oracle be independent: the
+/// oracle holds the same list of numbers and encodes it with an encoder of its
+/// own, where a literal would make both sides read the same UTF-8 out of two
+/// files and prove only that the files matched.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// `part` repeated `times` over.
+fn repeat(part: String, times: Int) -> String {
+  var out: Vector<String> = Vector.of()
+  var round = 0
+  while round < times {
+    out.push(part)
+    round += 1
+  }
+  "".join(out.freeze())
+}
+
+/// One `Int.parse` call, printed as its value or as its refusal.
+///
+/// The refusal is printed **verbatim**, which is the whole point of the
+/// failing half of this file: `Int.parse`'s message quotes the text it was
+/// given, so the sentence is evidence about the interpolation as well as
+/// about the verdict. A row whose text is not printable is printed here all
+/// the same and read again as numbers in the `msg.*` section.
+fn show(label: String, text: String) -> Result<Unit, Error> {
+  match Int.parse(text) {
+    Ok(value) => println("{label} ok {value}")?
+    Err(error) => println("{label} err {error.message}")?
+  }
+  Ok(())
+}
+
+/// The refusal message of `text`, as bytes.
+///
+/// A row that is `Ok` has no message and prints `-`, which no byte list can
+/// be, so a body that started answering `Ok` where the golden says `Err`
+/// fails here as well as on its own line.
+fn showMessageBytes(label: String, text: String) -> Result<Unit, Error> {
+  match Int.parse(text) {
+    Ok(_) => println("{label} msg -")?
+    Err(error) => println("{label} msg [{bytesOf(error.message)}]")?
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  zeros()?
+  plain()?
+  limits()?
+  padded()?
+  overflow()?
+  signs()?
+  spaces()?
+  separators()?
+  radixPrefixes()?
+  wide()?
+  nul()?
+  backticks()?
+  messageBytes()?
+  results()?
+  Ok(())
+}
+
+/// Nought, its two signed spellings, and leading zeros.
+///
+/// `-0` is `0` and not a negative nought, because an `Int` has one nought.
+/// An accumulator that answered the sign by negating at the end agrees here
+/// by accident; the `limit.min` row below is where that stops being enough.
+fn zeros() -> Result<Unit, Error> {
+  show("zero.bare", "0")?
+  show("zero.minus", "-0")?
+  show("zero.plus", "+0")?
+  show("zero.three", "000")?
+  show("zero.minus.three", "-000")?
+  show("zero.plus.three", "+000")?
+  show("zero.lead", "007")?
+  show("zero.lead.plus", "+007")?
+  show("zero.lead.minus", "-007")?
+  Ok(())
+}
+
+/// Ordinary numbers, and the two signs on each of them.
+fn plain() -> Result<Unit, Error> {
+  show("plain.one", "1")?
+  show("plain.seven", "7")?
+  show("plain.seven.plus", "+7")?
+  show("plain.seven.minus", "-7")?
+  show("plain.big", "1234567890")?
+  show("plain.big.minus", "-1234567890")?
+  show("plain.word", "2147483647")?
+  show("plain.word.past", "2147483648")?
+  show("plain.word.minus", "-2147483648")?
+  Ok(())
+}
+
+/// Both ends of `Int`, and the first value past each of them.
+///
+/// **This is the section the implementation is written for.** `Int` is a
+/// two's-complement 64-bit word, so its least value has a magnitude its
+/// greatest has not, and an accumulator that built the magnitude positively
+/// cannot hold `limit.min`'s at all — Cove traps on overflow, so such a body
+/// does not answer `Err` here, it stops the program. `limit.min.past` and
+/// `limit.max.past` are the two rows either side of that: each is one more
+/// than a value that fits, each must be an `Err`, and neither may be reached
+/// by wrapping, because there is no wrapping to reach it by.
+fn limits() -> Result<Unit, Error> {
+  show("limit.max", "9223372036854775807")?
+  show("limit.max.below", "9223372036854775806")?
+  show("limit.max.past", "9223372036854775808")?
+  show("limit.max.plus", "+9223372036854775807")?
+  show("limit.min", "-9223372036854775808")?
+  show("limit.min.above", "-9223372036854775807")?
+  show("limit.min.past", "-9223372036854775809")?
+  show("limit.past.both", "9223372036854775809")?
+  Ok(())
+}
+
+/// Leading zeros in front of a value that only just fits.
+///
+/// A bound checked against the number of *digits* rather than against the
+/// accumulator answers `Err` to every row here, and every row here is `Ok`.
+/// `pad.max` is thirty zeros and then the greatest `Int`, 49 digits of a
+/// number that fits in 19 of them.
+fn padded() -> Result<Unit, Error> {
+  let zeros = repeat("0", 30)
+  show("pad.zeros", repeat("0", 100))?
+  show("pad.zeros.minus", "-{repeat("0", 100)}")?
+  show("pad.zeros.plus", "+{repeat("0", 100)}")?
+  show("pad.seven", "{zeros}7")?
+  show("pad.max", "{zeros}9223372036854775807")?
+  show("pad.min", "-{zeros}9223372036854775808")?
+  show("pad.max.past", "{zeros}9223372036854775808")?
+  Ok(())
+}
+
+/// Digit strings that no `Int` holds, including ones far past holding.
+///
+/// `over.nines` is a hundred nines and `over.nines.minus` is the same with a
+/// sign in front. They are here because an accumulator that checked its bound
+/// but kept multiplying would trap on the twentieth digit and never reach the
+/// hundredth: the requirement is not only that the answer is `Err`, it is
+/// that arriving at the `Err` costs nothing and stops nothing.
+fn overflow() -> Result<Unit, Error> {
+  show("over.nineteen", repeat("9", 19))?
+  show("over.twenty", repeat("9", 20))?
+  show("over.nines", repeat("9", 100))?
+  show("over.nines.minus", "-{repeat("9", 100)}")?
+  show("over.nines.plus", "+{repeat("9", 100)}")?
+  show("over.unsigned", "18446744073709551616")?
+  show("over.shifted", "92233720368547758070")?
+  show("over.shifted.minus", "-92233720368547758080")?
+  Ok(())
+}
+
+/// A sign with no digits after it, and more than one sign.
+fn signs() -> Result<Unit, Error> {
+  show("sign.empty", "")?
+  show("sign.minus", "-")?
+  show("sign.plus", "+")?
+  show("sign.minus.twice", "--1")?
+  show("sign.plus.twice", "++1")?
+  show("sign.plus.minus", "+-1")?
+  show("sign.minus.plus", "-+1")?
+  show("sign.trailing.minus", "1-")?
+  show("sign.trailing.plus", "1+")?
+  Ok(())
+}
+
+/// Whitespace, anywhere at all.
+///
+/// `Int.parse` trims nothing: the leading space, the trailing space, the
+/// space in the middle and the tab are four `Err`s, and so is a text that is
+/// only a space. `space.newline` is the one row in this file whose message
+/// spans two lines of the golden, because the message quotes the newline it
+/// is refusing; its bytes are read back in `msg.newline`.
+fn spaces() -> Result<Unit, Error> {
+  show("space.lead", " 1")?
+  show("space.trail", "1 ")?
+  show("space.middle", "1 2")?
+  show("space.tab.lead", "\t1")?
+  show("space.tab.trail", "1\t")?
+  show("space.only", " ")?
+  show("space.sign", "+ 1")?
+  show("space.sign.minus", "- 1")?
+  show("space.newline", "1\n")?
+  Ok(())
+}
+
+/// The ways a person writes a number that this does not read.
+///
+/// A Cove *literal* may be written `1_000`, and this is the operation that
+/// says the digit separator is a thing the **parser of source** knows and not
+/// a thing `Int.parse` knows. The three after it are a number in some other
+/// shape — a thousands comma, a decimal point, an exponent — and each is text
+/// that names a value this operation does not answer.
+fn separators() -> Result<Unit, Error> {
+  show("sep.underscore", "1_000")?
+  show("sep.comma", "1,000")?
+  show("sep.point", "1.0")?
+  show("sep.exponent", "1e3")?
+  show("sep.exponent.upper", "1E3")?
+  show("sep.apostrophe", "1'000")?
+  Ok(())
+}
+
+/// No radix prefix is read, in either case.
+///
+/// `Int.parseRadix` is where a radix is named, and naming one in the text is
+/// not naming one at all: `0x10` is a nought, an `x` and two more digits, and
+/// the `x` is what refuses it.
+fn radixPrefixes() -> Result<Unit, Error> {
+  show("radix.hex", "0x10")?
+  show("radix.hex.upper", "0X10")?
+  show("radix.binary", "0b1")?
+  show("radix.octal", "0o7")?
+  show("radix.suffix", "10x")?
+  show("radix.hexdigit", "1a")?
+  Ok(())
+}
+
+/// Digits that are not ASCII digits, and characters wider than a byte.
+///
+/// **A byte-at-a-time loop is the obvious way to get this wrong in both
+/// directions.** `wide.fullwidth` is `１２`, U+FF11 and U+FF12, which a reader
+/// sees as twelve and which is six bytes none of which is in `0..=9` plus 48;
+/// `wide.arabic` is `١٢`, U+0661 and U+0662, four bytes. Neither is a number
+/// here. The three rows after them put a two-byte, a three-byte and a
+/// four-byte character *between* two ASCII digits, so a loop that stepped by
+/// a character rather than by a byte, or that added a continuation byte's
+/// value to its accumulator, is wrong on a row whose first byte is fine.
+fn wide() -> Result<Unit, Error> {
+  show("wide.fullwidth", fromPoints([65297, 65298])?)?
+  show("wide.arabic", fromPoints([1633, 1634])?)?
+  show("wide.two", fromPoints([49, 233, 50])?)?
+  show("wide.three", fromPoints([49, 12354, 50])?)?
+  show("wide.four", fromPoints([49, 128512, 50])?)?
+  show("wide.alone", fromPoints([233])?)?
+  show("wide.trailing", fromPoints([49, 50, 233])?)?
+  show("wide.leading", fromPoints([233, 49, 50])?)?
+  Ok(())
+}
+
+/// A NUL inside the text.
+///
+/// A `String` here is a run of bytes with a length and not a C string, so a
+/// NUL is an ordinary byte of it: `nul.alone` is one byte long and is not the
+/// empty string, and `nul.middle` is three bytes of which the middle one
+/// stops the number. The message quotes the NUL, which is why every row here
+/// is read again in `msg.*`.
+fn nul() -> Result<Unit, Error> {
+  let zero = fromPoints([0])?
+  println("nul.tells {zero.byteLength()} {zero.isEmpty()} {zero == ""}")?
+  show("nul.alone", zero)?
+  show("nul.lead", "{zero}12")?
+  show("nul.trail", "12{zero}")?
+  show("nul.middle", "1{zero}2")?
+  Ok(())
+}
+
+/// A backtick in the text, which the message also quotes with.
+///
+/// The message is `` `{text}` is not an Int ``, so a text that is itself a
+/// backtick makes three of them in a row and nothing escapes any of them.
+/// That is worth pinning rather than leaving to be discovered: a later change
+/// that started escaping the quoted text would pass every other row in this
+/// file.
+fn backticks() -> Result<Unit, Error> {
+  show("tick.wrapped", "`1`")?
+  show("tick.middle", "1`2")?
+  show("tick.alone", "`")?
+  show("tick.twice", "``")?
+  Ok(())
+}
+
+/// Six messages, read as numbers.
+///
+/// Each is a row above whose text holds a byte a terminal does not show, or
+/// shows as something other than what it is. Reading the message back as
+/// bytes is what makes the golden file evidence about those rows rather than
+/// a picture of them.
+fn messageBytes() -> Result<Unit, Error> {
+  let zero = fromPoints([0])?
+  showMessageBytes("msg.nul", "1{zero}2")?
+  showMessageBytes("msg.newline", "1\n")?
+  showMessageBytes("msg.tab", "\t1")?
+  showMessageBytes("msg.wide", fromPoints([49, 233, 50])?)?
+  showMessageBytes("msg.fullwidth", fromPoints([65297, 65298])?)?
+  showMessageBytes("msg.tick", "`")?
+  showMessageBytes("msg.empty", "")?
+  showMessageBytes("msg.ok", "1")?
+  Ok(())
+}
+
+/// The `Result` itself, rendered and asked.
+///
+/// `show` above takes the two arms apart, so nothing there says what the
+/// whole value prints as or what `isOk` answers of it. These rows do, and
+/// `result.chain` is the one that says an `Int.parse` may be the operand of
+/// arithmetic without being unwrapped by hand.
+fn results() -> Result<Unit, Error> {
+  println("result.ok {Int.parse("42")}")?
+  println("result.err {Int.parse("4x2")}")?
+  println("result.isOk {Int.parse("42").isOk()} {Int.parse("4x2").isOk()}")?
+  println("result.unwrapOr {Int.parse("4x2").unwrapOr(-1)}")?
+  println(
+    "result.chain {Int.parse("20").unwrapOr(0) + Int.parse("22").unwrapOr(0)}",
+  )?
+  println("result.min.unwrap {Int.parse("-9223372036854775808").unwrapOr(0)}")?
+  Ok(())
+}

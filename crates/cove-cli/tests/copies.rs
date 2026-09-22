@@ -1007,7 +1007,29 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 ///   `tests/e2e:fail_string_replace_empty` are **+7 each**, which is the floor
 ///   a three-function program sits at — the two are the same shape and differ
 ///   only in which sentence they pin.
-const FORWARDABLE_COPIES: usize = 2940;
+///
+/// **The forty-fourth rise is one new row, and it is the largest single row
+/// this table has taken.** 2940 to 2970, 180 programs to 181, and all thirty
+/// are `tests/e2e:values_int_parse` — five in the `prod` column and
+/// **twenty-five** in the `ret` column. The survey with that directory removed
+/// is **2940 exactly**, over the same 180 programs, the same 18,757 functions
+/// and the same 375,040 instructions the row before it left, so no lowering
+/// moved: `Int.parse` is still an `Intrinsic` at this commit.
+///
+/// The `ret` column is where it differs from every corpus above it, and the
+/// cause is the operation rather than the corpus' size. `Int.parse` answers a
+/// `Result`, so each of `show` and `showMessageBytes` is a `match` whose two
+/// arms each end in a `println(...)?` and an `Ok(())` — the answer location
+/// decided before the body is lowered, written by a `copy` that a
+/// destination-forwarding lowering would not need — and the fourteen section
+/// functions beneath `main` are each a run of `?`-suffixed calls and then
+/// `Ok(())` of their own. `prod` stays at five because almost nothing here
+/// *builds* a collection: `fromPoints` and `repeat` are the only two, where
+/// `values_string_chars` and `values_string_split` had a `Vector` in every
+/// helper. A corpus for a reader that answers one word looks like this — long
+/// in `ret`, short in `prod` — and a corpus for a builder looks like the two
+/// above it.
+const FORWARDABLE_COPIES: usize = 2970;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
