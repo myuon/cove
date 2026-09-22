@@ -83,6 +83,7 @@ mod pattern;
 mod shapes;
 mod stmt;
 mod sweep;
+mod synth;
 mod tails;
 mod tasks;
 mod walks;
@@ -1188,6 +1189,15 @@ struct Pool {
     /// the id is recorded before the body is lowered, so a call the body
     /// makes to itself finds the number rather than starting again.
     instance_ids: HashMap<(FunctionId, String), FunctionId>,
+    /// The function one layout-directed operation was synthesized as, keyed
+    /// by the pair ADR 0064's Decision 3 says there is one function per.
+    ///
+    /// [`instance_ids`](Pool::instance_ids) for a producer that walks a
+    /// `Shape` instead of substituting into a written body, and it is
+    /// recorded before the body is walked for exactly that field's reason:
+    /// a layout that reaches itself finds the number rather than starting
+    /// again.
+    synthesized: HashMap<(synth::Operation, LayoutId), FunctionId>,
     /// The instantiations being lowered right now, outermost first.
     ///
     /// A chain rather than a count, because what a program that exceeds the
@@ -1226,6 +1236,7 @@ impl Pool {
             appended: Vec::new(),
             instances: HashMap::new(),
             instance_ids: HashMap::new(),
+            synthesized: HashMap::new(),
             open: Vec::new(),
         }
     }

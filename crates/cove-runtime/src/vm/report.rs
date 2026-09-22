@@ -1370,11 +1370,32 @@ mod tests {
     /// stronger sample of the two — it allocates the array it answers *and* a
     /// string per part, so a row that attributed only the outermost object
     /// would still be caught here.
+    /// The two compared values are **erased**, and that is not decoration.
+    /// Since [ADR 0064]'s Decision 3 a `==` whose operand layout is known is
+    /// a walk the lowering synthesizes and never reaches an intrinsic at all;
+    /// Decision 4 leaves exactly one arm that does, and it is this one. So a
+    /// row for `Any.equals` exists to be read only where a `dyn Trait` is
+    /// what is being compared, and a fixture that compared two `Array<Int>`s
+    /// would now be asserting about a row that is not there.
     const SPLIT_AND_COMPARE: &str = "
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+struct Triple {
+  a: Int
+  b: Int
+  c: Int
+}
+
+impl Tagged for Triple {
+  fn tag(self) -> Int { self.a }
+}
+
 export fn main() -> Int {
-  let left = [1, 2, 3]
-  let right = [1, 2, 3]
-  let other = [1, 9, 3]
+  let left: dyn Tagged = Triple(a: 1, b: 2, c: 3)
+  let right: dyn Tagged = Triple(a: 1, b: 2, c: 3)
+  let other: dyn Tagged = Triple(a: 1, b: 9, c: 3)
   var total = 0
   var i = 0
   while i < 50 {
@@ -1430,7 +1451,7 @@ export fn main() -> Int {
 
         let compared = boundary
             .intrinsic(Intrinsic::AnyEquals)
-            .expect("the program compares two arrays");
+            .expect("the program compares two erased values");
         assert!(compared.calls() > 0, "{compared:?}");
         assert_eq!(
             compared.allocations, 0,
@@ -1612,10 +1633,22 @@ export fn main() -> Int {{
     /// A struct is compared field by field in declaration order, so the two
     /// programs differ in how far the walk gets and in nothing else: the same
     /// declaration, the same number of comparisons, the same layouts.
+    ///
+    /// The two are held as `dyn Tagged` for [`SPLIT_AND_COMPARE`]'s reason:
+    /// since [ADR 0064]'s Decision 3 a struct whose layout is known is walked
+    /// by a synthesized function whose work is charged as instructions, and
+    /// the walk this file is about — `equal::value`, charging one unit per
+    /// value it reaches — is what answers for an erased operand. The property
+    /// is unchanged and so is the walk; what changed is which programs reach
+    /// it.
     fn equals_four_fields(differ: bool) -> String {
         let first = if differ { 9 } else { 1 };
         format!(
             "
+trait Tagged {{
+  fn tag(self) -> Int
+}}
+
 struct Quad {{
   a: Int
   b: Int
@@ -1623,9 +1656,13 @@ struct Quad {{
   d: Int
 }}
 
+impl Tagged for Quad {{
+  fn tag(self) -> Int {{ self.a }}
+}}
+
 export fn main() -> Int {{
-  let x = Quad(a: 1, b: 2, c: 3, d: 4)
-  let y = Quad(a: {first}, b: 2, c: 3, d: 4)
+  let x: dyn Tagged = Quad(a: 1, b: 2, c: 3, d: 4)
+  let y: dyn Tagged = Quad(a: {first}, b: 2, c: 3, d: 4)
   var total = 0
   var i = 0
   while i < 10 {{
@@ -1652,6 +1689,15 @@ export fn main() -> Int {{
     /// field. Two equal ones are the struct and all four of its fields. The
     /// exact multiples are asserted rather than an inequality, because an
     /// inequality would hold just as well for a charge that was merely noisy.
+    ///
+    /// **The two boxes are two more values**, and the multiples below say so:
+    /// `equal::value` charges a unit on entry, looks through erasure on the
+    /// left and calls itself, then looks through it on the right and calls
+    /// itself again — three entries before the struct arm is reached at all.
+    /// So an early exit is `3 + 1` and a whole walk `3 + 4`, and the
+    /// *difference* between them is the four minus the one that this is
+    /// really about and is asserted on its own line: the constant is what a
+    /// box costs and the difference is what the walk did.
     #[test]
     fn an_early_exit_is_charged_less_than_a_whole_walk() {
         use crate::vm::debug::tests::World;
@@ -1676,8 +1722,14 @@ export fn main() -> Int {{
             "the two runs make the same calls: {early:?} against {whole:?}"
         );
         assert!(early.calls() >= 10, "{early:?}");
-        assert_eq!(early.work, early.calls() * 2, "{early:?}");
-        assert_eq!(whole.work, whole.calls() * 5, "{whole:?}");
+        assert_eq!(early.work, early.calls() * 4, "{early:?}");
+        assert_eq!(whole.work, whole.calls() * 7, "{whole:?}");
+        assert_eq!(
+            whole.work - early.work,
+            whole.calls() * 3,
+            "three more fields were reached, and nothing else differs: \
+             {early:?} against {whole:?}"
+        );
         assert!(early.work < whole.work);
     }
 }

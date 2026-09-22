@@ -85,13 +85,21 @@ fn an_equality_assertion_renders_both_values_into_its_message() {
 
 /// A value the instruction set cannot compare in one step is walked, which
 /// is what `==` on one already does.
+///
+/// Since ADR 0064's Decision 3 that walk is the function
+/// `super::super::synth` composed for `P`'s layout, so what an `assertEqual`
+/// asks is what `==` asks and by the same route: `Body::holds` calls
+/// `Body::compare_values`, and there is one producer of the walk rather than
+/// two that have to agree. A one-field struct is one comparison, so the call
+/// is expanded where it was made and the `eq.int` is all that is left of it.
 #[test]
 fn an_equality_assertion_on_a_struct_walks_it() {
     let listed = listing(
         "struct P { x: Int }\nfn f(a: P, b: P) -> Result<Unit, Error> { assertEqual(a, b) }",
         "f",
     );
-    assert!(listed.contains("Any.equals"), "{listed}");
+    assert!(listed.contains("eq.int"), "{listed}");
+    assert!(!listed.contains("Any.equals"), "{listed}");
 }
 
 /// A declaration of the package wins over the shared table's name, exactly

@@ -373,3 +373,13 @@ allow = ["console", "clock"]
 [run.lower_rows]
 entry = "casemap.lowerRows"
 allow = ["console", "clock"]
+
+# What a layout-directed `==` costs as a walk the lowering composed against
+# what it cost as one call into a walk written in Rust, which is ADR 0064's
+# Decision 3. `benches/floatabs`' arrangement — the loop in a padded callee,
+# the control with nothing in it, two binaries over one source — with one row
+# per arm of the composition, and a last row over an erased value that reaches
+# the intrinsic in both builds and is therefore the control for the rebuild.
+[run.equals]
+entry = "equals.main"
+allow = ["console", "clock"]

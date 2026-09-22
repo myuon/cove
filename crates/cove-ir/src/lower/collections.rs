@@ -53,6 +53,7 @@ use cove_syntax::ast::{Arg, Block, Expr, Ident};
 use super::frame::Val;
 use super::gap;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START, VECTOR_LEN, VECTOR_STORE};
+use super::synth;
 use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot};
 use crate::intrinsic::Intrinsic;
@@ -1116,33 +1117,39 @@ impl Body<'_> {
     /// in one step.
     ///
     /// A `String` compares by its bytes, which is one instruction. Everything
-    /// else the language defines `==` for is compared by walking the two
-    /// values, and that walk is not an instruction: what `==` means for an
-    /// array, a struct, an enum or a vector is a rule of the language, stated
-    /// in the language reference, and the IR describes families rather than
-    /// carrying a case per family.
+    /// else the language defines `==` for is compared by *walking* the two
+    /// values, and since
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 3 that walk is a **function this lowering synthesizes for the
+    /// layout**, composed structurally: see [`super::synth`]. Two values of
+    /// one type are two values of one layout, so the walk is decided here,
+    /// once, and what runs is ordinary function and control-flow IR that the
+    /// printer, the verifier, the optimizer and both code generators see as a
+    /// function.
     ///
-    /// # An inline value has to be boxed to be compared
+    /// # What this replaced, and why it is not a boxing site any more
     ///
-    /// [`Inst::IntrinsicCall`] hands the machine slot numbers and nothing else:
-    /// there is no channel on it for the layout of each operand. A reference
-    /// carries its description in the object's own header, so an array or a
-    /// vector needs nothing; an *inline* struct, enum or range is a run of
-    /// words with nothing attached, so it goes into a box that carries its
-    /// layout. That is one allocation per comparison, and it is a
-    /// consequence of the instruction's shape rather than of the
-    /// representation.
+    /// It used to be one [`Inst::IntrinsicCall`] of `Any.equals`, and
+    /// [`Inst::IntrinsicCall`] hands the machine slot numbers and nothing
+    /// else: there is no channel on it for the layout of each operand. A
+    /// reference carries its description in the object's own header, so an
+    /// array or a vector needed nothing; an *inline* struct, enum or range is
+    /// a run of words with nothing attached, and used to go into a box that
+    /// carried its layout — one allocation per comparison, and a consequence
+    /// of the instruction's shape rather than of the representation. A
+    /// synthesized function is handed the layout by *being* the layout's
+    /// function, so there is nothing to box and nothing to allocate.
     ///
-    /// # What the builtin must do
+    /// # The one operand that has no layout to synthesize from
     ///
-    /// `Any.equals` takes two operands and answers whether they are the same
-    /// value, by the rule `Value::eq_value` states for the oracle: two
-    /// objects of different layouts are not equal; a string compares by
-    /// bytes; a struct field-wise; an enum by case and then payload-wise; an
-    /// array element-wise; a vector by the elements its length names; a box
-    /// by what it holds.
+    /// [`crate::Shape::Boxed`] — `dyn Trait`, and a Host schema's `Any` —
+    /// keeps its family in payload word 0 and is not known until the box is
+    /// opened. Decision 4 admits exactly one fallback for it, this is it, and
+    /// [`crate::verify`] refuses an `Any.equals` whose operands are anything
+    /// else. `Body::opened` has already unboxed the side that could be, so a
+    /// pair that arrives here boxed is a pair that is boxed on both sides.
     ///
-    /// `!=` is the same call and an [`Inst::Not`]: one builtin rather than a
+    /// `!=` is the same call and an [`Inst::Not`]: one walk rather than a
     /// second one that answers the negation.
     pub(super) fn compare_values(
         &mut self,
@@ -1166,12 +1173,40 @@ impl Body<'_> {
             );
             return;
         }
-        let site = self.pool.intrinsic_site(IntrinsicSite {
-            intrinsic: Intrinsic::AnyEquals,
-            result: shapes::BOOL,
-        });
-        let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
-        self.emit(Inst::IntrinsicCall { dst, site, args }, expr.span);
+        // Two operands of one type are two operands of one layout, because
+        // the layout table is interned by what a type *is*. The checker
+        // refuses `1 == "a"` outright and `Body::opened` has already looked
+        // through erasure on whichever side carried it, so the two agreeing
+        // here is a fact rather than a hope — and where it is not, it is this
+        // lowering that is wrong and not the program, which is the same
+        // reading `Body::holds` already takes of an `assertEqual`.
+        if a.layout != b.layout {
+            self.errors.push(gap::gap(
+                "an `==` whose two values are laid out differently",
+                expr.span,
+            ));
+            self.emit(Inst::Bool { dst, value: equal }, expr.span);
+            return;
+        }
+        if self.is_boxed(a.layout) {
+            let site = self.pool.intrinsic_site(IntrinsicSite {
+                intrinsic: Intrinsic::AnyEquals,
+                result: shapes::BOOL,
+            });
+            let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
+            self.emit(Inst::IntrinsicCall { dst, site, args }, expr.span);
+        } else {
+            let decls = self.plan.decls.len();
+            let callee = synth::function_for(
+                synth::Operation::Equality,
+                a.layout,
+                self.pool,
+                decls,
+                expr.span,
+            );
+            let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
+            self.emit(Inst::Call { dst, callee, args }, expr.span);
+        }
         if !equal {
             self.emit(Inst::Not { dst, a: dst }, expr.span);
         }

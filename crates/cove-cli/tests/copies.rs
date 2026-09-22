@@ -1208,7 +1208,63 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// the largest of the four because it has the most functions, not because it
 /// has the most rows: 173 golden lines against `values_float_format`'s 160,
 /// and eleven sections against five.
-const FORWARDABLE_COPIES: usize = 8432;
+/// **The fifty-first rise is one new row and no code at all.** 8432 to 8541,
+/// 196 programs to 197. The check the paragraphs above prescribe says the
+/// rest: the survey with the one `[run]` table removed from
+/// `tests/e2e/cove.toml` is **8432 exactly**, over the same 196 programs, the
+/// same 25,783 functions and the same 709,009 instructions the row before it
+/// left.
+///
+/// The one is `tests/e2e:values_any_equals` (109) — ADR 0064's Decision 3
+/// corpus for `Any.equals`, landed before the layout-directed synthesis it
+/// pins, and the first program in this repository that executes the operation
+/// at all: `covefmt` and `cq` have 0 static sites and 0 dynamic calls of it,
+/// and so does every other program surveyed here.
+///
+/// **The split is 59 `prod` against 50 `ret`**, and unlike the row before it
+/// the `prod` half is the larger one. The reason is [`law`], the one generic
+/// function every row goes through: it is instantiated once per type
+/// compared, and each instantiation binds `a == b`, `b == a`, `a != b` and
+/// `a == a` into four `let`s before interpolating them. A comparison is a
+/// producer and a `let` is the copy after it, so four `prod` arrive per
+/// instantiation — which is exactly what the file is for. Writing the four
+/// into the interpolation instead would remove them and would also remove the
+/// thing the corpus exists to make readable, which is that the four answers
+/// are named and can be read off a line.
+///
+/// The `ret` half is the shape every corpus in this series has: `law` and the
+/// nine section functions each end in `Ok(())`, and `built` and `chain` each
+/// end in a binding — issue #302's opening case, once per function.
+///
+/// 172 functions and 6,938 instructions for one file is the other number
+/// worth reading: a generic instantiated at twenty-odd layouts is twenty-odd
+/// functions, and that is the mechanism ADR 0064's Decision 3 builds on
+/// rather than a cost the corpus pays by accident.
+/// **The fifty-second rise is one new row and, from the code, nothing at
+/// all.** 8541 to 8600, 197 programs to 198.
+///
+/// The one is `benches/equals` (59), the microbenchmark ADR 0064's Decision 3
+/// is argued on: seven counting callees, each of which binds a comparison
+/// into a `var out` before the loop's next turn, and a `Row` maker per arm.
+///
+/// **The layout-directed synthesis itself contributes zero**, and that is the
+/// line in this row worth reading. The survey with `benches/equals` held out
+/// is **8541 exactly** — the same number the corpus row above it left, over
+/// the same 197 programs — while the *same* two runs show 26,006 functions
+/// against 25,955 and 717,158 instructions against 715,947. So the change
+/// adds **51 functions and 1,211 instructions** across the whole corpus and
+/// **no copy a known destination would remove**, which is what a synthesized
+/// walk is: a comparison, a branch and a load, and nothing that moves a value
+/// from where it was produced to where it is wanted.
+///
+/// That is a fact about the producer rather than a happy accident.
+/// `lower::synth` never emits an `Inst::Copy`: every arm writes its answer
+/// into the one slot the function returns, which is also the slot each branch
+/// reads — so there is no temporary to forward and no `return`'s answer to
+/// copy into. Issue #302's two shapes are both about a value arriving
+/// somewhere other than where it is wanted, and a walk composed a part at a
+/// time never has one.
+const FORWARDABLE_COPIES: usize = 8600;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

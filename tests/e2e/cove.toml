@@ -499,3 +499,7 @@ allow = ["console"]
 [run.values_string_to_lower]
 entry = "values_string_to_lower.main"
 allow = ["console"]
+
+[run.values_any_equals]
+entry = "values_any_equals.main"
+allow = ["console"]
