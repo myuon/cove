@@ -858,6 +858,7 @@ impl Check<'_> {
                         self.fits(at, dst, called.result, "the answer of a builtin");
                         self.check_signature(at, called, args);
                     }
+                    self.check_one_dynamic_boundary(at, called.intrinsic, args);
                 }
                 self.each_arg(at, args);
             }
@@ -1564,6 +1565,59 @@ impl Check<'_> {
         cases.iter().any(|case| {
             &*case.name == carrier && case.parts.len() == 1 && carries(case.parts[0].layout)
         }) && cases.iter().any(|case| &*case.name == other)
+    }
+
+    /// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 4: a layout-directed operation whose operand layout is
+    /// statically known is a walk the lowering synthesized, and the intrinsic
+    /// is reached from an erased value alone.
+    ///
+    /// > It is *one* fallback, reached only from `Shape::Boxed`. A site whose
+    /// > operand layout is statically known may not use it for convenience.
+    ///
+    /// This is that sentence as a check rather than as a promise, and it is
+    /// here rather than in a test over a corpus because *here* is where every
+    /// program this repository compiles arrives — `lower::finish` verifies
+    /// what it produced and panics if the verifier refuses it, so a lowering
+    /// that reached for the fallback to save itself an arm fails loudly on
+    /// the first program that hits the arm rather than on whichever program a
+    /// corpus happened to hold.
+    ///
+    /// It names `Any.equals` and nothing else yet, because `Any.equals` is
+    /// the first of Decision 3's five whose producer was migrated.
+    /// `Value.order`, `Value.admitKey` and `Value.renderInto` join it as each
+    /// one's producer is, and adding one here is a line — which is the point
+    /// of writing the rule as a list rather than as a category.
+    fn check_one_dynamic_boundary(
+        &mut self,
+        at: Option<usize>,
+        intrinsic: crate::Intrinsic,
+        args: crate::ArgsId,
+    ) {
+        if !matches!(intrinsic, crate::Intrinsic::AnyEquals) {
+            return;
+        }
+        if args.index() >= self.program.args.len() {
+            return;
+        }
+        for (index, arg) in self.program.arg_list(args).to_vec().into_iter().enumerate() {
+            if arg.layout.index() >= self.program.layouts.len() {
+                continue;
+            }
+            let described = self.program.layout(arg.layout);
+            if matches!(described.shape, Shape::Boxed) {
+                continue;
+            }
+            let name = described.name.clone();
+            self.fault(
+                at,
+                format!(
+                    "passes operand {index} of `{intrinsic}` a `{name}`, whose layout it knows \
+                     statically; ADR 0064's Decision 4 admits this fallback from an erased \
+                     value alone, and a known layout is a walk `lower::synth` writes"
+                ),
+            );
+        }
     }
 
     fn each_arg(&mut self, at: Option<usize>, args: crate::ArgsId) {

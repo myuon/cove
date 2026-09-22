@@ -46,6 +46,7 @@ mod snapshots;
 mod strings;
 mod structs;
 mod sweep;
+mod synthesis;
 mod tasks;
 mod values;
 mod walks;

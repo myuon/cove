@@ -760,6 +760,32 @@ impl Shapes {
         ))
     }
 
+    /// The layout of one entry of a [`Shape::Entries`] run over `key` and
+    /// `value`: the key's words, then the value's.
+    ///
+    /// That is `MapEntry<K, V>`'s own layout, which is why a `for` over a map
+    /// is one [`crate::Inst::LoadElem`] at this width and why a run of
+    /// `MapEntry`s can be finished into a map — see
+    /// [`crate::layout::is_entry_of`], which asks the same question the other
+    /// way round. Built from the two [`LayoutId`]s rather than from a `Ty`
+    /// because the reader that needs it has a layout and no type:
+    /// [`super::synth`] walks the layout table.
+    pub(super) fn entry_of(&mut self, key: LayoutId, value: LayoutId) -> LayoutId {
+        let declared = [
+            (Arc::from(MAP_ENTRY.fields[0].name), key),
+            (Arc::from(MAP_ENTRY.fields[1].name), value),
+        ];
+        let (fields, words) = struct_layout(&declared, &self.layouts);
+        self.intern(Layout::inline(
+            MAP_ENTRY.name,
+            Shape::Struct {
+                fields,
+                opaque: false,
+            },
+            words,
+        ))
+    }
+
     /// The layout of a *location* holding a function value.
     ///
     /// One word, and one layout for every signature. See [`Shapes::of`].

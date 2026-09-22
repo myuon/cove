@@ -1,0 +1,559 @@
+use console.println
+use clock.now
+
+/// What a layout-directed `==` costs as a walk the lowering wrote against
+/// what it cost as one call into a walk written in Rust.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 makes `==` on a value whose layout is known a **function
+/// lowering synthesizes for that layout**, composed structurally, where it was
+/// one `Inst::IntrinsicCall` of `Any.equals` reaching `equal::value` in the
+/// runtime. `Any.equals` runs **zero times** on covefmt and on cq — 0 static
+/// sites and 0 dynamic calls on both — so no whole-program figure exists to
+/// make, and this package is the whole of the performance argument.
+///
+/// # The two arms are two binaries over one source
+///
+/// There is no way to write both arms in one process for a *known* layout:
+/// after the migration a program cannot ask for the intrinsic, because
+/// nothing in the language names it. So this file is run twice, over the same
+/// bytes of the same package — once by a `cove` built at the migration's
+/// parent, where every row below lowers to an `intrinsic-call`, and once by a
+/// `cove` built here, where every row but the last lowers to a walk.
+/// `benches/floatabs` settled that arrangement and this is its shape.
+///
+/// # The last row is a control that sees what it controls
+///
+/// `boxed` compares two `dyn Tagged` values, and a `dyn Tagged` is Decision
+/// 4's one dynamic-layout fallback: its family is a word in its own header
+/// and no walk can be composed for it, so it reaches `Any.equals` in **both**
+/// builds. It is the same operation over the same bytes on both sides of the
+/// comparison, so whatever it moves by between two builds is what a rebuild
+/// moves things by — and a row that moved by less than `boxed` did is a row
+/// that said nothing. ADR 0063 measured a rebuild's code layout at −2.13% on
+/// a program whose every count was byte-identical, which is why a control is
+/// asked for rather than a percentage.
+///
+/// It is also the row that says the fallback is still *reached*: a rule that
+/// nothing may use the intrinsic wrongly is satisfied by deleting the arm,
+/// and this is a program that needs it.
+///
+/// # What the rows are, and why these
+///
+/// One per arm of the composition, at the sizes a walk's cost is actually
+/// shaped by:
+///
+/// - `one`, a one-field struct: the smallest walk there is, and the one
+///   `cove_ir::lower::inline` expands into its caller whole. What it measures
+///   is the *floor* — a comparison with no call at either end.
+/// - `triple`, three fields of which the middle is a `String`: the shape a
+///   record has, and the one that makes a wrong field offset visible.
+/// - `mark`, an enum with a payload: a case comparison and a `switch`.
+/// - `array`, eight `Int`s: a loop, which is where a walk written in Cove is
+///   most exposed against a loop written in Rust — eight turns of five
+///   instructions against one crossing.
+/// - `map`, four entries: the same loop over a two-part element, which is
+///   what a keyed collection's canonical order costs.
+/// - `boxed`, the control above.
+///
+/// Every pair is **equal**, which is the walk's worst case: an early exit
+/// stops at the first part that differs and would measure the prefix rather
+/// than the composition. The early-exit case is charged correctly and
+/// `crates/cove-runtime/src/vm/report.rs` pins that; what is wanted here is
+/// the whole walk.
+///
+/// # The loops are in callees, and they are padded
+///
+/// `benches/floatabs`' arrangement, for its reason: the outermost frame is
+/// always encoded, so a loop written in `main` is a VM measurement even under
+/// `--backend native`. Each row is a call to a counting callee whose body is
+/// the loop, and every counting callee opens with [`ballast`] — a block the
+/// parameter's sign makes unreachable and nothing can fold away, sized past
+/// `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight — so that it is not
+/// expanded into [`Row`]'s maker.
+///
+/// # What the native column will and will not hold
+///
+/// `crates/cove-native/src/subset.rs` admits `Compare::Str` for `CmpOp::Order`
+/// alone and admits `Compare::Float` for nothing, so a synthesized walk that
+/// compares a `String` field is **refused by the native tier** where the
+/// `intrinsic-call` it replaced was admitted. `triple` and `map` are the rows
+/// that carry one; `one`, `mark` and `array` are `Int` throughout. That is a
+/// finding rather than a defect of this file, and the rows are arranged so
+/// that it can be read off them: `--backend native --boundary` names the
+/// compiled and the refused.
+fn turns() -> Int {
+  200000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller, which the native tier refuses for the `now()` in it.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// A one-field struct: the floor.
+struct One {
+  first: Int
+}
+
+/// Three fields of which the middle is a reference.
+struct Triple {
+  first: Int
+  middle: String
+  last: Int
+}
+
+/// Cases with payloads beside one without.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+/// Something to erase, so that the control row has a trait to be a `dyn` of.
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+impl Tagged for Triple {
+  fn tag(self) -> Int {
+    self.first
+  }
+}
+
+/// `rounds` comparisons of two equal `One`s, and nothing else in the loop.
+fn countOne(x: One, y: One, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x == y
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` comparisons of two equal `Triple`s, and nothing else in the loop.
+fn countTriple(x: Triple, y: Triple, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x == y
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` comparisons of two equal `Mark`s, and nothing else in the loop.
+fn countMark(x: Mark, y: Mark, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x == y
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` comparisons of two equal `Array<Int>`s, and nothing else in the loop.
+fn countArray(x: Array<Int>, y: Array<Int>, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x == y
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` comparisons of two equal `Map<String, Int>`s, and nothing else in the loop.
+fn countMap(x: Map<String, Int>, y: Map<String, Int>, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x == y
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` comparisons of two equal `dyn Tagged`s, and nothing else in the loop.
+fn countBoxed(x: dyn Tagged, y: dyn Tagged, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x == y
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// [`countOne`]'s loop with the comparison taken out and nothing put in its
+/// place.
+///
+/// A control has to see what it controls, and what these rows control is a
+/// walk of several instructions — so unlike `benches/floatabs`' control this
+/// one can afford to hold the turn and nothing else without being dearer than
+/// its subject.
+fn countBare(rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// How long `rounds` turns took, in microseconds, and the last answer the
+/// loop wrote.
+struct Row {
+  micros: Int
+  witness: Bool
+}
+
+fn bareRow(rounds: Int) -> Row {
+  let from = now()
+  let witness = countBare(rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn oneRow(x: One, y: One, rounds: Int) -> Row {
+  let from = now()
+  let witness = countOne(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn tripleRow(x: Triple, y: Triple, rounds: Int) -> Row {
+  let from = now()
+  let witness = countTriple(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn markRow(x: Mark, y: Mark, rounds: Int) -> Row {
+  let from = now()
+  let witness = countMark(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn arrayRow(x: Array<Int>, y: Array<Int>, rounds: Int) -> Row {
+  let from = now()
+  let witness = countArray(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn mapRow(x: Map<String, Int>, y: Map<String, Int>, rounds: Int) -> Row {
+  let from = now()
+  let witness = countMap(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn boxedRow(x: dyn Tagged, y: dyn Tagged, rounds: Int) -> Row {
+  let from = now()
+  let witness = countBoxed(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one comparison cost, in nanoseconds, over `rounds` turns of which
+/// `bare` microseconds were the loop itself.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000 / rounds
+}
+
+/// One row per arm, each against the same bare loop.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let one = One(first: 7)
+  let otherOne = One(first: 7)
+  let triple = Triple(first: 7, middle: "middle", last: 9)
+  let otherTriple = Triple(first: 7, middle: "middle", last: 9)
+  let mark = Mark.Count(7)
+  let otherMark = Mark.Count(7)
+  let array = [1, 2, 3, 4, 5, 6, 7, 8]
+  let otherArray = [1, 2, 3, 4, 5, 6, 7, 8]
+  let map = Map.of(
+    MapEntry(key: "alpha", value: 1),
+    MapEntry(key: "beta", value: 2),
+    MapEntry(key: "gamma", value: 3),
+    MapEntry(key: "delta", value: 4),
+  )
+  let otherMap = Map.of(
+    MapEntry(key: "delta", value: 4),
+    MapEntry(key: "gamma", value: 3),
+    MapEntry(key: "beta", value: 2),
+    MapEntry(key: "alpha", value: 1),
+  )
+  let boxed: dyn Tagged = triple
+  let otherBoxed: dyn Tagged = otherTriple
+
+  let bare = bareRow(rounds)
+  let xOne = oneRow(one, otherOne, rounds)
+  let xTriple = tripleRow(triple, otherTriple, rounds)
+  let xMark = markRow(mark, otherMark, rounds)
+  let xArray = arrayRow(array, otherArray, rounds)
+  let xMap = mapRow(map, otherMap, rounds)
+  let xBoxed = boxedRow(boxed, otherBoxed, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row whose loop stopped writing would still report a number, and the
+  // number would be of something else. Every pair is equal, so every witness
+  // but the bare loop's is `true`.
+  assertEqual(bare.witness, false)?
+  assertEqual(xOne.witness, true)?
+  assertEqual(xTriple.witness, true)?
+  assertEqual(xMark.witness, true)?
+  assertEqual(xArray.witness, true)?
+  assertEqual(xMap.witness, true)?
+  assertEqual(xBoxed.witness, true)?
+
+  println("bare loop           {bare.micros * 1000 / rounds} ns/turn over {rounds} turn(s)")?
+  println("")?
+  println("row                 ns/call")?
+  println("one                 {perCall(xOne.micros, bare.micros, rounds)}")?
+  println("triple              {perCall(xTriple.micros, bare.micros, rounds)}")?
+  println("mark                {perCall(xMark.micros, bare.micros, rounds)}")?
+  println("array               {perCall(xArray.micros, bare.micros, rounds)}")?
+  println("map                 {perCall(xMap.micros, bare.micros, rounds)}")?
+  println("boxed               {perCall(xBoxed.micros, bare.micros, rounds)}")?
+  Ok(())
+}

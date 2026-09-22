@@ -1240,7 +1240,31 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// worth reading: a generic instantiated at twenty-odd layouts is twenty-odd
 /// functions, and that is the mechanism ADR 0064's Decision 3 builds on
 /// rather than a cost the corpus pays by accident.
-const FORWARDABLE_COPIES: usize = 8541;
+/// **The fifty-second rise is one new row and, from the code, nothing at
+/// all.** 8541 to 8600, 197 programs to 198.
+///
+/// The one is `benches/equals` (59), the microbenchmark ADR 0064's Decision 3
+/// is argued on: seven counting callees, each of which binds a comparison
+/// into a `var out` before the loop's next turn, and a `Row` maker per arm.
+///
+/// **The layout-directed synthesis itself contributes zero**, and that is the
+/// line in this row worth reading. The survey with `benches/equals` held out
+/// is **8541 exactly** — the same number the corpus row above it left, over
+/// the same 197 programs — while the *same* two runs show 26,006 functions
+/// against 25,955 and 717,158 instructions against 715,947. So the change
+/// adds **51 functions and 1,211 instructions** across the whole corpus and
+/// **no copy a known destination would remove**, which is what a synthesized
+/// walk is: a comparison, a branch and a load, and nothing that moves a value
+/// from where it was produced to where it is wanted.
+///
+/// That is a fact about the producer rather than a happy accident.
+/// `lower::synth` never emits an `Inst::Copy`: every arm writes its answer
+/// into the one slot the function returns, which is also the slot each branch
+/// reads — so there is no temporary to forward and no `return`'s answer to
+/// copy into. Issue #302's two shapes are both about a value arriving
+/// somewhere other than where it is wanted, and a walk composed a part at a
+/// time never has one.
+const FORWARDABLE_COPIES: usize = 8600;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

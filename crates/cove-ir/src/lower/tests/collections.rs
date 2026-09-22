@@ -377,12 +377,24 @@ fn @m.head(Vector) -> Option
 }
 
 /// What `==` means for a struct is a rule of the language rather than an
-/// instruction, so it is a call — and an argument carries the layout of the
-/// location it names, so the call hands over both `Point`s where they are.
+/// instruction, so it is a walk — and since
+/// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 that walk is a function `super::super::synth` composes out of
+/// the layout, which for two `Int` fields is two comparisons and a branch.
 ///
-/// This used to box each of them, because an argument was a slot and a slot
-/// says where a value begins and not how wide it is. That was one allocation
-/// per comparison, on a path the predecessor did not allocate on.
+/// **There is no call here either**, and that is the second thing this row
+/// records: the synthesized function is four instructions, so
+/// `super::super::inline` expanded it where it was made. Two `Point`s now
+/// compare in exactly the instructions a hand-written `a.x == b.x && a.y ==
+/// b.y` would take, and ADR 0054 has already fused the first comparison into
+/// its branch.
+///
+/// It used to be one `intrinsic-call` of `Any.equals` into a Rust walk, and
+/// before that it boxed each operand — an argument was a slot, and a slot
+/// says where a value begins and not how wide it is, so an inline value had
+/// to be given a header to carry its layout. That was one allocation per
+/// comparison. Carrying the layout on the argument removed the allocation;
+/// this removes the call.
 #[test]
 fn two_inline_values_are_compared_where_they_sit() {
     assert_eq!(
@@ -392,17 +404,29 @@ fn two_inline_values_are_compared_where_they_sit() {
         ),
         "\
 fn @m.same(m.Point m.Point) -> Bool
-  frame 5: s0!:int s1!:int s2!:int s3!:int s4:bool
-  local a -> s0..s1:m.Point [0, 2)
-  local b -> s2..s3:m.Point [0, 2)
-     0  intrinsic-call s4:Bool Any.equals (s0..s1:m.Point s2..s3:m.Point)
-     1  return s4:Bool
+  frame 6: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool
+  local a -> s0..s1:m.Point [0, 3)
+  local b -> s2..s3:m.Point [0, 3)
+     0  eq.int.branch s4:bool s0:int s2:int 2
+     1  eq.int s4:bool s1:int s3:int
+     2  return s4:Bool
 "
     );
 }
 
-/// A reference carries its description in the object's own header, so
-/// there is nothing to attach.
+/// A run is its length and then its elements, at the element's own rule.
+///
+/// Eleven instructions where there was one `intrinsic-call`, and every one of
+/// them is ordinary IR: a `len`, a length comparison, a loop, two
+/// `load-elem`s and an `eq.int`. What that buys is the whole of ADR 0064's
+/// argument — the native tier compiles all eleven and compiled none of the
+/// one — and what it costs is that the interpreted tier now dispatches eleven
+/// instructions per element instead of crossing once into a Rust loop. Both
+/// halves are measured in the pull request rather than assumed here.
+///
+/// The elements are `Int`s, so the element comparison is an instruction and
+/// there is no inner call. An `Array<Point>` would call `equals<m.Point>`
+/// here instead, which is the composition recursing.
 #[test]
 fn two_arrays_compare_without_being_boxed() {
     assert_eq!(
@@ -412,11 +436,20 @@ fn two_arrays_compare_without_being_boxed() {
         ),
         "\
 fn @m.same(Array Array) -> Bool
-  frame 3: s0!:ref s1!:ref s2:bool
-  local a -> s0:Array [0, 2)
-  local b -> s1:Array [0, 2)
-     0  intrinsic-call s2:Bool Any.equals (s0:Array s1:Array)
-     1  return s2:Bool
+  frame 10: s0!:ref s1!:ref s2:bool s3:bool s4:int s5:int s6:int s7:bool s8:int s9:int
+  local a -> s0:Array [0, 11)
+  local b -> s1:Array [0, 11)
+     0  len s4:int s0:ref
+     1  len s5:int s1:ref
+     2  eq.int.branch s2:bool s4:int s5:int 10
+     3  int s6:int 0
+     4  lt.int.branch s7:bool s6:int s4:int 10
+     5  load-elem s8:Int s0:ref s6:int
+     6  load-elem s9:Int s1:ref s6:int
+     7  eq.int.branch s2:bool s8:int s9:int 10
+     8  add.int.imm s6:int s6:int 1
+     9  jump 4
+    10  return s2:Bool
 "
     );
 }
