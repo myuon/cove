@@ -886,7 +886,28 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// difference is that `slice` answers a `String` and this answers a `Result`,
 /// and an `Err` built in one branch and returned from another is the shape
 /// this column exists to count.
-const FORWARDABLE_COPIES: usize = 2808;
+///
+/// **The thirty-ninth rise is one new row and nothing else.** 2808 to 2834,
+/// 172 programs to 173, and all twenty-six are `tests/e2e:values_string_join`
+/// — six in the `prod` column and twenty in the `ret` column. The overlap
+/// between the two sub-totals is 49 before and after, so nothing moved between
+/// the columns. The check the paragraphs above prescribe says the rest: the
+/// survey with that directory removed is **2808 exactly**, over the same 172
+/// programs, the same 17,591 functions and the same 339,368 instructions the
+/// row before it left.
+///
+/// The program is ADR 0064's Decision 6 corpus for `String.join`, issue #454's
+/// Step 3, landed before a line of the reimplementation and — like the row
+/// before it — without a benchmark of its own, so that the corpus rise and the
+/// migration rise can be told apart afterwards. Its `ret` column of twenty is
+/// the highest any e2e corpus here has had, and it is one shape repeated:
+/// eight small `Result<Unit, Error>` helpers and three `show*` printers, each
+/// of which binds the join it is about to ask four questions of and then
+/// answers `Ok(())`. A corpus for an operation whose answer has to be
+/// *measured* rather than merely printed looks like this — `bytesOf`,
+/// `checksum` and every `show*` hold the answered `String` still while they
+/// read it.
+const FORWARDABLE_COPIES: usize = 2834;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

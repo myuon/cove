@@ -1,0 +1,280 @@
+use console.println
+use std.stringbuilder.StringBuilder
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `join` builds its answer out of bytes — the separator's and each part's —
+/// so the bytes are what this file pins rather than what they render as. A
+/// rendered string would be the same question asked through the terminal's
+/// encoder; a list of numbers is the answer itself, and `・` at
+/// `227 131 187` is a fact no display layer can be blamed for.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// The sum of every byte of `text`.
+///
+/// What a row too long to print byte by byte says instead. A sum over
+/// thousands of bytes is not a hash and does not claim to be: it is there so
+/// that a join that wrote the right *number* of bytes in the wrong *order*
+/// still passes and one that wrote a wrong byte does not, which is the half a
+/// length cannot see.
+fn checksum(text: String) -> Int {
+  var total = 0
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    total += text.byteAt(at)
+    at += 1
+  }
+  total
+}
+
+/// One `separator.join(parts)`, printed as its bytes and both of its counts.
+///
+/// The counts are both here for the reason `values_string_slice`'s are: a
+/// character count and a byte count separate the two readings of an answer,
+/// and every row of `wide.*` has them differ.
+fn show(
+  label: String,
+  separator: String,
+  parts: Array<String>,
+) -> Result<Unit, Error> {
+  let joined = separator.join(parts)
+  println("{label} parts {parts.length()} sep [{bytesOf(separator)}] chars {joined.length()} bytes {joined.byteLength()} [{bytesOf(joined)}] <{joined}>")?
+  Ok(())
+}
+
+/// A join too long to print byte by byte: its counts, its sum, and both ends.
+fn showBig(
+  label: String,
+  separator: String,
+  parts: Array<String>,
+) -> Result<Unit, Error> {
+  let joined = separator.join(parts)
+  let size = joined.byteLength()
+  let head = joined.sliceBytes(0, 24).unwrapOr("?")
+  let tail = joined.sliceBytes(size - 24, size).unwrapOr("?")
+  println("{label} parts {parts.length()} chars {joined.length()} bytes {size} sum {checksum(joined)} head <{head}> tail <{tail}>")?
+  Ok(())
+}
+
+/// A join whose ends do not fall on character boundaries: counts and sum only.
+fn showCounts(
+  label: String,
+  separator: String,
+  parts: Array<String>,
+) -> Result<Unit, Error> {
+  let joined = separator.join(parts)
+  println("{label} parts {parts.length()} chars {joined.length()} bytes {joined.byteLength()} sum {checksum(joined)}")?
+  Ok(())
+}
+
+/// Pins every answer `String.join` gives before it moves out of the runtime,
+/// so the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation, and this is `String.join`'s. Today it is a sum of the
+/// parts' lengths, one `new_string_of` and a run of `copy_string_bytes` in
+/// Rust, reached through one `Inst::IntrinsicCall`.
+///
+/// It is issue #454's Step 3, fourth item, and it is **the first migration of
+/// the series that a whole-program measurement can see**. Every operation
+/// moved before it ran nought times on both representative programs;
+/// `examples/covefmt` calls this one **8,742 times from 17 static sites**, and
+/// those calls allocate **1,361,125 words, 2.3% of that program's total**. So
+/// this file is not the only thing that will notice, and it is the only thing
+/// that can say the *answers* did not move while the numbers did.
+///
+/// # The receiver is the separator
+///
+/// `separator.join(parts)` and not `parts.join(separator)`. It reads oddly
+/// once and then never again, and it is why the array is the argument in every
+/// row below. `String.join`'s own schema says so — `fixed(&[C::Str,
+/// C::Strings], C::Str)` — and `sep.*` is where a reading that had the two the
+/// other way round would answer something else.
+///
+/// # The empty array, one element, and the count between them
+///
+/// The number of separators is **one fewer than the number of parts**, which
+/// is the whole of the operation's arithmetic and the one thing a row can
+/// prove on its own:
+///
+/// - the **empty array** answers `""`, whatever the separator is. There is no
+///   part to write and no gap between two parts to write a separator into, so
+///   `empty.wide`'s three-byte separator contributes nothing;
+/// - **one element** answers that element, and the separator **is not used at
+///   all**. `one.long` gives it five bytes to prove there is nowhere for them
+///   to go, and `one.empty` is the row where the single part is itself empty,
+///   so the answer is `""` for a second reason;
+/// - `count.*` is that arithmetic isolated. Every part is the empty string, so
+///   the answer holds **separators and nothing else** and its length is
+///   exactly `separator.byteLength() * (parts - 1)`. Three empty parts and a
+///   one-byte separator is **two bytes** — the row the brief for this change
+///   named, and the row an implementation that wrote one separator per part
+///   fails by one.
+///
+/// # Bytes, not characters
+///
+/// The answer is a run of bytes and the separator is copied whole, so a
+/// multi-byte separator and multi-byte parts are where a byte count and a
+/// character count part company. `wide.*` is three rows of that, and
+/// `count.three.wide` puts a three-byte separator into the counting section so
+/// that the `(parts - 1)` multiplication is checked in bytes rather than in
+/// characters.
+///
+/// # Parts a run made
+///
+/// `built.*` hands `join` arrays that no literal spelled: a `Vector` frozen
+/// after a loop, three byte slices of one string, the output of `split`, and a
+/// separator that came out of a `StringBuilder.finish()`. An implementation
+/// that read the parts' bytes from anywhere but the objects it was handed
+/// fails these and passes every literal row above them.
+///
+/// # Large enough to grow
+///
+/// `large.*` is a thousand parts and then five hundred wide ones — 8,888,
+/// 6,890 and 4,887 bytes of answer. They are here because the answer to this
+/// operation is *built*, and a builder that is sized by its caller rather than
+/// grown is the one design question this migration has to answer; these rows
+/// are what says the answer is the same either way. Their bytes are a sum and
+/// their ends are a slice rather than a list of eight thousand numbers.
+///
+/// # There is no refusal
+///
+/// `String.join` cannot fail at anything a program can write. Its effects
+/// declare `MAY_ALLOCATE`, so an exhausted heap raises as it does anywhere
+/// else, and the VM arm refuses a null part — but a null cannot reach it, as
+/// that arm's own comment says: "no array a program builds holds one", and the
+/// checker holds `parts` to `Array<String>` before the call is lowered. There
+/// is no empty-needle refusal as `split` and `replace` have, no range to be
+/// outside, and no row below is an `Err`. That is why every row here prints an
+/// answer and none prints a message.
+export fn main() -> Result<Unit, Error> {
+  empty()?
+  one()?
+  counts()?
+  separators()?
+  wide()?
+  built()?
+  nested()?
+  large()?
+  Ok(())
+}
+
+/// The empty array, against three separators.
+fn empty() -> Result<Unit, Error> {
+  let none: Array<String> = []
+  show("empty.plain", ", ", none)?
+  show("empty.none", "", none)?
+  show("empty.wide", "・", none)?
+  Ok(())
+}
+
+/// One element, where the separator has nowhere to go.
+fn one() -> Result<Unit, Error> {
+  show("one.plain", ", ", ["solo"])?
+  show("one.long", "-----", ["solo"])?
+  show("one.empty", "-", [""])?
+  show("one.wide", "😀", ["日本"])?
+  Ok(())
+}
+
+/// The separator count, with every part empty so that nothing else is in the
+/// answer.
+fn counts() -> Result<Unit, Error> {
+  show("count.one", "-", [""])?
+  show("count.two", "-", ["", ""])?
+  show("count.three", "-", ["", "", ""])?
+  show("count.four", "-", ["", "", "", ""])?
+  show("count.three.two", "--", ["", "", ""])?
+  show("count.three.wide", "・", ["", "", ""])?
+  Ok(())
+}
+
+/// The separator between parts that are not all empty.
+fn separators() -> Result<Unit, Error> {
+  show("sep.none", "", ["a", "bc", "", "def"])?
+  show("sep.ascii", ", ", ["Alice", "Bob", "Cara"])?
+  show("sep.empty.part", "-", ["a", "", "b"])?
+  show("sep.only.empties", "", ["", "", ""])?
+  Ok(())
+}
+
+/// Multi-byte parts and multi-byte separators, where the two counts differ.
+fn wide() -> Result<Unit, Error> {
+  show("wide.kana", "・", ["あ", "いう", "", "😀"])?
+  show("wide.sep", "😀", ["é", "日本"])?
+  show("wide.both", "—", ["é😀", "abc", "あ"])?
+  Ok(())
+}
+
+/// Parts and separators a run made rather than ones a program spelled.
+fn built() -> Result<Unit, Error> {
+  var parts: Vector<String> = Vector.of()
+  var k = 0
+  while k < 3 {
+    parts.push("part{k}")
+    k += 1
+  }
+  show("built.vector", ", ", parts.freeze())?
+
+  let source = "é😀abc"
+  let slices = [
+    source.sliceBytes(0, 2).unwrapOr("?"),
+    source.sliceBytes(2, 6).unwrapOr("?"),
+    source.sliceBytes(6, 9).unwrapOr("?"),
+  ]
+  show("built.slices", "|", slices)?
+
+  show("built.split", ",", "a,b,,c".split(","))?
+
+  var made = StringBuilder.withCapacity(2)
+  made.append("<")
+  made.append(">")
+  show("built.finish", made.finish(), ["a", "b"])?
+  Ok(())
+}
+
+/// A join of joins, and a join whose separator is itself one.
+fn nested() -> Result<Unit, Error> {
+  let inner = "-".join(["a", "b"])
+  show("nest.parts", "+", [inner, inner])?
+  let outer = inner.join(["x", "y"])
+  show("nest.separator", "/", [outer, ""])?
+  Ok(())
+}
+
+/// Answers long enough that a builder sized by a guess would have to grow.
+fn large() -> Result<Unit, Error> {
+  var ascii: Vector<String> = Vector.of()
+  var k = 0
+  while k < 1000 {
+    ascii.push("part{k}")
+    k += 1
+  }
+  let parts = ascii.freeze()
+  showBig("large.ascii", ", ", parts)?
+  showBig("large.none", "", parts)?
+
+  var runes: Vector<String> = Vector.of()
+  var n = 0
+  while n < 500 {
+    runes.push("😀{n}")
+    n += 1
+  }
+  showCounts("large.wide", "・", runes.freeze())?
+  Ok(())
+}
