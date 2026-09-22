@@ -74,13 +74,20 @@ fn @m.greet(String) -> String
 
 /// An argument carries the layout of the location it names, so a `Point`
 /// crosses into its rendering as the two words it already is: a piece that is
-/// neither a `String` nor an `Int` is one `Value.renderInto` into the buffer.
+/// neither a `String` nor an `Int` is **one call to the walk `lower::synth`
+/// composed for its layout**, over the value and the buffer.
 ///
-/// It used to be boxed: a builtin was handed slot numbers and nothing else,
-/// so an operand wider than a word had to carry its own description. That
-/// cost an allocation per interpolated struct on a path the predecessor did
-/// not allocate on, and the answer was `1` rather than `Point(x: 1, y: 2)`
-/// wherever the box was skipped.
+/// It used to be an `intrinsic-call` of `Value.renderInto`, and ADR 0064's
+/// Decision 3 made it a call to a private function. What the call site keeps
+/// is the *shape* the assertion below is about: the `Point` is passed where
+/// it sits, two words wide, and the buffer beside it — a byte buffer is a
+/// handle, so the callee's appends are this assembly's.
+///
+/// It used to be boxed, before either of those: a builtin was handed slot
+/// numbers and nothing else, so an operand wider than a word had to carry its
+/// own description. That cost an allocation per interpolated struct on a path
+/// the predecessor did not allocate on, and the answer was `1` rather than
+/// `Point(x: 1, y: 2)` wherever the box was skipped.
 #[test]
 fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
     assert_eq!(
@@ -103,7 +110,7 @@ fn @m.show(m.Point) -> String
      8  run-copy.bytes (s11:<ref> s9:Int s5:String s10:Int s8:Int)
      9  clear s11:<ref>
     10  growable-commit.bytes s4:ref s8:int
-    11  intrinsic-call s6:Unit Value.renderInto (s0..s1:m.Point s4:ByteBuffer)
+    11  call s6:Unit <synth>.renders<m.Point#16> (s0..s1:m.Point s4:ByteBuffer)
     12  run-finish.bytes s2:ref s4:ref String utf8
     13  return s2:String
 "
@@ -113,6 +120,10 @@ fn @m.show(m.Point) -> String
 /// Each piece is appended as soon as it has been evaluated, so a later piece
 /// cannot change what an earlier one shows (#389): the `Point` is rendered
 /// before `n + 1` is computed, and the sum is formatted after it.
+///
+/// The `Point`'s rendering is a call to a synthesized walk and the `Int`'s is
+/// a call to `std.int.renderInto`, which is two different callees and one
+/// order — the order the pieces were written in.
 #[test]
 fn a_piece_is_appended_before_the_next_piece_is_evaluated() {
     let listed = listing(
@@ -120,7 +131,7 @@ fn a_piece_is_appended_before_the_next_piece_is_evaluated() {
         "show",
     );
     let rendered = listed
-        .find("Value.renderInto (s0..s1:m.Point")
+        .find("<synth>.renders<m.Point#16> (s0..s1:m.Point")
         .unwrap_or_else(|| panic!("{listed}"));
     let summed = listed.find("add.int").unwrap_or_else(|| panic!("{listed}"));
     let formatted = listed

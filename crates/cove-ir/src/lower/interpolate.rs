@@ -24,9 +24,10 @@
 //! here is the same window a builder's is, recognised by the same
 //! [`crate::legalize`] — and no lowering writes the protocol a second time.
 //!
-//! # One append per piece, chosen by the piece's type
+//! # One append per piece, chosen by the piece's type and then by its layout
 //!
-//! [`Body::append_piece`] is a single `match` on the checked type of a piece:
+//! [`Body::append_piece`] is two arms on the checked type and then one
+//! question of a layout table:
 //!
 //! - a `String` is appended whole by `appendText` — no rendering and no
 //!   temporary string;
@@ -34,14 +35,30 @@
 //!   buffer: standard-library Cove that appends one digit at a time,
 //!   reached through [`Body::call_library`] and expanded where the inliner
 //!   finds it worth it, as any call is;
-//! - anything else is rendered into the buffer by `Value.renderInto`, which is
-//!   the runtime's one layout-directed rendering walk, so an `Error`, an
-//!   opaque value, a `Range`, a collection, a box and a closure all show
-//!   exactly as they did.
+//! - anything else is [`Body::render_piece`], which asks
+//!   [`synth::rendered`] and gets back one of four answers. Almost always it
+//!   is a **walk**: [ADR 0064]'s Decision 3 composes one private function per
+//!   `(rendering, layout)` pair, out of this module's own two appends and
+//!   `std.int.renderInto`, so an `Error`, an opaque value, a `Range`, a
+//!   struct, an enum and every collection are ordinary IR the printer, the
+//!   verifier, the optimizer and both code generators can see. What is left
+//!   below is `Value.renderInto`, reached from a value whose layout does not
+//!   say what it is — a box, a bare reference — and from a `Float` or a
+//!   `Duration`, whose text no Cove body writes.
+//!
+//! The first two arms are the **short circuit**, and they are why the two
+//! commonest interpolations in the repository cost what they always did: a
+//! piece the checked type already answers for never reaches the layout table
+//! at all.
 //!
 //! A literal run of text is not a piece and never reaches that match: its
 //! bytes are known here, so it is `appendByteInto` of a constant when it is
-//! one byte and `appendText` of a string from the pool otherwise.
+//! one byte and `appendText` of a string from the pool otherwise. A
+//! synthesized walk appends its own punctuation the same two ways, through
+//! the same two bodies, because [`synth::Leaves`] hands it their
+//! `FunctionId`s.
+//!
+//! [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
 //!
 //! [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
 //! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
@@ -50,6 +67,7 @@ use cove_diag::Span;
 use cove_sema::typeck::Ty;
 
 use super::frame::Val;
+use super::synth;
 use super::{shapes, Body, Dest};
 use crate::inst::{Inst, Storage, Validation};
 use crate::intrinsic::Intrinsic;
@@ -172,8 +190,87 @@ impl Body<'_> {
                     self.release(unit, span);
                 }
             }
-            _ => self.render_into(Intrinsic::ValueRenderInto, assembly, value, span),
+            _ => self.render_piece(assembly, value, span),
         }
+    }
+
+    /// The text of a piece that is neither a `String` nor an `Int`.
+    ///
+    /// One question of one table — [`synth::rendered`] — asked here and
+    /// asked again at every part of whatever walk it produces, which is
+    /// `synth::ordered_by`'s arrangement and is what keeps the call site and
+    /// the walk from disagreeing about which of them writes a part.
+    ///
+    /// The two arms above it are the *short circuit*, and they are the
+    /// reason a `String` piece costs one append and an `Int` piece one call:
+    /// both are answers this table would give a moment later, taken from the
+    /// checked type before a layout is looked at.
+    fn render_piece(&mut self, assembly: &Assembly, value: &Val, span: Span) {
+        let shape = self.pool.shapes.layout(value.layout).shape.clone();
+        match synth::rendered(&shape) {
+            // A layout that does not say what the value is, or a scalar
+            // whose text no Cove body spells. ADR 0064's Decision 4 and the
+            // whole of what survives this migration; `crate::verify` refuses
+            // an operand that is anything else.
+            synth::Rendered::Dynamic => {
+                self.render_into(Intrinsic::ValueRenderInto, assembly, value, span)
+            }
+            // A piece whose checked type was not `Ty::Str` or `Ty::Int` and
+            // whose layout is one of theirs anyway. The same two appends the
+            // short circuit makes, reached the long way round.
+            synth::Rendered::Text => {
+                self.append_by(TEXT_APPEND, assembly, value, span);
+            }
+            synth::Rendered::Digits => {
+                let (module, function) = INT_RENDERING;
+                if let Some(unit) =
+                    self.call_library(module, function, &[value, &assembly.buffer], span)
+                {
+                    self.release(unit, span);
+                }
+            }
+            synth::Rendered::Walk => self.render_by_walk(assembly, value, span),
+        }
+    }
+
+    /// The walk [`synth`] composes for this piece's layout, called over the
+    /// value and the buffer.
+    ///
+    /// The buffer is a *parameter* and not an answer: a byte buffer is a
+    /// handle (ADR 0052), so the callee's appends are this assembly's and a
+    /// level of nesting costs no `String`. What the call answers is the `()`
+    /// every append answers, which nothing reads.
+    fn render_by_walk(&mut self, assembly: &Assembly, value: &Val, span: Span) {
+        if self.render_leaves(span).is_none() {
+            // A round in which one of the three appends was not in the
+            // slice. `Body::reached` has recorded it and `lower_roots` will
+            // lower the package again with it; this round's program is
+            // discarded before it is verified, so the intrinsic standing in
+            // here is never one the boundary rule sees.
+            return self.render_into(Intrinsic::ValueRenderInto, assembly, value, span);
+        }
+        let decls = self.plan.decls.len();
+        let callee = synth::function_for(
+            synth::Operation::Rendering,
+            value.layout,
+            self.pool,
+            decls,
+            span,
+        );
+        let unit = self.temp(shapes::UNIT);
+        let args = self
+            .pool
+            .args
+            .intern(vec![value.arg(), assembly.buffer.arg()]);
+        self.emit(
+            Inst::Call {
+                dst: unit.slot,
+                callee,
+                args,
+            },
+            span,
+        );
+        self.release(unit, span);
     }
 
     /// The `String` the appended bytes are, written where the surrounding form

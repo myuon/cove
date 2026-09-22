@@ -1730,14 +1730,37 @@ impl Check<'_> {
     /// the first program that hits the arm rather than on whichever program a
     /// corpus happened to hold.
     ///
-    /// It names `Any.equals` and `Value.order`, which are the two of Decision
-    /// 3's five whose producers have been migrated *and* whose fallback is
-    /// reached from a box alone. `Value.admitKey`'s producer has been
-    /// migrated too and its rule is [`one_admission_boundary`], a pass of its
-    /// own for a reason that is the operation's rather than this rule's; see
-    /// there. `Value.renderInto` joins one of the two as its producer is, and
-    /// adding one here is a line — which is the point of writing the rule as
-    /// a list rather than as a category.
+    /// It names `Any.equals`, `Value.order` and `Value.renderInto`, which are
+    /// the three of Decision 3's five whose producers have been migrated
+    /// *and* whose fallback is an arm of the walk — so the rule is a fact
+    /// about one instruction and survives `inline` moving it.
+    /// `Value.admitKey`'s producer has been migrated too and its rule is
+    /// [`one_admission_boundary`], a pass of its own for a reason that is the
+    /// operation's rather than this rule's; see there.
+    ///
+    /// # `Value.renderInto` is reached from more than a box, and that is a
+    /// widening rather than a reading
+    ///
+    /// The first two are Decision 4 word for word: an operand whose layout is
+    /// not [`Shape::Boxed`] is a fault. The rendering admits **four** shapes,
+    /// which [`crate::lower::synth::Rendered::Dynamic`] is the list of, in
+    /// two kinds:
+    ///
+    /// - a layout that does not say what the value is — a `Shape::Boxed`,
+    ///   whose family is a [`LayoutId`] in its own payload word 0, and a bare
+    ///   `Repr::Ref` word, whose object's family is read off the object.
+    ///   Decision 4's own case, twice;
+    /// - a scalar whose text no Cove body can write — a `Float`, which
+    ///   renders as the shortest decimal that reads back as itself, and a
+    ///   `Duration`, whose unit table is `std.duration`'s policy to write and
+    ///   has not been written.
+    ///
+    /// It is a **leaf** rule and not a whole-layout one, which is what keeps
+    /// it narrow: a `Point { x: Float, y: Float }` is still a walk, and what
+    /// goes below is the two words and not the name, the labels and the
+    /// punctuation around them. And it is checked here rather than assumed,
+    /// so the day `Float`'s rendering becomes Cove the list shrinks in one
+    /// place and every site that was leaning on it fails loudly.
     ///
     /// **What the `Value.order` line catches is the cheap way out of the
     /// migration that added it.** The order's walk has arms that are awkward
@@ -1754,30 +1777,54 @@ impl Check<'_> {
         intrinsic: crate::Intrinsic,
         args: crate::ArgsId,
     ) {
-        if !matches!(
-            intrinsic,
-            crate::Intrinsic::AnyEquals | crate::Intrinsic::ValueOrder
-        ) {
-            return;
-        }
+        // How many of the operands are *values* the rule is about.
+        // `Value.renderInto`'s second is the buffer it appends to, which is
+        // a handle and not a value of anything — `Intrinsic::signature`
+        // gives it as `C::Buffer` — so the rule stops after the first.
+        let values = match intrinsic {
+            crate::Intrinsic::AnyEquals | crate::Intrinsic::ValueOrder => 2,
+            crate::Intrinsic::ValueRenderInto => 1,
+            _ => return,
+        };
         if args.index() >= self.program.args.len() {
             return;
         }
-        for (index, arg) in self.program.arg_list(args).to_vec().into_iter().enumerate() {
+        for (index, arg) in self
+            .program
+            .arg_list(args)
+            .to_vec()
+            .into_iter()
+            .enumerate()
+            .take(values)
+        {
             if arg.layout.index() >= self.program.layouts.len() {
                 continue;
             }
             let described = self.program.layout(arg.layout);
-            if matches!(described.shape, Shape::Boxed) {
+            let admitted = match intrinsic {
+                crate::Intrinsic::ValueRenderInto => {
+                    crate::lower::synth::rendered(&described.shape)
+                        == crate::lower::synth::Rendered::Dynamic
+                }
+                _ => matches!(described.shape, Shape::Boxed),
+            };
+            if admitted {
                 continue;
             }
             let name = described.name.clone();
+            let admits = match intrinsic {
+                crate::Intrinsic::ValueRenderInto => {
+                    "this fallback from a value whose layout does not say what it is, and from a \
+                     `Float` or a `Duration`, whose text no Cove body writes"
+                }
+                _ => "this fallback from an erased value alone",
+            };
             self.fault(
                 at,
                 format!(
                     "passes operand {index} of `{intrinsic}` a `{name}`, whose layout it knows \
-                     statically; ADR 0064's Decision 4 admits this fallback from an erased \
-                     value alone, and a known layout is a walk `lower::synth` writes"
+                     statically; ADR 0064's Decision 4 admits {admits}, and a known layout is a \
+                     walk `lower::synth` writes"
                 ),
             );
         }
@@ -3353,6 +3400,12 @@ mod tests {
         // A rendering takes a piece of any layout, and appends it to a byte
         // buffer and nothing else. No intrinsic takes a list of pieces any
         // more (#403), so a third operand is a count fault like any other.
+        //
+        // The third line is [`Checking::check_one_dynamic_boundary`]'s, and it
+        // is here rather than in a case of its own because it is a fact about
+        // the same fixture: ADR 0064's Decision 3 made a `Point` a walk, so a
+        // site that hands one to the intrinsic is refused whatever else is
+        // wrong with it.
         let point = |slot| Arg {
             slot,
             layout: POINT,
@@ -3368,6 +3421,10 @@ mod tests {
             vec![
                 "the answer of `Value.renderInto` is `Int`, where its signature has Unit",
                 "operand 1 of `Value.renderInto` is `String`, where its signature has ByteBuffer",
+                "passes operand 0 of `Value.renderInto` a `Point`, whose layout it knows \
+                 statically; ADR 0064's Decision 4 admits this fallback from a value whose \
+                 layout does not say what it is, and from a `Float` or a `Duration`, whose \
+                 text no Cove body writes, and a known layout is a walk `lower::synth` writes",
             ]
         );
         let held = calling(
@@ -3381,6 +3438,10 @@ mod tests {
             vec![
                 "the answer of `Value.renderInto` is `Int`, where its signature has Unit",
                 "`Value.renderInto` takes 2 operand(s), and this call passes 3",
+                "passes operand 0 of `Value.renderInto` a `Point`, whose layout it knows \
+                 statically; ADR 0064's Decision 4 admits this fallback from a value whose \
+                 layout does not say what it is, and from a `Float` or a `Duration`, whose \
+                 text no Cove body writes, and a known layout is a walk `lower::synth` writes",
             ]
         );
     }

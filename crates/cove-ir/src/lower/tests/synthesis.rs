@@ -787,6 +787,274 @@ fn reached(program: &Program, intrinsic: crate::Intrinsic) -> usize {
     found
 }
 
+// ---- `core.renderInto(value, buffer)` ----------------------------------
+
+/// A struct renders as its declared short name and its fields in declaration
+/// order — and the **name and the first label are one literal**, as every
+/// separator and the label after it are one.
+///
+/// That is the arrangement the walk is written for and the one a reader is
+/// most likely to undo: a mark at a time is nine appends for a four-field
+/// struct where this is five, and every append is [ADR 0062]'s whole window.
+/// What the strings say is the whole of the punctuation, so they are what is
+/// asserted rather than a listing that would also pin the inliner's work.
+///
+/// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[test]
+fn a_struct_renders_its_name_and_a_label_as_one_literal_apiece() {
+    let program = rendering("struct Row { id: Int, tag: String }", "Row");
+    assert_eq!(literals(&program, "renders<m.Row"), ["Row(id: ", ", tag: "]);
+}
+
+/// An opaque value renders as its bare type name and reads no field of it.
+///
+/// ADR 0014's whole point, and the one arm where the walk deliberately looks
+/// at *less* than the layout offers: its fields are the declaring module's
+/// business and a rendering is read by whoever the string reaches. The
+/// assertion is that the only thing appended is the name — no label, no
+/// bracket, and so nothing a field could be written between.
+#[test]
+fn an_opaque_struct_renders_as_its_name_and_reads_no_field() {
+    let program = rendering(
+        "export opaque struct Token { at: Int, tag: String }",
+        "Token",
+    );
+    assert_eq!(literals(&program, "renders<m.Token"), ["Token"]);
+}
+
+/// A builtin `Error` renders as the message it carries and not as the struct
+/// it happens to be.
+///
+/// So the walk appends **no literal at all**: it reads field 0 and hands it
+/// to `appendText`, which is what makes `"{e}"` say what went wrong rather
+/// than `Error(message: what went wrong)`.
+#[test]
+fn an_error_renders_as_its_message_and_appends_no_literal() {
+    let program = rendering("struct Row { id: Int }", "Error");
+    assert_eq!(literals(&program, "renders<Error").len(), 0);
+}
+
+/// An enum switches on its discriminant, names the case, and brackets its
+/// payload only where it has one.
+///
+/// The default arm is an [`Inst::Trap`] and not a fallback: the runtime's own
+/// walk words the same refusal with the discriminant in it and a trap carries
+/// one string, so this says `key::wrong_case`'s sentence — the one
+/// `Synth::ranking` already emits for the same reading of the same `switch`.
+#[test]
+fn an_enum_names_its_case_and_brackets_only_a_payload() {
+    let program = rendering(
+        "enum Mark { Plain\n  Named(String)\n  Pair(Int, Int) }",
+        "Mark",
+    );
+    assert_eq!(
+        literals(&program, "renders<m.Mark"),
+        ["Plain", "Named(", "Pair(", ", "]
+    );
+    let walk = synthesized(&program, "renders<m.Mark");
+    assert!(
+        walk.contains("trap \"this `m.Mark` is in a case it does not have\""),
+        "{walk}"
+    );
+}
+
+/// A run puts its separator **before** every element but the first, which is
+/// one comparison and one branch a turn.
+///
+/// The other way round — one after every element, and the last one taken back
+/// — is not writable over an append-only buffer at all, which is why the test
+/// is here: it is the arm most likely to be rewritten into something that
+/// renders `[1, 2, 3, ]`.
+#[test]
+fn a_run_separates_every_element_but_the_first() {
+    let program = rendering("struct Row { id: Int }", "Row");
+    assert_eq!(literals(&program, "renders<Array"), [", "]);
+    let walk = synthesized(&program, "renders<Array");
+    assert!(walk.contains("ne.int.imm"), "{walk}");
+}
+
+/// A map renders `key: value` a pair at a time, read at the `MapEntry`
+/// layout's width.
+#[test]
+fn a_map_renders_a_key_and_a_value_at_the_entry_s_width() {
+    let program = rendering("struct Row { id: Int }", "Row");
+    assert_eq!(literals(&program, "renders<Map"), [", ", ": "]);
+}
+
+/// **The widening, as a fact rather than as a sentence.**
+///
+/// A `Float` is the one scalar the walk hands back, because the text of one
+/// is the shortest decimal that reads back as itself and no Cove body writes
+/// that. So a struct holding one is *still a walk* — its name, its labels and
+/// its brackets are composed here — and what goes below is the one word.
+///
+/// The other direction matters as much: the `Int` field beside it does **not**
+/// reach the intrinsic, so the count is one and not two.
+#[test]
+fn a_float_field_is_the_only_part_that_reaches_the_fallback() {
+    let program = rendering("struct Reading { id: Int, at: Float }", "Reading");
+    assert_eq!(
+        literals(&program, "renders<m.Reading"),
+        ["Reading(id: ", ", at: "]
+    );
+    assert_eq!(renderings(&program), 1);
+}
+
+/// **ADR 0064's Decision 4 for the rendering, over every family that has a
+/// walk.**
+///
+/// [`no_statically_known_layout_reaches_the_fallback`]'s argument, and the
+/// same half a verifier rule cannot state: that the rule bites, and that an
+/// ordinary program reaches the intrinsic exactly as often as it interpolates
+/// something whose layout does not say what it is — which for the first list
+/// below is never.
+#[test]
+fn no_statically_known_layout_reaches_the_rendering_fallback() {
+    let composed: &[&str] = &[
+        "struct Row { n: Int, name: String, flag: Bool }\n\
+         enum Mark { Plain\n  Count(Int)\n  Named(String) }\n\
+         export opaque struct Token { at: Int }\n\
+         fn a(x: Row) -> String { \"{x}\" }\n\
+         fn b(x: Mark) -> String { \"{x}\" }\n\
+         fn c(x: Array<Row>) -> String { \"{x}\" }\n\
+         fn d(x: Vector<Mark>) -> String { \"{x}\" }\n\
+         fn e(x: Set<String>) -> String { \"{x}\" }\n\
+         fn f(x: Map<String, Row>) -> String { \"{x}\" }\n\
+         fn g(x: Option<Row>) -> String { \"{x}\" }\n\
+         fn h(x: Result<Row, String>) -> String { \"{x}\" }\n\
+         fn i(x: Range) -> String { \"{x}\" }\n\
+         fn j(x: Token) -> String { \"{x}\" }\n\
+         fn k(x: Unit) -> String { \"{x}\" }\n\
+         fn l(x: Error) -> String { \"{x}\" }",
+        // A recursion, which is the one that has to reach itself rather than
+        // give up and hand the cycle to the runtime.
+        "struct Node { tag: Int, kids: Array<Node> }\n\
+         fn a(x: Node) -> String { \"{x}\" }",
+    ];
+    for source in composed {
+        let program = lowered(source);
+        assert_eq!(
+            renderings(&program),
+            0,
+            "`Value.renderInto` sites in:\n{source}"
+        );
+    }
+
+    // And the other direction, because a rule nothing can satisfy is
+    // satisfied by deleting the arm. Three reach it and each is a different
+    // reason: an erased value, a `Float` and a `Duration`.
+    let program = lowered(
+        "trait Summary { fn summarize(self) -> String }\n\
+         struct Booking { id: Int }\n\
+         impl Summary for Booking { fn summarize(self) -> String { \"{self.id}\" } }\n\
+         fn a(x: dyn Summary) -> String { \"{x}\" }\n\
+         fn b(x: Float) -> String { \"{x}\" }\n\
+         fn c(x: Duration) -> String { \"{x}\" }",
+    );
+    assert_eq!(renderings(&program), 3);
+}
+
+/// A layout that reaches itself is synthesized once and calls itself, which
+/// is what makes a recursive rendering terminate at lowering time.
+///
+/// **And it is the depth bound moving**, which is worth a test of its own
+/// because it is the one thing about this migration a corpus cannot show: the
+/// intrinsic stops at its own `MAX_DEPTH` of 128, and a walk that recurses as
+/// ordinary calls is bounded by ADR 0040's `max_call_depth` instead. Two
+/// functions and no intrinsic is the shape that says so.
+#[test]
+fn a_layout_that_reaches_itself_renders_by_calling_itself() {
+    let program = lowered(
+        "struct Node { tag: Int, kids: Array<Node> }\n\
+         fn a(x: Node) -> String { \"{x}\" }",
+    );
+    assert_eq!(
+        walks_named(&program, "renders<"),
+        ["renders<m.Node#16>", "renders<Array#17>"]
+    );
+    let walk = synthesized(&program, "renders<Array");
+    assert!(walk.contains("<synth>.renders<m.Node#16>"), "{walk}");
+}
+
+/// A program that interpolates only a `String` and an `Int` makes no walk at
+/// all, and that is the **short circuit** `Body::append_piece`'s two leading
+/// arms are.
+///
+/// It is `synth::ordered_by`'s clause for the rendering: a piece the checked
+/// type already answers for never reaches the layout table, so the commonest
+/// two interpolations in the repository cost one append and one call exactly
+/// as they did before this migration.
+#[test]
+fn a_string_and_an_int_piece_reach_no_walk() {
+    let program = lowered("fn a(s: String, n: Int) -> String { \"{s}{n}\" }");
+    assert_eq!(walks_named(&program, "renders<"), Vec::<String>::new());
+    assert_eq!(renderings(&program), 0);
+}
+
+/// A program that interpolates a value of `what`, with `declarations` in
+/// front of it.
+fn rendering(declarations: &str, what: &str) -> Program {
+    lowered(&format!(
+        "{declarations}\nfn show(x: Map<String, Array<{what}>>, y: {what}) -> String {{ \"{{x}}{{y}}\" }}"
+    ))
+}
+
+/// The pooled strings the one synthesized walk whose name holds `what`
+/// loads, in the order it loads them.
+///
+/// What a rendering walk *appends* is its whole behaviour, and a literal is
+/// where the punctuation is. The one-byte literals are not here — those are a
+/// number handed to `appendByteInto` — which is why every assertion above
+/// that wants a bracket looks for it in the listing instead.
+fn literals(program: &Program, what: &str) -> Vec<String> {
+    let at = program
+        .functions
+        .iter()
+        .position(|held| &*held.module == synth::MODULE && held.name.contains(what))
+        .unwrap_or_else(|| {
+            panic!(
+                "a synthesized function holds `{what}`, and these are the ones there are: {:?}",
+                walks_of(program)
+            )
+        });
+    program.functions[at]
+        .code
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Str { text, .. } => Some(program.string(*text).to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many `Value.renderInto` sites the program holds, checking as it counts
+/// that every one of them is a layout ADR 0064's Decision 4 admits for this
+/// operation.
+///
+/// `reached`'s second half, written apart because this operation's admitted
+/// list is four shapes and not one: see `synth::Rendered::Dynamic`.
+fn renderings(program: &Program) -> usize {
+    let mut found = 0;
+    for function in &program.functions {
+        for inst in &function.code {
+            let Inst::IntrinsicCall { site, args, .. } = inst else {
+                continue;
+            };
+            if program.intrinsic_site(*site).intrinsic != crate::Intrinsic::ValueRenderInto {
+                continue;
+            }
+            found += 1;
+            let piece = program.arg_list(*args)[0];
+            assert!(
+                synth::rendered(&program.layout(piece.layout).shape) == synth::Rendered::Dynamic,
+                "`Value.renderInto` was handed a `{}`, whose layout says what it is",
+                program.layout(piece.layout).name
+            );
+        }
+    }
+    found
+}
+
 /// How many instructions of the whole program satisfy `wanted`.
 fn count(program: &Program, wanted: impl Fn(&Inst) -> bool) -> usize {
     program
@@ -850,6 +1118,7 @@ fn no_backend_names_a_synthesized_function() {
         "equals<",
         "order<",
         "refuses<",
+        "renders<",
         "synth::",
         "lower::synth",
     ];

@@ -263,6 +263,17 @@ impl Intrinsic {
             // may reach, which stops the run — and appends the text to a byte
             // buffer the caller holds: a write through a handle, and a growth
             // of the buffer's store when the text does not fit.
+            //
+            // It keeps every one of those after ADR 0064's Decision 3 made
+            // the operation a walk `lower::synth` composes, and for the
+            // reason `Intrinsic::AnyEquals` and `Intrinsic::ValueOrder` keep
+            // theirs: the arm that survives is the one reached from a value
+            // whose layout does not say what it is, and that arm is the whole
+            // of the runtime's walk. A `Float` and a `Duration` reach it too
+            // — the two scalars whose text no Cove body writes — and those
+            // are one word and no walk at all, but an effect list is a bound
+            // on what a caller must be ready for rather than a description of
+            // the commonest call.
             Intrinsic::ValueRenderInto => allocate
                 .union(E::READS_MEMORY)
                 .union(E::WRITES_MEMORY)

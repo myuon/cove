@@ -1,0 +1,636 @@
+use console.println
+use clock.now
+
+/// What a layout-directed **rendering** costs as a walk the lowering wrote
+/// against what it cost as one call into a walk written in Rust.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 makes `"{x}"` on a piece whose layout says what the value is a
+/// **function lowering synthesizes for that layout**, where it was one
+/// `Inst::IntrinsicCall` of `Value.renderInto` reaching `render_value` in the
+/// runtime. `benches/equals`, `benches/ordering` and `benches/admission` are
+/// this package's siblings, written for the same migration's first three
+/// operations; this is the fourth. A package beside them rather than a row
+/// inside one, so that their published numbers keep the code layout they were
+/// measured under.
+///
+/// # Why every row is an interpolation
+///
+/// `core.renderInto` is not a name a Cove program can write. What a program
+/// can write is `"{x}"`, which allocates a byte buffer, appends one piece to
+/// it and finishes it into a `String` — so one turn here is one whole
+/// interpolation, of which the rendering is the part this change moves. The
+/// buffer, the append protocol and the finish are the same code in both
+/// builds, and `bare` takes the loop itself out from under all of them.
+///
+/// # The two arms are two binaries over one source
+///
+/// `benches/admission`'s arrangement, for its reason: after the migration a
+/// program cannot ask for the intrinsic, because nothing in the language names
+/// it. So this file is run twice over the same bytes — once by a `cove` built
+/// at the migration's parent and once by a `cove` built after it.
+///
+/// # Four of the rows are controls, and each controls something different
+///
+/// - `string` and `int` are the **short circuit**. `Body::append_piece` reads
+///   the piece's checked type first and answers a `String` with one
+///   `appendText` and an `Int` with one `std.int.renderInto`, in both builds,
+///   without ever asking a layout anything. They are the two commonest
+///   interpolations in the repository and a synthesis that displaced either of
+///   them would show up here as the one regression this change could cause.
+/// - `float` is the **widening**. A `Float` renders as the shortest decimal
+///   that reads back as itself, and no Cove body writes that — so it reaches
+///   `Value.renderInto` in both builds, and it is the row that says ADR 0064's
+///   Decision 4 is still reached for a reason that is not a box.
+/// - `boxed` is Decision 4 itself: a `dyn Tagged`, whose family is a word in
+///   its own header and for which no walk can be composed. It reaches the
+///   intrinsic in both builds too, and it is the rebuild control — the same
+///   operation over the same bytes on both sides.
+///
+/// # What the walked rows are, and why these
+///
+/// - `struct`, a two-field record: a name, a label, a number and a string, in
+///   five appends where a mark at a time would be nine.
+/// - `enum`, a `Mark` with a payload: one `switch` into an arm that names the
+///   case and brackets its part.
+/// - `array`, eight `Int`s: a loop with a separator before every element but
+///   the first, which is where a walk written as IR is most exposed against a
+///   loop written in Rust.
+/// - `map`, four entries of `Int` to `Point`: the same loop at the `MapEntry`
+///   layout's width, with a nested walk under each value.
+///
+/// # The loops are in callees, and they are padded
+///
+/// `benches/admission`'s arrangement and `benches/ordering`'s before it: the
+/// outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is a call to a counting
+/// callee whose body is the loop, and every counting callee opens with
+/// [`ballast`] — a block the parameter's sign makes unreachable and nothing can
+/// fold away, sized past `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight
+/// — so that it is not expanded into [`Row`]'s maker.
+fn turns() -> Int {
+  20000
+}
+
+/// A trait with one conformance, so that a `dyn Tagged` is a box whose
+/// rendering looks through it.
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+/// A two-field record: one word the walk renders with a call and one
+/// reference it appends whole.
+struct Point {
+  id: Int
+  label: String
+}
+
+impl Tagged for Point {
+  fn tag(self) -> Int {
+    self.id
+  }
+}
+
+/// An enum with a payload, so that the walk has a `switch` to write and an
+/// arm to bracket.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller, which the native tier refuses for the `now()` in it.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// [`countInt`]'s loop with the interpolation taken out and nothing put in its
+/// place.
+///
+/// A control has to see what it controls, and what these rows control is an
+/// interpolation of several hundred instructions — so this one can afford to
+/// hold the turn and nothing else without being dearer than its subject.
+fn countBare(rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = ""
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `String`, and nothing else in the loop.
+fn countString(text: String, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{text}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `Int`, and nothing else in the loop.
+fn countInt(value: Int, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `Point`, and nothing else in the loop.
+fn countStruct(value: Point, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `Mark`, and nothing else in the loop.
+fn countEnum(value: Mark, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `Array<Int>`, and nothing else in the loop.
+fn countArray(value: Array<Int>, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `Map<Int, Point>`, and nothing else in the loop.
+fn countMap(value: Map<Int, Point>, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `Float`, and nothing else in the loop.
+fn countFloat(value: Float, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// `rounds` interpolations of one `dyn Tagged`, and nothing else in the loop.
+fn countBoxed(value: dyn Tagged, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
+/// What one row measured: the microseconds its loop took, and what its last
+/// turn rendered.
+///
+/// The witness is checked before any number is read as a timing: a row whose
+/// loop stopped doing the work would still report one, and a row whose walk
+/// rendered the *wrong* text would report one too.
+struct Row {
+  micros: Int
+  witness: String
+}
+
+fn bareRow(rounds: Int) -> Row {
+  let from = now()
+  let witness = countBare(rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn stringRow(text: String, rounds: Int) -> Row {
+  let from = now()
+  let witness = countString(text, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn intRow(value: Int, rounds: Int) -> Row {
+  let from = now()
+  let witness = countInt(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn structRow(value: Point, rounds: Int) -> Row {
+  let from = now()
+  let witness = countStruct(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn enumRow(value: Mark, rounds: Int) -> Row {
+  let from = now()
+  let witness = countEnum(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn arrayRow(value: Array<Int>, rounds: Int) -> Row {
+  let from = now()
+  let witness = countArray(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn mapRow(value: Map<Int, Point>, rounds: Int) -> Row {
+  let from = now()
+  let witness = countMap(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn floatRow(value: Float, rounds: Int) -> Row {
+  let from = now()
+  let witness = countFloat(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn boxedRow(value: dyn Tagged, rounds: Int) -> Row {
+  let from = now()
+  let witness = countBoxed(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one rendering cost, in nanoseconds, over `rounds` turns of which
+/// `bare` microseconds were the loop itself.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000 / rounds
+}
+
+/// One row per arm, each against the same bare loop.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let point = Point(id: 5, label: "label")
+  let numbers = [1, 2, 3, 4, 5, 6, 7, 8]
+  let table = Map.of(
+    MapEntry(key: 1, value: Point(id: 1, label: "one")),
+    MapEntry(key: 2, value: Point(id: 2, label: "two")),
+    MapEntry(key: 3, value: Point(id: 3, label: "three")),
+    MapEntry(key: 4, value: Point(id: 4, label: "four")),
+  )
+  let held: dyn Tagged = point
+
+  let bare = bareRow(rounds)
+  let xString = stringRow("a moderately long label", rounds)
+  let xInt = intRow(1234567, rounds)
+  let xStruct = structRow(point, rounds)
+  let xEnum = enumRow(Mark.Count(5), rounds)
+  let xArray = arrayRow(numbers, rounds)
+  let xMap = mapRow(table, rounds)
+  let xFloat = floatRow(1.5, rounds)
+  let xBoxed = boxedRow(held, rounds)
+
+  // What each row rendered, checked before any of it is read as a timing.
+  // These are the same strings `tests/e2e/values_value_render_into` pins, so
+  // a walk that composed the wrong punctuation fails here rather than
+  // reporting a number for something else.
+  assertEqual(bare.witness, "")?
+  assertEqual(xString.witness, "a moderately long label")?
+  assertEqual(xInt.witness, "1234567")?
+  assertEqual(xStruct.witness, "Point(id: 5, label: label)")?
+  assertEqual(xEnum.witness, "Count(5)")?
+  assertEqual(xArray.witness, "[1, 2, 3, 4, 5, 6, 7, 8]")?
+  assertEqual(
+    xMap.witness,
+    "\{1: Point(id: 1, label: one), 2: Point(id: 2, label: two), 3: Point(id: 3, label: three), 4: Point(id: 4, label: four)\}",
+  )?
+  assertEqual(xFloat.witness, "1.5")?
+  assertEqual(xBoxed.witness, "Point(id: 5, label: label)")?
+
+  println("bare loop           {bare.micros * 1000 / rounds} ns/turn over {rounds} turn(s)")?
+  println("")?
+  println("row                 ns/rendering")?
+  println("string              {perCall(xString.micros, bare.micros, rounds)}")?
+  println("int                 {perCall(xInt.micros, bare.micros, rounds)}")?
+  println("struct              {perCall(xStruct.micros, bare.micros, rounds)}")?
+  println("enum                {perCall(xEnum.micros, bare.micros, rounds)}")?
+  println("array               {perCall(xArray.micros, bare.micros, rounds)}")?
+  println("map                 {perCall(xMap.micros, bare.micros, rounds)}")?
+  println("float               {perCall(xFloat.micros, bare.micros, rounds)}")?
+  println("boxed               {perCall(xBoxed.micros, bare.micros, rounds)}")?
+  Ok(())
+}

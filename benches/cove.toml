@@ -391,3 +391,7 @@ allow = ["console", "clock"]
 [run.admission]
 entry = "admission.main"
 allow = ["console", "clock"]
+
+[run.rendering]
+entry = "rendering.main"
+allow = ["console", "clock"]
