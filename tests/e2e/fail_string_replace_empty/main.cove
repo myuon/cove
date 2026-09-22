@@ -1,0 +1,33 @@
+use console.println
+
+/// Rewrites `old` as `new` in `text`, where `old` is whatever its caller chose.
+/// Not the standard library: an ordinary Cove function with a caller, between
+/// `main` and the operation that refuses, so that the diagnostic below has a
+/// frame to blame that is neither the entry point nor the machine.
+fn rewritten(text: String, old: String, new: String) -> String {
+  text.replace(old, new)
+}
+
+/// Pins `String.replace`'s refusal of an empty `old`, word for word.
+///
+/// `String.split`'s refusal and this one share a rule and share nothing else:
+/// the message names a different method and a different parameter, and **the
+/// help is not the same sentence**. `split` is pointed at `chars()`, which is
+/// the operation that means what an empty separator would have meant; `replace`
+/// is told that `old` is the text to look for and that an empty one names none,
+/// because there is no operation for it to be pointed at. A brief that assumed
+/// the two refusals were one refusal would have changed this line.
+///
+/// This is the half of `String.replace`'s contract that `values_string_replace`
+/// cannot hold, because a refusal stops the run and takes every row after it:
+/// one case, one refusal. [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 8 gates a migration on the diagnostic being unchanged, and this
+/// file is where "unchanged" is written down. Issue
+/// [#461](https://github.com/myuon/cove/issues/461) is why that gate is not met
+/// yet: a Cove body has nothing to raise with, and nothing that would carry the
+/// `rule` and the `help` if it had.
+export fn main() -> Result<Unit, Error> {
+  let out = rewritten("a,b,c", "", ";")
+  println("{out}")?
+  Ok(())
+}

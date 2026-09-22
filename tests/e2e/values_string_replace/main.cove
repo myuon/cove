@@ -1,0 +1,266 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_chars`' helper, and here for its reason: a rendered answer is
+/// the same question asked through the terminal's encoder, and this file has
+/// rows whose replacement is a **NUL** and rows whose answer is empty. A list
+/// of numbers is the encoding itself, so `é` at `195 169` is a fact no display
+/// layer can be blamed for.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// The bytes of `text` from byte `from` up to but not including byte `to`,
+/// clamped into the string, as decimal values.
+///
+/// What the long rows print instead of the whole answer. `byteAt` and not
+/// `sliceBytes`, so that a row prints the bytes that are there rather than a
+/// substring some other operation decided the shape of.
+fn byteRange(text: String, from: Int, to: Int) -> String {
+  var rendered = ""
+  var at = from
+  if at < 0 {
+    at = 0
+  }
+  var end = to
+  if end > text.byteLength() {
+    end = text.byteLength()
+  }
+  while at < end {
+    if rendered == "" {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// A position-weighted sum of every byte of `text`.
+///
+/// What a long row prints in place of its bytes. The weight is what makes it
+/// an ordering check as well as a multiset check: an answer holding the right
+/// bytes in the wrong places keeps every other number on the line and moves
+/// this one.
+fn weightedOf(text: String) -> Int {
+  var total = 0
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    total += (at + 1) * text.byteAt(at)
+    at += 1
+  }
+  total
+}
+
+/// The string the code points `points` name, in order.
+///
+/// Every row this file builds out of code points rather than out of a source
+/// literal is built here, and that is what lets the oracle be independent: the
+/// oracle holds the same list of numbers and encodes it with an encoder of its
+/// own, where a literal would make both sides read the same UTF-8 out of two
+/// files and prove only that the files matched.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// `points` repeated `times` over.
+fn repeated(points: Array<Int>, times: Int) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  var round = 0
+  while round < times {
+    for point in points {
+      out.push(String.fromCodePoint(point)?)
+    }
+    round += 1
+  }
+  Ok("".join(out.freeze()))
+}
+
+/// One `String.replace()` call, written out as bytes.
+///
+/// The line is the three operands' byte lengths, the answer's byte length and
+/// character length, the **delta** between the answer's bytes and the
+/// receiver's, whether the answer still holds `old`, and then every byte of
+/// the answer.
+///
+/// `delta` is what says how many occurrences were rewritten wherever `old` and
+/// `new` are different widths: it is `hits * (new - old)`, so a row that
+/// matched once too often or once too few moves it even when the bytes
+/// themselves are hard to read. `left` is the other half, and it is not always
+/// `false`: a `new` that **contains** `old` leaves `old` in the answer by
+/// construction, and the rows that do that are the rows which say the
+/// operation does not rewrite what it has just written.
+fn show(
+  label: String,
+  text: String,
+  old: String,
+  new: String,
+) -> Result<Unit, Error> {
+  let out = text.replace(old, new)
+  println("{label} text {text.byteLength()} old {old.byteLength()} new {new.byteLength()} out {out.byteLength()} chars {out.length()} delta {out.byteLength() - text.byteLength()} left {out.contains(old)} [{bytesOf(out)}]")?
+  Ok(())
+}
+
+/// [`show`] for a row whose answer is too long to print.
+///
+/// The same line without the bytes, then a position-weighted sum of every byte
+/// of the answer, and then its first and last sixteen bytes — because an answer
+/// that lost a rewrite at one end keeps its shape and loses a count, and the
+/// two ends together say which one.
+fn digest(
+  label: String,
+  text: String,
+  old: String,
+  new: String,
+) -> Result<Unit, Error> {
+  let out = text.replace(old, new)
+  println("{label} text {text.byteLength()} old {old.byteLength()} new {new.byteLength()} out {out.byteLength()} chars {out.length()} delta {out.byteLength() - text.byteLength()} left {out.contains(old)}")?
+  println("{label}.shape weighted {weightedOf(out)}")?
+  println("{label}.ends head [{byteRange(out, 0, 16)}] tail [{byteRange(out, out.byteLength() - 16, out.byteLength())}]")?
+  Ok(())
+}
+
+/// Pins every answer `String.replace()` gives before it moves out of the
+/// runtime, so that the move shows no difference here.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 says a differential corpus is landed **before** the first line of
+/// a reimplementation, and this is `String.replace()`'s. Today it is
+/// `text.replace(&old, &new)` in Rust — `str::replace`'s own matcher over the
+/// receiver and one heap `String` for the answer — reached through one
+/// `Inst::IntrinsicCall`. Issue #454's Step 3, thirteenth item.
+///
+/// **No shipped program runs it.** Measured at `282dfe1` on a pristine root
+/// with `--boundary --stats`: `examples/covefmt` has 0 static sites and 0
+/// dynamic calls, and `examples/cq` has **one** static site — the CSV writer's
+/// doubling of a quotation mark in `cq/csv/csv.cove` — and **0 dynamic calls**
+/// on `revenue-summary` over 20,000 records. So this file is the whole of what
+/// will notice when the body becomes Cove.
+///
+/// # Every non-overlapping occurrence, scanning left to right
+///
+/// `crates/cove-schema/src/builtins.rs` states it and each clause is a row:
+///
+/// - **every** occurrence is rewritten and not only the first, so `a,b,c`
+///   under `,` becomes `a;b;c`;
+/// - matching **does not overlap**: `aaa` under `aa` is `ba` and not `bb`,
+///   because the match at byte 0 consumes two bytes and the search resumes
+///   after it. `aaaa` is `bb` and `aaaaa` is `bba`;
+/// - a receiver with **no** occurrence comes back unchanged, and so does the
+///   **empty** receiver;
+/// - a `new` that **contains** `old` does not loop and is not rewritten again:
+///   `aa` under `a` becomes `aa` gives `aaaa`, four bytes and not an
+///   unbounded run. `left` is `true` on exactly those rows, which is what says
+///   the answer was not re-scanned.
+///
+/// # The three widths, and the empty replacement
+///
+/// A `new` **longer** than `old` grows the answer, a **shorter** one shrinks
+/// it, an **equal** one leaves its length alone, and an **empty** one deletes.
+/// `delta` on every line is the arithmetic: `hits * (new - old)`. The rows that
+/// make it unambiguous are `lit.empty.all`, where every byte of the receiver is
+/// deleted and the answer is `""`, and `w.widen`, where one ASCII byte becomes
+/// a four-byte character and the answer's **character** count falls while its
+/// byte count rises.
+///
+/// # A match cannot start inside a character
+///
+/// A `String` is valid UTF-8, so a needle that is itself valid UTF-8 begins
+/// with a lead byte and ends at a character boundary; a byte search over the
+/// receiver can only land on a boundary. `w.near` puts that under load rather
+/// than leaving it to the argument: it rewrites `é` in a receiver that also
+/// holds `è`, whose first byte is the same `195`, and an implementation that
+/// matched a lead byte and stopped would rewrite both. `w.ascii` is the other
+/// side — a receiver with no ASCII byte in it at all, under an ASCII `old`,
+/// comes back unchanged, because every byte of a multi-byte character is 128 or
+/// above.
+export fn main() -> Result<Unit, Error> {
+  // Every occurrence, and the three widths.
+  show("lit.basic", "a,b,c", ",", ";")?
+  show("lit.longer", "aa", "a", "bbb")?
+  show("lit.shorter", "aaa", "aa", "b")?
+  show("lit.same", "abc", "b", "z")?
+  show("lit.empty.new", "abc", "b", "")?
+  show("lit.empty.all", "aaa", "a", "")?
+  show("lit.none", "abc", "z", "y")?
+  show("lit.empty.text", "", "a", "b")?
+  show("lit.whole", "abc", "abc", "z")?
+  show("lit.old.longer", "ab", "abc", "z")?
+  show("lit.lead", ",abc", ",", ";")?
+  show("lit.trail", "abc,", ",", ";")?
+  show("lit.adjacent", "a,,b", ",", ";")?
+  show("lit.run", ",,,", ",", ";")?
+
+  // A `new` that holds `old`: the answer is not scanned again.
+  show("self.one", "aa", "a", "aa")?
+  show("self.three", "aaa", "a", "aa")?
+  show("self.around", "ab", "a", "ba")?
+  show("self.whole", "ab", "ab", "abab")?
+
+  // An `old` of more than one byte, which is where an off-by-one in the resume
+  // offset shows: `a::::b` is two rewrites and not three.
+  show("lit.multi", "a::b::c", "::", "-")?
+  show("lit.multi.adjacent", "a::::b", "::", "-")?
+  show("lit.multi.odd", "a:::b", "::", "-")?
+
+  // Matching does not overlap and runs left to right.
+  show("lap.three", "aaa", "aa", "b")?
+  show("lap.four", "aaaa", "aa", "b")?
+  show("lap.five", "aaaaa", "aa", "b")?
+  show("lap.aba", "ababa", "aba", "x")?
+  show("lap.abab", "abababa", "abab", "x")?
+
+  // A NUL is a byte and a character like any other, on both sides of the
+  // question: as the text looked for, and as the text written in.
+  show("zero.old", fromPoints([97, 0, 98])?, fromPoints([0])?, ",")?
+  show("zero.new", "a,b", ",", fromPoints([0])?)?
+
+  // Two, three and four bytes, in `old`, in `new` and in the receiver.
+  show("w.two", fromPoints([97, 233, 98, 233])?, fromPoints([233])?, "e")?
+  show("w.near", fromPoints([97, 232, 233, 98, 233])?, fromPoints([233])?, "!")?
+  show("w.three", fromPoints([97, 8594, 98])?, fromPoints([8594])?, "->")?
+  show("w.four", fromPoints([97, 128512, 98])?, fromPoints([128512])?, ":)")?
+  show("w.widen", "abc", "b", fromPoints([128512])?)?
+  show("w.narrow", fromPoints([128512, 128512])?, fromPoints([128512])?, "x")?
+  show("w.ascii", fromPoints([233, 8594, 128512])?, ",", "x")?
+  show(
+    "w.equal",
+    fromPoints([97, 233, 98])?,
+    fromPoints([233])?,
+    fromPoints([232])?,
+  )?
+
+  // Rows long enough that no fast path is left untaken, and each varies one
+  // thing: how many rewrites there are, which way the answer moves, and how
+  // wide the operands are.
+  digest("long.none", repeated([97], 2048)?, "z", "y")?
+  digest("long.every", repeated([97], 2048)?, "a", "bb")?
+  digest("long.shrink", repeated([97, 97], 1024)?, "aa", "b")?
+  digest(
+    "long.eight",
+    repeated([97, 97, 97, 97, 97, 97, 97, 44], 256)?,
+    ",",
+    ";",
+  )?
+  digest("long.wide", repeated([128512, 8594], 512)?, fromPoints([8594])?, "-")?
+  digest("long.self", repeated([97], 1024)?, "a", "aa")?
+  Ok(())
+}
