@@ -30,8 +30,10 @@
 //! the sorted run itself — but the order a search steps by and the admission
 //! of a key are layout-directed walks no instruction performs for a struct, an
 //! array or a set. So `core.order` is one `cmp` of `CmpOp::Order` where the
-//! key is a scalar, a `String` or a case index in name order, and a
-//! [`Inst::IntrinsicCall`] of `Intrinsic::ValueOrder` otherwise;
+//! key is a scalar, a `String` or a case index in name order, a call into the
+//! walk `super::synth` composes out of the key's layout where the layout is
+//! known, and a [`Inst::IntrinsicCall`] of `Intrinsic::ValueOrder` only where
+//! the key is erased (ADR 0064, Decisions 3 and 4);
 //! `core.admitKey` is nothing at all where the key's layout cannot hold a
 //! refused part, and `Intrinsic::ValueAdmitKey` where it can; and
 //! `core.refuseDuplicate` is always `Intrinsic::ValueRefuseDuplicate`.
@@ -59,8 +61,8 @@ use cove_syntax::ast::{Arg, Expr, ExprKind};
 
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, BUFFER_STORE, VECTOR_LEN, VECTOR_STORE};
-use super::{Body, Dest};
-use crate::inst::{CmpOp, Compare, Inst, Len, Slot, Storage, Validation};
+use super::{synth, Body, Dest};
+use crate::inst::{CmpOp, Inst, Len, Slot, Storage, Validation};
 use crate::intrinsic::Intrinsic;
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Arg as Operand, IntrinsicSite};
@@ -1119,8 +1121,19 @@ impl Body<'_> {
     ///
     /// One [`Inst::Cmp`] of [`CmpOp::Order`] where the key's layout is one a
     /// comparison instruction orders exactly as `key::order` does — see
-    /// [`Body::ordered_by`] — and otherwise one [`Inst::IntrinsicCall`] of
-    /// [`Intrinsic::ValueOrder`], the layout-directed walk.
+    /// [`synth::ordered_by`] — one [`Inst::Call`] into the function
+    /// `super::synth` composes out of the layout where the layout is known
+    /// and wider than that, and one [`Inst::IntrinsicCall`] of
+    /// [`Intrinsic::ValueOrder`] where the key is a box, which is ADR 0064's
+    /// Decision 4 and the only dynamic layout left.
+    ///
+    /// **The first of the three is the one to be careful with.** It is what
+    /// makes `cq` — every one of whose map keys is a `String` — execute
+    /// `Value.order` at no site and on no turn, and a synthesis that
+    /// displaced it with a call into a one-instruction function would be a
+    /// regression on the one program in this repository that exercises the
+    /// path at all. So it is asked first, and it is asked through the same
+    /// function the walk itself asks.
     fn core_order(&mut self, expr: &Expr, a: &Expr, b: &Expr, want: Option<Dest>) -> Val {
         let Some(ty) = self.settled_ty(a) else {
             return self.dead(expr);
@@ -1131,7 +1144,7 @@ impl Body<'_> {
         let left = self.expr(a);
         let right = self.expr(b);
         let dst = self.answer_at(want, shapes::INT);
-        match self.ordered_by(layout) {
+        match synth::ordered_by(&self.pool.shapes, layout) {
             Some(on) => {
                 self.emit(
                     Inst::Cmp {
@@ -1144,41 +1157,36 @@ impl Body<'_> {
                     expr.span,
                 );
             }
-            None => self.intrinsic_call(
+            None if self.is_boxed(layout) => self.intrinsic_call(
                 Intrinsic::ValueOrder,
                 shapes::INT,
                 dst.slot,
                 &[&left, &right],
                 expr.span,
             ),
+            None => {
+                let decls = self.plan.decls.len();
+                let callee = synth::function_for(
+                    synth::Operation::Order,
+                    layout,
+                    self.pool,
+                    decls,
+                    expr.span,
+                );
+                let args = self.pool.args.intern(vec![left.arg(), right.arg()]);
+                self.emit(
+                    Inst::Call {
+                        dst: dst.slot,
+                        callee,
+                        args,
+                    },
+                    expr.span,
+                );
+            }
         }
         self.release(right, expr.span);
         self.release(left, expr.span);
         dst
-    }
-
-    /// The comparison that orders a value of `layout` exactly as a key is
-    /// ordered, where one instruction can.
-    ///
-    /// `key::order` ranks an `Int` and a `Duration` by their signed words, a
-    /// `Bool` `false` first, and a `String` by its bytes — which are
-    /// [`Compare::Int`], [`Compare::Bool`] and [`Compare::Str`]. It ranks an
-    /// enum's cases by their *names*, and a payload-free enum's word is its
-    /// case *index*, so [`Compare::Tag`] is the order only where the cases were
-    /// declared in ascending name order; any other enum is a walk. A `Unit`
-    /// has one value and no comparison instruction admits it, so it is a walk
-    /// too, and so is everything wider than a word.
-    fn ordered_by(&self, layout: LayoutId) -> Option<Compare> {
-        match &self.pool.shapes.layout(layout).shape {
-            Shape::Word(Repr::Int | Repr::Duration) => Some(Compare::Int),
-            Shape::Word(Repr::Bool) => Some(Compare::Bool),
-            Shape::Str => Some(Compare::Str),
-            Shape::Enum { cases, payload } if payload.is_empty() => cases
-                .windows(2)
-                .all(|pair| pair[0].name < pair[1].name)
-                .then_some(Compare::Tag),
-            _ => None,
-        }
     }
 
     /// `core.admitKey(key, method, role)`: the refusal of a key the language

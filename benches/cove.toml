@@ -383,3 +383,7 @@ allow = ["console", "clock"]
 [run.equals]
 entry = "equals.main"
 allow = ["console", "clock"]
+
+[run.ordering]
+entry = "ordering.main"
+allow = ["console", "clock"]

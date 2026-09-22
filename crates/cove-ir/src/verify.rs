@@ -1583,18 +1583,31 @@ impl Check<'_> {
     /// the first program that hits the arm rather than on whichever program a
     /// corpus happened to hold.
     ///
-    /// It names `Any.equals` and nothing else yet, because `Any.equals` is
-    /// the first of Decision 3's five whose producer was migrated.
-    /// `Value.order`, `Value.admitKey` and `Value.renderInto` join it as each
-    /// one's producer is, and adding one here is a line — which is the point
-    /// of writing the rule as a list rather than as a category.
+    /// It names `Any.equals` and `Value.order`, which are the two of Decision
+    /// 3's five whose producers have been migrated. `Value.admitKey` and
+    /// `Value.renderInto` join them as each one's producer is, and adding one
+    /// here is a line — which is the point of writing the rule as a list
+    /// rather than as a category.
+    ///
+    /// **What the `Value.order` line catches is the cheap way out of the
+    /// migration that added it.** The order's walk has arms that are awkward
+    /// — an enum declared out of name order needs a permutation, a run
+    /// compares its lengths *after* its elements, a `Float` field has to
+    /// raise — and every one of them could be made to work by handing the
+    /// layout to the intrinsic instead. Nothing else in this repository would
+    /// notice: the answers would still be right, the differential corpus
+    /// would still be green, and the architecture would be exactly where it
+    /// was. This is the line that says no.
     fn check_one_dynamic_boundary(
         &mut self,
         at: Option<usize>,
         intrinsic: crate::Intrinsic,
         args: crate::ArgsId,
     ) {
-        if !matches!(intrinsic, crate::Intrinsic::AnyEquals) {
+        if !matches!(
+            intrinsic,
+            crate::Intrinsic::AnyEquals | crate::Intrinsic::ValueOrder
+        ) {
             return;
         }
         if args.index() >= self.program.args.len() {
@@ -3058,9 +3071,24 @@ mod tests {
                 layout: INT,
             },
         ]];
+        // The operands are a `Point` and an `Int` rather than two boxes, so
+        // ADR 0064's Decision 4 speaks as well and speaks first — it is
+        // checked where the call is read and this is checked where its
+        // arguments are. Both are asserted rather than the case being
+        // rewritten around the other rule: what it is about is the *last*
+        // sentence, and a case that quietly stopped producing it would still
+        // be green.
         assert_eq!(
             faults(&held),
-            vec!["argument 0 is `Point`, 2 words at slot 2, and the frame has 3"]
+            vec![
+                "passes operand 0 of `Value.order` a `Point`, whose layout it knows \
+                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
+                 alone, and a known layout is a walk `lower::synth` writes",
+                "passes operand 1 of `Value.order` a `Int`, whose layout it knows \
+                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
+                 alone, and a known layout is a walk `lower::synth` writes",
+                "argument 0 is `Point`, 2 words at slot 2, and the frame has 3",
+            ]
         );
     }
 
@@ -3251,13 +3279,30 @@ mod tests {
         // `no_intrinsic_is_a_collection_operation` now asserts unconditionally
         // that no operand is one.
 
+        // `Value.order` is a value intrinsic, so the *category* refusal above
+        // is silent for it — an `Array<Int>` operand is not "a collection a
+        // Text intrinsic takes none of". What speaks instead is ADR 0064's
+        // Decision 4, because an array's layout is one the lowering knows
+        // statically and a walk is what it composes for one. Both halves are
+        // asserted here: the sentence is the boundary's and not the
+        // category's, and there is one per operand.
         let held = calling(
             crate::Intrinsic::ValueOrder,
             INT,
             vec![Repr::Int, Repr::Ref, Repr::Ref],
             vec![array(1), array(2)],
         );
-        assert_eq!(faults(&held), Vec::<String>::new());
+        assert_eq!(
+            faults(&held),
+            vec![
+                "passes operand 0 of `Value.order` a `Array<Int>`, whose layout it knows \
+                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
+                 alone, and a known layout is a walk `lower::synth` writes",
+                "passes operand 1 of `Value.order` a `Array<Int>`, whose layout it knows \
+                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
+                 alone, and a known layout is a walk `lower::synth` writes",
+            ]
+        );
     }
 
     /// A closure call's destination is checked like every other call's.
