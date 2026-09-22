@@ -927,7 +927,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// 111 functions against 11,278 in 109, which is the two new bodies arriving
 /// and seventeen `IntrinsicCall` sites leaving, and cq at 6,429 in 75 against
 /// 6,355 in 74.
-const FORWARDABLE_COPIES: usize = 2845;
+///
+/// **The forty-first rise is one new row and nothing else.** 2845 to 2872,
+/// 174 programs to 175, and all twenty-seven are
+/// `tests/e2e:values_string_chars` — seven in the `prod` column and twenty in
+/// the `ret` column. The check the paragraphs above prescribe says the rest:
+/// the survey with that directory removed is **2845 exactly**, over the same
+/// 174 programs, the same 17,970 functions and the same 356,268 instructions
+/// the row before it left.
+///
+/// The program is ADR 0064's Decision 6 corpus for `String.chars`, issue
+/// #454's Step 3, landed before a line of the reimplementation. Its `ret`
+/// column is twenty again and its `prod` column is the highest an e2e corpus
+/// here has had, and the two numbers have the same cause: this operation
+/// answers an `Array<String>`, so every helper *produces* a collection and
+/// then holds it still while it asks it four questions. `fromPoints`,
+/// `repeated` and `cycled` each build a `Vector` and answer
+/// `Ok("".join(out.freeze()))` — a produce, a copy and a `return` in one
+/// expression — and `show` and `digest` bind the answered array before they
+/// count anything in it.
+const FORWARDABLE_COPIES: usize = 2872;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
