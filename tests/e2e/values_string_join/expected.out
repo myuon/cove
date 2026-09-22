@@ -1,0 +1,29 @@
+empty.plain parts 0 sep [44 32] chars 0 bytes 0 [] <>
+empty.none parts 0 sep [] chars 0 bytes 0 [] <>
+empty.wide parts 0 sep [227 131 187] chars 0 bytes 0 [] <>
+one.plain parts 1 sep [44 32] chars 4 bytes 4 [115 111 108 111] <solo>
+one.long parts 1 sep [45 45 45 45 45] chars 4 bytes 4 [115 111 108 111] <solo>
+one.empty parts 1 sep [45] chars 0 bytes 0 [] <>
+one.wide parts 1 sep [240 159 152 128] chars 2 bytes 6 [230 151 165 230 156 172] <日本>
+count.one parts 1 sep [45] chars 0 bytes 0 [] <>
+count.two parts 2 sep [45] chars 1 bytes 1 [45] <->
+count.three parts 3 sep [45] chars 2 bytes 2 [45 45] <-->
+count.four parts 4 sep [45] chars 3 bytes 3 [45 45 45] <--->
+count.three.two parts 3 sep [45 45] chars 4 bytes 4 [45 45 45 45] <---->
+count.three.wide parts 3 sep [227 131 187] chars 2 bytes 6 [227 131 187 227 131 187] <・・>
+sep.none parts 4 sep [] chars 6 bytes 6 [97 98 99 100 101 102] <abcdef>
+sep.ascii parts 3 sep [44 32] chars 16 bytes 16 [65 108 105 99 101 44 32 66 111 98 44 32 67 97 114 97] <Alice, Bob, Cara>
+sep.empty.part parts 3 sep [45] chars 4 bytes 4 [97 45 45 98] <a--b>
+sep.only.empties parts 3 sep [] chars 0 bytes 0 [] <>
+wide.kana parts 4 sep [227 131 187] chars 7 bytes 22 [227 129 130 227 131 187 227 129 132 227 129 134 227 131 187 227 131 187 240 159 152 128] <あ・いう・・😀>
+wide.sep parts 2 sep [240 159 152 128] chars 4 bytes 12 [195 169 240 159 152 128 230 151 165 230 156 172] <é😀日本>
+wide.both parts 3 sep [226 128 148] chars 8 bytes 18 [195 169 240 159 152 128 226 128 148 97 98 99 226 128 148 227 129 130] <é😀—abc—あ>
+built.vector parts 3 sep [44 32] chars 19 bytes 19 [112 97 114 116 48 44 32 112 97 114 116 49 44 32 112 97 114 116 50] <part0, part1, part2>
+built.slices parts 3 sep [124] chars 7 bytes 11 [195 169 124 240 159 152 128 124 97 98 99] <é|😀|abc>
+built.split parts 4 sep [44] chars 6 bytes 6 [97 44 98 44 44 99] <a,b,,c>
+built.finish parts 2 sep [60 62] chars 4 bytes 4 [97 60 62 98] <a<>b>
+nest.parts parts 2 sep [43] chars 7 bytes 7 [97 45 98 43 97 45 98] <a-b+a-b>
+nest.separator parts 2 sep [47] chars 6 bytes 6 [120 97 45 98 121 47] <xa-by/>
+large.ascii parts 1000 chars 8888 bytes 8888 sum 667144 head <part0, part1, part2, par> tail <art997, part998, part999>
+large.none parts 1000 chars 6890 bytes 6890 sum 591220 head <part0part1part2part3part> tail <996part997part998part999>
+large.wide parts 500 chars 2389 bytes 4887 sum 683675

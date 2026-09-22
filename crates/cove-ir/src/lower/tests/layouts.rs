@@ -245,6 +245,14 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // and then the `Result` around it.
             "Error",
             "Result",
+            // `std.string.join` takes an `Array<String>`, and it is the first
+            // non-generic library function whose *signature* names a
+            // collection at all — `std.array`'s are generic and are interned
+            // only where a program instantiates one. Issue #454's Step 3 put
+            // it here: the run of one-word references is a family, so
+            // `Array<String>` and `Array<Int>` are one layout and this row is
+            // every array a program will ever have.
+            "Array",
             // The one *declaration* in this list, and it is here because
             // `lower` lowers a whole package: `std.stringbuilder` is attached
             // to every package, and a method of it names its own receiver, so

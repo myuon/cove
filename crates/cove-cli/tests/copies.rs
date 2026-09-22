@@ -886,7 +886,48 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// difference is that `slice` answers a `String` and this answers a `Result`,
 /// and an `Err` built in one branch and returned from another is the shape
 /// this column exists to count.
-const FORWARDABLE_COPIES: usize = 2808;
+///
+/// **The thirty-ninth rise is one new row and nothing else.** 2808 to 2834,
+/// 172 programs to 173, and all twenty-six are `tests/e2e:values_string_join`
+/// — six in the `prod` column and twenty in the `ret` column. The overlap
+/// between the two sub-totals is 49 before and after, so nothing moved between
+/// the columns. The check the paragraphs above prescribe says the rest: the
+/// survey with that directory removed is **2808 exactly**, over the same 172
+/// programs, the same 17,591 functions and the same 339,368 instructions the
+/// row before it left.
+///
+/// The program is ADR 0064's Decision 6 corpus for `String.join`, issue #454's
+/// Step 3, landed before a line of the reimplementation and — like the row
+/// before it — without a benchmark of its own, so that the corpus rise and the
+/// migration rise can be told apart afterwards. Its `ret` column of twenty is
+/// the highest any e2e corpus here has had, and it is one shape repeated:
+/// eight small `Result<Unit, Error>` helpers and three `show*` printers, each
+/// of which binds the join it is about to ask four questions of and then
+/// answers `Ok(())`. A corpus for an operation whose answer has to be
+/// *measured* rather than merely printed looks like this — `bytesOf`,
+/// `checksum` and every `show*` hold the answered `String` still while they
+/// read it.
+///
+/// **The fortieth rise is one new row, and the migration beside it adds
+/// nought.** 2834 to 2845, 173 programs to 174, and all eleven are
+/// `benches/join` — the microbenchmark that lands with the migration rather
+/// than with the corpus, which is why the two rises are a commit apart. The
+/// survey with that directory removed is **2834 exactly**.
+///
+/// What does move there is the function and the instruction count, and that is
+/// the migration rather than the bench: 17,697 functions and 341,648
+/// instructions become 17,870 and 354,294 with the bench still removed — plus
+/// **one function and 73 instructions in every one of the 173**, which is
+/// `std.string.join` appearing in a survey that lowers a *package* rather than
+/// an entry. It adds **no copy at all**, which is `std.string.slice`'s result
+/// and for `slice`'s reason: the body answers a `String` rather than a
+/// `Result`, so there is no `Err` built in one branch and returned from
+/// another for this column to count. No shipped program carries the 173
+/// either — `cove run --boundary` reports covefmt at 11,219 instructions in
+/// 111 functions against 11,278 in 109, which is the two new bodies arriving
+/// and seventeen `IntrinsicCall` sites leaving, and cq at 6,429 in 75 against
+/// 6,355 in 74.
+const FORWARDABLE_COPIES: usize = 2845;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

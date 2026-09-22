@@ -806,3 +806,170 @@ fn refuseRange(text: String, from: Int, to: Int) -> Result<String, Error> {
   }
   return Err(Error(message))
 }
+
+/// `parts` with this string between each pair of them.
+///
+/// **The receiver is the separator**, so it is `", ".join(names)` and never
+/// `names.join(", ")`. The schema has declared it that way for as long as the
+/// method has existed — `fixed(&[C::Str, C::Strings], C::Str)` — and the
+/// parameter order here is that declaration read out loud. It is the one thing
+/// about this operation a reader gets wrong, and gets wrong twice.
+///
+/// # One separator fewer than there are parts
+///
+/// That sentence is the whole of the arithmetic, and it is why this is Cove
+/// rather than an operation of the machine. ADR 0064's Decision 2 asks whether
+/// an operation's only failures are ones the program wrote; a count of the
+/// *gaps* between things is not a failure at all, it is a policy over a
+/// representation, and ADR 0058's table gives those to the standard library.
+/// Nothing below it should have to know that joining three things uses two
+/// separators.
+///
+/// It settles three answers at once, and each is a row of
+/// `tests/e2e/values_string_join`:
+///
+/// - an **empty array** is `""`, whatever the separator is — there is no part
+///   to write and no gap between two parts to put a separator in, so a
+///   three-byte separator contributes nothing. It is the early `return` below,
+///   which also makes `count - 1` safe for everything after it;
+/// - **one part** is that part, and the separator **is not used**, however
+///   wide it is;
+/// - `n` **empty** parts under a one-byte separator is `n - 1` bytes, which is
+///   the row that tells this arithmetic from an implementation that writes one
+///   separator per part.
+///
+/// # The length is known before a byte is written, and that is what makes the
+/// # move affordable
+///
+/// A join is the one string-building operation that can size its own answer:
+/// the parts' lengths summed, plus the separator's times one fewer than the
+/// parts. So the loop below sums first and allocates once at exactly that
+/// size, which is what `vm::intrinsics::text::joined_bytes` did in Rust with
+/// `new_string_of`, and the run **grows nought times**. Measured rather than
+/// assumed: `examples/covefmt` reallocates 607,602 stores either side of this
+/// change, to the store, and the 31 joins in the e2e corpus — which include a
+/// thousand-part one — add none.
+///
+/// That matters more here than anywhere else in this file, because this is the
+/// first operation issue #454 has moved that a shipped program runs in
+/// quantity. A body that let the buffer grow instead would pay a reallocation
+/// and a copy of everything written so far, per growth, 8,742 times over.
+///
+/// # Why ADR 0062's window is written out here rather than taken from
+/// # `StringBuilder`
+///
+/// [`fromCodePoint`] above builds its answer through `std.stringbuilder`, and
+/// the obvious thing is for this to do the same. It was written that way
+/// first, and the two were measured against each other on covefmt over seven
+/// interleaved rounds: the builder costs **four more instructions per part** —
+/// an `addr-of-slot`, a `load` and two `clear`s per iteration, which is a
+/// `var` builder being re-derived from its frame slot every turn of a loop
+/// that runs 1,465,687 times — for **+5,910,658 instructions**, 0.59% of the
+/// whole program, and 6.015 ms against 5.983 ms at the median, the branch
+/// losing 6 pairs of 7. The allocations and the growths are identical either
+/// way, so this is a pure instruction-count difference and the sign of it is
+/// not in doubt.
+///
+/// So the three `core.bytes*` calls are here, in the frame of the loop that
+/// makes them, which is the same reason `std.stringbuilder.appendText` and
+/// `std.int.renderInto` take a `ByteBuffer` rather than a builder: an assembly
+/// holds the run, not a handle to it. `let buffer` rather than `var` is the
+/// whole of the difference — a growable is ADR 0052's stable owner, so a local
+/// binding of it names the same owner an append replaces the store under, and
+/// nothing here has to be told when that happens.
+///
+/// # Two loops, because the separator a real program passes is `""`
+///
+/// The empty separator gets a loop of its own instead of a `width == 0` test
+/// inside one loop, and that is not a guess about which is common. Of
+/// `examples/covefmt`'s 8,742 calls, 757 hand over an empty array and return
+/// above; **all 7,985 of the rest take the `width == 0` arm**, and the
+/// instruction profile of the other arm reports nought executions at every one
+/// of its program counters. `"".join(out.freeze())` is how that program
+/// assembles every line it prints. So the branch that is never taken is the
+/// one with the separator in it, and a comparison per part to find that out
+/// would be paid 1,465,687 times.
+///
+/// # What the move cost
+///
+/// Counted at `1796f23` against this, both binaries pointed at one pristine
+/// root, on `examples/covefmt` — 8,742 calls, 7,985 of them building, over
+/// **1,465,687 parts**, which is 184 parts a call:
+///
+/// ```text
+///                        intrinsic          Cove        delta
+///   instructions       965,939,026   995,431,204       +3.05%
+///   dispatches         915,665,847   936,365,051       +2.26%
+///   allocations          4,732,157     4,739,385       +0.15%
+///   allocated words     59,723,366    59,751,331      +0.047%
+///   collections                 14            14            0
+///   growths                607,602       607,602            0
+/// ```
+///
+/// **The cost is instructions and not allocation**, which is the opposite of
+/// what the round before this one found for [`fromCodePoint`] and is the whole
+/// of why this migration was affordable. Twenty instructions a part — seven in
+/// the sum loop and thirteen in the append loop — and against them, per
+/// *building* call, one extra allocation and about three and a half extra
+/// words: `Inst::GrowableAlloc` makes ADR 0052's owner as well as its store,
+/// where `new_string_of` made one object. Spread over a program, that is
+/// 0.15% more allocations and 0.047% more allocated words. `examples/cq` calls
+/// it four times and moves by 636 instructions, 4 allocations and 12 words.
+///
+/// **Sizing the run is what keeps the allocation figure that small, and the
+/// alternative was measured rather than reasoned about.** The same body with
+/// the sum loop deleted and `core.bytesAllocate(0)` in its place answers every
+/// row of `tests/e2e/values_string_join` identically and costs 10,323,689
+/// fewer instructions — but covefmt's growths rise 607,602 to **626,815**, its
+/// allocations by a further 19,213, its **allocated words by 2,522,104
+/// (+4.22%)**, and its collections from 14 to 15. So the sum loop buys a
+/// hundredfold reduction in the allocation delta for one percent of the
+/// program's instructions, and ADR 0064's Decision 8 gates on the allocation.
+///
+/// **What none of this can tell you is the wall clock.** Both figures above
+/// are exact counts. The interleaved timings are not attributable: a control
+/// that never calls `join` and executes an instruction stream identical to the
+/// instruction — `benches/bytescan` — moves by the same +4.6% the subject
+/// does, and four rebuilds of each source, three of them with a code-layout
+/// probe inside `vm/exec.rs`, put that difference in two clusters 4.6% apart
+/// rather than in one spread. The commit that made this change records the
+/// tables and the experiment.
+export fn join(separator: String, parts: Array<String>) -> String {
+  let count = core.arrayLength(parts)
+  if count == 0 {
+    return ""
+  }
+  let width = core.byteLength(separator)
+  var total = width * (count - 1)
+  for part in parts {
+    total += core.byteLength(part)
+  }
+  let buffer = core.bytesAllocate(total)
+  if width == 0 {
+    for part in parts {
+      let size = core.byteLength(part)
+      let at = core.bytesLength(buffer)
+      core.bytesEnsure(buffer, size)
+      core.bytesCopy(buffer, at, part, 0, size)
+      core.bytesCommit(buffer, size)
+    }
+  } else {
+    var first = true
+    for part in parts {
+      if first {
+        first = false
+      } else {
+        let gap = core.bytesLength(buffer)
+        core.bytesEnsure(buffer, width)
+        core.bytesCopy(buffer, gap, separator, 0, width)
+        core.bytesCommit(buffer, width)
+      }
+      let size = core.byteLength(part)
+      let at = core.bytesLength(buffer)
+      core.bytesEnsure(buffer, size)
+      core.bytesCopy(buffer, at, part, 0, size)
+      core.bytesCommit(buffer, size)
+    }
+  }
+  core.bytesFinish(buffer)
+}

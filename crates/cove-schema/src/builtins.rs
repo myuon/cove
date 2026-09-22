@@ -1099,6 +1099,22 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "slice",
     },
+    // `join` is the second binding whose body **builds** a string, and the
+    // first of any of them that a shipped program runs in quantity —
+    // `examples/covefmt` calls it 8,742 times from 17 sites. What it decides
+    // is that there is one separator fewer than there are parts, which is an
+    // arithmetic policy over a representation and not an operation of the
+    // machine; what is under it is `std.stringbuilder` sized by that same
+    // arithmetic, so the run is allocated once at the answer's exact length
+    // and grows nought times, which is what the Rust arm's `new_string_of`
+    // did and is why this could move at all.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "join",
+        module: "std.string",
+        function: "join",
+    },
     // The fourth predicate, and the one that needed something underneath it.
     // `startsWith` and `endsWith` compare at an offset the caller's own
     // argument bounds, so a Cove loop over `byteAt` is the whole of each;
