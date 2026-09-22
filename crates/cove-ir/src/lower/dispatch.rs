@@ -69,6 +69,7 @@ use super::frame::Val;
 use super::gap;
 use super::pattern::UNPLACED;
 use super::shapes;
+use super::synth;
 use super::{Body, CallShape, Dest, PENDING};
 use crate::inst::{CmpOp, Compare, Inst, Len, Slot};
 use crate::layout::LayoutId;
@@ -254,6 +255,102 @@ impl Body<'_> {
             span,
         );
         Some(dst)
+    }
+
+    /// The three standard-library appends [`super::synth`]'s rendering walk
+    /// is composed out of, resolved once per lowering and recorded on the
+    /// [`Pool`](super::Pool).
+    ///
+    /// [`Body::call_library`]'s resolution without its emission. A walk emits
+    /// its own calls, out of a `Pool` that has no `Plan` to resolve a name
+    /// with and no slice to record a want against, so the call site that
+    /// first asks for a rendering does both on its behalf — see
+    /// [`synth::Leaves`].
+    ///
+    /// All three are asked about even when the first is missing, so that a
+    /// package whose slice has none of them converges in one more round
+    /// rather than in three.
+    ///
+    /// `None` is that round, or a gap already reported. The caller renders
+    /// that piece through the intrinsic instead, which is sound because a
+    /// round that wanted anything is discarded whole: `lower_roots` verifies
+    /// only the round that wants nothing.
+    pub(super) fn render_leaves(&mut self, span: Span) -> Option<synth::Leaves> {
+        if let Some(leaves) = self.pool.leaves {
+            return Some(leaves);
+        }
+        let text = self.library_leaf(
+            "std.stringbuilder",
+            "appendText",
+            &[shapes::BYTE_BUFFER, shapes::STR],
+            span,
+        );
+        let byte = self.library_leaf(
+            "std.stringbuilder",
+            "appendByteInto",
+            &[shapes::BYTE_BUFFER, shapes::INT],
+            span,
+        );
+        let digits = self.library_leaf(
+            "std.int",
+            "renderInto",
+            &[shapes::INT, shapes::BYTE_BUFFER],
+            span,
+        );
+        let leaves = synth::Leaves {
+            text: text?,
+            byte: byte?,
+            digits: digits?,
+        };
+        self.pool.leaves = Some(leaves);
+        Some(leaves)
+    }
+
+    /// One standard-library function a lowering composes calls to, found by
+    /// module and name and checked against the parameters those calls will
+    /// pass.
+    ///
+    /// The check is [`Body::call_library`]'s `fits`, asked of layouts the
+    /// caller names rather than of operands it holds — because what will be
+    /// emitted has not been emitted yet, and a walk that discovered the
+    /// mismatch would discover it with the call already in the code.
+    fn library_leaf(
+        &mut self,
+        module: &str,
+        function: &str,
+        params: &[LayoutId],
+        span: Span,
+    ) -> Option<FunctionId> {
+        let Some(id) = self.plan.resolve(self.checked, module, function) else {
+            self.errors.push(gap::gap(
+                &format!(
+                    "`{module}.{function}` names no function — the package is missing the \
+                     standard library module `cove_sema::stdlib::attach` adds"
+                ),
+                span,
+            ));
+            return None;
+        };
+        if !self.reached(id) {
+            return None;
+        }
+        let shape = self.shape(id)?;
+        let fits = !shape.receiver
+            && !shape.variadic
+            && !shape.is_async
+            && shape.returns == shapes::UNIT
+            && shape.params == params;
+        if !fits {
+            self.errors.push(gap::gap(
+                &format!(
+                    "`{module}.{function}` does not take the operands a rendering walk composes \
+                     it out of"
+                ),
+                span,
+            ));
+            return None;
+        }
+        Some(id)
     }
 
     /// Which argument fills each written parameter.

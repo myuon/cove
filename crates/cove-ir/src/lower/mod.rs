@@ -1210,6 +1210,16 @@ struct Pool {
     /// a layout that reaches itself finds the number rather than starting
     /// again.
     synthesized: HashMap<(synth::Operation, LayoutId), FunctionId>,
+    /// The three standard-library appends a rendering walk is composed out
+    /// of, once the first call site has resolved them.
+    ///
+    /// [`synth::Leaves`] says why they are here rather than passed down: a
+    /// walk emits ordinary calls and a call needs a [`FunctionId`], which is
+    /// [`Plan::resolve`]'s and [`Body::reached`]'s to give and neither is
+    /// reachable from a `Pool`. `None` until `Body::render_leaves` has found
+    /// all three, and `None` for every program that interpolates nothing but
+    /// a `String` and an `Int`.
+    leaves: Option<synth::Leaves>,
     /// The instantiations being lowered right now, outermost first.
     ///
     /// A chain rather than a count, because what a program that exceeds the
@@ -1249,6 +1259,7 @@ impl Pool {
             instances: HashMap::new(),
             instance_ids: HashMap::new(),
             synthesized: HashMap::new(),
+            leaves: None,
             open: Vec::new(),
         }
     }

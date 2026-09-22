@@ -80,16 +80,44 @@
 //! the walk, of one table — `ordered_by`'s arrangement, and `Body::always_admitted`
 //! before this module had an arm for the operation.
 //!
-//! # Nothing here allocates, and one walk may refuse
+//! # Three of the four walks allocate nothing, and the fourth allocates by
+//! nature
 //!
-//! Every instruction this emits is a load, a comparison, a branch, an
-//! [`Inst::Trap`] or a call into another function of the same kind, and no
-//! intrinsic it can reach declares `MAY_ALLOCATE`. So no collection can
-//! happen inside a synthesized walk, and a reference temporary this leaves
-//! live across a loop turn cannot be holding a stale address when a collector
-//! reads it. That is why there is no [`Inst::Clear`] here, and it is a fact
-//! about the walk rather than a convention: an arm added later that allocates
-//! owes the clears that go with it.
+//! This paragraph used to say *nothing here allocates*, as a fact about every
+//! instruction the module emits, and [`Operation::Rendering`] is the arm that
+//! made it false. A rendering's whole business is to put bytes in a buffer:
+//! it calls `std.stringbuilder`'s `appendText` and `appendByteInto` and
+//! `std.int`'s `renderInto`, each of which is [ADR 0062]'s ensure, write and
+//! commit, and an *ensure* that does not fit grows the buffer's store. So a
+//! collection can happen part way through a rendering walk, and a reader who
+//! believed the old sentence would have reasoned wrongly about exactly the
+//! arm that needs the reasoning.
+//!
+//! What is true of all four, and is what the old sentence was reaching for:
+//!
+//! - [`Operation::Equality`], [`Operation::Order`] and
+//!   [`Operation::Admission`] emit only loads, comparisons, branches,
+//!   [`Inst::Trap`]s and calls to walks of their own kind, and no intrinsic
+//!   any of them reaches declares `MAY_ALLOCATE`. Nothing can collect inside
+//!   one.
+//! - [`Operation::Rendering`] can collect at every append. It still owes no
+//!   [`Inst::Clear`], and the reason is what a clear is *for*: a clear ends
+//!   the **retention** a static [`crate::repr::RefMap`] would otherwise give
+//!   a dead slot, and it is never a safety obligation — an address a live
+//!   frame's map still names is traced, so it is never stale and never
+//!   dangling (`super::tails` says the same thing from the other side).
+//!   What a rendering walk retains is one element of the run it is walking,
+//!   in a slot the next turn overwrites, until its own frame is popped a few
+//!   instructions later. That is the position `super::tails` exists to drop
+//!   a clear *from*.
+//!
+//! So an arm added later that allocates owes the clears that its own shape
+//! earns, and this one earns none. An arm that held a reference across an
+//! unbounded amount of work — a run of appends whose length is the *value's*
+//! rather than the layout's — would be a different answer, and the sentence
+//! to check it against is the one above rather than the one this replaced.
+//!
+//! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 //!
 //! What [`Operation::Order`] adds is a walk that can *fail*. A `Float` and a
 //! mutable handle are not keys, so where equality falls through to `false`
@@ -105,10 +133,11 @@
 use std::sync::Arc;
 
 use cove_diag::Span;
+use cove_schema::builtins::{ERROR, MESSAGE_FIELD, RANGE};
 
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Pc, Slot};
 use crate::intrinsic::Intrinsic;
-use crate::layout::{Case, Layout, LayoutId, Shape};
+use crate::layout::{Case, Field, Layout, LayoutId, Shape};
 use crate::program::{Arg, Function, FunctionId, IntrinsicSite, Table, TableId};
 use crate::repr::{RefMap, Repr};
 
@@ -125,8 +154,7 @@ pub(super) const MODULE: &str = "<synth>";
 
 /// One layout-directed operation ADR 0064's Decision 3 names.
 ///
-/// Two of the five are still to come — `ValueRenderInto` is a walk of the
-/// same shape over the same table, and `ValueRefuseDuplicate` is an error
+/// One of the five is still to come — `ValueRefuseDuplicate` is an error
 /// construction blocked on issue #461 — and the key of the memo is the
 /// *pair* rather than the layout so that adding one is a variant here and an
 /// arm in [`Synth::body`] rather than a second memo.
@@ -171,6 +199,33 @@ pub(crate) enum Operation {
     /// instruction where a `branch-true` would be two, since the instruction
     /// set has only the one.
     Admission,
+    /// `core.renderInto(value, buffer)`: the text of one value of a layout,
+    /// appended to the byte buffer an interpolation is being assembled in.
+    ///
+    /// Two things make this a fourth shape of walk, and neither of them is
+    /// the table being walked — which is the same [`Shape`] table the other
+    /// three read.
+    ///
+    /// **It is a composition of calls rather than of comparisons.** The
+    /// other three end at an [`Inst::Cmp`]; every leaf of this one is a
+    /// `call`, of `std.stringbuilder`'s `appendText` or `appendByteInto` for
+    /// a literal and of `std.int`'s `renderInto` for a number. Those are the
+    /// same three bodies `super::interpolate` already appends a piece
+    /// through, reached the same way, so no lowering writes [ADR 0062]'s
+    /// ensure-store-commit window a second time. [`Leaves`] is how a walk
+    /// gets at them, because resolving a name is `Plan` and `Body`'s and a
+    /// [`Pool`] has neither.
+    ///
+    /// **It has a written second operand.** The buffer is a parameter, not
+    /// an answer: a byte buffer is a handle (ADR 0052), so a callee's
+    /// appends are its caller's and a level of nesting costs no `String` at
+    /// all. What the function answers is `()`, which is why nothing here
+    /// uses [`Synth::leaves`](Synth::leave) — a rendering never stops early,
+    /// every part of a value is shown, and the joins it does need are local
+    /// to the `switch` or the branch that opened them.
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    Rendering,
 }
 
 impl Operation {
@@ -180,6 +235,7 @@ impl Operation {
             Operation::Equality => "equals",
             Operation::Order => "order",
             Operation::Admission => "refuses",
+            Operation::Rendering => "renders",
         }
     }
 
@@ -189,18 +245,22 @@ impl Operation {
             Operation::Equality => shapes::BOOL,
             Operation::Order => shapes::INT,
             Operation::Admission => shapes::BOOL,
+            Operation::Rendering => shapes::UNIT,
         }
     }
 
     /// What it takes, in order.
     ///
-    /// Two values of the layout for a comparison, and one for the admission,
-    /// which needs neither of `core.admitKey`'s two names: they word a
-    /// refusal, and this walk does not word one.
+    /// Two values of the layout for a comparison, one for the admission,
+    /// which needs neither of `core.admitKey`'s two names — they word a
+    /// refusal, and this walk does not word one — and for the rendering the
+    /// value and the buffer its text is appended to, in that order, which is
+    /// `Value.renderInto`'s own.
     fn params(self, layout: LayoutId) -> Vec<LayoutId> {
         match self {
             Operation::Equality | Operation::Order => vec![layout, layout],
             Operation::Admission => vec![layout],
+            Operation::Rendering => vec![layout, shapes::BYTE_BUFFER],
         }
     }
 }
@@ -320,6 +380,161 @@ pub(crate) fn admission(layouts: &[Layout], layout: LayoutId) -> Admission {
     walk(layouts, layout, &mut Vec::new())
 }
 
+/// The three standard-library appends a rendering walk is composed out of.
+///
+/// A synthesized walk emits ordinary [`Inst::Call`]s and a call needs a
+/// [`FunctionId`]. Turning `std.stringbuilder.appendText` into one is
+/// `Plan::resolve`'s and `Body::reached`'s, and a [`Pool`] has neither — so
+/// the call site that first asks for a rendering resolves all three, and
+/// every walk that ask reaches reads them from here.
+///
+/// They are the same three bodies [`super::interpolate`] appends a piece
+/// through. That is the point rather than a convenience: each is
+/// [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+/// ensure, write and commit written once in Cove, expanded at every site by
+/// `super::inline` and recognised by [`crate::legalize`], and a lowering
+/// that emitted the window itself would be the second copy that module's
+/// header says there is not.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Leaves {
+    /// `std.stringbuilder.appendText(buffer, text)`: a whole `String`.
+    pub(super) text: FunctionId,
+    /// `std.stringbuilder.appendByteInto(buffer, value)`: one byte, which is
+    /// what a one-character separator or bracket is.
+    pub(super) byte: FunctionId,
+    /// `std.int.renderInto(value, buffer)`: the decimal text of an `Int`,
+    /// one digit at a time.
+    pub(super) digits: FunctionId,
+}
+
+/// How a value of one layout becomes text.
+///
+/// [`ordered_by`]'s arrangement for the rendering: **one table, asked by the
+/// call site and by the walk**, so that the two cannot disagree about which
+/// of them writes a part. [`walks`]'s `Rendering` arm is this function and
+/// nothing else, and so is `super::interpolate`'s choice of append.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rendered {
+    /// The bytes themselves, appended whole by [`Leaves::text`].
+    ///
+    /// A `String` renders as its bytes — **unquoted and unescaped**, which
+    /// is what makes `"{name}"` interpolation rather than a debug form — so
+    /// the whole of rendering one is the append `super::interpolate`'s
+    /// `Ty::Str` arm already makes for a piece.
+    Text,
+    /// One digit at a time, by [`Leaves::digits`].
+    Digits,
+    /// A walk [`Synth::rendering`] writes.
+    Walk,
+    /// The runtime's own rendering walk.
+    ///
+    /// ADR 0064's Decision 4, and **this is the operation whose fallback is
+    /// reached from more than a [`Shape::Boxed`]** — which is a real
+    /// widening of that decision rather than a reading of it, and is written
+    /// down here because [`crate::verify`] checks exactly this list.
+    ///
+    /// Four shapes reach it, in two kinds:
+    ///
+    /// - a **layout that does not say what the value is**. A [`Shape::Boxed`]
+    ///   keeps its [`LayoutId`] in payload word 0, and a bare `Repr::Ref`
+    ///   word is an address whose object's family is read off the object.
+    ///   There is nothing here for a walk to be directed by. This is
+    ///   Decision 4 exactly as the other three operations have it.
+    /// - a **scalar whose text no Cove body can write**. A `Float` renders
+    ///   as the shortest decimal that reads back as itself, which is Rust's
+    ///   `{}` and is a dragon-4 class algorithm; `Float.format` is not it,
+    ///   and ADR 0064's own census puts that variant's migration (row 24) at
+    ///   a phase this one does not wait for. A `Duration` renders in the
+    ///   largest of six units that divides it exactly, which *is* ordinary
+    ///   Cove — a table and a remainder — but it is `std.duration`'s policy
+    ///   to write rather than a walk's to inline, and no `std.duration`
+    ///   function renders one today.
+    ///
+    /// So a `Float` field of a struct reaches the intrinsic at that field
+    /// and the struct around it is still a walk. That is the whole of what
+    /// the widening buys, and it is why it is a *leaf* rule rather than a
+    /// whole-layout one: a `Point { x: Float, y: Float }` that fell back
+    /// whole would take its name, its field labels and its punctuation back
+    /// below with it.
+    Dynamic,
+}
+
+/// Which of the four [`Rendered`] a value of this shape is.
+///
+/// Asked of a [`Shape`] and not of a [`LayoutId`] because every answer is
+/// decided by the family alone — which is what lets [`crate::verify`] ask it
+/// of a finished program's layout table without reaching into this module's
+/// [`Pool`].
+pub(crate) fn rendered(shape: &Shape) -> Rendered {
+    match shape {
+        Shape::Str => Rendered::Text,
+        Shape::Word(Repr::Int) => Rendered::Digits,
+        // See [`Rendered::Dynamic`]. `Shape::Free` is here for the reason a
+        // reclaimed run is not a value: there is nothing to walk, and the
+        // runtime's own arm is the one that says so.
+        Shape::Boxed | Shape::Free | Shape::Word(Repr::Ref | Repr::Float | Repr::Duration) => {
+            Rendered::Dynamic
+        }
+        _ => Rendered::Walk,
+    }
+}
+
+/// The declared name of a layout, without the type arguments the
+/// instantiation is identified by.
+///
+/// `crates/cove-runtime/src/vm/boundary.rs`'s `declared`, which is what the
+/// rendering intrinsic reads a struct's name through, written here so that a
+/// walk composed at lowering time spells the name the same way. The first
+/// `<` after the first character, so that the layout table's own bracketed
+/// names — `<free>`, `<synth>` — are left whole rather than reduced to
+/// nothing.
+fn declared(name: &str) -> &str {
+    match name.char_indices().find(|(at, ch)| *at > 0 && *ch == '<') {
+        Some((at, _)) => &name[..at],
+        None => name,
+    }
+}
+
+/// The declared name without its module, which is what a rendering shows.
+///
+/// `boundary::short`. It is applied *after* [`declared`] for the reason that
+/// module gives: a layout's name carries the instantiation's type arguments,
+/// and cutting at the last `.` of `m.Cell<m.Point>` would cut inside the
+/// brackets (#407).
+fn short(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+/// Whether this struct layout is the builtin `Error`, which renders as the
+/// message it carries rather than as the struct it happens to be.
+///
+/// The intrinsic's own test, by name and by the first field's name. Sound
+/// because the name is the checker's and `Error` is a builtin a module
+/// cannot redeclare — and a program that prints an error is printing what
+/// went wrong, where `Error(message: x)` says the same thing twice.
+fn is_error(name: &str, fields: &[Field]) -> bool {
+    name == ERROR.name && fields.first().map(|field| &*field.name) == Some(MESSAGE_FIELD.name)
+}
+
+/// Whether this struct layout is the builtin `Range`, which renders as the
+/// operator it was written with.
+///
+/// `boundary::is_range`, whole rather than by name alone: `1..3` and `1..<4`
+/// cover the same values and are two renderings because they are two values.
+fn is_range(shapes: &shapes::Shapes, layout: LayoutId, name: &str, fields: &[Field]) -> bool {
+    let word = |at: usize, called: &str, repr: Repr| {
+        fields
+            .get(at)
+            .is_some_and(|field| &*field.name == called && shapes.words(field.layout) == [repr])
+    };
+    name == RANGE.name
+        && fields.len() == 3
+        && shapes.words(layout) == [Repr::Int, Repr::Int, Repr::Bool]
+        && word(0, "start", Repr::Int)
+        && word(1, "end", Repr::Int)
+        && word(2, "inclusive", Repr::Bool)
+}
+
 /// The comparison that orders a value of `layout` exactly as a key is
 /// ordered, where one instruction can — and nothing at all where a walk is
 /// needed.
@@ -426,6 +641,19 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
                 }
                 | Shape::Entries { .. }
         ),
+        // The rendering's list is a *complement* and not a list, because
+        // every family has text and only four of them have text a walk
+        // cannot compose. It is [`rendered`] and nothing else, for that
+        // function's reason: the call site asks the same question of the
+        // same table.
+        //
+        // So a `Bool` gets a function of six instructions and a `Unit` one
+        // of two, where the other three operations would have compared them
+        // in place. That is deliberate — `super::inline` expands a leaf that
+        // small at every site and `super::sweep` stands the function down,
+        // so what it costs is nothing, and what it buys is that the call
+        // site has one arm instead of fifteen.
+        Operation::Rendering => matches!(rendered(shape), Rendered::Walk),
     }
 }
 
@@ -490,6 +718,8 @@ pub(super) fn function_for(
         leaves: Vec::new(),
         answer,
         settled: None,
+        literal: None,
+        punctuation: None,
     };
     synth.body(layout, &taken);
     let end = synth.here();
@@ -578,6 +808,20 @@ struct Synth<'p> {
     leaves: Vec<Pc>,
     /// The one slot the answer is written into, by every arm.
     answer: Slot,
+    /// The one `String` slot a rendering walk loads each of its literals
+    /// into, made on first use and reused by every literal after it.
+    ///
+    /// [`Synth::settled`]'s arrangement, for the same reason and with one
+    /// more: nothing reads the slot but the `call` on the very next
+    /// instruction, so a walk of ten literals costs one word rather than
+    /// ten — and the word is a `Repr::Ref`, so ten of them would be ten
+    /// entries in the frame's [`crate::repr::RefMap`] for the collector to
+    /// read at every safepoint of a walk that can collect.
+    literal: Option<Slot>,
+    /// The one `Int` slot a rendering walk loads each of its one-byte
+    /// literals into. [`Synth::literal`]'s counterpart for a bracket, a
+    /// space or a comma, which `appendByteInto` takes as a number.
+    punctuation: Option<Slot>,
     /// The one `Bool` a three-valued walk tests its answer with, made on
     /// first use and reused by every test after it.
     ///
@@ -659,6 +903,7 @@ impl Synth<'_> {
             Operation::Equality => self.equality(layout, taken[0], taken[1]),
             Operation::Order => self.ordering(layout, taken[0], taken[1]),
             Operation::Admission => self.admission(layout, taken[0]),
+            Operation::Rendering => self.rendering(layout, taken[0], taken[1]),
         }
     }
 
@@ -1704,5 +1949,514 @@ impl Synth<'_> {
             site,
             args,
         });
+    }
+
+    // ---- `core.renderInto(value, buffer)` -------------------------------
+
+    /// The whole of a rendering walk: the text of one value of `layout`,
+    /// appended to the buffer at `buffer`.
+    ///
+    /// The `()` is written first and never again. Every append this walk
+    /// makes is a call to a body that answers `()`, and each of them writes
+    /// its answer into this same slot — so the instruction below is what
+    /// covers the two arms that append nothing at all, and the rest is the
+    /// same word rewritten with the same value.
+    ///
+    /// There is no early exit anywhere in here. Equality stops at the first
+    /// difference, the order at the first part that decides and the
+    /// admission at the first part that is refused; a rendering shows every
+    /// part of every value, so [`Synth::leaves`] stays empty and each join —
+    /// a `switch`'s, a `Bool`'s, a loop's — is patched where it was opened.
+    fn rendering(&mut self, layout: LayoutId, at: Slot, buffer: Slot) {
+        self.emit(Inst::Unit { dst: self.answer });
+        let described = self.pool.shapes.layout(layout);
+        let name = described.name.clone();
+        let shape = described.shape.clone();
+        match shape {
+            // `()` is two characters and a `Bool` is one branch and two
+            // literals. Both are here rather than at the call site because
+            // [`walks`] sends them here; see its `Rendering` arm.
+            Shape::Word(Repr::Unit) => self.literal(buffer, "()"),
+            Shape::Word(Repr::Bool) => self.boolean(buffer, at),
+            Shape::Struct { fields, opaque } => {
+                self.record(layout, &name, &fields, opaque, at, buffer)
+            }
+            Shape::Enum { cases, .. } => self.variant(&cases, &name, at, buffer),
+            // An `Array`, and the run a `Vector` keeps its elements in.
+            Shape::Elements { elem, .. } => self.run(elem, at, buffer, "[", "]"),
+            // A set and a map both render inside braces, which is how the
+            // language writes them and why they are ordered families rather
+            // than hashed ones: the order is part of what a program sees.
+            Shape::Members { elem } => self.run(elem, at, buffer, "{", "}"),
+            Shape::Entries { key, value } => self.mapping(key, value, at, buffer),
+            Shape::Vector { elem } => self.vector(elem, at, buffer),
+            // Not Cove values, so nothing renders one deliberately — a
+            // debugger inspecting a run under construction is the only
+            // reader. The bytes of a buffer may not be valid UTF-8 besides.
+            Shape::Bytes => self.literal(buffer, "<byte run>"),
+            Shape::ByteBuffer => self.literal(buffer, "<byte buffer>"),
+            // A cell shows as the handle it is rather than as what it holds:
+            // its contents are reachable only under a `lock`, and rendering
+            // one would be reading it without taking it.
+            Shape::Shared { .. } => self.literal(buffer, "<shared>"),
+            Shape::Closure { .. } => self.literal(buffer, "<fn>"),
+            // An address is a place, a handle is the host's, and a task or a
+            // scope is the scheduler's; interpolating one would be putting
+            // this run's bookkeeping into a string a program prints. A tag is
+            // not a value either, for a reason of its own: it is word 0 of an
+            // enum, and an enum renders whole through its layout.
+            //
+            // Everything else — a `String`, an `Int`, a `Float`, a
+            // `Duration`, a box — is not a walk at all, so [`walks`] made no
+            // function for it and it cannot arrive here.
+            _ => self.no_text(),
+        }
+    }
+
+    /// One part of a rendering: the append where the layout is one, a call
+    /// where it is a walk of its own, and the fallback where it is a layout
+    /// that does not say what the value is or a scalar no Cove body spells.
+    ///
+    /// The one place [`rendered`] is read at run-time-emitting time, and the
+    /// same question `super::interpolate` asks of a whole piece.
+    fn render(&mut self, layout: LayoutId, at: Slot, buffer: Slot) {
+        let shape = self.pool.shapes.layout(layout).shape.clone();
+        match rendered(&shape) {
+            Rendered::Text => {
+                let callee = self.leaves().text;
+                self.append(callee, buffer, at, shapes::STR);
+            }
+            Rendered::Digits => {
+                let callee = self.leaves().digits;
+                // `std.int.renderInto` takes the value *first* and the
+                // buffer second, where the two appends take the buffer
+                // first. Each is its own declaration's order.
+                let args = self.pool.args.intern(vec![
+                    Arg {
+                        slot: at,
+                        layout: shapes::INT,
+                    },
+                    Arg {
+                        slot: buffer,
+                        layout: shapes::BYTE_BUFFER,
+                    },
+                ]);
+                self.emit(Inst::Call {
+                    dst: self.answer,
+                    callee,
+                    args,
+                });
+            }
+            Rendered::Walk => {
+                let callee = function_for(
+                    Operation::Rendering,
+                    layout,
+                    self.pool,
+                    self.decls,
+                    self.span,
+                );
+                let args = self.pool.args.intern(vec![
+                    Arg { slot: at, layout },
+                    Arg {
+                        slot: buffer,
+                        layout: shapes::BYTE_BUFFER,
+                    },
+                ]);
+                self.emit(Inst::Call {
+                    dst: self.answer,
+                    callee,
+                    args,
+                });
+            }
+            Rendered::Dynamic => self.below(layout, at, buffer),
+        }
+    }
+
+    /// A struct: the builtin `Error` and `Range`, an opaque type's bare
+    /// name, and otherwise the declared name and the fields in declaration
+    /// order.
+    fn record(
+        &mut self,
+        layout: LayoutId,
+        name: &str,
+        fields: &[Field],
+        opaque: bool,
+        at: Slot,
+        buffer: Slot,
+    ) {
+        // An opaque type renders as its name and nothing else. Its fields
+        // are the declaring module's own business, and a rendering is read
+        // by whoever the string reaches, so showing them here would publish
+        // through `println` what the checker refuses to let a caller name.
+        if opaque {
+            let text = short(declared(name)).to_string();
+            self.literal(buffer, &text);
+            return;
+        }
+        if is_error(name, fields) {
+            let message = fields[0].clone();
+            self.render(message.layout, at + message.at as Slot, buffer);
+            return;
+        }
+        if is_range(&self.pool.shapes, layout, name, fields) {
+            self.extent(buffer, at);
+            return;
+        }
+        // One literal per gap rather than one per punctuation mark: the
+        // declared name and the first label are one string, and every label
+        // after it carries the `, ` in front of it. A four-field struct is
+        // five appends and four renderings, where a mark at a time would be
+        // nine appends.
+        let mut lead = format!("{}(", short(declared(name)));
+        if fields.is_empty() {
+            lead.push(')');
+            self.literal(buffer, &lead);
+            return;
+        }
+        for (nth, field) in fields.iter().enumerate() {
+            if nth > 0 {
+                lead.push_str(", ");
+            }
+            lead.push_str(&field.name);
+            lead.push_str(": ");
+            self.literal(buffer, &lead);
+            lead.clear();
+            self.render(field.layout, at + field.at as Slot, buffer);
+        }
+        self.literal(buffer, ")");
+    }
+
+    /// A `Range`, as the operator it was written with.
+    ///
+    /// `1..3` and `1..<4` cover the same values and are two renderings,
+    /// because they are two values: `==` on ranges compares the bounds a
+    /// program wrote and not the set they describe.
+    fn extent(&mut self, buffer: Slot, at: Slot) {
+        self.render(shapes::INT, at + shapes::RANGE_START as Slot, buffer);
+        let exclusive = self.emit(Inst::BranchFalse {
+            cond: at + shapes::RANGE_INCLUSIVE as Slot,
+            to: PENDING,
+        });
+        self.literal(buffer, "..");
+        let done = self.emit(Inst::Jump { to: PENDING });
+        let other = self.here();
+        self.patch(exclusive, other);
+        self.literal(buffer, "..<");
+        let join = self.here();
+        self.patch(done, join);
+        self.render(shapes::INT, at + shapes::RANGE_END as Slot, buffer);
+    }
+
+    /// The case this value is in, and the parts that case names.
+    ///
+    /// One [`Inst::Switch`] into one arm per case, each arm a literal, its
+    /// parts and a jump to the join. The case name and its opening bracket
+    /// are one literal for [`Synth::record`]'s reason.
+    ///
+    /// The default is an [`Inst::Trap`]. The runtime's own arm words the
+    /// same refusal with the discriminant in it — `` is in case {index} `` —
+    /// and a trap carries one [`crate::StrId`], so this one says
+    /// [`Synth::wrong_case`]'s sentence instead: the words `key::wrong_case`
+    /// already uses, which [`Synth::ranking`] already emits for the same
+    /// reading of the same `switch`. Nothing a checked program holds reaches
+    /// either — the machine bounds-checks what it reads out of an object
+    /// rather than taking the lowering's word for it, which is the same
+    /// reason a `match` the checker proved exhaustive still carries a
+    /// default.
+    fn variant(&mut self, cases: &[Case], name: &str, at: Slot, buffer: Slot) {
+        let switch = self.emit(Inst::Switch {
+            on: at,
+            table: TableId(0),
+        });
+        let mut targets = Vec::with_capacity(cases.len());
+        let mut ends = Vec::with_capacity(cases.len());
+        for case in cases {
+            targets.push(self.here());
+            if case.parts.is_empty() {
+                self.literal(buffer, &case.name);
+            } else {
+                let mut lead = format!("{}(", case.name);
+                for (nth, part) in case.parts.iter().enumerate() {
+                    if nth > 0 {
+                        lead.push_str(", ");
+                    }
+                    self.literal(buffer, &lead);
+                    lead.clear();
+                    // A part's offset is within the payload region, which
+                    // begins after the discriminant.
+                    self.render(part.layout, at + 1 + part.at as Slot, buffer);
+                }
+                self.literal(buffer, ")");
+            }
+            ends.push(self.emit(Inst::Jump { to: PENDING }));
+        }
+        let default = self.here();
+        self.wrong_case(name);
+        let table = self.pool.table(Table { targets, default });
+        let Inst::Switch { table: held, .. } = &mut self.code[switch as usize] else {
+            unreachable!("the switch was emitted a few lines above");
+        };
+        *held = table;
+        let join = self.here();
+        for end in ends {
+            self.patch(end, join);
+        }
+    }
+
+    /// A run of elements between two brackets, `, ` between each pair.
+    fn run(&mut self, elem: LayoutId, at: Slot, buffer: Slot, open: &str, close: &str) {
+        let len = self.alloc(shapes::INT);
+        self.emit(Inst::Len { dst: len, obj: at });
+        self.joined(elem, at, len, buffer, open, close);
+    }
+
+    /// A vector's elements, which are its store's, over the length the
+    /// *vector* carries.
+    ///
+    /// A vector renders like an array, because the indirection is what lets
+    /// it grow without moving and is not a fact about the value. The length
+    /// comes from the vector and not from the store, which is the whole
+    /// reason the two are separate: a store is as long as the last growth
+    /// made it, and the elements past the length are the spare room.
+    fn vector(&mut self, elem: LayoutId, at: Slot, buffer: Slot) {
+        let store = self.pool.shapes.store_of(elem);
+        let len = self.alloc(shapes::INT);
+        self.emit(Inst::LoadField {
+            dst: len,
+            obj: at,
+            at: shapes::VECTOR_LEN,
+            layout: shapes::INT,
+        });
+        let held = self.alloc(store);
+        self.emit(Inst::LoadField {
+            dst: held,
+            obj: at,
+            at: shapes::VECTOR_STORE,
+            layout: store,
+        });
+        self.joined(elem, held, len, buffer, "[", "]");
+    }
+
+    /// A map's entries, `key: value` apiece, between braces.
+    ///
+    /// The entry is `MapEntry`'s own inline layout — the key's words then
+    /// the value's — so one `load-elem` at that width reads both halves and
+    /// the value's offset inside it is the key's width. That is the same
+    /// [`shapes::Shapes::entry_of`] the other three walks read a map with.
+    fn mapping(&mut self, key: LayoutId, value: LayoutId, at: Slot, buffer: Slot) {
+        let entry = self.pool.shapes.entry_of(key, value);
+        let keys = self.pool.shapes.words(key).len() as Slot;
+        let len = self.alloc(shapes::INT);
+        self.emit(Inst::Len { dst: len, obj: at });
+        self.literal(buffer, "{");
+        let each = self.through(len, buffer);
+        let held = self.alloc(entry);
+        self.emit(Inst::LoadElem {
+            dst: held,
+            obj: at,
+            index: each.index,
+            layout: entry,
+        });
+        self.render(key, held, buffer);
+        self.literal(buffer, ": ");
+        self.render(value, held + keys, buffer);
+        self.around(each);
+        self.literal(buffer, "}");
+    }
+
+    /// `len` units of `obj`, rendered and joined between two brackets.
+    fn joined(
+        &mut self,
+        elem: LayoutId,
+        obj: Slot,
+        len: Slot,
+        buffer: Slot,
+        open: &str,
+        close: &str,
+    ) {
+        self.literal(buffer, open);
+        let each = self.through(len, buffer);
+        let held = self.alloc(elem);
+        self.emit(Inst::LoadElem {
+            dst: held,
+            obj,
+            index: each.index,
+            layout: elem,
+        });
+        self.render(elem, held, buffer);
+        self.around(each);
+        self.literal(buffer, close);
+    }
+
+    /// The head of a loop over `len` positions, with the separator every
+    /// position but the first is preceded by already appended.
+    ///
+    /// [`Synth::over`] with the `, ` in it, and the separator is inside the
+    /// loop rather than after each element for the reason a joining ever
+    /// puts it there: what is wanted is `n - 1` separators, and a loop that
+    /// appended one after every element would have to take the last one back
+    /// out. The test is `index != 0` and a `branch-false` over the append,
+    /// which is one comparison and one branch a turn — the instruction set
+    /// has no `branch-true`, so writing it the other way round would be two.
+    fn through(&mut self, len: Slot, buffer: Slot) -> Each {
+        let index = self.alloc(shapes::INT);
+        self.emit(Inst::Int {
+            dst: index,
+            value: 0,
+        });
+        let head = self.here();
+        let more = self.alloc(shapes::BOOL);
+        self.emit(Inst::Cmp {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: more,
+            a: index,
+            b: len,
+        });
+        let done = self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        });
+        self.emit(Inst::CmpImm {
+            op: CmpOp::Ne,
+            dst: more,
+            a: index,
+            value: 0,
+        });
+        let first = self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        });
+        self.literal(buffer, ", ");
+        let body = self.here();
+        self.patch(first, body);
+        Each { index, head, done }
+    }
+
+    /// One literal run of text, appended to the buffer at `buffer`.
+    ///
+    /// One byte is [`Leaves::byte`] of a constant, which needs no string
+    /// loaded and no length; anything longer is a pooled string and
+    /// [`Leaves::text`]. That is `super::interpolate::Body::append_literal`'s
+    /// own choice, made here for the same reason and over the same two
+    /// bodies.
+    fn literal(&mut self, buffer: Slot, text: &str) {
+        match text.as_bytes() {
+            [] => {}
+            [byte] => {
+                let value = i64::from(*byte);
+                let slot = match self.punctuation {
+                    Some(slot) => slot,
+                    None => {
+                        let slot = self.alloc(shapes::INT);
+                        self.punctuation = Some(slot);
+                        slot
+                    }
+                };
+                self.emit(Inst::Int { dst: slot, value });
+                let callee = self.leaves().byte;
+                self.append(callee, buffer, slot, shapes::INT);
+            }
+            _ => {
+                let id = self.pool.string(text);
+                let slot = match self.literal {
+                    Some(slot) => slot,
+                    None => {
+                        let slot = self.alloc(shapes::STR);
+                        self.literal = Some(slot);
+                        slot
+                    }
+                };
+                self.emit(Inst::Str {
+                    dst: slot,
+                    text: id,
+                });
+                let callee = self.leaves().text;
+                self.append(callee, buffer, slot, shapes::STR);
+            }
+        }
+    }
+
+    /// One call of an append: the buffer first, then what is appended.
+    ///
+    /// Its answer is written into [`Synth::answer`], which already holds the
+    /// `()` this function returns and is about to hold it again. A
+    /// destination of its own would be a word per append in a frame that has
+    /// one word of answer.
+    fn append(&mut self, callee: FunctionId, buffer: Slot, slot: Slot, layout: LayoutId) {
+        let args = self.pool.args.intern(vec![
+            Arg {
+                slot: buffer,
+                layout: shapes::BYTE_BUFFER,
+            },
+            Arg { slot, layout },
+        ]);
+        self.emit(Inst::Call {
+            dst: self.answer,
+            callee,
+            args,
+        });
+    }
+
+    /// `true` or `false`, the two words the language writes a `Bool` as.
+    fn boolean(&mut self, buffer: Slot, at: Slot) {
+        let otherwise = self.emit(Inst::BranchFalse {
+            cond: at,
+            to: PENDING,
+        });
+        self.literal(buffer, "true");
+        let done = self.emit(Inst::Jump { to: PENDING });
+        let no = self.here();
+        self.patch(otherwise, no);
+        self.literal(buffer, "false");
+        let join = self.here();
+        self.patch(done, join);
+    }
+
+    /// A value with no text of its own, refused in the runtime's own words.
+    ///
+    /// The sentence is a constant, which is why synthesis may raise it, and
+    /// it is [`Synth::not_a_key`]'s argument again. Not reachable from a
+    /// checked program: the families it answers for are word 0 of an enum,
+    /// an address, a host handle, a task and a task scope, and none of them
+    /// is a type a program can interpolate.
+    fn no_text(&mut self) {
+        let message = self.pool.string("this value has no text of its own");
+        self.emit(Inst::Trap { message });
+    }
+
+    /// ADR 0064's Decision 4 for the rendering, widened by two scalars.
+    ///
+    /// See [`Rendered::Dynamic`], which is the list, and `crate::verify`,
+    /// which is where the list is enforced rather than promised.
+    fn below(&mut self, layout: LayoutId, at: Slot, buffer: Slot) {
+        let site = self.pool.intrinsic_site(IntrinsicSite {
+            intrinsic: Intrinsic::ValueRenderInto,
+            result: shapes::UNIT,
+        });
+        let args = self.pool.args.intern(vec![
+            Arg { slot: at, layout },
+            Arg {
+                slot: buffer,
+                layout: shapes::BYTE_BUFFER,
+            },
+        ]);
+        self.emit(Inst::IntrinsicCall {
+            dst: self.answer,
+            site,
+            args,
+        });
+    }
+
+    /// The three appends this walk is composed out of.
+    ///
+    /// Recorded on the [`Pool`] by the call site that first asked for a
+    /// rendering, because resolving a standard-library name is `Plan`'s and
+    /// `Body::reached`'s and neither is reachable from here. A walk is asked
+    /// for only through that call site, which is what makes this total.
+    fn leaves(&self) -> Leaves {
+        self.pool
+            .leaves
+            .expect("a rendering walk is asked for only after its call site has found the appends")
     }
 }

@@ -519,3 +519,7 @@ allow = ["console"]
 [run.values_value_admit_key]
 entry = "values_value_admit_key.main"
 allow = ["console"]
+
+[run.values_value_render_into]
+entry = "values_value_render_into.main"
+allow = ["console"]

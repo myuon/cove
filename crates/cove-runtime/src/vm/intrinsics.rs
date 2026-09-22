@@ -1204,9 +1204,28 @@ mod tests {
         rendered(build, held, reprs, code, &[Intrinsic::ValueRenderInto])
     }
 
-    /// Runs `code`, then renders the value in slot 0 of `held` into a fresh
-    /// buffer through each of `renderings` in turn, and answers the finished
-    /// text.
+    /// Runs `code`, boxes the value in slot 0 of `held`, then renders the box
+    /// into a fresh buffer through each of `renderings` in turn, and answers
+    /// the finished text.
+    ///
+    /// # Why the value is boxed, which it did not used to be
+    ///
+    /// [ADR 0064]'s Decision 3 made `Value.renderInto` on a piece whose
+    /// layout says what the value is a **walk the lowering composes**, and
+    /// `cove_ir::verify` refuses any site that hands the intrinsic such a
+    /// layout — a rule `crate::vm::exec`'s fixture builder runs like any
+    /// other, because a hand-written program is checked exactly as a lowered
+    /// one is. So a fixture that passed an `Int` where it sits no longer
+    /// describes a program that exists.
+    ///
+    /// Boxing it is not a workaround but the path the arm now *has*: what is
+    /// left below the boundary is a value whose family is a word in its own
+    /// header, the rendering looks through the box (`render_object`'s
+    /// `Shape::Boxed` arm) and reaches `render_value` at the held layout, and
+    /// every assertion below is unchanged to the byte because the text of a
+    /// boxed value is the text of the value.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     fn rendered(
         mut build: Build,
         held: LayoutId,
@@ -1217,11 +1236,18 @@ mod tests {
         let str_layout = build.program.str_layout;
         build.bytes_layout();
         let buffer_layout = build.buffer_layout();
+        let boxed_layout = build.boxed();
         let unit = build.scalar(Repr::Unit);
         let base = reprs.len() as u32;
-        let (capacity, buffer, answer, text) = (base, base + 1, base + 2, base + 3);
-        reprs.extend([Repr::Int, Repr::Ref, Repr::Unit, Repr::Ref]);
-        let operands = build.args(&[(0, held), (buffer, buffer_layout)]);
+        let (erased, capacity, buffer, answer, text) =
+            (base, base + 1, base + 2, base + 3, base + 4);
+        reprs.extend([Repr::Ref, Repr::Int, Repr::Ref, Repr::Unit, Repr::Ref]);
+        let operands = build.args(&[(erased, boxed_layout), (buffer, buffer_layout)]);
+        code.push(Inst::Box {
+            dst: erased,
+            src: 0,
+            layout: held,
+        });
         code.push(Inst::Int {
             dst: capacity,
             value: 16,

@@ -1371,7 +1371,74 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// per row before anything is asked. `benches:admission` is 414 and 43 and 34,
 /// `benches/ordering`'s shape with one row fewer. The two `fail_key_*` cases
 /// are a handful apiece.
-const FORWARDABLE_COPIES: usize = 9066;
+///
+/// **The fifty-sixth move is a rise of 63, and every one of them is one new
+/// program.** 9066 to 9129, 204 programs to 205: `values_value_render_into`,
+/// which pins what `"{x}"` renders family by family ahead of
+/// `Intrinsic::ValueRenderInto` becoming layout-directed IR.
+///
+/// Pinned rather than assumed, the same way the move above it was, by running
+/// the survey over the same tree with the case held out and then put back:
+///
+/// | | programs | forwardable | instructions |
+/// | --- | ---: | ---: | ---: |
+/// | held out | 204 | 9066 | 779,596 |
+/// | put back | 205 | **9129** | 786,428 |
+///
+/// The instruction count moves by 6832, which is exactly the new case's own
+/// row in the listing, so no other program moved by an instruction — and the
+/// 63 is exactly its `prod` 35 plus its `ret` 28, so no other program moved by
+/// a copy either.
+///
+/// The shape is the one every corpus row in this file has: 118 rows of
+/// `println("label: {value}")`, most of them building the value into a `let`
+/// first. It is the same reason `values_value_order` is 1146 and
+/// `values_value_admit_key` is 1108, and it is expected to fall again when the
+/// rendering walk this case exists to guard is synthesized per layout, for the
+/// reason the order's row fell by seven.
+///
+/// **The fifty-seventh move is 98, and it is both kinds at once** — which is
+/// why it is decomposed here rather than stated. 9129 to 9227, 205 programs
+/// to 206: one new program, `benches/rendering`, and the layout-directed
+/// synthesis of the rendering.
+///
+/// | | programs | forwardable | prod | ret | functions | instructions |
+/// | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+/// | base lowering, the bench held out | 205 | 9129 | 4724 | 4481 | 28,212 | 786,428 |
+/// | base lowering, the bench put back | 206 | 9192 | 4762 | 4516 | 28,356 | 790,413 |
+/// | **with the rendering walk** | 206 | **9227** | 4797 | 4516 | 28,670 | 803,743 |
+///
+/// So **63 of the 98 are the new program's own row** and 35 are the lowering,
+/// measured by running the survey twice over the *same* 206 programs — once
+/// with a `cove-ir` built at this migration's parent and once with this one.
+/// `benches:rendering` is 38 `prod` and 35 `ret` under the base lowering and
+/// its whole row is 63, which is the reminder this file's own counter needs:
+/// the ratchet is the union of the two columns and not their sum, so ten of
+/// that row's copies are both.
+///
+/// **The 35 are the sixth rise's mechanism exactly, and no new kind of copy
+/// appears.** `ret` does not move at all — 4516 either way — and every one of
+/// the 35 is in `prod`, in a function named `<synth>.renders<…>`, and is the
+/// *same instruction*: `std.int.renderInto`'s `var rest = value`, expanded
+/// into a walk that had just loaded the number with a `load-elem` or a
+/// `load-field`. It is one copy per expansion of that leaf, and the walks
+/// added 314 functions and 13,330 instructions for it to be expanded into.
+///
+/// `lower::synth` still emits no `Inst::Copy` of its own — the fact
+/// `benches/equals`' row and `benches/ordering`'s were both read against — and
+/// what rose is a copy the standard library already wrote, at more sites. The
+/// order's walk *took* a producer away where it inlined whole (−7); the
+/// rendering's cannot, because what it replaced answers `()` and no `let`
+/// binds one.
+///
+/// **The corpus row above did not fall after all**, which is the other thing
+/// this move settles: the paragraph before this one expected
+/// `values_value_render_into` to lose copies when the walk landed, for the
+/// order's reason. It does not. Its `prod` goes 35 to 38 and its `ret` stays
+/// at 28 — up three, not down — and its instructions go 6832 to 8854, for the
+/// reason in the paragraph above. A prediction written down is a prediction
+/// that can be checked, and this one was wrong.
+const FORWARDABLE_COPIES: usize = 9227;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
