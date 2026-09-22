@@ -216,8 +216,8 @@ written as a namespace.
 | `endsWith(suffix: String) -> Bool` |  |  |  | `std.string.endsWith` |
 | `indexOf(text: String) -> Option<Int>` |  |  |  | `std.string.indexOf` |
 | `replace(old: String, new: String) -> String` |  |  |  | `machine` |
-| `toUpper() -> String` |  |  |  | `machine` |
-| `toLower() -> String` |  |  |  | `machine` |
+| `toUpper() -> String` |  |  |  | `std.string.toUpper` |
+| `toLower() -> String` |  |  |  | `std.string.toLower` |
 | `byteLength() -> Int` |  |  |  | `std.string.byteLength` |
 | `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `std.string.codePointAtByte` |

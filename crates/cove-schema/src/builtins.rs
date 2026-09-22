@@ -1155,10 +1155,7 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
     // code point named and the version stated.
     // `crates/cove-runtime/tests/unicode.rs` sweeps all of `0 ..= 0x10FFFF` and
     // holds the two Cove sets to the toolchain's, so a table that drifts is a
-    // failing test rather than a silent change of meaning. `toUpper` and
-    // `toLower` are the half of Step 5 this could not be written for: their
-    // tables are the full case mappings, one-to-many ones included, and need
-    // the generated asset that decision describes.
+    // failing test rather than a silent change of meaning.
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "String",
@@ -1172,6 +1169,46 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "words",
         module: "std.string",
         function: "words",
+    },
+    // `toUpper` and `toLower` finished Step 5, and they are what needed the
+    // generated asset Decision 5 describes where `trim`'s twenty-five code
+    // points could be written out by hand. 1,580 code points have an uppercase
+    // mapping and 1,488 a lowercase one, 102 of the uppercase ones expand to
+    // two or three characters, and the whole of it is **10,969 bytes** packed
+    // into six string literals in `std.string`: `upperRuns`, `lowerRuns`,
+    // `upperExpansions`, `lowerExpansions`, `casedRanges` and
+    // `ignorableRanges`. They are generated and checked in rather than
+    // maintained — `crates/cove-sema/tests/unicase.rs` builds all six from
+    // this toolchain and asserts they are byte for byte what is written there,
+    // so a toolchain whose Unicode tables move is a failing test naming the
+    // table.
+    //
+    // Each is read by binary search, which is the bounded lookup of a literal
+    // ADR 0045 has already placed in the heap before the run's first
+    // instruction. A program that calls neither method never lowers the
+    // function that names one, so it pays nothing: `examples/covefmt`'s
+    // counters are identical across the change that moved these.
+    //
+    // `toLower` is the one entry in this table whose answer depends on a
+    // character's **neighbours**. `Σ` lowercases to `ς` at the end of a word
+    // and to `σ` elsewhere, which is Unicode's `Final_Sigma` and the only
+    // conditional case mapping in `SpecialCasing.txt` that is not conditional
+    // on a locale — the Turkish and Lithuanian rows are, and this language has
+    // no locale, so `I` lowercases to `i` and never to `ı`. `casedRanges` and
+    // `ignorableRanges` are what that rule is made of.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "toUpper",
+        module: "std.string",
+        function: "toUpper",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "toLower",
+        module: "std.string",
+        function: "toLower",
     },
     // The fourth predicate, and the one that needed something underneath it.
     // `startsWith` and `endsWith` compare at an offset the caller's own
@@ -3721,7 +3758,10 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             mutating: false,
             fresh: false,
         },
-        // Unicode-aware, by Rust's own `str::to_uppercase`.
+        // Unicode-aware, by a table `std.string` owns rather than by a
+        // table Rust does: Unicode 17.0.0's **full** uppercase mapping, so
+        // `ß` is `SS` and `ﬃ` is `FFI` and the answer is not the receiver's
+        // length. 102 code points expand.
         MethodSchema {
             name: "toUpper",
             generics: &[],
@@ -3731,7 +3771,9 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             mutating: false,
             fresh: false,
         },
-        // Unicode-aware, by Rust's own `str::to_lowercase`.
+        // The same table in the other direction, and the one method here
+        // whose answer depends on where a character *is*: `Σ` is `ς` at the
+        // end of a word and `σ` elsewhere, so `"ΣΣ"` lowercases to `"σς"`.
         MethodSchema {
             name: "toLower",
             generics: &[],

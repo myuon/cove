@@ -191,12 +191,36 @@ fn the_run_writes_the_recording_a_run_writes() {
     // counts do not move at all, and it still allocates one more object,
     // because a literal is placed by the program that *emitted* the body and
     // not by the run that reached it.
+    //
+    // **It is 1,436 since issue #454's Step 5 moved `String.toUpper` and
+    // `String.toLower` into `std.string`, and the 1,380 words are the largest
+    // thing this row has ever measured — twenty-four times what it held
+    // before.** They are the whole of that migration's asset: Unicode
+    // 17.0.0's case mappings, packed into six string literals in
+    // `std.string`, 10,969 bytes. Six headers and 1,374 payload words, which
+    // is `ceil(bytes / 8)` per table and comes to exactly 1,380: 491 for
+    // `upperRuns`, 303 for `lowerRuns`, 40 for `upperExpansions`, 1 for
+    // `lowerExpansions`, 133 for `casedRanges` and 406 for `ignorableRanges`.
+    //
+    // **`ARITH` calls neither method**, and it pays for the table anyway, for
+    // the reason the `refuseRange` paragraph above gives: this fixture lowers
+    // the whole package. A `cove run` over a named entry that calls neither
+    // pays **nothing** — the slice never reaches the functions that name the
+    // literals, so they never enter `Program::strings` and `place_literals`
+    // never sees them. `examples/covefmt`'s allocation and word counters are
+    // identical across the change, on 302 files of real source, and that is
+    // the measurement of it rather than the claim.
+    //
+    // It is the one row in this file where the two lowerings differ by
+    // something a reader would notice, and the honest way to read it is as
+    // the price of `cove_ir::lower` rather than as the price of the
+    // operation.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(56), capacity_words: Some(56) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1436), capacity_words: Some(1436) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

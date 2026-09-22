@@ -3044,44 +3044,55 @@ mod tests {
         let string = |slot| Arg { slot, layout: STR };
         let int = |slot| Arg { slot, layout: INT };
         // Slot 0 holds the answer and slot 3 is the `Int` an operand fault is
-        // made of. The one-operand sample below was `String.length` until ADR
-        // 0064 moved it into `std.string`, and then `String.trim` until issue
-        // #454's Step 5 moved that one too. `String.toUpper` is what it names
-        // now, and it is the **same signature to the letter** — one `String`
-        // operand and a `String` answer, `fixed(&[C::Str], C::Str)`, the arm
-        // `trim` shared with it — so all three faults below are the faults
-        // that were being checked before: the count, the operand class, and a
-        // call that is right. Nothing this test asserts is about the answer's
-        // class — `Float.parse` below is what checks that — so the swap costs
-        // the case nothing.
+        // made of. This sample was `String.length` until ADR 0064 moved it
+        // into `std.string`, then `String.trim`, then `String.toUpper` — and
+        // issue #454's Step 5 finished by moving that one too. **There is no
+        // `fixed(&[C::Str], C::Str)` intrinsic left**, so unlike the last two
+        // swaps this one changes the *arity*: `String.replace` is
+        // `fixed(&[C::Str, C::Str, C::Str], C::Str)`, three `String` operands
+        // and a `String` answer.
+        //
+        // What the case is about survives the change exactly, because none of
+        // the three faults is about the number three. The first is a call that
+        // is right and must be silent; the second is one operand too many,
+        // where "too many" is whatever the signature says plus one; the third
+        // is an `Int` at operand 0 where a `String` goes. The answer's class
+        // still matches the signature's, which is what keeps the third fault
+        // the only one the third call reports — `Float.parse` below is the
+        // case about a wrong answer class.
         let reprs = || vec![Repr::Ref, Repr::Ref, Repr::Ref, Repr::Int];
 
-        // `String.toUpper` over one `String`, answering a `String`: nothing.
+        // `String.replace` over three `String`s, answering a `String`: nothing.
         let held = calling(
-            crate::Intrinsic::StringToUpper,
+            crate::Intrinsic::StringReplace,
             STR,
             reprs(),
-            vec![string(1)],
+            vec![string(1), string(2), string(2)],
         );
         assert_eq!(faults(&held), Vec::<String>::new());
 
         // One operand too many.
         let held = calling(
-            crate::Intrinsic::StringToUpper,
+            crate::Intrinsic::StringReplace,
             STR,
             reprs(),
-            vec![string(1), string(2)],
+            vec![string(1), string(2), string(2), string(1)],
         );
         assert_eq!(
             faults(&held),
-            vec!["`String.toUpper` takes 1 operand(s), and this call passes 2"]
+            vec!["`String.replace` takes 3 operand(s), and this call passes 4"]
         );
 
         // An `Int` where a `String` goes.
-        let held = calling(crate::Intrinsic::StringToUpper, STR, reprs(), vec![int(3)]);
+        let held = calling(
+            crate::Intrinsic::StringReplace,
+            STR,
+            reprs(),
+            vec![int(3), string(2), string(2)],
+        );
         assert_eq!(
             faults(&held),
-            vec!["operand 0 of `String.toUpper` is `Int`, where its signature has String"]
+            vec!["operand 0 of `String.replace` is `Int`, where its signature has String"]
         );
 
         // The answer a `Float.parse` writes is a `Result<Float>`, and the
@@ -3152,16 +3163,24 @@ mod tests {
             slot,
             layout: ARRAY_INT,
         };
+        // `String.replace` rather than `String.toUpper`, which issue #454's
+        // Step 5 moved into `std.string`: the refusal is about the operand's
+        // *class* and about the intrinsic's category being `Text`, and
+        // `replace` is that category with the same `C::Str` at operand 0. It
+        // takes three operands where `toUpper` took one, so the call passes
+        // three — otherwise a count fault would stand beside the one under
+        // test and this assertion would be about two things.
+        let string = |slot| Arg { slot, layout: STR };
         let held = calling(
-            crate::Intrinsic::StringToUpper,
+            crate::Intrinsic::StringReplace,
             STR,
-            vec![Repr::Ref, Repr::Ref],
-            vec![array(1)],
+            vec![Repr::Ref, Repr::Ref, Repr::Ref],
+            vec![array(1), string(2), string(2)],
         );
         assert_eq!(
             faults(&held),
             vec![
-                "operand 0 of `String.toUpper` is the collection `Array<Int>`, and a Text \
+                "operand 0 of `String.replace` is the collection `Array<Int>`, and a Text \
                  intrinsic takes none: a collection operation is a run instruction or the \
                  standard library's, not an intrinsic (ADR 0058)"
             ]

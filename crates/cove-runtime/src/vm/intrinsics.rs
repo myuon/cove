@@ -177,8 +177,21 @@ pub(crate) fn call(
         // of the prefix's lead bytes that turns the byte offset it found into
         // the character position the method promises.
         Intrinsic::StringReplace => text::replace(machine, frame, dest),
-        Intrinsic::StringToUpper => text::to_upper(machine, frame, dest),
-        Intrinsic::StringToLower => text::to_lower(machine, frame, dest),
+        // `String.toUpper` and `String.toLower` finished issue #454's Step 5
+        // and are not here either. They are the pair that needed the thing
+        // `trim` did not: a **generated table**, because the full case
+        // mappings are 1,580 code points one way and 1,488 the other, 102 of
+        // them one-to-many. `crates/cove-sema/tests/unicase.rs` generates all
+        // 10,969 bytes of it into six `std.string` string literals and asserts
+        // they are byte for byte what is checked in, so a toolchain whose
+        // Unicode tables move is a failing test rather than a silent change to
+        // what every Cove program means. Each body binary-searches a literal
+        // ADR 0045 placed before the run's first instruction.
+        //
+        // `toLower` is the only operation this file ever dispatched whose
+        // answer depends on a character's neighbours — `Σ` is `ς` at a word's
+        // end and `σ` elsewhere — and the two extra tables that rule needs are
+        // 40% of the asset.
         // Not a method of `String` a program can call: the refusal
         // `std.stringbuilder`'s `appendRange` reaches once its own range check
         // has failed. It never answers, so there is nothing to write into
@@ -1378,37 +1391,48 @@ mod tests {
     }
 
     /// An answer may be written over one of its own operands:
-    /// `x = x.toUpper()` lowers to a call whose destination is `x`, and since
-    /// the operands are read where they are rather than copied out first,
-    /// every arm reads all of them before it writes (#378, Q5.2).
+    /// `x = x.replace("a", "o")` lowers to a call whose destination is `x`,
+    /// and since the operands are read where they are rather than copied out
+    /// first, every arm reads all of them before it writes (#378, Q5.2).
     ///
-    /// **It was `x.trim()` until issue #454's Step 5**, which is the same
-    /// shape to the letter — one `String` operand read off the heap, one
-    /// `String` answer allocated, and a destination slot that is the operand's
-    /// — and the reason the swap changes nothing this asserts: what is under
-    /// test is `Dest::word`'s order against `operand::text`'s, which is the
-    /// same order for every arm in `text.rs`.
+    /// **It was `x.trim()`, then `x.toUpper()`, and issue #454's Step 5 took
+    /// both.** `replace` is the last `String` arm that allocates its answer,
+    /// and it makes the case *stronger* rather than weaker: the destination
+    /// aliases operand 0, and there are now two more operands read after it.
+    /// An arm that wrote its answer before it had finished reading would
+    /// corrupt a slot it still needed, which the one-operand version could
+    /// only fail at by reading its own receiver twice. What is under test is
+    /// unchanged — `Dest::word`'s order against `operand::text`'s, which is
+    /// the same order for every arm in `text.rs`.
     #[test]
     fn an_answer_may_be_written_over_its_own_operand() {
-        let mut build = Build::default().strings(&["ha"]);
+        let mut build = Build::default().strings(&["ha", "a", "o"]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
-        let raised = build.args(&[(0, str_layout)]);
-        let to_upper = site(&mut build.program, "String", "toUpper", str_layout);
+        let operands = build.args(&[(0, str_layout), (1, str_layout), (2, str_layout)]);
+        let replace = site(&mut build.program, "String", "replace", str_layout);
         let f = build.function(
             "f",
             &[],
-            &[Repr::Ref],
+            &[Repr::Ref, Repr::Ref, Repr::Ref],
             str_layout,
             vec![
                 Inst::Str {
                     dst: 0,
                     text: cove_ir::StrId(0),
                 },
+                Inst::Str {
+                    dst: 1,
+                    text: cove_ir::StrId(1),
+                },
+                Inst::Str {
+                    dst: 2,
+                    text: cove_ir::StrId(2),
+                },
                 Inst::IntrinsicCall {
                     dst: 0,
-                    site: to_upper,
-                    args: raised,
+                    site: replace,
+                    args: operands,
                 },
                 Inst::Return { src: 0 },
             ],
@@ -1418,7 +1442,7 @@ mod tests {
         let word = machine.run(f, &[], &budget()).unwrap();
         assert_eq!(
             String::from_utf8(machine.string_bytes(word[0])).unwrap(),
-            "HA"
+            "ho"
         );
     }
 

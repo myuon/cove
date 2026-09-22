@@ -352,3 +352,24 @@ allow = ["console", "clock"]
 [run.words_rows]
 entry = "trimwords.wordsRows"
 allow = ["console", "clock"]
+
+# `String.toUpper` and `String.toLower`, issue #454's Step 5. Nothing in
+# `benches/` used either, and neither `examples/covefmt` nor `examples/cq`
+# calls them — 0 static sites and 0 dynamic calls on both — so this package is
+# the only place either operation is timed at all.
+#
+# `[run.casemap]` is the turn `cove-bench` would time; the two `*_rows` entries
+# are the decompositions beside it, for the reason `[run.trim_rows]` is beside
+# `[run.trimwords]`.
+
+[run.casemap]
+entry = "casemap.main"
+allow = ["console", "clock"]
+
+[run.upper_rows]
+entry = "casemap.upperRows"
+allow = ["console", "clock"]
+
+[run.lower_rows]
+entry = "casemap.lowerRows"
+allow = ["console", "clock"]

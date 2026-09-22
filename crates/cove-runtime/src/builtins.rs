@@ -1481,14 +1481,15 @@ pub fn call_method(
                 let new = expect_str("String.replace", "new", &args[1], span)?;
                 Ok(Value(Repr::Str(text.replace(old, new).into())))
             }
-            "toUpper" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Str(text.to_uppercase().into())))
-            }
-            "toLower" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Str(text.to_lowercase().into())))
-            }
+            // `toUpper` and `toLower` used to answer here, out of
+            // `str::to_uppercase` and `str::to_lowercase`, which are whatever
+            // Unicode case-mapping tables this *toolchain* was built against.
+            // Neither reaches this arm any more: `Interpreter::eval_method_call`
+            // resolves each to a call into `std.string` first, over the
+            // generated `upperRuns`/`lowerRuns`/`upperExpansions`/
+            // `lowerExpansions`/`casedRanges`/`ignorableRanges` tables
+            // `crates/cove-sema/tests/unicase.rs` regenerates. ADR 0064's
+            // Decision 5, and issue #454's Step 5.
             // The byte-counted operations. Their diagnostics are written out
             // again in `crates/cove-runtime/src/vm/intrinsics/text.rs` rather
             // than shared, as every other builtin's are; what holds the two

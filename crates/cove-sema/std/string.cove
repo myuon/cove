@@ -1561,3 +1561,724 @@ fn separates(byte: Int) -> Bool {
   }
   return true
 }
+
+/// This string with every character replaced by its uppercase mapping.
+///
+/// **Unicode's full uppercase mapping, at a version this file names.** It is
+/// **Unicode 17.0.0** — what `rustc 1.98.1` reports as `char::UNICODE_VERSION`,
+/// and where the answer came from while this was `str::to_uppercase` in the
+/// runtime. ADR 0064's Decision 5 asks that Cove own its Unicode version
+/// rather than inherit whichever one the Rust toolchain was built against.
+/// [`upperRuns`] and [`upperExpansions`] are that version packed into two
+/// literals, and `crates/cove-runtime/tests/unicode.rs` sweeps **every code
+/// point from 0 to `0x10FFFF`** against the toolchain's own
+/// `char::to_uppercase`, so a future toolchain whose table differs is a
+/// *failing test naming the code point*.
+///
+/// # Full, not simple, and so not length-preserving
+///
+/// A character may uppercase to more than one. `ß` is `SS`, `ﬃ` is `FFI`, `և`
+/// is `ԵՒ`, and `ΰ` is three characters. **102 code points expand** — 86 to two
+/// characters and 16 to three — and the worst of them trebles the bytes. So
+/// the answer's length is computed rather than assumed, and the first of the
+/// two walks below is what computes it.
+///
+/// **No rule here depends on context.** An uppercase answer is a function of
+/// one character, and that is asserted exhaustively rather than believed:
+/// every code point in four multi-character contexts agrees with the same code
+/// point alone. [`toLower`] is the one of the pair with a context rule, and
+/// the asymmetry is the most surprising thing about them.
+///
+/// **There is no locale.** `i` uppercases to `I` and never to `İ`, whatever
+/// language the caller is writing, because `SpecialCasing.txt`'s Turkish and
+/// Lithuanian rows are conditional on a locale this language does not have.
+/// `tests/e2e/values_string_to_upper` pins that as a row rather than leaving it
+/// to be assumed of a reader who knows the Turkish rule exists.
+///
+/// # A receiver with nothing to change is handed back
+///
+/// The first walk answers *whether* as well as *how long*, and a receiver that
+/// uppercases to itself returns without allocating at all — `"HELLO"`, a CJK
+/// string, an emoji, a run of digits. That is [`trim`]'s `return text` for
+/// [`trim`]'s reason: a `String` is immutable and interchangeable, so no Cove
+/// program can tell the receiver from a copy of it, and the intrinsic could not
+/// do it because `Machine::new_string` copied whatever `str::to_uppercase` had
+/// built.
+///
+/// # Why two walks, and why the second one is nearly free
+///
+/// The store is sized **exactly**, which costs a walk of the receiver before
+/// the one that fills it. Measured on `benches/casemap`'s `upper_rows`:
+///
+/// ```text
+///   sizing                    allocations   allocated words   instructions
+///   grown from nought              50,090           723,357    110,733,701
+///   an upper bound of 3 × len      24,090           953,357    110,733,701
+///   exact, this body               24,090           357,357    113,513,701
+/// ```
+///
+/// **Grown is +107.7% allocated words and +107.9% allocations**; the upper
+/// bound is **+166.8% words**, and it has to be three times the receiver
+/// because that is what `ΰ` does — so every ASCII string in the world would
+/// take three bytes a character to hold one, and an oversized store is
+/// *relabelled* rather than trimmed, so it is permanently allocated. Neither
+/// is a number ADR 0064's Decision 8 admits.
+///
+/// **Exact costs +2.5% instructions, where the same trade cost `chars` 17%
+/// and `words` 86.7%.** The reason is the row above the table rather than
+/// anything about case mapping: the `return text` branch *already needs a
+/// whole walk*, because a receiver maps to itself only if every character
+/// does. So all three arms pay for the walk and for the table lookup in it,
+/// and what exact adds on top is one `mappedWidth` and one addition a
+/// character. Where a sizing pre-pass is usually a second scan bought to
+/// avoid reallocation, here it is a column added to a scan that was going to
+/// happen anyway.
+///
+/// The pass is cheap where it matters for a second reason: an ASCII character
+/// is settled by one load and two comparisons and never reaches the table.
+export fn toUpper(text: String) -> String {
+  let runs = upperRuns()
+  let length = core.byteLength(text)
+  var size = 0
+  var changed = false
+  var at = 0
+  while at < length {
+    let lead = text.byteAt(at)
+    if lead < 128 {
+      // The only ASCII characters with an uppercase mapping are `a` through
+      // `z`, and each maps within ASCII — so the common case never reaches
+      // the table and never changes a width. `crates/cove-runtime/tests/unicode.rs`
+      // is what keeps that true of the table rather than of this comment.
+      size += 1
+      at += 1
+      if lead >= 97 {
+        if lead <= 122 {
+          changed = true
+        }
+      }
+    } else {
+      let width = characterWidth(lead)
+      let point = pointAt(text, at, lead)
+      let mapping = caseMappingOf(runs, point)
+      if mapping == point {
+        size += width
+      } else {
+        changed = true
+        size += mappedWidth(mapping)
+      }
+      at += width
+    }
+  }
+  if changed == false {
+    return text
+  }
+  let expansions = upperExpansions()
+  let buffer = core.bytesAllocate(size)
+  var from = 0
+  while from < length {
+    let lead = text.byteAt(from)
+    if lead < 128 {
+      var byte = lead
+      if lead >= 97 {
+        if lead <= 122 {
+          byte = lead - 32
+        }
+      }
+      let to = core.bytesLength(buffer)
+      core.bytesEnsure(buffer, 1)
+      core.bytesStore(buffer, to, byte)
+      core.bytesCommit(buffer, 1)
+      from += 1
+    } else {
+      let width = characterWidth(lead)
+      let point = pointAt(text, from, lead)
+      let mapping = caseMappingOf(runs, point)
+      if mapping == point {
+        let to = core.bytesLength(buffer)
+        core.bytesEnsure(buffer, width)
+        core.bytesCopy(buffer, to, text, from, width)
+        core.bytesCommit(buffer, width)
+      } else {
+        writeMapping(buffer, mapping, expansions)
+      }
+      from += width
+    }
+  }
+  core.bytesFinish(buffer)
+}
+
+/// This string with every character replaced by its lowercase mapping.
+///
+/// [`toUpper`]'s mirror in everything but the one thing that matters: **this
+/// direction has a rule that depends on a character's neighbours**, and it is
+/// the reason a per-character table is not on its own enough.
+///
+/// # The final sigma
+///
+/// `Σ` lowercases to `ς` at the end of a word and to `σ` everywhere else.
+/// `"ΑΣ"` is `"ας"`; `"ΑΣΑ"` is `"ασα"`; `"Σ"` alone is `"σ"`, because there is
+/// no word for it to be the end of; and `"ΣΣ"` is `"σς"`, which is both answers
+/// in one string. Unicode calls the condition `Final_Sigma` and it is the only
+/// conditional case mapping in `SpecialCasing.txt` that is not conditional on a
+/// *locale* — which is why it is here and the Turkish rows are not.
+///
+/// [`sigmaIsFinal`] is the rule. What "a word" means there is two Unicode
+/// properties, `Cased` and `Case_Ignorable`, and they are [`casedRanges`] and
+/// [`ignorableRanges`]. The subtlety that decides 268 code points is written
+/// down at [`sigmaIsFinal`] rather than here.
+///
+/// # One character expands, and it is not the one people expect
+///
+/// `İ` — `U+0130`, the Turkish dotted capital I — lowercases to **`i` followed
+/// by a combining dot above**, and it is the *only* code point whose lowercase
+/// mapping is more than one character. Uppercasing has 102. So this direction
+/// is very nearly length-preserving and still is not, and
+/// `tests/e2e/values_string_to_lower` has the row.
+///
+/// **`ẞ` does not lowercase to `SS`.** `U+1E9E` lowercases to `ß`, one
+/// character, and it is `ß` that uppercases to two. The pair is not a
+/// bijection, which is why `toUpper(toLower(x))` is not `toUpper(x)` in
+/// general — `U+212A` KELVIN SIGN is the shortest demonstration, and the
+/// corpus's `round` rows are where both files say so.
+export fn toLower(text: String) -> String {
+  let runs = lowerRuns()
+  let length = core.byteLength(text)
+  var size = 0
+  var changed = false
+  var at = 0
+  while at < length {
+    let lead = text.byteAt(at)
+    if lead < 128 {
+      // `A` through `Z`, within ASCII, and nothing else below 128.
+      size += 1
+      at += 1
+      if lead >= 65 {
+        if lead <= 90 {
+          changed = true
+        }
+      }
+    } else {
+      let width = characterWidth(lead)
+      let point = pointAt(text, at, lead)
+      let mapping = caseMappingOf(runs, point)
+      if mapping == point {
+        size += width
+      } else {
+        changed = true
+        size += mappedWidth(mapping)
+      }
+      at += width
+    }
+  }
+  if changed == false {
+    return text
+  }
+  let expansions = lowerExpansions()
+  let buffer = core.bytesAllocate(size)
+  var from = 0
+  while from < length {
+    let lead = text.byteAt(from)
+    if lead < 128 {
+      var byte = lead
+      if lead >= 65 {
+        if lead <= 90 {
+          byte = lead + 32
+        }
+      }
+      let to = core.bytesLength(buffer)
+      core.bytesEnsure(buffer, 1)
+      core.bytesStore(buffer, to, byte)
+      core.bytesCommit(buffer, 1)
+      from += 1
+    } else {
+      let width = characterWidth(lead)
+      let point = pointAt(text, from, lead)
+      // `U+03A3` is the one character whose answer the table cannot give,
+      // and `U+03C3` and `U+03C2` are the two it chooses between. Both are
+      // two bytes, which is why the sizing walk above needs none of this:
+      // the final sigma changes what is written and never how much.
+      if point == 931 {
+        var answer = 963
+        if sigmaIsFinal(text, from, length) {
+          answer = 962
+        }
+        writePoint(buffer, answer)
+      } else {
+        let mapping = caseMappingOf(runs, point)
+        if mapping == point {
+          let to = core.bytesLength(buffer)
+          core.bytesEnsure(buffer, width)
+          core.bytesCopy(buffer, to, text, from, width)
+          core.bytesCommit(buffer, width)
+        } else {
+          writeMapping(buffer, mapping, expansions)
+        }
+      }
+      from += width
+    }
+  }
+  core.bytesFinish(buffer)
+}
+
+/// Whether the `Σ` beginning at byte `at` of `text` ends a word.
+///
+/// Unicode's `Final_Sigma`: the sigma is preceded by a `Cased` character and
+/// not followed by one, in both cases **skipping `Case_Ignorable` characters**
+/// on the way. So `"ΑΣ'"` is a final sigma — the apostrophe is ignorable and
+/// the alpha is cased — and `"ΑΣa"` is not.
+///
+/// # The rule that decides 268 code points
+///
+/// `Cased` and `Case_Ignorable` **overlap**. A modifier letter such as `ʰ` is
+/// both: it is `Other_Lowercase`, so it is cased, and it is `Lm`, so it is
+/// ignorable. 268 code points are in both sets, and what happens at `"ΑʰΣ"`
+/// depends entirely on which answer is taken first.
+///
+/// **The skip comes first, so a character that is both is skipped.** `"ΑʰΣ"`
+/// lowercases to `"αʰς"`: the `ʰ` is stepped over and the `Α` behind it is what
+/// satisfies the condition. An implementation that asked "cased?" first would
+/// answer `"αʰσ"` — it would stop at the `ʰ`, find it cased, and be right for
+/// the wrong reason on this row while being wrong on `"ΑʰΣa"`.
+///
+/// This is not a reading of the Rust source. It was established against the
+/// binary that still had the intrinsic, by asking `str::to_lowercase` about
+/// every code point in that position, and then reconciled against Unicode
+/// 17.0.0's published `DerivedCoreProperties.txt`: the two agree exactly once
+/// the both-sets rule above is applied, and differ by exactly those 268
+/// without it. [`casedRanges`] therefore holds `Cased` **minus**
+/// `Case_Ignorable`, and the two tables below are disjoint by construction.
+///
+/// # What it costs
+///
+/// A scan in each direction, per sigma, so a string of `n` sigmas costs
+/// `O(n²)` in the worst case. That is the shape `str::to_lowercase` had too —
+/// it scanned the same two directions from each sigma — so it is not a change
+/// of class, and no other character in the receiver pays anything at all,
+/// because this is reached only from the `U+03A3` arm.
+fn sigmaIsFinal(text: String, at: Int, length: Int) -> Bool {
+  let cased = casedRanges()
+  let ignorable = ignorableRanges()
+  var before = false
+  var back = at
+  while back > 0 {
+    // Back over the continuation bytes to the lead byte of the previous
+    // character: a continuation byte is `10xxxxxx`, 128 through 191.
+    // [`trim`] walks backwards the same way and for the same reason.
+    var start = back - 1
+    while start > 0 {
+      let byte = text.byteAt(start)
+      if byte < 128 {
+        break
+      }
+      if byte >= 192 {
+        break
+      }
+      start -= 1
+    }
+    let point = pointAt(text, start, text.byteAt(start))
+    if inPackedRanges(ignorable, point) == false {
+      before = inPackedRanges(cased, point)
+      break
+    }
+    back = start
+  }
+  if before == false {
+    return false
+  }
+  // Forwards from the character after the sigma, which is two bytes wide.
+  var ahead = at + 2
+  while ahead < length {
+    let lead = text.byteAt(ahead)
+    let point = pointAt(text, ahead, lead)
+    if inPackedRanges(ignorable, point) == false {
+      return inPackedRanges(cased, point) == false
+    }
+    ahead += characterWidth(lead)
+  }
+  true
+}
+
+/// What `point` maps to under `runs`, or `point` itself when it maps to
+/// nothing.
+///
+/// The answer is one `Int` and carries two cases, because a Cove function
+/// answers one value and a pair would be an allocation on a path that runs
+/// once a character. A **non-negative** answer is the code point to write. A
+/// **negative** answer is `0 - 1 - packed`, where `packed` names a slice of the
+/// expansion text — [`writeMapping`] and [`mappedWidth`] are the two readers
+/// and neither needs to know which case it has until it asks.
+///
+/// # The table
+///
+/// A record is thirteen base-32 symbols and the records are sorted by their
+/// first field, so this is a binary search: nine probes for the uppercase
+/// table's 302 records, and no allocation, no growth, and no walk. The fields
+/// are the start code point (five symbols), how many code points the run
+/// covers (two), the stride (one), the kind (one) and the payload (four).
+///
+/// **The stride is one or two**, because case mappings come in both shapes:
+/// `U+0041` through `U+005A` is a run of consecutive code points with the same
+/// delta, and `U+0100`, `U+0102`, `U+0104` … is every *other* code point, the
+/// Latin Extended-A pattern where an uppercase letter and its lowercase are
+/// adjacent. Allowing the second shape takes the uppercase table from 688
+/// records to 302. The runs never overlap — the generator asserts it — so
+/// "the last record starting at or below `point`" is the only record that can
+/// hold it.
+fn caseMappingOf(runs: String, point: Int) -> Int {
+  let record = packedRecordFor(runs, 13, point)
+  if record < 0 {
+    return point
+  }
+  let at = record * 13
+  let offset = point - packedStart(runs, at)
+  let stride = runs.byteAt(at + 7) - 48
+  // The run's last member, as an offset from its first. It is a local rather
+  // than written into the comparison because `examples/covefmt` does not
+  // reproduce a parenthesised expression on the right of a bare `>` — see
+  // issue #469 — and `cove fmt --check` cannot see that, only
+  // `covefmtBench` can.
+  let reach = (packedField(runs, at + 5, 2) - 1) * stride
+  if offset > reach {
+    return point
+  }
+  if stride == 2 {
+    if offset - offset / 2 * 2 != 0 {
+      return point
+    }
+  }
+  let payload = packedField(runs, at + 9, 4)
+  // Kind `0` is a delta, biased so that it is never negative in the table;
+  // kind `1` is a slice of the expansion text.
+  if runs.byteAt(at + 8) == 48 {
+    return point + payload - 524288
+  }
+  0 - 1 - payload
+}
+
+/// Whether `point` is inside one of `table`'s ranges.
+///
+/// [`packedRecordFor`]'s other reader, over the two-field records
+/// [`casedRanges`] and [`ignorableRanges`] are made of: a start code point in
+/// five symbols and a count in two.
+fn inPackedRanges(table: String, point: Int) -> Bool {
+  let record = packedRecordFor(table, 7, point)
+  if record < 0 {
+    return false
+  }
+  let at = record * 7
+  point < packedStart(table, at) + packedField(table, at + 5, 2)
+}
+
+/// The index of the last record of `table` whose first field is at most
+/// `point`, or `0 - 1` when every record starts above it.
+///
+/// The bounded lookup ADR 0064's Decision 5 asks for, and the only kind of
+/// lookup a packed literal admits. `table` is a `String` literal, so
+/// [ADR 0045](../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+/// has already placed it in the heap before the first instruction of the run:
+/// the call that named it is a load of an address, and every `byteAt` below is
+/// one `Inst::RunLoad` against an object that is never collected, never copied
+/// and never rebuilt. There is nothing here that allocates, so nothing here is
+/// refused inside a reservation either.
+fn packedRecordFor(table: String, width: Int, point: Int) -> Int {
+  var low = 0
+  var high = core.byteLength(table) / width
+  // Every record below `low` starts at or below `point`, and every record at
+  // or above `high` starts above it.
+  while low < high {
+    let middle = low + (high - low) / 2
+    if packedStart(table, middle * width) <= point {
+      low = middle + 1
+    } else {
+      high = middle
+    }
+  }
+  low - 1
+}
+
+/// The five-symbol code point beginning at byte `at` of `table`: the first
+/// field of every record, and the only one a search reads.
+///
+/// [`packedField`]'s loop written out, which is worth a helper because it is
+/// the one field read more than once a character: a binary search over
+/// `upperRuns`' 302 records asks it nine times, and `toUpper` searches twice —
+/// once to size the answer and once to build it. Unrolling the five turns is
+/// worth **1.25x to 1.36x** on every row that reads the table —
+/// `benches/casemap`'s `latin.one` 5,929 ns a call to 4,737, `greek.run`
+/// 41,422 to 30,473, `han.run` 41,538 to 31,117 — and it moves the ASCII rows,
+/// which never reach a table at all, by less than the spread between two runs.
+fn packedStart(table: String, at: Int) -> Int {
+  var value = table.byteAt(at) - 48
+  value = value * 32 + table.byteAt(at + 1) - 48
+  value = value * 32 + table.byteAt(at + 2) - 48
+  value = value * 32 + table.byteAt(at + 3) - 48
+  value * 32 + table.byteAt(at + 4) - 48
+}
+
+/// The `width`-symbol base-32 field beginning at byte `at` of `table`.
+///
+/// **The alphabet is `0` through `O` — the 32 bytes from 48 to 79 — and a
+/// symbol's value is its byte less 48.** A contiguous run, so the decode is a
+/// subtraction rather than a lookup, and one that contains none of `"`, `\`,
+/// `{` and `}`: the tables are written into this file as ordinary string
+/// literals with no escape in them, which is what makes them diffable and what
+/// makes the formatter reproduce them untouched.
+///
+/// Thirty-two rather than sixty-four because there is no window of 64
+/// contiguous printable bytes that misses the backslash. Five bits a symbol
+/// costs about a fifth more than six would; the whole asset is eleven
+/// kilobytes either way.
+fn packedField(table: String, at: Int, width: Int) -> Int {
+  var value = 0
+  var step = 0
+  while step < width {
+    value = value * 32 + table.byteAt(at + step) - 48
+    step += 1
+  }
+  value
+}
+
+/// How many bytes [`caseMappingOf`]'s answer writes.
+fn mappedWidth(mapping: Int) -> Int {
+  if mapping < 0 {
+    let packed = 0 - 1 - mapping
+    return packed - packed / 16 * 16
+  }
+  if mapping < 128 {
+    return 1
+  }
+  if mapping < 2048 {
+    return 2
+  }
+  if mapping < 65536 {
+    return 3
+  }
+  4
+}
+
+/// How wide the character beginning with the lead byte `lead` is.
+///
+/// [`charactersBefore`]'s four cases, as an answer rather than as a step. A
+/// `String` is valid UTF-8 in its shortest form, so the lead byte alone says
+/// how wide the character it begins is and a lead byte of `11111xxx` cannot
+/// occur — which is why the last case needs no test.
+fn characterWidth(lead: Int) -> Int {
+  if lead < 128 {
+    return 1
+  }
+  if lead < 224 {
+    return 2
+  }
+  if lead < 240 {
+    return 3
+  }
+  4
+}
+
+/// The code point of the character at byte `at` of `text`, whose lead byte the
+/// caller has already read as `lead`.
+///
+/// [`codePointAtByte`] without the `Option`, and that is the whole of the
+/// difference. That one is the API and answers `None` for an offset outside
+/// the string or inside a character; every caller here has just read `lead`
+/// from a boundary it walked to itself, so the question is already settled and
+/// an `Option` would be a wrapper allocated and unwrapped once a character.
+fn pointAt(text: String, at: Int, lead: Int) -> Int {
+  if lead < 128 {
+    return lead
+  }
+  let second = text.byteAt(at + 1) - 128
+  if lead < 224 {
+    return (lead - 192) * 64 + second
+  }
+  let third = text.byteAt(at + 2) - 128
+  if lead < 240 {
+    return ((lead - 224) * 64 + second) * 64 + third
+  }
+  (((lead - 240) * 64 + second) * 64 + third) * 64 + text.byteAt(at + 3) - 128
+}
+
+/// Appends what [`caseMappingOf`] answered to `buffer`.
+///
+/// An expansion is **one `core.bytesCopy` out of the expansion literal**, not
+/// an encode of two or three code points: the literal holds the answers as the
+/// UTF-8 they already are, so the payload is an offset and a length and the
+/// append is a run copy. 72 distinct expansions share 317 bytes, because an
+/// answer that is a suffix of one already written is not written twice.
+fn writeMapping(buffer: ByteBuffer, mapping: Int, expansions: String) {
+  if mapping < 0 {
+    let packed = 0 - 1 - mapping
+    let from = packed / 16
+    let count = packed - from * 16
+    let at = core.bytesLength(buffer)
+    // Everything the copy needs is a local *before* the reservation opens.
+    // Between an `ensure` and its `commit` the verifier admits only what
+    // cannot fail, and arithmetic can overflow — so a `packed / 16` written
+    // where it is used is refused, naming the reservation rather than the
+    // division.
+    core.bytesEnsure(buffer, count)
+    core.bytesCopy(buffer, at, expansions, from, count)
+    core.bytesCommit(buffer, count)
+    return
+  }
+  writePoint(buffer, mapping)
+}
+
+/// Appends `point` to `buffer` as UTF-8.
+///
+/// [`fromCodePoint`]'s encoder over a buffer that already exists, and without
+/// its three refusals: `point` here is a code point a table answered or the
+/// small sigma [`toLower`] chose, so there is no number to refuse. The
+/// remainder is a subtraction rather than a second division, which is the
+/// arithmetic choice [`fromCodePoint`] measured.
+///
+/// **Each byte is its own ensure, store and commit**, which is not a style.
+/// ADR 0062's reservation admits exactly *one* write, at an index known to be
+/// the store's own length and for the count the `ensure` named — so a
+/// three-byte character cannot be three stores inside one window, and it is
+/// not a matter of hoisting the arithmetic out either: `at + 1` is not the
+/// length the reservation was opened at. Writing it the other way is refused
+/// by `cove_ir::verify`, naming the reservation rather than the store, and
+/// that refusal is the thing to remember about appending anything wider than
+/// a byte from Cove.
+///
+/// So this is [`appendUtf8Byte`] one to four times, which is what
+/// `std.stringbuilder.appendByteInto` is and what
+/// [`fromCodePoint`]'s `StringBuilder` was already doing a byte at a time
+/// underneath.
+fn writePoint(buffer: ByteBuffer, point: Int) {
+  if point < 128 {
+    appendUtf8Byte(buffer, point)
+    return
+  }
+  if point < 2048 {
+    let low = point / 64
+    appendUtf8Byte(buffer, 192 + low)
+    appendUtf8Byte(buffer, 128 + point - low * 64)
+    return
+  }
+  if point < 65536 {
+    let low = point / 64
+    let lead = low / 64
+    appendUtf8Byte(buffer, 224 + lead)
+    appendUtf8Byte(buffer, 128 + low - lead * 64)
+    appendUtf8Byte(buffer, 128 + point - low * 64)
+    return
+  }
+  let low = point / 64
+  let middle = low / 64
+  let lead = middle / 64
+  appendUtf8Byte(buffer, 240 + lead)
+  appendUtf8Byte(buffer, 128 + middle - lead * 64)
+  appendUtf8Byte(buffer, 128 + low - middle * 64)
+  appendUtf8Byte(buffer, 128 + point - low * 64)
+}
+
+/// One byte onto the end of `buffer`: ADR 0062's ensure, store and commit.
+///
+/// `std.stringbuilder.appendByteInto` written again rather than shared,
+/// because sharing it would mean `std.string` depending on `std.stringbuilder`
+/// for three instructions — and because what makes this correct is the shape
+/// and not the name: the index is the store's own length, read after the
+/// `ensure`, and the count is the one the `ensure` was made for. That is the
+/// only write a reservation admits.
+fn appendUtf8Byte(buffer: ByteBuffer, value: Int) {
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, at, value)
+  core.bytesCommit(buffer, 1)
+}
+
+/// Unicode 17.0.0's full uppercase mapping, packed.
+///
+/// **302 records of thirteen base-32 symbols, 3,926 bytes**, covering 1,580
+/// code points — 1,478 that map to one character and 102 that expand.
+/// [`caseMappingOf`] is the reader and describes the record; [`packedField`]
+/// describes the alphabet.
+///
+/// # It is generated, and a toolchain bump is a failing test
+///
+/// `crates/cove-sema/tests/unicase.rs` builds all six of these tables from
+/// `char::to_uppercase`, `char::to_lowercase` and the observable behaviour of
+/// the toolchain's own `Final_Sigma`, and asserts that what it built is byte
+/// for byte what is written here. So this is not hand-maintained data: it is an
+/// asset with a generator beside it, which is ADR 0064's Decision 5, and the
+/// command that rewrites it is in that file's header.
+///
+/// A function rather than a constant because Cove has no module-level
+/// constant. It costs nothing: this is one `Inst::Str`, and
+/// [ADR 0045](../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+/// placed the object before the run's first instruction. A program that calls
+/// neither [`toUpper`] nor [`toLower`] never lowers this function at all, so
+/// it does not pay a byte for the table — measured, on `examples/covefmt`,
+/// whose counters are identical across this change.
+fn upperRuns() -> String {
+  "000310J10?OO00005E0110@0G70006O01110002000700G10?OO00007H0710?OO00007O0110@03I000810H20?OOO0009A0110?OHH0009C0320?OOO0009J0820?OOO000:901110013000:;0G20?OOO000;J0320?OOO000;O0110?OFD000<00110@063000<30220?OOO000<80110?OOO000<<0110?OOO000<B0110?OOO000<E0110@031000<I0110?OOO000<J0110@053000<K0110A9B1000<N0110@042000=10320?OOO000=80110?OOO000==0110?OOO000=@0110?OOO000=D0220?OOO000=I0110?OOO000=M0110?OOO000=O0110@01H000>50110?OOO000>60110?OON000>80110?OOO000>90110?OON000>;0110?OOO000><0110?OON000>>0820?OOO000>M0110?OMA000>O0920?OOO000?@0111002C000?B0110?OOO000?C0110?OON000?E0110?OOO000?I0D20?OOO000A30920?OOO000AL0110?OOO000AO0210@:AO000B20110?OOO000B70520?OOO000B@0110@:@O000BA0110@:@L000BB0110@:@N000BC0110?OI>000BD0110?OIB000BF0210?OIC000BI0110?OIF000BK0110?OIE000BL0110A9:?000C00110?OIC000C10110A9:;000C30110?OIA000C40110A9;7000C50110A998000C60110A9:4000C80110?OI?000C90110?OI=000C:0110A9:4000C;0110@:?G000C<0110A9:1000C?0110?OI=000CA0110@:?M000CB0110?OI;000CE0110?OI:000CM0110@:?7000D00110?OI6000D20110A9:3000D30110?OI6000D70110A99:000D80110?OI6000D90110?OMK000D:0210?OI7000D<0110?OMI000DB0110?OI5000DM0110A98E000DN0110A98B000J50110@02D000KA0220?OOO000KG0110?OOO000KK0310@042000L@01110046000M<0110?ONJ000M=0310?ONK000M@01110076000MA0A10?OO0000N20110?OO1000N30910?OO0000N<0110?ON0000N=0210?ON1000N@0110?ON2000NA0110?ON7000NE0110?ONA000NF0110?ON:000NG0110?OOH000NI0<20?OOO000O@0110?OM:000OA0110?OM@000OB0110@007000OC0110?OL<000OE0110?OM0000OH0110?OOO000OK0110?OOO0011@1010?OO00012@0@10?OM@001310A20?OOO0014;0K20?OOO001620720?OOO0016?0110?OOA0016A1@20?OOO001;11610?ON@001<7011100:40046@1;10@2N00047M0310@2N0004OH0610?OOH007400110?ILB007410110?ILC007420110?ILL007430210?ILN007450110?ILM007460110?IM4007470110?INK007480110A2>20074:0110?OOO007;I0110A2@4007;M0110@3G6007<>0110A2AH007@12;20?OOO007DF011100<3007DG011100=C007DH011100?3007DI011100@C007DJ011100B3007DK0110?ON5007E11@20?OOO007H00810@008007H@0610@008007I00810@008007I@0810@008007J00610@008007J@011100CD007JA0110@008007JB011100EF007JC0110@008007JD011100HF007JE0110@008007JF011100KF007JG0110@008007K00810@008007K@0210@02:007KB0410@02F007KF0210@034007KH0210@040007KJ0210@03@007KL0210@03N007L0011100NE007L101110115007L20111013E007L301110165007L40111018E007L5011101;5007L6011101=E007L7011101@5007L8011100NE007L901110115007L:0111013E007L;01110165007L<0111018E007L=011101;5007L>011101=E007L?011101@5007L@011101BE007LA011101E5007LB011101GE007LC011101J5007LD011101LE007LE011101O5007LF0111021E007LG01110245007LH011101BE007LI011101E5007LJ011101GE007LK011101J5007LL011101LE007LM011101O5007LN0111021E007LO01110245007M00111026E007M101110295007M2011102;E007M3011102>5007M4011102@E007M5011102C5007M6011102EE007M7011102H5007M80111026E007M901110295007M:011102;E007M;011102>5007M<011102@E007M=011102C5007M>011102EE007M?011102H5007M@0210@008007MB011102JE007MC011102M4007MD011102O4007MF01110314007MG01110336007ML011102M4007MN0110?HNK007N201110365007N30111038D007N4011103:D007N6011103<D007N7011103>F007N<0111038D007N@0210@008007NB011103AF007NC01110046007NF011103DD007NG011103FF007O00210@008007O2011103IF007O301110076007O4011103LD007O50110@007007O6011103ND007O70111040F007OB0111043E007OC01110464007OD01110484007OF011104:4007OG011104<6007OL01110464008:>0110?OO4008;@0@10?OO@008<40110?OOO0096@0J10?OO600;1@1@10?ON@00;310110?OOO00;350110?E>E00;360110?E>H00;380320?OOO00;3C0110?OOO00;3F0110?OOO00;411B20?OOO00;7<0220?OOO00;7C0110?OOO00;801610?HM000;970110?HM000;9=0110?HM0019B10G20?OOO019D10>20?OOO019I30720?OOO019IC0O20?OOO019KJ0220?OOO019KO0520?OOO019L<0110?OOO019LA0220?OOO019LD0110@01@019LG0:20?OOO019ME0820?OOO019N80220?OOO019N=0820?OOO019OF0110?OOO01:JC0110?O3001:K@2@10>J1@01NH0011104?201NH1011104@201NH2011104A201NH3011104?C01NH4011104B301NH5021104CB01NHC011104DD01NHD011104FD01NHE011104HD01NHF011104JD01NHG011104LD01OJ10J10?OO0021181810?ONH0216H1410?ONH021<G0;10?ONI021=30?10?ONI021=C0710?ONI021=K0210?ONI023601C10?ON0023;@0F10?OO0026601010?OO002KC01010?OO002KEK0I10?OO503J921210?ONN"
+}
+
+/// Unicode 17.0.0's full lowercase mapping, packed.
+///
+/// **186 records, 2,418 bytes**, covering 1,488 code points. [`upperRuns`]'s
+/// shape exactly, and smaller for the reason [`toLower`] gives: one code point
+/// expands here where 102 do there.
+///
+/// `U+03A3` is **not** in this table, and its absence is deliberate — a table
+/// row would answer `σ` unconditionally and [`toLower`] would never ask
+/// [`sigmaIsFinal`]. The generator drops it and asserts that it did.
+fn lowerRuns() -> String {
+  "000210J10@010000600G10@0100006H0710@010000800H20@0010009@011100030009B0320@0010009I0820@001000::0G20@001000;H0110?OL7000;I0320@001000<10110@06B000<20220@001000<60110@06>000<70110@001000<90210@06=000<;0110@001000<>0110@02?000<?0110@06:000<@0110@06;000<A0110@001000<C0110@06=000<D0110@06?000<F0110@06C000<G0110@06A000<H0110@001000<L0110@06C000<M0110@06E000<O0110@06F000=00320@001000=60110@06J000=70110@001000=90110@06J000=<0110@001000=>0110@06J000=?0110@001000=A0210@06I000=C0220@001000=G0110@06K000=H0110@001000=L0110@001000>40110@002000>50110@001000>70110@002000>80110@001000>:0110@002000>;0920@001000>N0920@001000?A0110@002000?B0220@001000?F0110?OLO000?G0110?ON8000?H0D20@001000A00110?OKN000A20920@001000AJ0110@:A;000AK0110@001000AM0110?OJM000AN0110@:A8000B10110@001000B30110?OIM000B40110@025000B50110@027000B60520@001000K@0220@001000KF0110@001000KO0110@03D000L60110@016000L80310@015000L<0110@020000L>0210@01O000LA0A10@010000M30910@010000N?0110@008000NH0<20@001000OD0110?ON4000OG0110@001000OI0110?OOI000OJ0110@001000OM0310?OKN001000@10@02@0010@1010@010001300A20@0010014:0K20@001001600110@00?001610720@0010016@1@20@0010019A1610@01@004501610@730004670110@7300046=0110@730004M02@10A5N@004O@0610@008007490110@0010074@1;10?M200075M0310?M20007@02;20@001007DN0110?HB1007E01@20@001007H80810?OOH007HH0610?OOH007I80810?OOH007IH0810?OOH007J80610?OOH007JI0420?OOH007K80810?OOH007L80810?OOH007LH0810?OOH007M80810?OOH007MH0210?OOH007MJ0210?OMF007ML0110?OOG007N80410?OM:007N<0110?OOG007NH0210?OOH007NJ0210?OLL007O80210?OOH007O:0210?OL@007O<0110?OOI007OH0210?OL0007OJ0210?OL2007OL0110?OOG008960110?HE30089:0110?GJ10089;0110?GMJ0089B0110@00L008;00@10@00@008<30110@0010095F0J10@00J00;001@10@01@00;300110@00100;320110?E@900;330110?L8J00;340110?E@I00;370320@00100;3=0110?E?400;3>0110?E@300;3?0110?E?100;3@0110?E?200;3B0110@00100;3E0110@00100;3N0210?E>100;401B20@00100;7;0220@00100;7B0110@001019B00G20@001019D00>20@001019I20720@001019IB0O20@001019KI0220@001019KM0110>M?L019KN0520@001019L;0110@001019L=0110>FFH019L@0220@001019LF0:20@001019M:0110>FEL019M;0110>FEA019M<0110>FEE019M=0110>FEO019M>0110>FEL019M@0110>FG>019MA0110>FFF019MB0110>FG;019MC0110@0M0019MD0820@001019N40110?ON@019N50110>FEM019N60110>M>8019N70220@001019N;0110>FDI019N<0820@001019NL0110>F=O019OE0110@00101OI10J10@010021001810@0180215@1410@018021;@0;10@017021;L0?10@017021<<0710@017021<D0210@017023401C10@020023:@0F10@010026501010@01002KB01010@01002KE00I10@00K03J801210@012"
+}
+
+/// The uppercase answers that are more than one character, as UTF-8.
+///
+/// **317 bytes for 102 expansions**, because an answer that is already a
+/// substring of the text is not written again: `ﬀ` is `FF` and `ﬃ` is `FFI`,
+/// and the first is inside the second. [`caseMappingOf`]'s negative answer is
+/// an offset and a length into this, and [`writeMapping`] copies the run.
+///
+/// It is readable on purpose. `SS` is `ß`; `ԵՒ` is `և`; the long Greek middle
+/// is the `U+1F80` block, each an uppercase letter followed by an iota; and
+/// `FF FI FL FFI FFL ST` at the end are the Latin ligatures.
+fn upperExpansions() -> String {
+  "SSʼNJ̌Ϊ́Ϋ́ԵՒH̱T̈W̊Y̊AʾΥ̓Υ̓̀Υ̓́Υ̓͂ἈΙἉΙἊΙἋΙἌΙἍΙἎΙἏΙἨΙἩΙἪΙἫΙἬΙἭΙἮΙἯΙὨΙὩΙὪΙὫΙὬΙὭΙὮΙὯΙᾺΙΑΙΆΙΑ͂Α͂ΙῊΙΗΙΉΙΗ͂Η͂ΙΪ̀Ι͂Ϊ͂Ϋ̀Ρ̓Υ͂Ϋ͂ῺΙΩΙΏΙΩ͂Ω͂ΙFFFIFLFFLSTՄՆՄԵՄԻՎՆՄԽ"
+}
+
+/// The lowercase answers that are more than one character, as UTF-8.
+///
+/// **Three bytes, and one entry.** `U+0130` — the Turkish dotted capital I —
+/// lowercases to `i` followed by `U+0307` COMBINING DOT ABOVE, and it is the
+/// only code point in Unicode whose lowercase mapping is longer than one
+/// character. The table exists for it alone, and it exists rather than being
+/// special-cased so that [`toLower`] and [`toUpper`] read the same record
+/// format.
+fn lowerExpansions() -> String {
+  "i̇"
+}
+
+/// Unicode 17.0.0's `Cased`, **less** `Case_Ignorable`, as ranges.
+///
+/// **151 records of seven base-32 symbols, 1,057 bytes**, covering 4,364 code
+/// points. [`inPackedRanges`] is the reader.
+///
+/// The subtraction is the whole point and [`sigmaIsFinal`] argues it: 268 code
+/// points are in both Unicode sets, and the scan skips ignorable characters
+/// before it asks about cased ones, so a character in both is skipped. Holding
+/// the difference here rather than the full set makes the two tables disjoint
+/// and the scan's order irrelevant.
+fn casedRanges() -> String {
+  "000210J000310J0005:010005E010005J01000600G0006H0O0007H63000=L04000>46@000DF0J000K@04000KF02000KK03000KO01000L601000L803000L<01000L>0D000M32C000OG4;0014:560019A16001;019004501600467010046=010046@1;0047M03004M02F004OH06007400;0074@1;0075M03007801<007;;0=007;I12007@08F007HH06007I016007J806007J@08007JI01007JK01007JM01007JO0O007L01E007MF07007MN01007N203007N607007N@04007NF06007O00=007OB03007OF07008820100887010088:0:0088E010088I050089401008960100898010089:040089?060089I010089L04008:505008:>01008;010008<3020095F1D00;003L00;3N3700;7;0400;7B0200;801600;970100;9=01019B01>019D00L019I22>019KA0G019L;04019L@2=019OE02019OJ0101:I@1;01:K00901:K@2@01NH00701NHC0501OI10J01OJ10J021002@0215@140216H14021;@0;021;L0?021<<07021<D02021<G0;021=30?021=C07021=K02023401C023601C023:@0F023;@0F026502002KB02002KE00I02KEK0I03E002E03E2F2703E4N0203E520103E550203E590403E5>0<03E5K0103E5M0703E652103E870403E8=0803E8F0703E8N0L03E9K0403E:00503E:60103E::0703E:B:D03EE80I03EF20I03EFL0O03EGL0I03EHF0O03EIF0I03EJ@0O03EK@0I03EL:0O03EM:0I03EN40803GH00:03GH;0D03GI50603J802403L9@0J03L:@0J03L;@0J"
+}
+
+/// Unicode 17.0.0's `Case_Ignorable`, as ranges.
+///
+/// **464 records, 3,248 bytes**, covering 2,794 code points — the largest of
+/// the six tables and 30% of the asset, for a rule that fires only at a `Σ`.
+/// Combining marks, format characters, modifier letters, and the three word
+/// characters `'`, `’` and `.`.
+///
+/// It is not shrinkable by dropping what looks unlikely: `"ΑΣ\u{00AD}"` ends in
+/// a soft hyphen and is still a final sigma, and `tests/e2e/values_string_to_lower`
+/// has that row because the set is what makes it true.
+fn ignorableRanges() -> String {
+  "00017010001>010001J010002N01000300100058010005=010005?010005D010005G02000E@60000KD02000KJ01000L402000L7010014307001:I01001:O01001<A1=001=O01001>102001>402001>701001?D01001@006001@@0;001@L01001B001001B;0E001C@01001FF08001FO0:001G:04001H?01001HA01001I@0K001M60;001O;0;001OJ01001OM010020F0H0022I0300248010024@020024G09002691J0029J010029L01002:108002:=01002:A07002;202002;A01002<101002=L01002>104002>=01002?202002?N01002@102002AL01002B102002B702002B;03002BA01002C@02002CE01002D102002EL01002F105002F702002F=01002G202002GJ06002H101002IL01002IO01002J104002J=01002JE02002K202002L201002N001002N=01003000100304010031L010031N0300326030032:040032E02003320200341010035L010035O0100366010036<02003720200380020039K02003:104003:=01003;202003<101003>:01003>B03003>F01003AA01003AD07003B609003EA01003ED09003F601003F807003HH02003IE01003IG01003II01003KA0>003L005003L602003L=0;003LI14003N6010041=040041B060041I020041M020042H020042N030043A04004420100445020044=010044M010047L01004JM03005HB03005IB02005JB02005KB02005MD02005MG07005N601005N90;005NG01005NM010060;05006230100645020065901006900300697020069B010069I03006@G02006@K01006BF01006BH07006C001006C201006C508006CC0:006CO01006E701006E@1>006G00<006H004006ID01006IF05006IL01006J201006K;09006L002006M204006M802006M;03006O601006O802006O=01006O?030071<080071F020073H060076@030076D0=00772070077=010077D010077H020079<1O007;H01007<K35007MM01007MO03007N=03007NM03007O=03007OM020080;050080H02008140100817010081:050083005008360:0083A010083O010084@0=0086@1100;3L0200;7?0300;;?0100;;O0100;?01000;A?0100<050100<1:0400<1A0500<1K0100<4I0600<7L030180E010197H06019@<01019C?04019CD0:019CO01019DL04019G@02019H012019K@01019L803019OA04019OH0201:020101:060101:0;0101:150201:1<0101:640201:700B01:7O0101:960801::70;01:<00301:=C0101:=F0401:=L0201:>?0101:?50201:A90601:AA0201:AE0201:B30101:B<0101:C@0101:CL0101:E@0101:EB0301:EG0201:EN0201:F10101:FM0101:G<0201:GC0201:GF0101:JK0501:K90301:O50101:O80101:O=0101NHN0101NMB0A01O@00@01O@C0101OA00@01OBB0101OBE0101OGO0101OH70101OH>0101OHJ0101OIN0101OJ00101OK@0101OLN0201OO30101OOI03020?M01020G001020KF05021L006021L71:021MB09022@103022@502022@<04022AH03022AO01022G5020239404023:>01023;905023;?01023E;02023F501023GJ06023J60;023L20402401010241H0?0243@010243C020243O030245C040245I020245M0102462010246=01024800302497050249=08024;C01024<002024=F09024>904024>?01024A?03024AD01024AF02024AN01024B101024FO01024G308024H002024IK02024J001024K607024K@05024MK06024N>01024N@01024NB01024O1020251H08025220302526010252N010255C060255J010255O020256202025=B04025=L02025=O02025>L02025AC08025AM01025AO02025E;01025E=01025E@06025EG01025HM01025HO01025I204025I7050261?090261I020269K020269N01026:301026>D04026>J02026?001026@10:026AC06026AK04026B701026BA06026BI03026D:0=026DH02026K001026K203026K6010271@070271H060271O010274B0F0275:070275B020275E020279A060279J010279L020279O07027:701027<@02027<E01027<G01027>I01027GC02027H002027IF05027J001027J201027JJ0102=1@0A02=270?02H8N0<02H9=0302JG@0502JI@0702JJ00402K:00302K;;0202KJ?0102KL?0A02KO00202KO30202KOB0203;O@0403;OE0703;OM0203?4M0203?500403CH01>03CI@0G03D;70303D;C0@03D<50703D=:0403DB20303F@01G03FAK1B03FCE0103FD40103FDK0503FE10?03H000703H080A03H0K0703H130203H160503H1@1N03H4?0103H9@0>03HE>0103HG<0403I7;0503I?>0203IG30103IG60103IG>0203IGE0103IGO0103J6@0703J:40803LOK050L001010L010300L0807@"
+}
