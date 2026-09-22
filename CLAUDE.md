@@ -31,15 +31,18 @@ Run the ignored ones with `cargo ratchet`, an alias for the same thing under
 profile is not a nicety there, because this is the one suite that is
 compute-bound rather than spawn-bound.
 
-**It costs about five minutes now, not the 39s this file used to claim.**
-Measured 2026-09-21: `cargo ratchet` 5:11 in all, of which `vm_coverage` is
-**301s** and the formatter's comment probe 9.6s. Nothing regressed — the
-corpus did what it is supposed to do and grew, to 160 programs, and
-`vm_coverage` runs every one of them on the tree-walking interpreter as well
-as on the linear-memory backend. The old figure was right when the corpus was
-a third of the size, and it is the sort of number that goes stale quietly, so
-it is dated here. Budget for it: this is the one part of the gate worth
-starting before you need the answer.
+**It costs about ten minutes now, and it has doubled twice.** Measured
+2026-09-22 by three separate runs that agreed: `cargo ratchet` **9:34 to
+9:36**, of which `vm_coverage` is **481.6s** and the formatter's comment probe
+**78.6s**, over **196 programs**. This file said 39s, then 5:11 (301s and 9.6s,
+160 programs, 2026-09-21), and both were right when they were written.
+Nothing regressed either time — the corpus did what it is supposed to do and
+grew, and `vm_coverage` runs every program on the tree-walking interpreter as
+well as on the linear-memory backend, so its cost is linear in a number this
+repository is trying to increase. **The figure here is dated because it goes
+stale quietly and every migration adds to it**; if yours disagrees by minutes,
+the corpus grew again rather than something being wrong. Budget for it: this
+is the one part of the gate worth starting before you need the answer.
 
 There are two, and both do their work once per program in the repository.
 
@@ -62,7 +65,8 @@ input against the ones it finds in the output — is the scanner judging itself,
 and it passed for as long as [issue 402](https://github.com/myuon/cove/issues/402)
 existed. A marker the test inserts and counts itself is an oracle the
 formatter does not supply. Every variant reparses a whole file, so the work is
-quadratic in file size: 9s over the cores, 58s on one.
+quadratic in file size, and it grows with the corpus: **78.6s over the cores**
+as of 2026-09-22, against 9s when this paragraph was written.
 
 Before pushing, the full gate is what CI runs, and CI runs all of it under
 `--profile checked`: `cargo fmt --all --check`,
