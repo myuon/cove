@@ -114,6 +114,23 @@
 //! `split` and `replace` refuse an empty needle: a call that raises still
 //! walked what it walked, and a bound a program could slip under by failing
 //! would not be one.
+//!
+//! **Neither of those two refusals can move into Cove, and that is issue
+//! [#461](https://github.com/myuon/cove/issues/461) rather than a gap in this
+//! module.** The standard library could compute both answers — `Inst::RunFind`
+//! is already under `std.string.contains` and `std.string.indexOf`, and
+//! `std.string.chars` and `std.string.join` are the vector build and the byte
+//! build — but a Cove body has nothing to *raise* with: `ExprKind` has no
+//! `raise` form, `Inst::Trap` carries a `StrId` and not a slot, and it carries
+//! neither the `rule` nor the `help` that these two sentences have. So
+//! `Intrinsic::StringSplit` and `Intrinsic::StringReplace` stand where
+//! `Intrinsic::StringRefuseByteRange` stands, and issue #454's Step 3 stops at
+//! seventeen variants rather than the thirteen it planned for.
+//!
+//! `tests/e2e/values_string_split` and `tests/e2e/values_string_replace` pin
+//! what the two operations answer, and `tests/e2e/fail_string_split_empty` and
+//! `tests/e2e/fail_string_replace_empty` pin what they refuse, word for word —
+//! including that the two `help` lines are **not** the same sentence.
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
