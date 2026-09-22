@@ -1,0 +1,161 @@
+use console.println
+
+/// `Float.format` and then `Float.parse`, and what does not come back.
+///
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 6 asks for round-trip and, in the same breath, says what a
+/// round-trip is not allowed to be used for: **"a formatting change is not
+/// accepted because the output parses back to the same number. The bytes are
+/// the contract."** So this file is deliberately the weaker of the pair, and
+/// it is a separate program from `tests/e2e/values_float_format` for that
+/// reason — a reader who finds a row here cannot mistake it for the byte
+/// contract, because the byte contract is in the other file.
+///
+/// What it is worth is the *asymmetry*. Eighteen values at five digit counts
+/// each, and the `true`/`false` column says which of the ninety recover the
+/// value they started from. They are not the ones a reader would guess.
+///
+/// # What comes back
+///
+/// The infinities and the NaN, at every digit count, because `format` writes
+/// `inf`, `-inf` and `NaN` and `parse` reads all three. `-0.0`, at every
+/// digit count, because `format` keeps the sign and `parse` keeps it too —
+/// which the `1.0 / x` columns say and which the `true` column, where
+/// `-0.0 == 0.0`, cannot. The largest finite `Float` at nought digits,
+/// because its fixed-point form is 309 exact digits.
+///
+/// # What does not
+///
+/// Every value whose magnitude needs more than `digits` places after the
+/// point, which is most of them at 0, 1 and 6 — and, at the small end,
+/// **every digit count there is**: `5.0e-324` and `2.2250738585072014e-308`
+/// are nought at seventeen digits and at any other. The NaN row's `false` is
+/// a third thing again, and is not a failure to recover: `NaN == NaN` is
+/// false whatever came back, which is why the rendering is printed beside
+/// the comparison.
+///
+/// The expected bytes come from the same standalone oracle the other two
+/// corpora use — an exact bignum expansion for `format` and an exact
+/// midpoint comparison for `parse`, neither of them calling the Rust
+/// facility it stands in for.
+export fn main() -> Result<Unit, Error> {
+  trips()?
+  Ok(())
+}
+
+/// One value, formatted at `digits` and read back.
+///
+/// The columns are: the digit count, the bytes `format` wrote in brackets,
+/// what `parse` made of them, whether that equals the value it started from,
+/// and the reciprocal of each — which is the only thing that tells `-0.0`
+/// from `0.0` and so the only thing that can say a sign survived the trip.
+fn trip(label: String, x: Float, digits: Int) -> Result<Unit, Error> {
+  let text = x.format(digits)
+  match Float.parse(text) {
+    Ok(back) => println(
+      "{label} {digits} [{text}] {back} {back == x} {1.0 / x} {1.0 / back}",
+    )?
+    Err(error) => println("{label} {digits} [{text}] err {error.message}")?
+  }
+  Ok(())
+}
+
+/// Eighteen values at nought, one, six, fifteen and seventeen digits.
+///
+/// The digit counts are the ones that say different things: nought loses
+/// every fraction, one is what a report prints, six is a float's worth,
+/// fifteen is the most that always round-trips for a decimal literal, and
+/// seventeen is `format`'s ceiling.
+fn trips() -> Result<Unit, Error> {
+  trip("rt.tenth", 0.1, 0)?
+  trip("rt.tenth", 0.1, 1)?
+  trip("rt.tenth", 0.1, 6)?
+  trip("rt.tenth", 0.1, 15)?
+  trip("rt.tenth", 0.1, 17)?
+  trip("rt.third", 1.0 / 3.0, 0)?
+  trip("rt.third", 1.0 / 3.0, 1)?
+  trip("rt.third", 1.0 / 3.0, 6)?
+  trip("rt.third", 1.0 / 3.0, 15)?
+  trip("rt.third", 1.0 / 3.0, 17)?
+  trip("rt.pi", 3.141592653589793, 0)?
+  trip("rt.pi", 3.141592653589793, 1)?
+  trip("rt.pi", 3.141592653589793, 6)?
+  trip("rt.pi", 3.141592653589793, 15)?
+  trip("rt.pi", 3.141592653589793, 17)?
+  trip("rt.e5", 1.0e-5, 0)?
+  trip("rt.e5", 1.0e-5, 1)?
+  trip("rt.e5", 1.0e-5, 6)?
+  trip("rt.e5", 1.0e-5, 15)?
+  trip("rt.e5", 1.0e-5, 17)?
+  trip("rt.sub", 5.0e-324, 0)?
+  trip("rt.sub", 5.0e-324, 1)?
+  trip("rt.sub", 5.0e-324, 6)?
+  trip("rt.sub", 5.0e-324, 15)?
+  trip("rt.sub", 5.0e-324, 17)?
+  trip("rt.dblmin", 2.2250738585072014e-308, 0)?
+  trip("rt.dblmin", 2.2250738585072014e-308, 1)?
+  trip("rt.dblmin", 2.2250738585072014e-308, 6)?
+  trip("rt.dblmin", 2.2250738585072014e-308, 15)?
+  trip("rt.dblmin", 2.2250738585072014e-308, 17)?
+  trip("rt.max", 1.7976931348623157e308, 0)?
+  trip("rt.max", 1.7976931348623157e308, 1)?
+  trip("rt.max", 1.7976931348623157e308, 6)?
+  trip("rt.max", 1.7976931348623157e308, 15)?
+  trip("rt.max", 1.7976931348623157e308, 17)?
+  trip("rt.e308", 1.0e308, 0)?
+  trip("rt.e308", 1.0e308, 1)?
+  trip("rt.e308", 1.0e308, 6)?
+  trip("rt.e308", 1.0e308, 15)?
+  trip("rt.e308", 1.0e308, 17)?
+  trip("rt.zero", 0.0, 0)?
+  trip("rt.zero", 0.0, 1)?
+  trip("rt.zero", 0.0, 6)?
+  trip("rt.zero", 0.0, 15)?
+  trip("rt.zero", 0.0, 17)?
+  trip("rt.zero.neg", -0.0, 0)?
+  trip("rt.zero.neg", -0.0, 1)?
+  trip("rt.zero.neg", -0.0, 6)?
+  trip("rt.zero.neg", -0.0, 15)?
+  trip("rt.zero.neg", -0.0, 17)?
+  trip("rt.inf", 1.0 / 0.0, 0)?
+  trip("rt.inf", 1.0 / 0.0, 1)?
+  trip("rt.inf", 1.0 / 0.0, 6)?
+  trip("rt.inf", 1.0 / 0.0, 15)?
+  trip("rt.inf", 1.0 / 0.0, 17)?
+  trip("rt.inf.neg", -1.0 / 0.0, 0)?
+  trip("rt.inf.neg", -1.0 / 0.0, 1)?
+  trip("rt.inf.neg", -1.0 / 0.0, 6)?
+  trip("rt.inf.neg", -1.0 / 0.0, 15)?
+  trip("rt.inf.neg", -1.0 / 0.0, 17)?
+  trip("rt.nan", 0.0 / 0.0, 0)?
+  trip("rt.nan", 0.0 / 0.0, 1)?
+  trip("rt.nan", 0.0 / 0.0, 6)?
+  trip("rt.nan", 0.0 / 0.0, 15)?
+  trip("rt.nan", 0.0 / 0.0, 17)?
+  trip("rt.price", 12345.6789, 0)?
+  trip("rt.price", 12345.6789, 1)?
+  trip("rt.price", 12345.6789, 6)?
+  trip("rt.price", 12345.6789, 15)?
+  trip("rt.price", 12345.6789, 17)?
+  trip("rt.neg", -273.15, 0)?
+  trip("rt.neg", -273.15, 1)?
+  trip("rt.neg", -273.15, 6)?
+  trip("rt.neg", -273.15, 15)?
+  trip("rt.neg", -273.15, 17)?
+  trip("rt.half", 0.5, 0)?
+  trip("rt.half", 0.5, 1)?
+  trip("rt.half", 0.5, 6)?
+  trip("rt.half", 0.5, 15)?
+  trip("rt.half", 0.5, 17)?
+  trip("rt.two.half", 2.5, 0)?
+  trip("rt.two.half", 2.5, 1)?
+  trip("rt.two.half", 2.5, 6)?
+  trip("rt.two.half", 2.5, 15)?
+  trip("rt.two.half", 2.5, 17)?
+  trip("rt.int53", 9007199254740993.0, 0)?
+  trip("rt.int53", 9007199254740993.0, 1)?
+  trip("rt.int53", 9007199254740993.0, 6)?
+  trip("rt.int53", 9007199254740993.0, 15)?
+  trip("rt.int53", 9007199254740993.0, 17)?
+  Ok(())
+}

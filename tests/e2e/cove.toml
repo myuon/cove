@@ -68,6 +68,10 @@ entry = "fail_max_tasks.main"
 allow = ["console"]
 max_tasks = 2
 
+[run.fail_float_format_digits]
+entry = "fail_float_format_digits.main"
+allow = ["console"]
+
 [run.fail_files_escape]
 entry = "fail_files_escape.main"
 allow = ["files", "console"]
@@ -428,12 +432,24 @@ allow = ["console"]
 entry = "values_int_rendering.main"
 allow = ["console"]
 
+[run.values_float_format]
+entry = "values_float_format.main"
+allow = ["console"]
+
 [run.values_float_min_max]
 entry = "values_float_min_max.main"
 allow = ["console"]
 
+[run.values_float_parse]
+entry = "values_float_parse.main"
+allow = ["console"]
+
 [run.values_float_round]
 entry = "values_float_round.main"
+allow = ["console"]
+
+[run.values_float_roundtrip]
+entry = "values_float_roundtrip.main"
 allow = ["console"]
 
 [run.values_float_sqrt]

@@ -1177,7 +1177,38 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// that `Intrinsic` is 12, that `Effects::BULK_WORK` has six carriers, and
 /// that Cove now names its own Unicode version in a file a diff can be read
 /// from.
-const FORWARDABLE_COPIES: usize = 8275;
+/// **The fiftieth rise is four new rows and no code at all.** 8275 to 8432,
+/// 192 programs to 196. The check the paragraphs above prescribe says the
+/// rest: the survey with all four directories removed is **8275 exactly**,
+/// over the same 192 programs, the same 25,282 functions and the same 694,638
+/// instructions the row before it left.
+///
+/// The four are `tests/e2e:values_float_parse` (49),
+/// `tests/e2e:values_float_format` (40),
+/// `tests/e2e:values_float_roundtrip` (35) and
+/// `tests/e2e:fail_float_format_digits` (33) — ADR 0064's Decision 6 corpus
+/// for the two operations that ADR names, landed before a line of a
+/// reimplementation, and the case that pins the refusal the corpus cannot
+/// hold because it stops the run.
+///
+/// **Eighteen of each row's total is the same eighteen**, which is the one
+/// thing in this row worth reading twice: `prod` goes 4,255 to 4,327, exactly
+/// 18 per new program, and holding out any single one of the four leaves it
+/// at 4,309. Those eighteen are the row before this one's — the case-mapping
+/// migration's, which "every one of them carries because a survey lowers a
+/// *package*" — so **the four files contribute nothing to `prod` themselves**
+/// and the whole of what they add is `ret`: 31, 22, 17 and 15, which is 85
+/// and which is the entire difference between 4,069 and 4,154.
+///
+/// A `ret` and not a `prod` is what a corpus that interpolates every answer
+/// looks like, and `values_float_to_int`'s row said the same. `show`,
+/// `showRecip`, `fmt` and `trip` each end in `Ok(())`, and the eleven, five
+/// and one section functions above them each end in another — issue #302's
+/// opening case, once per function, and nothing else. `values_float_parse` is
+/// the largest of the four because it has the most functions, not because it
+/// has the most rows: 173 golden lines against `values_float_format`'s 160,
+/// and eleven sections against five.
+const FORWARDABLE_COPIES: usize = 8432;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

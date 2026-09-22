@@ -1,0 +1,46 @@
+use console.println
+
+/// Writes `x` with `digits` places. Not the standard library: an ordinary
+/// Cove function with a caller, between `main` and the operation that
+/// refuses, so that the diagnostic below has a frame to blame that is neither
+/// the entry point nor the machine.
+fn written(x: Float, digits: Int) -> String {
+  x.format(digits)
+}
+
+/// Pins `Float.format`'s refusal of a digit count past seventeen, word for
+/// word.
+///
+/// A `Float` carries at most 17 significant decimal digits, so an eighteenth
+/// asks for padding rather than for precision and the operation refuses it.
+/// `crates/cove-runtime/src/vm/intrinsics/operand.rs`'s `format_digits`
+/// builds the sentence and
+/// `crates/cove-runtime/src/builtins.rs`'s `format_digits_error` builds it a
+/// second time for the interpreter; this file is what holds the two in
+/// agreement.
+///
+/// This is the half of `Float.format`'s contract that
+/// `tests/e2e/values_float_format` cannot hold, because a refusal stops the
+/// run and takes every row after it: one case, one refusal.
+/// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 8 gates a migration on the diagnostic being unchanged, and this
+/// file is where "unchanged" is written down.
+///
+/// **It is also what says `Float.format` cannot move yet.** Decision 2 refuses
+/// a primitive "whose policy is a branch on its argument", and names
+/// `format`'s 17 digits as one of the three examples — so the branch belongs
+/// in Cove. A Cove body cannot raise at all
+/// ([issue #461](https://github.com/myuon/cove/issues/461)): `ExprKind` has
+/// no such form, `Inst::Trap` carries a `StrId` rather than a slot, and it
+/// carries no `rule`. `String.split`, `String.replace`, `Int.parseRadix`,
+/// `String.refuseByteRange` and `Value.refuseDuplicate` are behind the same
+/// wall, and `Float.format` is the sixth.
+///
+/// `Float.parse` is **not**, which is the distinction worth reading these two
+/// files together for: every one of its refusals is an `Err` value carrying a
+/// message that quotes only its own argument, so there is nothing in
+/// `tests/e2e/values_float_parse` a Cove body could not build.
+export fn main() -> Result<Unit, Error> {
+  println(written(1.5, 18))?
+  Ok(())
+}
