@@ -1,0 +1,496 @@
+use console.println
+
+/// What `"{x}"` renders, family by family, exactly.
+///
+/// Interpolation is the one place every value in the language is turned into
+/// bytes a person reads, and today it is one Rust walk:
+/// `Intrinsic::ValueRenderInto` reads a layout, matches on its shape, and
+/// appends. That walk is about to be replaced by IR the lowering synthesises
+/// per layout — an arm per family, composed at the interpolation site, the
+/// way `Any.equals` in `values_any_equals` and the value order in
+/// `values_value_order` already are. A composition has one arm per family and
+/// can get exactly one of them wrong, so this file is one row per arm and per
+/// corner of an arm.
+///
+/// # The golden is an oracle, not a transcript
+///
+/// Every line of `expected.out` was written by hand from the *specification*
+/// of the rendering — a `Float` with no fractional part in Rust's `{:.1}` and
+/// any other in its shortest round-tripping form, a `Duration` in the largest
+/// of `h`, `m`, `s`, `ms`, `us`, `ns` that divides it exactly, a `String` as
+/// its bytes with nothing quoted and nothing escaped, an `Error` as its
+/// message alone, an opaque struct as its bare declared name, a struct as
+/// `Name(field: value, ...)` in declaration order, an enum as `Case` or
+/// `Case(part, ...)`, a run in `[]`, a set and a map in `{}`, an erasure
+/// looked through, a function as `<fn>` and a `Shared` as `<shared>` — and
+/// not from what any implementation printed.
+///
+/// That distinction is the whole value of the file. A golden taken from the
+/// subject records what the subject does, which is the one thing a
+/// differential oracle must not take on trust: it would agree with a
+/// rewritten walk by construction, including where the rewrite is wrong. The
+/// rows below disagree with a wrong arm because they were derived from
+/// somewhere else.
+///
+/// # What the corners are
+///
+/// - `float.e300` is 303 characters because `{:.1}` is a *fixed-point*
+///   format: the renderer never writes an exponent, so the exact decimal
+///   value of the nearest `Float` to `1e300` is what a program sees.
+/// - `float.zero.neg` keeps its sign, and `dur.h.from.s` says the unit is
+///   chosen by division and not by how the literal was written: `3600s` is
+///   `1h`.
+/// - `str.punctuation`, `struct.unescaped` and `enum.payload.punctuation`
+///   hold a comma and a parenthesis inside a `String` inside a compound.
+///   Nothing quotes them, so the rendering really is ambiguous — that is the
+///   specification, and pinning it here is what stops a rewrite from
+///   "fixing" it quietly.
+/// - `struct.generic.*` pins that the **declared** short name prints and not
+///   the monomorphised layout's, which is
+///   [#407](https://github.com/myuon/cove/issues/407);
+///   `tests/e2e/generic_struct_render` is where that was first pinned, and
+///   these rows are here so a rewrite of the walk cannot lose it again.
+/// - `order.map.*` and `order.set.*` are each built twice from the same
+///   entries in opposite orders and must render identically, because the
+///   order a set and a map render in is the value order and not the
+///   insertion order.
+/// - `deep.chain` is nine levels of walk and `deep.mixed` is eight, through
+///   five different families.
+/// - The `str.*` rows are fenced with `|` so that an empty string, a leading
+///   space and a trailing one are visible in the golden. `str.newline`
+///   deliberately ends its row: its value holds a newline, so that row is two
+///   lines of output.
+///
+/// # What is not here
+///
+/// The refusals. An address, a host handle, a task, a scope and a bare enum
+/// tag have no text of their own, and rendering one is an error — which ends
+/// the run and would silence every row below it. They belong in a `fail_`
+/// case of their own, the way the key refusals do.
+///
+/// Two fields whose words are an `Int` each.
+struct Point {
+  x: Int
+  y: Int
+}
+
+/// A struct whose fields are themselves structs, so a walk has to recurse
+/// through a field that is not a word.
+struct Segment {
+  from: Point
+  to: Point
+}
+
+/// Exactly one field, which is the arm that writes no `, ` at all.
+struct Only {
+  value: Int
+}
+
+/// One `String` field, held so that a row can put a comma and a parenthesis
+/// inside a struct's rendering.
+struct Label {
+  text: String
+}
+
+/// One field of every scalar family, in a declaration order no two of which
+/// render to the same width.
+struct Row {
+  count: Int
+  ratio: Float
+  took: Duration
+  name: String
+  ok: Bool
+}
+
+/// A one-field generic struct, instantiated below at four type arguments.
+///
+/// A layout is named by the instantiation it is — `Cell<Int>` and
+/// `Cell<String>` are two layouts — and a rendering shows the name the
+/// declaration wrote. See [#407](https://github.com/myuon/cove/issues/407).
+struct Cell<T> {
+  it: T
+}
+
+/// Two cases, neither with a payload.
+enum Flag {
+  On
+  Off
+}
+
+/// A case with no payload, one with a single part, and one with two.
+enum Mark {
+  Plain
+  Count(Int)
+  Both(Int, String)
+}
+
+/// A value type that reaches itself through a reference, which is the only
+/// way [ADR 0035](../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+/// admits.
+struct Node {
+  tag: Int
+  kids: Array<Node>
+}
+
+/// A run held inside an `Option` beside a `String`, so that `deep.mixed`
+/// alternates families rather than repeating one.
+struct Pair {
+  left: Option<Array<Int>>
+  right: String
+}
+
+/// Eight levels of walk through five families: struct, `Option`, `Array`,
+/// `Map`, struct, `Option`, `Array`, `Int`.
+struct Deep {
+  held: Option<Array<Map<String, Pair>>>
+}
+
+/// A value that can summarise itself, so that `dyn Summary` erases one.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// One erasable value.
+struct Booking {
+  id: Int
+}
+
+/// A second, so an `Array<dyn Summary>` holds two families rather than one
+/// struct wearing a trait.
+struct Receipt {
+  cents: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+impl Summary for Receipt {
+  fn summarize(self) -> String {
+    "receipt {self.cents}c"
+  }
+}
+
+/// A type whose representation is this module's own.
+///
+/// `opaque` describes an export, so the declaration has to be exported to
+/// carry it. Rendering one shows its name and nothing else, wherever it is
+/// rendered — including here, in the module that declares it and may read its
+/// fields.
+export opaque struct Token {
+  secret: String
+  issued: Int
+}
+
+/// An opaque value inside an ordinary struct, so that a row says the arm is
+/// reached from within a walk and not only at the top of one.
+struct Holder {
+  token: Token
+  note: String
+}
+
+/// A chain of `depth + 1` nodes, each the only child of the one above.
+///
+/// The topmost node's tag is `0` and the leaf's is `depth`, so the rendering
+/// counts up as the walk goes down and a level that was skipped shows as a
+/// missing number.
+fn chain(depth: Int) -> Node {
+  var held = Node(tag: depth, kids: [])
+  var at = depth - 1
+  while at >= 0 {
+    held = Node(tag: at, kids: [held])
+    at -= 1
+  }
+  held
+}
+
+/// Every scalar family: `Unit`, `Bool`, `Int`, `Float`, `Duration`.
+///
+/// `int.least` is written as a subtraction because the literal
+/// `-9223372036854775808` does not lex: the `-` is an operator, and the
+/// digits on their own overflow an `Int`.
+fn scalars() -> Result<Unit, Error> {
+  let unit = ()
+  println("unit: {unit}")?
+  println("bool.true: {true}")?
+  println("bool.false: {false}")?
+
+  let least = -9223372036854775807 - 1
+  println("int.zero: {0}")?
+  println("int.one: {1}")?
+  println("int.neg: {-1}")?
+  println("int.greatest: {9223372036854775807}")?
+  println("int.least: {least}")?
+
+  println("float.zero: {0.0}")?
+  println("float.zero.neg: {-0.0}")?
+  println("float.one: {1.0}")?
+  println("float.neg: {-1.5}")?
+  println("float.tenth: {0.1}")?
+  println("float.third: {1.0 / 3.0}")?
+  println("float.pi: {3.141592653589793}")?
+  println("float.e21: {1e21}")?
+  println("float.e300: {1e300}")?
+  println("float.nan: {0.0 / 0.0}")?
+  println("float.nan.sqrt: {(-1.0).sqrt()}")?
+  println("float.inf: {1.0 / 0.0}")?
+  println("float.inf.neg: {-1.0 / 0.0}")?
+
+  println("dur.zero: {0ns}")?
+  println("dur.ns: {1ns}")?
+  println("dur.us: {1500us}")?
+  println("dur.ms: {1ms}")?
+  println("dur.s: {1s}")?
+  println("dur.s.90: {90s}")?
+  println("dur.m: {1m}")?
+  println("dur.h: {2h}")?
+  println("dur.h.from.s: {3600s}")?
+  println("dur.neg.ms: {-5ms}")?
+  println("dur.neg.s: {-90s}")?
+  println("dur.neg.us: {-1500us}")?
+  Ok(())
+}
+
+/// A `String`, rendered as its bytes with nothing quoted and nothing escaped.
+///
+/// Every row but the last is fenced with `|`, which is not part of the value:
+/// without the fence an empty string, a leading space and a trailing one are
+/// invisible in a golden file, and a rewrite could lose one of them silently.
+fn strings() -> Result<Unit, Error> {
+  let empty = ""
+  let plain = "hello"
+  let spaced = " padded "
+  let quoted = "say \"hi\""
+  let slashed = "a\\b"
+  let braced = "\{x\}"
+  let tabbed = "a\tb"
+  let nulled = "a\0b"
+  let japanese = "日本語"
+  let emoji = "🌊"
+  let punctuation = "a, b (c)"
+  println("str.empty: |{empty}|")?
+  println("str.plain: |{plain}|")?
+  println("str.spaced: |{spaced}|")?
+  println("str.quote: |{quoted}|")?
+  println("str.backslash: |{slashed}|")?
+  println("str.brace: |{braced}|")?
+  println("str.tab: |{tabbed}|")?
+  println("str.nul: |{nulled}|")?
+  println("str.japanese: |{japanese}|")?
+  println("str.emoji: |{emoji}|")?
+  println("str.punctuation: |{punctuation}|")?
+
+  // Last in the section, and unfenced: the value holds a newline, so this one
+  // row is two lines of output and a closing fence would land on the second.
+  let broken = "before\nafter"
+  println("str.newline: {broken}")?
+  Ok(())
+}
+
+/// A struct: the declared short name, then its fields in declaration order
+/// with `: ` after each name and `, ` between.
+fn structs() -> Result<Unit, Error> {
+  println("struct.flat: {Point(x: 1, y: -2)}")?
+  let segment = Segment(from: Point(x: 0, y: 0), to: Point(x: 3, y: 4))
+  println("struct.nested: {segment}")?
+  println("struct.one: {Only(value: 5)}")?
+  println("struct.unescaped: {Label(text: "a, b (c)")}")?
+  let row = Row(count: 2, ratio: 0.5, took: 250ms, name: "cove", ok: true)
+  println("struct.scalars: {row}")?
+  println("struct.generic.int: {Cell(it: 7)}")?
+  println("struct.generic.str: {Cell(it: "seven")}")?
+  println("struct.generic.struct: {Cell(it: Point(x: 1, y: 2))}")?
+  println("struct.generic.nested: {Cell(it: Cell(it: 7))}")?
+  Ok(())
+}
+
+/// An enum: the case name, and its parts in parentheses when it has any.
+///
+/// `Option`, `Result` and `Error` are the standard library's, and an `Error`
+/// renders as its message alone rather than as the struct it happens to be.
+fn enums() -> Result<Unit, Error> {
+  println("enum.bare: {Flag.On}")?
+  println("enum.bare.other: {Flag.Off}")?
+  println("enum.payload.none: {Mark.Plain}")?
+  println("enum.payload.one: {Mark.Count(3)}")?
+  println("enum.payload.neg: {Mark.Count(-1)}")?
+  println("enum.payload.two: {Mark.Both(1, "a")}")?
+  println("enum.payload.punctuation: {Mark.Both(2, "a, b (c)")}")?
+
+  let none: Option<Int> = None
+  let nestedNone: Option<Option<Int>> = Some(None)
+  println("option.some: {Some(7)}")?
+  println("option.none: {none}")?
+  println("option.some.struct: {Some(Point(x: 1, y: 2))}")?
+  println("option.nested: {Some(Some(7))}")?
+  println("option.nested.none: {nestedNone}")?
+
+  let ok: Result<Int, Error> = Ok(7)
+  let bad: Result<Int, Error> = Err(Error("it went wrong"))
+  println("result.ok: {ok}")?
+  println("result.err: {bad}")?
+  println("error.bare: {Error("it went wrong")}")?
+  println("error.array: {[Error("first"), Error("second")]}")?
+  Ok(())
+}
+
+/// A run in `[]`, a set and a map in `{}`, and each of them empty.
+fn collections() -> Result<Unit, Error> {
+  let noArray: Array<Int> = []
+  let noVector: Vector<Int> = Vector.of()
+  let noSet: Set<Int> = Set.of()
+  let noMap: Map<String, Int> = Map.of()
+
+  println("array.int: {[1, 2, 3]}")?
+  println("array.one: {[1]}")?
+  println("array.str: {["a", "b", "c"]}")?
+  println("array.struct: {[Point(x: 1, y: 2), Point(x: 3, y: 4)]}")?
+  println("array.nested: {[[1, 2], noArray, [3]]}")?
+  println("array.empty: {noArray}")?
+
+  println("vector.int: {Vector.of(10, 20, 30)}")?
+  println("vector.str: {Vector.of("a", "b")}")?
+  println("vector.empty: {noVector}")?
+
+  println("set.int: {Set.of(3, 1, 2)}")?
+  println("set.str: {Set.of("b", "a", "C")}")?
+  println("set.empty: {noSet}")?
+
+  let ages = Map.of(MapEntry(key: "b", value: 2), MapEntry(key: "a", value: 1))
+  let points = Map.of(
+    MapEntry(key: 2, value: Point(x: 2, y: 2)),
+    MapEntry(key: 1, value: Point(x: 1, y: 1)),
+  )
+  println("map.str.int: {ages}")?
+  println("map.int.struct: {points}")?
+  println("map.empty: {noMap}")?
+  Ok(())
+}
+
+/// The same entries in opposite orders, printed adjacently.
+///
+/// A set and a map render in the value order, which is not the order they
+/// were built in, so each pair of rows below must be two identical lines. A
+/// rewrite that rendered a backing store as it lies would pass every row
+/// above and fail these.
+fn orders() -> Result<Unit, Error> {
+  let forward = Map.of(
+    MapEntry(key: "a", value: 1),
+    MapEntry(key: "b", value: 2),
+    MapEntry(key: "c", value: 3),
+  )
+  let backward = Map.of(
+    MapEntry(key: "c", value: 3),
+    MapEntry(key: "b", value: 2),
+    MapEntry(key: "a", value: 1),
+  )
+  println("order.map.forward: {forward}")?
+  println("order.map.backward: {backward}")?
+
+  println("order.set.forward: {Set.of(1, 2, 3)}")?
+  println("order.set.backward: {Set.of(3, 2, 1)}")?
+  println("order.set.str.forward: {Set.of("a", "b", "c")}")?
+  println("order.set.str.backward: {Set.of("c", "b", "a")}")?
+  Ok(())
+}
+
+/// A value deep enough that a walk has to recurse, twice over.
+fn deep() -> Result<Unit, Error> {
+  println("deep.chain: {chain(4)}")?
+  let inner = Map.of(MapEntry(
+    key: "k",
+    value: Pair(left: Some([1, 2]), right: "x"),
+  ))
+  let held = Deep(held: Some([inner]))
+  println("deep.mixed: {held}")?
+  Ok(())
+}
+
+/// Erasure, which is looked through: a `dyn Summary` renders as the value it
+/// holds, and the wrapper leaves no trace.
+fn erased() -> Result<Unit, Error> {
+  let one: dyn Summary = Booking(id: 41)
+  let other: dyn Summary = Receipt(cents: 12500)
+  let entries: Array<dyn Summary> = [one, other]
+  println("dyn.struct: {one}")?
+  println("dyn.other: {other}")?
+  println("dyn.array: {entries}")?
+  println("dyn.option: {Some(one)}")?
+  Ok(())
+}
+
+/// An opaque type: its bare declared name, with no module, no type arguments
+/// and no fields, wherever it is reached from.
+fn hidden() -> Result<Unit, Error> {
+  let token = Token(secret: "s3cret", issued: 7)
+  println("opaque.bare: {token}")?
+  println("opaque.array: {[token, Token(secret: "other", issued: 8)]}")?
+  println("opaque.option: {Some(token)}")?
+  println("opaque.field: {Holder(token: token, note: "kept")}")?
+  Ok(())
+}
+
+/// A function value and a `Shared`, both of which render as the handle they
+/// are rather than as anything they hold.
+fn handles() -> Result<Unit, Error> {
+  let double: fn(Int) -> Int = fn(n) {
+    n * 2
+  }
+  let by = 3
+  let adder: fn(Int) -> Int = fn(n) {
+    n + by
+  }
+  let both: Array<fn(Int) -> Int> = [double, adder]
+  println("fn.plain: {double}")?
+  println("fn.capturing: {adder}")?
+  println("fn.array: {both}")?
+
+  let cell = Shared(Point(x: 1, y: 2))
+  println("shared: {cell}")?
+  Ok(())
+}
+
+/// A `Range`, rendered as the operator it was written with.
+fn ranges() -> Result<Unit, Error> {
+  println("range.exclusive: {0..<3}")?
+  println("range.inclusive: {1..5}")?
+  println("range.neg: {-3..<0}")?
+  println("range.neg.inclusive: {-3..0}")?
+  println("range.empty: {0..<0}")?
+  println("range.array: {[0..<3, 1..5]}")?
+  Ok(())
+}
+
+/// One interpolation holding pieces of three different kinds, which are three
+/// different appends in the lowering.
+fn composition() -> Result<Unit, Error> {
+  let n = 7
+  let s = "hello"
+  let p = Point(x: 1, y: 2)
+  println("compose.mixed: literal {n} then {s} then {p} end")?
+  println("compose.adjacent: {n}{s}{p}")?
+  println("compose.repeat: {p} {p}")?
+  println("compose.nested: {"inner {n} {p}"}")?
+  println("compose.escaped: \{{n}\}")?
+  println("compose.only: {p}")?
+  Ok(())
+}
+
+/// Every section, in the order they are declared above.
+export fn main() -> Result<Unit, Error> {
+  scalars()?
+  strings()?
+  structs()?
+  enums()?
+  collections()?
+  orders()?
+  deep()?
+  erased()?
+  hidden()?
+  handles()?
+  ranges()?
+  composition()?
+  Ok(())
+}

@@ -1371,7 +1371,32 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// per row before anything is asked. `benches:admission` is 414 and 43 and 34,
 /// `benches/ordering`'s shape with one row fewer. The two `fail_key_*` cases
 /// are a handful apiece.
-const FORWARDABLE_COPIES: usize = 9066;
+///
+/// **The fifty-sixth move is a rise of 63, and every one of them is one new
+/// program.** 9066 to 9129, 204 programs to 205: `values_value_render_into`,
+/// which pins what `"{x}"` renders family by family ahead of
+/// `Intrinsic::ValueRenderInto` becoming layout-directed IR.
+///
+/// Pinned rather than assumed, the same way the move above it was, by running
+/// the survey over the same tree with the case held out and then put back:
+///
+/// | | programs | forwardable | instructions |
+/// | --- | ---: | ---: | ---: |
+/// | held out | 204 | 9066 | 779,596 |
+/// | put back | 205 | **9129** | 786,428 |
+///
+/// The instruction count moves by 6832, which is exactly the new case's own
+/// row in the listing, so no other program moved by an instruction — and the
+/// 63 is exactly its `prod` 35 plus its `ret` 28, so no other program moved by
+/// a copy either.
+///
+/// The shape is the one every corpus row in this file has: 118 rows of
+/// `println("label: {value}")`, most of them building the value into a `let`
+/// first. It is the same reason `values_value_order` is 1146 and
+/// `values_value_admit_key` is 1108, and it is expected to fall again when the
+/// rendering walk this case exists to guard is synthesized per layout, for the
+/// reason the order's row fell by seven.
+const FORWARDABLE_COPIES: usize = 9129;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
