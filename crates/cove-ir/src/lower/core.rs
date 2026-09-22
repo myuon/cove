@@ -35,7 +35,9 @@
 //! known, and a [`Inst::IntrinsicCall`] of `Intrinsic::ValueOrder` only where
 //! the key is erased (ADR 0064, Decisions 3 and 4);
 //! `core.admitKey` is nothing at all where the key's layout cannot hold a
-//! refused part, and `Intrinsic::ValueAdmitKey` where it can; and
+//! refused part, a call into the walk `super::synth` composes out of it where
+//! it can and the layout says which values, and an
+//! `Intrinsic::ValueAdmitKey` where the key is erased or holds itself; and
 //! `core.refuseDuplicate` is always `Intrinsic::ValueRefuseDuplicate`.
 //!
 //! `core.refuseByteRange` is a fourth of the same kind, and for the same
@@ -64,17 +66,8 @@ use super::shapes::{self, BUFFER_LEN, BUFFER_STORE, VECTOR_LEN, VECTOR_STORE};
 use super::{synth, Body, Dest};
 use crate::inst::{CmpOp, Inst, Len, Slot, Storage, Validation};
 use crate::intrinsic::Intrinsic;
-use crate::layout::{LayoutId, Shape};
+use crate::layout::LayoutId;
 use crate::program::{Arg as Operand, IntrinsicSite};
-use crate::repr::Repr;
-
-/// How deep a key's layout may nest for `Body::always_admitted` to remove
-/// the admission of it.
-///
-/// Well inside the runtime's bound on how deep a key is walked (128 steps,
-/// of which a level of nesting takes at most two), so a layout this shallow
-/// has no value the admission would stop for its depth.
-const ADMITTED_DEPTH: usize = 48;
 
 /// Which half of ADR 0062's reservation [`Body::core_vector_reserve`] emits.
 #[derive(Clone, Copy)]
@@ -1192,10 +1185,23 @@ impl Body<'_> {
     /// `core.admitKey(key, method, role)`: the refusal of a key the language
     /// does not admit, in `method`'s words.
     ///
-    /// Nothing at all where `key`'s layout cannot hold a part the admission
-    /// refuses — [`Body::always_admitted`] — and there the call answers a `()`
-    /// only if something reads one. Otherwise one [`Inst::IntrinsicCall`] of
-    /// [`Intrinsic::ValueAdmitKey`] over the key and the two names.
+    /// Three ways, and [`synth::admission`] is the one question that decides
+    /// between them — asked here and inside the walk, of one table, for
+    /// [`synth::ordered_by`]'s reason.
+    ///
+    /// - [`synth::Admission::Always`]: **nothing at all.** No value of the
+    ///   layout is ever refused, so there is nothing to ask, and the call
+    ///   answers a `()` only if something reads one. Every key `covefmt` and
+    ///   `cq` use is a `String` or an `Int`, so this arm is why neither
+    ///   program reaches `Value.admitKey` at a single site.
+    /// - [`synth::Admission::Decided`] of a composite: one [`Inst::Call`] of
+    ///   the walk `super::synth` composes out of the layout (ADR 0064,
+    ///   Decision 3), which reads whatever decides and hands the key on only
+    ///   where the answer is that it is refused.
+    /// - otherwise one [`Inst::IntrinsicCall`] of
+    ///   [`Intrinsic::ValueAdmitKey`] over the key and the two names: a box,
+    ///   a layout that holds itself, and the scalars and handles the language
+    ///   refuses outright, which are one value and not a walk.
     fn core_admit_key(
         &mut self,
         expr: &Expr,
@@ -1209,7 +1215,8 @@ impl Body<'_> {
         let Some(layout) = self.layout(&ty, key.span) else {
             return self.dead(expr);
         };
-        if self.always_admitted(layout) {
+        let admission = synth::admission(self.pool.shapes.all(), layout);
+        if admission == synth::Admission::Always {
             let held = self.expr(key);
             self.release(held, expr.span);
             return match want {
@@ -1217,7 +1224,89 @@ impl Body<'_> {
                 None => self.temp(shapes::UNIT),
             };
         }
+        let shape = self.pool.shapes.layout(layout).shape.clone();
+        if admission == synth::Admission::Decided
+            && synth::walks(synth::Operation::Admission, &shape)
+        {
+            return self.admit_by_walk(expr, key, [method, role], layout, want);
+        }
         self.keyed_refusal(Intrinsic::ValueAdmitKey, expr, key, [method, role], want)
+    }
+
+    /// The walk `super::synth` composes out of `layout`, and the intrinsic
+    /// under the one branch its answer decides.
+    ///
+    /// ```text
+    ///   call     refused, refuses<Mark#16>(key)
+    ///   branch-false refused -> past
+    ///   intrinsic-call Value.admitKey(key, method, role)
+    /// past:
+    /// ```
+    ///
+    /// The intrinsic stays **here**, at the site, in this frame, over this
+    /// key — which is where it was before this migration and is the whole of
+    /// why the diagnostic does not move. A refusal names the path from the
+    /// key to the part that is wrong and is blamed on the caller by reading
+    /// the live frames (ADR 0058); a fallback raised from inside the walk
+    /// would have added a frame and a second `in the standard library` label
+    /// pointing at the line the first already pointed at. So the walk answers
+    /// a bit and this decides what to do with it.
+    ///
+    /// The answer's sense is `true` for "ask the runtime", because the
+    /// instruction set has a `branch-false` and no `branch-true`, and the
+    /// `()` is written before the branch so that both paths leave it written.
+    fn admit_by_walk(
+        &mut self,
+        expr: &Expr,
+        key: &Expr,
+        [method, role]: [&Expr; 2],
+        layout: LayoutId,
+        want: Option<Dest>,
+    ) -> Val {
+        let held = self.expr(key);
+        let method = self.expr(method);
+        let role = self.expr(role);
+        let dst = self.answer_at(want, shapes::UNIT);
+        self.emit(Inst::Unit { dst: dst.slot }, expr.span);
+        let decls = self.plan.decls.len();
+        let callee = synth::function_for(
+            synth::Operation::Admission,
+            layout,
+            self.pool,
+            decls,
+            expr.span,
+        );
+        let refused = self.temp(shapes::BOOL);
+        let args = self.pool.args.intern(vec![held.arg()]);
+        self.emit(
+            Inst::Call {
+                dst: refused.slot,
+                callee,
+                args,
+            },
+            expr.span,
+        );
+        let branch = self.emit(
+            Inst::BranchFalse {
+                cond: refused.slot,
+                to: super::PENDING,
+            },
+            expr.span,
+        );
+        self.intrinsic_call(
+            Intrinsic::ValueAdmitKey,
+            shapes::UNIT,
+            dst.slot,
+            &[&held, &method, &role],
+            expr.span,
+        );
+        let past = self.here();
+        self.patch(branch, past);
+        self.release(refused, expr.span);
+        self.release(role, expr.span);
+        self.release(method, expr.span);
+        self.release(held, expr.span);
+        dst
     }
 
     /// `core.refuseDuplicate(key, method, role)`: one [`Inst::IntrinsicCall`]
@@ -1277,51 +1366,6 @@ impl Body<'_> {
             .args
             .intern(args.iter().map(|arg| arg.arg()).collect());
         self.emit(Inst::IntrinsicCall { dst, site, args }, span);
-    }
-
-    /// Whether every value of `layout` is one the key admission admits, so
-    /// that asking it could never refuse.
-    ///
-    /// The admission refuses a `Float`, a `Vector`, a closure, a task, a
-    /// shared cell and anything that holds one, and looks inside a box at
-    /// whatever it was given — so a word of those, a box, and every shape
-    /// that is not a key's are `false`. An `Int`, a `Bool`, a `Duration`, a
-    /// `Unit` and a `String` are `true`; an array, a struct and an enum are
-    /// what their parts are; a set's members and a map's keys are keys by
-    /// construction, so a set is `true` and a map is what its values are.
-    ///
-    /// The walk also refuses a layout that holds itself, and one nested deeper
-    /// than [`ADMITTED_DEPTH`]: the admission stops a value nested past the
-    /// machine's depth bound with a refusal of its own, and only a layout of
-    /// bounded depth is one no value of can reach it.
-    fn always_admitted(&self, layout: LayoutId) -> bool {
-        fn walk(body: &Body<'_>, layout: LayoutId, path: &mut Vec<LayoutId>) -> bool {
-            if path.contains(&layout) || path.len() >= ADMITTED_DEPTH {
-                return false;
-            }
-            path.push(layout);
-            let admitted = match &body.pool.shapes.layout(layout).shape {
-                Shape::Word(repr) => {
-                    matches!(repr, Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration)
-                }
-                Shape::Str | Shape::Members { .. } => true,
-                Shape::Elements {
-                    elem,
-                    growable: false,
-                } => walk(body, *elem, path),
-                Shape::Entries { value, .. } => walk(body, *value, path),
-                Shape::Struct { fields, .. } => {
-                    fields.iter().all(|field| walk(body, field.layout, path))
-                }
-                Shape::Enum { cases, .. } => cases
-                    .iter()
-                    .all(|case| case.parts.iter().all(|part| walk(body, part.layout, path))),
-                _ => false,
-            };
-            path.pop();
-            admitted
-        }
-        walk(self, layout, &mut Vec::new())
     }
 
     /// `core.memberAt(members, at)`: the member at `at` of a set's sorted run.

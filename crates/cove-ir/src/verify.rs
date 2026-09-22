@@ -101,6 +101,153 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
     }
 }
 
+/// ADR 0064's Decision 4 for `Value.admitKey`, which is the one of the three
+/// whose fallback is reached from more than a box — and the one whose rule
+/// therefore has to be asked before the optimizer runs.
+///
+/// # Why the fallback is reached from more than a box
+///
+/// The other two layout-directed walks answer a value. This one answers `()`
+/// or raises, and its refusal is
+/// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` **with
+/// a `rule:` and a `help:` beside it**, where [`crate::Inst::Trap`] carries
+/// one [`crate::StrId`] and nothing else. Every hole in that sentence is
+/// something the lowering knows; three sentences are not something a trap
+/// can hold. So `lower::synth`'s admission walk proves what it can and hands
+/// the runtime the whole key wherever it cannot, and the sentence stays the
+/// runtime's, unchanged to the byte. See `lower::synth::Synth::ask`.
+///
+/// # Why it is a pass of its own, and why it runs first
+///
+/// Because what it checks is what the **lowering chose**, and the optimizer
+/// is allowed to move it. `lower::finish` expands a small leaf before it
+/// verifies, so by the time [`verify`] runs, a walk small enough to inline is
+/// no longer a function: its body sits in whatever called it, and
+/// `sweep::stand_down_unreferenced` has since emptied the function an
+/// expansion record names. Asked there, the rule could only be satisfied by
+/// recognising the walk by its *name*, which is the one thing ADR 0064 says
+/// nothing may do. Asked here — over the program as the lowering emitted it —
+/// it is a fact about three adjacent instructions.
+///
+/// # What it refuses
+///
+/// A layout every value of which is a key: there is nothing to ask, and a
+/// site that asked anyway would be paying for an answer the layout already
+/// gave. This is the clause that keeps `always_admitted`'s short circuit
+/// honest — it is why `covefmt` and `cq` reach the operation at no site, and
+/// a lowering that stopped asking it would be caught here rather than in a
+/// benchmark.
+///
+/// And a layout the walk decides, asked about *unguarded*. The lowering emits
+/// the walk, a `branch-false` on what it answered, and the intrinsic under
+/// it; this is those three instructions read back, so a site that skipped the
+/// first two is a site that asked the runtime a question the layout had
+/// already narrowed.
+///
+/// **That is the cheap way out of the migration that added it.** An enum
+/// needs a `switch`, an array needs a loop, a map needs a loop at the entry's
+/// width — and every one of those could have been made to work by handing the
+/// layout to the intrinsic instead. Nothing else in this repository would
+/// have noticed: the answers would still be right, the corpus green, the
+/// architecture exactly where it was.
+pub fn one_admission_boundary(program: &Program) -> Result<(), Vec<Invalid>> {
+    let mut faults = Vec::new();
+    for function in &program.functions {
+        for (pc, inst) in function.code.iter().enumerate() {
+            let Inst::IntrinsicCall { site, args, .. } = inst else {
+                continue;
+            };
+            let Some(called) = program.intrinsic_sites.get(site.index()) else {
+                continue;
+            };
+            if called.intrinsic != crate::Intrinsic::ValueAdmitKey {
+                continue;
+            }
+            if args.index() >= program.args.len() {
+                continue;
+            }
+            let Some(arg) = program.arg_list(*args).first().copied() else {
+                continue;
+            };
+            if arg.layout.index() >= program.layouts.len() {
+                continue;
+            }
+            let described = program.layout(arg.layout);
+            let name = described.name.clone();
+            let admission = crate::lower::synth::admission(&program.layouts, arg.layout);
+            let what = if admission == crate::lower::synth::Admission::Always {
+                format!(
+                    "asks `Value.admitKey` about a `{name}`, every value of which is a key; \
+                     ADR 0064's Decision 4 admits this fallback where the layout does not \
+                     answer, and this one answers"
+                )
+            } else if admission == crate::lower::synth::Admission::Decided
+                && crate::lower::synth::walks(
+                    crate::lower::synth::Operation::Admission,
+                    &described.shape,
+                )
+                && !guarded_by_a_walk(program, function, pc, arg)
+            {
+                format!(
+                    "passes operand 0 of `Value.admitKey` a `{name}`, whose layout says which \
+                     of its values are keys; ADR 0064's Decision 4 admits this fallback from a \
+                     value the layout does not answer for, and a layout that answers is a walk \
+                     `lower::synth` writes"
+                )
+            } else {
+                continue;
+            };
+            faults.push(Invalid {
+                function: function.qualified(),
+                pc: Some(pc),
+                what,
+            });
+        }
+    }
+    if faults.is_empty() {
+        Ok(())
+    } else {
+        Err(faults)
+    }
+}
+
+/// Whether the `Value.admitKey` at `pc` is the one under the branch on what a
+/// walk of `arg`'s layout answered.
+///
+/// The three instructions `lower::core::Body::admit_by_walk` emits, read
+/// back: a call to a body that takes one value of the layout and answers a
+/// `Bool`, a `branch-false` on what it answered that lands past this
+/// instruction, and this instruction. Recognised by shape and never by name.
+fn guarded_by_a_walk(
+    program: &Program,
+    function: &crate::Function,
+    pc: usize,
+    arg: crate::program::Arg,
+) -> bool {
+    let Some(call) = pc.checked_sub(2) else {
+        return false;
+    };
+    let Some(Inst::Call { dst, callee, args }) = function.code.get(call) else {
+        return false;
+    };
+    let Some(Inst::BranchFalse { cond, to }) = function.code.get(pc - 1) else {
+        return false;
+    };
+    if cond != dst || *to as usize != pc + 1 {
+        return false;
+    }
+    let Some(walk) = program.functions.get(callee.index()) else {
+        return false;
+    };
+    if walk.params.as_slice() != [arg.layout] || walk.returns != crate::lower::shapes_bool() {
+        return false;
+    }
+    program
+        .arg_list(*args)
+        .first()
+        .is_some_and(|passed| passed.slot == arg.slot && passed.layout == arg.layout)
+}
+
 /// Marks `width` words starting at `slot` as written by something
 /// [`Check::slot_facts`] declines to guess about — the `Some(None)` case any
 /// writer other than the one this fact is about produces.
@@ -1584,10 +1731,13 @@ impl Check<'_> {
     /// corpus happened to hold.
     ///
     /// It names `Any.equals` and `Value.order`, which are the two of Decision
-    /// 3's five whose producers have been migrated. `Value.admitKey` and
-    /// `Value.renderInto` join them as each one's producer is, and adding one
-    /// here is a line — which is the point of writing the rule as a list
-    /// rather than as a category.
+    /// 3's five whose producers have been migrated *and* whose fallback is
+    /// reached from a box alone. `Value.admitKey`'s producer has been
+    /// migrated too and its rule is [`one_admission_boundary`], a pass of its
+    /// own for a reason that is the operation's rather than this rule's; see
+    /// there. `Value.renderInto` joins one of the two as its producer is, and
+    /// adding one here is a line — which is the point of writing the rule as
+    /// a list rather than as a category.
     ///
     /// **What the `Value.order` line catches is the cheap way out of the
     /// migration that added it.** The order's walk has arms that are awkward

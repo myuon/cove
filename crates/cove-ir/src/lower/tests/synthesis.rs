@@ -519,6 +519,235 @@ fn orders_of(program: &Program) -> Vec<String> {
         .collect()
 }
 
+// ---- `core.admitKey(key, method, role)` --------------------------------
+
+/// **The short circuit still fires, and this is the load-bearing test of the
+/// admission's half of this module.**
+///
+/// [`super::super::synth::admission`] answers [`synth::Admission::Always`] for
+/// every layout no value of which is ever refused, and `core.admitKey` emits
+/// **nothing at all** there — no walk, no call, no intrinsic. That is why
+/// `covefmt` and `cq` reach `Value.admitKey` at no site and on no turn: every
+/// key either program uses is a `String` or an `Int`. It is also the property
+/// a synthesis is in a position to destroy by making a function for every key
+/// and letting the inliner sort it out.
+///
+/// The families here are ADR 0001's whole admitted list, and a composite of
+/// each: a scalar, a string, a range, a struct, an enum, an array, a set, a
+/// map, and the two the standard library declares.
+#[test]
+fn a_key_no_value_of_which_is_refused_is_not_asked_about() {
+    let keys: &[(&str, &str)] = &[
+        ("", "Int"),
+        ("", "String"),
+        ("", "Bool"),
+        ("", "Duration"),
+        ("", "Unit"),
+        ("", "Range"),
+        ("", "Array<Int>"),
+        ("", "Set<String>"),
+        ("", "Map<String, Int>"),
+        ("", "Option<Int>"),
+        ("", "Result<Int, String>"),
+        ("struct Row { n: Int, name: String, flag: Bool }", "Row"),
+        ("enum Flag { On\n  Off }", "Flag"),
+        (
+            "struct Row { n: Int, name: String, flag: Bool }",
+            "Array<Row>",
+        ),
+        (
+            "struct Row { n: Int, name: String, flag: Bool }",
+            "Map<String, Row>",
+        ),
+    ];
+    for (declarations, key) in keys {
+        let program = keyed(declarations, key);
+        assert_eq!(admissions(&program), 0, "a `Value.admitKey` site for {key}");
+        assert_eq!(
+            walks_named(&program, "refuses<"),
+            Vec::<String>::new(),
+            "a walk for {key}"
+        );
+    }
+}
+
+/// An enum whose payload one case refuses is read at its discriminant.
+///
+/// This is the family the admission exists for: `Mark.Count(3)` is a key and
+/// `Mark.Weight(1.5)` is not, and nothing about the *type* decides it. So the
+/// walk is one `switch`, two arms that do nothing at all, and one that
+/// answers `true`.
+///
+/// It answers a `Bool` and never raises: the sentence a refusal is carries a
+/// `rule:` and a `help:` beside it and `Inst::Trap` carries one string, so
+/// what the walk hands back is the bit and `core.admitKey` runs the intrinsic
+/// under a `branch-false`.
+#[test]
+fn an_enum_is_read_at_its_discriminant_and_answers_a_bool() {
+    let program = keyed("enum Mark { Plain\n  Count(Int)\n  Weight(Float) }", "Mark");
+    let listed = synthesized(&program, "refuses<");
+    assert!(listed.contains("-> Bool"), "{listed}");
+    assert!(listed.contains("switch"), "{listed}");
+    assert!(!listed.contains("trap"), "{listed}");
+    assert!(!listed.contains("Value.admitKey"), "{listed}");
+    // `true` from the refused case and from the discriminant no case names,
+    // and the one `false` the good path falls through with — and nothing
+    // unreachable between them.
+    assert_eq!(listed.matches("  bool ").count(), 3, "{listed}");
+    assert_eq!(listed.matches("  jump ").count(), 4, "{listed}");
+}
+
+/// A struct is its fields, and the ones already known to be keys cost
+/// nothing.
+///
+/// `Holder`'s `id` and `label` are an `Int` and a `String`, so the walk has
+/// no instruction for either of them: what it holds is the `switch` on the
+/// middle field, reached by a static word offset.
+#[test]
+fn a_struct_walks_only_the_field_that_decides() {
+    let program = keyed(
+        "enum Mark { Plain\n  Count(Int)\n  Weight(Float) }\n\
+         struct Holder { id: Int, mark: Mark, label: String }",
+        "Holder",
+    );
+    let listed = synthesized(&program, "refuses<m.Holder");
+    assert_eq!(listed.matches("switch").count(), 1, "{listed}");
+    assert!(!listed.contains("load-field"), "{listed}");
+}
+
+/// A run is a loop over its elements, and an empty one is a key.
+///
+/// Which is the whole of why `Array<Float>` cannot be answered from the type:
+/// `[]` is a key and `[1.5]` is not.
+#[test]
+fn a_run_is_a_loop_and_an_empty_one_falls_through() {
+    let program = keyed("", "Array<Float>");
+    let listed = synthesized(&program, "refuses<Array");
+    assert!(listed.contains("len"), "{listed}");
+    assert!(listed.contains("load-elem"), "{listed}");
+}
+
+/// A map is asked about its **values** and not about its keys.
+///
+/// A map's keys are keys by construction — it could not have been built
+/// otherwise — so the walk reads the entry at the `MapEntry` layout's width
+/// and looks past the key's words. `key::admits` does exactly this, and a
+/// walk that asked about the keys too would be slower and no more correct.
+#[test]
+fn a_map_is_asked_about_its_values_and_not_its_keys() {
+    let program = keyed("", "Map<Int, Float>");
+    let listed = synthesized(&program, "refuses<Map");
+    assert!(listed.contains("load-elem"), "{listed}");
+    // One loop, not two.
+    assert_eq!(listed.matches("load-elem").count(), 1, "{listed}");
+}
+
+/// The two things no walk can be composed for, and the fallback they reach.
+///
+/// A box's family is a word in its own header. A layout that holds itself has
+/// values that nest as deep as they like, where a walk expanded in place is
+/// finite — and handing it over is also what keeps the runtime's depth bound
+/// governing the values that could reach it, which is the one place this
+/// migration does *not* move a bound the two before it moved.
+#[test]
+fn a_box_and_a_layout_that_holds_itself_reach_the_fallback() {
+    let boxed = keyed(
+        "trait Summary { fn summarize(self) -> String }\n\
+         struct Booking { id: Int }\n\
+         impl Summary for Booking { fn summarize(self) -> String { \"{self.id}\" } }",
+        "dyn Summary",
+    );
+    assert!(admissions(&boxed) > 0, "no `Value.admitKey` for a box");
+    assert_eq!(walks_named(&boxed, "refuses<"), Vec::<String>::new());
+
+    let deep = keyed("struct Node { tag: Int, kids: Array<Node> }", "Node");
+    assert!(
+        admissions(&deep) > 0,
+        "no `Value.admitKey` for a layout that holds itself"
+    );
+    assert_eq!(walks_named(&deep, "refuses<"), Vec::<String>::new());
+}
+
+/// **ADR 0064's Decision 4 for the admission, as a fact about every program
+/// this crate lowers.**
+///
+/// The check itself is [`crate::verify::one_admission_boundary`], and it is a
+/// pass of its own rather than a line in the verifier because what it checks
+/// is what the *lowering* chose and `lower::finish` expands a small leaf
+/// before it verifies. What is left for a test is the half a rule cannot
+/// state: that the rule bites, and that a program of many key families
+/// reaches the intrinsic exactly as often as it holds a key no layout can
+/// answer for.
+///
+/// The programs below hold every composite family whose admission a walk
+/// decides — a struct, an enum, an array, a map, an `Option` — and reach
+/// `Value.admitKey` **under a branch and never unguarded**, which
+/// [`admissions`] checks as it counts.
+#[test]
+fn no_layout_the_walk_decides_is_asked_about_unguarded() {
+    let program = lowered(
+        "enum Mark { Plain\n  Count(Int)\n  Weight(Float) }\n\
+         struct Holder { id: Int, mark: Mark, label: String }\n\
+         fn a(m: Set<Mark>, k: Mark) -> Bool { m.contains(k) }\n\
+         fn b(m: Set<Holder>, k: Holder) -> Bool { m.contains(k) }\n\
+         fn c(m: Set<Array<Mark>>, k: Array<Mark>) -> Bool { m.contains(k) }\n\
+         fn d(m: Set<Map<Int, Mark>>, k: Map<Int, Mark>) -> Bool { m.contains(k) }\n\
+         fn e(m: Set<Option<Mark>>, k: Option<Mark>) -> Bool { m.contains(k) }\n\
+         fn f(m: Set<Int>, k: Int) -> Bool { m.contains(k) }",
+    );
+    let names = walks_named(&program, "refuses<");
+    assert!(
+        names.len() >= 5,
+        "one walk per composite family, and these are what there are: {names:?}"
+    );
+    // Every `Value.admitKey` the program holds is one of those five under its
+    // branch; `Int` reaches none at all.
+    assert!(admissions(&program) > 0);
+}
+
+/// How many `Value.admitKey` sites the program holds, checking as it counts
+/// that each is either a layout no walk can be composed for or one under the
+/// branch on what a walk answered.
+///
+/// The second half duplicates [`crate::verify::one_admission_boundary`] on
+/// purpose, for [`reached`]'s reason: the pass panics through
+/// `lower::finish`, and a panic is a worse thing for a test to read than an
+/// assertion is. It is asked of the *finished* program, where the pass is
+/// asked of the one the lowering emitted, so what it can still say is that no
+/// site is about a layout the admission already answered.
+fn admissions(program: &Program) -> usize {
+    let mut found = 0;
+    for function in &program.functions {
+        for inst in &function.code {
+            let Inst::IntrinsicCall { site, args, .. } = inst else {
+                continue;
+            };
+            if program.intrinsic_site(*site).intrinsic != crate::Intrinsic::ValueAdmitKey {
+                continue;
+            }
+            found += 1;
+            let Some(arg) = program.arg_list(*args).first() else {
+                continue;
+            };
+            assert_ne!(
+                synth::admission(&program.layouts, arg.layout),
+                synth::Admission::Always,
+                "`Value.admitKey` was asked about a `{}`, every value of which is a key",
+                program.layout(arg.layout).name
+            );
+        }
+    }
+    found
+}
+
+/// Every synthesized function whose name holds `what`.
+fn walks_named(program: &Program, what: &str) -> Vec<String> {
+    walks_of(program)
+        .into_iter()
+        .filter(|name| name.contains(what))
+        .collect()
+}
+
 /// How many `Any.equals` sites the program holds.
 fn fallbacks(program: &Program) -> usize {
     reached(program, crate::Intrinsic::AnyEquals)
@@ -616,7 +845,14 @@ fn no_backend_names_a_synthesized_function() {
     // paths a backend could reach the module by. A verb added there owes a
     // string here: what makes the scan worth anything is that it names every
     // form a walk's name can take.
-    let forbidden = ["<synth>", "equals<", "order<", "synth::", "lower::synth"];
+    let forbidden = [
+        "<synth>",
+        "equals<",
+        "order<",
+        "refuses<",
+        "synth::",
+        "lower::synth",
+    ];
     let mut faults = Vec::new();
     for crate_name in ["cove-native", "cove-runtime"] {
         let root = workspace().join("crates").join(crate_name).join("src");

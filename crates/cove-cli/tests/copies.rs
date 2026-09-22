@@ -1336,7 +1336,42 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// programs both lowerings share) — one function per `(operation, layout)`
 /// pair actually reached, over a corpus in which almost every keyed collection
 /// is keyed by a `String` and reaches no pair at all.
-const FORWARDABLE_COPIES: usize = 8811;
+/// **The fifty-fifth move is a rise and nothing else**, and that is the
+/// finding. 8811 to 9066, 200 programs to 204: four new programs adding 255,
+/// and the layout-directed synthesis of the key admission taking **nothing**
+/// away and adding nothing either.
+///
+/// Pinned rather than assumed, by running the survey twice over the *same*
+/// 204 programs — once with a `cove-ir` built at the migration's parent and
+/// once with this one:
+///
+/// | | base | with the walk |
+/// | --- | ---: | ---: |
+/// | 204 programs | 9066 | **9066** |
+///
+/// Not close: the same number, and the same number in every row of the
+/// listing. What does move is the code around them — 778,695 instructions in
+/// 28,043 functions becomes 779,596 in 28,057, which is **14 synthesized
+/// functions and 901 instructions** across the whole corpus — and not one of
+/// those instructions is an `Inst::Copy` or a producer a `let` copies out of.
+///
+/// That is the equality walk's answer (#473 moved this file by zero) rather
+/// than the order's (#475 moved it by −7), and the reason is the shape of the
+/// call site. The order's walk *replaced* an `intrinsic-call` whose answer a
+/// `let` bound, so where the walk inlined whole it took the producer away with
+/// it. The admission's walk replaces nothing: `core.admitKey` answers `()`,
+/// which no `let` in the standard library binds, and the intrinsic it guards
+/// is still there under a branch. Nothing this emits is the destination of a
+/// copy, and nothing it removes was one.
+///
+/// The 255 is four programs. `tests/e2e:values_value_admit_key` is 1108 copy
+/// and 66 prod and 54 ret over 57 rows, each of which builds two values and
+/// runs them through nine standard-library call sites — the same shape
+/// `values_value_order`'s 1146 has, and for the same reason: a `let` per value
+/// per row before anything is asked. `benches:admission` is 414 and 43 and 34,
+/// `benches/ordering`'s shape with one row fewer. The two `fail_key_*` cases
+/// are a handful apiece.
+const FORWARDABLE_COPIES: usize = 9066;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

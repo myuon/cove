@@ -5,10 +5,10 @@
 //! than algorithms over a representation, **lowering synthesizes one private
 //! function per `(operation, layout)` actually reached, composed
 //! structurally.** This module is that producer. `Any.equals` was its first
-//! user and `Value.order` is its second, which is also the first pair to
-//! share it: what differs between the two is the shape of the control flow
-//! and not the table being walked, so the memo is keyed by the *pair* and
-//! each operation is a variant of [`Operation`] and an arm of [`Synth::body`].
+//! user, `Value.order` its second and `Value.admitKey` its third: what
+//! differs between them is the shape of the control flow and not the table
+//! being walked, so the memo is keyed by the *pair* and each operation is a
+//! variant of [`Operation`] and an arm of [`Synth::body`].
 //!
 //! # Why a producer and not a Cove declaration
 //!
@@ -40,23 +40,56 @@
 //! [`Shape::Boxed`] — `dyn Trait`, and a Host schema's `Any` — keeps its
 //! [`LayoutId`] in payload word 0 and is genuinely unknown until the box is
 //! opened. Decision 4 admits exactly one dynamic-layout fallback *per
-//! operation* and each is reached from there and from nowhere else:
+//! operation* and the first two are reached from there and from nowhere else:
 //! [`Synth::fallback`] is the only place in this crate that emits an
 //! [`Intrinsic::AnyEquals`] and [`Synth::dynamic`] the only place that emits
 //! an [`Intrinsic::ValueOrder`], and [`crate::verify`] refuses either one
-//! whose operands are not boxed. So the two intrinsics survive this
-//! migration, and each survives it in one arm rather than in thirty.
+//! whose operands are not boxed. So the intrinsics survive this migration,
+//! and each survives it in one arm rather than in thirty.
+//!
+//! # `Value.admitKey`'s boundary is not that boundary, and the reason is the
+//! sentence
+//!
+//! The third user does not fit that paragraph and it is worth saying why
+//! rather than filing it under "nearly". The other two *answer* something —
+//! a `Bool`, an `Int` — and a walk that has composed the answer is done. An
+//! admission answers `()` **or raises**, and what it raises is
+//! `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` with a
+//! `rule:` and a `help:` beside it. [`Inst::Trap`] carries one
+//! [`crate::StrId`] and nothing else.
+//!
+//! Every hole in that sentence is something the lowering knows. The two names
+//! are literals at all nine of `std.map`'s and `std.set`'s call sites; the
+//! type is the layout's; the path is composed of field and case names a
+//! *synthesized* walk knows statically per arm. It is not enough, because a
+//! trap is one string and a refusal is three — and a `path` that reaches
+//! through a run or a map quotes an index or a rendered key, which is issue
+//! #461's kind besides.
+//!
+//! So [`Operation::Admission`] does not refuse. It **decides**: a `Bool`,
+//! `true` where the runtime is to be asked, and `super::core` runs the
+//! [`Intrinsic::ValueAdmitKey`] it would have run anyway, at the site it
+//! would have run it at, over the key it would have run it over. That keeps
+//! the diagnostic byte for byte — including the frame it is blamed on, which
+//! a fallback raised from inside a walk would have added one to (ADR 0058
+//! reads the blame off the live frames). What the walk buys is the admitting
+//! path, which is every path a program that works ever takes: a key the
+//! layout settles reaches no intrinsic at all.
+//!
+//! [`admission`] is the question that decides, asked by the call site and by
+//! the walk, of one table — `ordered_by`'s arrangement, and `Body::always_admitted`
+//! before this module had an arm for the operation.
 //!
 //! # Nothing here allocates, and one walk may refuse
 //!
 //! Every instruction this emits is a load, a comparison, a branch, an
-//! [`Inst::Trap`] or a call into another function of the same kind, and
-//! neither intrinsic it can reach declares `MAY_ALLOCATE`. So no collection
-//! can happen inside a synthesized walk, and a reference temporary this
-//! leaves live across a loop turn cannot be holding a stale address when a
-//! collector reads it. That is why there is no [`Inst::Clear`] here, and it
-//! is a fact about the walk rather than a convention: an arm added later that
-//! allocates owes the clears that go with it.
+//! [`Inst::Trap`] or a call into another function of the same kind, and no
+//! intrinsic it can reach declares `MAY_ALLOCATE`. So no collection can
+//! happen inside a synthesized walk, and a reference temporary this leaves
+//! live across a loop turn cannot be holding a stale address when a collector
+//! reads it. That is why there is no [`Inst::Clear`] here, and it is a fact
+//! about the walk rather than a convention: an arm added later that allocates
+//! owes the clears that go with it.
 //!
 //! What [`Operation::Order`] adds is a walk that can *fail*. A `Float` and a
 //! mutable handle are not keys, so where equality falls through to `false`
@@ -65,7 +98,9 @@
 //! lowering that emits it, exactly as `super::pattern`'s uncovered `match`
 //! and `super::dispatch`'s undispatchable call choose theirs, so a refusal
 //! whose wording does not quote a value computed at run time is one synthesis
-//! can write. Issue #461 is about the other kind, and none of these are it.
+//! can write. Issue #461 is about the other kind. `Value.order`'s two are not
+//! it, and `Value.admitKey`'s — which carry a rule and a help — are not it
+//! either, for a reason next to it rather than in it.
 
 use std::sync::Arc;
 
@@ -73,7 +108,7 @@ use cove_diag::Span;
 
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Pc, Slot};
 use crate::intrinsic::Intrinsic;
-use crate::layout::{Case, LayoutId, Shape};
+use crate::layout::{Case, Layout, LayoutId, Shape};
 use crate::program::{Arg, Function, FunctionId, IntrinsicSite, Table, TableId};
 use crate::repr::{RefMap, Repr};
 
@@ -90,14 +125,13 @@ pub(super) const MODULE: &str = "<synth>";
 
 /// One layout-directed operation ADR 0064's Decision 3 names.
 ///
-/// Three of the five are still to come — `ValueAdmitKey` and
-/// `ValueRenderInto` are walks of the same shape over the same table, and
-/// `ValueRefuseDuplicate` is an error construction blocked on issue #461 —
-/// and the key of the memo is the *pair* rather than the layout so that
-/// adding one is a variant here and an arm in [`Synth::body`] rather than a
-/// second memo.
+/// Two of the five are still to come — `ValueRenderInto` is a walk of the
+/// same shape over the same table, and `ValueRefuseDuplicate` is an error
+/// construction blocked on issue #461 — and the key of the memo is the
+/// *pair* rather than the layout so that adding one is a variant here and an
+/// arm in [`Synth::body`] rather than a second memo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(super) enum Operation {
+pub(crate) enum Operation {
     /// `a == b`: whether two values of one layout are the same value.
     Equality,
     /// `core.order(a, b)`: where one value of a layout sorts relative to
@@ -112,6 +146,31 @@ pub(super) enum Operation {
     /// no branch after it, because its answer is the whole answer exactly as
     /// equality's is.
     Order,
+    /// `core.admitKey(key, method, role)`: whether this value is one the
+    /// language will not have as a map key or a set element.
+    ///
+    /// The walk **decides** rather than refuses, and that is the whole of
+    /// what makes it a third shape. The other two answer the question their
+    /// call site asked; this one answers a question the call site did not
+    /// ask — the call site asked for a *refusal*, which is a sentence, and
+    /// the walk hands back the one bit that says whether there is one to
+    /// write. Where the bit is set, `super::core` runs the
+    /// [`Intrinsic::ValueAdmitKey`] it would have run anyway, at the site it
+    /// would have run it at, and the runtime writes the sentence.
+    ///
+    /// It has to be that way round, and the reason is in the sentence rather
+    /// than in the walk. A refusal here is
+    /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``
+    /// with a **`rule:` and a `help:` beside it**, and [`Inst::Trap`] carries
+    /// one [`crate::StrId`] and nothing else — so `super::pattern`'s trick of
+    /// choosing the string at the lowering is not enough here, whatever is
+    /// known about the layout. See this module's header.
+    ///
+    /// So the answer is a `Bool` and the sense of it is **`true` when the
+    /// runtime is to be asked**: a `branch-false` over the intrinsic is one
+    /// instruction where a `branch-true` would be two, since the instruction
+    /// set has only the one.
+    Admission,
 }
 
 impl Operation {
@@ -120,6 +179,7 @@ impl Operation {
         match self {
             Operation::Equality => "equals",
             Operation::Order => "order",
+            Operation::Admission => "refuses",
         }
     }
 
@@ -128,8 +188,136 @@ impl Operation {
         match self {
             Operation::Equality => shapes::BOOL,
             Operation::Order => shapes::INT,
+            Operation::Admission => shapes::BOOL,
         }
     }
+
+    /// What it takes, in order.
+    ///
+    /// Two values of the layout for a comparison, and one for the admission,
+    /// which needs neither of `core.admitKey`'s two names: they word a
+    /// refusal, and this walk does not word one.
+    fn params(self, layout: LayoutId) -> Vec<LayoutId> {
+        match self {
+            Operation::Equality | Operation::Order => vec![layout, layout],
+            Operation::Admission => vec![layout],
+        }
+    }
+}
+
+/// What the language can say, from a layout alone, about every value of it as
+/// a map key or a set element.
+///
+/// ADR 0001 admits a key built only from immutable parts and refuses a
+/// `Float`, whose `NaN` is not equal to itself and so has no total order, and
+/// a `Vector` and everything holding one, because a key's equality must not
+/// change while a collection holds it. Which of the three this answers is
+/// what decides, at the call site, between emitting nothing, a call to a
+/// walk, and the intrinsic.
+///
+/// The order of the variants is the order of the lattice: a composite is the
+/// **greatest** of its parts, so one part nobody can settle statically makes
+/// the whole value one the runtime is asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Admission {
+    /// No value of this layout is ever refused, so asking is nothing at all.
+    ///
+    /// `Body::always_admitted` before this module had an arm for the
+    /// operation, moved here unchanged and for [`ordered_by`]'s reason: the
+    /// call site and the walk ask one question, in one place, of one table.
+    /// **It is load-bearing and it is not an optimisation.** Every key
+    /// `covefmt` and `cq` use is a `String` or an `Int`, so this is why
+    /// neither program reaches `Value.admitKey` at a single site.
+    Always,
+    /// Some values of this layout are refused and a walk can tell which.
+    ///
+    /// A `Float` field, a `Vector` field, an enum with one case that holds
+    /// one — the walk reads whatever decides and asks only where the answer
+    /// is that the key is refused, which is the one path that does not
+    /// continue.
+    Decided,
+    /// The runtime's own walk is what answers.
+    ///
+    /// Three things reach it, and ADR 0064's Decision 4 names only the first:
+    /// a [`Shape::Boxed`], whose family is a [`LayoutId`] in its own payload
+    /// word 0 and is genuinely unknown until the box is opened; a layout that
+    /// holds itself, whose values nest as deep as they like where a walk
+    /// composed here is finite; and a layout nested past [`NESTING`], which
+    /// is the same question asked about code size.
+    Dynamic,
+}
+
+/// How deep a key's layout may nest before the admission stops composing and
+/// asks.
+///
+/// `Body::always_admitted`'s `ADMITTED_DEPTH`, moved here with it. Well
+/// inside the runtime's bound on how deep a key is walked (128 steps, of
+/// which a level of nesting takes at most two), so a layout this shallow has
+/// no value the runtime's walk would stop for its depth — which is what makes
+/// the bound *not* move under this migration, where it moved under the two
+/// before it.
+const NESTING: usize = 48;
+
+/// Which of the three [`layout`] is.
+///
+/// Over a slice of layouts rather than over a [`shapes::Shapes`] because
+/// [`crate::verify`] asks it too, of a finished [`crate::Program`], and the
+/// rule it checks is this one: a question asked in one place of one table.
+pub(crate) fn admission(layouts: &[Layout], layout: LayoutId) -> Admission {
+    fn walk(layouts: &[Layout], layout: LayoutId, path: &mut Vec<LayoutId>) -> Admission {
+        if layout.index() >= layouts.len() {
+            return Admission::Dynamic;
+        }
+        if path.contains(&layout) || path.len() >= NESTING {
+            return Admission::Dynamic;
+        }
+        path.push(layout);
+        // A composite is the greatest of its parts, walked one at a time
+        // because each of them may push onto the same path.
+        fn parts(layouts: &[Layout], held: &[LayoutId], path: &mut Vec<LayoutId>) -> Admission {
+            let mut answer = Admission::Always;
+            for one in held {
+                answer = answer.max(walk(layouts, *one, path));
+            }
+            answer
+        }
+        let answer = match &layouts[layout.index()].shape {
+            // The scalars a key may be, and the string.
+            Shape::Word(Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration) | Shape::Str => {
+                Admission::Always
+            }
+            // A set's members are keys by construction, so nesting one never
+            // fails and nothing inside it is asked about.
+            Shape::Members { .. } => Admission::Always,
+            // An array is its element, and a map is its *value*: a map's keys
+            // are keys by construction too, so only its values need asking.
+            Shape::Elements {
+                elem,
+                growable: false,
+            } => walk(layouts, *elem, path),
+            Shape::Entries { value, .. } => walk(layouts, *value, path),
+            Shape::Struct { fields, .. } => {
+                let held: Vec<LayoutId> = fields.iter().map(|field| field.layout).collect();
+                parts(layouts, &held, path)
+            }
+            Shape::Enum { cases, .. } => {
+                let held: Vec<LayoutId> = cases
+                    .iter()
+                    .flat_map(|case| case.parts.iter().map(|part| part.layout))
+                    .collect();
+                parts(layouts, &held, path)
+            }
+            Shape::Boxed => Admission::Dynamic,
+            // A `Float`, a `Vector` and the growable run beneath it, a byte
+            // run and a byte buffer, a closure, a `Shared` cell, a host
+            // handle, a task and a task scope. Every one of them is refused,
+            // whatever value it holds, and a walk that met one knows so.
+            _ => Admission::Decided,
+        };
+        path.pop();
+        answer
+    }
+    walk(layouts, layout, &mut Vec::new())
 }
 
 /// The comparison that orders a value of `layout` exactly as a key is
@@ -201,7 +389,7 @@ fn ranks_of(cases: &[Case]) -> Vec<i64> {
 /// value either. So the order walks neither, and reaches them at
 /// [`Synth::not_a_key`] instead — where the intrinsic reaches its own
 /// refusal, in the same words.
-pub(super) fn walks(op: Operation, shape: &Shape) -> bool {
+pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
     match op {
         Operation::Equality => matches!(
             shape,
@@ -221,6 +409,21 @@ pub(super) fn walks(op: Operation, shape: &Shape) -> bool {
                     ..
                 }
                 | Shape::Members { .. }
+                | Shape::Entries { .. }
+        ),
+        // The admission's list leaves out the `Set`, and for a third reason
+        // again: a set's members are keys by construction, so [`admission`]
+        // answers [`Admission::Always`] for one and a call site never gets
+        // this far. What is left is the four families whose parts have to be
+        // looked at.
+        Operation::Admission => matches!(
+            shape,
+            Shape::Struct { .. }
+                | Shape::Enum { .. }
+                | Shape::Elements {
+                    growable: false,
+                    ..
+                }
                 | Shape::Entries { .. }
         ),
     }
@@ -266,14 +469,17 @@ pub(super) fn function_for(
         layout.0
     ));
 
-    let words = pool.shapes.words(layout).to_vec();
-    let mut reprs = words.clone();
-    reprs.extend_from_slice(&words);
-    let left = 0;
-    let right = words.len() as Slot;
-    let answer = (words.len() * 2) as Slot;
+    // The parameters are laid out from slot 0 in order, each as wide as its
+    // layout, and the answer sits after the last of them.
+    let params = op.params(layout);
+    let mut reprs: Vec<Repr> = Vec::new();
+    let mut taken: Vec<Slot> = Vec::with_capacity(params.len());
+    for param in &params {
+        taken.push(reprs.len() as Slot);
+        reprs.extend_from_slice(pool.shapes.words(*param));
+    }
+    let answer = reprs.len() as Slot;
     reprs.extend_from_slice(pool.shapes.words(op.answers()));
-
     let mut synth = Synth {
         pool,
         op,
@@ -285,7 +491,7 @@ pub(super) fn function_for(
         answer,
         settled: None,
     };
-    synth.body(layout, left, right);
+    synth.body(layout, &taken);
     let end = synth.here();
     for at in std::mem::take(&mut synth.leaves) {
         synth.patch(at, end);
@@ -295,7 +501,7 @@ pub(super) fn function_for(
     let function = Function {
         module: Arc::from(MODULE),
         name,
-        params: vec![layout, layout],
+        params,
         refs: RefMap::of(&synth.reprs),
         reprs: synth.reprs,
         returns: op.answers(),
@@ -329,6 +535,17 @@ struct Both {
     head: Pc,
     /// The two `branch-false`s that leave the loop, one per run.
     exits: [Pc; 2],
+}
+
+/// A loop over the units of one run, carried between [`Synth::over`] and
+/// [`Synth::around`] because the unit is read and asked about between them.
+struct Each {
+    /// The position being looked at.
+    index: Slot,
+    /// Where the next turn begins.
+    head: Pc,
+    /// The `branch-false` that leaves the loop.
+    done: Pc,
 }
 
 /// One synthesized function being written.
@@ -437,10 +654,11 @@ impl Synth<'_> {
     /// control flow*: equality is a conjunction that stops at the first
     /// difference and answers a `Bool`, and an order is a chain that stops at
     /// the first part that is not equal and answers the sign that part gave.
-    fn body(&mut self, layout: LayoutId, a: Slot, b: Slot) {
+    fn body(&mut self, layout: LayoutId, taken: &[Slot]) {
         match self.op {
-            Operation::Equality => self.equality(layout, a, b),
-            Operation::Order => self.ordering(layout, a, b),
+            Operation::Equality => self.equality(layout, taken[0], taken[1]),
+            Operation::Order => self.ordering(layout, taken[0], taken[1]),
+            Operation::Admission => self.admission(layout, taken[0]),
         }
     }
 
@@ -1208,6 +1426,261 @@ impl Synth<'_> {
             .pool
             .string(&format!("this `{name}` is in a case it does not have"));
         self.emit(Inst::Trap { message });
+    }
+
+    // ---- `core.admitKey(key, method, role)` -----------------------------
+
+    /// The whole of an admission walk: whether this value is one the runtime
+    /// is to be asked to refuse.
+    ///
+    /// Three things make this a different shape of walk from the other two,
+    /// and every one of them follows from the call site having asked for a
+    /// *sentence* rather than for a value.
+    ///
+    /// **The parts it settles emit nothing at all.** Equality stops at the
+    /// first part that differs and the order at the first part that decides,
+    /// and both write an answer at every part; here a part no value of which
+    /// is ever refused is not looked at. A
+    /// `Holder { id: Int, mark: Mark, label: String }` is two fields of
+    /// nothing and one `switch`, and the walk for a layout with no such part
+    /// is not made at all.
+    ///
+    /// **It is expanded in place rather than composed out of calls.** The
+    /// other two reach a nested layout through [`function_for`], which is
+    /// what makes `equals<Array<Row>>` call `equals<Row>`; here the nested
+    /// part is written into this same function, because a part that settles
+    /// is *nothing* and a call around nothing is not a saving. [`admission`]
+    /// is what makes the expansion finite: a layout that holds itself, or one
+    /// nested past [`NESTING`], is [`Admission::Dynamic`] and never reaches a
+    /// walk at all, so what is expanded here is a finite tree of inline
+    /// containment.
+    ///
+    /// **It never raises**, and the `false` it falls through with is the
+    /// whole of its good path. See [`Synth::refuse`].
+    fn admission(&mut self, layout: LayoutId, at: Slot) {
+        let mut path = Vec::new();
+        self.admit(layout, at, &mut path);
+        // Nothing refused: every part the walk looked at is a key, and every
+        // part it did not look at is one whatever it holds.
+        self.constant(false);
+    }
+
+    /// One value of `layout`, at `at`: nothing where every value of it is a
+    /// key, and otherwise whatever reading decides.
+    fn admit(&mut self, layout: LayoutId, at: Slot, path: &mut Vec<LayoutId>) {
+        match admission(self.pool.shapes.all(), layout) {
+            // Nothing at all. This is the arm that makes the walk small:
+            // every scalar, every string, every set, and every composite
+            // built only out of those.
+            Admission::Always => return,
+            // Unreachable from a walk, because [`admission`] is the greatest
+            // of a composite's parts and a call site only makes a function
+            // for a layout that is not this. Written out because "should
+            // never" is not "cannot", and asking is always correct.
+            Admission::Dynamic => {
+                self.refuse();
+                return;
+            }
+            Admission::Decided => {}
+        }
+        if path.contains(&layout) || path.len() >= NESTING {
+            self.refuse();
+            return;
+        }
+        let shape = self.pool.shapes.layout(layout).shape.clone();
+        path.push(layout);
+        match shape {
+            // Fields in declaration order, each at its static word offset,
+            // and the ones that are already keys cost nothing.
+            Shape::Struct { fields, .. } => {
+                for field in &fields {
+                    self.admit(field.layout, at + field.at as Slot, path);
+                }
+            }
+            // The one family where the *value* decides and the type does not:
+            // `Mark.Count(3)` is a key and `Mark.Weight(1.5)` is not.
+            Shape::Enum { cases, .. } => self.cases(&cases, at, path),
+            // An array is its elements, over the length the header carries. A
+            // `Set`'s members never reach here — [`admission`] answers
+            // `Always` for one — which is why this arm is an array's alone.
+            Shape::Elements {
+                elem,
+                growable: false,
+            } => self.each(elem, at, path),
+            // A map is its *values*: the keys are keys by construction, since
+            // the map could not have been built otherwise.
+            Shape::Entries { key, value } => self.values(key, value, at, path),
+            // A `Float`, a `Vector` and the growable run beneath it, a byte
+            // run and a byte buffer, a closure, a `Shared` cell, a host
+            // handle, a task and a task scope: none of them is a key,
+            // whatever it holds, so there is nothing to read and the answer
+            // is settled.
+            _ => self.refuse(),
+        }
+        path.pop();
+    }
+
+    /// The parts of whichever case this value is in.
+    ///
+    /// One [`Inst::Switch`] into one arm per case, and an arm is only as long
+    /// as the parts of it that are not already keys — which for an enum with
+    /// one refused case is a single [`Synth::refuse`] under one of the arms and
+    /// a bare [`Inst::Jump`] under the rest.
+    ///
+    /// The default is [`Synth::refuse`] and not a [`Inst::Trap`], for the
+    /// reason every other arm's is: the runtime's own walk answers a
+    /// discriminant no case names with a sentence of its own, and handing the
+    /// question over is what keeps that sentence the one a reader sees. The
+    /// machine bounds-checks what it reads out of an object rather than
+    /// taking the lowering's word for it, which is the same reason a `match`
+    /// the checker proved exhaustive still carries a default.
+    fn cases(&mut self, cases: &[Case], at: Slot, path: &mut Vec<LayoutId>) {
+        let switch = self.emit(Inst::Switch {
+            on: at,
+            table: TableId(0),
+        });
+        let mut targets = Vec::with_capacity(cases.len());
+        let mut ends = Vec::with_capacity(cases.len());
+        for case in cases {
+            targets.push(self.here());
+            for part in &case.parts {
+                // A part's offset is within the payload region, which begins
+                // after the discriminant.
+                self.admit(part.layout, at + 1 + part.at as Slot, path);
+            }
+            // An arm that has already left needs no jump to the join, and the
+            // one it would get would be unreachable: [`Synth::refuse`] leaves
+            // with the answer written, and this is how that is noticed
+            // without reading the instruction back.
+            if self.leaves.last() != Some(&(self.here() - 1)) {
+                ends.push(self.emit(Inst::Jump { to: PENDING }));
+            }
+        }
+        let default = self.here();
+        self.refuse();
+        let table = self.pool.table(Table { targets, default });
+        let Inst::Switch { table: held, .. } = &mut self.code[switch as usize] else {
+            unreachable!("the switch was emitted a few lines above");
+        };
+        *held = table;
+        let join = self.here();
+        for end in ends {
+            self.patch(end, join);
+        }
+    }
+
+    /// Every element of a run, at the layout its elements have.
+    ///
+    /// An ordinary loop, so ADR 0040's bounds apply to it because they apply
+    /// to every back edge. An empty run runs it no times and is a key, which
+    /// is what makes an empty `Array<Float>` one.
+    fn each(&mut self, elem: LayoutId, at: Slot, path: &mut Vec<LayoutId>) {
+        let each = self.over(at);
+        let held = self.alloc(elem);
+        self.emit(Inst::LoadElem {
+            dst: held,
+            obj: at,
+            index: each.index,
+            layout: elem,
+        });
+        self.admit(elem, held, path);
+        self.around(each);
+    }
+
+    /// Every *value* of a map's entries, read at the `MapEntry` layout's
+    /// width.
+    ///
+    /// The same [`shapes::Shapes::entry_of`] the other two walks read a map
+    /// with: the entry is the key's words then the value's, so the value's
+    /// offset inside it is the key's width.
+    fn values(&mut self, key: LayoutId, value: LayoutId, at: Slot, path: &mut Vec<LayoutId>) {
+        let entry = self.pool.shapes.entry_of(key, value);
+        let keys = self.pool.shapes.words(key).len() as Slot;
+        let each = self.over(at);
+        let held = self.alloc(entry);
+        self.emit(Inst::LoadElem {
+            dst: held,
+            obj: at,
+            index: each.index,
+            layout: entry,
+        });
+        self.admit(value, held + keys, path);
+        self.around(each);
+    }
+
+    /// The head of a loop over the units of the run at `at`.
+    ///
+    /// Carried to [`Synth::around`] because the unit is read and asked about
+    /// between them, exactly as [`Both`] is carried across a run comparison.
+    fn over(&mut self, at: Slot) -> Each {
+        let len = self.alloc(shapes::INT);
+        self.emit(Inst::Len { dst: len, obj: at });
+        let index = self.alloc(shapes::INT);
+        self.emit(Inst::Int {
+            dst: index,
+            value: 0,
+        });
+        let head = self.here();
+        let more = self.alloc(shapes::BOOL);
+        self.emit(Inst::Cmp {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: more,
+            a: index,
+            b: len,
+        });
+        let done = self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        });
+        Each { index, head, done }
+    }
+
+    /// The tail of that loop: the step, the back edge, and the landing the
+    /// exit was left pending for.
+    fn around(&mut self, each: Each) {
+        self.emit(Inst::ArithImm {
+            op: ArithOp::Add,
+            dst: each.index,
+            a: each.index,
+            value: 1,
+        });
+        self.emit(Inst::Jump { to: each.head });
+        let end = self.here();
+        self.patch(each.done, end);
+    }
+
+    /// This value is one the runtime is to be asked about: `true`, and leave.
+    ///
+    /// **The admission walk never raises, and this is why.** Its refusal is
+    /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``
+    /// with a `rule:` and a `help:` beside it, and [`Inst::Trap`] carries one
+    /// [`crate::StrId`]. Every one of those four holes is something the
+    /// lowering knows — the two names are literals at all nine standard-
+    /// library call sites, the type is the layout's, the path is composed of
+    /// field and case names a *synthesized* walk knows statically, and the
+    /// rule and the help are one of two constant pairs — and none of that is
+    /// enough, because a trap is one string and a refusal is three.
+    ///
+    /// So the walk answers the bit and `super::core` runs the intrinsic,
+    /// **at the call site, in the caller's frame, over the caller's key**.
+    /// That is not tidiness either: the sentence names the path from the key
+    /// to the part that is wrong, the blame chain is read off the live frames
+    /// (ADR 0058), and a fallback raised from inside a walk would have added
+    /// a frame of its own and a second `in the standard library` label
+    /// pointing at the line the first one already pointed at. Decision 8 asks
+    /// that the diagnostic not change, and this is what that costs.
+    ///
+    /// Every point this is reached from is one the runtime really does
+    /// refuse — a `Float`, a `Vector`, a handle, a discriminant no case names
+    /// — so the intrinsic that follows the `true` raises rather than
+    /// answering, and the extra walk it does is on the one path that ends the
+    /// run. The `Admission::Dynamic` arms above are the exception and they
+    /// are unreachable from a walk, because a composite holding one is
+    /// `Dynamic` itself and never gets a walk.
+    fn refuse(&mut self) {
+        self.constant(true);
+        self.leave();
     }
 
     /// ADR 0064's Decision 4: the one dynamic-layout boundary.
