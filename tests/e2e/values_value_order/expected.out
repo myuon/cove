@@ -1,0 +1,153 @@
+int.least.zero fwd -1 back 1 selfA 0 selfB 0 want -1
+int.least.neg fwd -1 back 1 selfA 0 selfB 0 want -1
+int.neg.zero fwd -1 back 1 selfA 0 selfB 0 want -1
+int.zero.one fwd -1 back 1 selfA 0 selfB 0 want -1
+int.one.greatest fwd -1 back 1 selfA 0 selfB 0 want -1
+int.least.greatest fwd -1 back 1 selfA 0 selfB 0 want -1
+int.neg.pos fwd -1 back 1 selfA 0 selfB 0 want -1
+int.same fwd 0 back 0 selfA 0 selfB 0 want 0
+int.same.zero fwd 0 back 0 selfA 0 selfB 0 want 0
+int.adjacent fwd -1 back 1 selfA 0 selfB 0 want -1
+bool.false.true fwd -1 back 1 selfA 0 selfB 0 want -1
+bool.same.false fwd 0 back 0 selfA 0 selfB 0 want 0
+bool.same.true fwd 0 back 0 selfA 0 selfB 0 want 0
+unit.same fwd 0 back 0 selfA 0 selfB 0 want 0
+duration.neg.zero fwd -1 back 1 selfA 0 selfB 0 want -1
+duration.zero.pos fwd -1 back 1 selfA 0 selfB 0 want -1
+duration.units fwd -1 back 1 selfA 0 selfB 0 want -1
+duration.same fwd 0 back 0 selfA 0 selfB 0 want 0
+duration.fraction fwd 1 back -1 selfA 0 selfB 0 want 1
+duration.neg.neg fwd -1 back 1 selfA 0 selfB 0 want -1
+str.same.built fwd 0 back 0 selfA 0 selfB 0 want 0
+str.empty.built fwd 0 back 0 selfA 0 selfB 0 want 0
+str.diff fwd -1 back 1 selfA 0 selfB 0 want -1
+str.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+str.empty.one fwd -1 back 1 selfA 0 selfB 0 want -1
+str.byte.beats.length fwd 1 back -1 selfA 0 selfB 0 want 1
+str.upper.lower fwd -1 back 1 selfA 0 selfB 0 want -1
+str.digits fwd -1 back 1 selfA 0 selfB 0 want -1
+str.multibyte fwd -1 back 1 selfA 0 selfB 0 want -1
+str.multibyte.pair fwd -1 back 1 selfA 0 selfB 0 want -1
+str.built.diff fwd -1 back 1 selfA 0 selfB 0 want -1
+str.space fwd -1 back 1 selfA 0 selfB 0 want -1
+struct.same fwd 0 back 0 selfA 0 selfB 0 want 0
+struct.first fwd -1 back 1 selfA 0 selfB 0 want -1
+struct.middle fwd -1 back 1 selfA 0 selfB 0 want -1
+struct.last fwd -1 back 1 selfA 0 selfB 0 want -1
+struct.first.beats.rest fwd -1 back 1 selfA 0 selfB 0 want -1
+struct.middle.beats.last fwd -1 back 1 selfA 0 selfB 0 want -1
+struct.nested.same fwd 0 back 0 selfA 0 selfB 0 want 0
+struct.nested.left fwd -1 back 1 selfA 0 selfB 0 want -1
+struct.nested.right fwd -1 back 1 selfA 0 selfB 0 want -1
+flag.on.off fwd 1 back -1 selfA 0 selfB 0 want 1
+flag.same fwd 0 back 0 selfA 0 selfB 0 want 0
+mark.both.count fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.count.named fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.named.plain fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.count.plain fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.plain.both fwd 1 back -1 selfA 0 selfB 0 want 1
+mark.named.both fwd 1 back -1 selfA 0 selfB 0 want 1
+mark.plain.same fwd 0 back 0 selfA 0 selfB 0 want 0
+mark.count.payload fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.count.neg fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.count.same fwd 0 back 0 selfA 0 selfB 0 want 0
+mark.named.payload fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.named.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.named.built fwd 0 back 0 selfA 0 selfB 0 want 0
+mark.both.first fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.both.second fwd -1 back 1 selfA 0 selfB 0 want -1
+mark.both.same fwd 0 back 0 selfA 0 selfB 0 want 0
+option.none.some fwd -1 back 1 selfA 0 selfB 0 want -1
+option.none.same fwd 0 back 0 selfA 0 selfB 0 want 0
+option.some.some fwd -1 back 1 selfA 0 selfB 0 want -1
+option.some.neg fwd -1 back 1 selfA 0 selfB 0 want -1
+option.some.same fwd 0 back 0 selfA 0 selfB 0 want 0
+option.nested.none fwd -1 back 1 selfA 0 selfB 0 want -1
+option.nested.some fwd -1 back 1 selfA 0 selfB 0 want -1
+option.struct fwd -1 back 1 selfA 0 selfB 0 want -1
+result.err.ok fwd -1 back 1 selfA 0 selfB 0 want -1
+result.ok.ok fwd -1 back 1 selfA 0 selfB 0 want -1
+result.err.err fwd -1 back 1 selfA 0 selfB 0 want -1
+result.ok.same fwd 0 back 0 selfA 0 selfB 0 want 0
+result.err.same fwd 0 back 0 selfA 0 selfB 0 want 0
+array.same fwd 0 back 0 selfA 0 selfB 0 want 0
+array.element fwd -1 back 1 selfA 0 selfB 0 want -1
+array.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+array.element.beats.length fwd 1 back -1 selfA 0 selfB 0 want 1
+array.empty.one fwd -1 back 1 selfA 0 selfB 0 want -1
+array.empty.same fwd 0 back 0 selfA 0 selfB 0 want 0
+array.neg fwd -1 back 1 selfA 0 selfB 0 want -1
+array.longer fwd 1 back -1 selfA 0 selfB 0 want 1
+array.str fwd 1 back -1 selfA 0 selfB 0 want 1
+array.struct fwd -1 back 1 selfA 0 selfB 0 want -1
+array.struct.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+array.nested fwd -1 back 1 selfA 0 selfB 0 want -1
+array.nested.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+array.mark fwd 1 back -1 selfA 0 selfB 0 want 1
+set.build.order fwd 0 back 0 selfA 0 selfB 0 want 0
+set.element fwd -1 back 1 selfA 0 selfB 0 want -1
+set.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+set.element.beats.length fwd 1 back -1 selfA 0 selfB 0 want 1
+set.empty fwd -1 back 1 selfA 0 selfB 0 want -1
+set.empty.same fwd 0 back 0 selfA 0 selfB 0 want 0
+set.str fwd 1 back -1 selfA 0 selfB 0 want 1
+map.build.order fwd 0 back 0 selfA 0 selfB 0 want 0
+map.value fwd -1 back 1 selfA 0 selfB 0 want -1
+map.key.beats.value fwd -1 back 1 selfA 0 selfB 0 want -1
+map.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+map.entry.beats.length fwd 1 back -1 selfA 0 selfB 0 want 1
+map.empty fwd -1 back 1 selfA 0 selfB 0 want -1
+map.empty.same fwd 0 back 0 selfA 0 selfB 0 want 0
+range.same fwd 0 back 0 selfA 0 selfB 0 want 0
+range.start fwd -1 back 1 selfA 0 selfB 0 want -1
+range.end fwd -1 back 1 selfA 0 selfB 0 want -1
+range.inclusive fwd -1 back 1 selfA 0 selfB 0 want -1
+range.start.beats.end fwd -1 back 1 selfA 0 selfB 0 want -1
+range.end.written fwd 1 back -1 selfA 0 selfB 0 want 1
+range.neg fwd -1 back 1 selfA 0 selfB 0 want -1
+range.empty fwd -1 back 1 selfA 0 selfB 0 want -1
+deep.leaf fwd -1 back 1 selfA 0 selfB 0 want -1
+deep.leaf.same fwd 0 back 0 selfA 0 selfB 0 want 0
+deep.six.bottom fwd -1 back 1 selfA 0 selfB 0 want -1
+deep.six.depth fwd -1 back 1 selfA 0 selfB 0 want -1
+deep.thirty.same fwd 0 back 0 selfA 0 selfB 0 want 0
+deep.thirty.bottom fwd 1 back -1 selfA 0 selfB 0 want 1
+deep.wide fwd -1 back 1 selfA 0 selfB 0 want -1
+deep.wide.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+deep.wide.tag fwd -1 back 1 selfA 0 selfB 0 want -1
+boxed.same fwd 0 back 0 selfA 0 selfB 0 want 0
+boxed.diff fwd -1 back 1 selfA 0 selfB 0 want -1
+boxed.neg fwd -1 back 1 selfA 0 selfB 0 want -1
+boxed.array fwd 0 back 0 selfA 0 selfB 0 want 0
+boxed.array.element fwd -1 back 1 selfA 0 selfB 0 want -1
+boxed.array.prefix fwd -1 back 1 selfA 0 selfB 0 want -1
+boxed.option fwd -1 back 1 selfA 0 selfB 0 want -1
+trans.int ab -1 bc -1 ac -1 want -1 -1 -1
+trans.str ab -1 bc -1 ac -1 want -1 -1 -1
+trans.duration ab -1 bc -1 ac -1 want -1 -1 -1
+trans.struct ab -1 bc -1 ac -1 want -1 -1 -1
+trans.mark ab -1 bc -1 ac -1 want -1 -1 -1
+trans.mark.payload ab -1 bc -1 ac -1 want -1 -1 -1
+trans.array ab -1 bc -1 ac -1 want -1 -1 -1
+trans.set ab -1 bc -1 ac -1 want -1 -1 -1
+trans.range ab -1 bc -1 ac -1 want -1 -1 -1
+trans.option ab -1 bc -1 ac -1 want -1 -1 -1
+trans.deep ab -1 bc -1 ac -1 want -1 -1 -1
+marks {Both(1, z): both, Count(-1): count -1, Count(2): count 2, Named(a): named a, Named(b): named b, Plain: plain}
+  found Some(both) Some(count -1) Some(count 2) Some(named a) Some(named b) Some(plain)
+  missed None None None None None
+mixed {Mixed(first: 0, middle: z, last: 0), Mixed(first: 1, middle: a, last: 9), Mixed(first: 1, middle: b, last: 0)}
+  found true true true
+  missed false false false
+runs {[], [1], [1, 2], [1, 2, 0], [2]}
+  found true true true true true
+  missed false false false false
+sets {{1}, {1, 2}, {2}}
+  found true true missed false false
+maps {{a: 1}: a1, {a: 2}: a2, {b: 1}: b1}
+  found Some(a1) Some(a2) Some(b1)
+  missed None None
+ranges {0..<2, 0..<3, 0..3, 1..<2}
+  found true true true true
+  missed false false false
+deep found Some(eight) Some(nine) missed None None

@@ -2674,22 +2674,38 @@ export fn main() -> Int {
             .collect()
     };
 
-    // One instruction wherever one orders the key as a key is ordered: the
-    // four `Int`s and two `Duration`s, three `Bool`s, eight `String`s and the
-    // three fruits, whose index order is their name order. Everything else is
-    // the walk — the colors, whose is not, and the unit, the option, the
-    // points, the arrays, the sets, the map and the ranges.
+    // One instruction wherever one orders the key as a key is ordered, and a
+    // walk `cove_ir::lower::synth` composed wherever one does not.
+    //
+    // **The probe reaches the intrinsic zero times**, which is the number
+    // that moved. It used to reach it seventeen: the unit, the three colours
+    // — declared out of case-name order, where the three fruits are not —
+    // the two options, the three points, the three arrays, the two sets, the
+    // map and the two ranges. Every one of those is a layout the lowering
+    // knows, so every one of them is now a function it wrote, and ADR 0064's
+    // Decision 4 leaves the intrinsic for a box alone. This probe holds none,
+    // so it holds none of the intrinsic either.
+    //
+    // The comparison counts below are a fence and no longer a statement about
+    // the short circuit on its own. `lower::inline` expands the small walks
+    // into the caller, so what they see is the short circuit's instructions
+    // and the inlined walks' together — six `Int`s and three `Bool`s and
+    // three `Tag`s of short circuit, and the rest composed. The short circuit
+    // is pinned where it *can* be seen alone, in
+    // `cove_ir::lower::tests::synthesis`'
+    // `a_key_one_instruction_orders_is_not_a_function`, which asserts that a
+    // key one instruction orders is not a function at all.
     let compares = orders("probeOrders");
     let count = |on: cove_ir::Compare| compares.iter().filter(|c| **c == on).count();
-    assert_eq!(count(cove_ir::Compare::Int), 6, "{compares:?}");
-    assert_eq!(count(cove_ir::Compare::Bool), 3, "{compares:?}");
+    assert_eq!(count(cove_ir::Compare::Int), 28, "{compares:?}");
+    assert_eq!(count(cove_ir::Compare::Bool), 5, "{compares:?}");
     assert_eq!(count(cove_ir::Compare::Str), 8, "{compares:?}");
-    assert_eq!(count(cove_ir::Compare::Tag), 3, "{compares:?}");
+    assert_eq!(count(cove_ir::Compare::Tag), 5, "{compares:?}");
     let walks = intrinsics("probeOrders")
         .into_iter()
         .filter(|intrinsic| *intrinsic == cove_ir::Intrinsic::ValueOrder)
         .count();
-    assert_eq!(walks, 1 + 3 + 2 + 3 + 3 + 2 + 1 + 2);
+    assert_eq!(walks, 0, "a layout the lowering knows is a walk it wrote");
     assert_eq!(
         intrinsics("probeAdmitted"),
         Vec::new(),

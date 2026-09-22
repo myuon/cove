@@ -1,0 +1,652 @@
+use console.println
+
+/// Where every family of value sorts relative to another of its kind, and the
+/// three laws the order owes at every row.
+///
+/// The value order is the one thing a `Set` and a `Map` are built out of:
+/// `Set.of` places each element where it belongs, `Map.get` and
+/// `Set.contains` binary-search for it, and both render in ascending order.
+/// It is about to stop being one Rust intrinsic and become IR the lowering
+/// composes out of a key's layout — a walk per arm, the way `Any.equals` in
+/// `values_any_equals` already is. A composition has one arm per family and
+/// can get exactly one of them wrong, so this file is one row per arm:
+/// scalars, a string, a struct, an enum with and without a payload, a run, a
+/// keyed collection, a range, an `Option`, a `Result`, a recursion, and the
+/// erased box that is the one case a layout cannot be read off the source.
+///
+/// # The rows are the oracle, and they were written before anything ran
+///
+/// Every `want` below was written from the specification of the order — by
+/// signed value for an `Int` and a `Duration`, `false` before `true`, byte-wise
+/// for a `String`, field by field in declaration order for a struct, **by case
+/// name alphabetically** for an enum, element by element with the shorter last
+/// for a run, key before value for a map entry, start then end then
+/// exclusive-before-inclusive for a range — and not from what any
+/// implementation printed. A golden taken from the subject records what the
+/// subject does, which is the one thing a differential test must not take on
+/// trust.
+///
+/// The row family that matters most is [`Mark`]'s. Its cases are declared
+/// `Plain`, `Count`, `Named`, `Both` and they sort `Both`, `Count`, `Named`,
+/// `Plain`, because the order is by case *name* and not by case *index*. An
+/// arm that compared the discriminant word would pass every row in this file
+/// whose enum happens to be declared in name order and fail those. `Result` is
+/// the same shape in the standard library: it is declared `Ok` then `Err`, and
+/// `Err` sorts first.
+///
+/// # Four answers per row, not one
+///
+/// [`law`] prints `sign(a, b)`, `sign(b, a)`, `sign(a, a)` and `sign(b, b)` at
+/// every row. `want` is what `fwd` must be, `back` must be its negation, and
+/// `selfA` and `selfB` must both be `0`. That is antisymmetry and reflexivity
+/// printed rather than asserted, so the golden records them: a composition that
+/// compares the left value's field against the left value's field answers `0`
+/// for everything and is antisymmetric and reflexive while being useless, and a
+/// composition that forgets to negate on one arm is antisymmetric nowhere.
+/// [`trio`] is the third law, transitivity, over a triple whose middle value
+/// really does lie between the other two.
+///
+/// # What is not here
+///
+/// The *refusals* — a `Float` key, a `Vector` key, and either nested inside
+/// another key — are pinned by `tests/e2e/fail_invalid_map_key`,
+/// `tests/e2e/fail_key_float_empty_map` and `tests/e2e/fail_key_nested_float`,
+/// and they belong there rather than here: a refusal ends the run, so one row
+/// of it in this file would silence every row below it.
+///
+/// Nor is there a row for the order *between* two different erasures of the
+/// same trait, or between two different key types. Every row here compares two
+/// values whose type is the same, because that is the whole of what the
+/// specification of the order says; what a `Booking` and a `Receipt` do to each
+/// other inside one `Set<dyn Summary>` is a question this file deliberately
+/// leaves for whoever decides it.
+///
+/// Nor is there a row at 128 deep. The recursion rows stop at 30, which is far
+/// enough that a walk has to recurse and short of a bound this change is not
+/// pinning.
+///
+/// Three fields whose words are an `Int`, a reference and an `Int`.
+///
+/// The middle field is what makes a wrong offset visible: a walk that read both
+/// `Int`s from word 0 would answer `0` for `Mixed(1, "x", 2)` against
+/// `Mixed(2, "x", 1)`, which is the `struct.first` row.
+struct Mixed {
+  first: Int
+  middle: String
+  last: Int
+}
+
+/// A struct whose fields are themselves walks, so that the "first field that
+/// differs decides" rule is asked of a field that is not a word.
+struct Pair {
+  left: Mixed
+  right: Mixed
+}
+
+/// Two cases with no payload, declared out of name order.
+///
+/// `Off` sorts before `On` and is declared after it, so `sign(On, Off)` is `1`
+/// under the order and `-1` under a comparison of case indices.
+enum Flag {
+  On
+  Off
+}
+
+/// Cases with payloads beside one without, declared in an order that agrees
+/// with alphabetical order nowhere.
+///
+/// Declared `Plain`, `Count`, `Named`, `Both`; sorted `Both`, `Count`, `Named`,
+/// `Plain`. Every pair of distinct cases here has a different answer under the
+/// two readings, which is the point of choosing these four names.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+  Both(Int, String)
+}
+
+/// A value type that reaches itself through a reference, which is the only way
+/// [ADR 0035](../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+/// admits.
+struct Node {
+  tag: Int
+  kids: Array<Node>
+}
+
+/// A value that can summarise itself, so that `dyn Summary` erases one.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// One erasable value.
+struct Booking {
+  id: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+/// Where `a` sorts relative to `b`: `-1`, `0` or `1`, read off the one
+/// canonical order a `Set` keeps its elements in.
+///
+/// `core.order` is reserved to the standard library, so a program cannot ask
+/// the order anything directly. It can ask a `Set`, which is built out of it:
+/// two distinct values land in a two-element run whose first is the smaller,
+/// and two equal ones land in a run of one, since `inserted` answers the
+/// receiver unchanged when the element is already a member. That last part is
+/// also why this is `Set.of(a).inserted(b)` and not `Set.of(a, b)` — a literal
+/// with the same element twice is refused rather than collapsed, and `selfA`
+/// asks for exactly that pair.
+fn sign<T>(a: T, b: T) -> Int {
+  let sorted = Set.of(a).inserted(b).toArray()
+  if sorted.length() == 1 {
+    return 0
+  }
+  for first in sorted {
+    if first == a {
+      return -1
+    }
+    return 1
+  }
+  0
+}
+
+/// `a` against `b`, `b` against `a`, and each against itself, written out
+/// beside what the specification says the first of them is.
+///
+/// One generic function rather than one per type, which is also what makes
+/// every row go through the same lowering: the call is monomorphised, so
+/// `law<Mixed>` and `law<Array<Int>>` are separate functions over separate
+/// layouts and each of them asks the question its own way.
+fn law<T>(label: String, a: T, b: T, want: Int) -> Result<Unit, Error> {
+  println("{label} fwd {sign(a, b)} back {sign(b, a)} selfA {sign(a, a)} selfB {sign(b, b)} want {want}")?
+  Ok(())
+}
+
+/// Transitivity: three values written smallest first, and the three pairwise
+/// signs that must follow.
+///
+/// `ab` and `bc` being `-1` is what makes `b` the middle one; `ac` is the law.
+/// An arm that is antisymmetric and reflexive can still be intransitive — a
+/// struct walk that compared field 0 of the left against field 1 of the right
+/// is — and no amount of [`law`] rows would show it.
+fn trio<T>(label: String, a: T, b: T, c: T) -> Result<Unit, Error> {
+  println(
+    "{label} ab {sign(a, b)} bc {sign(b, c)} ac {sign(a, c)} want -1 -1 -1",
+  )?
+  Ok(())
+}
+
+/// A string built a character at a time, so that two equal strings are two
+/// objects.
+///
+/// `"ab"` written twice in the source may be one interned literal, and then a
+/// row proves that a pointer equals itself. This one cannot be.
+fn built(parts: Array<String>) -> String {
+  var out = ""
+  for part in parts {
+    out = "{out}{part}"
+  }
+  out
+}
+
+/// A chain of `depth` nodes, each the only child of the one above, ending in a
+/// leaf whose tag is `last`.
+///
+/// The topmost node's tag is `depth - 1`, so two chains of different depths
+/// differ at their first field and never reach the bottom.
+fn chain(depth: Int, last: Int) -> Node {
+  var held = Node(tag: last, kids: [])
+  var at = 0
+  while at < depth {
+    held = Node(tag: at, kids: [held])
+    at += 1
+  }
+  held
+}
+
+/// Every scalar a key may be: `Int` by signed value, `Bool` with `false`
+/// first, `Unit` equal to itself, `Duration` by signed value.
+///
+/// `int.least.zero` is the row a comparison of the two words as *unsigned*
+/// gets wrong: the least `Int` has the top bit set, so it reads as the largest
+/// of all of them.
+fn scalars() -> Result<Unit, Error> {
+  let least = -9223372036854775807 - 1
+  let greatest = 9223372036854775807
+  law("int.least.zero", least, 0, -1)?
+  law("int.least.neg", least, -1, -1)?
+  law("int.neg.zero", -1, 0, -1)?
+  law("int.zero.one", 0, 1, -1)?
+  law("int.one.greatest", 1, greatest, -1)?
+  law("int.least.greatest", least, greatest, -1)?
+  law("int.neg.pos", -1, 1, -1)?
+  law("int.same", 7, 7, 0)?
+  law("int.same.zero", 0, 0, 0)?
+  law("int.adjacent", 7, 8, -1)?
+
+  law("bool.false.true", false, true, -1)?
+  law("bool.same.false", false, false, 0)?
+  law("bool.same.true", true, true, 0)?
+
+  law("unit.same", (), (), 0)?
+
+  // Written in different units on purpose: a `Duration` is a count of
+  // nanoseconds, so `2s` and `2000ms` are one value written two ways.
+  law("duration.neg.zero", -5ms, 0ns, -1)?
+  law("duration.zero.pos", 0ns, 1ns, -1)?
+  law("duration.units", 1ms, 2s, -1)?
+  law("duration.same", 2s, 2000ms, 0)?
+  law("duration.fraction", 1500ms, 1s, 1)?
+  law("duration.neg.neg", -2s, -1s, -1)?
+  Ok(())
+}
+
+/// A `String`, compared byte-wise over its UTF-8.
+///
+/// `str.byte.beats.length` is the row that says byte-wise and not
+/// shortest-first: `"b"` is one byte and sorts *after* the two bytes of
+/// `"ab"`, because the first byte decides and only then the length.
+/// `str.digits` says the same about numbers that are text.
+fn strings() -> Result<Unit, Error> {
+  law("str.same.built", built(["a", "b"]), "ab", 0)?
+  law("str.empty.built", built([]), "", 0)?
+  law("str.diff", "ab", "ac", -1)?
+  law("str.prefix", "ab", "abc", -1)?
+  law("str.empty.one", "", "a", -1)?
+  law("str.byte.beats.length", "b", "ab", 1)?
+  law("str.upper.lower", "Z", "a", -1)?
+  law("str.digits", "10", "9", -1)?
+  law("str.multibyte", "z", "é", -1)?
+  law("str.multibyte.pair", "é", "ê", -1)?
+  law("str.built.diff", built(["a", "b", "c"]), built(["ab", "d"]), -1)?
+  law("str.space", " a", "a", -1)?
+  Ok(())
+}
+
+/// A struct, field by field in declaration order, and a struct of structs.
+///
+/// The `beats` rows are the ones that say *first field that differs*: a later
+/// field disagreeing with the first changes nothing.
+fn structs() -> Result<Unit, Error> {
+  let one = Mixed(first: 1, middle: "x", last: 2)
+  let swapped = Mixed(first: 2, middle: "x", last: 1)
+  law("struct.same", one, Mixed(first: 1, middle: "x", last: 2), 0)?
+  law("struct.first", one, swapped, -1)?
+  law("struct.middle", one, Mixed(first: 1, middle: "y", last: 2), -1)?
+  law("struct.last", one, Mixed(first: 1, middle: "x", last: 3), -1)?
+  law(
+    "struct.first.beats.rest",
+    Mixed(first: 1, middle: "z", last: 9),
+    Mixed(first: 2, middle: "a", last: 0),
+    -1,
+  )?
+  law(
+    "struct.middle.beats.last",
+    Mixed(first: 1, middle: "x", last: 9),
+    Mixed(first: 1, middle: "y", last: 0),
+    -1,
+  )?
+  law(
+    "struct.nested.same",
+    Pair(left: one, right: swapped),
+    Pair(left: one, right: swapped),
+    0,
+  )?
+  law(
+    "struct.nested.left",
+    Pair(left: one, right: swapped),
+    Pair(left: swapped, right: one),
+    -1,
+  )?
+  law(
+    "struct.nested.right",
+    Pair(left: one, right: one),
+    Pair(left: one, right: swapped),
+    -1,
+  )?
+  Ok(())
+}
+
+/// An enum: by case **name**, alphabetically, and only then by the payload's
+/// parts in declaration order.
+///
+/// Every cross-case row here has the opposite answer under a comparison of
+/// case indices, which is what makes the section worth its length.
+/// `mark.plain.both` is the sharpest: `Plain` is declared first and sorts
+/// last.
+fn enums() -> Result<Unit, Error> {
+  law("flag.on.off", Flag.On, Flag.Off, 1)?
+  law("flag.same", Flag.On, Flag.On, 0)?
+
+  law("mark.both.count", Mark.Both(9, "z"), Mark.Count(0), -1)?
+  law("mark.count.named", Mark.Count(3), Mark.Named("a"), -1)?
+  law("mark.named.plain", Mark.Named("z"), Mark.Plain, -1)?
+  law("mark.count.plain", Mark.Count(99), Mark.Plain, -1)?
+  law("mark.plain.both", Mark.Plain, Mark.Both(0, ""), 1)?
+  law("mark.named.both", Mark.Named(""), Mark.Both(9, "z"), 1)?
+
+  law("mark.plain.same", Mark.Plain, Mark.Plain, 0)?
+  law("mark.count.payload", Mark.Count(3), Mark.Count(4), -1)?
+  law("mark.count.neg", Mark.Count(-1), Mark.Count(0), -1)?
+  law("mark.count.same", Mark.Count(3), Mark.Count(3), 0)?
+  law("mark.named.payload", Mark.Named("ab"), Mark.Named("ac"), -1)?
+  law("mark.named.prefix", Mark.Named("ab"), Mark.Named("abc"), -1)?
+  law("mark.named.built", Mark.Named(built(["a", "b"])), Mark.Named("ab"), 0)?
+  law("mark.both.first", Mark.Both(1, "z"), Mark.Both(2, "a"), -1)?
+  law("mark.both.second", Mark.Both(1, "a"), Mark.Both(1, "b"), -1)?
+  law("mark.both.same", Mark.Both(1, "a"), Mark.Both(1, "a"), 0)?
+  Ok(())
+}
+
+/// `Option` and `Result`, which are the enums the standard library declares.
+///
+/// `Option`'s cases are `None` then `Some` and sort that way too, so it is the
+/// row family that proves nothing on its own. `Result`'s are declared `Ok`
+/// then `Err` and sort `Err` first, which is the one row in this file that
+/// distinguishes "by name" from "by index" in code nobody here wrote.
+fn wrappers() -> Result<Unit, Error> {
+  let none: Option<Int> = None
+  law("option.none.some", none, Some(0), -1)?
+  law("option.none.same", none, None, 0)?
+  law("option.some.some", Some(1), Some(2), -1)?
+  law("option.some.neg", Some(-1), Some(0), -1)?
+  law("option.some.same", Some(1), Some(1), 0)?
+  let nested: Option<Option<Int>> = Some(None)
+  law("option.nested.none", nested, Some(Some(0)), -1)?
+  law("option.nested.some", Some(Some(1)), Some(Some(2)), -1)?
+  law(
+    "option.struct",
+    Some(Mixed(first: 1, middle: "x", last: 2)),
+    Some(Mixed(first: 1, middle: "x", last: 3)),
+    -1,
+  )?
+
+  let ok: Result<Int, String> = Ok(0)
+  let bad: Result<Int, String> = Err("z")
+  law("result.err.ok", bad, ok, -1)?
+  law("result.ok.ok", ok, Ok(1), -1)?
+  law("result.err.err", bad, Err("zz"), -1)?
+  law("result.ok.same", ok, Ok(0), 0)?
+  law("result.err.same", bad, Err("z"), 0)?
+  Ok(())
+}
+
+/// An `Array`: element by element over the shorter length, and the length only
+/// if one is a prefix of the other.
+///
+/// `array.element.beats.length` is the row that says length *last*: `[2]` is
+/// shorter than `[1, 2, 3]` and sorts after it, because the first elements
+/// differ before the lengths are ever reached.
+fn runs() -> Result<Unit, Error> {
+  let noArray: Array<Int> = []
+  law("array.same", [1, 2, 3], [1, 2, 3], 0)?
+  law("array.element", [1, 2], [1, 3], -1)?
+  law("array.prefix", [1, 2], [1, 2, 3], -1)?
+  law("array.element.beats.length", [2], [1, 2, 3], 1)?
+  law("array.empty.one", noArray, [0], -1)?
+  law("array.empty.same", noArray, [], 0)?
+  law("array.neg", [-1], [0], -1)?
+  law("array.longer", [1, 2, 3], [1, 2], 1)?
+  law("array.str", ["b"], ["ab", "z"], 1)?
+  law(
+    "array.struct",
+    [Mixed(first: 1, middle: "x", last: 2)],
+    [Mixed(first: 1, middle: "x", last: 3)],
+    -1,
+  )?
+  law(
+    "array.struct.prefix",
+    [Mixed(first: 1, middle: "x", last: 2)],
+    [
+      Mixed(first: 1, middle: "x", last: 2),
+      Mixed(first: 0, middle: "a", last: 0),
+    ],
+    -1,
+  )?
+  law("array.nested", [[1], [2, 3]], [[1], [2, 4]], -1)?
+  law("array.nested.prefix", [[1]], [[1, 0]], -1)?
+  law("array.mark", [Mark.Plain], [Mark.Count(0)], 1)?
+  Ok(())
+}
+
+/// A `Set` and a `Map` as the elements of an outer `Set`: two runs the
+/// language keeps in one canonical order, so the order they were written in is
+/// not part of the value.
+///
+/// `set.build.order` and `map.build.order` are the rows that say so, and
+/// `map.key.beats.value` is the one that says key before value: `"a"` maps to
+/// `9` and `"b"` to `0`, and the `"a"` entry still sorts first.
+fn keyed() -> Result<Unit, Error> {
+  let noSet: Set<Int> = Set.of()
+  law("set.build.order", Set.of(3, 1, 2), Set.of(2, 3, 1), 0)?
+  law("set.element", Set.of(1, 2), Set.of(1, 3), -1)?
+  law("set.prefix", Set.of(1), Set.of(1, 2), -1)?
+  law("set.element.beats.length", Set.of(2), Set.of(1, 2, 3), 1)?
+  law("set.empty", noSet, Set.of(1), -1)?
+  law("set.empty.same", noSet, Set.of(), 0)?
+  law("set.str", Set.of("b"), Set.of("ab", "z"), 1)?
+
+  let ages = Map.of(
+    MapEntry(key: "Alice", value: 30),
+    MapEntry(key: "Bob", value: 25),
+  )
+  let reversed = Map.of(
+    MapEntry(key: "Bob", value: 25),
+    MapEntry(key: "Alice", value: 30),
+  )
+  let noMap: Map<String, Int> = Map.of()
+  law("map.build.order", ages, reversed, 0)?
+  law(
+    "map.value",
+    Map.of(MapEntry(key: "a", value: 1)),
+    Map.of(MapEntry(key: "a", value: 2)),
+    -1,
+  )?
+  law(
+    "map.key.beats.value",
+    Map.of(MapEntry(key: "a", value: 9)),
+    Map.of(MapEntry(key: "b", value: 0)),
+    -1,
+  )?
+  law("map.prefix", Map.of(MapEntry(key: "Alice", value: 30)), ages, -1)?
+  law(
+    "map.entry.beats.length",
+    Map.of(MapEntry(key: "Bob", value: 25)),
+    ages,
+    1,
+  )?
+  law("map.empty", noMap, ages, -1)?
+  law("map.empty.same", noMap, Map.of(), 0)?
+  Ok(())
+}
+
+/// A `Range`: by its start, then its end, then exclusive before inclusive.
+///
+/// `range.end.written` is the row that says a range is compared as it is
+/// written and not as the integers it covers: `0..<3` and `0..2` run over the
+/// same three numbers, and `3` is greater than `2`.
+fn ranges() -> Result<Unit, Error> {
+  law("range.same", 0..<3, 0..<3, 0)?
+  law("range.start", 0..<3, 1..<3, -1)?
+  law("range.end", 0..<3, 0..<4, -1)?
+  law("range.inclusive", 0..<3, 0..3, -1)?
+  law("range.start.beats.end", 0..<9, 1..<2, -1)?
+  law("range.end.written", 0..<3, 0..2, 1)?
+  law("range.neg", -1..<0, 0..<1, -1)?
+  law("range.empty", 0..<0, 0..<1, -1)?
+  Ok(())
+}
+
+/// A value that reaches itself, at a depth a walk has to recurse to.
+///
+/// The bottom of a 30-deep chain is the last thing a walk compares, and
+/// `deep.thirty.bottom` is the row that says it got there.
+fn recursion() -> Result<Unit, Error> {
+  law("deep.leaf", chain(0, 8), chain(0, 9), -1)?
+  law("deep.leaf.same", chain(0, 9), chain(0, 9), 0)?
+  law("deep.six.bottom", chain(6, 1), chain(6, 2), -1)?
+  law("deep.six.depth", chain(5, 9), chain(6, 9), -1)?
+  law("deep.thirty.same", chain(30, 9), chain(30, 9), 0)?
+  law("deep.thirty.bottom", chain(30, 9), chain(30, 8), 1)?
+  law(
+    "deep.wide",
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 2)]),
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 3)]),
+    -1,
+  )?
+  law(
+    "deep.wide.prefix",
+    Node(tag: 0, kids: [chain(2, 1)]),
+    Node(tag: 0, kids: [chain(2, 1), chain(2, 0)]),
+    -1,
+  )?
+  law(
+    "deep.wide.tag",
+    Node(tag: 0, kids: [chain(2, 9)]),
+    Node(tag: 1, kids: [chain(2, 0)]),
+    -1,
+  )?
+  Ok(())
+}
+
+/// The one case a layout cannot be read off the source: an erased value, whose
+/// family is a word in its own header.
+///
+/// Both sides of every row here erase a `Booking`, so every `want` follows from
+/// the struct rule and nothing here depends on how two *different* erasures
+/// would compare — see the note at the top of this file.
+fn erased() -> Result<Unit, Error> {
+  let one: dyn Summary = Booking(id: 1)
+  let same: dyn Summary = Booking(id: 1)
+  let two: dyn Summary = Booking(id: 2)
+  let negative: dyn Summary = Booking(id: -1)
+  law("boxed.same", one, same, 0)?
+  law("boxed.diff", one, two, -1)?
+  law("boxed.neg", negative, one, -1)?
+  law("boxed.array", [one, two], [same, two], 0)?
+  law("boxed.array.element", [one, one], [one, two], -1)?
+  law("boxed.array.prefix", [one], [one, two], -1)?
+  law("boxed.option", Some(one), Some(two), -1)?
+  Ok(())
+}
+
+/// Transitivity, over a triple per family whose middle value really is between
+/// the other two.
+///
+/// Each row is written smallest first, so all three of its signs are `-1`, and
+/// `trio` prints that want rather than taking one: a triple whose middle value
+/// is not in the middle is a mistake in the row and not a finding about the
+/// order.
+fn transitivity() -> Result<Unit, Error> {
+  trio("trans.int", -1, 0, 1)?
+  trio("trans.str", "a", "ab", "b")?
+  trio("trans.duration", -1ms, 0ns, 1s)?
+  trio(
+    "trans.struct",
+    Mixed(first: 1, middle: "a", last: 9),
+    Mixed(first: 1, middle: "b", last: 0),
+    Mixed(first: 2, middle: "a", last: 0),
+  )?
+  trio("trans.mark", Mark.Count(1), Mark.Named("a"), Mark.Plain)?
+  trio("trans.mark.payload", Mark.Count(-1), Mark.Count(0), Mark.Count(1))?
+  trio("trans.array", [1], [1, 2], [2])?
+  trio("trans.set", Set.of(1), Set.of(1, 2), Set.of(2))?
+  trio("trans.range", 0..<3, 0..3, 1..<2)?
+  let none: Option<Int> = None
+  trio("trans.option", none, Some(0), Some(1))?
+  trio("trans.deep", chain(30, 7), chain(30, 8), chain(30, 9))?
+  Ok(())
+}
+
+/// `Map.get` and `Set.contains` over composite keys, which is what the order
+/// is really for.
+///
+/// A search compares against about `log2(n)` members and takes whichever half
+/// the sign points at, so an arm that answers the wrong sign does not merely
+/// sort oddly — it walks into the half the key is not in and misses a key that
+/// is there. Each line prints the keys that are present, then keys that are
+/// not, and the rendered collection beside them is the ascending order the
+/// rows above derive:
+///
+/// - `marks`: `Both(1, z)`, `Count(-1)`, `Count(2)`, `Named(a)`, `Named(b)`,
+///   `Plain` — alphabetical by case name, and no two of those are in the order
+///   the cases are declared.
+/// - `mixed`: `first` ascending, then `middle`.
+/// - `runs`: `[]`, `[1]`, `[1, 2]`, `[1, 2, 0]`, `[2]` — the prefix before its
+///   extension, and `[2]` last though it is the shortest but one.
+/// - `sets`: `{1}`, `{1, 2}`, `{2}`.
+/// - `maps`: `{a: 1}`, `{a: 2}`, `{b: 1}` — key before value.
+/// - `ranges`: `0..<2`, `0..<3`, `0..3`, `1..<2`.
+fn searches() -> Result<Unit, Error> {
+  let byMark = Map.of(
+    MapEntry(key: Mark.Plain, value: "plain"),
+    MapEntry(key: Mark.Named("b"), value: "named b"),
+    MapEntry(key: Mark.Count(2), value: "count 2"),
+    MapEntry(key: Mark.Both(1, "z"), value: "both"),
+    MapEntry(key: Mark.Count(-1), value: "count -1"),
+    MapEntry(key: Mark.Named("a"), value: "named a"),
+  )
+  println("marks {byMark}")?
+  println("  found {byMark.get(Mark.Both(1, "z"))} {byMark.get(Mark.Count(-1))} {byMark.get(Mark.Count(2))} {byMark.get(Mark.Named("a"))} {byMark.get(Mark.Named("b"))} {byMark.get(Mark.Plain)}")?
+  println("  missed {byMark.get(Mark.Both(1, "y"))} {byMark.get(Mark.Both(0, "z"))} {byMark.get(Mark.Count(0))} {byMark.get(Mark.Named("c"))} {byMark.get(Mark.Named(""))}")?
+
+  let mixed = Set.of(
+    Mixed(first: 1, middle: "b", last: 0),
+    Mixed(first: 1, middle: "a", last: 9),
+    Mixed(first: 0, middle: "z", last: 0),
+  )
+  println("mixed {mixed}")?
+  println("  found {mixed.contains(Mixed(first: 0, middle: "z", last: 0))} {mixed.contains(Mixed(first: 1, middle: "a", last: 9))} {mixed.contains(Mixed(first: 1, middle: "b", last: 0))}")?
+  println("  missed {mixed.contains(Mixed(first: 0, middle: "z", last: 1))} {mixed.contains(Mixed(first: 1, middle: "a", last: 0))} {mixed.contains(Mixed(first: 2, middle: "a", last: 9))}")?
+
+  let runs = Set.of([1, 2], [1], [2], [], [1, 2, 0])
+  println("runs {runs}")?
+  println("  found {runs.contains([])} {runs.contains([1])} {runs.contains([1, 2])} {runs.contains([1, 2, 0])} {runs.contains([2])}")?
+  println("  missed {runs.contains([0])} {runs.contains([1, 3])} {runs.contains([1, 2, 1])} {runs.contains([2, 0])}")?
+
+  let sets = Set.of(Set.of(2), Set.of(1, 2), Set.of(1))
+  println("sets {sets}")?
+  println("  found {sets.contains(Set.of(2, 1))} {sets.contains(Set.of(1))} missed {sets.contains(Set.of(3))} {sets.contains(Set.of(1, 3))}")?
+
+  let maps = Map.of(
+    MapEntry(key: Map.of(MapEntry(key: "b", value: 1)), value: "b1"),
+    MapEntry(key: Map.of(MapEntry(key: "a", value: 2)), value: "a2"),
+    MapEntry(key: Map.of(MapEntry(key: "a", value: 1)), value: "a1"),
+  )
+  println("maps {maps}")?
+  println("  found {maps.get(Map.of(MapEntry(key: "a", value: 1)))} {maps.get(Map.of(MapEntry(key: "a", value: 2)))} {maps.get(Map.of(MapEntry(key: "b", value: 1)))}")?
+  println("  missed {maps.get(Map.of(MapEntry(key: "a", value: 3)))} {maps.get(Map.of(MapEntry(key: "c", value: 1)))}")?
+
+  let ranges = Set.of(0..3, 0..<3, 1..<2, 0..<2)
+  println("ranges {ranges}")?
+  println("  found {ranges.contains(0..<2)} {ranges.contains(0..<3)} {ranges.contains(0..3)} {ranges.contains(1..<2)}")?
+  println("  missed {ranges.contains(0..2)} {ranges.contains(1..2)} {ranges.contains(0..<4)}")?
+
+  let deep = Map.of(
+    MapEntry(key: chain(30, 8), value: "eight"),
+    MapEntry(key: chain(30, 9), value: "nine"),
+  )
+  println("deep found {deep.get(chain(30, 8))} {deep.get(chain(30, 9))} missed {deep.get(chain(30, 7))} {deep.get(chain(29, 9))}")?
+  Ok(())
+}
+
+/// Every section, in the order they are declared above.
+export fn main() -> Result<Unit, Error> {
+  scalars()?
+  strings()?
+  structs()?
+  enums()?
+  wrappers()?
+  runs()?
+  keyed()?
+  ranges()?
+  recursion()?
+  erased()?
+  transitivity()?
+  searches()?
+  Ok(())
+}

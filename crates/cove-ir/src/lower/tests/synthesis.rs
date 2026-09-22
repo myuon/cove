@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use cove_schema::HostSchemas;
 
 use super::{checked, listing};
-use crate::inst::Inst;
+use crate::inst::{CmpOp, Inst};
 use crate::layout::Shape;
 use crate::lower::{lower, synth};
 use crate::Program;
@@ -211,12 +211,14 @@ fn an_erased_value_reaches_the_one_dynamic_fallback() {
 /// below reach the intrinsic exactly as often as they hold an erased
 /// comparison and no oftener.
 ///
-/// What it catches is the cheap way out of the next three migrations. When
-/// `Value.order`'s producer is written, a layout whose arm is awkward —
-/// a `Shared`, a host handle, a case with an unusual payload — can be made to
-/// work by handing it to the intrinsic, and everything passes: the answer is
-/// right, the corpus is green, and the architecture is exactly where it was.
-/// This is what says no.
+/// What it catches is the cheap way out of the migrations that follow. It
+/// already caught one: when `Value.order`'s producer was written, every
+/// awkward arm it has — an enum declared out of case-name order, a run whose
+/// lengths are compared after its elements, a `Float` field that has to raise
+/// — could have been made to work by handing the layout to the intrinsic, and
+/// everything would have passed, because the answers would still have been
+/// right. `Value.admitKey` and `Value.renderInto` are the two left, and the
+/// same is true of each.
 #[test]
 fn no_statically_known_layout_reaches_the_fallback() {
     let known: &[&str] = &[
@@ -262,33 +264,321 @@ fn no_statically_known_layout_reaches_the_fallback() {
     assert!(fallbacks(&program) > 0);
 }
 
-/// How many `Any.equals` sites the program holds, checking as it counts that
-/// every operand of every one of them is erased.
+// ---- `core.order(a, b)` ------------------------------------------------
+
+/// **The short circuit still fires, and this is the load-bearing test of the
+/// order's half of this module.**
+///
+/// [`super::super::synth::ordered_by`] answers a comparison instruction for
+/// every key a *single* instruction orders, and `core.order` emits it there
+/// rather than calling anything. That is why `cq` — twenty thousand records
+/// looked up by `String` key — executes `Value.order` at no site and on no
+/// turn, and it is a property a synthesis is in a position to destroy by
+/// making a function for every key and letting the inliner sort it out. What
+/// would be left is a program whose counts moved for no reason anybody asked
+/// for.
+///
+/// So: not one synthesized function, not one intrinsic call, and at least one
+/// three-way comparison, for each of the five families the instruction set
+/// orders on its own.
+#[test]
+fn a_key_one_instruction_orders_is_not_a_function() {
+    let keys: &[(&str, &str)] = &[
+        ("", "Int"),
+        ("", "String"),
+        ("", "Bool"),
+        ("", "Duration"),
+        // A payload-free enum whose cases were *declared* in ascending name
+        // order, where the discriminant is the rank.
+        ("enum Flag { Off\n  On }", "Flag"),
+    ];
+    for (declarations, key) in keys {
+        let program = keyed(declarations, key);
+        assert_eq!(
+            orders_of(&program),
+            Vec::<String>::new(),
+            "a walk for {key}"
+        );
+        assert_eq!(orderings(&program), 0, "a `Value.order` site for {key}");
+        assert!(
+            count(&program, |inst| matches!(
+                inst,
+                Inst::Cmp {
+                    op: CmpOp::Order,
+                    ..
+                }
+            )) > 0,
+            "no three-way comparison for {key}"
+        );
+    }
+}
+
+/// A struct key is ordered field by field in declaration order.
+///
+/// `key::order` compares the two type names first and then, field by field,
+/// the field *names* before the field values. Two values of one layout are
+/// two values of one declaration, so every one of those name comparisons is
+/// equal and nothing is left but the fields — which is the same thing a
+/// statically known layout buys at an enum's discriminant, in the one place
+/// it costs nothing to spend.
+///
+/// The early exit is a `cmp-imm` against `0` and the branch beside it, which
+/// is the pair `super::super::peephole` fuses; the last field needs no branch
+/// at all, because its answer is the answer of the whole.
+#[test]
+fn a_struct_key_is_ordered_field_by_field_in_declaration_order() {
+    let program = keyed("struct Row { n: Int, name: String, flag: Bool }", "Row");
+    let listed = synthesized(&program, "order<");
+    assert!(listed.contains("order.int"), "{listed}");
+    assert!(listed.contains("order.str"), "{listed}");
+    assert!(listed.contains("order.bool"), "{listed}");
+    assert!(!listed.contains("Value.order"), "{listed}");
+    // Three fields, two early exits.
+    assert_eq!(listed.matches("eq.int.imm").count(), 2, "{listed}");
+}
+
+/// **An enum orders by its case NAME, and not by its case index.**
+///
+/// `Mark` is declared `Plain`, `Count`, `Named` and orders `Count`, `Named`,
+/// `Plain`, because that is alphabetical. A walk that compared the
+/// discriminants would answer the declaration order, which is a different
+/// total order and a wrong one — and nothing but this would notice, because
+/// it is still a total order and every law a test might check of it holds.
+///
+/// So the discriminant is turned into a rank: one `switch` per operand into
+/// one `int` per case, and a three-way comparison of the two ranks. The
+/// permutation is compile-time, and this is it written as the only
+/// structural read the instruction set has.
+#[test]
+fn an_enum_orders_by_case_name_and_not_by_case_index() {
+    assert_eq!(
+        synthesized(
+            &keyed("enum Mark { Plain\n  Count(Int)\n  Named(String) }", "Mark"),
+            "order<"
+        ),
+        "\
+fn @<synth>.order<m.Mark#16>(m.Mark m.Mark) -> Int
+  frame 10: s0!:tag s1!:int s2!:ref s3!:tag s4!:int s5!:ref s6:int s7:int s8:int s9:bool
+     0  switch s0:tag [1 3 5] else 7
+     1  int s7:int 2
+     2  jump 8
+     3  int s7:int 0
+     4  jump 8
+     5  int s7:int 1
+     6  jump 8
+     7  trap \"this `m.Mark` is in a case it does not have\"
+     8  switch s3:tag [9 11 13] else 15
+     9  int s8:int 2
+    10  jump 16
+    11  int s8:int 0
+    12  jump 16
+    13  int s8:int 1
+    14  jump 16
+    15  trap \"this `m.Mark` is in a case it does not have\"
+    16  order.int s6:int s7:int s8:int
+    17  eq.int.imm.branch s9:bool s6:int 0 25
+    18  switch s0:tag [19 20 22] else 24
+    19  jump 25
+    20  order.int s6:int s1:int s4:int
+    21  jump 25
+    22  order.str s6:int s2:ref s5:ref
+    23  jump 25
+    24  trap \"this `m.Mark` is in a case it does not have\"
+    25  return s6:Int
+"
+    );
+}
+
+/// And where the declaration *is* in name order, the discriminant is the
+/// rank and one instruction is the whole comparison of the case.
+///
+/// `Option` is this: `None` then `Some`. [`super::super::synth::ordered_by`]
+/// does not answer for it, because it has a payload and the payload still has
+/// to be walked — but the case itself is one `order.tag` and there is no
+/// permutation to build.
+#[test]
+fn an_enum_declared_in_name_order_orders_by_its_discriminant() {
+    let program = keyed("", "Option<Int>");
+    let listed = synthesized(&program, "order<");
+    assert!(listed.contains("order.tag"), "{listed}");
+    // The payload switch, and no rank switch.
+    assert_eq!(listed.matches("switch").count(), 1, "{listed}");
+}
+
+/// **A run compares its lengths after its elements, where equality compares
+/// them first.**
+///
+/// `[1]` sorts before `[1, 0]` and both sort before `[2]`, so a length that
+/// decided first would put `[1, 0]` after `[2]`. The loop therefore runs over
+/// the positions *both* runs have — two comparisons and two branches rather
+/// than a computed minimum — and the two lengths are the last thing compared.
+#[test]
+fn a_run_compares_its_lengths_after_its_elements() {
+    let program = keyed("", "Array<Int>");
+    let listed = synthesized(&program, "order<");
+    let lines: Vec<&str> = listed.lines().collect();
+    let returned = lines
+        .iter()
+        .position(|line| line.contains("return"))
+        .expect("the walk returns");
+    assert!(
+        lines[returned - 1].contains("order.int"),
+        "the last thing before the return is the lengths:\n{listed}"
+    );
+    assert_eq!(listed.matches("len ").count(), 2, "{listed}");
+    assert_eq!(listed.matches("lt.int").count(), 2, "{listed}");
+}
+
+/// A map compares entry for entry, and the key of an entry before its value.
+///
+/// One `load-elem` at the `MapEntry` layout's width reads both halves, and
+/// the value's offset inside it is the key's width — which is
+/// `Shapes::entry_of`, the same layout equality's walk reads a map with.
+#[test]
+fn a_map_key_compares_its_key_before_its_value() {
+    let program = keyed("", "Map<String, Int>");
+    let listed = synthesized(&program, "order<");
+    let at = |what: &str| {
+        listed
+            .find(what)
+            .unwrap_or_else(|| panic!("{what}\n{listed}"))
+    };
+    assert!(at("order.str") < at("order.int"), "{listed}");
+    assert_eq!(listed.matches("load-elem").count(), 2, "{listed}");
+}
+
+/// A value that is not a key raises, in the runtime walk's own sentence.
+///
+/// This is the first arm in this module that *raises*, and the reason it may
+/// is that the sentence is a constant: `Inst::Trap`'s string is chosen by the
+/// lowering that emits it, exactly as an uncovered `match`'s is, and nothing
+/// in it quotes a value computed at run time. Issue #461 is about the other
+/// kind and this is not it.
+///
+/// Unreachable from a checked program — `core.admitKey` refuses such a key
+/// before a single comparison is made — and written out for the reason the
+/// runtime's own arm is written out.
+#[test]
+fn a_value_that_is_not_a_key_raises_in_the_runtime_s_words() {
+    let program = keyed("struct Reading { at: Int, value: Float }", "Reading");
+    let listed = synthesized(&program, "order<");
+    assert!(listed.contains("trap"), "{listed}");
+    assert!(
+        program
+            .strings
+            .iter()
+            .any(|held| &**held == "this value cannot be a map key or a set element"),
+        "the refusal is the runtime's, word for word"
+    );
+}
+
+/// ADR 0064's Decision 4 for the order, which is the same test as
+/// [`no_statically_known_layout_reaches_the_fallback`] over the same rule.
+#[test]
+fn no_statically_known_layout_reaches_the_order_fallback() {
+    let known: &[(&str, &str)] = &[
+        ("struct Row { n: Int, name: String, flag: Bool }", "Row"),
+        ("enum Mark { Plain\n  Count(Int)\n  Named(String) }", "Mark"),
+        (
+            "struct Row { n: Int, name: String, flag: Bool }",
+            "Array<Row>",
+        ),
+        ("", "Set<String>"),
+        ("", "Map<String, Int>"),
+        ("", "Option<Int>"),
+        ("", "Result<Int, String>"),
+        ("", "Range"),
+        ("", "Unit"),
+        // A recursion, which has to reach itself rather than give up and hand
+        // the cycle to the runtime.
+        ("struct Node { tag: Int, kids: Array<Node> }", "Node"),
+    ];
+    for (declarations, key) in known {
+        let program = keyed(declarations, key);
+        assert_eq!(orderings(&program), 0, "`Value.order` sites for {key}");
+    }
+
+    // And the other direction: an erased field *inside* a known layout is
+    // walked down to, and the one field that is a box is the one thing handed
+    // over.
+    let program = keyed(
+        "trait Summary { fn summarize(self) -> String }\n\
+         struct Booking { id: Int }\n\
+         impl Summary for Booking { fn summarize(self) -> String { \"{self.id}\" } }\n\
+         struct Held { tag: Int, item: dyn Summary }",
+        "Held",
+    );
+    assert!(orderings(&program) > 0);
+}
+
+/// Every synthesized *order*'s name, in the order they were made.
+fn orders_of(program: &Program) -> Vec<String> {
+    walks_of(program)
+        .into_iter()
+        .filter(|name| name.starts_with("order<"))
+        .collect()
+}
+
+/// How many `Any.equals` sites the program holds.
+fn fallbacks(program: &Program) -> usize {
+    reached(program, crate::Intrinsic::AnyEquals)
+}
+
+/// How many `Value.order` sites it holds.
+fn orderings(program: &Program) -> usize {
+    reached(program, crate::Intrinsic::ValueOrder)
+}
+
+/// How many sites of `intrinsic` the program holds, checking as it counts
+/// that every operand of every one of them is erased.
 ///
 /// The second half duplicates `crate::verify`'s rule on purpose: the verifier
 /// panics through `lower::finish`, and a panic is a worse thing for a test to
 /// read than an assertion is.
-fn fallbacks(program: &Program) -> usize {
+fn reached(program: &Program, intrinsic: crate::Intrinsic) -> usize {
     let mut found = 0;
     for function in &program.functions {
         for inst in &function.code {
             let Inst::IntrinsicCall { site, args, .. } = inst else {
                 continue;
             };
-            if program.intrinsic_site(*site).intrinsic != crate::Intrinsic::AnyEquals {
+            if program.intrinsic_site(*site).intrinsic != intrinsic {
                 continue;
             }
             found += 1;
             for arg in program.arg_list(*args) {
                 assert!(
                     matches!(program.layout(arg.layout).shape, Shape::Boxed),
-                    "`Any.equals` was handed a `{}`, whose layout is known",
+                    "`{intrinsic}` was handed a `{}`, whose layout is known",
                     program.layout(arg.layout).name
                 );
             }
         }
     }
     found
+}
+
+/// How many instructions of the whole program satisfy `wanted`.
+fn count(program: &Program, wanted: impl Fn(&Inst) -> bool) -> usize {
+    program
+        .functions
+        .iter()
+        .flat_map(|function| &function.code)
+        .filter(|inst| wanted(inst))
+        .count()
+}
+
+/// A program whose `std.map` or `std.set` is instantiated at a key layout,
+/// which is the only way a Cove source reaches `core.order`.
+///
+/// `core.*` is reserved to the standard library, so nothing a test can write
+/// calls the order directly: what reaches it is a lookup in a keyed
+/// collection, and the instantiation of `seekMap` or `seekSet` at that key is
+/// where the comparison is lowered.
+fn keyed(declarations: &str, key: &str) -> Program {
+    lowered(&format!(
+        "{declarations}\nfn look(m: Map<{key}, Int>, k: {key}) -> Bool {{ m.contains(k) }}"
+    ))
 }
 
 /// **ADR 0064's Decision 3, second paragraph, as a fact about the two
@@ -322,7 +612,11 @@ fn fallbacks(program: &Program) -> usize {
 /// wants.
 #[test]
 fn no_backend_names_a_synthesized_function() {
-    let forbidden = ["<synth>", "equals<", "synth::", "lower::synth"];
+    // One entry per verb `synth::Operation::verb` answers, and the two
+    // paths a backend could reach the module by. A verb added there owes a
+    // string here: what makes the scan worth anything is that it names every
+    // form a walk's name can take.
+    let forbidden = ["<synth>", "equals<", "order<", "synth::", "lower::synth"];
     let mut faults = Vec::new();
     for crate_name in ["cove-native", "cove-runtime"] {
         let root = workspace().join("crates").join(crate_name).join("src");

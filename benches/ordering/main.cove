@@ -1,0 +1,724 @@
+use console.println
+use clock.now
+
+/// What a layout-directed **order** costs as a walk the lowering wrote against
+/// what it cost as one call into a walk written in Rust.
+///
+/// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+/// Decision 3 makes `core.order` on a key whose layout is known a **function
+/// lowering synthesizes for that layout**, composed structurally, where it was
+/// one `Inst::IntrinsicCall` of `Value.order` reaching `key::order` in the
+/// runtime. `benches/equals` is this package's sibling and was written for the
+/// same migration's first operation; this is the second.
+///
+/// # Why every row is a lookup and not a comparison
+///
+/// `core.*` is reserved to the standard library, so a Cove program cannot ask
+/// the order anything directly. What it can do is ask a `Set`, whose
+/// `contains` is a binary search written in Cove over exactly that order. So
+/// one turn here is **one `Set.contains` over eight members**, which is one
+/// `Value.admitKey` — an intrinsic this change does not touch, and the same
+/// call in both builds — and three comparisons.
+///
+/// That fixed cost dilutes the rows and does not bias them: it is identical on
+/// both sides of the comparison, so the *difference* between two builds is the
+/// three comparisons and nothing else. What the absolute numbers are is a
+/// lookup's, and they are not offered as anything else.
+///
+/// # The two arms are two binaries over one source
+///
+/// `benches/equals`' arrangement, for its reason: after the migration a
+/// program cannot ask for the intrinsic, because nothing in the language names
+/// it. So this file is run twice over the same bytes — once by a `cove` built
+/// at the migration's parent, where every row lowers to an `intrinsic-call`,
+/// and once by a `cove` built after it, where the middle rows lower to walks.
+///
+/// # Three of the rows are controls, and each controls something different
+///
+/// - `int` and `text` are keys **one instruction orders**. `lower::synth`'s
+///   `ordered_by` answers `Compare::Int` and `Compare::Str` for them and
+///   `core.order` emits the single `cmp` rather than calling anything, in
+///   *both* builds. They are the shape `cq` has — twenty thousand records
+///   looked up by `String` key — and a synthesis that made a function for
+///   every key would show up here as the one regression this change could
+///   cause. They move by nothing if the short circuit still fires.
+/// - `boxed` is a `Set<dyn Tagged>`, whose element layout is Decision 4's one
+///   dynamic-layout fallback: its family is a word in its own header and no
+///   walk can be composed for it, so it reaches `Value.order` in **both**
+///   builds. It is the rebuild control — the same operation over the same
+///   bytes on both sides — and it is also the row that says the fallback is
+///   still reached, because a rule that nothing may use the intrinsic is
+///   satisfied by deleting the arm.
+///
+/// # What the rows are, and why these
+///
+/// - `one`, a one-field struct: the smallest walk there is, and the one
+///   `cove_ir::lower::inline` expands into its caller whole.
+/// - `triple`, three fields of which the middle is a `String`: the shape a
+///   record has, and — unlike `benches/equals`' row of the same name — one the
+///   native tier **compiles**, because `subset.rs` admits `Compare::Str` for
+///   `CmpOp::Order` and refuses it for `CmpOp::Eq`. An order over a `String`
+///   is the one comparison that tier does admit.
+/// - `mark`, an enum declared out of case-name order: two `switch`es into a
+///   constant apiece and a comparison of the ranks, because an enum orders by
+///   case *name* and its discriminant is its *index*. This is the arm with no
+///   counterpart at all in the equality walk.
+/// - `array`, eight `Int`s differing only in the last: a loop, walked to the
+///   end, which is where a walk written in Cove is most exposed against a loop
+///   written in Rust.
+/// - `entries`, a `Map<String, Int>` as a key: a loop over a two-part element,
+///   key before value, which is what a keyed collection inside a keyed
+///   collection costs.
+///
+/// Every set is eight members and every probe **is** a member, so the search
+/// runs its full three steps rather than stopping early on a miss.
+///
+/// # The loops are in callees, and they are padded
+///
+/// `benches/equals`' arrangement and `benches/floatabs`' before it: the
+/// outermost frame is always encoded, so a loop written in `main` is a VM
+/// measurement even under `--backend native`. Each row is a call to a counting
+/// callee whose body is the loop, and every counting callee opens with
+/// [`ballast`] — a block the parameter's sign makes unreachable and nothing can
+/// fold away, sized past `cove_ir::lower::inline`'s `HOT_LIMIT` of forty-eight
+/// — so that it is not expanded into [`Row`]'s maker.
+fn turns() -> Int {
+  50000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller, which the native tier refuses for the `now()` in it.
+///
+/// `rounds` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(rounds: Int) -> Int {
+  var dead = 0
+  if rounds < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// A one-field struct: the smallest walk there is.
+struct One {
+  first: Int
+}
+
+/// Three fields of which the middle is a reference.
+struct Triple {
+  first: Int
+  middle: String
+  last: Int
+}
+
+/// Cases with payloads beside one without, declared out of case-name order.
+///
+/// Declared `Plain`, `Count`, `Named`; ordered `Count`, `Named`, `Plain`. So
+/// the walk builds the permutation rather than comparing the discriminants.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+/// Something to erase, so that the control row has a trait to be a `dyn` of.
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+impl Tagged for One {
+  fn tag(self) -> Int {
+    self.first
+  }
+}
+
+/// `rounds` lookups of a member of a `Set<Int>`, and nothing else in the loop.
+fn countInt(items: Set<Int>, probe: Int, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<String>`, and nothing else in the loop.
+fn countText(items: Set<String>, probe: String, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<One>`, and nothing else in the loop.
+fn countOne(items: Set<One>, probe: One, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Triple>`, and nothing else in the loop.
+fn countTriple(items: Set<Triple>, probe: Triple, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Mark>`, and nothing else in the loop.
+fn countMark(items: Set<Mark>, probe: Mark, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Array<Int>>`, and nothing else in the loop.
+fn countArray(items: Set<Array<Int>>, probe: Array<Int>, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<Map<String, Int>>`, and nothing else in the loop.
+fn countEntries(
+  items: Set<Map<String, Int>>,
+  probe: Map<String, Int>,
+  rounds: Int,
+) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// `rounds` lookups of a member of a `Set<dyn Tagged>`, and nothing else in the loop.
+fn countBoxed(items: Set<dyn Tagged>, probe: dyn Tagged, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = items.contains(probe)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// [`countInt`]'s loop with the lookup taken out and nothing put in its place.
+///
+/// A control has to see what it controls, and what these rows control is a
+/// lookup of several hundred instructions — so this one can afford to hold the
+/// turn and nothing else without being dearer than its subject.
+fn countBare(rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
+/// How long `rounds` turns took, in microseconds, and the last answer the loop
+/// wrote.
+struct Row {
+  micros: Int
+  witness: Bool
+}
+
+fn bareRow(rounds: Int) -> Row {
+  let from = now()
+  let witness = countBare(rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn intRow(items: Set<Int>, probe: Int, rounds: Int) -> Row {
+  let from = now()
+  let witness = countInt(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn textRow(items: Set<String>, probe: String, rounds: Int) -> Row {
+  let from = now()
+  let witness = countText(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn oneRow(items: Set<One>, probe: One, rounds: Int) -> Row {
+  let from = now()
+  let witness = countOne(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn tripleRow(items: Set<Triple>, probe: Triple, rounds: Int) -> Row {
+  let from = now()
+  let witness = countTriple(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn markRow(items: Set<Mark>, probe: Mark, rounds: Int) -> Row {
+  let from = now()
+  let witness = countMark(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn arrayRow(items: Set<Array<Int>>, probe: Array<Int>, rounds: Int) -> Row {
+  let from = now()
+  let witness = countArray(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn entriesRow(
+  items: Set<Map<String, Int>>,
+  probe: Map<String, Int>,
+  rounds: Int,
+) -> Row {
+  let from = now()
+  let witness = countEntries(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+fn boxedRow(items: Set<dyn Tagged>, probe: dyn Tagged, rounds: Int) -> Row {
+  let from = now()
+  let witness = countBoxed(items, probe, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one lookup cost, in nanoseconds, over `rounds` turns of which `bare`
+/// microseconds were the loop itself.
+fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
+  (micros - bare) * 1000 / rounds
+}
+
+/// One row per arm, each against the same bare loop.
+export fn main() -> Result<Unit, Error> {
+  let rounds = turns()
+
+  let ints = Set.of(1, 2, 3, 4, 5, 6, 7, 8)
+  let texts = Set.of("a", "b", "c", "d", "e", "f", "g", "h")
+  let ones = Set.of(
+    One(first: 1),
+    One(first: 2),
+    One(first: 3),
+    One(first: 4),
+    One(first: 5),
+    One(first: 6),
+    One(first: 7),
+    One(first: 8),
+  )
+  let triples = Set.of(
+    Triple(first: 7, middle: "middle", last: 1),
+    Triple(first: 7, middle: "middle", last: 2),
+    Triple(first: 7, middle: "middle", last: 3),
+    Triple(first: 7, middle: "middle", last: 4),
+    Triple(first: 7, middle: "middle", last: 5),
+    Triple(first: 7, middle: "middle", last: 6),
+    Triple(first: 7, middle: "middle", last: 7),
+    Triple(first: 7, middle: "middle", last: 8),
+  )
+  let marks = Set.of(
+    Mark.Plain,
+    Mark.Count(1),
+    Mark.Count(2),
+    Mark.Count(3),
+    Mark.Named("a"),
+    Mark.Named("b"),
+    Mark.Named("c"),
+    Mark.Named("d"),
+  )
+  let arrays = Set.of(
+    [1, 2, 3, 4, 5, 6, 7, 1],
+    [1, 2, 3, 4, 5, 6, 7, 2],
+    [1, 2, 3, 4, 5, 6, 7, 3],
+    [1, 2, 3, 4, 5, 6, 7, 4],
+    [1, 2, 3, 4, 5, 6, 7, 5],
+    [1, 2, 3, 4, 5, 6, 7, 6],
+    [1, 2, 3, 4, 5, 6, 7, 7],
+    [1, 2, 3, 4, 5, 6, 7, 8],
+  )
+  let entries = Set.of(
+    Map.of(MapEntry(key: "key", value: 1)),
+    Map.of(MapEntry(key: "key", value: 2)),
+    Map.of(MapEntry(key: "key", value: 3)),
+    Map.of(MapEntry(key: "key", value: 4)),
+    Map.of(MapEntry(key: "key", value: 5)),
+    Map.of(MapEntry(key: "key", value: 6)),
+    Map.of(MapEntry(key: "key", value: 7)),
+    Map.of(MapEntry(key: "key", value: 8)),
+  )
+  let first: dyn Tagged = One(first: 1)
+  let second: dyn Tagged = One(first: 2)
+  let third: dyn Tagged = One(first: 3)
+  let fourth: dyn Tagged = One(first: 4)
+  let fifth: dyn Tagged = One(first: 5)
+  let sixth: dyn Tagged = One(first: 6)
+  let seventh: dyn Tagged = One(first: 7)
+  let eighth: dyn Tagged = One(first: 8)
+  let boxes = Set.of(
+    first,
+    second,
+    third,
+    fourth,
+    fifth,
+    sixth,
+    seventh,
+    eighth,
+  )
+
+  let bare = bareRow(rounds)
+  let xInt = intRow(ints, 5, rounds)
+  let xText = textRow(texts, "e", rounds)
+  let xOne = oneRow(ones, One(first: 5), rounds)
+  let xTriple = tripleRow(
+    triples,
+    Triple(first: 7, middle: "middle", last: 5),
+    rounds,
+  )
+  let xMark = markRow(marks, Mark.Named("a"), rounds)
+  let xArray = arrayRow(arrays, [1, 2, 3, 4, 5, 6, 7, 5], rounds)
+  let xEntries = entriesRow(
+    entries,
+    Map.of(MapEntry(key: "key", value: 5)),
+    rounds,
+  )
+  let xBoxed = boxedRow(boxes, fifth, rounds)
+
+  // What each row answered, checked before any of it is read as a timing: a
+  // row whose loop stopped writing would still report a number, and the
+  // number would be of something else. Every probe is a member, so every
+  // witness but the bare loop's is `true`.
+  assertEqual(bare.witness, false)?
+  assertEqual(xInt.witness, true)?
+  assertEqual(xText.witness, true)?
+  assertEqual(xOne.witness, true)?
+  assertEqual(xTriple.witness, true)?
+  assertEqual(xMark.witness, true)?
+  assertEqual(xArray.witness, true)?
+  assertEqual(xEntries.witness, true)?
+  assertEqual(xBoxed.witness, true)?
+
+  println("bare loop           {bare.micros * 1000 / rounds} ns/turn over {rounds} turn(s)")?
+  println("")?
+  println("row                 ns/lookup")?
+  println("int                 {perCall(xInt.micros, bare.micros, rounds)}")?
+  println("text                {perCall(xText.micros, bare.micros, rounds)}")?
+  println("one                 {perCall(xOne.micros, bare.micros, rounds)}")?
+  println("triple              {perCall(xTriple.micros, bare.micros, rounds)}")?
+  println("mark                {perCall(xMark.micros, bare.micros, rounds)}")?
+  println("array               {perCall(xArray.micros, bare.micros, rounds)}")?
+  println("entries             {perCall(xEntries.micros, bare.micros, rounds)}")?
+  println("boxed               {perCall(xBoxed.micros, bare.micros, rounds)}")?
+  Ok(())
+}

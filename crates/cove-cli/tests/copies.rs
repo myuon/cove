@@ -1264,7 +1264,79 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// copy into. Issue #302's two shapes are both about a value arriving
 /// somewhere other than where it is wanted, and a walk composed a part at a
 /// time never has one.
-const FORWARDABLE_COPIES: usize = 8600;
+/// **The fifty-third rise is one new row and no code at all.** 8600 to 8717,
+/// 198 programs to 199. The check the paragraphs above prescribe says the
+/// rest: the survey with the one `[run]` table removed from
+/// `tests/e2e/cove.toml` is **8600 exactly**, over the same 198 programs, the
+/// same 26,152 functions and the same 720,831 instructions the row before it
+/// left.
+///
+/// The one is `tests/e2e:values_value_order` (117) — ADR 0064's Decision 3
+/// corpus for `Value.order`, landed before the layout-directed synthesis it
+/// pins, exactly as `values_any_equals` was. It is the largest program in the
+/// survey by instruction count, at 17,011 in 475 functions, and the reason is
+/// the mechanism rather than the file: [`sign`] and [`law`] are generic and
+/// are instantiated once per key type compared, so a corpus with thirty-odd
+/// key layouts in it is a hundred-odd monomorphisations.
+///
+/// **The split is 46 `prod` against 65 `ret`**, which is the other way round
+/// from `values_any_equals`' 59 against 50, and the difference is what the
+/// two files can observe. An equality is a `Bool` a row can bind and print;
+/// an order is not askable from a Cove program at all — `core.*` is reserved
+/// to the standard library — so every row here reads it off a `Set`, through
+/// `sign`, which is a function *call* per answer and not an expression per
+/// answer. The `prod` half is smaller because the comparisons are inside
+/// `std.set` where the corpus cannot bind them, and the `ret` half is larger
+/// because `sign` has three `return`s of its own on top of the `Ok(())` every
+/// section function ends in.
+/// **The fifty-fourth move is a rise and a fall together.** 8717 to 8811, 199
+/// programs to 200: one new row adding 101, and the layout-directed synthesis
+/// of the order taking **7** away.
+///
+/// The new row is `benches/ordering` (101), the microbenchmark the synthesis
+/// is argued on, and it is `benches/equals`' 59 with two things added. Eight
+/// counting callees rather than seven, each binding a lookup into a `var out`
+/// before the loop's next turn; and eight sets built with `let` in `main`
+/// before any of them is timed, where the equality bench needed two values
+/// apiece and not eight. A `Set.of` is a producer and the `let` after it is
+/// the copy, which is exactly issue #302's opening shape and exactly what a
+/// benchmark that needs its data built before the clock starts looks like.
+///
+/// **The fall is the first in this file's history**, so it is worth the four
+/// numbers that pin it. Two surveys either side of the lowering, each run
+/// twice — once over the corpus as it stands and once with `values_value_order`
+/// held out:
+///
+/// | | base | with the walk |
+/// | --- | ---: | ---: |
+/// | 198 programs | 8600 | **8599** |
+/// | 199 programs | 8717 | **8710** |
+///
+/// So the corpus row costs 117 copies at the old lowering and 111 at the new
+/// one: the synthesis removes 7 from it, and 1 from everything else. The one
+/// is `tests/e2e:coll_keyed_search`, whose `prod` falls 36 to 35 and whose
+/// `copy` falls 477 to 473; it is the only program in the other 197 that moves
+/// a copy at all, and five more move in instruction count without moving one
+/// (`benches:keyed`, and the three `fail_key_*` cases beside
+/// `fail_invalid_map_key`).
+///
+/// The mechanism is the one `benches/equals`' row named from the other
+/// direction. `lower::synth` never emits an `Inst::Copy`, because every arm
+/// writes its answer into the one slot the function returns. What the *order*
+/// can do, which the equality walk could not, is take a producer away: a
+/// `core.order` whose answer a `let` binds used to be an `intrinsic-call`, and
+/// where the walk for that key is small enough for `lower::inline` to expand
+/// whole, what the `let` copies from is no longer one instruction's
+/// destination. Seven copies across 744,335 instructions, and recorded because
+/// the ratchet is one-way and a fall nobody explained is a fall nobody can
+/// repeat.
+///
+/// Across the whole survey the synthesis adds **17 functions and 506
+/// instructions** (26,152 to 26,169 and 720,831 to 721,337, over the 198
+/// programs both lowerings share) — one function per `(operation, layout)`
+/// pair actually reached, over a corpus in which almost every keyed collection
+/// is keyed by a `String` and reaches no pair at all.
+const FORWARDABLE_COPIES: usize = 8811;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
