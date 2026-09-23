@@ -432,6 +432,14 @@ allow = ["console"]
 entry = "fail_key_nested_float.main"
 allow = ["console"]
 
+[run.fail_key_boxed_float]
+entry = "fail_key_boxed_float.main"
+allow = ["console", "clock"]
+
+[run.fail_key_boxed_vector]
+entry = "fail_key_boxed_vector.main"
+allow = ["console", "clock"]
+
 [run.values_interpolation_order]
 entry = "values_interpolation_order.main"
 allow = ["console"]
@@ -531,3 +539,7 @@ allow = ["console"]
 [run.values_value_render_into]
 entry = "values_value_render_into.main"
 allow = ["console"]
+
+[run.values_boxed]
+entry = "values_boxed.main"
+allow = ["console", "clock"]

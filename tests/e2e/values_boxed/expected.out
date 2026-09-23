@@ -1,0 +1,54 @@
+equals.enum.flag.same eq true sym true ne false refl true want true
+equals.enum.flag.diff eq false sym false ne true refl true want false
+equals.enum.mark.payload.same eq true sym true ne false refl true want true
+equals.enum.mark.payload.diff eq false sym false ne true refl true want false
+equals.enum.mark.case eq false sym false ne true refl true want false
+equals.vector.same eq true sym true ne false refl true want true
+equals.vector.diff eq false sym false ne true refl true want false
+equals.set.same eq true sym true ne false refl true want true
+equals.set.diff eq false sym false ne true refl true want false
+equals.map.same eq true sym true ne false refl true want true
+equals.map.diff eq false sym false ne true refl true want false
+equals.range.same eq true sym true ne false refl true want true
+equals.range.diff eq false sym false ne true refl true want false
+equals.scalar.bool.same eq true sym true ne false refl true want true
+equals.scalar.bool.diff eq false sym false ne true refl true want false
+equals.scalar.int.same eq true sym true ne false refl true want true
+equals.scalar.int.diff eq false sym false ne true refl true want false
+equals.scalar.duration.same eq true sym true ne false refl true want true
+equals.scalar.duration.diff eq false sym false ne true refl true want false
+equals.scalar.string.same eq true sym true ne false refl true want true
+equals.scalar.string.diff eq false sym false ne true refl true want false
+equals.scalar.unit.same eq true sym true ne false refl true want true
+equals.scalar.float.same eq true sym true ne false refl true want true
+equals.scalar.float.diff eq false sym false ne true refl true want false
+equals.scalar.float.nan eq false sym false ne true refl false want false
+equals.scalar.float.zero eq true sym true ne false refl true want true
+order.boxed.cross {Booking(id: 1), Receipt(cents: 5)}
+order.enum.flag {Off, On}
+order.enum.mark {Count(3), Named(a), Plain}
+order.set {{1}, {1, 2}}
+order.map {{a: 1}, {b: 0}}
+order.range {0..<3, 1..<2}
+order.scalar.bool {false, true}
+order.scalar.int {1, 3}
+order.scalar.duration {1ms, 2s}
+order.scalar.string {a, b}
+order.scalar.unit {()}
+admit.enum.flag set 2 has true map 2 got true
+admit.enum.mark set 2 has true map 2 got true
+admit.set set 2 has true map 2 got true
+admit.map set 2 has true map 2 got true
+admit.range set 2 has true map 2 got true
+admit.scalar.bool set 2 has true map 2 got true
+admit.scalar.int set 2 has true map 2 got true
+admit.scalar.duration set 2 has true map 2 got true
+admit.scalar.string set 2 has true map 2 got true
+admit.scalar.unit set 1 has true map 1 got true
+render.enum.flag On
+render.enum.mark Plain Count(3) Named(a)
+render.vector [1, 2]
+render.set {1, 2}
+render.map {a: 1}
+render.range 0..<3
+render.scalar.int 7
