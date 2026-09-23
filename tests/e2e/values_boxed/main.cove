@@ -1,0 +1,568 @@
+use clock.timeout
+use console.println
+
+/// What `==`, the value order, key admission and `"{x}"` answer for kinds and
+/// combinations the four `values_*` files could not reach while boxed.
+///
+/// [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 0 asks that every remaining boxed call site be pinned before the four
+/// walks move out of Rust, and an audit of `values_any_equals`,
+/// `values_value_order`, `values_value_admit_key` and `values_value_render_into`
+/// found five kinds of gap left open. This file is the four operations' rows
+/// for exactly those gaps, grouped by operation (`equals.*`, `order.*`,
+/// `admit.*`, `render.*`) rather than by kind, the way the four sibling files
+/// are: the answers below are ADR 0068's Decision 4 — the current Rust
+/// fallback's behaviour is the contract a Cove rewrite has to reproduce, not a
+/// specification derived independently of it.
+///
+/// # The two ways a value gets boxed here
+///
+/// A `dyn Summary` erasure reaches a struct or an enum; `Booking`, `Receipt`,
+/// `Flag` and `Mark` below exist only to be erased through it. A `Float`, a
+/// `Vector`, a `Set`, a `Map`, a `Range` and every scalar cannot implement a
+/// trait, so they are boxed the other way ADR 0068 names: `clock.timeout`
+/// answers `Result<Any, Error>`, and a value that crosses that boundary is
+/// erased the same way a `dyn Trait` is. `Any` cannot be named in an
+/// annotation or a generic parameter, which is why every row that uses it
+/// computes what it prints inline, in the function that produced the value,
+/// rather than through a shared generic helper the way the dyn-erased rows do
+/// — a value of an unconstrained type does not survive being passed to one.
+///
+/// # What each group covers
+///
+/// `equals.*` is the four-answer law (`eq`, `sym`, `ne`, `refl`, and `want`
+/// beside them) from `values_any_equals`, for an enum with and without a
+/// payload, a `Vector`, a `Set`, a `Map`, a `Range`, and every scalar —
+/// `Float` included, with its `NaN` and `-0.0` rows, since `==` never refuses.
+///
+/// `order.*` prints the ascending `Set` two boxed values sort into, which is
+/// the only way an order is observable at all: `core.order` is not a public
+/// operation. `order.boxed.cross` is the row `values_value_order` named and
+/// left open — two *different* concrete types erased into one `Set<dyn
+/// Summary>` — and the rest are an enum with and without a payload, a `Set`,
+/// a `Map`, a `Range`, and every scalar admission admits. There is no
+/// `order.scalar.float` row: a `Float` is never a member of anything ordered,
+/// boxed or not, so the order over one is never asked.
+///
+/// `admit.*` covers the boxed values a `Set` or a `Map` *accepts*: an enum
+/// with and without a payload, a `Set`, a `Map`, a `Range`, and every scalar
+/// but `Float`. The two it refuses — a boxed `Float` and a boxed `Vector` —
+/// end the run, so they are `fail_key_boxed_float` and
+/// `fail_key_boxed_vector` beside this file, the way every other admission
+/// refusal in this repository is pinned outside the file that pins success.
+///
+/// `render.*` covers the same kinds `admit.*` does, plus the ones `admit.*`
+/// cannot reach (`Vector`, and `Float` and `Vector` render without being
+/// admitted anywhere) — but only one scalar, `Int`: a boxed scalar's
+/// rendering is already exercised incidentally by every `Set` `order.*`
+/// prints, and a dedicated row per scalar would repeat what those already
+/// show without pinning anything new.
+///
+/// # What was tried and does not reach here
+///
+/// A closure and a `Shared` cannot be named as a `dyn` erasure — `impl` only
+/// extends a struct or an enum — and neither can cross `clock.timeout`'s
+/// boundary: both are refused before a value exists to box, with
+/// "a `closure` cannot cross the boundary into the linear-memory backend yet"
+/// and "a `Shared` names one cell of this run's heap, so it cannot be handed
+/// out as a value". A `Task` handle is refused the same way, with "this value
+/// cannot cross the boundary as it is represented". A host resource (a
+/// `files.Reader`, a `database.Connection`) needs a live external resource
+/// this corpus cannot depend on to be deterministic. None of the four
+/// operations is reachable on any of these while boxed, so none has a row.
+struct Booking {
+  id: Int
+}
+
+struct Receipt {
+  cents: Int
+}
+
+trait Summary {
+  fn summarize(self) -> String
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+impl Summary for Receipt {
+  fn summarize(self) -> String {
+    "receipt {self.cents}c"
+  }
+}
+
+/// Two cases with no payload.
+enum Flag {
+  On
+  Off
+}
+
+/// A case with no payload beside two with one, so a `dyn Summary` erasing a
+/// `Mark` covers both shapes at once.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+impl Summary for Flag {
+  fn summarize(self) -> String {
+    "flag"
+  }
+}
+
+impl Summary for Mark {
+  fn summarize(self) -> String {
+    "mark"
+  }
+}
+
+/// `a == b`, `b == a`, `a != b` and `a == a`, computed by the caller and
+/// printed beside `want` — [`values_any_equals`]'s `law`, taken apart so a
+/// row whose operands are erased through `clock.timeout` can compute the four
+/// answers itself instead of passing an unconstrained-typed value through a
+/// generic parameter.
+fn lawRow(
+  label: String,
+  forward: Bool,
+  backward: Bool,
+  differ: Bool,
+  reflexive: Bool,
+  want: Bool,
+) -> Result<Unit, Error> {
+  println("{label} eq {forward} sym {backward} ne {differ} refl {reflexive} want {want}")?
+  Ok(())
+}
+
+/// What a `Set` and a `Map` answer after two boxed values were admitted into
+/// each: how many members, whether the first is found, how many entries, and
+/// whether the first key is found.
+fn admitRow(
+  label: String,
+  setLength: Int,
+  has: Bool,
+  mapLength: Int,
+  got: Bool,
+) -> Result<Unit, Error> {
+  println("{label} set {setLength} has {has} map {mapLength} got {got}")?
+  Ok(())
+}
+
+/// `==` on an erased enum, a boxed collection, a boxed range and every boxed
+/// scalar.
+fn equalsGroup() -> Result<Unit, Error> {
+  let f1: dyn Summary = Flag.On
+  let f2: dyn Summary = Flag.Off
+  lawRow("equals.enum.flag.same", f1 == f1, f1 == f1, f1 != f1, f1 == f1, true)?
+  lawRow("equals.enum.flag.diff", f1 == f2, f2 == f1, f1 != f2, f1 == f1, false)?
+
+  let m1: dyn Summary = Mark.Count(3)
+  let m2: dyn Summary = Mark.Count(3)
+  let m3: dyn Summary = Mark.Count(4)
+  let m4: dyn Summary = Mark.Named("3")
+  lawRow(
+    "equals.enum.mark.payload.same",
+    m1 == m2,
+    m2 == m1,
+    m1 != m2,
+    m1 == m1,
+    true,
+  )?
+  lawRow(
+    "equals.enum.mark.payload.diff",
+    m1 == m3,
+    m3 == m1,
+    m1 != m3,
+    m1 == m1,
+    false,
+  )?
+  lawRow("equals.enum.mark.case", m1 == m4, m4 == m1, m1 != m4, m1 == m1, false)?
+
+  let v1 = timeout(1ms) { Vector.of(1, 2) }?
+  let v2 = timeout(1ms) { Vector.of(1, 2) }?
+  let v3 = timeout(1ms) { Vector.of(2, 1) }?
+  lawRow("equals.vector.same", v1 == v2, v2 == v1, v1 != v2, v1 == v1, true)?
+  lawRow("equals.vector.diff", v1 == v3, v3 == v1, v1 != v3, v1 == v1, false)?
+
+  let s1 = timeout(1ms) { Set.of(1, 2) }?
+  let s2 = timeout(1ms) { Set.of(2, 1) }?
+  let s3 = timeout(1ms) { Set.of(1) }?
+  lawRow("equals.set.same", s1 == s2, s2 == s1, s1 != s2, s1 == s1, true)?
+  lawRow("equals.set.diff", s1 == s3, s3 == s1, s1 != s3, s1 == s1, false)?
+
+  let mp1 = timeout(1ms) { Map.of(MapEntry(key: "a", value: 1)) }?
+  let mp2 = timeout(1ms) { Map.of(MapEntry(key: "a", value: 1)) }?
+  let mp3 = timeout(1ms) { Map.of(MapEntry(key: "a", value: 2)) }?
+  lawRow(
+    "equals.map.same",
+    mp1 == mp2,
+    mp2 == mp1,
+    mp1 != mp2,
+    mp1 == mp1,
+    true,
+  )?
+  lawRow(
+    "equals.map.diff",
+    mp1 == mp3,
+    mp3 == mp1,
+    mp1 != mp3,
+    mp1 == mp1,
+    false,
+  )?
+
+  let r1 = timeout(1ms) { 0..<3 }?
+  let r2 = timeout(1ms) { 0..<3 }?
+  let r3 = timeout(1ms) { 1..<2 }?
+  lawRow("equals.range.same", r1 == r2, r2 == r1, r1 != r2, r1 == r1, true)?
+  lawRow("equals.range.diff", r1 == r3, r3 == r1, r1 != r3, r1 == r1, false)?
+
+  let bt = timeout(1ms) { true }?
+  let bf = timeout(1ms) { false }?
+  lawRow(
+    "equals.scalar.bool.same",
+    bt == bt,
+    bt == bt,
+    bt != bt,
+    bt == bt,
+    true,
+  )?
+  lawRow(
+    "equals.scalar.bool.diff",
+    bt == bf,
+    bf == bt,
+    bt != bf,
+    bt == bt,
+    false,
+  )?
+
+  let i1 = timeout(1ms) { 7 }?
+  let i2 = timeout(1ms) { 7 }?
+  let i3 = timeout(1ms) { 8 }?
+  lawRow("equals.scalar.int.same", i1 == i2, i2 == i1, i1 != i2, i1 == i1, true)?
+  lawRow(
+    "equals.scalar.int.diff",
+    i1 == i3,
+    i3 == i1,
+    i1 != i3,
+    i1 == i1,
+    false,
+  )?
+
+  let d1 = timeout(1ms) { 2s }?
+  let d2 = timeout(1ms) { 2000ms }?
+  let d3 = timeout(1ms) { 1s }?
+  lawRow(
+    "equals.scalar.duration.same",
+    d1 == d2,
+    d2 == d1,
+    d1 != d2,
+    d1 == d1,
+    true,
+  )?
+  lawRow(
+    "equals.scalar.duration.diff",
+    d1 == d3,
+    d3 == d1,
+    d1 != d3,
+    d1 == d1,
+    false,
+  )?
+
+  let str1 = timeout(1ms) { "ab" }?
+  let str2 = timeout(1ms) { "ab" }?
+  let str3 = timeout(1ms) { "ac" }?
+  lawRow(
+    "equals.scalar.string.same",
+    str1 == str2,
+    str2 == str1,
+    str1 != str2,
+    str1 == str1,
+    true,
+  )?
+  lawRow(
+    "equals.scalar.string.diff",
+    str1 == str3,
+    str3 == str1,
+    str1 != str3,
+    str1 == str1,
+    false,
+  )?
+
+  let u1 = timeout(1ms) { () }?
+  let u2 = timeout(1ms) { () }?
+  lawRow(
+    "equals.scalar.unit.same",
+    u1 == u2,
+    u2 == u1,
+    u1 != u2,
+    u1 == u1,
+    true,
+  )?
+
+  let flt1 = timeout(1ms) { 1.5 }?
+  let flt2 = timeout(1ms) { 1.5 }?
+  let flt3 = timeout(1ms) { 1.25 }?
+  lawRow(
+    "equals.scalar.float.same",
+    flt1 == flt2,
+    flt2 == flt1,
+    flt1 != flt2,
+    flt1 == flt1,
+    true,
+  )?
+  lawRow(
+    "equals.scalar.float.diff",
+    flt1 == flt3,
+    flt3 == flt1,
+    flt1 != flt3,
+    flt1 == flt1,
+    false,
+  )?
+
+  let nan1 = timeout(1ms) { 0.0 / 0.0 }?
+  let nan2 = timeout(1ms) { 0.0 / 0.0 }?
+  lawRow(
+    "equals.scalar.float.nan",
+    nan1 == nan2,
+    nan2 == nan1,
+    nan1 != nan2,
+    nan1 == nan1,
+    false,
+  )?
+
+  let zero1 = timeout(1ms) { 0.0 }?
+  let zero2 = timeout(1ms) { -0.0 }?
+  lawRow(
+    "equals.scalar.float.zero",
+    zero1 == zero2,
+    zero2 == zero1,
+    zero1 != zero2,
+    zero1 == zero1,
+    true,
+  )?
+  Ok(())
+}
+
+/// The ascending `Set` two boxed values sort into, for the cross-type row
+/// [`values_value_order`] left open, an erased enum, a boxed collection, a
+/// boxed range and every scalar admission admits.
+fn orderGroup() -> Result<Unit, Error> {
+  let one: dyn Summary = Booking(id: 1)
+  let two: dyn Summary = Receipt(cents: 5)
+  let heldCross = Set.of(one).inserted(two)
+  println("order.boxed.cross {heldCross}")?
+
+  let f1: dyn Summary = Flag.On
+  let f2: dyn Summary = Flag.Off
+  let heldFlag = Set.of(f1).inserted(f2)
+  println("order.enum.flag {heldFlag}")?
+
+  let m1: dyn Summary = Mark.Plain
+  let m2: dyn Summary = Mark.Count(3)
+  let m3: dyn Summary = Mark.Named("a")
+  let heldMark = Set.of(m1).inserted(m2).inserted(m3)
+  println("order.enum.mark {heldMark}")?
+
+  let s1 = timeout(1ms) { Set.of(1) }?
+  let s2 = timeout(1ms) { Set.of(1, 2) }?
+  let heldSet = Set.of(s1).inserted(s2)
+  println("order.set {heldSet}")?
+
+  let mp1 = timeout(1ms) { Map.of(MapEntry(key: "a", value: 1)) }?
+  let mp2 = timeout(1ms) { Map.of(MapEntry(key: "b", value: 0)) }?
+  let heldMap = Set.of(mp1).inserted(mp2)
+  println("order.map {heldMap}")?
+
+  let r1 = timeout(1ms) { 0..<3 }?
+  let r2 = timeout(1ms) { 1..<2 }?
+  let heldRange = Set.of(r1).inserted(r2)
+  println("order.range {heldRange}")?
+
+  let bf = timeout(1ms) { false }?
+  let bt = timeout(1ms) { true }?
+  let heldBool = Set.of(bf).inserted(bt)
+  println("order.scalar.bool {heldBool}")?
+
+  let i1 = timeout(1ms) { 3 }?
+  let i2 = timeout(1ms) { 1 }?
+  let heldInt = Set.of(i1).inserted(i2)
+  println("order.scalar.int {heldInt}")?
+
+  let d1 = timeout(1ms) { 2s }?
+  let d2 = timeout(1ms) { 1ms }?
+  let heldDur = Set.of(d1).inserted(d2)
+  println("order.scalar.duration {heldDur}")?
+
+  let str1 = timeout(1ms) { "b" }?
+  let str2 = timeout(1ms) { "a" }?
+  let heldStr = Set.of(str1).inserted(str2)
+  println("order.scalar.string {heldStr}")?
+
+  let u1 = timeout(1ms) { () }?
+  let heldUnit = Set.of().inserted(u1)
+  println("order.scalar.unit {heldUnit}")?
+  Ok(())
+}
+
+/// An erased enum, a boxed collection, a boxed range and every scalar but
+/// `Float`, admitted into a `Set` and a `Map`. `Float` and `Vector` are the
+/// admissions that refuse, and they are pinned in `fail_key_boxed_float` and
+/// `fail_key_boxed_vector` instead: a refusal ends the run and would silence
+/// every row after it.
+fn admitGroup() -> Result<Unit, Error> {
+  let f1: dyn Summary = Flag.On
+  let f2: dyn Summary = Flag.Off
+  let heldSetFlag = Set.of(f1).inserted(f2)
+  let heldMapFlag = Map.of().inserted(f1, 1).inserted(f2, 2)
+  admitRow(
+    "admit.enum.flag",
+    heldSetFlag.length(),
+    heldSetFlag.contains(f1),
+    heldMapFlag.length(),
+    heldMapFlag.get(f1).isSome(),
+  )?
+
+  let m1: dyn Summary = Mark.Plain
+  let m2: dyn Summary = Mark.Count(3)
+  let heldSetMark = Set.of(m1).inserted(m2)
+  let heldMapMark = Map.of().inserted(m1, 1).inserted(m2, 2)
+  admitRow(
+    "admit.enum.mark",
+    heldSetMark.length(),
+    heldSetMark.contains(m1),
+    heldMapMark.length(),
+    heldMapMark.get(m1).isSome(),
+  )?
+
+  let s1 = timeout(1ms) { Set.of(1) }?
+  let s2 = timeout(1ms) { Set.of(2) }?
+  let heldSetSet = Set.of(s1).inserted(s2)
+  let heldMapSet = Map.of().inserted(s1, 1).inserted(s2, 2)
+  admitRow(
+    "admit.set",
+    heldSetSet.length(),
+    heldSetSet.contains(s1),
+    heldMapSet.length(),
+    heldMapSet.get(s1).isSome(),
+  )?
+
+  let mp1 = timeout(1ms) { Map.of(MapEntry(key: "a", value: 1)) }?
+  let mp2 = timeout(1ms) { Map.of(MapEntry(key: "b", value: 2)) }?
+  let heldSetMap = Set.of(mp1).inserted(mp2)
+  let heldMapMap = Map.of().inserted(mp1, 1).inserted(mp2, 2)
+  admitRow(
+    "admit.map",
+    heldSetMap.length(),
+    heldSetMap.contains(mp1),
+    heldMapMap.length(),
+    heldMapMap.get(mp1).isSome(),
+  )?
+
+  let r1 = timeout(1ms) { 0..<3 }?
+  let r2 = timeout(1ms) { 1..<2 }?
+  let heldSetRange = Set.of(r1).inserted(r2)
+  let heldMapRange = Map.of().inserted(r1, 1).inserted(r2, 2)
+  admitRow(
+    "admit.range",
+    heldSetRange.length(),
+    heldSetRange.contains(r1),
+    heldMapRange.length(),
+    heldMapRange.get(r1).isSome(),
+  )?
+
+  let bt = timeout(1ms) { true }?
+  let bf = timeout(1ms) { false }?
+  let heldSetBool = Set.of(bt).inserted(bf)
+  let heldMapBool = Map.of().inserted(bt, 1).inserted(bf, 2)
+  admitRow(
+    "admit.scalar.bool",
+    heldSetBool.length(),
+    heldSetBool.contains(bt),
+    heldMapBool.length(),
+    heldMapBool.get(bt).isSome(),
+  )?
+
+  let i1 = timeout(1ms) { 1 }?
+  let i2 = timeout(1ms) { 2 }?
+  let heldSetInt = Set.of(i1).inserted(i2)
+  let heldMapInt = Map.of().inserted(i1, 1).inserted(i2, 2)
+  admitRow(
+    "admit.scalar.int",
+    heldSetInt.length(),
+    heldSetInt.contains(i1),
+    heldMapInt.length(),
+    heldMapInt.get(i1).isSome(),
+  )?
+
+  let d1 = timeout(1ms) { 1ms }?
+  let d2 = timeout(1ms) { 2s }?
+  let heldSetDur = Set.of(d1).inserted(d2)
+  let heldMapDur = Map.of().inserted(d1, 1).inserted(d2, 2)
+  admitRow(
+    "admit.scalar.duration",
+    heldSetDur.length(),
+    heldSetDur.contains(d1),
+    heldMapDur.length(),
+    heldMapDur.get(d1).isSome(),
+  )?
+
+  let str1 = timeout(1ms) { "a" }?
+  let str2 = timeout(1ms) { "b" }?
+  let heldSetStr = Set.of(str1).inserted(str2)
+  let heldMapStr = Map.of().inserted(str1, 1).inserted(str2, 2)
+  admitRow(
+    "admit.scalar.string",
+    heldSetStr.length(),
+    heldSetStr.contains(str1),
+    heldMapStr.length(),
+    heldMapStr.get(str1).isSome(),
+  )?
+
+  let u1 = timeout(1ms) { () }?
+  let heldSetUnit = Set.of().inserted(u1)
+  let heldMapUnit = Map.of().inserted(u1, 1)
+  admitRow(
+    "admit.scalar.unit",
+    heldSetUnit.length(),
+    heldSetUnit.contains(u1),
+    heldMapUnit.length(),
+    heldMapUnit.get(u1).isSome(),
+  )?
+  Ok(())
+}
+
+/// An erased enum, a boxed collection, a boxed range and one boxed scalar,
+/// rendered through `"{x}"`.
+fn renderGroup() -> Result<Unit, Error> {
+  let f1: dyn Summary = Flag.On
+  println("render.enum.flag {f1}")?
+  let m1: dyn Summary = Mark.Plain
+  let m2: dyn Summary = Mark.Count(3)
+  let m3: dyn Summary = Mark.Named("a")
+  println("render.enum.mark {m1} {m2} {m3}")?
+
+  let v1 = timeout(1ms) { Vector.of(1, 2) }?
+  println("render.vector {v1}")?
+  let s1 = timeout(1ms) { Set.of(1, 2) }?
+  println("render.set {s1}")?
+  let mp1 = timeout(1ms) { Map.of(MapEntry(key: "a", value: 1)) }?
+  println("render.map {mp1}")?
+  let r1 = timeout(1ms) { 0..<3 }?
+  println("render.range {r1}")?
+
+  let i1 = timeout(1ms) { 7 }?
+  println("render.scalar.int {i1}")?
+  Ok(())
+}
+
+/// Every group, in the order they are declared above.
+export fn main() -> Result<Unit, Error> {
+  equalsGroup()?
+  orderGroup()?
+  admitGroup()?
+  renderGroup()?
+  Ok(())
+}

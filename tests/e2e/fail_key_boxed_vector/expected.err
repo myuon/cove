@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `Vector` as a set element
+  --> <e2e>/fail_key_boxed_vector/main.cove:19:14
+   |
+19 |   let held = Set.of(one).inserted(other)
+   |              ^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_boxed_vector/main.cove:26:3
+   |
+26 |   admitVector()?
+   |   ^^^^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

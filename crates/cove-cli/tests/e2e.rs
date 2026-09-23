@@ -214,6 +214,29 @@ impl Actual {
     }
 }
 
+/// `stderr` without the mixture report a native run prints.
+///
+/// ADR 0055 requires a native run to say what ran where, on stderr, whether or
+/// not `--stats` was asked for — after the run and before the diagnostic that
+/// ends it, if one does. So the report is the lines from the first that begins
+/// `native: ` up to the first that begins a diagnostic, and everything the
+/// program itself wrote is on one side of it or the other.
+fn without_native_report(stderr: &str) -> String {
+    let mut kept = String::new();
+    let mut reporting = false;
+    for line in stderr.split_inclusive('\n') {
+        if line.starts_with("native: ") {
+            reporting = true;
+        } else if reporting && (line.starts_with("error") || line.starts_with("warning")) {
+            reporting = false;
+        }
+        if !reporting {
+            kept.push_str(line);
+        }
+    }
+    kept
+}
+
 #[test]
 fn every_case_matches_its_golden_files() {
     let root = e2e_root();
@@ -272,6 +295,17 @@ fn every_case_matches_its_golden_files() {
             if let Some(difference) = actual.differs_from(&oracle) {
                 failures.push(format!(
                     "case `{name}`: the backend and the interpreter do not agree\n{difference}"
+                ));
+            }
+        }
+        // The native tier, for a case that asks and a binary that has one. See
+        // [`Case::asks_for_the_native_tier`].
+        if cfg!(feature = "template") && case.asks_for_the_native_tier() {
+            let mut native = case.run_with(&root, &["--backend", "native"]);
+            native.stderr = without_native_report(&native.stderr);
+            if let Some(difference) = native.differs_from(&actual) {
+                failures.push(format!(
+                    "case `{name}`: the native tier and the encoded VM do not agree\n{difference}"
                 ));
             }
         }
@@ -355,6 +389,20 @@ impl Case {
     /// anyway](Case::asks_for_both_backends).
     fn compares_both_backends(&self) -> bool {
         (!self.names_its_own_command && self.runs_an_entry()) || self.asks_for_both_backends()
+    }
+
+    /// Whether a `native` file asks for this case to be run on the native tier
+    /// too, and held to what the encoded VM answered.
+    ///
+    /// Nothing else runs this corpus on the native tier: `cove test` refuses it
+    /// and the comparison above is the interpreter's. ADR 0068's gates ask that
+    /// AST, VM and native answer alike for every boxed-value operation it moves,
+    /// so the cases that pin those operations opt in here. It runs only in a
+    /// build with the `template` feature — which is the step of
+    /// `.github/workflows/ci.yml` that tests `cove-cli` with it — because a
+    /// default build has no code generator to ask.
+    fn asks_for_the_native_tier(&self) -> bool {
+        self.dir.join("native").exists()
     }
 
     /// Whether a `both_backends` file asks for the comparison a `command`

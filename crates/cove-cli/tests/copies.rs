@@ -1485,7 +1485,12 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// of `benches/stringlib` with the standard library under it, whatever entry
 /// it names. Both operations were still Rust arms, so there was no lowering to
 /// attribute any of it to.
-const FORWARDABLE_COPIES: usize = 9716;
+///
+/// **9,864 since ADR 0068's Phase 0 pinned the boxed-value contract**:
+/// `tests/e2e/values_boxed`, `fail_key_boxed_float` and `fail_key_boxed_vector`.
+/// All 148 of the rise is the three programs existing — 9,716 with them held out,
+/// over the same 210 programs — because the phase changed no lowering.
+const FORWARDABLE_COPIES: usize = 9864;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

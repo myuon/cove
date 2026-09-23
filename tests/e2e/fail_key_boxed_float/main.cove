@@ -1,0 +1,28 @@
+use clock.timeout
+use console.println
+
+/// Boxes two `Float`s through `clock.timeout` and puts the first into a
+/// `Set`, where admission refuses it. Not the standard library: an ordinary
+/// Cove function with a caller, between `main` and the operation that
+/// refuses, so that the diagnostic below has a frame to blame that is
+/// neither the entry point nor the machine.
+///
+/// A boxed `Float` refuses through the same call `values_value_admit_key`
+/// pins for an unboxed one — the audit behind `values_boxed` found this a
+/// gap `values_value_admit_key` never closed, because every operand there is
+/// declared with a static type and a `Float` cannot be erased through a
+/// `dyn` trait. `clock.timeout`'s `Result<Any, Error>` is what erases it
+/// instead, the way `values_boxed`'s doc comment explains.
+fn admitFloat() -> Result<Unit, Error> {
+  let one = timeout(10ms) { 1.5 }?
+  let other = timeout(10ms) { 2.5 }?
+  let held = Set.of(one).inserted(other)
+  println("never printed {held}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed Float as a set element")?
+  admitFloat()?
+  Ok(())
+}
