@@ -1,0 +1,5 @@
+/// A struct whose short name sorts last and whose module sorts first: `Zed`
+/// after `Alpha`, and `values_boxed_order.aa` before `values_boxed_order.p`.
+export struct Zed {
+  n: Int
+}

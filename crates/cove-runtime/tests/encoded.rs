@@ -266,12 +266,23 @@ fn the_run_writes_the_recording_a_run_writes() {
     // fifteen; and the help, 109 and fifteen. A walk the lowering composes for
     // a layout that can hold itself raises the same three by the same text,
     // so it adds none of its own.
+    //
+    // It is 1,631 since ADR 0068's Phase 3 moved the order of two erased keys
+    // into `std.dynamic.order`, and the seven words are one literal: the
+    // sentence an order raises at a value that is not a key, "this value
+    // cannot be a map key or a set element", 47 bytes and so a header and six
+    // payload words. It was `key::not_a_key`'s in Rust, and `lower::synth`
+    // raises it too where a walk it composed meets such a value — but a
+    // composed walk is placed only by a program that orders a known key
+    // holding one, and this fixture orders nothing, so `std.dynamic`, which
+    // every whole-package lowering places, is where it arrives from. Its rule
+    // and help are the empty string, which the program already held.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1624), capacity_words: Some(1624) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1631), capacity_words: Some(1631) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

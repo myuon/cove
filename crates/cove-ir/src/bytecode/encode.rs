@@ -551,6 +551,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::DynSameObject { dst, a, b } => {
             build(Op::DynSameObject, slot(dst)?, slot(a)?, slot(b)?, 0)
         }
+        Inst::DynNameOrder { dst, a, b } => {
+            build(Op::DynNameOrder, slot(dst)?, slot(a)?, slot(b)?, 0)
+        }
         Inst::DynRead { dst, view } => build(Op::DynRead, slot(dst)?, slot(view)?, 0, 0),
         Inst::DynCase { dst, view } => build(Op::DynCase, slot(dst)?, slot(view)?, 0, 0),
         Inst::DynCount { dst, view } => build(Op::DynCount, slot(dst)?, slot(view)?, 0, 0),
@@ -1251,6 +1254,7 @@ mod tests {
             (0, Inst::DynKind { dst: 1, view: 2 }),
             (0, Inst::DynSameType { dst: 1, a: 2, b: 5 }),
             (0, Inst::DynSameObject { dst: 1, a: 2, b: 5 }),
+            (0, Inst::DynNameOrder { dst: 1, a: 2, b: 5 }),
             (0, Inst::DynRead { dst: 1, view: 2 }),
             (0, Inst::DynCase { dst: 1, view: 2 }),
             (0, Inst::DynCount { dst: 1, view: 2 }),

@@ -84,6 +84,10 @@ const RENDERING: &str = "a rendering walk";
 /// `std.dynamic.equals`, which no program can name.
 pub(super) const DYNAMIC_EQUALS: (&str, &str) = ("std.dynamic", "equals");
 
+/// The Cove function `core.order` answers two erased keys with: ADR 0068's
+/// `std.dynamic.order`, which no program can name either.
+pub(super) const DYNAMIC_ORDER: (&str, &str) = ("std.dynamic", "order");
+
 /// What fills one written parameter of a call.
 ///
 /// The three the language has, and the reason a call site can no longer line
@@ -352,6 +356,33 @@ impl Body<'_> {
             span,
         )?;
         self.pool.dynamic_equals = Some(id);
+        Some(id)
+    }
+
+    /// `std.dynamic.order`, the Cove walk `core.order` answers two erased keys
+    /// with, resolved once per lowering and recorded on the
+    /// [`Pool`](super::Pool).
+    ///
+    /// [`Body::dynamic_equals`]' arrangement for ADR 0068's Phase 3, and for
+    /// its reason: an order walk composed for a known key layout that reaches a
+    /// boxed field calls this from a [`synth`] walk that cannot resolve a name,
+    /// so the call site that asks for the walk resolves it first — see
+    /// [`synth::reaches_a_box`] asked of [`synth::Operation::Order`] — and
+    /// `Body::core_order` resolves it for the boxed pair it calls it over
+    /// directly. `None` is [`Body::dynamic_equals`]' `None`.
+    pub(super) fn dynamic_order(&mut self, span: Span) -> Option<FunctionId> {
+        if let Some(id) = self.pool.dynamic_order {
+            return Some(id);
+        }
+        let (module, function) = DYNAMIC_ORDER;
+        let id = self.library_leaf(
+            module,
+            function,
+            (&[shapes::BOXED, shapes::BOXED], shapes::INT),
+            "the order of two erased keys",
+            span,
+        )?;
+        self.pool.dynamic_order = Some(id);
         Some(id)
     }
 

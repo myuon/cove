@@ -1817,7 +1817,7 @@ impl CoreIntrinsicSchema {
 /// keyed finish that relabels it into the new set or map. `Set.toArray` is
 /// [`CORE_SET_SLICE`], a run slice out of a set (P4-7).
 ///
-/// The last twelve are [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// The last thirteen are [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 /// structural observations of an erased value, each one instruction:
 /// [`CORE_DYNAMIC_OPEN`] opens a box into a [`CORE_DYNAMIC_VIEW_TYPE`];
 /// [`CORE_DYNAMIC_KIND`], [`CORE_DYNAMIC_SAME_TYPE`], [`CORE_DYNAMIC_CASE`] and
@@ -1827,6 +1827,8 @@ impl CoreIntrinsicSchema {
 /// them, since the ADR's Phase 2: `==` on two erased values. The last,
 /// [`CORE_DYNAMIC_SAME_OBJECT`], is issue #493's: the one identity question,
 /// which that walk asks at a vector to refuse a value that contains itself.
+/// And [`CORE_DYNAMIC_NAME_ORDER`] is Phase 3's: the same-type question
+/// asked three ways, which `std.dynamic.order` asks once a node.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_ENSURE,
@@ -1874,6 +1876,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_DYNAMIC_CHILD_COUNT,
     CORE_DYNAMIC_CHILD,
     CORE_DYNAMIC_SAME_OBJECT,
+    CORE_DYNAMIC_NAME_ORDER,
 ];
 
 /// Every core intrinsic.
@@ -2952,6 +2955,32 @@ pub const CORE_DYNAMIC_SAME_OBJECT: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Bool,
+    fresh: false,
+};
+
+/// `core.dynamicNameOrder(a: DynamicView, b: DynamicView) -> Int`: where the
+/// name of the value `a` views sorts against `b`'s, as `-1`, `0` or `1`.
+///
+/// One `Inst::DynNameOrder`: the declared names bytewise with any
+/// instantiation left off, and then, for two enums, the names of their cases
+/// bytewise. A kind with no name sorts before one with a name, and two of them
+/// are `0`. [`CORE_DYNAMIC_SAME_TYPE`] asked three ways rather than two, so
+/// that `std.dynamic.order` can put `Err` before `Ok` and a type from `aa`
+/// before one from `p` without a name ever reaching Cove as a `String`.
+pub const CORE_DYNAMIC_NAME_ORDER: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicNameOrder",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "a",
+            ty: BuiltinType::DynamicView,
+        },
+        ParamSchema {
+            name: "b",
+            ty: BuiltinType::DynamicView,
+        },
+    ],
+    result: BuiltinType::Int,
     fresh: false,
 };
 
@@ -5589,8 +5618,9 @@ mod tests {
             .collect();
         assert_eq!(
             dynamic.len(),
-            12,
-            "the eleven observations of ADR 0068, and issue #493's identity question"
+            13,
+            "the eleven observations of ADR 0068, issue #493's identity question and Phase \
+             3's name order"
         );
 
         let mut ints: Vec<String> = Vec::new();
@@ -5633,6 +5663,9 @@ mod tests {
                 "dynamicInt ->",
                 // A code from `DynamicKind`'s fixed table, not a `LayoutId`.
                 "dynamicKind ->",
+                // A sign, `-1`, `0` or `1`: where one name sorts against
+                // another, and not the name.
+                "dynamicNameOrder ->",
             ]
         );
         for entry in &dynamic {

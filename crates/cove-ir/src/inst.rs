@@ -1806,6 +1806,23 @@ pub enum Inst {
     /// follow that can contain itself (issue #493), to refuse a cycle on the
     /// path they are walking.
     DynSameObject { dst: Slot, a: Slot, b: Slot },
+    /// `dst = <where the name of the value a views sorts against b's>`, an
+    /// `Int`: `-1`, `0` or `1`.
+    ///
+    /// [`Inst::DynSameType`]'s question asked three ways rather than two. The
+    /// declared names first, bytewise and with any instantiation left off — so
+    /// `m.Cell<Duration>` and `m.Cell<Int>` are one name, as they are to the
+    /// oracle — and then, where both are enums, the names of their cases,
+    /// bytewise: `Err` before `Ok`, whatever order the declaration put them
+    /// in. A kind with no name — every kind but a struct, an enum and a range
+    /// — sorts before one with a name, and two of them are `0`. The name is
+    /// the qualified one the value carries, so which module declared a type is
+    /// part of where it sorts, as it is in the order a key has always had.
+    ///
+    /// It allocates nothing and places no string: both names are the layout
+    /// table's, compared where they are. `std.dynamic.order` asks it once a
+    /// node, so that a type's name never has to reach Cove as text.
+    DynNameOrder { dst: Slot, a: Slot, b: Slot },
     /// `dst = <the scalar the value view names>`.
     ///
     /// Which scalar is the destination slot's [`Repr`](crate::Repr): a

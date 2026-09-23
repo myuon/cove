@@ -325,7 +325,7 @@ fn no_statically_known_layout_reaches_the_fallback() {
 /// [`super::super::synth::ordered_by`] answers a comparison instruction for
 /// every key a *single* instruction orders, and `core.order` emits it there
 /// rather than calling anything. That is why `cq` — twenty thousand records
-/// looked up by `String` key — executes `Value.order` at no site and on no
+/// looked up by `String` key — calls no order walk at any site and on any
 /// turn, and it is a property a synthesis is in a position to destroy by
 /// making a function for every key and letting the inliner sort it out. What
 /// would be left is a program whose counts moved for no reason anybody asked
@@ -352,7 +352,11 @@ fn a_key_one_instruction_orders_is_not_a_function() {
             Vec::<String>::new(),
             "a walk for {key}"
         );
-        assert_eq!(orderings(&program), 0, "a `Value.order` site for {key}");
+        assert_eq!(
+            orderings(&program),
+            0,
+            "a `std.dynamic.order` call for {key}"
+        );
         assert!(
             count(&program, |inst| matches!(
                 inst,
@@ -385,7 +389,7 @@ fn a_struct_key_is_ordered_field_by_field_in_declaration_order() {
     assert!(listed.contains("order.int"), "{listed}");
     assert!(listed.contains("order.str"), "{listed}");
     assert!(listed.contains("order.bool"), "{listed}");
-    assert!(!listed.contains("Value.order"), "{listed}");
+    assert!(!listed.contains("std.dynamic.order"), "{listed}");
     // Three fields, two early exits.
     assert_eq!(listed.matches("eq.int.imm").count(), 2, "{listed}");
 }
@@ -556,7 +560,11 @@ fn no_statically_known_layout_reaches_the_order_fallback() {
     ];
     for (declarations, key) in known {
         let program = keyed(declarations, key);
-        assert_eq!(orderings(&program), 0, "`Value.order` sites for {key}");
+        assert_eq!(
+            orderings(&program),
+            0,
+            "`std.dynamic.order` calls for {key}"
+        );
     }
 
     // And the other direction: an erased field *inside* a known layout is
@@ -814,60 +822,47 @@ fn walks_named(program: &Program, what: &str) -> Vec<String> {
 /// counts that every operand of every one of them is erased.
 ///
 /// Equality's fallback was the intrinsic `Any.equals` until ADR 0068's Phase 2
-/// made it this Cove function; the property is [`reached`]'s, asked of a call
-/// instead of an intrinsic site. Unlike the intrinsic, the function has a body,
-/// and a whole-package lowering lowers it — so what is counted is the calls, and
-/// none of them is inside the function itself.
+/// made it this Cove function; the property is the one that intrinsic's sites
+/// were held to, asked of a call instead of an intrinsic site. Unlike the
+/// intrinsic, the function has a body, and a whole-package lowering lowers it
+/// — so what is counted is the calls, and none of them is inside the function
+/// itself.
 fn fallbacks(program: &Program) -> usize {
+    reflected(program, "equals")
+}
+
+/// How many calls of `std.dynamic.order` it holds, checked the same way.
+///
+/// The order's fallback was the intrinsic `Value.order` until ADR 0068's Phase
+/// 3 made it this Cove function, and [`fallbacks`]' argument carries over word
+/// for word.
+fn orderings(program: &Program) -> usize {
+    reflected(program, "order")
+}
+
+/// How many calls of `std.dynamic.<function>` the program holds, checking as it
+/// counts that every operand of every one of them is erased.
+///
+/// The check duplicates `cove-cli`'s `tests/boxed.rs` on purpose, over the
+/// programs this file lowers rather than the repository's: a call handed a
+/// layout the lowering knows is a static layout routed through reflection,
+/// which ADR 0068's Decision 5 calls a failure.
+fn reflected(program: &Program, function: &str) -> usize {
     let mut found = 0;
-    for function in &program.functions {
-        for inst in &function.code {
+    for caller in &program.functions {
+        for inst in &caller.code {
             let Inst::Call { callee, args, .. } = inst else {
                 continue;
             };
             let called = &program.functions[callee.index()];
-            if (&*called.module, &*called.name) != ("std.dynamic", "equals") {
+            if (&*called.module, &*called.name) != ("std.dynamic", function) {
                 continue;
             }
             found += 1;
             for arg in program.arg_list(*args) {
                 assert!(
                     matches!(program.layout(arg.layout).shape, Shape::Boxed),
-                    "`std.dynamic.equals` was handed a `{}`, whose layout is known",
-                    program.layout(arg.layout).name
-                );
-            }
-        }
-    }
-    found
-}
-
-/// How many `Value.order` sites it holds.
-fn orderings(program: &Program) -> usize {
-    reached(program, crate::Intrinsic::ValueOrder)
-}
-
-/// How many sites of `intrinsic` the program holds, checking as it counts
-/// that every operand of every one of them is erased.
-///
-/// The second half duplicates `crate::verify`'s rule on purpose: the verifier
-/// panics through `lower::finish`, and a panic is a worse thing for a test to
-/// read than an assertion is.
-fn reached(program: &Program, intrinsic: crate::Intrinsic) -> usize {
-    let mut found = 0;
-    for function in &program.functions {
-        for inst in &function.code {
-            let Inst::IntrinsicCall { site, args, .. } = inst else {
-                continue;
-            };
-            if program.intrinsic_site(*site).intrinsic != intrinsic {
-                continue;
-            }
-            found += 1;
-            for arg in program.arg_list(*args) {
-                assert!(
-                    matches!(program.layout(arg.layout).shape, Shape::Boxed),
-                    "`{intrinsic}` was handed a `{}`, whose layout is known",
+                    "`std.dynamic.{function}` was handed a `{}`, whose layout is known",
                     program.layout(arg.layout).name
                 );
             }

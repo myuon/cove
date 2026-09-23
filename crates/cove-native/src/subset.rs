@@ -1378,7 +1378,7 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
         // [ADR 0068]'s seven structural observations, and issue #493's identity
-        // question beside them, are refused by name, as
+        // question and Phase 3's name order beside them, are refused by name, as
         // `Reason::Reflection`: Phase 1 lowers them for the encoded machine
         // alone, so a function holding one runs there, as a function holding
         // `Inst::Box` or `Inst::Unbox` does today. Listed rather than left to
@@ -1397,7 +1397,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         | Inst::DynCase { .. }
         | Inst::DynCount { .. }
         | Inst::DynChild { .. }
-        | Inst::DynSameObject { .. } => return Some(Reason::Reflection),
+        | Inst::DynSameObject { .. }
+        | Inst::DynNameOrder { .. } => return Some(Reason::Reflection),
         // [ADR 0065]'s run search, the same helper with [`RunOp::FindBytes`].
         // Bounded as the slice is — four one-word operands the frame has —
         // and over packed bytes alone, which `cove_ir::verify` is what holds:
@@ -1648,8 +1649,8 @@ mod tests {
         }
     }
 
-    /// ADR 0068's seven observations and the identity question are refused as
-    /// one family, each by name.
+    /// ADR 0068's seven observations, the identity question and the name order
+    /// are refused as one family, each by name.
     #[test]
     fn every_reflection_observation_is_refused_as_reflection() {
         // A box at 0 and two views at 1..=3 and 4..=6, then an `Int`: every
@@ -1678,6 +1679,7 @@ mod tests {
                 index: 7,
             },
             Inst::DynSameObject { dst: 7, a: 1, b: 4 },
+            Inst::DynNameOrder { dst: 7, a: 1, b: 4 },
             Inst::Return { src: 0 },
         ];
         let function = function(reprs, LayoutId(2), code);
@@ -1697,7 +1699,7 @@ mod tests {
             .collect();
         assert_eq!(
             reasons,
-            (0..8)
+            (0..9)
                 .map(|pc| (Reason::Reflection, Some(pc)))
                 .collect::<Vec<_>>()
         );

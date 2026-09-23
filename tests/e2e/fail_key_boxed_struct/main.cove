@@ -1,0 +1,39 @@
+use console.println
+
+/// A `dyn` struct holding a `Float`, used as a set element: the admission
+/// refuses it and names the field by the path the oracle writes.
+///
+/// The path begins at the struct's own name, which is the name its
+/// declaration wrote — `Reading.weight` — and not the name the linear-memory
+/// backend's layout table carries, which is qualified by the module
+/// (`fail_key_boxed_struct.Reading`). The interpreter has always said the
+/// short name; the machine said the qualified one until ADR 0068's Phase 3
+/// held the two to one sentence, and this is the row that pins it on the
+/// interpreter, the encoded machine and the native tier alike.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Reading {
+  label: String
+  weight: Float
+}
+
+impl Summary for Reading {
+  fn summarize(self) -> String {
+    self.label
+  }
+}
+
+fn admitReading() -> Result<Unit, Error> {
+  let held: dyn Summary = Reading(label: "a", weight: 1.5)
+  let keyed = Set.of(held)
+  println("never printed {keyed}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed struct holding a Float as a set element")?
+  admitReading()?
+  Ok(())
+}

@@ -460,6 +460,7 @@ impl Check<'_> {
                 Inst::DynKind { dst, .. }
                 | Inst::DynSameType { dst, .. }
                 | Inst::DynSameObject { dst, .. }
+                | Inst::DynNameOrder { dst, .. }
                 | Inst::DynRead { dst, .. }
                 | Inst::DynCase { dst, .. }
                 | Inst::DynCount { dst, .. } => {
@@ -1319,6 +1320,11 @@ impl Check<'_> {
                 self.view(at, a, "the first view an object is compared of");
                 self.view(at, b, "the second view an object is compared of");
             }
+            Inst::DynNameOrder { dst, a, b } => {
+                self.expect(at, dst, &[Repr::Int]);
+                self.view(at, a, "the first view a name is ordered of");
+                self.view(at, b, "the second view a name is ordered of");
+            }
             // The destination's `Repr` is the whole of which scalar is read,
             // so it is held to the five a view can answer: the four scalar
             // words, and the reference a string is.
@@ -1840,16 +1846,16 @@ impl Check<'_> {
     /// the first program that hits the arm rather than on whichever program a
     /// corpus happened to hold.
     ///
-    /// It names `Value.order` and `Value.renderInto`, which are two of
-    /// Decision 3's five whose producers have been migrated *and* whose
-    /// fallback is an arm of the walk — so the rule is a fact about one
-    /// instruction and survives `inline` moving it. It named `Any.equals` as
-    /// well until [ADR
+    /// It names `Value.renderInto`, which is one of Decision 3's five whose
+    /// producer has been migrated *and* whose fallback is an arm of the walk —
+    /// so the rule is a fact about one instruction and survives `inline`
+    /// moving it. It named `Any.equals` as well until [ADR
     /// 0068](../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    /// Phase 2 deleted that variant: equality's fallback is an ordinary call of
-    /// `std.dynamic.equals` now, and a call's operands are held to the
-    /// callee's parameters — two `Any`s — by the rule every call is, with
-    /// `cove-cli`'s `tests/boxed.rs` asserting it of the whole corpus.
+    /// Phase 2 deleted that variant, and `Value.order` until its Phase 3
+    /// deleted that one: each fallback is an ordinary call now, of
+    /// `std.dynamic.equals` and `std.dynamic.order`, and a call's operands are
+    /// held to the callee's parameters — two `Any`s — by the rule every call
+    /// is, with `cove-cli`'s `tests/boxed.rs` asserting it of the whole corpus.
     /// `Value.admitKey`'s producer has been migrated too and its rule is
     /// [`one_admission_boundary`], a pass of its own for a reason that is the
     /// operation's rather than this rule's; see there.
@@ -1866,8 +1872,8 @@ impl Check<'_> {
     /// # `Value.renderInto` is reached from more than a box, and that is a
     /// widening rather than a reading
     ///
-    /// `Value.order` is Decision 4 word for word: an operand whose layout is
-    /// not [`Shape::Boxed`] is a fault. The rendering admits **four** shapes,
+    /// `Value.order` was Decision 4 word for word: an operand whose layout was
+    /// not [`Shape::Boxed`] was a fault. The rendering admits **four** shapes,
     /// which [`crate::lower::synth::Rendered::Dynamic`] is the list of, in
     /// two kinds:
     ///
@@ -1887,15 +1893,15 @@ impl Check<'_> {
     /// so the day `Float`'s rendering becomes Cove the list shrinks in one
     /// place and every site that was leaning on it fails loudly.
     ///
-    /// **What the `Value.order` line catches is the cheap way out of the
+    /// **What the `Value.order` line caught was the cheap way out of the
     /// migration that added it.** The order's walk has arms that are awkward
     /// — an enum declared out of name order needs a permutation, a run
     /// compares its lengths *after* its elements, a `Float` field has to
-    /// raise — and every one of them could be made to work by handing the
-    /// layout to the intrinsic instead. Nothing else in this repository would
-    /// notice: the answers would still be right, the differential corpus
-    /// would still be green, and the architecture would be exactly where it
-    /// was. This is the line that says no.
+    /// raise — and every one of them could have been made to work by handing
+    /// the layout to the intrinsic instead. The same cheap way out is open
+    /// against `std.dynamic.order` now, and `cove-cli`'s `tests/boxed.rs` is
+    /// what says no to it: every call of that function has two erased
+    /// operands, or the corpus fails.
     fn check_one_dynamic_boundary(
         &mut self,
         at: Option<usize>,
@@ -1907,7 +1913,6 @@ impl Check<'_> {
         // a handle and not a value of anything — `Intrinsic::signature`
         // gives it as `C::Buffer` — so the rule stops after the first.
         let values = match intrinsic {
-            crate::Intrinsic::ValueOrder => 2,
             crate::Intrinsic::ValueRenderInto => 1,
             // `Value.admitKey` is checked by [`one_admission_boundary`].
             crate::Intrinsic::ValueAdmitKey => return,
@@ -1928,24 +1933,15 @@ impl Check<'_> {
                 continue;
             }
             let described = self.program.layout(arg.layout);
-            let admitted = match intrinsic {
-                crate::Intrinsic::ValueRenderInto => {
-                    crate::lower::synth::rendered(&described.shape)
-                        == crate::lower::synth::Rendered::Dynamic
-                }
-                _ => matches!(described.shape, Shape::Boxed),
-            };
-            if admitted {
+            // `Value.renderInto` is the one intrinsic this rule still names.
+            if crate::lower::synth::rendered(&described.shape)
+                == crate::lower::synth::Rendered::Dynamic
+            {
                 continue;
             }
             let name = described.name.clone();
-            let admits = match intrinsic {
-                crate::Intrinsic::ValueRenderInto => {
-                    "this fallback from a value whose layout does not say what it is, and from a \
-                     `Float` or a `Duration`, whose text no Cove body writes"
-                }
-                _ => "this fallback from an erased value alone",
-            };
+            let admits = "this fallback from a value whose layout does not say what it is, and \
+                          from a `Float` or a `Duration`, whose text no Cove body writes";
             self.fault(
                 at,
                 format!(
@@ -2941,8 +2937,8 @@ mod tests {
         )])
     }
 
-    /// Every one of ADR 0068's seven observations, and issue #493's identity
-    /// question beside them, well formed: each view
+    /// Every one of ADR 0068's seven observations, issue #493's identity
+    /// question and Phase 3's name order beside them, well formed: each view
     /// operand is a whole `[Int, Ref, Int]` location and each scalar is the
     /// word its instruction answers — and a read into each of the five words
     /// a view can hold.
@@ -2953,6 +2949,7 @@ mod tests {
             Inst::DynKind { dst: 7, view: 1 },
             Inst::DynSameType { dst: 8, a: 1, b: 4 },
             Inst::DynSameObject { dst: 8, a: 1, b: 4 },
+            Inst::DynNameOrder { dst: 7, a: 1, b: 4 },
             Inst::DynRead { dst: 8, view: 1 },
             Inst::DynRead { dst: 7, view: 1 },
             Inst::DynRead { dst: 9, view: 1 },
@@ -3008,6 +3005,15 @@ mod tests {
                 Inst::DynSameObject { dst: 8, a: 5, b: 1 },
                 "the first view an object is compared of is `DynamicView`, whose word 0 is int, \
                  but slot 5 holds ref",
+            ),
+            (
+                Inst::DynNameOrder { dst: 8, a: 1, b: 4 },
+                "slot 8 holds bool, but this wants int",
+            ),
+            (
+                Inst::DynNameOrder { dst: 7, a: 1, b: 5 },
+                "the second view a name is ordered of is `DynamicView`, whose word 0 is int, but \
+                 slot 5 holds ref",
             ),
             (
                 Inst::DynRead { dst: 12, view: 1 },
@@ -3544,8 +3550,8 @@ mod tests {
     #[test]
     fn an_argument_that_runs_off_the_end_of_the_frame_is_a_fault() {
         let f = function(
-            vec![Repr::Int, Repr::Int, Repr::Bool],
-            INT,
+            vec![Repr::Unit, Repr::Ref, Repr::Bool],
+            UNIT,
             vec![
                 Inst::IntrinsicCall {
                     dst: 0,
@@ -3557,8 +3563,8 @@ mod tests {
         );
         let mut held = program(vec![f]);
         held.intrinsic_sites = vec![crate::IntrinsicSite {
-            intrinsic: crate::Intrinsic::ValueOrder,
-            result: INT,
+            intrinsic: crate::Intrinsic::ValueAdmitKey,
+            result: UNIT,
         }];
         held.args = vec![vec![
             Arg {
@@ -3566,28 +3572,24 @@ mod tests {
                 layout: POINT,
             },
             Arg {
-                slot: 0,
-                layout: INT,
+                slot: 1,
+                layout: STR,
+            },
+            Arg {
+                slot: 1,
+                layout: STR,
             },
         ]];
-        // The operands are a `Point` and an `Int` rather than two boxes, so
-        // ADR 0064's Decision 4 speaks as well and speaks first — it is
-        // checked where the call is read and this is checked where its
-        // arguments are. Both are asserted rather than the case being
-        // rewritten around the other rule: what it is about is the *last*
-        // sentence, and a case that quietly stopped producing it would still
-        // be green.
+        // The call was `Value.order` over a `Point` and an `Int` until ADR
+        // 0068's Phase 3 made the order `std.dynamic.order` and deleted the
+        // variant, and ADR 0064's Decision 4 spoke beside this sentence then.
+        // `Value.admitKey` takes a value of any layout first and its two
+        // names after it, and its own boundary is
+        // [`one_admission_boundary`]'s pass rather than this one's, so what is
+        // left is the sentence the case is about.
         assert_eq!(
             faults(&held),
-            vec![
-                "passes operand 0 of `Value.order` a `Point`, whose layout it knows \
-                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
-                 alone, and a known layout is a walk `lower::synth` writes",
-                "passes operand 1 of `Value.order` a `Int`, whose layout it knows \
-                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
-                 alone, and a known layout is a walk `lower::synth` writes",
-                "argument 0 is `Point`, 2 words at slot 2, and the frame has 3",
-            ]
+            vec!["argument 0 is `Point`, 2 words at slot 2, and the frame has 3"]
         );
     }
 
@@ -3793,30 +3795,22 @@ mod tests {
         // `no_intrinsic_is_a_collection_operation` now asserts unconditionally
         // that no operand is one.
 
-        // `Value.order` is a value intrinsic, so the *category* refusal above
-        // is silent for it — an `Array<Int>` operand is not "a collection a
-        // Text intrinsic takes none of". What speaks instead is ADR 0064's
-        // Decision 4, because an array's layout is one the lowering knows
-        // statically and a walk is what it composes for one. Both halves are
-        // asserted here: the sentence is the boundary's and not the
-        // category's, and there is one per operand.
+        // `Value.admitKey` is a value intrinsic, so the *category* refusal
+        // above is silent for it — an `Array<Int>` operand is not "a
+        // collection a Text intrinsic takes none of". This half stood on
+        // `Value.order` until ADR 0068's Phase 3 deleted that variant, and ADR
+        // 0064's Decision 4 spoke instead of the category then, one sentence
+        // per operand; the admission's Decision 4 is
+        // [`one_admission_boundary`]'s, a pass of its own, so here nothing
+        // speaks at all, which is the half this is about.
+        let string = |slot| Arg { slot, layout: STR };
         let held = calling(
-            crate::Intrinsic::ValueOrder,
-            INT,
-            vec![Repr::Int, Repr::Ref, Repr::Ref],
-            vec![array(1), array(2)],
+            crate::Intrinsic::ValueAdmitKey,
+            UNIT,
+            vec![Repr::Unit, Repr::Ref, Repr::Ref],
+            vec![array(1), string(2), string(2)],
         );
-        assert_eq!(
-            faults(&held),
-            vec![
-                "passes operand 0 of `Value.order` a `Array<Int>`, whose layout it knows \
-                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
-                 alone, and a known layout is a walk `lower::synth` writes",
-                "passes operand 1 of `Value.order` a `Array<Int>`, whose layout it knows \
-                 statically; ADR 0064's Decision 4 admits this fallback from an erased value \
-                 alone, and a known layout is a walk `lower::synth` writes",
-            ]
-        );
+        assert_eq!(faults(&held), Vec::<String>::new());
     }
 
     /// A closure call's destination is checked like every other call's.

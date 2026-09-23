@@ -93,6 +93,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `dynamicChildCount` | `core.dynamicChildCount(view: DynamicView) -> Int` |
 | `dynamicChild` | `core.dynamicChild(view: DynamicView, index: Int) -> DynamicView` |
 | `dynamicSameObject` | `core.dynamicSameObject(a: DynamicView, b: DynamicView) -> Bool` |
+| `dynamicNameOrder` | `core.dynamicNameOrder(a: DynamicView, b: DynamicView) -> Int` |
 
 ## Builtin types
 

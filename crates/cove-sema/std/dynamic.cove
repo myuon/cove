@@ -428,3 +428,331 @@ fn mark(ends: Vector<Int>, end: Int) {
   core.vectorStore(ends, at, end)
   core.vectorCommit(ends, 1)
 }
+
+/// Where the erased value `a` sorts against `b` in the one order a key is kept
+/// in: `-1`, `0` or `1`. What `core.order` answers for two keys that are a
+/// `dyn Trait` or a Host `Any`, whose concrete type is known only once the box
+/// is opened — every search of a `Set<dyn Summary>`, or of a `Map` keyed by
+/// one.
+///
+/// Nothing in a program calls this, for [`equals`]' reason. The lowering does,
+/// at every `core.order` of the standard library's whose two keys are boxed,
+/// and from inside an order it composed for a known key layout wherever that
+/// walk reaches a boxed field or payload. Where the layout is known it never
+/// gets here: a key one comparison orders is that comparison, and every other
+/// known key is a function the lowering writes for its layout (ADR 0064's
+/// Decision 3). This is the one fallback for what no layout describes (ADR
+/// 0068's Decisions 4 and 5).
+///
+/// # What it answers
+///
+/// The order the oracle's `MapKey` derives, and the machine's `key::order`
+/// reproduced in Rust until this replaced it, part for part:
+///
+/// - **The kind first**, by rank: `()`, `Bool`, `Int`, `Duration`, `String`,
+///   an enum, a struct, an `Array`, a `Set`, a `Map` and a `Range`, in that
+///   order. So every `Int` sorts before every `Duration`, however many
+///   nanoseconds it is, and every enum before every struct. The rank is not
+///   quite the kind code, and [`sorts`] says how the one is the other.
+/// - **A scalar** by its value: `false` before `true`, an `Int` and a
+///   `Duration` as signed numbers, and `()` equal to `()`.
+/// - **A `String`** by its bytes, and a prefix before what extends it.
+/// - **A struct and an enum** by name first, as `core.dynamicNameOrder`
+///   compares names: the declared name, qualified by the module that declared
+///   it and without its type arguments — so an `aa.Zed` sorts before a
+///   `p.Alpha`, and a `m.Cell<Duration>` and a `m.Cell<Int>` are one name
+///   whose payloads decide — and then, for an enum, the case's *name* and not
+///   its position, so `Err` sorts before `Ok`. Once the names are equal the
+///   two are of one declaration, so their field names, their field counts and
+///   whether they are `opaque` are equal too, and the children are what is
+///   left.
+/// - **Then the children**, in the order `core.dynamicChild` gives them — a
+///   struct's fields and a case's payload in declaration order, an `Array`'s
+///   and a `Set`'s elements, a `Map`'s entries as key then value, and a
+///   `Range`'s `start`, `end` and `inclusive` — in turn until one differs,
+///   and **then the counts**, so a prefix sorts before what extends it. A
+///   `Map` is therefore ordered key before value, entry by entry, and an
+///   inclusive `Range` after the exclusive one with the same bounds, because
+///   `false < true`.
+///
+/// # What cannot reach it
+///
+/// A `Float`, a `Vector`, a function and every opaque value are not keys, and
+/// admission refuses one before anything is ordered: every `Set` and `Map`
+/// method asks `core.admitKey` of its argument first. So none reaches this,
+/// and one that did would be refused in the words the Rust walk used and the
+/// walks composed for a known layout still use at the same arm, by
+/// [`notAKey`].
+///
+/// That is also why **no path is kept here**, where [`equals`] keeps one. A
+/// value can hold itself only through a `Vector`, and a `Vector` is refused by
+/// admission, so an order never meets a cycle.
+///
+/// # There is no nesting bound
+///
+/// [`equals`]' loop over two stacks of views, for its reason (issue #480): a
+/// key nested a thousand deep is ordered exactly as one nested ten deep is.
+///
+/// What an order adds to that walk is **the counts, which decide only if every
+/// child ties**, and they need no stack of their own. A pair whose counts
+/// differ is the answer the moment its children are finished: either a child
+/// differs first, and that is the answer, or the walk comes back down to the
+/// height the pair's children began at, and the counts are. Every pair above
+/// it on the stacks is finished before it is, so the innermost such pair is
+/// the only one that can be waiting — one height and one verdict, two `Int`s,
+/// are the whole of the bookkeeping, and a pair found later replaces them.
+///
+/// # A value one level deep allocates nothing
+///
+/// [`equals`]' arrangement. The two roots are opened and compared before a
+/// stack exists, their children are compared where they are, and the stacks
+/// are made only at the first child that has children of its own — so two
+/// boxed scalars, two strings, a struct of scalars, an `Array<Int>`, a
+/// `Some(3)` or two empty sets are ordered without allocating, and a value
+/// that really nests pays for its two stacks once, however deep it goes.
+fn order(a: Any, b: Any) -> Int {
+  let left = core.dynamicOpen(a)
+  let right = core.dynamicOpen(b)
+  let root = sorts(left, right)
+  if root != 2 {
+    return root
+  }
+  let lefts = core.dynamicChildCount(left)
+  let rights = core.dynamicChildCount(right)
+  var count = lefts
+  if rights < count {
+    count = rights
+  }
+  var at = 0
+  while at < count {
+    let x = core.dynamicChild(left, at)
+    let y = core.dynamicChild(right, at)
+    var here = sorts(x, y)
+    if here == 2 {
+      let xs = core.dynamicChildCount(x)
+      let ys = core.dynamicChildCount(y)
+      var under = xs
+      if ys < under {
+        under = ys
+      }
+      if under > 0 {
+        return orderBelow(
+          left,
+          right,
+          lefts,
+          rights,
+          at,
+          x,
+          y,
+          under,
+          core.order(xs, ys),
+        )
+      }
+      here = core.order(xs, ys)
+    }
+    if here != 0 {
+      return here
+    }
+    at = at + 1
+  }
+  // Every child the roots both have ties, so their counts decide.
+  core.order(lefts, rights)
+}
+
+/// The rest of [`order`] from child `from` of `left` and `right` on: `x` and
+/// `y` are that pair, alike so far with `under` children each still to
+/// compare, and `tie` is what they come to if those all tie. `leftCount` and
+/// `rightCount` are the roots' own counts, which decide last of all.
+///
+/// [`deeper`]'s stacks, pushed the same way: the siblings after `from`, and
+/// then `from`'s children last first, so that its first child is on top.
+///
+/// `edge` and `verdict` are the pair [`order`] says is the only one that can
+/// be waiting: the height at which its children began, and its counts' answer.
+/// The walk returns the verdict the first time it is back down at that height.
+/// The roots are the pair below every other, and their counts are the answer
+/// when the stacks are empty.
+fn orderBelow(
+  left: DynamicView,
+  right: DynamicView,
+  leftCount: Int,
+  rightCount: Int,
+  from: Int,
+  x: DynamicView,
+  y: DynamicView,
+  under: Int,
+  tie: Int,
+) -> Int {
+  var count = leftCount
+  if rightCount < count {
+    count = rightCount
+  }
+  let lefts: Vector<DynamicView> = core.vectorWithCapacity(count)
+  let rights: Vector<DynamicView> = core.vectorWithCapacity(count)
+  var at = count - 1
+  while at > from {
+    stack(lefts, core.dynamicChild(left, at))
+    stack(rights, core.dynamicChild(right, at))
+    at = at - 1
+  }
+  // The two stacks are always the same height, so one count serves both.
+  var depth = count - 1 - from
+  // No pair is waiting: `-1` is never a height the walk comes back down to.
+  var edge = -1
+  var verdict = 0
+  if tie != 0 {
+    edge = depth
+    verdict = tie
+  }
+  var next = under - 1
+  while next >= 0 {
+    stack(lefts, core.dynamicChild(x, next))
+    stack(rights, core.dynamicChild(y, next))
+    depth = depth + 1
+    next = next - 1
+  }
+  while depth > 0 {
+    if depth == edge {
+      return verdict
+    }
+    depth = depth - 1
+    let x = core.vectorLoad(lefts, depth)
+    let y = core.vectorLoad(rights, depth)
+    core.vectorTruncate(lefts, depth)
+    core.vectorTruncate(rights, depth)
+    let here = sorts(x, y)
+    if here != 2 {
+      if here != 0 {
+        return here
+      }
+    } else {
+      let xs = core.dynamicChildCount(x)
+      let ys = core.dynamicChildCount(y)
+      let tie = core.order(xs, ys)
+      var next = xs - 1
+      if ys < xs {
+        next = ys - 1
+      }
+      if next < 0 {
+        if tie != 0 {
+          return tie
+        }
+      }
+      if tie != 0 {
+        edge = depth
+        verdict = tie
+      }
+      while next >= 0 {
+        stack(lefts, core.dynamicChild(x, next))
+        stack(rights, core.dynamicChild(y, next))
+        depth = depth + 1
+        next = next - 1
+      }
+    }
+  }
+  // A pair whose children began at the bottom of the stacks is finished only
+  // now, and it is above the roots.
+  if edge == 0 {
+    return verdict
+  }
+  core.order(leftCount, rightCount)
+}
+
+/// Where `x` sorts against `y` on what each is before its children: `-1` or
+/// `1` where that decides, `0` where they are equal and have no children — two
+/// equal scalars, two equal strings, two `()`s — and `2` where they are alike
+/// so far and their children and their counts are what is left.
+///
+/// The kind codes are [`children`]' table. A scalar and a string are ordered
+/// by value, through `core.order`, which is one comparison instruction for
+/// each — a signed word, a `Bool`, a string's bytes in place — and which the
+/// oracle answers by the same `MapKey` order; a struct and an enum by name
+/// first; and an `Array`, a `Set`, a `Map` and a `Range` have nothing but their
+/// children. The two most common kinds are asked first. What is left over — a
+/// float, a vector, a function, an opaque value — is not a key, and is
+/// refused.
+///
+/// # Two kinds apart are ordered by rank, which is the code but for one pair
+///
+/// The rank is the order the oracle's `MapKey` declares its variants in:
+///
+/// | kind code | 0 | 1 | 2 | 4 | 5 | 7 | 6 | 8 | 10 | 11 | 12 |
+/// |---|---|---|---|---|---|---|---|---|---|---|---|
+/// | rank | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+///
+/// Among the codes a key can have, that is the order of the codes themselves
+/// with one pair turned round: an enum, 7, ranks before a struct, 6. So two
+/// kinds apart are compared as codes, and that pair the other way — which is
+/// the table without a table, and without a function whose every answer is a
+/// constant that a caller then copies (issue #302's shape). Two codes that sum
+/// to 13 are that pair only when one of them is a 6 or a 7.
+fn sorts(x: DynamicView, y: DynamicView) -> Int {
+  let kind = core.dynamicKind(x)
+  let other = core.dynamicKind(y)
+  if kind != other {
+    admitted(kind)
+    admitted(other)
+    if kind + other == 13 {
+      if kind >= 6 {
+        if kind <= 7 {
+          return core.order(other, kind)
+        }
+      }
+    }
+    return core.order(kind, other)
+  }
+  if kind == 5 {
+    return core.order(core.dynamicString(x), core.dynamicString(y))
+  }
+  if kind == 2 {
+    return core.order(core.dynamicInt(x), core.dynamicInt(y))
+  }
+  if kind >= 6 {
+    if kind <= 7 {
+      let named = core.dynamicNameOrder(x, y)
+      if named != 0 {
+        return named
+      }
+      return 2
+    }
+    if kind <= 12 {
+      if kind != 9 {
+        return 2
+      }
+    }
+  }
+  if kind == 1 {
+    return core.order(core.dynamicBool(x), core.dynamicBool(y))
+  }
+  if kind == 4 {
+    return core.order(core.dynamicDuration(x), core.dynamicDuration(y))
+  }
+  if kind == 0 {
+    return 0
+  }
+  core.refuse(notAKey(), "", "")
+  0
+}
+
+/// Nothing, where `kind` is a kind a key can be, and the refusal of a value
+/// that is not a key where it is not: a float, 3, a vector, 9, and a function
+/// or an opaque value, 13 and up. [`sorts`] asks it of each of two kinds that
+/// are apart, because which of two such kinds sorts first is a question only
+/// keys have an answer to.
+fn admitted(kind: Int) {
+  if kind < 13 {
+    if kind != 3 {
+      if kind != 9 {
+        return
+      }
+    }
+  }
+  core.refuse(notAKey(), "", "")
+}
+
+/// What an order says of a value that is not a key, with no rule and no help:
+/// the sentence the Rust walk raised, and the one `lower::synth` raises where
+/// a walk it composed for a known layout meets the same thing.
+fn notAKey() -> String {
+  "this value cannot be a map key or a set element"
+}

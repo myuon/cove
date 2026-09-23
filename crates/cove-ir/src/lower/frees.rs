@@ -379,6 +379,7 @@ impl<'p> Flow<'p> {
             | Inst::DynKind { dst, .. }
             | Inst::DynSameType { dst, .. }
             | Inst::DynSameObject { dst, .. }
+            | Inst::DynNameOrder { dst, .. }
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
             | Inst::DynCount { dst, .. } => f(dst, 1),
@@ -624,7 +625,9 @@ impl<'p> Flow<'p> {
             | Inst::DynRead { view, .. }
             | Inst::DynCase { view, .. }
             | Inst::DynCount { view, .. } => f(view, width(self.program.view_layout)),
-            Inst::DynSameType { a, b, .. } | Inst::DynSameObject { a, b, .. } => {
+            Inst::DynSameType { a, b, .. }
+            | Inst::DynSameObject { a, b, .. }
+            | Inst::DynNameOrder { a, b, .. } => {
                 f(a, width(self.program.view_layout));
                 f(b, width(self.program.view_layout));
             }

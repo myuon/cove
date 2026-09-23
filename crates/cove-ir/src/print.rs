@@ -516,6 +516,12 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             v(*a, program.view_layout),
             v(*b, program.view_layout)
         ),
+        Inst::DynNameOrder { dst, a, b } => format!(
+            "dyn.name-order {} {} {}",
+            s(*dst),
+            v(*a, program.view_layout),
+            v(*b, program.view_layout)
+        ),
         Inst::DynRead { dst, view } => {
             format!("dyn.read {} {}", s(*dst), v(*view, program.view_layout))
         }

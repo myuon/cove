@@ -1211,7 +1211,7 @@ impl Body<'_> {
             // from a function that cannot resolve a name, so it is resolved
             // here first; a layout with no box in it asks for nothing. A round
             // that has to lower the package again gets the stand-in above.
-            if synth::reaches_a_box(&self.pool.shapes, a.layout)
+            if synth::reaches_a_box(&self.pool.shapes, synth::Operation::Equality, a.layout)
                 && self.dynamic_equals(expr.span).is_none()
             {
                 self.emit(Inst::Bool { dst, value: false }, expr.span);

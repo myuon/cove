@@ -211,6 +211,7 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
         | Inst::DynKind { dst, .. }
         | Inst::DynSameType { dst, .. }
         | Inst::DynSameObject { dst, .. }
+        | Inst::DynNameOrder { dst, .. }
         | Inst::DynRead { dst, .. }
         | Inst::DynCase { dst, .. }
         | Inst::DynCount { dst, .. } => one(dst),
@@ -1522,7 +1523,36 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `_enum`, `_map`, `_boxed`, `_mutual` and `_contains`, and
 /// `values_equals_shared` — and **5** is the two rows `benches/equals` gained
 /// for a layout that can contain itself, `countTree` and `treeRow`.
-const FORWARDABLE_COPIES: usize = 10201;
+///
+/// **10,339 since ADR 0068's Phase 3 moved the order of two erased keys into
+/// `std.dynamic.order`**, and the rise of 138 is two moves in opposite
+/// directions, measured both ways over the same tree:
+///
+/// | | programs | forwardable | prod | ret |
+/// | --- | ---: | ---: | ---: | ---: |
+/// | base lowering | 222 | 10,201 | 5154 | 5138 |
+/// | this lowering, the three new programs held out | 222 | **10,182** | 5135 | 5138 |
+/// | `values_boxed_order` held out alone | 224 | 10,257 | 5175 | 5175 |
+/// | this lowering, all of it | 225 | **10,339** | 5212 | 5226 |
+///
+/// **The lowering moved it by −19, all of it `prod`**, and where the listing
+/// shows it, only in programs that order a boxed key: `values_value_admit_key`
+/// −6, `benches/admission`, `benches/ordering` and `values_value_order` −3
+/// each and `values_boxed` −2, with −2 more below the listing's cut. A
+/// standard-library search binds `core.order`'s answer with a `let`, and over
+/// two boxes that answer was an `intrinsic-call` a copy followed; it is a call
+/// of `std.dynamic.order` now, which is not the producer that copy was counted
+/// after. The order's own walk, like equality's, holds none: `std/dynamic.cove`
+/// is lowered into every program — none of it is generic — so a forwardable
+/// copy in it would be one in each of 225, and the first draft had eighteen: a
+/// helper answering a kind's rank from nine `return`s of a constant, expanded
+/// twice, each answer a literal copied into the caller. The rank is the kind
+/// code with one pair turned round, and asking it that way holds no copy.
+///
+/// **157** is the three programs Phase 3 added existing: `values_boxed_order`
+/// 82, and `fail_key_boxed_struct` and `fail_key_boxed_generic` 75 between
+/// them.
+const FORWARDABLE_COPIES: usize = 10339;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

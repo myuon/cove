@@ -12,7 +12,10 @@
 //! is the one question beside them that is not about structure: whether two
 //! views are one vector, which the standard library's walk asks to refuse a
 //! value that contains itself (issue #493), and which answers a `Bool` so that
-//! no identity reaches Cove as a number.
+//! no identity reaches Cove as a number. [`Inst::DynNameOrder`](crate::Inst::DynNameOrder)
+//! is [`Inst::DynSameType`](crate::Inst::DynSameType) asked three ways — where
+//! one [`declared_name`], and then one case name, sorts against another —
+//! which `std.dynamic.order` asks so that no name reaches Cove as text.
 //!
 //! # A view is three words, and none of them is Cove's to read
 //!

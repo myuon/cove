@@ -6,6 +6,16 @@
 //! implementation's leftovers — which is why both are sorted runs here and a
 //! lookup is a binary search. This is the comparison that search is over.
 //!
+//! **Nothing in a run asks this module for an order any more.** A key whose
+//! layout is known is ordered by one comparison instruction or by a walk
+//! `cove_ir::lower::synth` composes for its layout, and since [ADR
+//! 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+//! Phase 3 an erased key is ordered by `std.dynamic.order`, Cove over a view
+//! of each box. What is left here that runs is the *admission*, [`admit_key`].
+//! [`order`] stays, under `cfg(test)`, as this crate's tests' statement of the
+//! order in the machine's own words: [`is_ascending_and_distinct`] checks
+//! every keyed finish a test makes against it.
+//!
 //! [`crate::value::MapKey`] is the oracle's copy of it: a value converted to
 //! the shapes a key may take, ordered by the `Ord` its declaration derives.
 //! The two are written twice for the reason [`super`]'s rendering and
@@ -58,18 +68,22 @@
 //! last. An `Int` and a `Duration` are the same sixty-four bits and are never
 //! compared as numbers: every `Int` sorts before every `Duration`.
 //!
-//! # A name here is the layout's, and the oracle's is the declaration's
+//! # A name here is the declaration's, as it is the oracle's
 //!
 //! `MapKey::Struct` and `MapKey::EnumCase` are keyed by the type name the
-//! *value* carries, which is qualified — `rules.policy.Decision`. A
-//! [`cove_ir::Layout`] carries the unqualified name, which is also the name
-//! the boundary materialises with, so a set of two different struct types is
-//! ordered by their short names on this side and by their qualified ones on
-//! the oracle's. The two agree wherever the qualification does not decide the
-//! comparison, which is every program whose key types are declared in one
-//! module, and disagree about the *order* — never about membership or
-//! equality — where they are not. The fix is a qualified name in the layout
-//! table, which is a change to the lowering rather than to this file.
+//! *value* carries, which is qualified and has no type arguments —
+//! `rules.policy.Decision`, `m.Cell`. A [`cove_ir::Layout`] is named by the
+//! instantiation it is, which is qualified too and carries the type arguments
+//! — `m.Cell<Int>` — because two instantiations are two layouts. So what is
+//! compared here is [`declared_name`] of the layout's name, which is the
+//! value's name exactly: `m.Cell<Duration>` and `m.Cell<Int>` are one type to
+//! the order, and their payloads decide, as they do on the oracle.
+//!
+//! A refusal's path shows a type the other way, by the name its declaration
+//! wrote: [`short`] of [`declared_name`], which is what `MapKey::convert`
+//! shows and what every pinned `fail_key_*` diagnostic says — `S.v`, never
+//! `m.S.v` or `m.Cell<Float>.v`. The type arguments go first, because the last
+//! `.` of `m.Cell<m.Point>` is inside the brackets.
 //!
 //! # What is refused
 //!
@@ -82,8 +96,8 @@
 //!
 //! # Both walks say how far they got
 //!
-//! `core.order` and `core.admitKey` both declare `Effects::BULK_WORK` and,
-//! until
+//! `core.order` and `core.admitKey` both declared `Effects::BULK_WORK` while
+//! both were intrinsics — `core.admitKey` still does — and, until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7, cost the run one unit of work whichever key they were handed —
 //! a `Duration`, or a `Map` of arrays of structs. So [`order`] and [`admits`]
@@ -98,13 +112,16 @@
 //! name and once to build the path — and is charged for both, because it
 //! really did walk twice.
 
+#[cfg(test)]
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 
 use cove_ir::{Field, LayoutId, Part, Program, Repr, Shape};
 
+use cove_ir::dynamic::declared_name;
+
 use crate::error::RuntimeError;
-use crate::vm::boundary::is_range;
+use crate::vm::boundary::{is_range, short};
 use crate::vm::exec::Machine;
 #[cfg(test)]
 use crate::vm::intrinsics::operand::Operand;
@@ -237,38 +254,14 @@ fn cmp_held(
 
 // --- the intrinsics a standard-library search reaches -----------------------
 
-/// `core.order(a, b)`: `-1`, `0` or `1` as the `Int` word `a` sorts before,
-/// equal to or after `b` — ADR 0059's `value-order`, for a key the lowering
-/// could not order with one comparison instruction.
-///
-/// Both operands carry their layout, and both are the key layout the search
-/// is over: the standard library hands it a key it read out of a sorted run
-/// and the key it was asked about. Nothing is admitted here; the body asked
-/// [`admit_key`] first, as every refusal of a key is asked before anything
-/// is compared.
-pub(super) fn value_order(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let ordered = {
-        let machine = &*machine;
-        let (a, b) = (frame.operand(machine, 0), frame.operand(machine, 1));
-        order(
-            machine,
-            Key::Held(a.layout, a.words),
-            Key::Held(b.layout, b.words),
-            0,
-        )?
-    };
-    let answer = match ordered {
-        Ordering::Less => -1i64 as u64,
-        Ordering::Equal => 0,
-        Ordering::Greater => 1,
-    };
-    dest.word(machine, answer);
-    Ok(())
-}
+// `value_order` stood here: `core.order(a, b)` for two erased keys, the one
+// arm of ADR 0059's `value-order` a layout could not answer. ADR 0068's Phase
+// 3 made it `std.dynamic.order`, a Cove loop over a view of each box, and
+// deleted `Intrinsic::ValueOrder`. [`order`] below is what it walked, kept for
+// this crate's tests alone: [`is_ascending_and_distinct`] checks a keyed
+// finish's run with it, and the unit tests at the end pin it — so that the
+// order the oracle's `MapKey` derives is written down a second time, in the
+// machine's words, beside the Cove that now answers it.
 
 /// `core.admitKey(key, method, role)`: nothing, or the refusal [`check`]
 /// makes of a key the language does not admit, in `method`'s words and
@@ -583,7 +576,7 @@ fn admits_value(
         // key like any other and there is nothing inside it to walk.
         Shape::Struct { .. } if is_range(program, described) => Ok(()),
         Shape::Struct { fields, .. } => {
-            let base = path(anchor, || described.name.to_string());
+            let base = path(anchor, || short(declared_name(&described.name)).to_string());
             for field in fields {
                 let anchor = format!("{base}.{}", field.name);
                 admits(
@@ -602,7 +595,9 @@ fn admits_value(
             let case = cases
                 .get(index as usize)
                 .ok_or_else(|| wrong_case(&described.name))?;
-            let base = path(anchor, || format!("{}.{}", described.name, case.name));
+            let base = path(anchor, || {
+                format!("{}.{}", short(declared_name(&described.name)), case.name)
+            });
             for (at, part) in case.parts.iter().enumerate() {
                 let anchor = format!("{base}({at})");
                 admits(
@@ -642,6 +637,7 @@ fn path(anchor: Option<&str>, own: impl FnOnce() -> String) -> String {
 
 // --- ordering two keys -----------------------------------------------------
 
+#[cfg(test)]
 fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, RuntimeError> {
     // One pair of values visited, for [`admits`]' reason: `sequences` and
     // `maps` compare element for element and entry for entry back through
@@ -679,7 +675,8 @@ fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, Ru
             machine.examined(u64::from(one.min(other)));
             Ok(machine.string_bytes(a).cmp(&machine.string_bytes(b)))
         }
-        // Type name, then case name, then payload — and the case is read out
+        // Type name — the declared one, see [`self`] — then case name, then
+        // payload — and the case is read out
         // of word 0, because which of the payload words are anything at all
         // depends on the case the value is in.
         (Family::Case(x, a), Family::Case(y, b)) => {
@@ -694,8 +691,8 @@ fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, Ru
             let other = others
                 .get(index(b))
                 .ok_or_else(|| wrong_case(&right.name))?;
-            match (*left.name)
-                .cmp(&right.name)
+            match declared_name(&left.name)
+                .cmp(declared_name(&right.name))
                 .then_with(|| (*one.name).cmp(&other.name))
             {
                 Ordering::Equal => {}
@@ -714,7 +711,7 @@ fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, Ru
             }
             Ok(one.parts.len().cmp(&other.parts.len()))
         }
-        // Type name, then the fields as pairs of name and value, then how
+        // Declared type name, then the fields as pairs of name and value, then how
         // many there are, then whether the declaration was opaque. That is
         // `MapKey::Struct`'s derived order field for field: it carries
         // `(String, Vec<(String, MapKey)>, bool)` and compares them in that
@@ -734,7 +731,7 @@ fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, Ru
             else {
                 unreachable!("`family` answers `Struct` for a struct-shaped value");
             };
-            match (*left.name).cmp(&right.name) {
+            match declared_name(&left.name).cmp(declared_name(&right.name)) {
                 Ordering::Equal => {}
                 ordered => return Ok(ordered),
             }
@@ -786,6 +783,7 @@ fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, Ru
 /// an element is a run of words: a `Set<Point>` is a run of two-word members,
 /// and materialising both whole runs to answer a question about their fronts
 /// would be paying for the length to compare the head.
+#[cfg(test)]
 fn sequences(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<Ordering, RuntimeError> {
     let (x, y) = (elem_of(machine, a), elem_of(machine, b));
     let (left, right) = (machine.object_len(a), machine.object_len(b));
@@ -801,6 +799,7 @@ fn sequences(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<Ordering
 }
 
 /// The same, entry for entry and key before value.
+#[cfg(test)]
 fn maps(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<Ordering, RuntimeError> {
     let (x, y) = (pairs_of(machine, a), pairs_of(machine, b));
     let (left, right) = (machine.object_len(a), machine.object_len(b));
@@ -830,6 +829,7 @@ fn maps(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<Ordering, Run
 }
 
 /// The element layout of an `Array` or the member layout of a `Set`.
+#[cfg(test)]
 fn elem_of(machine: &Machine, addr: u64) -> LayoutId {
     match machine.program().layout(machine.object_layout(addr)).shape {
         Shape::Elements { elem, .. } | Shape::Members { elem } => elem,
@@ -890,6 +890,7 @@ fn pairs_of(machine: &Machine, addr: u64) -> Pairs {
 /// family that lives in the heap carries its object, because what it holds is
 /// read out of it; and an inline family carries its layout and its words,
 /// because those *are* it.
+#[cfg(test)]
 enum Family<'w> {
     Unit,
     Bool(bool),
@@ -904,6 +905,7 @@ enum Family<'w> {
     Range(&'w [u64]),
 }
 
+#[cfg(test)]
 impl Family<'_> {
     /// Where this family sits in the one order. See the table in [`self`].
     fn rank(&self) -> u8 {
@@ -925,6 +927,7 @@ impl Family<'_> {
 
 /// Which family `key` belongs to, asked only of a key [`inward`] has nothing
 /// left to look through on.
+#[cfg(test)]
 fn family<'w>(machine: &Machine, key: Key<'w>) -> Result<Family<'w>, RuntimeError> {
     match key {
         Key::Word(repr, word) => match repr {
@@ -1017,6 +1020,7 @@ fn wrong_case(name: &str) -> RuntimeError {
 /// something that did. It is written out because "should never" is not
 /// "cannot", and a silent wrong answer from a comparison costs more than the
 /// arm that reports one.
+#[cfg(test)]
 fn not_a_key() -> RuntimeError {
     RuntimeError::new("this value cannot be a map key or a set element")
 }

@@ -836,6 +836,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::DynKind { dst, .. }
             | Inst::DynSameType { dst, .. }
             | Inst::DynSameObject { dst, .. }
+            | Inst::DynNameOrder { dst, .. }
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
             | Inst::DynCount { dst, .. } => mark(dst, 1),
@@ -1512,7 +1513,9 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         | Inst::DynRead { dst, view }
         | Inst::DynCase { dst, view }
         | Inst::DynCount { dst, view } => vec![dst, view],
-        Inst::DynSameType { dst, a, b } | Inst::DynSameObject { dst, a, b } => vec![dst, a, b],
+        Inst::DynSameType { dst, a, b }
+        | Inst::DynSameObject { dst, a, b }
+        | Inst::DynNameOrder { dst, a, b } => vec![dst, a, b],
         Inst::DynChild { dst, view, index } => vec![dst, view, index],
         Inst::IntrinsicCall { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
