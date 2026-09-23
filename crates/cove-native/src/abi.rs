@@ -355,9 +355,14 @@ pub enum Raise {
     DividedByZero = 7,
     /// `divided_by_zero("remainder")`
     RemainderByZero = 8,
-    /// [`Inst::Trap`](cove_ir::Inst::Trap): the message is
-    /// `program.string(StrId(detail))`, where `detail` is
-    /// [`NativeCtx::raise_detail`].
+    /// [`Inst::Trap`](cove_ir::Inst::Trap): the three sentences are the heap
+    /// `String`s at [`NativeCtx::raise_message`], [`NativeCtx::raise_rule`] and
+    /// [`NativeCtx::raise_help`], an empty one being an absent one.
+    ///
+    /// It was one `StrId` stored as an immediate, until ADR 0067 let a
+    /// standard-library body raise a refusal it had worded itself. The variant
+    /// still names rather than builds, which is this crate's division: three
+    /// addresses are as much a name as an index into a literal table was.
     Trapped = 9,
     /// `null_object()` — a reference read before it was given one.
     ///
@@ -1414,9 +1419,6 @@ pub struct NativeCtx {
     /// Which error, when the outcome is [`Outcome::Raised`]. See
     /// [`Raise::from_abi`].
     pub raise_code: u32,
-    /// The one number a raise carries: a `StrId` for [`Raise::Trapped`], and
-    /// unused by every other variant.
-    pub raise_detail: u32,
     /// The IR instruction a raise happened at.
     ///
     /// The span every runtime error carries is `Function::span_at(pc)`, which
@@ -1434,6 +1436,27 @@ pub struct NativeCtx {
     pub raise_a: i64,
     /// The second: the collection's length, or the string's.
     pub raise_b: i64,
+    /// The address of the `String` holding a trap's leading sentence, and
+    /// unused by every raise but [`Raise::Trapped`].
+    ///
+    /// A `StrId` stood here — one number, stored as an immediate, because a
+    /// trap's words were the lowering's own. They are not any more:
+    /// [ADR 0067][adr] gives `Inst::Trap` three slots so that a
+    /// standard-library body can raise the refusal it worded, and a sentence
+    /// built at run time is an object on the heap rather than an entry in the
+    /// program's literal table. So the code generator loads each slot and
+    /// stores it, as it already did for the two numbers
+    /// [`Raise::IndexOutOfRange`] names, and the runtime reads the bytes back
+    /// out of the heap.
+    ///
+    /// [adr]: ../../../../docs/adr/0067-a-trap-carries-the-sentence-it-was-handed.md
+    pub raise_message: u64,
+    /// The address of the `String` holding a trap's `rule:` sentence, or the
+    /// address of an empty one when it has none.
+    pub raise_rule: u64,
+    /// The address of the `String` holding a trap's `help:` sentence, or the
+    /// address of an empty one when it has none.
+    pub raise_help: u64,
 }
 
 impl NativeCtx {
@@ -1468,10 +1491,12 @@ impl NativeCtx {
             // publishes nothing polls too often rather than too rarely.
             poll_at: 0,
             raise_code: 0,
-            raise_detail: 0,
             raise_pc: u32::MAX,
             raise_a: 0,
             raise_b: 0,
+            raise_message: 0,
+            raise_rule: 0,
+            raise_help: 0,
         }
     }
 

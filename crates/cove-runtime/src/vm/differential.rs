@@ -2796,6 +2796,150 @@ export fn main() -> Int {
     }
 }
 
+/// A refusal a Cove body worded arrives whole on both evaluators — all three
+/// sentences, not the message alone.
+///
+/// [ADR 0067][adr] gives `Inst::Trap` three slots and the standard library one
+/// primitive to stop a run with, `core.refuse`. The three sentences are what a
+/// diagnostic prints, so the three are what has to agree: a `rule:` the
+/// machine dropped would be a refusal that reads differently depending on
+/// which evaluator ran it, and `said` above compares messages only, which is
+/// why this case does not go through it.
+///
+/// Two probes and two questions. The first quotes a value the run computed,
+/// which is the whole reason the sentences are slots and not a `StrId` — no
+/// lowering could have written `7` down. The second says a message and nothing
+/// else: an **empty sentence is an absent one**, so what must come back is
+/// `None` rather than a blank `rule:` line, and this is the only place that
+/// distinction is asserted about both evaluators at once.
+///
+/// It also pins the lowering: one `Inst::Trap` and **no** `IntrinsicCall`. The
+/// six operations that waited on this — `split`, `replace`, `parseRadix`,
+/// `format`, a byte range and a duplicate key — migrate onto exactly that, and
+/// a `core.refuse` that lowered to an intrinsic would be one more variant
+/// rather than the end of six.
+///
+/// [adr]: ../../../../docs/adr/0067-a-trap-carries-the-sentence-it-was-handed.md
+#[test]
+fn a_refusal_a_cove_body_words_arrives_whole_on_both_evaluators() {
+    let probe = "\
+/// Three sentences, one of them quoting a value the run computed.
+export fn probeRefusal(at: Int) -> Int {
+  core.refuse(
+    \"`probe` cannot use `{at}`\",
+    \"A probe refuses an argument it was given, and says which.\",
+    \"pass an argument the probe admits\",
+  )
+  1
+}
+
+/// A message and nothing else, which is two empty sentences.
+export fn probeMessageOnly() -> Int {
+  core.refuse(\"`probe` refuses, and has only this to say\", \"\", \"\")
+  1
+}
+";
+    let source = "\
+use std.set
+
+export fn main() -> Int {
+  set.probeMessageOnly()
+}
+";
+    let (sources, checked) = checked_with_probe(source, "std.set", probe);
+    let program = lowered(&sources, &checked);
+    let function = |name: &str| {
+        program
+            .functions
+            .iter()
+            .find(|f| &*f.module == "std.set" && &*f.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is lowered"))
+    };
+    for name in ["probeRefusal", "probeMessageOnly"] {
+        let code = &function(name).code;
+        assert!(
+            code.iter()
+                .any(|inst| matches!(inst, cove_ir::Inst::Trap { .. })),
+            "`{name}` stops the run with a trap"
+        );
+        assert!(
+            !code
+                .iter()
+                .any(|inst| matches!(inst, cove_ir::Inst::IntrinsicCall { .. })),
+            "`{name}` reaches no intrinsic: a refusal primitive that was one \
+             would be a variant rather than the end of six"
+        );
+    }
+
+    /// `probeRefusal` is given the number its refusal quotes; the other
+    /// probe takes none. A `fn` rather than a closure because both threads
+    /// below need it and a `Value` cannot be sent to either.
+    fn args_for(name: &str) -> Vec<Value> {
+        match name {
+            "probeRefusal" => vec![Value::int(7)],
+            _ => Vec::new(),
+        }
+    }
+
+    // The three sentences, as a diagnostic would print them, off each
+    // evaluator in turn. Taken apart inside the thread because a
+    // `RuntimeError` holds more than three strings and only the strings need
+    // to cross.
+    let sentences = |name: &'static str| -> (String, Option<String>, Option<String>) {
+        let said = |error: crate::error::RuntimeError| {
+            (
+                error.message,
+                error.rule.map(|rule| rule.to_string()),
+                error.help.map(|help| help.to_string()),
+            )
+        };
+        let oracle = on_a_deep_stack(move || {
+            let (sources, checked) = checked_with_probe(source, "std.set", probe);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(checked, sources, hosts);
+            said(
+                Interpreter::new(&runtime)
+                    .invoke("std.set", name, args_for(name))
+                    .expect_err("the probe refuses"),
+            )
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, checked) = checked_with_probe(source, "std.set", probe);
+            let ir = lowered(&sources, &checked);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(checked, sources, hosts.clone());
+            said(
+                Vm::new(&runtime, &hosts, &ir)
+                    .invoke("std.set", name, args_for(name))
+                    .expect_err("the probe refuses"),
+            )
+        });
+        assert_eq!(
+            machine, oracle,
+            "the machine and the interpreter word `{name}` alike"
+        );
+        oracle
+    };
+
+    assert_eq!(
+        sentences("probeRefusal"),
+        (
+            "`probe` cannot use `7`".to_string(),
+            Some("A probe refuses an argument it was given, and says which.".to_string()),
+            Some("pass an argument the probe admits".to_string()),
+        )
+    );
+    assert_eq!(
+        sentences("probeMessageOnly"),
+        (
+            "`probe` refuses, and has only this to say".to_string(),
+            None,
+            None,
+        ),
+        "an empty sentence is an absent one on both evaluators, not a blank line"
+    );
+}
+
 /// ADR 0062's append — `core.vectorEnsure`, `core.vectorStore` at the length,
 /// `core.vectorCommit` — answers alike on both evaluators, through growths and
 /// for an ensure the machine refuses; and the oracle's staged suffix is what

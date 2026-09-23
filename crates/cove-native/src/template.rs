@@ -52,7 +52,9 @@ const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_POLL_AT: i32 = offset_of!(NativeCtx, poll_at) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
-const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
+const OFF_RAISE_MESSAGE: i32 = offset_of!(NativeCtx, raise_message) as i32;
+const OFF_RAISE_RULE: i32 = offset_of!(NativeCtx, raise_rule) as i32;
+const OFF_RAISE_HELP: i32 = offset_of!(NativeCtx, raise_help) as i32;
 const OFF_RAISE_PC: i32 = offset_of!(NativeCtx, raise_pc) as i32;
 const OFF_RAISE_A: i32 = offset_of!(NativeCtx, raise_a) as i32;
 const OFF_RAISE_B: i32 = offset_of!(NativeCtx, raise_b) as i32;
@@ -1164,9 +1166,13 @@ impl<'a> Emit<'a> {
                 self.jmp(Target::Pc(*to));
             }
             Inst::Return { src } => self.ret(*src),
-            // The message is a program string, so the `StrId` is what crosses
-            // the boundary and `cove-runtime` looks it up.
-            Inst::Trap { message } => self.raise(Raise::Trapped, message.0),
+            // Three sentences a Cove body may have built, so three addresses
+            // cross the boundary and `cove-runtime` reads the bytes at them.
+            Inst::Trap {
+                message,
+                rule,
+                help,
+            } => self.trap(*message, *rule, *help),
             // `encoded.rs`'s `INTRINSIC_CALL` arm, through the one helper. See
             // [`Emit::intrinsic_call`].
             Inst::IntrinsicCall { dst, site, args } => self.intrinsic_call(*dst, *site, *args),
@@ -2232,7 +2238,7 @@ impl<'a> Emit<'a> {
         self.jcc(CC_B, Target::Label(fine));
         self.store(CTX, OFF_RAISE_A, a);
         self.store(CTX, OFF_RAISE_B, b);
-        self.raise(code, 0);
+        self.raise(code);
         self.bind(fine);
     }
 
@@ -2538,7 +2544,7 @@ impl<'a> Emit<'a> {
                 self.mov_imm64(RDX, -1);
                 self.cmp_rr(RCX, RDX);
                 self.jcc(CC_NE, Target::Label(fine));
-                self.raise(overflow, 0);
+                self.raise(overflow);
                 self.bind(fine);
                 // `cqo` sign-extends `RAX` into `RDX:RAX`, which is the
                 // dividend `idiv` reads; the quotient lands in `RAX` and the
@@ -2959,11 +2965,34 @@ impl<'a> Emit<'a> {
         self.leave(Outcome::Returned);
     }
 
+    /// Leaves with the refusal a `Trap`'s three slots hold.
+    ///
+    /// Each slot holds the address of a heap `String` and the three addresses
+    /// are what cross the boundary — [ADR 0067][adr], which took the trap's
+    /// message out of the program's literal table so that a standard-library
+    /// body could raise a sentence it had worded itself. This is
+    /// [`Emit::raise_unless_below`]'s shape and not a new one: load what the
+    /// frame holds, store it where the runtime will look, and leave. A trap
+    /// ends the run, so `RAX` being clobbered three times costs nothing and
+    /// nothing has to survive it.
+    ///
+    /// [adr]: ../../../../docs/adr/0067-a-trap-carries-the-sentence-it-was-handed.md
+    fn trap(&mut self, message: Slot, rule: Slot, help: Slot) {
+        for (slot, at) in [
+            (message, OFF_RAISE_MESSAGE),
+            (rule, OFF_RAISE_RULE),
+            (help, OFF_RAISE_HELP),
+        ] {
+            self.load_slot(RAX, slot);
+            self.store(CTX, at, RAX);
+        }
+        self.raise(Raise::Trapped);
+    }
+
     /// Leaves with a runtime error named rather than built.
-    fn raise(&mut self, code: Raise, detail: u32) {
+    fn raise(&mut self, code: Raise) {
         self.store(CTX, OFF_PENDING_WORK, WORK);
         self.store_imm32(CTX, OFF_RAISE_CODE, code.abi() as i32);
-        self.store_imm32(CTX, OFF_RAISE_DETAIL, detail as i32);
         // The span every runtime error carries is `Function::span_at(pc)`, and
         // only compiled code knows which instruction it was on. Stored on this
         // path only, so the ordinary path pays nothing for it.
@@ -2980,7 +3009,7 @@ impl<'a> Emit<'a> {
     fn raise_unless(&mut self, cc: u8, code: Raise) {
         let good = self.label();
         self.jcc(cc, Target::Label(good));
-        self.raise(code, 0);
+        self.raise(code);
         self.bind(good);
     }
 

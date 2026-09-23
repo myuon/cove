@@ -110,10 +110,12 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
 /// The other two layout-directed walks answer a value. This one answers `()`
 /// or raises, and its refusal is
 /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` **with
-/// a `rule:` and a `help:` beside it**, where [`crate::Inst::Trap`] carries
-/// one [`crate::StrId`] and nothing else. Every hole in that sentence is
-/// something the lowering knows; three sentences are not something a trap
-/// can hold. So `lower::synth`'s admission walk proves what it can and hands
+/// a `rule:` and a `help:` beside it** — three sentences, and
+/// [`crate::Inst::Trap`] takes a slot for each. Every hole in that sentence
+/// is something the lowering knows, except where `path` reaches through a
+/// run or a map: there it quotes an index or a rendered key computed at run
+/// time, which is issue #461's kind and not something `lower::synth`'s walks
+/// build. So `lower::synth`'s admission walk proves what it can and hands
 /// the runtime the whole key wherever it cannot, and the sentence stays the
 /// runtime's, unchanged to the byte. See `lower::synth::Synth::ask`.
 ///
@@ -1337,8 +1339,14 @@ impl Check<'_> {
                 self.expect(at, cell, &[Repr::Ref])
             }
 
-            Inst::Trap { message } => {
-                self.in_range(at, message.index(), self.program.strings.len(), "string");
+            Inst::Trap {
+                message,
+                rule,
+                help,
+            } => {
+                self.expect(at, message, &[Repr::Ref]);
+                self.expect(at, rule, &[Repr::Ref]);
+                self.expect(at, help, &[Repr::Ref]);
             }
             Inst::AssertFailed { message } => {
                 self.expect(at, message, &[Repr::Ref]);
@@ -1751,9 +1759,10 @@ impl Check<'_> {
     /// and every answer stays right — and there is no walk here to take that
     /// way out of: `lower::core::core_refuse_duplicate` emits the intrinsic
     /// for every layout, by design, because the refusal it raises quotes the
-    /// key as it renders and [`Inst::Trap`](crate::Inst::Trap) carries one
-    /// [`crate::StrId`]. A line for it would have to admit every layout, and
-    /// a rule that admits everything asserts nothing.
+    /// key as it renders — a value computed at run time, issue #461's own
+    /// wall — and composing that into a raised sentence is work nothing here
+    /// builds. A line for it would have to admit every layout, and a rule
+    /// that admits everything asserts nothing.
     ///
     /// # `Value.renderInto` is reached from more than a box, and that is a
     /// widening rather than a reading

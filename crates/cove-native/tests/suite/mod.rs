@@ -1240,7 +1240,11 @@ pub struct Answer {
     /// from, and this is the copy.
     pub returned: Vec<u64>,
     pub raise: Option<Raise>,
-    pub raise_detail: u32,
+    /// The three addresses a trap's sentences are at. See
+    /// [`NativeCtx::raise_message`].
+    pub raise_message: u64,
+    pub raise_rule: u64,
+    pub raise_help: u64,
     /// Which instruction raised, and the two numbers an out-of-range message
     /// names. See [`NativeCtx::raise_pc`].
     pub raise_pc: u32,
@@ -1485,7 +1489,9 @@ pub fn enter_with_tables<A: Arm>(
         outcome,
         returned,
         raise: ctx.raise(),
-        raise_detail: ctx.raise_detail,
+        raise_message: ctx.raise_message,
+        raise_rule: ctx.raise_rule,
+        raise_help: ctx.raise_help,
         raise_pc: ctx.raise_pc,
         raise_a: ctx.raise_a,
         raise_b: ctx.raise_b,
@@ -3408,30 +3414,40 @@ pub fn a_copy_moves_every_word_and_does_not_smear<A: Arm>() {
     }
 }
 
-/// `Inst::Trap` leaves with the message's `StrId` and nothing else.
+/// `Inst::Trap` leaves with the addresses of its three sentences and nothing
+/// else.
 ///
-/// `encoded.rs`'s `TRAP` arm (line 1870) is
-/// `fail!(RuntimeError::new(program.string(StrId(held.lo())).to_string()))`.
-/// The lookup is the runtime's, so what crosses the boundary is the id: this
-/// crate has no strings table and must not grow one, which is the same rule
-/// that keeps the overflow messages out of `Raise`.
-pub fn a_trap_names_its_message_by_id<A: Arm>() {
+/// A trap carried one `StrId` until ADR 0067, and the argument for the id was
+/// that the lookup is the runtime's. That argument is why the addresses cross
+/// the boundary now instead: a sentence a standard-library body worded is an
+/// object on the heap, which this crate may name and may not read — it has no
+/// strings table and no reader for one, the same rule that keeps the overflow
+/// messages out of `Raise`.
+///
+/// The three words below are not real string objects. They do not need to be:
+/// what is under test is that the loads read the slots the instruction named
+/// and store them where `cove-runtime` looks, and a distinguishable number per
+/// slot is a stronger assertion about that than three addresses would be.
+pub fn a_trap_names_its_sentences_by_address<A: Arm>() {
     forget_polls();
     let held = program(function(
-        vec![Repr::Int],
+        vec![Repr::Ref, Repr::Ref, Repr::Ref],
         UNIT,
-        vec![
-            Inst::Int { dst: 0, value: 1 },
-            Inst::Trap { message: StrId(37) },
-        ],
+        vec![Inst::Trap {
+            message: 0,
+            rule: 1,
+            help: 2,
+        }],
     ));
-    let mut words = vec![0u64];
+    let mut words = vec![0x1111_u64, 0x2222, 0x3333];
     let answer = run::<A>(&held, &mut words, 0);
 
     assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::Trapped));
-    assert_eq!(answer.raise_detail, 37);
-    assert_eq!(answer.pending_work, 2, "both instructions of the block");
+    assert_eq!(answer.raise_message, 0x1111);
+    assert_eq!(answer.raise_rule, 0x2222);
+    assert_eq!(answer.raise_help, 0x3333);
+    assert_eq!(answer.pending_work, 1, "the one instruction of the block");
 }
 
 /// A function holding anything outside the slice compiles to `None`, whole.

@@ -1497,7 +1497,12 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::Box { dst, src, .. } | Inst::Unbox { dst, src, .. } => vec![dst, src],
         Inst::IntrinsicCall { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
-        Inst::Jump { .. } | Inst::Trap { .. } => Vec::new(),
+        Inst::Trap {
+            message,
+            rule,
+            help,
+        } => vec![message, rule, help],
+        Inst::Jump { .. } => Vec::new(),
         // Every variant below is one `reaches_nothing` refuses, so a leaf
         // never holds one and none of them can arrive here.
         //

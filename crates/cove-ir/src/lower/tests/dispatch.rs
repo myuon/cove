@@ -6,13 +6,16 @@ use super::listing;
 /// type is *written*: a parameter, a declared return type, a struct field,
 /// an enum payload, an annotated `let`.
 ///
-/// Here it is a parameter, and `take` is small enough that `lower::inline`
-/// expands it into this caller — so the listing runs on past the `box` into
-/// the dispatch the next test is about. That is worth having rather than
-/// working around: the `box` at pc 4 is the conversion, and what this shows
-/// is that it is still made at the boundary after the boundary's function
-/// has been expanded away. A pass that dropped it would leave a raw `Point`
-/// where the switch reads a box's first word.
+/// Here it is a parameter. `take` used to be small enough that
+/// `lower::inline` expanded it into this caller, which ran the listing on
+/// past the `box` into the dispatch; it no longer is, because a dispatch's
+/// undispatchable-entry [`crate::Inst::Trap`] costs three instructions
+/// rather than one; see this crate's `Inst::Trap`. So what this shows now is
+/// narrower and still true: the `box` at pc 4 is the conversion, made at the
+/// call boundary before `take` is ever entered, rather than inside `take`
+/// where the switch reads a box's first word. The next test,
+/// `a_dyn_call_switches_on_the_layout_the_box_records`, reads the dispatch
+/// itself straight from `take`'s own listing.
 #[test]
 fn erasure_boxes_a_concrete_value_where_a_dyn_type_is_written() {
     assert_eq!(
@@ -22,25 +25,14 @@ fn erasure_boxes_a_concrete_value_where_a_dyn_type_is_written() {
         ),
         "\
 fn @m.f() -> String
-  frame 14: s0:ref s1:int s2:int s3:int s4:int s5:ref s6:ref s7:int s8:ref s9:ref \
-s10:int s11:int s12:ref s13:ref
+  frame 6: s0:ref s1:int s2:int s3:int s4:int s5:ref
      0  int s1:int 1
      1  int s2:int 2
      2  copy s3:Int s1:Int
      3  copy s4:Int s2:Int
      4  box s5:ref s3..s4:m.Point
-     5  load-field s7:Int s5:ref +0
-     6  switch s7:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
-     7  unbox s9:m.Name s5:ref
-     8  copy s8:String s9:String
-     9  clear s9:m.Name
-    10  jump 15
-    11  unbox s10..s11:m.Point s5:ref
-    12  str s8:ref \"point\"
-    13  jump 15
-    14  trap \"no implementation of `Show.show` for this value\"
-    15  copy s0:String s8:String
-    16  return s0:String
+     5  call s0:String m.take (s5:Any)
+     6  return s0:String
 "
     );
 }
@@ -63,20 +55,22 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
         ),
         "\
 fn @m.take(Any) -> String
-  frame 9: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int s7:ref s8:ref
-  local v -> s0:Any [0, 12)
+  frame 10: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int s7:ref s8:ref s9:ref
+  local v -> s0:Any [0, 14)
      0  load-field s2:Int s0:ref +0
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:m.Name s0:ref
      3  copy s3:String s4:String
      4  clear s4:m.Name
-     5  jump 10
+     5  jump 12
      6  unbox s5..s6:m.Point s0:ref
      7  str s3:ref \"point\"
-     8  jump 10
-     9  trap \"no implementation of `Show.show` for this value\"
-    10  copy s1:String s3:String
-    11  return s1:String
+     8  jump 12
+     9  str s4:ref \"no implementation of `Show.show` for this value\"
+    10  str s7:ref \"\"
+    11  trap s4:ref, s7:ref, s7:ref
+    12  copy s1:String s3:String
+    13  return s1:String
 "
     );
 }
@@ -113,8 +107,8 @@ fn a_dyn_struct_field_holds_the_box() {
         ),
         "\
 fn @m.f() -> String
-  frame 9: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int s7:ref s8:ref
-  local h -> s2:m.Holder [5, 16)
+  frame 10: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int s7:ref s8:ref s9:ref
+  local h -> s2:m.Holder [5, 18)
      0  str s1:ref \"n\"
      1  copy s2:String s1:String
      2  box s1:ref s2:m.Name
@@ -125,13 +119,15 @@ fn @m.f() -> String
      7  unbox s4:m.Name s2:ref
      8  copy s1:String s4:String
      9  clear s4:m.Name
-    10  jump 15
+    10  jump 17
     11  unbox s5..s6:m.Point s2:ref
     12  str s1:ref \"point\"
-    13  jump 15
-    14  trap \"no implementation of `Show.show` for this value\"
-    15  copy s0:String s1:String
-    16  return s0:String
+    13  jump 17
+    14  str s4:ref \"no implementation of `Show.show` for this value\"
+    15  str s7:ref \"\"
+    16  trap s4:ref, s7:ref, s7:ref
+    17  copy s0:String s1:String
+    18  return s0:String
 "
     );
 }

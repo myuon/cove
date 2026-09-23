@@ -1769,6 +1769,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTES_COPY,
     CORE_BYTES_COMMIT,
     CORE_REFUSE_BYTE_RANGE,
+    CORE_REFUSE,
     CORE_BYTES_FINISH,
     CORE_BYTES_LENGTH,
     CORE_ARRAY_LENGTH,
@@ -2329,6 +2330,49 @@ pub const CORE_REFUSE_BYTE_RANGE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ParamSchema {
             name: "to",
             ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.refuse(message: String, rule: String, help: String) -> Unit`: stop
+/// the run with a refusal the standard library worded. It never answers — a
+/// call is a divergence, the way [`CORE_REFUSE_BYTE_RANGE`]'s and
+/// [`CORE_REFUSE_DUPLICATE`]'s are.
+///
+/// Lowers to one `Inst::Trap`, whose three slots are exactly these three
+/// arguments. An empty `rule` or `help` prints no such line, so a refusal
+/// with only two sentences passes `""` for the third — `Inst::Trap`'s own
+/// contract, not a new one.
+///
+/// A Cove body could already *answer* an `Err`, a value its caller asked for.
+/// It could not stop a run with a sentence of its own making: ADR 0064's
+/// Decision 2 —
+/// "every refusal that quotes a method name, a parameter name, a value or a
+/// range is the standard library's, and is constructed in Cove" — says the
+/// words are Cove's to build, but building the sentence and stopping the run
+/// with it are two different acts, and the standard library had a primitive
+/// for neither until [issue 461](https://github.com/myuon/cove/issues/461)
+/// asked for the second. `core.refuse` is only the second: it chooses no
+/// words of its own, quotes nothing, names no method, no parameter, no
+/// value. The three sentences arrive built; this only stops the run with
+/// them.
+pub const CORE_REFUSE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "refuse",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "message",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "rule",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "help",
+            ty: BuiltinType::String,
         },
     ],
     result: BuiltinType::Unit,

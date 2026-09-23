@@ -1,6 +1,10 @@
 # ADR 0064: An intrinsic names a machine, not a method
 
 - Status: Proposed
+- Superseded in part by
+  [ADR 0067](0067-a-trap-carries-the-sentence-it-was-handed.md), which adds a
+  sixth entry — stopping a run with a sentence the caller built — to Decision
+  2's acceptable vocabulary, leaving Decision 2's test as it stands
 - Date: 2026-09-19
 - Decides: that `Inst::IntrinsicCall` is a migration mechanism whose
   population may only shrink; the test a surviving IR primitive has to pass;

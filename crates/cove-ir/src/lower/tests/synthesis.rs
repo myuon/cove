@@ -358,33 +358,40 @@ fn an_enum_orders_by_case_name_and_not_by_case_index() {
         ),
         "\
 fn @<synth>.order<m.Mark#16>(m.Mark m.Mark) -> Int
-  frame 10: s0!:tag s1!:int s2!:ref s3!:tag s4!:int s5!:ref s6:int s7:int s8:int s9:bool
+  frame 16: s0!:tag s1!:int s2!:ref s3!:tag s4!:int s5!:ref s6:int s7:int s8:ref s9:ref \
+s10:int s11:ref s12:ref s13:bool s14:ref s15:ref
      0  switch s0:tag [1 3 5] else 7
      1  int s7:int 2
-     2  jump 8
+     2  jump 10
      3  int s7:int 0
-     4  jump 8
+     4  jump 10
      5  int s7:int 1
-     6  jump 8
-     7  trap \"this `m.Mark` is in a case it does not have\"
-     8  switch s3:tag [9 11 13] else 15
-     9  int s8:int 2
-    10  jump 16
-    11  int s8:int 0
-    12  jump 16
-    13  int s8:int 1
-    14  jump 16
-    15  trap \"this `m.Mark` is in a case it does not have\"
-    16  order.int s6:int s7:int s8:int
-    17  eq.int.imm.branch s9:bool s6:int 0 25
-    18  switch s0:tag [19 20 22] else 24
-    19  jump 25
-    20  order.int s6:int s1:int s4:int
-    21  jump 25
-    22  order.str s6:int s2:ref s5:ref
-    23  jump 25
-    24  trap \"this `m.Mark` is in a case it does not have\"
-    25  return s6:Int
+     6  jump 10
+     7  str s8:ref \"this `m.Mark` is in a case it does not have\"
+     8  str s9:ref \"\"
+     9  trap s8:ref, s9:ref, s9:ref
+    10  switch s3:tag [11 13 15] else 17
+    11  int s10:int 2
+    12  jump 20
+    13  int s10:int 0
+    14  jump 20
+    15  int s10:int 1
+    16  jump 20
+    17  str s11:ref \"this `m.Mark` is in a case it does not have\"
+    18  str s12:ref \"\"
+    19  trap s11:ref, s12:ref, s12:ref
+    20  order.int s6:int s7:int s10:int
+    21  eq.int.imm.branch s13:bool s6:int 0 31
+    22  switch s0:tag [23 24 26] else 28
+    23  jump 31
+    24  order.int s6:int s1:int s4:int
+    25  jump 31
+    26  order.str s6:int s2:ref s5:ref
+    27  jump 31
+    28  str s14:ref \"this `m.Mark` is in a case it does not have\"
+    29  str s15:ref \"\"
+    30  trap s14:ref, s15:ref, s15:ref
+    31  return s6:Int
 "
     );
 }
@@ -450,10 +457,11 @@ fn a_map_key_compares_its_key_before_its_value() {
 /// A value that is not a key raises, in the runtime walk's own sentence.
 ///
 /// This is the first arm in this module that *raises*, and the reason it may
-/// is that the sentence is a constant: `Inst::Trap`'s string is chosen by the
-/// lowering that emits it, exactly as an uncovered `match`'s is, and nothing
-/// in it quotes a value computed at run time. Issue #461 is about the other
-/// kind and this is not it.
+/// is that the sentence is a constant: its `StrId` is chosen by the lowering
+/// that emits it and loaded into `Inst::Trap`'s slot with `Inst::Str`,
+/// exactly as an uncovered `match`'s is, and nothing in it quotes a value
+/// computed at run time. Issue #461 is about the other kind and this is not
+/// it.
 ///
 /// Unreachable from a checked program — `core.admitKey` refuses such a key
 /// before a single comparison is made — and written out for the reason the
@@ -578,10 +586,11 @@ fn a_key_no_value_of_which_is_refused_is_not_asked_about() {
 /// walk is one `switch`, two arms that do nothing at all, and one that
 /// answers `true`.
 ///
-/// It answers a `Bool` and never raises: the sentence a refusal is carries a
-/// `rule:` and a `help:` beside it and `Inst::Trap` carries one string, so
-/// what the walk hands back is the bit and `core.admitKey` runs the intrinsic
-/// under a `branch-false`.
+/// It answers a `Bool` and never raises: the sentence a refusal carries has a
+/// `rule:` and a `help:` beside it, and `Operation::Admission` always decides
+/// rather than composes it — see `lower::synth`'s header — so what the walk
+/// hands back is the bit and `core.admitKey` runs the intrinsic under a
+/// `branch-false`.
 #[test]
 fn an_enum_is_read_at_its_discriminant_and_answers_a_bool() {
     let program = keyed("enum Mark { Plain\n  Count(Int)\n  Weight(Float) }", "Mark");
@@ -838,9 +847,10 @@ fn an_error_renders_as_its_message_and_appends_no_literal() {
 /// payload only where it has one.
 ///
 /// The default arm is an [`Inst::Trap`] and not a fallback: the runtime's own
-/// walk words the same refusal with the discriminant in it and a trap carries
-/// one string, so this says `key::wrong_case`'s sentence — the one
-/// `Synth::ranking` already emits for the same reading of the same `switch`.
+/// walk words the same refusal with the discriminant in it and rendering
+/// that discriminant into text is work this walk does not do, so this says
+/// `key::wrong_case`'s sentence — the one `Synth::ranking` already emits for
+/// the same reading of the same `switch`.
 #[test]
 fn an_enum_names_its_case_and_brackets_only_a_payload() {
     let program = rendering(
@@ -849,11 +859,19 @@ fn an_enum_names_its_case_and_brackets_only_a_payload() {
     );
     assert_eq!(
         literals(&program, "renders<m.Mark"),
-        ["Plain", "Named(", "Pair(", ", "]
+        [
+            "Plain",
+            "Named(",
+            "Pair(",
+            ", ",
+            "this `m.Mark` is in a case it does not have",
+            "",
+        ]
     );
     let walk = synthesized(&program, "renders<m.Mark");
     assert!(
-        walk.contains("trap \"this `m.Mark` is in a case it does not have\""),
+        walk.contains("str s8:ref \"this `m.Mark` is in a case it does not have\"")
+            && walk.contains("trap s8:ref, s9:ref, s9:ref"),
         "{walk}"
     );
 }

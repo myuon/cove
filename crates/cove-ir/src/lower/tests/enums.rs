@@ -152,23 +152,25 @@ fn a_match_reads_the_discriminant_at_offset_zero() {
         ),
         "\
 fn @m.f(m.Shape) -> Int
-  frame 6: s0!:tag s1!:int s2!:int s3:int s4:int s5:int
-  local s -> s0..s2:m.Shape [0, 12)
+  frame 8: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:ref s7:ref
+  local s -> s0..s2:m.Shape [0, 14)
   local a -> s4:Int [4, 5)
   local a -> s4:Int [7, 9)
   local b -> s5:Int [8, 9)
      0  switch s0:tag [1 3 6] else 10
      1  int s3:int 0
-     2  jump 11
+     2  jump 13
      3  copy s4:Int s1:Int
      4  copy s3:Int s4:Int
-     5  jump 11
+     5  jump 13
      6  copy s4:Int s1:Int
      7  copy s5:Int s2:Int
      8  add.int s3:int s4:int s5:int
-     9  jump 11
-    10  trap \"no `match` arm covers this value\"
-    11  return s3:Int
+     9  jump 13
+    10  str s6:ref \"no `match` arm covers this value\"
+    11  str s7:ref \"\"
+    12  trap s6:ref, s7:ref, s7:ref
+    13  return s3:Int
 "
     );
 }
@@ -182,17 +184,19 @@ fn an_option_is_two_words_and_none_is_the_zeroed_one() {
         ),
         "\
 fn @m.f(Option) -> Int
-  frame 4: s0!:tag s1!:int s2:int s3:int
-  local o -> s0..s1:Option [0, 8)
+  frame 6: s0!:tag s1!:int s2:int s3:int s4:ref s5:ref
+  local o -> s0..s1:Option [0, 10)
   local v -> s3:Int [2, 3)
      0  switch s0:tag [4 1] else 6
      1  copy s3:Int s1:Int
      2  copy s2:Int s3:Int
-     3  jump 7
+     3  jump 9
      4  int s2:int 0
-     5  jump 7
-     6  trap \"no `match` arm covers this value\"
-     7  return s2:Int
+     5  jump 9
+     6  str s4:ref \"no `match` arm covers this value\"
+     7  str s5:ref \"\"
+     8  trap s4:ref, s5:ref, s5:ref
+     9  return s2:Int
 "
     );
 }
@@ -295,17 +299,19 @@ fn an_enum_inside_a_struct_is_inline_there_too() {
         ),
         "\
 fn @m.f(m.S) -> Int
-  frame 5: s0!:tag s1!:int s2!:int s3:int s4:int
-  local s -> s0..s2:m.S [0, 8)
+  frame 7: s0!:tag s1!:int s2!:int s3:int s4:int s5:ref s6:ref
+  local s -> s0..s2:m.S [0, 10)
   local v -> s4:Int [4, 5)
      0  switch s0:tag [1 3] else 6
      1  int s3:int 0
-     2  jump 7
+     2  jump 9
      3  copy s4:Int s1:Int
      4  add.int s3:int s4:int s2:int
-     5  jump 7
-     6  trap \"no `match` arm covers this value\"
-     7  return s3:Int
+     5  jump 9
+     6  str s5:ref \"no `match` arm covers this value\"
+     7  str s6:ref \"\"
+     8  trap s5:ref, s6:ref, s6:ref
+     9  return s3:Int
 "
     );
 }

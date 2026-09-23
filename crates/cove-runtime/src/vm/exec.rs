@@ -2762,6 +2762,35 @@ impl<'a> Machine<'a> {
         out
     }
 
+    /// The refusal `Inst::Trap`'s three slots hold, read out of the heap.
+    ///
+    /// One function because both tiers raise the same trap: the encoded VM
+    /// reads the three slots out of the executing frame and compiled code
+    /// leaves the three addresses in [`NativeCtx`](cove_native::NativeCtx), and
+    /// what a program sees must not depend on which of them was running.
+    ///
+    /// **An empty sentence is an absent one** — no blank `rule:` or `help:`
+    /// line — which is [ADR 0067][adr]'s rule and is why a standard-library
+    /// body with two sentences to say passes `""` for the third rather than
+    /// reaching for a second primitive.
+    ///
+    /// [adr]: ../../../../docs/adr/0067-a-trap-carries-the-sentence-it-was-handed.md
+    pub(crate) fn refusal(&self, message: u64, rule: u64, help: u64) -> RuntimeError {
+        let sentence = |addr: u64| {
+            let text = String::from_utf8_lossy(&self.string_bytes(addr)).into_owned();
+            (!text.is_empty()).then_some(text)
+        };
+        let error = RuntimeError::new(sentence(message).unwrap_or_default());
+        let error = match sentence(rule) {
+            Some(rule) => error.with_rule(rule),
+            None => error,
+        };
+        match sentence(help) {
+            Some(help) => error.with_help(help),
+            None => error,
+        }
+    }
+
     /// A new string object holding `text`.
     ///
     /// Unlike [`Machine::place_literals`] this allocates every time, and is
@@ -9078,17 +9107,34 @@ pub(crate) mod tests {
     /// the difference `crate::task::ChildFailure` draws, kept.
     #[test]
     fn a_child_that_raises_leaves_the_scope_with_its_own_error() {
-        let mut build = Build::default().strings(&["tasks", "the child said so"]);
+        let mut build = Build::default().strings(&["tasks", "the child said so", ""]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
         let int = build.scalar(Repr::Int);
+        // A trap's three sentences are slots since ADR 0067, so the fixture
+        // loads the two literals it needs into them: the child's own message,
+        // and the empty string that is an absent `rule:` and `help:`.
         let body = build.lambda(
             "body",
             &[],
-            &[Repr::Int],
+            &[Repr::Int, Repr::Ref, Repr::Ref],
             int,
             &[],
-            vec![Inst::Trap { message: StrId(1) }],
+            vec![
+                Inst::Str {
+                    dst: 1,
+                    text: StrId(1),
+                },
+                Inst::Str {
+                    dst: 2,
+                    text: StrId(2),
+                },
+                Inst::Trap {
+                    message: 1,
+                    rule: 2,
+                    help: 2,
+                },
+            ],
         );
         let environment = closure_layout(&mut build, body, &[]);
         let mut code = vec![Inst::ScopeEnter {
@@ -9945,7 +9991,7 @@ pub(crate) mod tests {
     /// only the innermost would leave the other held.
     #[test]
     fn a_failing_run_gives_back_every_cell_it_held() {
-        let mut build = Build::default().strings(&["stop"]);
+        let mut build = Build::default().strings(&["stop", ""]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
         let int = build.word("Int", Repr::Int);
@@ -9953,7 +9999,10 @@ pub(crate) mod tests {
         let main = build.function(
             "main",
             &[],
-            &[Repr::Int, Repr::Ref, Repr::Ref],
+            // Slots 3 and 4 are the trap's sentences, which ADR 0067 makes
+            // slots: the two cells this case is about are 1 and 2 and stay
+            // locked when the trap reads them.
+            &[Repr::Int, Repr::Ref, Repr::Ref, Repr::Ref, Repr::Ref],
             int,
             vec![
                 Inst::Alloc {
@@ -9968,8 +10017,18 @@ pub(crate) mod tests {
                 },
                 Inst::SharedLock { cell: 1 },
                 Inst::SharedLock { cell: 2 },
+                Inst::Str {
+                    dst: 3,
+                    text: cove_ir::StrId(0),
+                },
+                Inst::Str {
+                    dst: 4,
+                    text: cove_ir::StrId(1),
+                },
                 Inst::Trap {
-                    message: cove_ir::StrId(0),
+                    message: 3,
+                    rule: 4,
+                    help: 4,
                 },
                 Inst::Return { src: 0 },
             ],

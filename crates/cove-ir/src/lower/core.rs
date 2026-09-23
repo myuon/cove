@@ -134,6 +134,9 @@ impl Body<'_> {
             ("refuseByteRange", [text, from, to]) => {
                 self.core_refuse_byte_range(expr, &text.value, [&from.value, &to.value], want)
             }
+            ("refuse", [message, rule, help]) => {
+                self.core_refuse(expr, [&message.value, &rule.value, &help.value], want)
+            }
             ("bytesFinish", [buffer]) => self.core_bytes_finish(expr, &buffer.value, want),
             ("bytesLength", [buffer]) => self.core_bytes_length(expr, &buffer.value, want),
             ("arrayLength", [items]) => self.core_array_length(expr, &items.value, want),
@@ -1059,6 +1062,46 @@ impl Body<'_> {
         self.release(end, expr.span);
         self.release(start, expr.span);
         self.release(src, expr.span);
+        dst
+    }
+
+    /// `core.refuse(message, rule, help)`: one [`Inst::Trap`], whose three
+    /// slots are exactly these three arguments.
+    ///
+    /// [`Body::core_refuse_byte_range`]'s doc above says which of the five
+    /// things is wrong in `String.sliceBytes`'s words — that `appendRange`
+    /// has nothing to raise with was the standard library's problem in
+    /// general, not only there, and this is what answers it: any body may
+    /// build the three sentences of a refusal at run time out of values it
+    /// computed and stop the run with them, which is
+    /// [issue 461](https://github.com/myuon/cove/issues/461).
+    ///
+    /// Unlike `core_refuse_byte_range`'s [`Inst::IntrinsicCall`], a `Trap` is
+    /// a terminator — nothing runs after it, ever, so nothing is emitted
+    /// after it either. `dst` is answered the same way a diverging `return`
+    /// or `break` answers one, a location nothing will write, so the
+    /// surrounding form still has something to hold.
+    fn core_refuse(
+        &mut self,
+        expr: &Expr,
+        [message, rule, help]: [&Expr; 3],
+        want: Option<Dest>,
+    ) -> Val {
+        let message = self.expr(message);
+        let rule = self.expr(rule);
+        let help = self.expr(help);
+        let dst = self.answer_at(want, shapes::UNIT);
+        self.emit(
+            Inst::Trap {
+                message: message.slot,
+                rule: rule.slot,
+                help: help.slot,
+            },
+            expr.span,
+        );
+        self.release(help, expr.span);
+        self.release(rule, expr.span);
+        self.release(message, expr.span);
         dst
     }
 
