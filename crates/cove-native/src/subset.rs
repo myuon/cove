@@ -1641,7 +1641,10 @@ mod tests {
         assert!(super::comparison_supported(Compare::Identity, CmpOp::Eq));
         assert!(super::comparison_supported(Compare::Identity, CmpOp::Ne));
         for op in [CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge, CmpOp::Order] {
-            assert!(!super::comparison_supported(Compare::Identity, op), "{op:?}");
+            assert!(
+                !super::comparison_supported(Compare::Identity, op),
+                "{op:?}"
+            );
         }
     }
 
