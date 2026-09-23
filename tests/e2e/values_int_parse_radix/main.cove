@@ -1,0 +1,138 @@
+use console.println
+
+/// `Int.parseRadix`, pinned before it moves.
+///
+/// ADR 0064's Decision 6 asks a corpus of an operation's answers to be
+/// written before the operation leaves Rust, and this is `parseRadix`'s. Every
+/// row was derived from the specification of the notation this method reads —
+/// which is Rust's `i64::from_str_radix`, whose rules the method has had since
+/// it existed — and not from what either backend printed: one optional `+` or
+/// `-`, then one or more digits, a digit being `0`-`9` and then a letter of
+/// either case for ten upward, each below the radix; nothing else, no space, no
+/// separator, no `0x`; and the value an `Int`, or a refusal.
+///
+/// The refusal is `` `{text}` is not an Int in radix {radix} ``, an `Err`
+/// and not a raise, because it is the *text* that is wrong. A radix outside
+/// `2..=36` is the call that is wrong and stops the run: that is
+/// `fail_int_parse_radix`, a directory of its own because a refusal that stops
+/// a run is the last thing that run does.
+///
+/// The rows are in the order a reader would ask: nought, ordinary numbers, the
+/// digit at the radix against the one below it, the signs, what other
+/// notations write and this one does not, the two ends of `Int` in four
+/// radixes, leading zeros in front of a number longer than any `Int`, bytes
+/// that are not ASCII digits, and the backtick the message quotes with.
+fn show(label: String, text: String, radix: Int) -> Result<Unit, Error> {
+  match Int.parseRadix(text, radix) {
+    Ok(value) => println("{label} ok {value}")?
+    Err(error) => println("{label} err {error.message}")?
+  }
+  Ok(())
+}
+
+/// The string the code points `points` name, in order.
+///
+/// `values_int_parse`' helper, for its reason: a row built from code points
+/// holds the same list of numbers the oracle encodes with an encoder of its
+/// own, where a source literal would make both sides read one file's UTF-8.
+fn fromPoints(points: Array<Int>) -> Result<String, Error> {
+  var out: Vector<String> = Vector.of()
+  for point in points {
+    out.push(String.fromCodePoint(point)?)
+  }
+  Ok("".join(out.freeze()))
+}
+
+export fn main() -> Result<Unit, Error> {
+  show("zero.bare", "0", 2)?
+  show("zero.minus", "-0", 16)?
+  show("zero.plus", "+0", 36)?
+  show("zero.three", "000", 8)?
+  show("plain.hex", "ff", 16)?
+  show("plain.hex.upper", "FF", 16)?
+  show("plain.hex.mixed", "fF", 16)?
+  show("plain.binary", "1010", 2)?
+  show("plain.octal", "777", 8)?
+  show("plain.ternary", "21", 3)?
+  show("plain.septenary", "66", 7)?
+  show("plain.decimal", "12", 10)?
+  show("plain.z", "z", 36)?
+  show("plain.z.upper", "Z", 36)?
+  show("plain.z.minus", "-z", 36)?
+  show("plain.z.plus", "+z", 36)?
+  show("plain.ten.36", "10", 36)?
+  show("plain.ten.2", "10", 2)?
+  show("digit.2.in.2", "2", 2)?
+  show("digit.1.in.2", "1", 2)?
+  show("digit.9.in.9", "9", 9)?
+  show("digit.8.in.9", "8", 9)?
+  show("digit.a.in.10", "a", 10)?
+  show("digit.a.in.11", "a", 11)?
+  show("digit.g.in.16", "g", 16)?
+  show("digit.f.in.16", "f", 16)?
+  show("digit.z.in.35", "z", 35)?
+  show("digit.y.in.35", "y", 35)?
+  show("digit.Z.in.35", "Z", 35)?
+  show("sign.plus.alone", "+", 10)?
+  show("sign.minus.alone", "-", 16)?
+  show("sign.empty", "", 10)?
+  show("sign.twice", "--1", 10)?
+  show("sign.plus.minus", "+-1", 10)?
+  show("sign.minus.plus", "-+1", 10)?
+  show("sign.trailing", "1-", 10)?
+  show("space.lead", " 1", 10)?
+  show("space.trail", "1 ", 10)?
+  show("separator", "1_0", 10)?
+  show("prefix.hex", "0x10", 16)?
+  show("prefix.binary", "0b1", 2)?
+  show("prefix.octal", "0o7", 8)?
+  show(
+    "limit.max.2",
+    "111111111111111111111111111111111111111111111111111111111111111",
+    2,
+  )?
+  show(
+    "limit.over.2",
+    "1111111111111111111111111111111111111111111111111111111111111111",
+    2,
+  )?
+  show(
+    "limit.min.2",
+    "-1000000000000000000000000000000000000000000000000000000000000000",
+    2,
+  )?
+  show(
+    "limit.under.2",
+    "-1000000000000000000000000000000000000000000000000000000000000001",
+    2,
+  )?
+  show("limit.max.16", "7fffffffffffffff", 16)?
+  show("limit.max.16.upper", "7FFFFFFFFFFFFFFF", 16)?
+  show("limit.over.16", "8000000000000000", 16)?
+  show("limit.min.16", "-8000000000000000", 16)?
+  show("limit.under.16", "-8000000000000001", 16)?
+  show("limit.max.36", "1y2p0ij32e8e7", 36)?
+  show("limit.over.36", "1y2p0ij32e8e8", 36)?
+  show("limit.min.36", "-1y2p0ij32e8e8", 36)?
+  show("limit.under.36", "-1y2p0ij32e8e9", 36)?
+  show("limit.max.10", "9223372036854775807", 10)?
+  show("limit.over.10", "9223372036854775808", 10)?
+  show("limit.min.10", "-9223372036854775808", 10)?
+  show("limit.under.10", "-9223372036854775809", 10)?
+  show("limit.far.16", "ffffffffffffffffffffffff", 16)?
+  show("padded.hex", "0000000000000000000000000000000000000000ff", 16)?
+  show(
+    "padded.min.2",
+    "-0000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000",
+    2,
+  )?
+  show("wide.fullwidth", fromPoints([65297])?, 10)?
+  show("wide.arabic", fromPoints([1633])?, 10)?
+  show("wide.accent", fromPoints([233])?, 16)?
+  show("tick.wrapped", "`1`", 10)?
+  show("tick.alone", "`", 16)?
+  println("result.ok {Int.parseRadix("ff", 16)}")?
+  println("result.err {Int.parseRadix("fg", 16)}")?
+  println("result.decimal {Int.parseRadix("12", 10)} {Int.parse("12")}")?
+  Ok(())
+}

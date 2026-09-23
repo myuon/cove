@@ -1454,7 +1454,13 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// evaluators; it is a gap in what *these* four see, and the decomposition
 /// `CLAUDE.md` asks for answers itself here: all of the nothing is the new
 /// program, and there was no lowering change to attribute the rest to.
-const FORWARDABLE_COPIES: usize = 9227;
+///
+/// **9,384 since `Int.parseRadix`'s corpus landed ahead of its move** —
+/// `tests/e2e/values_int_parse_radix`, `tests/e2e/fail_int_parse_radix` and
+/// `benches`' `parse_radix_rows` — and all 157 of the rise is the three
+/// programs existing: the operation was still the Rust arm, so there was no
+/// lowering to attribute any of it to. 206 programs became 209.
+const FORWARDABLE_COPIES: usize = 9384;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

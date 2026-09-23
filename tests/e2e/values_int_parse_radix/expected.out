@@ -1,0 +1,70 @@
+zero.bare ok 0
+zero.minus ok 0
+zero.plus ok 0
+zero.three ok 0
+plain.hex ok 255
+plain.hex.upper ok 255
+plain.hex.mixed ok 255
+plain.binary ok 10
+plain.octal ok 511
+plain.ternary ok 7
+plain.septenary ok 48
+plain.decimal ok 12
+plain.z ok 35
+plain.z.upper ok 35
+plain.z.minus ok -35
+plain.z.plus ok 35
+plain.ten.36 ok 36
+plain.ten.2 ok 2
+digit.2.in.2 err `2` is not an Int in radix 2
+digit.1.in.2 ok 1
+digit.9.in.9 err `9` is not an Int in radix 9
+digit.8.in.9 ok 8
+digit.a.in.10 err `a` is not an Int in radix 10
+digit.a.in.11 ok 10
+digit.g.in.16 err `g` is not an Int in radix 16
+digit.f.in.16 ok 15
+digit.z.in.35 err `z` is not an Int in radix 35
+digit.y.in.35 ok 34
+digit.Z.in.35 err `Z` is not an Int in radix 35
+sign.plus.alone err `+` is not an Int in radix 10
+sign.minus.alone err `-` is not an Int in radix 16
+sign.empty err `` is not an Int in radix 10
+sign.twice err `--1` is not an Int in radix 10
+sign.plus.minus err `+-1` is not an Int in radix 10
+sign.minus.plus err `-+1` is not an Int in radix 10
+sign.trailing err `1-` is not an Int in radix 10
+space.lead err ` 1` is not an Int in radix 10
+space.trail err `1 ` is not an Int in radix 10
+separator err `1_0` is not an Int in radix 10
+prefix.hex err `0x10` is not an Int in radix 16
+prefix.binary err `0b1` is not an Int in radix 2
+prefix.octal err `0o7` is not an Int in radix 8
+limit.max.2 ok 9223372036854775807
+limit.over.2 err `1111111111111111111111111111111111111111111111111111111111111111` is not an Int in radix 2
+limit.min.2 ok -9223372036854775808
+limit.under.2 err `-1000000000000000000000000000000000000000000000000000000000000001` is not an Int in radix 2
+limit.max.16 ok 9223372036854775807
+limit.max.16.upper ok 9223372036854775807
+limit.over.16 err `8000000000000000` is not an Int in radix 16
+limit.min.16 ok -9223372036854775808
+limit.under.16 err `-8000000000000001` is not an Int in radix 16
+limit.max.36 ok 9223372036854775807
+limit.over.36 err `1y2p0ij32e8e8` is not an Int in radix 36
+limit.min.36 ok -9223372036854775808
+limit.under.36 err `-1y2p0ij32e8e9` is not an Int in radix 36
+limit.max.10 ok 9223372036854775807
+limit.over.10 err `9223372036854775808` is not an Int in radix 10
+limit.min.10 ok -9223372036854775808
+limit.under.10 err `-9223372036854775809` is not an Int in radix 10
+limit.far.16 err `ffffffffffffffffffffffff` is not an Int in radix 16
+padded.hex ok 255
+padded.min.2 ok -9223372036854775808
+wide.fullwidth err `１` is not an Int in radix 10
+wide.arabic err `١` is not an Int in radix 10
+wide.accent err `é` is not an Int in radix 16
+tick.wrapped err ``1`` is not an Int in radix 10
+tick.alone err ``` is not an Int in radix 16
+result.ok Ok(255)
+result.err Err(`fg` is not an Int in radix 16)
+result.decimal Ok(12) Ok(12)
