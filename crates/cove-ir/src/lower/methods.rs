@@ -921,7 +921,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("Float", "sqrt"),
     ("Float", "min"),
     ("Float", "max"),
-    ("Float", "format"),
     ("Duration", "nanos"),
 ];
 

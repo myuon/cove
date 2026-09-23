@@ -312,13 +312,6 @@ pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth
     }
 }
 
-/// `Float.format` refused a `digits` outside `0..=17`.
-pub(super) fn format_digits(digits: i64) -> RuntimeError {
-    RuntimeError::new(format!("`Float.format` cannot use `{digits}` digits")).with_rule(
-        "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17.",
-    )
-}
-
 /// A reference slot that was read before anything was written to it.
 ///
 /// Not the oracle's: a `Value` is never absent, and a null `Repr::Ref` is

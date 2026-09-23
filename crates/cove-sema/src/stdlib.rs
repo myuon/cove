@@ -86,6 +86,11 @@ static SOURCES: &[StdSource] = &[
         text: include_str!("../std/int.cove"),
     },
     StdSource {
+        module: "std.float",
+        path: "std/float.cove",
+        text: include_str!("../std/float.cove"),
+    },
+    StdSource {
         module: "std.duration",
         path: "std/duration.cove",
         text: include_str!("../std/duration.cove"),

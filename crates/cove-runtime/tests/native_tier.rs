@@ -1055,22 +1055,25 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
   snapshotsWhileCollecting(n)
 }
 
-/// A refused caller making `n` calls to `Float.format`, which nothing
+/// A refused caller making `n` calls to `Float.parse`, which nothing
 /// lowers, before handing the same `n` to the compiled loop above.
 ///
 /// It was `String.indexOf` until ADR 0064 moved that into `std.string`,
-/// `String.toUpper` until issue #454's Step 5 moved that one, and
-/// `String.replace` until the end of Step 3 moved that one too. What the case
-/// below wants of it is only that it is an intrinsic called `n` times from a
-/// frame the tier refused, so that the mediated calls land on the encoded side
-/// of the report and nowhere else — and that its answer has a `byteLength` the
-/// loop can sum. `2.5` to two places is `2.50`, four bytes.
+/// `String.toUpper` until issue #454's Step 5 moved that one, `String.replace`
+/// until the end of Step 3 moved that one, and `Float.format` until it moved
+/// into `std.float`. What the case below wants of it is only that it is an
+/// intrinsic called `n` times from a frame the tier refused, so that the
+/// mediated calls land on the encoded side of the report and nowhere else —
+/// and that its answer is something the loop can count: `2.5` parses, so
+/// each turn adds one.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   var cut = 0
   var at = 0
   while at < n {
-    cut = cut + 2.5.format(2).byteLength()
+    if Float.parse(\"2.5\").isOk() {
+      cut = cut + 1
+    }
     at = at + 1
   }
   var v = Vector.of(7)
@@ -3632,8 +3635,8 @@ fn counted_run(
         .map_err(|error| error.message);
     assert_eq!(
         answered,
-        Ok(format!("{}", n * 1000 + 4 * n)),
-        "the loop's counter, then four bytes per `format` of `2.5`"
+        Ok(format!("{}", n * 1000 + n)),
+        "the loop's counter, then one per `parse` of `2.5`"
     );
     vm.boundary()
 }
@@ -3643,12 +3646,12 @@ fn counted_run(
 /// ADR 0058's Phase 1 asks for "emitted IR, mediated intrinsics, encoded VM
 /// instructions, native-to-VM crossings and native-to-runtime calls" to be
 /// reported separately. `countsTheBoundary` is refused and calls
-/// `format` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
+/// `parse` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
 /// `byteLength` and `push` `n` times each in machine code. So each lands in a
 /// different place, and a report that lumped any two of them together would fail
 /// one of the rows below:
 ///
-/// - `Float.format`: `n` from the encoded tier, none from native code;
+/// - `Float.parse`: `n` from the encoded tier, none from native code;
 /// - `String.byteLength`: not an intrinsic at all. It is `std.string` over
 ///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
@@ -3716,7 +3719,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .intrinsic(intrinsic)
             .unwrap_or_else(|| panic!("the program names {intrinsic}"))
     };
-    assert_eq!(row(&on_vm, Intrinsic::FloatFormat).sites, 1);
+    assert_eq!(row(&on_vm, Intrinsic::FloatParse).sites, 1);
     assert_eq!(
         on_vm.emitted.intrinsic_sites,
         on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
@@ -3729,9 +3732,9 @@ fn the_boundary_report_counts_each_quantity_apart() {
         let held = row(report, intrinsic);
         (held.encoded, held.native)
     };
-    assert_eq!(calls(&on_vm, Intrinsic::FloatFormat), (n, 0));
+    assert_eq!(calls(&on_vm, Intrinsic::FloatParse), (n, 0));
     for report in [&on_native, &uncounted] {
-        assert_eq!(calls(report, Intrinsic::FloatFormat), (n, 0));
+        assert_eq!(calls(report, Intrinsic::FloatParse), (n, 0));
         // Sorted by dynamic calls, most first.
         assert!(report
             .intrinsics

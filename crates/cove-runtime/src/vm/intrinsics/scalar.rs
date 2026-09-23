@@ -55,22 +55,10 @@ pub(super) fn float_to_int(
     make::ok(machine, dest, &[truncated as i64 as u64])
 }
 
-/// `Float.format(digits) -> String`, fixed-point.
-pub(super) fn float_format(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let x = operand::float(machine, frame, 0);
-    let digits = operand::int(machine, frame, 1);
-    if !(0..=17).contains(&digits) {
-        return Err(operand::format_digits(digits));
-    }
-    let text = format!("{:.*}", digits as usize, x);
-    let word = machine.new_string(&text)?;
-    dest.word(machine, word);
-    Ok(())
-}
+// `float_format` stood here: `format!("{:.*}")`, and a raise on a `digits`
+// outside `0..=17`. It is `std.float.format` — the value taken apart into
+// `m * 2^e` with `Float` arithmetic, then written from an exact integer in
+// base-`10^9` limbs, ties to even — and the raise is ADR 0067's `core.refuse`.
 
 /// `Float.parse(text) -> Result<Float, Error>`.
 ///
@@ -92,7 +80,7 @@ pub(super) fn float_parse(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::intrinsics::tests::{message_of, read, result_of, run, scalar, word, world};
+    use crate::vm::intrinsics::tests::{message_of, result_of, run, scalar, world};
     use cove_ir::Repr;
 
     // `parsing_an_int_separates_bad_data_from_a_bad_call` stood here and asked
@@ -104,42 +92,12 @@ mod tests {
     // written from the notation, and `tests/e2e/fail_int_parse_radix`'s three
     // sentences and blame.
 
-    /// `sqrt`, `round`, `min` and `max` are not here any more: ADR 0064's
-    /// last two Phase 1 migrations made the pair `Inst::FloatMinMax` and
-    /// issue #454's Step 2 made `round` `Inst::FloatRound` and then `sqrt`
-    /// `Inst::FloatSqrt`, instructions rather than runtime calls, so there is
-    /// no arm of this module left to ask. **What is left in this file is the
-    /// three operations that allocate or refuse** — `toInt`, `format`,
-    /// `parse` — which is the same sentence `Intrinsic::effects` now makes
-    /// about the whole enum. What the four answer is asserted in bits, on
-    /// both tiers, by `vm::exec`'s
-    /// `a_float_extremum_answers_one_of_its_operands`,
-    /// `a_float_rounding_answers_the_nearest_integer` and
-    /// `a_float_square_root_is_correctly_rounded`, and by `cove-native`'s
-    /// `EXTREMA`, `ROUNDINGS` and `SQUARE_ROOTS`.
-    #[test]
-    fn a_float_formats() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let x = (-2.5f64).to_bits();
-
-        let text = word(
-            &mut machine,
-            "Float",
-            "format",
-            &[(Repr::Float, 1.5f64.to_bits()), (Repr::Int, 3)],
-        )
-        .unwrap();
-        assert_eq!(read(&machine, text), "1.500");
-        let error = run(
-            &mut machine,
-            "Float",
-            "format",
-            &[(Repr::Float, x), (Repr::Int, 18)],
-        )
-        .unwrap_err();
-        assert_eq!(error.message, "`Float.format` cannot use `18` digits");
-    }
+    // `a_float_formats` stood here, asking this module's `format` arm for
+    // `1.5` at three digits and then for eighteen. The arm is `std.float.format`
+    // now, and what answers for it is `tests/e2e/values_float_format`,
+    // `values_float_roundtrip` and `fail_float_format_digits` on all three
+    // backends, and `vm::differential`'s sweep of twenty thousand binary64
+    // values against `format!` itself.
 
     /// Three floats have no truncation an `Int` can hold, and each is named
     /// separately rather than answered with one message about conversion.

@@ -307,7 +307,7 @@ written as a namespace.
 | `sqrt() -> Float` |  |  |  | `machine` |
 | `min(other: Float) -> Float` |  |  |  | `machine` |
 | `max(other: Float) -> Float` |  |  |  | `machine` |
-| `format(digits: Int) -> String` |  |  |  | `machine` |
+| `format(digits: Int) -> String` |  |  |  | `std.float.format` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Bool`

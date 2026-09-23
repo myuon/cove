@@ -1,0 +1,529 @@
+/// This number written in decimal with exactly `digits` places after the
+/// point, correctly rounded from its exact value.
+///
+/// # What it answers
+///
+/// - **Fixed-point and never an exponent.** The whole part is every digit it
+///   has: `1.7976931348623157e308.format(0)` is 309 characters, and
+///   `5.0e-324.format(17)` is `0.` and seventeen zeros.
+/// - **Exactly `digits` places**, and no point at all when `digits` is 0:
+///   `(1.5).format(3)` is `1.500`, `(12.0).format(0)` is `12`.
+/// - **From the exact value, not from its shortest spelling.** Every finite
+///   `Float` is an integer times a power of two, so its decimal expansion is
+///   finite, and it is *that* expansion that is rounded: `(0.1).format(17)` is
+///   `0.10000000000000001`, because `0.1` is not one tenth.
+/// - **Ties to even.** When the discarded part is exactly half a unit in the
+///   last place, the answer is the neighbour whose last digit is even:
+///   `(0.5).format(0)`, `(1.5).format(0)` and `(2.5).format(0)` are `0`, `2`
+///   and `2`, and `(0.125).format(2)` is `0.12`. **This is not
+///   [`Float.round`]'s rule**, which breaks a tie away from zero —
+///   `(2.5).round()` is `3.0` — and the two are written apart on purpose: a
+///   helper shared between them would be wrong about one of the two.
+/// - **The sign of the value, whatever it rounds to.** A negative value that
+///   rounds to nought keeps its minus, and so does negative zero: `(-0.5)`
+///   at 0 places is `-0`, and `(-0.0).format(2)` is `-0.00`.
+/// - **`NaN`, `inf` and `-inf`** for the three values that have no digits,
+///   whatever `digits` is — and `NaN` with no sign, whichever sign bit it has.
+///
+/// # A digit count outside `0..=17` stops the run
+///
+/// A `Float` carries at most seventeen significant decimal digits, so a count
+/// past that asks for padding rather than precision, and a negative count names
+/// nothing. That is the call that is wrong rather than the value, so it is not
+/// an answer: the run stops through `core.refuse` (ADR 0067), with a message
+/// and a rule and no help line, the two sentences this operation has always
+/// refused with.
+///
+/// # How
+///
+/// A finite value is `m * 2^e` for an integer `m` below `2^53`. [`format`]
+/// finds `m` and `e` with `Float` arithmetic alone — multiplying or dividing
+/// by a power of two is exact, because it only moves an exponent — and then
+/// works in whole numbers, which is what makes the answer exact:
+///
+/// - for `e >= 0` the value times `10^digits` is the integer
+///   `m * 2^e * 10^digits`, and nothing is rounded;
+/// - for `e < 0` it is `m * 10^digits / 2^k` with `k = -e`, which is
+///   `m * 5^k * 10^digits / 10^k` — a division by a power of **ten**, so the
+///   quotient is the integer's digits with the last `k` taken off, and the
+///   rounding is a comparison of those `k` digits against `5` followed by
+///   zeros.
+///
+/// The integers are wider than an `Int` — `m * 5^1074` has 767 digits — so
+/// they are held as base-`10^9` limbs in a `Vector<Int>`, least significant
+/// first, where no product of a limb and a factor below `10^9` can overflow.
+///
+/// It was Rust's `format!("{:.*}")` behind `Intrinsic::FloatFormat` until
+/// ADR 0064's migration moved it here, held to `tests/e2e/values_float_format`,
+/// `values_float_roundtrip` and `fail_float_format_digits` (#471), whose goldens
+/// a standalone oracle wrote with the same algorithm and no `format!`.
+export fn format(x: Float, digits: Int) -> String {
+  if digits < 0 {
+    core.refuse(digitsRefused(digits), digitsRule(), "")
+  }
+  if digits > 17 {
+    core.refuse(digitsRefused(digits), digitsRule(), "")
+  }
+  if x != x {
+    return "NaN"
+  }
+  // The sign bit, which `x < 0.0` cannot see on a negative zero and a
+  // division can: `1.0 / -0.0` is minus infinity.
+  var negative = x < 0.0
+  if x == 0.0 {
+    negative = 1.0 / x < 0.0
+  }
+  var magnitude = x
+  if negative {
+    magnitude = -x
+  }
+  if magnitude == 1.0 / 0.0 {
+    if negative {
+      return "-inf"
+    }
+    return "inf"
+  }
+  // `magnitude` as `significand * 2^exponent`, the significand scaled into
+  // `[2^52, 2^53)` where every `Float` is a whole number. Each step is exact:
+  // a quotient by a power of two that stays at or above `2^53` is normal, and
+  // a product by one that stays below `2^52` cannot overflow and loses no bit
+  // even from a subnormal. Nought is its own case, with no significand to find.
+  var limbs: Vector<Int> = core.vectorWithCapacity(8)
+  var exponent = 0
+  // Every path leaves exactly two limbs here, the significand's low and high
+  // halves, and what follows reads both. `core.vectorLoad` is bounded by the
+  // storage and not by the length, so a read of a second limb that was never
+  // pushed would answer whatever the storage held on one backend and be
+  // refused on the other; the two evaluators agree only on a body that does
+  // not ask.
+  if magnitude == 0.0 {
+    pushLimb(limbs, 0)
+    pushLimb(limbs, 0)
+  } else {
+    var scaled = magnitude
+    while scaled >= 19342813113834066795298816.0 {
+      scaled = scaled / 4294967296.0
+      exponent += 32
+    }
+    while scaled < 2097152.0 {
+      scaled = scaled * 4294967296.0
+      exponent -= 32
+    }
+    // `scaled` is in `[2^21, 2^84)` now, at most 31 halvings or doublings from
+    // `[2^52, 2^53)`, and two ladders of 16, 8, 4, 2 and 1 take it the rest of
+    // the way in ten tests rather than a loop of up to thirty-one: each halves
+    // by `2^s` while at least `2^(52+s)`, or doubles by it while below
+    // `2^(53-s)`, and at most one of the two ladders does anything.
+    if scaled >= 295147905179352825856.0 {
+      scaled = scaled / 65536.0
+      exponent += 16
+    }
+    if scaled >= 1152921504606846976.0 {
+      scaled = scaled / 256.0
+      exponent += 8
+    }
+    if scaled >= 72057594037927936.0 {
+      scaled = scaled / 16.0
+      exponent += 4
+    }
+    if scaled >= 18014398509481984.0 {
+      scaled = scaled / 4.0
+      exponent += 2
+    }
+    if scaled >= 9007199254740992.0 {
+      scaled = scaled / 2.0
+      exponent += 1
+    }
+    if scaled < 137438953472.0 {
+      scaled = scaled * 65536.0
+      exponent -= 16
+    }
+    if scaled < 35184372088832.0 {
+      scaled = scaled * 256.0
+      exponent -= 8
+    }
+    if scaled < 562949953421312.0 {
+      scaled = scaled * 16.0
+      exponent -= 4
+    }
+    if scaled < 2251799813685248.0 {
+      scaled = scaled * 4.0
+      exponent -= 2
+    }
+    if scaled < 4503599627370496.0 {
+      scaled = scaled * 2.0
+      exponent -= 1
+    }
+    // The significand straight into its two limbs from the `Ok` it arrives
+    // in: `scaled` is a whole number below `2^53`, so `toInt` cannot refuse
+    // it, and binding it to a name first would copy it twice on the way.
+    match scaled.toInt() {
+      Ok(significand) => {
+        pushLimb(limbs, significand % 1000000000)
+        pushLimb(limbs, significand / 1000000000)
+      }
+      Err(_) => {
+        pushLimb(limbs, 0)
+        pushLimb(limbs, 0)
+      }
+    }
+  }
+  // A value this small is below half a unit at any `digits`: the significand
+  // is below `2^53` and `10^17` below `2^57`, so the value times `10^digits` is
+  // below `2^110`, and at `2^-111` or finer that is below `2^-1` — nought, and
+  // not a tie. Without this, `5.0e-324` would build `m * 5^1074`, 767 digits,
+  // to throw every one of them away: cost growing with the exponent's square,
+  // where the answer is known before a digit is made. With it, the integer
+  // below is at most `2^53 * 5^110 * 10^17`, thirteen limbs, whatever the value.
+  if exponent < -110 {
+    core.vectorStore(limbs, 0, 0)
+    core.vectorStore(limbs, 1, 0)
+    exponent = 0
+  }
+  // The trailing zero bits scaling put on the significand, taken back off
+  // while the exponent is negative: every one is a factor of five less in
+  // `m * 5^k` below. A value a program writes — `184.0`, `96.25`,
+  // `4018928.0` — is a small odd number times a power of two, and comes out
+  // of this at a non-negative exponent or nearly, where the integer below is
+  // a limb or two rather than a dozen. A ladder of thirty-two down to one, as
+  // the scaling above was, since a significand has at most fifty-two such
+  // bits and each rung takes its power of two at most once.
+  var low = core.vectorLoad(limbs, 0) + core.vectorLoad(limbs, 1) * 1000000000
+  if low != 0 {
+    if exponent <= -32 {
+      if low % 4294967296 == 0 {
+        low = low / 4294967296
+        exponent += 32
+      }
+    }
+    if exponent <= -16 {
+      if low % 65536 == 0 {
+        low = low / 65536
+        exponent += 16
+      }
+    }
+    if exponent <= -8 {
+      if low % 256 == 0 {
+        low = low / 256
+        exponent += 8
+      }
+    }
+    if exponent <= -4 {
+      if low % 16 == 0 {
+        low = low / 16
+        exponent += 4
+      }
+    }
+    if exponent <= -2 {
+      if low % 4 == 0 {
+        low = low / 4
+        exponent += 2
+      }
+    }
+    if exponent <= -1 {
+      if low % 2 == 0 {
+        low = low / 2
+        exponent += 1
+      }
+    }
+    core.vectorStore(limbs, 0, low % 1000000000)
+    core.vectorStore(limbs, 1, low / 1000000000)
+  }
+  // The value times `10^digits`, as an integer to be rounded by dropping its
+  // last `dropped` decimal digits.
+  var dropped = 0
+  if exponent >= 0 {
+    scaleByPowerOf(limbs, 2, 536870912, 29, exponent)
+  } else {
+    dropped = -exponent
+    scaleByPowerOf(limbs, 5, 244140625, 12, dropped)
+  }
+  scaleByPowerOf(limbs, 10, 1000000000, 9, digits)
+  let quotient = roundedQuotient(limbs, dropped)
+  written(quotient, digits, negative)
+}
+
+/// Multiplies `limbs` by `base^times`, a `step`-th power of it at a time.
+///
+/// `chunk` is `base^step`, the largest power of `base` below `10^9`, which is
+/// the largest factor [`scale`] takes without a product overflowing.
+fn scaleByPowerOf(
+  limbs: Vector<Int>,
+  base: Int,
+  chunk: Int,
+  step: Int,
+  times: Int,
+) {
+  var left = times
+  while left >= step {
+    scale(limbs, chunk)
+    left -= step
+  }
+  var factor = 1
+  while left > 0 {
+    factor = factor * base
+    left -= 1
+  }
+  if factor > 1 {
+    scale(limbs, factor)
+  }
+}
+
+/// Multiplies `limbs` in place by `factor`, which is at most `10^9`.
+///
+/// A limb is below `10^9`, so a limb times the factor plus the carry is below
+/// `10^18 + 10^9`, which an `Int` holds.
+fn scale(limbs: Vector<Int>, factor: Int) {
+  let length = core.vectorLength(limbs)
+  var carry = 0
+  var at = 0
+  while at < length {
+    let product = core.vectorLoad(limbs, at) * factor + carry
+    core.vectorStore(limbs, at, product % 1000000000)
+    carry = product / 1000000000
+    at += 1
+  }
+  while carry > 0 {
+    pushLimb(limbs, carry % 1000000000)
+    carry = carry / 1000000000
+  }
+  // A `return` rather than ending on the loop: a body whose last expression is
+  // a `while` answers that loop's `()` by copying it into the answer, and this
+  // body is not generic, so every program would carry the copy.
+  return
+}
+
+/// Appends `limb` as the most significant.
+fn pushLimb(limbs: Vector<Int>, limb: Int) {
+  let at = core.vectorLength(limbs)
+  core.vectorEnsure(limbs, 1)
+  core.vectorStore(limbs, at, limb)
+  core.vectorCommit(limbs, 1)
+}
+
+/// `limbs` divided by `10^dropped`, rounded to the nearest whole number and to
+/// the even one on a tie.
+///
+/// The division takes `dropped / 9` whole limbs off the bottom and divides what
+/// is left by `10^(dropped % 9)`. What was discarded is compared against half a
+/// unit — `5` followed by `dropped - 1` zeros — without being built: the digit
+/// the half's `5` sits over is either in the last remainder or at the top of the
+/// last limb taken off, and "exactly half" also needs every digit below it to be
+/// nought.
+fn roundedQuotient(limbs: Vector<Int>, dropped: Int) -> Vector<Int> {
+  let length = core.vectorLength(limbs)
+  let whole = dropped / 9
+  let part = dropped % 9
+  var divisor = 1
+  var at = 0
+  while at < part {
+    divisor = divisor * 10
+    at += 1
+  }
+  var kept = length - whole
+  if kept < 0 {
+    kept = 0
+  }
+  let quotient: Vector<Int> = core.vectorWithCapacity(kept + 1)
+  at = 0
+  while at < kept {
+    pushLimb(quotient, 0)
+    at += 1
+  }
+  // A value every limb of which was divided away is nought, and nought is one
+  // limb rather than none, so that [`written`] always has a digit to read.
+  if kept == 0 {
+    pushLimb(quotient, 0)
+  }
+  var remainder = 0
+  at = kept - 1
+  while at >= 0 {
+    let current = remainder * 1000000000 + core.vectorLoad(limbs, at + whole)
+    core.vectorStore(quotient, at, current / divisor)
+    remainder = current % divisor
+    at -= 1
+  }
+  if dropped == 0 {
+    return quotient
+  }
+  // Whether what was discarded is more than half a unit, and on exactly half,
+  // whether the quotient is odd — the tie broken toward the even neighbour.
+  // Half a unit is `5` followed by `dropped - 1` zeros; its `5` sits in the
+  // last remainder when the division had a part to do, and at the top of the
+  // last limb taken off when it did not, and "exactly half" also needs every
+  // digit below it to be nought. The parity of a number in base `10^9` is the
+  // parity of its least limb, because `10^9` is even.
+  var up = false
+  if part > 0 {
+    let half = divisor / 2
+    if remainder > half {
+      up = true
+    } else if remainder == half {
+      if noughtBelow(limbs, whole, length) {
+        up = oddAtBottom(quotient, kept)
+      } else {
+        up = true
+      }
+    }
+  } else if whole <= length {
+    let top = core.vectorLoad(limbs, whole - 1)
+    if top > 500000000 {
+      up = true
+    } else if top == 500000000 {
+      if noughtBelow(limbs, whole - 1, length) {
+        up = oddAtBottom(quotient, kept)
+      } else {
+        up = true
+      }
+    }
+  }
+  if up {
+    increment(quotient)
+  }
+  return quotient
+}
+
+/// Whether every limb below `below` is nought, reading no further than
+/// `length`.
+fn noughtBelow(limbs: Vector<Int>, below: Int, length: Int) -> Bool {
+  var at = 0
+  while at < below {
+    if at >= length {
+      return true
+    }
+    if core.vectorLoad(limbs, at) != 0 {
+      return false
+    }
+    at += 1
+  }
+  return true
+}
+
+/// Whether the number `limbs` holds in its `kept` limbs is odd.
+fn oddAtBottom(limbs: Vector<Int>, kept: Int) -> Bool {
+  if kept == 0 {
+    return false
+  }
+  return core.vectorLoad(limbs, 0) % 2 == 1
+}
+
+/// Adds one to `limbs` in place.
+fn increment(limbs: Vector<Int>) {
+  let length = core.vectorLength(limbs)
+  var at = 0
+  while at < length {
+    let next = core.vectorLoad(limbs, at) + 1
+    if next < 1000000000 {
+      core.vectorStore(limbs, at, next)
+      return
+    }
+    core.vectorStore(limbs, at, 0)
+    at += 1
+  }
+  pushLimb(limbs, 1)
+}
+
+/// `limbs` written in decimal with a point before the last `digits` of them,
+/// padded with leading zeros so that there is at least one digit before the
+/// point, and a minus in front when `negative`.
+///
+/// The buffer is `std.string.join`'s — `core.bytesAllocate` sized first and
+/// one append window a byte — rather than a `StringBuilder`, and the digit
+/// counting and the digit reading are written here rather than called, for
+/// one reason: this body is not generic, so every program lowers it, and a
+/// builder's constructor or a helper's answer inlined here is a copy that
+/// `crates/cove-cli/tests/copies.rs` counts once in each of them.
+fn written(limbs: Vector<Int>, digits: Int, negative: Bool) -> String {
+  // The most significant limb that is not nought — or the least, when every
+  // one is — the power of ten its leading digit is, and how many digits there
+  // are from it down.
+  var top = core.vectorLength(limbs) - 1
+  while top > 0 {
+    if core.vectorLoad(limbs, top) != 0 {
+      break
+    }
+    top -= 1
+  }
+  let leading = core.vectorLoad(limbs, top)
+  var lead = 1
+  var count = top * 9 + 1
+  while lead * 10 <= leading {
+    lead = lead * 10
+    count += 1
+  }
+  var width = count
+  if width < digits + 1 {
+    width = digits + 1
+  }
+  let buffer = core.bytesAllocate(width + 2)
+  // Each byte is bound before the four statements that append it, as
+  // `std.int.renderInto` binds its minus: a constant made between the ensure
+  // and the commit is a row the window does not admit, and the append would
+  // lose its fused dispatch.
+  if negative {
+    let minus = '-'
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, minus)
+    core.bytesCommit(buffer, 1)
+  }
+  let point = '.'
+  let zero = '0'
+  // `position` counts down from `width - 1` to nought, and the point goes in
+  // front of position `digits - 1`. First the padding zeros above the number's
+  // own digits, then its limbs from the top one down, a digit at a time with a
+  // divisor that falls by ten: the leading limb from `lead`, every other from
+  // `10^8`, because a limb below the top holds exactly nine digits.
+  var position = width - 1
+  while position >= count {
+    if position == digits - 1 {
+      let at = core.bytesLength(buffer)
+      core.bytesEnsure(buffer, 1)
+      core.bytesStore(buffer, at, point)
+      core.bytesCommit(buffer, 1)
+    }
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, zero)
+    core.bytesCommit(buffer, 1)
+    position -= 1
+  }
+  var index = top
+  var divisor = lead
+  while index >= 0 {
+    let limb = core.vectorLoad(limbs, index)
+    while divisor > 0 {
+      if position == digits - 1 {
+        let at = core.bytesLength(buffer)
+        core.bytesEnsure(buffer, 1)
+        core.bytesStore(buffer, at, point)
+        core.bytesCommit(buffer, 1)
+      }
+      let byte = zero + limb / divisor % 10
+      let at = core.bytesLength(buffer)
+      core.bytesEnsure(buffer, 1)
+      core.bytesStore(buffer, at, byte)
+      core.bytesCommit(buffer, 1)
+      divisor = divisor / 10
+      position -= 1
+    }
+    divisor = 100000000
+    index -= 1
+  }
+  core.bytesFinish(buffer)
+}
+
+/// What [`format`] says of a digit count it cannot write.
+///
+/// This and [`digitsRule`] were `vm::intrinsics::operand`'s `format_digits`
+/// and `builtins`' `format_digits_error`, two copies in Rust; they are here and
+/// nowhere else now. Functions of their own so that the refusal is one line of
+/// [`format`] and the path that writes a number carries neither.
+fn digitsRefused(digits: Int) -> String {
+  "`Float.format` cannot use `{digits}` digits"
+}
+
+/// The rule a digit count is held to.
+fn digitsRule() -> String {
+  "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17."
+}

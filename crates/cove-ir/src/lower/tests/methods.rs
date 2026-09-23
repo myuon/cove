@@ -7,19 +7,23 @@ use super::listing;
 /// the table has.
 ///
 /// The sample was `s.split(",")` until issue #454's Step 3 moved `split` into
-/// `std.string`; `Float.format` is the last method left on the table that is a
-/// runtime call over a receiver and an argument.
+/// `std.string`, and `x.format(2)` until `format` moved into `std.float`.
+/// `Float.toInt` is the last method on the table that is a runtime call over
+/// its receiver, and it has no argument after it, so "in source order" is a
+/// claim this case can only make about the one operand now.
 #[test]
 fn a_builtin_method_is_one_call_over_its_operands() {
     assert_eq!(
-        listing("fn show(x: Float) -> String { x.format(2) }", "show"),
+        listing(
+            "fn whole(x: Float) -> Result<Int, Error> { x.toInt() }",
+            "whole"
+        ),
         "\
-fn @m.show(Float) -> String
-  frame 3: s0!:float s1:ref s2:int
-  local x -> s0:Float [0, 3)
-     0  int s2:int 2
-     1  intrinsic-call s1:String Float.format (s0:Float s2:Int)
-     2  return s1:String
+fn @m.whole(Float) -> Result
+  frame 4: s0!:float s1:tag s2:int s3:ref
+  local x -> s0:Float [0, 2)
+     0  intrinsic-call s1..s3:Result Float.toInt (s0:Float)
+     1  return s1..s3:Result
 "
     );
 }
