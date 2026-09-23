@@ -238,12 +238,21 @@ fn the_run_writes_the_recording_a_run_writes() {
     // nine; and the leading piece of the `Err` a text that is not a number
     // gets, 25 and five. Each quoted value's opening backtick is a one-byte run
     // and is pushed rather than placed (#403).
+    //
+    // It is 1,555 since `String.split` and `String.replace` moved into
+    // `std.string` at the end of issue #454's Step 3, and the 49 words are the
+    // five sentences their two refusals are made of, which were `operand`'s
+    // `empty_needle` and its oracle copy in Rust: the two messages, 46 and 42
+    // bytes and seven words each; the rule they share, 121 and seventeen,
+    // placed once; and the two helps, 59 and 60 bytes and nine words each.
+    // None quotes a value, so none is an interpolation, and each is placed
+    // whole.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1506), capacity_words: Some(1506) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1555), capacity_words: Some(1555) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

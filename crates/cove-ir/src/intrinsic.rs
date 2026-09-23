@@ -27,8 +27,8 @@ use std::fmt;
 
 /// One core operation an `IntrinsicCall` may name.
 ///
-/// A variant is named `ReceiverOperation` in upper camel case — `String`'s
-/// `replace` is [`Intrinsic::StringReplace`] — because that pair is
+/// A variant is named `ReceiverOperation` in upper camel case — `Float`'s
+/// `format` is [`Intrinsic::FloatFormat`] — because that pair is
 /// the language reference's own naming of it: [`Intrinsic::receiver`] and
 /// [`Intrinsic::operation`] answer the two halves back apart, and
 /// [`Display`](fmt::Display) prints them the way `cove-ir`'s printer and
@@ -41,8 +41,6 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
     ValueRenderInto,
-    StringSplit,
-    StringReplace,
     StringRefuseByteRange,
     FloatToInt,
     FloatFormat,
@@ -59,8 +57,6 @@ pub enum Intrinsic {
 /// written list like this one goes wrong.
 pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRenderInto,
-    Intrinsic::StringSplit,
-    Intrinsic::StringReplace,
     Intrinsic::StringRefuseByteRange,
     Intrinsic::FloatToInt,
     Intrinsic::FloatFormat,
@@ -94,8 +90,6 @@ impl Intrinsic {
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "Value",
-            Intrinsic::StringSplit => "String",
-            Intrinsic::StringReplace => "String",
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatFormat => "Float",
@@ -110,8 +104,6 @@ impl Intrinsic {
     pub const fn operation(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "renderInto",
-            Intrinsic::StringSplit => "split",
-            Intrinsic::StringReplace => "replace",
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatFormat => "format",
@@ -169,9 +161,7 @@ impl Intrinsic {
     /// category to be.
     pub const fn category(self) -> Category {
         match self {
-            Intrinsic::StringSplit
-            | Intrinsic::StringReplace
-            | Intrinsic::StringRefuseByteRange => Category::Text,
+            Intrinsic::StringRefuseByteRange => Category::Text,
             Intrinsic::FloatToInt | Intrinsic::FloatFormat | Intrinsic::FloatParse => {
                 Category::Scalar
             }
@@ -203,8 +193,6 @@ impl Intrinsic {
             // The piece first, then the buffer it is appended to: the value
             // is the receiver, as it is of every other operation here.
             Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
-            Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
-            Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
             // The text and the two offsets a refusal is worded with, in the
             // order `String.sliceBytes` names them.
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
@@ -225,8 +213,8 @@ impl Intrinsic {
     /// Assigned by reading the VM arm each intrinsic dispatches to in
     /// `cove-runtime`'s `vm::intrinsics`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
-    /// differently, the way [`Intrinsic::StringRefuseByteRange`] allocates
-    /// nothing and [`Intrinsic::StringReplace`] does.
+    /// differently, the way [`Intrinsic::FloatToInt`] reads nothing past its
+    /// one word and [`Intrinsic::FloatParse`] reads a whole `String`.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // `MAY_RAISE` is language-level failure only (#378, Q5.3). An arm no
@@ -234,8 +222,8 @@ impl Intrinsic {
         // any call that disagrees with [`Intrinsic::signature`] — so the
         // `Err` those checks answered is not a path any verified program has,
         // and the flag says what a program can actually be stopped by: a
-        // refusal the language defines (an empty separator, a radix outside
-        // `2..=36`, a key it does not admit), a value nested past what a walk
+        // refusal the language defines (a digit count past 17, a byte range
+        // outside its string, a key it does not admit), a value nested past what a walk
         // of it may reach, and an exhausted heap — which is why every
         // intrinsic that allocates carries it.
         //
@@ -266,13 +254,11 @@ impl Intrinsic {
                 .union(E::WRITES_MEMORY)
                 .union(E::BULK_WORK),
 
-            // The readers do one decode and then walk, split or map the
-            // result, so every one of them is proportional to the receiver
-            // and allocates the array or string it answers. `split` and
-            // `replace` also refuse an empty needle.
-            Intrinsic::StringSplit | Intrinsic::StringReplace => {
-                allocate.union(E::READS_MEMORY).union(E::BULK_WORK)
-            }
+            // `split` and `replace` stood here, the last two readers of a
+            // `String` that allocated what they answered, and they left
+            // together at the end of issue #454's Step 3: `std.string` bodies
+            // over `core.stringFind`, raising on an empty needle through ADR
+            // 0067's `core.refuse`.
             // No predicate or search of a `String` is here any more, and
             // that is the whole of ADR 0046's four. `startsWith` and
             // `endsWith` left first, for ADR 0064's reason: a bounded byte
@@ -583,8 +569,6 @@ mod tests {
     fn the_intrinsic_set_only_shrinks() {
         const MIGRATED_BUT_STILL_HERE: &[&str] = &[
             "Value.renderInto",
-            "String.split",
-            "String.replace",
             "String.refuseByteRange",
             "Float.toInt",
             "Float.format",
@@ -644,8 +628,6 @@ mod tests {
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
                 Intrinsic::ValueRenderInto
-                | Intrinsic::StringSplit
-                | Intrinsic::StringReplace
                 | Intrinsic::StringRefuseByteRange
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatFormat
@@ -708,7 +690,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::StringSplit.to_string(), "String.split");
+        assert_eq!(Intrinsic::FloatFormat.to_string(), "Float.format");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

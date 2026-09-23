@@ -974,6 +974,160 @@ export fn join(separator: String, parts: Array<String>) -> String {
   core.bytesFinish(buffer)
 }
 
+/// This string cut at every occurrence of `separator`, which no part holds.
+///
+/// Every non-overlapping occurrence separates, scanning left to right, so two
+/// separators side by side make an empty part between them, a separator at
+/// either end makes an empty part there, and text that holds none is one part
+/// that is the whole text. `tests/e2e/values_string_split` pins all of it, and
+/// was written before this moved.
+///
+/// # An empty separator stops the run
+///
+/// It would match between every character, which answers a question other than
+/// the one this method asks; [`chars`] is the one that asks it. That is the call
+/// that is wrong rather than the text, so it is not an answer: the run stops
+/// through `core.refuse` (ADR 0067) with the three sentences [`splitRefused`],
+/// [`emptyNeedleRule`] and [`splitHelp`] word, on one line, before `text` is
+/// read.
+///
+/// # One search a part, and no counting pass
+///
+/// Each separator is found by `core.stringFind`, which is ADR 0065's
+/// `Inst::RunFind` — the one bounded byte search below the boundary, charged
+/// and polled as a run copy is — and each part is `core.stringSlice`, sliced
+/// into a local before the three instructions that publish it, because the
+/// window between an ensure and a commit admits nothing that allocates.
+///
+/// **It is not [`words`]' shape, and that was measured rather than chosen.**
+/// [`words`] counts first so its `Vector` is allocated once and never grows,
+/// and its count is a byte scan in Cove. Here a count is the same searches
+/// again: every separator found twice, which on `benches`' `split_rows` cost
+/// more than the growths it saved — `split.wide`, a hundred parts, was 26.9 µs
+/// a call counting first and 23.1 µs growing, on both tiers alike, because on
+/// the native tier each search is a runtime helper call. So the `Vector` starts
+/// with room for four and doubles, a handful of times for a hundred parts.
+///
+/// It was Rust's `str::split` behind `Intrinsic::StringSplit` until issue
+/// #454's Step 3, which could move everything about it but the refusal.
+export fn split(text: String, separator: String) -> Array<String> {
+  let step = core.byteLength(separator)
+  if step == 0 {
+    core.refuse(splitRefused(), emptyNeedleRule(), splitHelp())
+  }
+  let length = core.byteLength(text)
+  let parts: Vector<String> = core.vectorWithCapacity(4)
+  var start = 0
+  var found = core.stringFind(text, separator, 0)
+  while found >= 0 {
+    let part = core.stringSlice(text, start, found - start)
+    let index = core.vectorLength(parts)
+    core.vectorEnsure(parts, 1)
+    core.vectorStore(parts, index, part)
+    core.vectorCommit(parts, 1)
+    start = found + step
+    found = core.stringFind(text, separator, start)
+  }
+  let last = core.stringSlice(text, start, length - start)
+  let index = core.vectorLength(parts)
+  core.vectorEnsure(parts, 1)
+  core.vectorStore(parts, index, last)
+  core.vectorCommit(parts, 1)
+  core.vectorFinish(parts)
+}
+
+/// This string with every non-overlapping occurrence of `old` replaced by
+/// `new`, scanning left to right.
+///
+/// `tests/e2e/values_string_replace` pins what that means, and was written
+/// before this moved. An empty `old` names nothing to look for, so it stops
+/// the run for [`split`]'s reason and in [`split`]'s way, with its own help
+/// line: the two methods share the rule and not the suggestion.
+///
+/// # Text with nothing to replace is answered as it is
+///
+/// The first search runs before anything is allocated, and if it finds nothing
+/// the receiver is the answer. A `String` is immutable, so a program cannot
+/// tell it from a copy — the argument issue #104 made for `chars()`'s shared
+/// strings — and the Rust arm this replaced built one anyway.
+///
+/// # One search a match, and room for the receiver
+///
+/// Not [`join`]'s rule, for [`split`]'s reason: [`join`] can size its answer
+/// from lengths it already has, and here the size is a count of matches, which
+/// is the searches again. So the buffer starts at the receiver's own length —
+/// exact whenever `new` is as long as `old`, and the most common shape
+/// otherwise — and grows by doubling when a longer `new` outruns it. Each run
+/// between matches and each copy of `new` is an append window of its own:
+/// ensure, copy, commit. The two cannot be one window, because a window writes
+/// exactly the count it reserved at the length it read, and the verifier holds
+/// it to that.
+export fn replace(text: String, old: String, new: String) -> String {
+  let step = core.byteLength(old)
+  if step == 0 {
+    core.refuse(replaceRefused(), emptyNeedleRule(), replaceHelp())
+  }
+  var found = core.stringFind(text, old, 0)
+  if found < 0 {
+    return text
+  }
+  let length = core.byteLength(text)
+  let width = core.byteLength(new)
+  let buffer = core.bytesAllocate(length)
+  var start = 0
+  while found >= 0 {
+    let run = found - start
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, run)
+    core.bytesCopy(buffer, at, text, start, run)
+    core.bytesCommit(buffer, run)
+    let gap = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, width)
+    core.bytesCopy(buffer, gap, new, 0, width)
+    core.bytesCommit(buffer, width)
+    start = found + step
+    found = core.stringFind(text, old, start)
+  }
+  let rest = length - start
+  let tail = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, rest)
+  core.bytesCopy(buffer, tail, text, start, rest)
+  core.bytesCommit(buffer, rest)
+  core.bytesFinish(buffer)
+}
+
+/// What [`split`] says of an empty separator.
+///
+/// This and the four functions after it are the sentences
+/// `vm::intrinsics::operand`'s `empty_needle` wrote for both methods, and
+/// `builtins`' copy of them for the oracle; they are here and nowhere else now.
+/// Functions of their own so that each refusal is one line of its method and
+/// the path that answers carries none of them.
+fn splitRefused() -> String {
+  "`String.split` cannot use an empty `separator`"
+}
+
+/// What [`replace`] says of an empty `old`.
+fn replaceRefused() -> String {
+  "`String.replace` cannot use an empty `old`"
+}
+
+/// The rule both refusals are made under.
+fn emptyNeedleRule() -> String {
+  "An empty separator or search string would match between every character, rather than answer the question the method asks."
+}
+
+/// What [`split`] suggests instead.
+fn splitHelp() -> String {
+  "use `chars()` to take a string apart character by character"
+}
+
+/// What [`replace`] suggests instead — not [`splitHelp`], because there is no
+/// method that does what an empty `old` would.
+fn replaceHelp() -> String {
+  "`old` is the text to look for, and an empty `old` names none"
+}
+
 /// This string's characters, one one-character `String` each.
 ///
 /// A character in Cove is a `String` of `length()` 1 — there is no `Character`
