@@ -37,8 +37,10 @@
 //! `core.admitKey` is nothing at all where the key's layout cannot hold a
 //! refused part, a call into the walk `super::synth` composes out of it where
 //! it can and the layout says which values, and an
-//! `Intrinsic::ValueAdmitKey` where the key is erased or holds itself; and
-//! `core.refuseDuplicate` is always `Intrinsic::ValueRefuseDuplicate`.
+//! `Intrinsic::ValueAdmitKey` where the key is erased or holds itself.
+//! `core.refuseDuplicate` stood beside them until ADR 0067 gave the standard
+//! library [`Inst::Trap`]'s three slots: a duplicate in `Set.of` or `Map.of` is
+//! refused by `std.set` and `std.map` themselves, through `core.refuse`.
 //!
 //! `core.refuseByteRange` is a fourth of the same kind, and for the same
 //! reason: `std.stringbuilder`'s `appendRange` decides a byte range in Cove and
@@ -144,9 +146,6 @@ impl Body<'_> {
             ("order", [a, b]) => self.core_order(expr, &a.value, &b.value, want),
             ("admitKey", [key, method, role]) => {
                 self.core_admit_key(expr, &key.value, [&method.value, &role.value], want)
-            }
-            ("refuseDuplicate", [key, method, role]) => {
-                self.core_refuse_duplicate(expr, &key.value, [&method.value, &role.value], want)
             }
             ("memberAt", [members, at]) => {
                 self.core_member_at(expr, &members.value, &at.value, want)
@@ -1352,37 +1351,10 @@ impl Body<'_> {
         dst
     }
 
-    /// `core.refuseDuplicate(key, method, role)`: one [`Inst::IntrinsicCall`]
-    /// of [`Intrinsic::ValueRefuseDuplicate`], which always raises.
-    ///
-    /// **It stays one, where the four operations beside it became walks.**
-    /// ADR 0064's Decision 3 names five layout-directed operations and this
-    /// is the fifth; `super::synth`'s header carries the argument, and the
-    /// half of it that belongs at the call site is this. There is nothing
-    /// here to put a `branch-false` in front of, the way
-    /// [`Self::admit_by_walk`] puts one in front of `Value.admitKey`: the
-    /// decision this refusal follows from was made in Cove, by
-    /// `std.set.of`'s and `std.map.of`'s `seekPlaced(out, element) >= 0`, and
-    /// the lowering is reached only inside that `if`. A walk asked to decide
-    /// would answer `true` every time it was called.
-    ///
-    /// So the intrinsic is emitted unconditionally, and the thing that keeps
-    /// it from running is a branch in the standard library rather than a
-    /// table in this crate. That is why it is **0 dynamic calls on every
-    /// program that finishes** — including both gated ones — rather than 0
-    /// because a layout settled it.
-    fn core_refuse_duplicate(
-        &mut self,
-        expr: &Expr,
-        key: &Expr,
-        names: [&Expr; 2],
-        want: Option<Dest>,
-    ) -> Val {
-        self.keyed_refusal(Intrinsic::ValueRefuseDuplicate, expr, key, names, want)
-    }
-
     /// One [`Inst::IntrinsicCall`] of a keyed refusal over a key and the two
     /// names its message is written with, answering `()`.
+    ///
+    /// `Value.admitKey`'s, and once `Value.refuseDuplicate`'s too.
     fn keyed_refusal(
         &mut self,
         intrinsic: Intrinsic,

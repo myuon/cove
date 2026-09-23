@@ -2540,7 +2540,8 @@ export fn bumpBefore(var x: Int, by: Int) -> Int {
 /// `core.order` over the scalars, `String`s that differ in their ninth byte,
 /// payload-free enums declared in and out of case-name order, an `Option`, a
 /// struct, arrays, sets, maps and ranges; `core.admitKey` of a key it removes
-/// and of two it refuses, one nested; `core.refuseDuplicate`; and
+/// and of two it refuses, one nested; a literal's duplicate, which
+/// `std.set.of` refuses in Cove; and
 /// `core.memberAt` and `core.entryAt` over one-word members and a map of
 /// two-word values. Each answer is also the one the language's order gives,
 /// written out, so an agreement on a wrong order would not pass either.
@@ -2612,10 +2613,10 @@ export fn probeNested() -> Int {
   1
 }
 
-/// A literal's duplicate, refused.
+/// A literal's duplicate, refused by `std.set.of` itself.
 export fn probeDuplicate() -> Int {
-  core.refuseDuplicate(ProbePoint(x: 1, y: 2), \"Set.of\", \"element\")
-  1
+  let twice = of(ProbePoint(x: 1, y: 2), ProbePoint(x: 1, y: 2))
+  twice.length()
 }
 
 /// The members and entries of sorted runs, read by position.
@@ -2716,10 +2717,10 @@ export fn main() -> Int {
         vec![cove_ir::Intrinsic::ValueAdmitKey]
     );
     assert!(intrinsics("probeNested").contains(&cove_ir::Intrinsic::ValueAdmitKey));
-    assert_eq!(
-        intrinsics("probeDuplicate"),
-        vec![cove_ir::Intrinsic::ValueRefuseDuplicate]
-    );
+    // The duplicate's refusal is `std.set.of`'s own Cove since ADR 0067, so
+    // what the probe reaches is no intrinsic at all: the sentence is an
+    // interpolation of a layout the lowering knows, which is a walk it wrote.
+    assert_eq!(intrinsics("probeDuplicate"), Vec::new());
     assert!(function("probeElements")
         .code
         .iter()

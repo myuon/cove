@@ -903,15 +903,6 @@ pub fn call_core(
                 Err(invalid_key_error(&method, &role, &invalid, span))
             }
         },
-        // A literal's duplicate, found in Cove as an order of `0`: always the
-        // refusal, over the key as it renders.
-        "refuseDuplicate" => {
-            let (method, role) = core_names(&shown, &args[1], &args[2], span)?;
-            match MapKey::from_value(&args[0]) {
-                Ok(key) => Err(duplicate_key_error(&method, &role, &key, span)),
-                Err(invalid) => Err(invalid_key_error(&method, &role, &invalid, span)),
-            }
-        }
         // The element reads of a sorted run: the member or the entry at a
         // position the body has already held below the length. A slice indexes
         // in one step, which is why the oracle keeps one.
@@ -2137,18 +2128,6 @@ fn invalid_key_error(method: &str, role: &str, invalid: &InvalidKey, span: Span)
         .at(span)
         .with_rule(invalid.rule())
         .with_help(invalid.help())
-}
-
-/// `Map.of` and `Set.of` reject a duplicate key or element rather than
-/// silently keeping one entry, because a literal with two identical keys is a
-/// mistake, not an intent.
-fn duplicate_key_error(method: &str, role: &str, key: &MapKey, span: Span) -> RuntimeError {
-    RuntimeError::new(format!("`{method}` was given the {role} `{key}` more than once"))
-        .at(span)
-        .with_rule(
-            "A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.",
-        )
-        .with_help(format!("remove the duplicate, or give it a different {role}"))
 }
 
 /// `Map.of` takes `MapEntry` values, built with `MapEntry(key:, value:)`.

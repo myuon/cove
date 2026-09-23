@@ -215,12 +215,26 @@ fn the_run_writes_the_recording_a_run_writes() {
     // something a reader would notice, and the honest way to read it is as
     // the price of `cove_ir::lower` rather than as the price of the
     // operation.
+    //
+    // It is 1,471 since `Value.refuseDuplicate` moved into `std.set` and
+    // `std.map` (issue #454's Step 7, through ADR 0067's `core.refuse`), and
+    // the 35 words are three literals the runtime used to hold in Rust: the
+    // rule, 145 bytes and so a header and nineteen payload words, which the
+    // two modules state word for word and `Pool::string` places once; and
+    // the two helps, 48 and 52 bytes, seven words and eight. The two
+    // *messages* are not in it, and that is worth knowing rather than
+    // puzzling over: they are interpolations of a key, so they live in
+    // `duplicateKey<K>` and `duplicateElement<T>`, and a generic function is
+    // lowered per instantiation. This fixture instantiates neither, so their
+    // thirteen words of template are placed only by a program that builds a
+    // `Map` or a `Set` literal — the same "placed by the program that
+    // emitted the body" rule, one level further down.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1436), capacity_words: Some(1436) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1471), capacity_words: Some(1471) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

@@ -1746,23 +1746,14 @@ impl Check<'_> {
     /// [`one_admission_boundary`], a pass of its own for a reason that is the
     /// operation's rather than this rule's; see there.
     ///
-    /// # `Value.refuseDuplicate` has no line here, and cannot have one
+    /// # `Value.refuseDuplicate` has no line here, because it is gone
     ///
-    /// It is the fifth of Decision 3's five and the one whose producer is
-    /// **not** migrated and will not be; `crate::lower::synth`'s header
-    /// carries the argument. It is named in the `match` below rather than
-    /// falling into the catch-all anonymously, because the point of this
-    /// rule being a *list* is that a variant absent on purpose should say so.
-    ///
-    /// What it would be a rule about does not exist. This one catches the
-    /// cheap way out of a migration — hand an awkward layout to the intrinsic
-    /// and every answer stays right — and there is no walk here to take that
-    /// way out of: `lower::core::core_refuse_duplicate` emits the intrinsic
-    /// for every layout, by design, because the refusal it raises quotes the
-    /// key as it renders — a value computed at run time, issue #461's own
-    /// wall — and composing that into a raised sentence is work nothing here
-    /// builds. A line for it would have to admit every layout, and a rule
-    /// that admits everything asserts nothing.
+    /// It was the fifth of Decision 3's five and the one whose producer was
+    /// never migrated: its refusal quoted a key as it renders, and there was
+    /// no instruction to raise that with. ADR 0067 gave `Inst::Trap` three
+    /// slots, and `std.set.of` and `std.map.of` now word the refusal and raise
+    /// it themselves, so the variant this rule would have had to admit every
+    /// layout for does not exist.
     ///
     /// # `Value.renderInto` is reached from more than a box, and that is a
     /// widening rather than a reading
@@ -1810,11 +1801,8 @@ impl Check<'_> {
         let values = match intrinsic {
             crate::Intrinsic::AnyEquals | crate::Intrinsic::ValueOrder => 2,
             crate::Intrinsic::ValueRenderInto => 1,
-            // `Value.admitKey` is checked by [`one_admission_boundary`], and
-            // `Value.refuseDuplicate` by nothing at all — see this
-            // function's doc comment, which says why rather than leaving the
-            // fifth of Decision 3's five to be read out of this arm.
-            crate::Intrinsic::ValueAdmitKey | crate::Intrinsic::ValueRefuseDuplicate => return,
+            // `Value.admitKey` is checked by [`one_admission_boundary`].
+            crate::Intrinsic::ValueAdmitKey => return,
             _ => return,
         };
         if args.index() >= self.program.args.len() {

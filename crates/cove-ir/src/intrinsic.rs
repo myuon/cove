@@ -51,7 +51,6 @@ pub enum Intrinsic {
     AnyEquals,
     ValueOrder,
     ValueAdmitKey,
-    ValueRefuseDuplicate,
 }
 
 /// Every [`Intrinsic`], in declaration order.
@@ -71,7 +70,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::AnyEquals,
     Intrinsic::ValueOrder,
     Intrinsic::ValueAdmitKey,
-    Intrinsic::ValueRefuseDuplicate,
 ];
 
 /// How many variants there are, as the width of a per-variant table.
@@ -89,10 +87,10 @@ impl Intrinsic {
     ///
     /// `Any` for [`Intrinsic::AnyEquals`], which is `==` on anything wider
     /// than a word rather than a method a type declares — see the doc
-    /// comment where `cove-runtime` dispatches it. `Value` for the three a
-    /// keyed collection's standard-library body reaches through `core.order`,
-    /// `core.admitKey` and `core.refuseDuplicate`, which are rules over any
-    /// key's layout rather than methods of a type either, and for
+    /// comment where `cove-runtime` dispatches it. `Value` for the two a
+    /// keyed collection's standard-library body reaches through `core.order`
+    /// and `core.admitKey`, which are rules over any key's layout rather than
+    /// methods of a type either, and for
     /// [`Intrinsic::ValueRenderInto`], which is what `"{x}"` appends for a
     /// piece of any layout.
     pub const fn receiver(self) -> &'static str {
@@ -108,7 +106,6 @@ impl Intrinsic {
             Intrinsic::AnyEquals => "Any",
             Intrinsic::ValueOrder => "Value",
             Intrinsic::ValueAdmitKey => "Value",
-            Intrinsic::ValueRefuseDuplicate => "Value",
         }
     }
 
@@ -126,7 +123,6 @@ impl Intrinsic {
             Intrinsic::AnyEquals => "equals",
             Intrinsic::ValueOrder => "order",
             Intrinsic::ValueAdmitKey => "admitKey",
-            Intrinsic::ValueRefuseDuplicate => "refuseDuplicate",
         }
     }
 
@@ -190,8 +186,7 @@ impl Intrinsic {
             Intrinsic::ValueRenderInto
             | Intrinsic::AnyEquals
             | Intrinsic::ValueOrder
-            | Intrinsic::ValueAdmitKey
-            | Intrinsic::ValueRefuseDuplicate => Category::Value,
+            | Intrinsic::ValueAdmitKey => Category::Value,
         }
     }
 
@@ -225,9 +220,7 @@ impl Intrinsic {
             Intrinsic::AnyEquals => fixed(&[C::Value, C::Value], C::Bool),
             Intrinsic::ValueOrder => fixed(&[C::Value, C::Value], C::Int),
             // The key, then the method and the role a refusal is worded with.
-            Intrinsic::ValueAdmitKey | Intrinsic::ValueRefuseDuplicate => {
-                fixed(&[C::Value, C::Str, C::Str], C::Unit)
-            }
+            Intrinsic::ValueAdmitKey => fixed(&[C::Value, C::Str, C::Str], C::Unit),
         }
     }
 
@@ -369,22 +362,12 @@ impl Intrinsic {
             // walk a key as deep as it nests and allocate nothing: the order
             // answers one `Int` word, the admission nothing at all, and both
             // raise — a key too deep to walk, and for the admission a key the
-            // language refuses, in the method's words. The duplicate refusal
-            // always raises; it renders the key it names, which reads it, and
-            // the message is the machine's rather than an object on the heap.
+            // language refuses, in the method's words. (The duplicate refusal
+            // that stood beside them is `std.set.of`'s and `std.map.of`'s own
+            // Cove since `core.refuse`, ADR 0067.)
             Intrinsic::ValueOrder | Intrinsic::ValueAdmitKey => {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
-            // It renders a key of any depth and still declares no
-            // `BULK_WORK`, which reads like an omission and is not. That flag
-            // is a *cancellation* obligation — ADR 0040 asks generated code
-            // to poll in bounded chunks rather than run the call as one
-            // uninterruptible step — and there is nothing to return to here:
-            // this arm has no path that answers. It is the one intrinsic
-            // whose every execution is its program's last, which is also why
-            // ADR 0064's Decision 3 leaves it whole where it made walks of
-            // the four operations beside it (`lower::synth`'s header).
-            Intrinsic::ValueRefuseDuplicate => raise.union(E::READS_MEMORY),
         }
     }
 }
@@ -619,7 +602,6 @@ mod tests {
             "Any.equals",
             "Value.order",
             "Value.admitKey",
-            "Value.refuseDuplicate",
         ];
 
         let here: Vec<String> = ALL.iter().map(|one| one.to_string()).collect();
@@ -681,8 +663,7 @@ mod tests {
                 | Intrinsic::FloatParse
                 | Intrinsic::AnyEquals
                 | Intrinsic::ValueOrder
-                | Intrinsic::ValueAdmitKey
-                | Intrinsic::ValueRefuseDuplicate => 1,
+                | Intrinsic::ValueAdmitKey => 1,
             }
         }
         let variants: usize = ALL.iter().map(|intrinsic| count(*intrinsic)).sum();

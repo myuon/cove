@@ -1,25 +1,25 @@
 /// What a duplicate in a `Set.of` or a `Map.of` literal is refused with,
 /// family by family, exactly.
 ///
-/// `Value.refuseDuplicate` is the fifth and last of the layout-directed
-/// operations
+/// `Value.refuseDuplicate` was the fifth layout-directed operation
 /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-/// Decision 3 names, and the one that stays an intrinsic: see
-/// `crates/cove-ir/src/lower/synth.rs`'s header for why. What it does that
-/// is layout-directed is *render the key it names*, and that rendering ends
-/// up inside a `RuntimeError` with a `rule` and a `help` beside it, which is
-/// three sentences where `Inst::Trap` carries one. So this file is not a
-/// before-and-after for a migration. It is the thing a migration would have
-/// to keep, written down before anyone attempts one again.
+/// Decision 3 names. What it did that was layout-directed was *render the key
+/// it names*, inside a `RuntimeError` with a `rule` and a `help` beside it —
+/// three sentences where `Inst::Trap` carried one. This file was written as
+/// what a migration would have to keep, and it held the one that happened:
+/// ADR 0067 gave the trap three slots, and `std.set.of` and `std.map.of` now
+/// word the refusal and raise it through `core.refuse`. Every message, rule,
+/// help and blamed location below is the byte the two Rust copies wrote; what
+/// moved is the text of the standard-library line each diagnostic quotes.
 ///
-/// # Two implementations, and that is the point of running it twice
+/// # Two backends, and that is still the point of running it twice
 ///
-/// The refusal is worded in two places that share no code:
-/// `cove_runtime::builtins`' `duplicate_key_error`, over `MapKey`'s
-/// `Display`, is what the tree-walking oracle raises, and
-/// `cove_runtime::vm::intrinsics::key`'s `duplicate`, over `render_value`,
-/// is what the linear-memory backend raises. Nothing but a corpus holds the
-/// two to the same bytes, so this case carries a `both_backends` file and
+/// The refusal was worded in two places that shared no code —
+/// `cove_runtime::builtins`' `duplicate_key_error` over `MapKey`'s `Display`,
+/// and `cove_runtime::vm::intrinsics::key`'s `duplicate` over `render_value`
+/// — held to the same bytes by nothing but this corpus. It is one Cove
+/// sentence now, and what differs between the backends is the interpolation
+/// that names the key, so this case still carries a `both_backends` file and
 /// every row below is asserted on each of them.
 ///
 /// # The rows are the oracle, and they were written before anything ran

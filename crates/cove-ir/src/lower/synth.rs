@@ -132,57 +132,36 @@
 //! rule and a help — are not it either, for a reason next to it rather than
 //! in it.
 //!
-//! # The fifth operation is not here, and it is not waiting
+//! # The fifth operation is not here, and it never needed to be
 //!
 //! Decision 3 names five, and four of them are [`Operation`]'s variants. The
 //! fifth — `Value.refuseDuplicate`, which `std.set.of` and `std.map.of` reach
-//! when a literal holds one element twice — **is not a walk this module can
-//! compose, and the reason is not one a later change unblocks.** It is
+//! when a literal holds one element twice — **was never a walk this module
+//! had to compose**, and since ADR 0067 it is not an intrinsic either. It is
 //! written down here rather than left as a gap, because a gap reads as work
 //! outstanding and this is a finding.
 //!
-//! Three things about it, in the order they settle the question.
-//!
 //! **There is no decision left to make.** The other four answer something a
 //! call site asked: a `Bool`, an `Int`, a decision-`Bool`, an appended `()`.
-//! `core.refuseDuplicate` answers nothing — it *always raises* — and it is
+//! A duplicate's refusal answers nothing — it *always raises* — and it is
 //! reached only from inside `if at >= 0` in `std.set.of` and `std.map.of`,
 //! where `seekPlaced` has already found the duplicate **in Cove**. So the
 //! split [`Operation::Admission`] uses does not apply: a `refuses<L>(L) ->
 //! Bool` for this operation would be `return true`, no layout read and no
-//! call avoided. What that split bought for the admission was the *admitting*
-//! path, which is every path a working program takes. There is no
-//! corresponding path here, because this operation has no path that continues.
+//! call avoided.
 //!
-//! **The one thing in it that is layout-directed is the sentence.** The
-//! refusal is `` `{method}` was given the {role} `{key}` more than once `` —
-//! and `{key}` is the key **as it renders**. The method and the role are
-//! `String` literals at both call sites, the rule is one constant sentence,
-//! and the help is the role again; the only part a layout decides is the
-//! rendering, which is [`Operation::Rendering`]'s walk pointed at a
-//! diagnostic instead of at a buffer.
+//! **The one thing in it that is layout-directed is the sentence**, and the
+//! sentence is ordinary Cove. The refusal is
+//! `` `{method}` was given the {role} `{key}` more than once ``, and `{key}`
+//! is the key **as it renders** — which is an interpolation, and an
+//! interpolation of a layout the lowering knows is [`Operation::Rendering`]'s
+//! walk already. What was missing was never the rendering; it was a way to
+//! raise three sentences a frame holds, and `core.refuse` over
+//! [`Inst::Trap`]'s three slots is that. So `std.set` and `std.map` word the
+//! refusal themselves and nothing here grew a variant for it.
 //!
-//! **And that sentence still cannot be raised from IR on its own.**
-//! [`Inst::Trap`] no longer stops at one [`crate::StrId`] — it now takes
-//! three slots, each the address of a `String` a frame holds, so a refusal
-//! of three sentences is not the wall it was. What is left is the first of
-//! the three: it quotes a value computed at run time — `{key}` **as it
-//! renders** — which is issue #461's own wall, the one `Value.admitKey`
-//! also meets. `Value.refuseDuplicate` is the only one of `Intrinsic`'s
-//! twelve survivors that meets it with no producer migrated to ask.
-//! Rendering being composable IR since [`Operation::Rendering`] landed does
-//! not close that wall by itself: a walk can *build* the rendered text, but
-//! composing it into the whole three-sentence refusal and raising it is
-//! work nothing in this module does today.
-//!
-//! What it costs to leave it here is nothing that runs. On `examples/covefmt`
-//! and `examples/cq` it is **0 static sites and 0 dynamic calls**, and that
-//! is not those two programs being unrepresentative: a program that reaches
-//! this intrinsic stops. Its whole execution history, in any program that
-//! completes, is empty.
-//!
-//! `tests/e2e/values_value_refuse_duplicate` is the corpus that pins what a
-//! migration would have to keep, and issue #432 carries the argument.
+//! `tests/e2e/values_value_refuse_duplicate` is the corpus that held the
+//! migration to the bytes the two Rust copies had written, blame included.
 
 use std::sync::Arc;
 
@@ -210,10 +189,9 @@ pub(super) const MODULE: &str = "<synth>";
 ///
 /// **Four of the five, and the fifth is not pending.** Decision 3 names
 /// `ValueRefuseDuplicate` too, and this module's header says why it is not a
-/// variant here and why no later change makes it one: it decides nothing —
-/// `std.set.of` and `std.map.of` have already found the duplicate in Cove —
-/// and the refusal it raises is three sentences of which the first quotes the
-/// key as it renders.
+/// variant here: it decides nothing — `std.set.of` and `std.map.of` have
+/// already found the duplicate in Cove — and its sentence is an ordinary
+/// interpolation those two bodies raise through `core.refuse`.
 ///
 /// The key of the memo is still the *pair* rather than the layout, so that
 /// adding an operation is a variant here and an arm in [`Synth::body`] rather
