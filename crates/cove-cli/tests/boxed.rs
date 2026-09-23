@@ -17,10 +17,12 @@
 //!   are the operations ADR 0068's reflection walk will answer instead, and the
 //!   number may fall and may never rise;
 //! - **the reflected population**: calls of `std.dynamic.equals`, which is what
-//!   `Any.equals` became in Phase 2, and of `std.dynamic.order`, which is what
-//!   `Value.order` became in Phase 3 — the fallback already answered in Cove, over
-//!   a `DynamicView` of each box. Ratcheted like the fallback, because it *is* the
-//!   fallback, and held to Decision 5: every operand of every call is erased;
+//!   `Any.equals` became in Phase 2, of `std.dynamic.order`, which is what
+//!   `Value.order` became in Phase 3, and of `std.dynamic.refusesKey`, which is
+//!   what `Value.admitKey`'s *decision* became in Phase 3 — the fallback already
+//!   answered in Cove, over a `DynamicView` of each box. Ratcheted like the
+//!   fallback, because it *is* the fallback, and held to Decision 5: every
+//!   operand of every call is erased;
 //! - **the specialized population**: functions the lowering synthesized
 //!   (module `<synth>`), which is ADR 0064's Decision 3 working. Reported and not
 //!   ratcheted — a program that compares more kinds of value legitimately has more
@@ -65,10 +67,22 @@ fn discover() -> Vec<Case> {
 const BOXED: [Intrinsic; 2] = [Intrinsic::ValueAdmitKey, Intrinsic::ValueRenderInto];
 
 /// The Cove functions the moved operations became, in [`Counts::reflected`]'s
-/// order: what `==` answers two erased values with since ADR 0068's Phase 2, and
-/// what `core.order` answers two erased keys with since its Phase 3.
-const REFLECTED_FUNCTIONS: [(&str, &str); 2] =
-    [("std.dynamic", "equals"), ("std.dynamic", "order")];
+/// order: what `==` answers two erased values with since ADR 0068's Phase 2,
+/// what `core.order` answers two erased keys with since its Phase 3, and what
+/// `core.admitKey` decides an erased key with since that phase too.
+///
+/// The third is half of an operation. `Value.admitKey` stays at every site it
+/// was at, under a branch on what `std.dynamic.refusesKey` answered, because it
+/// words the refusal and a view cannot render the key a path through a map
+/// quotes until Phase 4. So [`FALLBACK_SITES`]' boxed admission column does not
+/// fall with this, and what falls is the **executed** count: a run whose keys
+/// are all admitted reaches `Value.admitKey` on no turn, which is what a
+/// `--boundary` report of `benches/admission` says.
+const REFLECTED_FUNCTIONS: [(&str, &str); 3] = [
+    ("std.dynamic", "equals"),
+    ("std.dynamic", "order"),
+    ("std.dynamic", "refusesKey"),
+];
 
 /// Why a site calls one of [`BOXED`], read off its first operand's layout.
 ///
@@ -97,10 +111,11 @@ enum Why {
 struct Counts {
     /// `IntrinsicCall` sites per entry of [`BOXED`], per [`Why`] in its order.
     sites: [[usize; 3]; 2],
-    /// Calls per entry of [`REFLECTED_FUNCTIONS`]: `==` on two erased values and
-    /// `core.order` over two erased keys, each from the operation itself or
-    /// from inside a synthesized walk that reached a boxed part.
-    reflected: [usize; 2],
+    /// Calls per entry of [`REFLECTED_FUNCTIONS`]: `==` on two erased values,
+    /// `core.order` over two erased keys and `core.admitKey`'s decision over an
+    /// erased key, each from the operation itself or from inside a synthesized
+    /// walk that reached a boxed part.
+    reflected: [usize; 3],
     /// Functions the lowering synthesized.
     synthesized: usize,
 }
@@ -116,11 +131,13 @@ fn why(program: &Program, args: cove_ir::ArgsId) -> Why {
     }
 }
 
-/// ADR 0068's Decision 5, as a fact about one call: a call of either of
+/// ADR 0068's Decision 5, as a fact about one call: a call of any of
 /// [`REFLECTED_FUNCTIONS`] whose operand has a layout the lowering knows would be
 /// a static layout routed through reflection, which the gate calls a failure —
 /// the walk the lowering writes for that layout is the fast path, and this is
-/// the fallback. Which of the two the call is, or `None` for any other call.
+/// the fallback. Every operand is asked, so it is the first operand of
+/// `std.dynamic.refusesKey`, which has only the one, and both of the other two.
+/// Which of them the call is, or `None` for any other call.
 fn reflected(
     program: &Program,
     function: &str,
@@ -222,10 +239,24 @@ fn count(program: &Program) -> Counts {
 /// rendering sites — its `Set<Holder>` is a known layout with a box in it — and
 /// `fail_key_boxed_struct` 1 and 3 and `fail_key_boxed_generic` 2 and 3 boxed
 /// admission and rendering sites.
-const FALLBACK_SITES: [[usize; 3]; 2] = [[37, 1, 115], [61, 669, 4]];
+///
+/// **ADR 0068's Phase 3b moved `Value.admitKey`'s decision into Cove, and no
+/// site moved.** A boxed key is decided by `std.dynamic.refusesKey` now, and the
+/// intrinsic stays at every site it was at, under the branch on that answer,
+/// because it words the refusal. Measured with the four programs it added held
+/// out and `values_boxed_order` as it was, over the same 225 programs, this
+/// table is 37, 1 and 115 and 61, 669 and 4 to the site. Then the four added
+/// what they are for: `fail_key_boxed_map_value` and `fail_key_boxed_enum` 2
+/// and 3 boxed admission and rendering sites each, and `fail_key_boxed_deep_200`
+/// and `fail_key_boxed_deep_1000` 1 and 2 each; the `chain` rows added to
+/// `values_boxed_order` moved none. What fell is the *executed* count, which a
+/// static census cannot see: an admitting run reaches `Value.admitKey` on no
+/// turn, where it reached it on every boxed lookup.
+const FALLBACK_SITES: [[usize; 3]; 2] = [[43, 1, 115], [71, 669, 4]];
 
-/// The whole-corpus calls of `std.dynamic.equals` and of `std.dynamic.order`,
-/// which may fall and may never rise: the reflected population, ADR 0068's Phase
+/// The whole-corpus calls of `std.dynamic.equals`, of `std.dynamic.order` and of
+/// `std.dynamic.refusesKey`, which may fall and may never rise: the reflected
+/// population, ADR 0068's Phase
 /// 2 asks for it reported apart from the specialized one.
 ///
 /// `std.dynamic.equals`, measured when Phase 2 landed, over 215 programs:
@@ -257,8 +288,27 @@ const FALLBACK_SITES: [[usize; 3]; 2] = [[37, 1, 115], [61, 669, 4]];
 ///   to 6, `values_value_order` 11 to 4, `values_boxed` 8 to 6, both benches 5 to
 ///   2 and the two `fail_key_boxed_*` programs 3 to 2;
 /// - **8** more from the three programs Phase 3 added: `values_boxed_order` 5,
-///   `fail_key_boxed_generic` 2 and `fail_key_boxed_struct` 1.
-const REFLECTED: [usize; 2] = [136, 32];
+///   `fail_key_boxed_generic` 2 and `fail_key_boxed_struct` 1;
+/// - **6** more from the four programs Phase 3b added, which order what they
+///   admit: `fail_key_boxed_map_value` and `fail_key_boxed_enum` 2 each, and
+///   `fail_key_boxed_deep_200` and `fail_key_boxed_deep_1000` 1 each. Phase 3b's
+///   lowering moved it by 0.
+///
+/// `std.dynamic.refusesKey`, measured when Phase 3b landed, over 229 programs:
+///
+/// - **42** in the 225 programs that were here before it, with
+///   `values_boxed_order` as it was. That is one call under every one of the
+///   37 boxed `Value.admitKey` sites, which is the guard, and **5** from inside
+///   the five admission walks the lowering now composes for a known key layout
+///   holding a box — a `Holder { tag: Int, item: dyn Summary }` handed the
+///   whole key to the runtime until a box became a part a walk can decide, so
+///   the synthesized count went 589 to 594 over those programs:
+///   `values_boxed_order` 1, `values_value_admit_key` 2 and `values_value_order`
+///   2;
+/// - **6** more from the four programs Phase 3b added, one under each of their
+///   boxed admission sites. The `chain` rows it added to `values_boxed_order`
+///   reach the calls that program already held.
+const REFLECTED: [usize; 3] = [136, 38, 48];
 
 #[test]
 fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
@@ -292,11 +342,13 @@ fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
     }
     println!(
         "{} program(s), {} synthesized function(s), {} reflected call(s) of \
-         `std.dynamic.equals` and {} of `std.dynamic.order`; sites as boxed / scalar / known:",
+         `std.dynamic.equals`, {} of `std.dynamic.order` and {} of \
+         `std.dynamic.refusesKey`; sites as boxed / scalar / known:",
         rows.len(),
         total.synthesized,
         total.reflected[0],
-        total.reflected[1]
+        total.reflected[1],
+        total.reflected[2]
     );
     for (intrinsic, sites) in BOXED.iter().zip(&total.sites) {
         println!(
@@ -308,19 +360,21 @@ fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
         );
     }
     println!(
-        "\n  reflected equals and order, boxed per operation (admit render), then synth, program"
+        "\n  reflected equals, order and refusesKey, boxed per operation (admit render), then \
+         synth, program"
     );
     for (name, found) in &rows {
         let boxed = [
             found.reflected[0],
             found.reflected[1],
+            found.reflected[2],
             found.sites[0][0],
             found.sites[1][0],
         ];
         if boxed.iter().any(|n| *n > 0) {
             println!(
-                "  {:>4} {:>4} {:>4} {:>4} {:>5}  {name}",
-                boxed[0], boxed[1], boxed[2], boxed[3], found.synthesized
+                "  {:>4} {:>4} {:>4} {:>4} {:>4} {:>5}  {name}",
+                boxed[0], boxed[1], boxed[2], boxed[3], boxed[4], found.synthesized
             );
         }
     }

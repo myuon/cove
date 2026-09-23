@@ -1,0 +1,29 @@
+use clock.timeout
+use console.println
+
+/// A boxed `Map<Int, Float>` used as a set element: the admission refuses the
+/// value of the entry keyed `7` and names it by that key, `[7]`.
+///
+/// `fail_key_map_value`'s row for an erased key. Since ADR 0068's Phase 3 the
+/// decision that a boxed key is refused is `std.dynamic.refusesKey`, Cove over
+/// a view of the box, which walks a map's values and never its keys — and the
+/// sentence is still the runtime's, because a path through a map quotes the
+/// entry's key as it renders, and a view cannot be rendered yet. So this is
+/// the row where the two halves meet: Cove decides, and the words name a key
+/// Cove never rendered.
+///
+/// The map is boxed through `clock.timeout`, which answers `Result<Any,
+/// Error>`, so that no `impl` has to be written for a `Map`.
+fn admitMap() -> Result<Unit, Error> {
+  let held = timeout(1s) { Map.of(MapEntry(key: 7, value: 1.5)) }?
+  let other = timeout(1s) { Map.of(MapEntry(key: 8, value: 2)) }?
+  let keyed = Set.of(held).inserted(other)
+  println("never printed {keyed}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed map holding a Float as a set element")?
+  admitMap()?
+  Ok(())
+}

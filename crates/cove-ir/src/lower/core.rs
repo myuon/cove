@@ -1342,10 +1342,15 @@ impl Body<'_> {
     ///   the walk `super::synth` composes out of the layout (ADR 0064,
     ///   Decision 3), which reads whatever decides and hands the key on only
     ///   where the answer is that it is refused.
+    /// - [`synth::Admission::Decided`] of a box: the same shape, with one
+    ///   [`Inst::Call`] of `std.dynamic.refusesKey` in the walk's place — Cove
+    ///   over a view of the box, since [ADR
+    ///   0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    ///   Phase 3 — because no layout says what the box holds.
     /// - otherwise one [`Inst::IntrinsicCall`] of
-    ///   [`Intrinsic::ValueAdmitKey`] over the key and the two names: a box,
-    ///   a layout that holds itself, and the scalars and handles the language
-    ///   refuses outright, which are one value and not a walk.
+    ///   [`Intrinsic::ValueAdmitKey`] over the key and the two names: a layout
+    ///   that holds itself, and the scalars and handles the language refuses
+    ///   outright, which are one value and not a walk.
     fn core_admit_key(
         &mut self,
         expr: &Expr,
@@ -1370,7 +1375,7 @@ impl Body<'_> {
         }
         let shape = self.pool.shapes.layout(layout).shape.clone();
         if admission == synth::Admission::Decided
-            && synth::walks(synth::Operation::Admission, &shape)
+            && (synth::walks(synth::Operation::Admission, &shape) || self.is_boxed(layout))
         {
             return self.admit_by_walk(expr, key, [method, role], layout, want);
         }
@@ -1386,6 +1391,18 @@ impl Body<'_> {
     ///   intrinsic-call Value.admitKey(key, method, role)
     /// past:
     /// ```
+    ///
+    /// A key that is a box has no layout to compose a walk out of, and the
+    /// call is of `std.dynamic.refusesKey` instead — the same three
+    /// instructions, and the same answer, decided in Cove over a view of the
+    /// box ([ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 3). A walk composed for a known layout that reaches a boxed part
+    /// calls it too, from a function that cannot resolve a name, so it is
+    /// resolved here first — [`synth::reaches_a_box`]'s arrangement for the
+    /// other two operations. `None` is a round that has to lower the package
+    /// again with it in the slice, and nothing this round emits is verified,
+    /// so the stand-in is the unguarded intrinsic, which is always correct.
     ///
     /// The intrinsic stays **here**, at the site, in this frame, over this
     /// key — which is where it was before this migration and is the whole of
@@ -1407,19 +1424,43 @@ impl Body<'_> {
         layout: LayoutId,
         want: Option<Dest>,
     ) -> Val {
+        let boxed = self.is_boxed(layout);
+        let reflected =
+            boxed || synth::reaches_a_box(&self.pool.shapes, synth::Operation::Admission, layout);
+        let refuses_key = if reflected {
+            match self.dynamic_refuses_key(expr.span) {
+                Some(id) => Some(id),
+                None => {
+                    return self.keyed_refusal(
+                        Intrinsic::ValueAdmitKey,
+                        expr,
+                        key,
+                        [method, role],
+                        want,
+                    )
+                }
+            }
+        } else {
+            None
+        };
         let held = self.expr(key);
         let method = self.expr(method);
         let role = self.expr(role);
         let dst = self.answer_at(want, shapes::UNIT);
         self.emit(Inst::Unit { dst: dst.slot }, expr.span);
-        let decls = self.plan.decls.len();
-        let callee = synth::function_for(
-            synth::Operation::Admission,
-            layout,
-            self.pool,
-            decls,
-            expr.span,
-        );
+        let callee = match refuses_key {
+            Some(callee) if boxed => callee,
+            _ => {
+                let decls = self.plan.decls.len();
+                synth::function_for(
+                    synth::Operation::Admission,
+                    layout,
+                    self.pool,
+                    decls,
+                    expr.span,
+                )
+            }
+        };
         let refused = self.temp(shapes::BOOL);
         let args = self.pool.args.intern(vec![held.arg()]);
         self.emit(

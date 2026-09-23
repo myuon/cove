@@ -39,6 +39,13 @@ use values_boxed_order.p
 /// - `deep`: keys nested 129 and 1000 levels deep, compared by `contains` —
 ///   past the machine's old bound of 128, which stopped the run with "this
 ///   value nests too deeply to compare" while the interpreter answered.
+/// - `chain`: keys nested 129 and 1000 links deep, admitted and then compared
+///   by `Set.of` and `contains`. A `Bag` hides its depth from admission inside
+///   a set; a `Link` does not, so these rows are the admission's as much as
+///   the order's. Phase 3a could not have them: the machine's admission was
+///   still the Rust walk with the bound of 128, and stopped them where the
+///   interpreter admitted them. Its Phase 3b decides a boxed key in Cove,
+///   `std.dynamic.refusesKey`, with no bound.
 trait Summary {
   fn summarize(self) -> String
 }
@@ -63,6 +70,11 @@ struct Bag {
   items: Set<dyn Summary>
 }
 
+/// One link of a chain: an erased field, which admission walks into.
+struct Link {
+  next: dyn Summary
+}
+
 /// A key whose layout is known, with one boxed field.
 struct Holder {
   tag: Int
@@ -81,12 +93,29 @@ impl Summary for Bag {
   }
 }
 
+impl Summary for Link {
+  fn summarize(self) -> String {
+    "link"
+  }
+}
+
 /// `depth` bags, each holding only the one inside it, around `Leaf(bottom)`.
 fn bags(depth: Int, bottom: Int) -> dyn Summary {
   var built: dyn Summary = Leaf(n: bottom)
   var at = 0
   while at < depth {
     built = Bag(items: Set.of(built))
+    at = at + 1
+  }
+  built
+}
+
+/// `depth` links, each holding only the one inside it, around `Leaf(bottom)`.
+fn links(depth: Int, bottom: Int) -> dyn Summary {
+  var built: dyn Summary = Leaf(n: bottom)
+  var at = 0
+  while at < depth {
+    built = Link(next: built)
     at = at + 1
   }
   built
@@ -233,6 +262,17 @@ fn deepRows() -> Result<Unit, Error> {
   Ok(())
 }
 
+fn chainRows() -> Result<Unit, Error> {
+  for depth in [129, 1000] {
+    let held = Set.of(links(depth, 7)).inserted(links(depth, 8))
+    let equal = held.contains(links(depth, 7))
+    let bottom = held.contains(links(depth, 9))
+    let shorter = held.contains(links(depth - 1, 7))
+    println("chain.{depth} length {held.length()} equal {equal} bottom {bottom} shorter {shorter}")?
+  }
+  Ok(())
+}
+
 export fn main() -> Result<Unit, Error> {
   namesRow()?
   genericRows()?
@@ -243,5 +283,6 @@ export fn main() -> Result<Unit, Error> {
   rangeRow()?
   staticRow()?
   deepRows()?
+  chainRows()?
   Ok(())
 }

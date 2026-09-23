@@ -324,8 +324,10 @@ impl Intrinsic {
 
             // ADR 0059's last keyed intrinsic. The admission walks a key as
             // deep as it nests, allocates nothing and answers nothing, and
-            // raises — a key too deep to walk, and a key the language refuses,
-            // in the method's words. (The order stood beside it, answering one
+            // raises a key the language refuses, in the method's words — with
+            // no depth bound since ADR 0068's Phase 3, which decides a boxed
+            // key in Cove, `std.dynamic.refusesKey`, and asks this only to word
+            // the refusal it found. (The order stood beside it, answering one
             // `Int` word, until ADR 0068's Phase 3 made it
             // `std.dynamic.order`, a Cove loop over a view of each box with no
             // depth bound; the duplicate refusal is `std.set.of`'s and

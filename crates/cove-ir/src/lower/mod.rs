@@ -1239,6 +1239,12 @@ struct Pool {
     /// where it reaches a boxed part — [`Pool::dynamic_equals`]' arrangement,
     /// filled in by `Body::dynamic_order`.
     dynamic_order: Option<FunctionId>,
+    /// `std.dynamic.refusesKey`, once a call site has resolved it: what
+    /// `core.admitKey` over an erased key calls to decide, and what an
+    /// admission walk calls where it reaches a boxed part —
+    /// [`Pool::dynamic_equals`]' arrangement, filled in by
+    /// `Body::dynamic_refuses_key`.
+    dynamic_refuses_key: Option<FunctionId>,
     /// The instantiations being lowered right now, outermost first.
     ///
     /// A chain rather than a count, because what a program that exceeds the
@@ -1282,6 +1288,7 @@ impl Pool {
             leaves: None,
             dynamic_equals: None,
             dynamic_order: None,
+            dynamic_refuses_key: None,
             open: Vec::new(),
         }
     }

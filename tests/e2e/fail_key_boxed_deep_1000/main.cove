@@ -1,0 +1,58 @@
+use console.println
+
+/// `fail_key_boxed_deep_200`'s key, a thousand links deep: the admission
+/// refuses it and names the field, a thousand `.next`s down.
+///
+/// Deep enough that a walk which recursed per link would be leaning on
+/// whatever native stack it happened to be given. Neither does: since ADR
+/// 0068's Phase 3 `std.dynamic.refusesKey` decides a boxed key over one
+/// explicit stack of views, and the Rust walk that words the refusal is a loop
+/// over one of its own.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Link {
+  next: dyn Summary
+}
+
+struct Reading {
+  label: String
+  weight: Float
+}
+
+impl Summary for Link {
+  fn summarize(self) -> String {
+    "link"
+  }
+}
+
+impl Summary for Reading {
+  fn summarize(self) -> String {
+    self.label
+  }
+}
+
+/// `depth` links, each holding only the one inside it, around a `Reading`.
+fn links(depth: Int) -> dyn Summary {
+  var built: dyn Summary = Reading(label: "a", weight: 1.5)
+  var at = 0
+  while at < depth {
+    built = Link(next: built)
+    at = at + 1
+  }
+  built
+}
+
+fn admitDeep() -> Result<Unit, Error> {
+  let held = links(1000)
+  let keyed = Set.of(held)
+  println("never printed {keyed.length()}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed key 1000 links deep as a set element")?
+  admitDeep()?
+  Ok(())
+}

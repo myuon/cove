@@ -1,0 +1,61 @@
+use console.println
+
+/// A boxed key two hundred links deep whose bottom holds a `Float`, used as a
+/// set element: the admission refuses it and names the field, two hundred
+/// `.next`s down.
+///
+/// Past the linear-memory backend's old bound. The Rust walk that decided and
+/// worded a boxed key stopped at 128 steps, of which a link took two, and
+/// said "this value nests too deeply to compare" where the interpreter named
+/// the `Float`. Since ADR 0068's Phase 3 `std.dynamic.refusesKey` decides the
+/// key in Cove with no nesting bound, and the Rust walk that still words the
+/// refusal lost its bound with it, so both evaluators say the sentence below.
+/// `fail_key_boxed_deep_1000` is the same key five times deeper.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Link {
+  next: dyn Summary
+}
+
+struct Reading {
+  label: String
+  weight: Float
+}
+
+impl Summary for Link {
+  fn summarize(self) -> String {
+    "link"
+  }
+}
+
+impl Summary for Reading {
+  fn summarize(self) -> String {
+    self.label
+  }
+}
+
+/// `depth` links, each holding only the one inside it, around a `Reading`.
+fn links(depth: Int) -> dyn Summary {
+  var built: dyn Summary = Reading(label: "a", weight: 1.5)
+  var at = 0
+  while at < depth {
+    built = Link(next: built)
+    at = at + 1
+  }
+  built
+}
+
+fn admitDeep() -> Result<Unit, Error> {
+  let held = links(200)
+  let keyed = Set.of(held)
+  println("never printed {keyed.length()}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed key 200 links deep as a set element")?
+  admitDeep()?
+  Ok(())
+}

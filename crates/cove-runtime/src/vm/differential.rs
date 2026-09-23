@@ -5139,3 +5139,257 @@ fn dynamic_order_allocates_only_to_descend() {
         "objects allocated by one order"
     );
 }
+
+/// [`REFLECTED_KINDS`]' families and the few more an admission refuses from
+/// inside: a `Float` as a map's value, in an `Option` and in an `Array`, and a
+/// `Vector` in an `Array` and as a map's value — so that the machine's layout
+/// table has one to box each of [`reflected_admissions`]' values at.
+///
+/// Nothing here runs, for [`REFLECTED_KINDS`]' reason.
+const REFLECTED_ADMISSION_LAYOUTS: &str = "
+export fn admissions(a: Map<Int, Float>, b: Option<Float>, c: Array<Float>, d: Array<Vector<Int>>, e: Map<String, Vector<Int>>, f: Option<dyn Probed>) -> Int {
+  0
+}
+";
+
+/// Every value [`dynamic_key_refusal_agrees_with_map_key_on_every_kind`] asks
+/// the admission about over [`REFLECTED_KINDS`]: [`reflected_values`], which
+/// has a `Float`, a `Vector`, a function-free opaque struct and a `Holder`
+/// refused for both of the parts a key cannot hold, then each of the `Holder`'s
+/// near misses, and then a refused part at each place a walk has to look for
+/// one — a map's value, an option's payload, an array's element, a boxed field —
+/// beside the same places holding a key.
+fn reflected_admissions() -> Vec<(String, Value)> {
+    use crate::value::MapKey;
+    let mut values = reflected_values();
+    for leaf in 0..REFLECTED_LEAVES {
+        values.push((format!("holder miss {leaf}"), reflected_holder(Some(leaf))));
+    }
+    let vector = || reflected_vector(vec![Value::int(1)]);
+    values.extend([
+        (
+            "map 7 float".to_string(),
+            Value::map([(MapKey::Int(7), Value::float(1.5))]),
+        ),
+        (
+            "map a vector".to_string(),
+            Value::map([(MapKey::Str("a".to_string()), vector())]),
+        ),
+        ("some float".to_string(), Value::some(Value::float(1.5))),
+        (
+            "array floats".to_string(),
+            Value::array([Value::float(1.5)]),
+        ),
+        ("array vectors".to_string(), Value::array([vector()])),
+        ("array no vectors".to_string(), Value::array([])),
+        (
+            "some dyn point".to_string(),
+            Value::some(reflected_dyn(reflected_point(1, 2))),
+        ),
+    ]);
+    values
+}
+
+/// **`std.dynamic.refusesKey` refuses exactly what `MapKey::from_value`
+/// refuses, on both evaluators, for every kind and every place a refused part
+/// can be.**
+///
+/// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 3 moves the *decision* of `Value.admitKey` over an erased key into
+/// Cove, and leaves the Rust walk only to word the refusal the decision found.
+/// So the reference is the oracle's own: whether `MapKey::from_value` converts
+/// the value, which is what every `Set` and `Map` on the interpreter asks. The
+/// function is run three ways over each value, as
+/// [`dynamic_order_agrees_with_map_key_on_every_kind`] runs the order: on the
+/// oracle, on the machine with the value boxed at the boundary, and against
+/// the conversion.
+///
+/// Twice over: [`reflected_admissions`] over [`REFLECTED_KINDS`], where most
+/// values hold something refused, and [`reflected_keys`] over
+/// [`REFLECTED_KEYS`], where every value is a key.
+#[test]
+fn dynamic_key_refusal_agrees_with_map_key_on_every_kind() {
+    type Values = fn() -> Vec<(String, Value)>;
+    fn answers(source: String, values: Values, on_machine: bool) -> Vec<String> {
+        let (sources, program) = checked(&source);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let mut lines = Vec::new();
+        if on_machine {
+            let ir = lowered(&sources, &program);
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            let mut vm = Vm::new(&runtime, &hosts, &ir);
+            for (label, value) in values() {
+                let said = said(vm.invoke("std.dynamic", "refusesKey", vec![value]));
+                lines.push(format!("{label}: {said:?}"));
+            }
+        } else {
+            use crate::value::MapKey;
+            let runtime = Runtime::new(program, sources, hosts);
+            let mut interp = Interpreter::new(&runtime);
+            for (label, value) in values() {
+                let reference = MapKey::from_value(&value).is_err();
+                let said = said(interp.invoke("std.dynamic", "refusesKey", vec![value]));
+                assert_eq!(
+                    said,
+                    Answer::Value(reference.to_string()),
+                    "`std.dynamic.refusesKey` on the oracle against `MapKey::from_value`: {label}"
+                );
+                lines.push(format!("{label}: {said:?}"));
+            }
+        }
+        lines
+    }
+    let runs: [(String, Values); 2] = [
+        (
+            format!("{REFLECTED_KINDS}{REFLECTED_ADMISSION_LAYOUTS}"),
+            reflected_admissions,
+        ),
+        (REFLECTED_KEYS.to_string(), reflected_keys),
+    ];
+    let mut all = Vec::new();
+    for (source, values) in runs {
+        let oracle = {
+            let source = source.clone();
+            on_a_deep_stack(move || answers(source, values, false))
+        };
+        let machine = on_a_deep_stack(move || answers(source, values, true));
+        assert_eq!(oracle.len(), machine.len());
+        for (oracle, machine) in oracle.iter().zip(&machine) {
+            assert_eq!(machine, oracle, "the machine against the oracle");
+        }
+        all.extend(oracle);
+    }
+    // The corpus is not vacuous: each place a refused part can be is refused,
+    // each of the same places holding a key is admitted, and every key of the
+    // order's corpus is one.
+    for wanted in [
+        "float 3: Value(\"true\")",
+        "float nan: Value(\"true\")",
+        "vector empty: Value(\"true\")",
+        "vector named: Value(\"true\")",
+        "holder: Value(\"true\")",
+        "map 7 float: Value(\"true\")",
+        "map a vector: Value(\"true\")",
+        "some float: Value(\"true\")",
+        "array floats: Value(\"true\")",
+        "array vectors: Value(\"true\")",
+        "array no vectors: Value(\"false\")",
+        "some dyn point: Value(\"false\")",
+        "set 1 2: Value(\"false\")",
+        "map a1: Value(\"false\")",
+        "range 1...4: Value(\"false\")",
+        "secret: Value(\"false\")",
+        "some point: Value(\"false\")",
+        "keyed: Value(\"false\")",
+        "point dyn: Value(\"false\")",
+    ] {
+        assert!(all.iter().any(|said| said == wanted), "{wanted}");
+    }
+    assert!(
+        !all.iter()
+            .any(|said| said.starts_with("keyed") && said.ends_with("Value(\"true\")")),
+        "a `Keyed` is a key: {all:?}"
+    );
+}
+
+/// A second file in `std.dynamic` that decides one key `n` times: a library
+/// file, because a program cannot name the function.
+const REFLECTED_REFUSES_REPEAT: &str = "
+/// How many of `n` admissions of `key` refuse it.
+export fn probeRefusesRepeat(key: Any, n: Int) -> Int {
+  var refused = 0
+  var at = 0
+  while at < n {
+    if refusesKey(key) {
+      refused = refused + 1
+    }
+    at = at + 1
+  }
+  refused
+}
+";
+
+/// **Deciding a boxed leaf allocates nothing**, and neither does deciding a key
+/// one level deep: `std.dynamic.refusesKey` makes its one stack only at the
+/// first part that has parts of its own.
+///
+/// [`dynamic_order_allocates_only_to_descend`]'s measurement, over
+/// [`REFLECTED_REFUSES_REPEAT`]: two runs over the same key, one deciding it ten
+/// times and one not at all, and the difference of the machine's own allocation
+/// counter, per decision. A key that really nests pays for its one stack once
+/// per decision, however deep it goes — one vector, an owner and a store, two
+/// objects. It is made with room for the root's parts and the first nesting
+/// part's together, which for the `Keyed` is room enough for the whole walk: a
+/// part popped makes room for its own before they go on, so the store never
+/// grows.
+#[test]
+fn dynamic_key_refusal_allocates_only_to_descend() {
+    /// A key to decide, made afresh for each run.
+    type Made = fn() -> Value;
+    fn allocated() -> Vec<(String, u64)> {
+        let (sources, program) =
+            checked_with_probe(REFLECTED_KEYS, "std.dynamic", REFLECTED_REFUSES_REPEAT);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let ir = lowered(&sources, &program);
+        let runtime = Runtime::new(program, sources, hosts.clone());
+        let rows: Vec<(&str, Made)> = vec![
+            ("int", || Value::int(3)),
+            ("string", || Value::string("s")),
+            ("unit", Value::unit),
+            ("none", Value::none),
+            ("point", || reflected_point(1, 2)),
+            ("array", || Value::array([Value::int(1), Value::int(2)])),
+            ("some", || Value::some(Value::int(1))),
+            ("range", || Value::range_of(1, 4, true)),
+            ("set", || {
+                Value::set([crate::value::MapKey::Int(1), crate::value::MapKey::Int(2)])
+            }),
+            ("map", || {
+                Value::map([(crate::value::MapKey::Str("a".to_string()), Value::int(1))])
+            }),
+            ("keyed", || reflected_keyed(None)),
+        ];
+        let mut out = Vec::new();
+        for (label, make) in rows {
+            let mut spent = Vec::new();
+            for turns in [0, 10] {
+                let mut vm = Vm::new(&runtime, &hosts, &ir);
+                let answer = vm.invoke(
+                    "std.dynamic",
+                    "probeRefusesRepeat",
+                    vec![make(), Value::int(turns)],
+                );
+                assert_eq!(
+                    answer.map(|value| value.as_int()).ok(),
+                    Some(Some(0)),
+                    "{label}: a key is admitted"
+                );
+                spent.push(vm.allocations());
+            }
+            out.push((label.to_string(), (spent[1] - spent[0]) / 10));
+        }
+        out
+    }
+    let counted = on_a_deep_stack(allocated);
+    let per_call: Vec<(&str, u64)> = counted
+        .iter()
+        .map(|(label, count)| (label.as_str(), *count))
+        .collect();
+    assert_eq!(
+        per_call,
+        [
+            ("int", 0),
+            ("string", 0),
+            ("unit", 0),
+            ("none", 0),
+            ("point", 0),
+            ("array", 0),
+            ("some", 0),
+            ("range", 0),
+            ("set", 0),
+            ("map", 0),
+            ("keyed", 2),
+        ],
+        "objects allocated by one decision"
+    );
+}

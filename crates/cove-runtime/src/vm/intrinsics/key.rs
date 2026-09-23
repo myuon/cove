@@ -111,6 +111,17 @@
 //! otherwise. `admitKey` walks twice when it refuses — once with nothing to
 //! name and once to build the path — and is charged for both, because it
 //! really did walk twice.
+//!
+//! # The admission has no nesting bound
+//!
+//! [`order`] stops at [`super::MAX_DEPTH`], and is asked only by this crate's
+//! tests. [`admits`] does not: it is a loop over a stack, so a key refused a
+//! thousand levels down is refused with the sentence the oracle words, where
+//! it once said the key "nests too deeply to compare". Since [ADR
+//! 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+//! Phase 3 decides a boxed key in Cove, `std.dynamic.refusesKey`, with no
+//! bound either, a bound left here would have been one this evaluator alone
+//! had on the path that words the refusal.
 
 #[cfg(test)]
 use std::cmp::Ordering;
@@ -186,11 +197,8 @@ pub(super) fn check(
 ) -> Result<(), RuntimeError> {
     admits(
         machine,
-        method,
-        role,
-        None,
+        Some((method, role)),
         Key::Held(operand.layout, operand.words),
-        0,
     )
 }
 
@@ -207,7 +215,7 @@ pub(super) fn check_value(
     layout: LayoutId,
     words: &[u64],
 ) -> Result<(), RuntimeError> {
-    admits(machine, method, role, None, Key::Held(layout, words), 0)
+    admits(machine, Some((method, role)), Key::Held(layout, words))
 }
 
 /// Where the value `a` sorts relative to the value `b`, both of `layout`.
@@ -272,6 +280,15 @@ fn cmp_held(
 /// asked once with nothing to name, and asked again with the names only when
 /// it failed. It is the same walk over the same words both times, so the
 /// second answers the refusal the first found.
+///
+/// Where the key's layout says which of its values are keys, and where it is
+/// a box, the lowering asks this only under a branch on a walk that already
+/// decided the key is refused — a walk it composed for the layout, or
+/// `std.dynamic.refusesKey` for a box ([ADR
+/// 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 3) — so there the first walk only finds again what Cove found, and
+/// the run ends on the second. It decides for itself only where the layout
+/// holds itself or nests past what a walk is composed for.
 pub(super) fn admit_key(
     machine: &mut Machine,
     frame: Frame<'_>,
@@ -281,12 +298,12 @@ pub(super) fn admit_key(
         let machine = &*machine;
         let key = frame.operand(machine, 0);
         let held = Key::Held(key.layout, key.words);
-        if admits(machine, "", "", None, held, 0).is_err() {
+        if admits(machine, None, held).is_err() {
             let text = |at: usize| {
                 String::from_utf8_lossy(&machine.string_bytes(frame.word(machine, at))).into_owned()
             };
             let (method, role) = (text(1), text(2));
-            admits(machine, &method, &role, None, held, 0)?;
+            admits(machine, Some((&method, &role)), held)?;
         }
     }
     dest.word(machine, 0);
@@ -435,34 +452,181 @@ fn run(words: &[u64], at: u32, width: u32) -> &[u64] {
 
 // --- admitting a key -------------------------------------------------------
 
-/// `anchor` is the path to this value from the one that was asked about, so
-/// that a refusal several levels down names the part that is wrong rather
-/// than blaming the whole struct. `None` at the root: a bare value has no name
-/// to anchor a path to, and a struct or an enum invents one from its own type
-/// name the first time a path is needed.
-fn admits(
+/// What a refusal is worded with: `core.admitKey`'s method and role.
+///
+/// `None` is the first of [`admit_key`]'s two walks, which only decides: it
+/// builds no path and renders no map key, so a key it admits costs no string
+/// at all.
+type Names<'n> = Option<(&'n str, &'n str)>;
+
+/// The path to one part still to be admitted, from the value that was asked
+/// about.
+enum Anchor {
+    /// The root, where a bare value has no name to anchor a path to and a
+    /// struct or an enum invents one from its own type name the first time a
+    /// path is needed — and every part of a walk that only decides.
+    Root,
+    /// A path already written.
+    Named(String),
+    /// A map's value, named by its entry's key as that key renders: `base`,
+    /// then `[{key}]`. The key is rendered only when the value is reached,
+    /// which is where the recursive walk this replaced rendered it, so a
+    /// refusal found earlier renders none of the keys after it.
+    Entry {
+        base: String,
+        key: LayoutId,
+        words: Vec<u64>,
+    },
+}
+
+/// One entry of [`admits`]' stack: a value, or where a run is up to.
+///
+/// A run is a cursor rather than its elements pushed at once, so that the
+/// stack holds one entry a run however long it is — the walk is depth first,
+/// and an element's own parts are finished before the cursor is read again.
+enum Pending {
+    /// One value, and the path to it.
+    One(Anchor, Step),
+    /// An array's elements from `at` on, of `len` in all, each of `elem`.
+    /// `base` is the path the array is at, when there is one to write.
+    Elements {
+        addr: u64,
+        elem: LayoutId,
+        at: u32,
+        len: u32,
+        base: Option<String>,
+    },
+    /// A map's values from entry `at` on, of `len` in all.
+    Values {
+        addr: u64,
+        pairs: Pairs,
+        at: u32,
+        len: u32,
+        base: Option<String>,
+    },
+}
+
+impl Step {
+    /// The step that is `key`, owned.
+    fn of(key: Key) -> Step {
+        match key {
+            Key::Word(repr, word) => Step::Word(repr, word),
+            Key::Held(layout, words) => Step::Held(layout, words.to_vec()),
+        }
+    }
+}
+
+/// Whether `key` may be a key, and when it may not, the refusal worded with
+/// `names`, naming the part that is wrong rather than blaming the whole value.
+///
+/// # There is no nesting bound
+///
+/// A loop over an explicit stack, depth first and left to right — which is
+/// the order `MapKey::convert` visits in, so the part named is the one the
+/// oracle names — and never a recursion. So a key nested ten thousand deep is
+/// refused in the words it would be refused in at ten, and is admitted where
+/// the oracle admits it, rather than stopping at a bound only this evaluator
+/// had (issue #480's decision, which ADR 0068's Phase 3 carried here). What
+/// bounds it is the work it reports through [`Machine::examined`], one unit a
+/// value, as before.
+///
+/// A key cannot hold itself: the one node that could close a cycle is a
+/// `Vector`, and this refuses the first one it meets without looking inside
+/// (issue #493). A heap graph that went round anyway would be one no program
+/// can build.
+fn admits(machine: &Machine, names: Names<'_>, key: Key) -> Result<(), RuntimeError> {
+    let mut pending = vec![Pending::One(Anchor::Root, Step::of(key))];
+    while let Some(top) = pending.last_mut() {
+        let (anchor, step) = match top {
+            Pending::One(..) => match pending.pop() {
+                Some(Pending::One(anchor, step)) => (anchor, step),
+                _ => unreachable!("the top of the stack was a value a moment ago"),
+            },
+            Pending::Elements {
+                addr,
+                elem,
+                at,
+                len,
+                base,
+            } => {
+                if *at == *len {
+                    pending.pop();
+                    continue;
+                }
+                let index = *at;
+                *at += 1;
+                let anchor = match base {
+                    Some(base) => Anchor::Named(format!("{base}[{index}]")),
+                    None => Anchor::Root,
+                };
+                (
+                    anchor,
+                    Step::Held(*elem, element(machine, *addr, *elem, index)),
+                )
+            }
+            Pending::Values {
+                addr,
+                pairs,
+                at,
+                len,
+                base,
+            } => {
+                if *at == *len {
+                    pending.pop();
+                    continue;
+                }
+                let index = *at;
+                *at += 1;
+                let anchor = match base {
+                    Some(base) => Anchor::Entry {
+                        base: base.clone(),
+                        key: pairs.key,
+                        words: pairs.key_words(machine, *addr, index),
+                    },
+                    None => Anchor::Root,
+                };
+                let value = pairs.value_words(machine, *addr, index);
+                (anchor, Step::Held(pairs.value, value))
+            }
+        };
+        let anchor = match anchor {
+            Anchor::Root => None,
+            Anchor::Named(path) => Some(path),
+            Anchor::Entry { base, key, words } => {
+                let mut shown = String::new();
+                render_value(machine, key, &words, 0, &mut shown)?;
+                Some(format!("{base}[{shown}]"))
+            }
+        };
+        admit_one(machine, names, anchor.as_deref(), step, &mut pending)?;
+    }
+    Ok(())
+}
+
+/// One value popped off [`admits`]' stack: looked through to a family, and
+/// then admitted outright, refused, or its parts pushed.
+fn admit_one(
     machine: &Machine,
-    method: &str,
-    role: &str,
+    names: Names<'_>,
     anchor: Option<&str>,
-    key: Key,
-    depth: usize,
+    step: Step,
+    pending: &mut Vec<Pending>,
 ) -> Result<(), RuntimeError> {
-    // One value visited. `admits_object` and `admits_value` are reached only
-    // from here and reach every element, field and part back through here, so
-    // one report here is one per value and no value twice.
+    // One value visited, and one more for every description looked through,
+    // which is what the recursion this replaced reported: every element,
+    // field and part is pushed and popped once, so one report here is one per
+    // value and no value twice.
     machine.examined(1);
-    if depth >= super::MAX_DEPTH {
-        return Err(equal::too_deep());
+    let mut step = step;
+    while let Some(next) = inward(machine, step.key())? {
+        machine.examined(1);
+        step = next;
     }
-    let deeper = depth + 1;
-    if let Some(step) = inward(machine, key)? {
-        return admits(machine, method, role, anchor, step.key(), deeper);
-    }
-    match key {
+    let (method, role) = names.unwrap_or(("", ""));
+    match step.key() {
         Key::Word(repr, word) => match repr {
             Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration => Ok(()),
-            Repr::Ref => admits_object(machine, method, role, anchor, word, deeper),
+            Repr::Ref => admit_object(machine, names, anchor, word, pending),
             // Every other `Repr` is refused by the name the language gives it,
             // which for a `Float` is the one rejection with a rule of its own.
             _ => Err(refused(
@@ -472,29 +636,29 @@ fn admits(
                 &operand::type_name(machine, repr, word),
             )),
         },
-        Key::Held(layout, words) => {
-            admits_value(machine, method, role, anchor, layout, words, deeper)
-        }
+        Key::Held(layout, words) => admit_value(machine, names, anchor, layout, words, pending),
     }
 }
 
-/// Whether the object at `addr` may be a key.
+/// Whether the object at `addr` may be a key, and its parts pushed where that
+/// depends on them.
 ///
 /// Only the families that *live in* the heap reach this. A struct and an enum
 /// are inline, so [`inward`] has already turned an address naming one into
 /// the words it holds.
-fn admits_object(
+fn admit_object(
     machine: &Machine,
-    method: &str,
-    role: &str,
+    names: Names<'_>,
     anchor: Option<&str>,
     addr: u64,
-    depth: usize,
+    pending: &mut Vec<Pending>,
 ) -> Result<(), RuntimeError> {
     if addr == 0 {
         return Err(operand::null_value());
     }
     let layout = machine.program().layout(machine.object_layout(addr));
+    // The path the parts are at, where there is one to write.
+    let base = || names.map(|_| path(anchor, String::new));
     match &layout.shape {
         Shape::Str => Ok(()),
         Shape::Free => Err(operand::reclaimed()),
@@ -505,19 +669,13 @@ fn admits_object(
             elem,
             growable: false,
         } => {
-            let base = path(anchor, String::new);
-            for at in 0..machine.object_len(addr) {
-                let words = element(machine, addr, *elem, at);
-                let anchor = format!("{base}[{at}]");
-                admits(
-                    machine,
-                    method,
-                    role,
-                    Some(&anchor),
-                    Key::Held(*elem, &words),
-                    depth,
-                )?;
-            }
+            pending.push(Pending::Elements {
+                addr,
+                elem: *elem,
+                at: 0,
+                len: machine.object_len(addr),
+                base: base(),
+            });
             Ok(())
         }
         // A set's members are keys by construction, so nesting one never
@@ -528,46 +686,40 @@ fn admits_object(
         // a key can still fail. The path names the entry by its key, exactly
         // as the key would render anywhere else.
         Shape::Entries { .. } => {
-            let pairs = pairs_of(machine, addr);
-            let base = path(anchor, String::new);
-            for at in 0..machine.object_len(addr) {
-                let key = pairs.key_words(machine, addr, at);
-                let mut shown = String::new();
-                render_value(machine, pairs.key, &key, 0, &mut shown)?;
-                let value = pairs.value_words(machine, addr, at);
-                let anchor = format!("{base}[{shown}]");
-                admits(
-                    machine,
-                    method,
-                    role,
-                    Some(&anchor),
-                    Key::Held(pairs.value, &value),
-                    depth,
-                )?;
-            }
+            pending.push(Pending::Values {
+                addr,
+                pairs: pairs_of(machine, addr),
+                at: 0,
+                len: machine.object_len(addr),
+                base: base(),
+            });
             Ok(())
         }
-        _ => Err(refused(
-            method,
-            role,
-            anchor,
-            &operand::type_name(machine, Repr::Ref, addr),
-        )),
+        _ => {
+            let (method, role) = names.unwrap_or(("", ""));
+            Err(refused(
+                method,
+                role,
+                anchor,
+                &operand::type_name(machine, Repr::Ref, addr),
+            ))
+        }
     }
 }
 
-/// Whether the value `words`, read as `layout`, may be a key.
+/// Whether the value `words`, read as `layout`, may be a key, and its parts
+/// pushed where that depends on them.
 ///
 /// Only the inline families reach this: a layout that describes a value
-/// living in the heap has already reduced to the address it holds.
-fn admits_value(
+/// living in the heap has already reduced to the address it holds. The parts
+/// go on last first, so that the first is the first popped.
+fn admit_value(
     machine: &Machine,
-    method: &str,
-    role: &str,
+    names: Names<'_>,
     anchor: Option<&str>,
     layout: LayoutId,
     words: &[u64],
-    depth: usize,
+    pending: &mut Vec<Pending>,
 ) -> Result<(), RuntimeError> {
     let program = machine.program();
     let described = program.layout(layout);
@@ -576,17 +728,17 @@ fn admits_value(
         // key like any other and there is nothing inside it to walk.
         Shape::Struct { .. } if is_range(program, described) => Ok(()),
         Shape::Struct { fields, .. } => {
-            let base = path(anchor, || short(declared_name(&described.name)).to_string());
-            for field in fields {
-                let anchor = format!("{base}.{}", field.name);
-                admits(
-                    machine,
-                    method,
-                    role,
-                    Some(&anchor),
-                    field_of(program, words, field),
-                    depth,
-                )?;
+            let base =
+                names.map(|_| path(anchor, || short(declared_name(&described.name)).to_string()));
+            for field in fields.iter().rev() {
+                let anchor = match &base {
+                    Some(base) => Anchor::Named(format!("{base}.{}", field.name)),
+                    None => Anchor::Root,
+                };
+                pending.push(Pending::One(
+                    anchor,
+                    Step::of(field_of(program, words, field)),
+                ));
             }
             Ok(())
         }
@@ -595,34 +747,40 @@ fn admits_value(
             let case = cases
                 .get(index as usize)
                 .ok_or_else(|| wrong_case(&described.name))?;
-            let base = path(anchor, || {
-                format!("{}.{}", short(declared_name(&described.name)), case.name)
+            let base = names.map(|_| {
+                path(anchor, || {
+                    format!("{}.{}", short(declared_name(&described.name)), case.name)
+                })
             });
-            for (at, part) in case.parts.iter().enumerate() {
-                let anchor = format!("{base}({at})");
-                admits(
-                    machine,
-                    method,
-                    role,
-                    Some(&anchor),
-                    part_of(program, words, part),
-                    depth,
-                )?;
+            for (at, part) in case.parts.iter().enumerate().rev() {
+                let anchor = match &base {
+                    Some(base) => Anchor::Named(format!("{base}({at})")),
+                    None => Anchor::Root,
+                };
+                pending.push(Pending::One(
+                    anchor,
+                    Step::of(part_of(program, words, part)),
+                ));
             }
             Ok(())
         }
         Shape::Free => Err(operand::reclaimed()),
-        _ => Err(refused(
-            method,
-            role,
-            anchor,
-            &operand::layout_name(
-                machine,
-                layout,
-                words.first().copied().unwrap_or_default(),
-                depth,
-            ),
-        )),
+        _ => {
+            let (method, role) = names.unwrap_or(("", ""));
+            // Named at depth nought: a value's name is its own layout's, and
+            // how deep in the key it sits says nothing about it.
+            Err(refused(
+                method,
+                role,
+                anchor,
+                &operand::layout_name(
+                    machine,
+                    layout,
+                    words.first().copied().unwrap_or_default(),
+                    0,
+                ),
+            ))
+        }
     }
 }
 
@@ -1494,7 +1652,15 @@ mod tests {
     }
 
     /// An object that holds itself is a legal heap graph and not a legal
-    /// key, so both halves stop rather than running out of native stack.
+    /// key, so the order stops rather than running out of native stack.
+    ///
+    /// This asked the admission too until ADR 0068's Phase 3 took its nesting
+    /// bound away, and the admission has no answer to give it now: an `Array`
+    /// that holds itself is one no program can build — a key can reach itself
+    /// only through a `Vector`, which the admission refuses without looking
+    /// inside — and a walk with no bound walks it for as long as it is let.
+    /// [`a_key_ten_thousand_deep_is_worded_rather_than_bounded`] is what the
+    /// admission is held to instead.
     #[test]
     fn a_cycle_stops_rather_than_recursing_forever() {
         let program = world();
@@ -1504,8 +1670,6 @@ mod tests {
         machine.set_payload(a, 0, a);
         let b = array(&mut machine, text, &[0]);
         machine.set_payload(b, 0, b);
-        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &a)).unwrap_err();
-        assert_eq!(error.message, "this value nests too deeply to compare");
         let error = order(
             &machine,
             Key::Word(Repr::Ref, a),
@@ -1514,6 +1678,50 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "this value nests too deeply to compare");
+    }
+
+    /// A key nested ten thousand arrays deep is admitted, and refused in the
+    /// words the oracle uses, rather than stopped by a depth.
+    ///
+    /// The admission is a loop over a stack since ADR 0068's Phase 3, and the
+    /// bound it had — 128 steps, which "nests too deeply to compare" — is
+    /// gone, because `std.dynamic.refusesKey` decides a boxed key with none
+    /// and a refusal it finds is worded here. So this is the case a recursion
+    /// would have overflowed the native stack at, on a test thread's stack.
+    ///
+    /// The chain is arrays whose one element is the next array, each at the
+    /// `String` layout's one-word width, and whose last holds a box: a `Float`
+    /// in it is refused at the bottom, with a path of ten thousand `[0]`s, and
+    /// an `Int` in it admits the whole key.
+    #[test]
+    fn a_key_ten_thousand_deep_is_worded_rather_than_bounded() {
+        const DEPTH: usize = 10_000;
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 20);
+        let text = program.str_layout;
+        let chain = |machine: &mut Machine, bottom: u64| {
+            let mut held = bottom;
+            for _ in 0..DEPTH {
+                held = array(machine, text, &[held]);
+            }
+            held
+        };
+        let float = scalar(&program, Repr::Float);
+        let refused = boxed(&mut machine, float, &[1.5f64.to_bits()]);
+        let top = chain(&mut machine, refused);
+        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &top)).unwrap_err();
+        assert_eq!(
+            error.message,
+            format!(
+                "`Set.of` cannot use a `Float` inside `{}` as a set element",
+                "[0]".repeat(DEPTH)
+            )
+        );
+
+        let int = scalar(&program, Repr::Int);
+        let admitted = boxed(&mut machine, int, &[7]);
+        let top = chain(&mut machine, admitted);
+        check(&machine, "Set.of", SET_ELEMENT, object(&machine, &top)).unwrap();
     }
 
     /// The two things only this representation can go wrong at.
