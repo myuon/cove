@@ -140,6 +140,12 @@ allow = []
 entry = "stringlib.parseRows"
 allow = ["console", "clock"]
 
+# `Int.parseRadix`'s matrix, which issue #454's Step 4 added when it moved that
+# method into `std.int`; run by hand, as `[run.parse_rows]` is.
+[run.parse_radix_rows]
+entry = "stringlib.parseRadixRows"
+allow = ["console", "clock"]
+
 # What one `Inst::IntrinsicCall` costs, decomposed. Three loops over the same
 # 2,000,000 turns as `arith`, each with exactly one builtin in it, and a
 # fourth with none: the difference between the bare loop and one of the others

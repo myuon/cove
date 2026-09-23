@@ -404,6 +404,116 @@ fn parseHits(text: String, expected: Int, rounds: Int) -> Int {
   hits
 }
 
+/// `Int.parseRadix`'s rows: `parseRows`' matrix over the radixes that change
+/// what a digit is.
+///
+/// Issue #454's Step 4 moved `parseRadix` out of Rust after `parse`, and these
+/// are the rows it was measured on — the same program before and after, so the
+/// difference is the operation and not the harness. Run by hand, as
+/// `parse_rows` is:
+///
+/// - **length, in three radixes.** `hex.two` and `hex.most` are two and
+///   sixteen hex digits, `binary.most` is sixty-three binary digits and
+///   `base36.most` thirteen; each is `Ok`, and each `most` is `Int`'s largest.
+///   A binary number is the longest text an `Int` can be written in, so it is
+///   the row a per-digit cost shows in first;
+/// - **the least `Int`** in hex, the one input a body that built the magnitude
+///   positively would trap on rather than answer;
+/// - **letters of both cases.** `hex.upper` is `hex.most` in capitals, so a
+///   difference between the two is what the second case range costs;
+/// - **decimal**, which is `parseRows`' `seven` asked through `parseRadix`, so
+///   the two methods can be read against each other on one input;
+/// - **the refusals**, each of which allocates its message: `empty` and `sign`
+///   before the loop, `digit.head` and `digit.tail` on the first byte of it and
+///   the last, and `over` on the seventeenth hex digit.
+///
+/// Each row is `parseTurns()` calls with the bare loop subtracted.
+export fn parseRadixRows() -> Result<Unit, Error> {
+  let rounds = parseTurns()
+  let least = -9223372036854775807 - 1
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let hexTwo = radixRow("ff", 16, 255, rounds)
+  let hexMost = radixRow("7fffffffffffffff", 16, 9223372036854775807, rounds)
+  let hexUpper = radixRow("7FFFFFFFFFFFFFFF", 16, 9223372036854775807, rounds)
+  let hexLeast = radixRow("-8000000000000000", 16, least, rounds)
+  let binaryMost = radixRow(
+    "111111111111111111111111111111111111111111111111111111111111111",
+    2,
+    9223372036854775807,
+    rounds,
+  )
+  let base36Most = radixRow("1y2p0ij32e8e7", 36, 9223372036854775807, rounds)
+  let decimal = radixRow("-1234567", 10, -1234567, rounds)
+  let emptied = radixRow("", 16, 0, rounds)
+  let sign = radixRow("-", 16, 0, rounds)
+  let digitHead = radixRow("g0000000", 16, 0, rounds)
+  let digitTail = radixRow("0000000g", 16, 0, rounds)
+  let over = radixRow("8000000000000000", 16, 0, rounds)
+
+  // What each row answered, checked before any of it is read as a timing, for
+  // `parseRows`' reason.
+  assertEqual(bare, rounds)?
+  assertEqual(hexTwo.hits, rounds)?
+  assertEqual(hexMost.hits, rounds)?
+  assertEqual(hexUpper.hits, rounds)?
+  assertEqual(hexLeast.hits, rounds)?
+  assertEqual(binaryMost.hits, rounds)?
+  assertEqual(base36Most.hits, rounds)?
+  assertEqual(decimal.hits, rounds)?
+  assertEqual(emptied.hits, -rounds)?
+  assertEqual(sign.hits, -rounds)?
+  assertEqual(digitHead.hits, -rounds)?
+  assertEqual(digitTail.hits, -rounds)?
+  assertEqual(over.hits, -rounds)?
+
+  let per = fn(row: ParseRow) {
+    (row.micros - bareMicros) * 1000 / rounds
+  }
+  println("bare loop                        {bareMicros * 1000 / rounds} ns/turn ({bare})")?
+  println("hex.two      (2 digits,  ok)     {per(hexTwo)} ns/call")?
+  println("hex.most     (16 digits, ok)     {per(hexMost)} ns/call")?
+  println("hex.upper    (16 digits, ok)     {per(hexUpper)} ns/call")?
+  println("hex.least    (16 digits, ok)     {per(hexLeast)} ns/call")?
+  println("binary.most  (63 digits, ok)     {per(binaryMost)} ns/call")?
+  println("base36.most  (13 digits, ok)     {per(base36Most)} ns/call")?
+  println("decimal      (7 digits,  ok)     {per(decimal)} ns/call")?
+  println("empty        (0 bytes,   err)    {per(emptied)} ns/call")?
+  println("sign         (1 byte,    err)    {per(sign)} ns/call")?
+  println("digit.head   (8 bytes,   err)    {per(digitHead)} ns/call")?
+  println("digit.tail   (8 bytes,   err)    {per(digitTail)} ns/call")?
+  println("over         (16 digits, err)    {per(over)} ns/call")?
+  Ok(())
+}
+
+fn radixRow(text: String, radix: Int, expected: Int, rounds: Int) -> ParseRow {
+  let startedAt = now()
+  let hits = radixHits(text, radix, expected, rounds)
+  ParseRow(micros: (now() - startedAt).micros(), hits: hits)
+}
+
+/// [`parseHits`] through `Int.parseRadix`.
+fn radixHits(text: String, radix: Int, expected: Int, rounds: Int) -> Int {
+  var hits = 0
+  var round = 0
+  while round < rounds {
+    match Int.parseRadix(text, radix) {
+      Ok(value) => {
+        if value == expected {
+          hits += 1
+        }
+      }
+      Err(_) => {
+        hits -= 1
+      }
+    }
+    round += 1
+  }
+  hits
+}
+
 /// The bare loop every row above is measured against.
 fn countBare(rounds: Int) -> Int {
   var total = 0

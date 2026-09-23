@@ -1,0 +1,15 @@
+/// Reads `text` in `radix`. Not the standard library: an ordinary Cove function
+/// with a caller, between `main` and the call that is refused.
+fn read(text: String, radix: Int) -> Int {
+  Int.parseRadix(text, radix).unwrapOr(0)
+}
+
+/// Asks for radix 37, which `Int.parseRadix` refuses by stopping the run: past
+/// 36 there are no letters left to spell a digit with, and that is the call
+/// that is wrong rather than the text, so it is not an `Err`. The diagnostic
+/// has three sentences — the radix it was given, the rule, and what to pass
+/// instead — and blames the line in `read` that made the call.
+export fn main() -> Result<Unit, Error> {
+  let n = read("10", 37)
+  Ok(())
+}

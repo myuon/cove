@@ -92,6 +92,10 @@ allow = ["console"]
 entry = "fail_int_abs_overflow.main"
 allow = ["console"]
 
+[run.fail_int_parse_radix]
+entry = "fail_int_parse_radix.main"
+allow = ["console"]
+
 [run.fail_nested_divide_by_zero]
 entry = "fail_nested_divide_by_zero.main"
 allow = ["console"]
@@ -338,6 +342,10 @@ allow = ["console"]
 
 [run.values_int_parse]
 entry = "values_int_parse.main"
+allow = ["console"]
+
+[run.values_int_parse_radix]
+entry = "values_int_parse_radix.main"
 allow = ["console"]
 
 [run.values_interpolation]
