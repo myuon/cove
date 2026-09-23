@@ -1170,6 +1170,26 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "words",
     },
+    // `split` and `replace` finished Step 3. They were the two it could not
+    // take: everything about each was Cove-shaped — a `core.stringFind` a
+    // match, a `core.stringSlice` a part, an answer sized before it is
+    // written — except that an empty needle *raises*, and a Cove body had
+    // nothing to raise with (issue #461). ADR 0067's `core.refuse` is what it
+    // raises with now.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "split",
+        module: "std.string",
+        function: "split",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "replace",
+        module: "std.string",
+        function: "replace",
+    },
     // `toUpper` and `toLower` finished Step 5, and they are what needed the
     // generated asset Decision 5 describes where `trim`'s twenty-five code
     // points could be written out by hand. 1,580 code points have an uppercase

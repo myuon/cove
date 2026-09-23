@@ -161,7 +161,7 @@ pub(crate) fn call(
         // `core.stringSlice` a part — and `trim`'s table is written out in
         // Cove with its Unicode version stated, which is ADR 0064's Decision 5
         // and the thing `str::trim` was quietly inheriting from the toolchain.
-        Intrinsic::StringSplit => text::split(machine, frame, dest),
+        // `String.split` followed them at the end of Step 3; see `replace` below.
         // None of the four searches and predicates ADR 0046 measured together
         // is here any more, and they did not all leave the same way.
         // `String.startsWith` and `String.endsWith` became Cove loops over
@@ -176,7 +176,10 @@ pub(crate) fn call(
         // `contains` a comparison of its answer against -1, `indexOf` a walk
         // of the prefix's lead bytes that turns the byte offset it found into
         // the character position the method promises.
-        Intrinsic::StringReplace => text::replace(machine, frame, dest),
+        // `String.split` and `String.replace` finished Step 3 and are not here
+        // either: each is a `std.string` body over the same `core.stringFind`,
+        // and each raises on an empty needle through ADR 0067's
+        // `core.refuse`, which is the one thing that had kept them below.
         // `String.toUpper` and `String.toLower` finished issue #454's Step 5
         // and are not here either. They are the pair that needed the thing
         // `trim` did not: a **generated table**, because the full case
@@ -1415,61 +1418,25 @@ mod tests {
         assert_eq!(text, "-1234567".repeat(20));
     }
 
-    /// An answer may be written over one of its own operands:
-    /// `x = x.replace("a", "o")` lowers to a call whose destination is `x`,
-    /// and since the operands are read where they are rather than copied out
-    /// first, every arm reads all of them before it writes (#378, Q5.2).
-    ///
-    /// **It was `x.trim()`, then `x.toUpper()`, and issue #454's Step 5 took
-    /// both.** `replace` is the last `String` arm that allocates its answer,
-    /// and it makes the case *stronger* rather than weaker: the destination
-    /// aliases operand 0, and there are now two more operands read after it.
-    /// An arm that wrote its answer before it had finished reading would
-    /// corrupt a slot it still needed, which the one-operand version could
-    /// only fail at by reading its own receiver twice. What is under test is
-    /// unchanged — `Dest::word`'s order against `operand::text`'s, which is
-    /// the same order for every arm in `text.rs`.
-    #[test]
-    fn an_answer_may_be_written_over_its_own_operand() {
-        let mut build = Build::default().strings(&["ha", "a", "o"]);
-        let str_layout = build.layout("String", Shape::Str);
-        build.program.str_layout = str_layout;
-        let operands = build.args(&[(0, str_layout), (1, str_layout), (2, str_layout)]);
-        let replace = site(&mut build.program, "String", "replace", str_layout);
-        let f = build.function(
-            "f",
-            &[],
-            &[Repr::Ref, Repr::Ref, Repr::Ref],
-            str_layout,
-            vec![
-                Inst::Str {
-                    dst: 0,
-                    text: cove_ir::StrId(0),
-                },
-                Inst::Str {
-                    dst: 1,
-                    text: cove_ir::StrId(1),
-                },
-                Inst::Str {
-                    dst: 2,
-                    text: cove_ir::StrId(2),
-                },
-                Inst::IntrinsicCall {
-                    dst: 0,
-                    site: replace,
-                    args: operands,
-                },
-                Inst::Return { src: 0 },
-            ],
-        );
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let word = machine.run(f, &[], &budget()).unwrap();
-        assert_eq!(
-            String::from_utf8(machine.string_bytes(word[0])).unwrap(),
-            "ho"
-        );
-    }
+    // `an_answer_may_be_written_over_its_own_operand` stood here: `x =
+    // x.replace("a", "o")` lowered to a call whose destination was `x`, and the
+    // case asserted that every arm reads all its operands before it writes
+    // (#378, Q5.2). It was `x.trim()` and then `x.toUpper()` before that, and
+    // each moved into `std.string`; `replace` was the last, at the end of issue
+    // #454's Step 3.
+    //
+    // **There is no sample left to write it with, and that is a finding rather
+    // than a gap.** An alias needs an answer whose slot can be an operand's
+    // slot, which needs an operand of the answer's own kind, and no surviving
+    // signature has one: `Float.format` answers a `String` over a `Float`,
+    // `Float.parse` and `Float.toInt` answer a `Result`, `String.refuseByteRange`
+    // and `Value.admitKey` answer nothing, `Value.renderInto` appends, and
+    // `Value.order` and `Any.equals` — which answer an `Int` and a `Bool` over
+    // values of any kind — are refused by the verifier over a known layout
+    // (ADR 0064's Decision 4) and take a box over an unknown one, which is not
+    // an `Int`. The discipline the case was about is still held for every arm,
+    // mechanically rather than by example: the case below panics under
+    // `debug_assertions` on an operand read after the answer was written.
 
     /// The contract that makes that sound is held, not hoped for: an arm that
     /// read an operand after writing its answer would read what it wrote, and

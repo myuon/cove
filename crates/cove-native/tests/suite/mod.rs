@@ -5033,7 +5033,7 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 
 /// One intrinsic of each effect class that still has a member, as the pair of
 /// names that resolves to it: a raise (`Any.equals`: a walk too deep to
-/// finish) and a safepoint (`String.replace`: allocates the string it
+/// finish) and a safepoint (`Float.format`: allocates the string it
 /// answers).
 ///
 /// **There were three, and the third has no member left.** A *plain call* —
@@ -5051,22 +5051,20 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 ///
 /// The double does not read the argument list, so the synthesized call hands
 /// it `String` operands either way and nothing here depends on that.
-/// **The safepoint member was `String.trim`, then `String.toUpper`, and issue
-/// #454's Step 5 took both.** `String.replace` is the same class to the
-/// letter — `MAY_ALLOCATE | MAY_COLLECT | MAY_RAISE | READS_MEMORY |
-/// BULK_WORK`, the arm all three shared on one line of `Intrinsic::effects`,
-/// and a `String` answer allocated out of a `String` receiver. It takes three
-/// operands where the other two took one, and that is the one thing this array
-/// has always been indifferent to: the double does not read the argument list,
-/// which the paragraph above says because it is what makes the swap free. So
-/// what the case below checks is unchanged: it is a call whose protocol
-/// publishes the unpaid work before the hand-over and tests the outcome after
-/// it.
-///
-/// **`String.replace` is the last `String` intrinsic that allocates**, so
-/// there is no third candidate behind it. A step that moves it will have to
-/// take the safepoint member from another receiver, or retire the row.
-pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Any", "equals"), ("String", "replace")];
+/// **The safepoint member was `String.trim`, then `String.toUpper`, then
+/// `String.replace`**, and issue #454's Step 3 took the last — the one this
+/// comment said a later step would have to take the member from another
+/// receiver for. It is `Float.format`: `MAY_ALLOCATE | MAY_COLLECT |
+/// MAY_RAISE` and nothing more, which is the safepoint class, because what
+/// makes a call a safepoint is that it may allocate and so may collect, and
+/// the reading flags the `String` members also had never decided the class.
+/// Its operands are a `Float` and an `Int`, and that is the one thing this
+/// array has always been indifferent to: the double does not read the argument
+/// list, which the paragraph above says because it is what makes the swap
+/// free. So what the case below checks is unchanged: it is a call whose
+/// protocol publishes the unpaid work before the hand-over and tests the
+/// outcome after it.
+pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Any", "equals"), ("Float", "format")];
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///

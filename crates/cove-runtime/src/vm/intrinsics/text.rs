@@ -145,7 +145,9 @@
 //! neither the `rule` nor the `help` that these two sentences have. So
 //! `Intrinsic::StringSplit` and `Intrinsic::StringReplace` stand where
 //! `Intrinsic::StringRefuseByteRange` stands, and issue #454's Step 3 stops at
-//! seventeen variants rather than the thirteen it planned for.
+//! seventeen variants rather than the thirteen it planned for. (ADR 0067
+//! answered #461 with `core.refuse`, and both are `std.string` bodies now;
+//! `StringRefuseByteRange` is the one this module still holds.)
 //!
 //! **Step 4 found the same wall at a different receiver and went round it.**
 //! `Int.parse` and `Int.parseRadix` were to move together, the general one
@@ -170,8 +172,8 @@
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
-use crate::vm::intrinsics::operand::{Dest, Frame};
-use crate::vm::intrinsics::{make, operand};
+use crate::vm::intrinsics::operand;
+use crate::vm::intrinsics::operand::Frame;
 
 // `words` was here, above `split`, and its *contract* was the interesting
 // thing about it rather than its algorithm. It was
@@ -195,29 +197,12 @@ use crate::vm::intrinsics::{make, operand};
 // no `Character` type for this to answer instead — and the module's header
 // says what moving it settled about where a character begins.
 
-/// `String.split(separator) -> Array<String>`.
-pub(super) fn split(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    // Before the refusal below, not after it: the receiver was decoded either
-    // way. See the module's "Every operation here says what it examined".
-    machine.examined(text.len() as u64);
-    let separator = operand::text(machine, frame, 1)?;
-    if separator.is_empty() {
-        return Err(operand::empty_needle(
-            "String.split",
-            "separator",
-            "use `chars()` to take a string apart character by character",
-        ));
-    }
-    let parts: Vec<&str> = text.split(&separator).collect();
-    let array = make::strings(machine, &parts)?;
-    dest.word(machine, array);
-    Ok(())
-}
+// `split` was here, out of `str::split` and `make::strings`, and it was the
+// last arm in this file that answered an array. It is `std.string.split` now —
+// a `core.stringFind` a separator and a `core.stringSlice` a part, into a
+// `Vector` sized by a first pass of the same searches — and it raises on an
+// empty separator through ADR 0067's `core.refuse`, which is the one thing that
+// kept it below while `words` and `chars` moved. Issue #454's Step 3, finished.
 
 // `join` was here, and it was the only arm in this file that *built* a
 // string rather than reading one. It summed the parts' lengths and the
@@ -348,52 +333,15 @@ pub(super) fn refuse_byte_range(
 // `Machine`'s scratch pool. Both are gone too: a mechanism whose callers have
 // all migrated is not kept against a caller that might arrive.
 
-/// `String.replace(old, new) -> String`.
-pub(super) fn replace(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    // Before the refusal below, as `split`.
-    machine.examined(text.len() as u64);
-    let old = operand::text(machine, frame, 1)?;
-    if old.is_empty() {
-        return Err(operand::empty_needle(
-            "String.replace",
-            "old",
-            "`old` is the text to look for, and an empty `old` names none",
-        ));
-    }
-    let new = operand::text(machine, frame, 2)?;
-    let replaced = text.replace(&old, &new);
-    let word = machine.new_string(&replaced)?;
-    dest.word(machine, word);
-    Ok(())
-}
+// `replace` was here, out of `str::replace`, and it was the last operation in
+// this file that searched. It is `std.string.replace` now: the matches counted
+// with `core.stringFind`, the answer allocated once at the length that count
+// gives, and every run between matches and every copy of `new` one append
+// window. Text with nothing to replace is answered as it is, where this arm
+// built a copy. It raises on an empty `old` the way `split` does.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::vm::intrinsics::tests::{read, run, word, words_of, world};
-    use cove_ir::Repr;
-
-    /// The parts of an `Array<String>` a builtin answered.
-    fn parts(machine: &Machine, addr: u64) -> Vec<String> {
-        words_of(machine, addr)
-            .into_iter()
-            .map(|word| read(machine, word))
-            .collect()
-    }
-
-    /// `text.operation(args)`, for the operations that answer one word.
-    fn on(machine: &mut Machine, text: &str, operation: &str, args: &[(Repr, u64)]) -> u64 {
-        let self_ = machine.new_string(text).unwrap();
-        let mut operands = vec![(Repr::Ref, self_)];
-        operands.extend_from_slice(args);
-        word(machine, "String", operation, &operands).unwrap()
-    }
-
     // `length()` had a test here — `héllo` is six bytes and five
     // characters — until ADR 0064 moved the count into `std.string.length`.
     // What replaced it is `tests/e2e/values_string_length`, a program that
@@ -435,32 +383,14 @@ mod tests {
     // sweep is for — the vertical tab is `White_Space` and is not one of the
     // five bytes — because it held one ASCII string with spaces in it.
 
-    #[test]
-    fn split_separates_on_the_separator_and_refuses_an_empty_one() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let comma = machine.new_string(",").unwrap();
-        let word = on(&mut machine, "a,,b", "split", &[(Repr::Ref, comma)]);
-        assert_eq!(parts(&machine, word), vec!["a", "", "b"]);
-
-        let empty = machine.new_string("").unwrap();
-        let self_ = machine.new_string("ab").unwrap();
-        let error = run(
-            &mut machine,
-            "String",
-            "split",
-            &[(Repr::Ref, self_), (Repr::Ref, empty)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`String.split` cannot use an empty `separator`"
-        );
-        assert_eq!(
-            error.help.as_deref(),
-            Some("use `chars()` to take a string apart character by character")
-        );
-    }
+    // A `split_separates_on_the_separator_and_refuses_an_empty_one` case
+    // stood here — `"a,,b"` into `["a", "", "b"]`, and the empty separator's
+    // message and help — and a `replace_rewrites_every_match_and_refuses_an_empty_old`
+    // case further down, `"banana"` to `"bbbnbbnbb"`. Neither operation is an
+    // arm in this file any more, and what answers both questions is
+    // `tests/e2e/values_string_split`, `values_string_replace`,
+    // `fail_string_split_empty` and `fail_string_replace_empty`, written in
+    // #466 before either moved and asked of both evaluators.
 
     // Three `join` cases stood here — one comparing against `[&str]::join`
     // at every separator width and every alignment of a part boundary, one
@@ -526,77 +456,12 @@ mod tests {
     // wider than one word. An oracle no arm here supplies, for a body no arm
     // here executes.
 
-    #[test]
-    fn replace_rewrites_every_match_and_refuses_an_empty_old() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let old = machine.new_string("a").unwrap();
-        let new = machine.new_string("bb").unwrap();
-        let word = on(
-            &mut machine,
-            "banana",
-            "replace",
-            &[(Repr::Ref, old), (Repr::Ref, new)],
-        );
-        assert_eq!(read(&machine, word), "bbbnbbnbb");
-
-        let empty = machine.new_string("").unwrap();
-        let self_ = machine.new_string("x").unwrap();
-        let error = run(
-            &mut machine,
-            "String",
-            "replace",
-            &[(Repr::Ref, self_), (Repr::Ref, empty), (Repr::Ref, new)],
-        )
-        .unwrap_err();
-        assert_eq!(error.message, "`String.replace` cannot use an empty `old`");
-        assert_eq!(
-            error.help.as_deref(),
-            Some("`old` is the text to look for, and an empty `old` names none")
-        );
-    }
-
-    /// The array a `split()` builds is a root while it is being filled: the
-    /// heap is full of dead objects, so a string made partway through the
-    /// walk collects, and an unrooted array would be freed under it.
-    ///
-    /// **It was `chars()` that asked this, and the question outlived it.**
-    /// Issue #454's Step 3 moved that operation into `std.string.chars`,
-    /// where the array under construction is a `Vector` the frame holds and
-    /// the collector finds through the frame rather than through
-    /// `make::strings`' temporary root. What is left below this file that
-    /// fills an array a word at a time is `words` and `split`, so `split` asks
-    /// it now — and it asks it harder, because it allocates a string per part
-    /// *and* the array, where `chars` allocated one string per character of a
-    /// receiver that was already on the heap. Ten one-character parts, which
-    /// is the fixture `chars` had, spelled as a separator run.
-    #[test]
-    fn split_holds_the_array_it_is_filling() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 12);
-        let source = machine.new_string("a,b,c,d,e,f,g,h,i,j").unwrap();
-        machine.push_temp(source);
-        let comma = machine.new_string(",").unwrap();
-        machine.push_temp(comma);
-        while machine.heap_words() + 2 <= 1 << 12 {
-            machine.new_string("dead").unwrap();
-        }
-        let before = machine.collected().collections;
-
-        let items = word(
-            &mut machine,
-            "String",
-            "split",
-            &[(Repr::Ref, source), (Repr::Ref, comma)],
-        )
-        .unwrap();
-        assert!(
-            machine.collected().collections > before,
-            "the fixture did not force a collection"
-        );
-        assert_eq!(
-            parts(&machine, items),
-            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
-        );
-    }
+    // `split_holds_the_array_it_is_filling` stood last: the array a `split()`
+    // built was a root while it was filled, through `make::strings`' temporary
+    // root, and a heap full of dead objects forced a collection partway
+    // through to prove it. The question outlived the arm, as it outlived
+    // `chars` before it: `std.string.split` fills a `Vector` the frame holds,
+    // and `vm::differential`'s
+    // `a_split_that_collects_keeps_the_parts_it_has_made` asks it of that body
+    // under heap pressure, on both evaluators.
 }

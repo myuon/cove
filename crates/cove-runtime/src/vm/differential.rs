@@ -2032,6 +2032,52 @@ export fn keeps_a_lot(n: Int) -> Int {
     );
 }
 
+/// A `split` that collects partway through keeps the parts it has made.
+///
+/// This was a unit test of the Rust arm — `split_holds_the_array_it_is_filling`
+/// in `vm::intrinsics::text` — which filled a heap with dead strings so that
+/// the array `make::strings` was filling had to survive a collection. The arm
+/// is gone: `std.string.split` is a Cove body that slices each part into a
+/// local and publishes it into a `Vector` the frame holds, so the question
+/// moved from "is the temporary root pushed" to "does the lowering keep the
+/// vector and the slice live across the allocation that collects", and that
+/// is asked of a body the lowering produced, under a heap small enough that
+/// collections land inside the loop. Every part of the last split is joined
+/// back and compared, so a part freed under the vector would show as the
+/// wrong bytes rather than pass unnoticed.
+#[test]
+fn a_split_that_collects_keeps_the_parts_it_has_made() {
+    let source = r#"
+export fn splits_under_pressure(n: Int) -> String {
+  var last = "x".split(",")
+  var count = 0
+  var i = 0
+  while i < n {
+    let line = "a{i},b,c,d,e,f,g,h,i,j"
+    let parts = line.split(",")
+    count += parts.length()
+    last = parts
+    i += 1
+  }
+  "{count} {"|".join(last)}"
+}
+"#;
+    let (answer, collections) = agree_under_heap_pressure(
+        source,
+        "splits_under_pressure",
+        vec![Value::int(2000)],
+        1 << 12,
+    );
+    assert_eq!(
+        answer,
+        Answer::Value("20000 a1999|b|c|d|e|f|g|h|i|j".to_string())
+    );
+    assert!(
+        collections >= 3,
+        "expected several collections over a heap this small, got {collections}"
+    );
+}
+
 /// A closure's captured environment stays live and correctly rooted across a
 /// collection that happens after it was created and before it is called.
 ///

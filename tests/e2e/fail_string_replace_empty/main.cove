@@ -22,10 +22,10 @@ fn rewritten(text: String, old: String, new: String) -> String {
 /// cannot hold, because a refusal stops the run and takes every row after it:
 /// one case, one refusal. [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 /// Decision 8 gates a migration on the diagnostic being unchanged, and this
-/// file is where "unchanged" is written down. Issue
-/// [#461](https://github.com/myuon/cove/issues/461) is why that gate is not met
-/// yet: a Cove body has nothing to raise with, and nothing that would carry the
-/// `rule` and the `help` if it had.
+/// file is where "unchanged" is written down. It held the move to its word
+/// once [#461](https://github.com/myuon/cove/issues/461) gave a Cove body
+/// `core.refuse`: the three sentences and the blame are unchanged, and the one
+/// line added is the `std/string.cove` context block ADR 0058's rule asks for.
 export fn main() -> Result<Unit, Error> {
   let out = rewritten("a,b,c", "", ";")
   println("{out}")?

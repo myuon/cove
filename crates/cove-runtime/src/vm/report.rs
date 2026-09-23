@@ -1255,7 +1255,7 @@ mod tests {
             },
             intrinsics: vec![
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::StringSplit,
+                    intrinsic: Intrinsic::FloatFormat,
                     sites: 1,
                     encoded: 1_000,
                     native: 7,
@@ -1264,7 +1264,7 @@ mod tests {
                     work: 128_440,
                 },
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::StringReplace,
+                    intrinsic: Intrinsic::FloatParse,
                     sites: 3,
                     encoded: 0,
                     native: 0,
@@ -1337,16 +1337,16 @@ mod tests {
         );
         assert!(text.contains(
             "           1,000              7       1       1,007        5,035        128,440  \
-             String.split"
+             Float.format"
         ));
         assert!(text.contains(
             "               0              0       3           0            0              0  \
-             String.replace"
+             Float.parse"
         ));
     }
 
-    /// A loop that calls an intrinsic that allocates (`String.split` builds
-    /// the array it answers and a string per part) and one that does not
+    /// A loop that calls an intrinsic that allocates (`Float.format` builds
+    /// the string it answers) and one that does not
     /// (`Any.equals` walks two values together and answers one `Bool` word),
     /// each several times over, so both [`Counting`]'s wiring and the
     /// reconciliation test below have more than one call and more than one
@@ -1363,13 +1363,14 @@ mod tests {
     /// others was: it reads the values it was handed, it charges what it
     /// walked, and it allocates nothing, because the answer is one word.
     ///
-    /// **The allocating one has now moved once too**, and for the first time
-    /// the reason is not that a reader found a run instruction to stand on: it
-    /// was `String.join` until issue #454's Step 3 wrote that over a
-    /// `StringBuilder` in Cove. `String.split` takes its place, and it is the
-    /// stronger sample of the two — it allocates the array it answers *and* a
-    /// string per part, so a row that attributed only the outermost object
-    /// would still be caught here.
+    /// **The allocating one has moved twice**, and neither time because a
+    /// reader found a run instruction to stand on: it was `String.join` until
+    /// issue #454's Step 3 wrote that over a `StringBuilder` in Cove, and then
+    /// `String.split` until the end of that step moved it to `std.string` too.
+    /// `Float.format` is the allocating intrinsic left that a plain program
+    /// reaches. It allocates one object where `split` allocated one per part
+    /// and the array, so this no longer catches a row that attributed only the
+    /// outermost object; nothing left allocates more than one per call.
     /// The two compared values are **erased**, and that is not decoration.
     /// Since [ADR 0064]'s Decision 3 a `==` whose operand layout is known is
     /// a walk the lowering synthesizes and never reaches an intrinsic at all;
@@ -1377,7 +1378,7 @@ mod tests {
     /// row for `Any.equals` exists to be read only where a `dyn Trait` is
     /// what is being compared, and a fixture that compared two `Array<Int>`s
     /// would now be asserting about a row that is not there.
-    const SPLIT_AND_COMPARE: &str = "
+    const FORMAT_AND_COMPARE: &str = "
 trait Tagged {
   fn tag(self) -> Int
 }
@@ -1405,8 +1406,8 @@ export fn main() -> Int {
     if left == other {
       total = total + 1
     }
-    let parts = \"a,b,c\".split(\",\")
-    total = total + parts.length()
+    let shown = 2.5.format(2)
+    total = total + shown.byteLength()
     i = i + 1
   }
   total
@@ -1416,8 +1417,8 @@ export fn main() -> Int {
     /// [ADR 0064]'s Decision 7 asks that allocations and allocated words be
     /// attributed per variant, and this is the property worth pinning about
     /// that attribution: it is not just present, it tells two operations
-    /// apart. `String.split` allocates the array it hands back and a string
-    /// per part, and `Any.equals` only reads the values it is given, so a run
+    /// apart. `Float.format` allocates the string it hands back, and
+    /// `Any.equals` only reads the values it is given, so a run
     /// of both
     /// must show one row with allocations and one row without — from the
     /// real machinery in `Machine::call_intrinsic`, not from calling
@@ -1429,25 +1430,25 @@ export fn main() -> Int {
     fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
         use crate::vm::debug::tests::World;
 
-        let world = World::new(SPLIT_AND_COMPARE);
+        let world = World::new(FORMAT_AND_COMPARE);
         let mut vm = world.plain();
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
         let boundary = vm.boundary().expect("count_boundary was called");
 
-        let split = boundary
-            .intrinsic(Intrinsic::StringSplit)
-            .expect("the program calls String.split");
-        assert!(split.calls() > 0, "{split:?}");
+        let formatted = boundary
+            .intrinsic(Intrinsic::FloatFormat)
+            .expect("the program calls Float.format");
+        assert!(formatted.calls() > 0, "{formatted:?}");
         assert!(
-            split.allocations > 0,
-            "String.split allocates the array it answers and a string per part: {split:?}"
+            formatted.allocations > 0,
+            "Float.format allocates the string it answers: {formatted:?}"
         );
-        assert!(split.words > 0, "{split:?}");
+        assert!(formatted.words > 0, "{formatted:?}");
         // The per-variant total is a subset of the whole run's, never past
         // it — the sanity Decision 7's own measurement leans on.
-        assert!(split.allocations <= vm.allocations(), "{split:?}");
-        assert!(split.words <= vm.allocated_words(), "{split:?}");
+        assert!(formatted.allocations <= vm.allocations(), "{formatted:?}");
+        assert!(formatted.words <= vm.allocated_words(), "{formatted:?}");
 
         let compared = boundary
             .intrinsic(Intrinsic::AnyEquals)
@@ -1484,7 +1485,7 @@ export fn main() -> Int {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::new(SPLIT_AND_COMPARE);
+        let world = World::new(FORMAT_AND_COMPARE);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();
@@ -1523,7 +1524,7 @@ export fn main() -> Int {
             assert_eq!(work, row.work, "{:?}: {row:?}", row.intrinsic);
         }
         // And the work is not vacuously nought on both sides: this program
-        // calls `Any.equals` and `String.split`, and both walk bytes.
+        // calls `Any.equals`, which walks what it compares.
         assert!(
             boundary.intrinsics.iter().any(|row| row.work > 0),
             "a program that walks strings examines something: {:?}",
@@ -1531,40 +1532,52 @@ export fn main() -> Int {
         );
     }
 
-    /// Ten `String.replace` calls over a string of `characters` ASCII
-    /// characters, so that two runs of it differ in exactly the one thing the
-    /// charge is supposed to be proportional to.
+    /// Ten `==` comparisons of two erased structs, each holding a `String` of
+    /// `characters` ASCII characters, so that two runs of it differ in exactly
+    /// the one thing the charge is supposed to be proportional to.
     ///
-    /// The receiver is a literal rather than something the program builds,
-    /// because anything that built it would call intrinsics of its own and
-    /// the two runs would then differ in more than the receiver's length.
+    /// **The operation has moved five times, and the fifth left no `Text`
+    /// intrinsic that reads a receiver it was handed.** It was `String.length`
+    /// until ADR 0064 moved the count out of the intrinsics, `String.contains`
+    /// until ADR 0065 gave that a run search, `String.indexOf` until the
+    /// migration that wrote that over the same search, `String.toUpper` until
+    /// issue #454's Step 5, and `String.replace` until the end of Step 3. What
+    /// is left that charges by the byte is `Any.equals` over two strings,
+    /// which charges the shorter of the two — here both — on top of one unit
+    /// per value its walk reaches. The values are held as `dyn Tagged` for
+    /// [`FORMAT_AND_COMPARE`]'s reason: a comparison whose layout is known is
+    /// a walk the lowering writes and never reaches an intrinsic.
     ///
-    /// **The operation has moved four times, and the fourth move is the one
-    /// that ran out of choices.** It was `String.length` until ADR 0064 moved
-    /// the count out of the intrinsics, `String.contains` until ADR 0065 gave
-    /// that a run search, `String.indexOf` until the migration that wrote that
-    /// over the same search, and `String.toUpper` until issue #454's Step 5.
-    /// **`String.split` and `String.replace` are the whole of the `Text`
-    /// category now**, and `replace` is the one that still answers a `String`,
-    /// so `byteLength()` below reads what it built.
-    ///
-    /// The needle is a character the receiver does not hold, which is what
-    /// makes the charge exact rather than an upper bound: `replace` calls
-    /// `Machine::examined` with the receiver's own length before it looks for
-    /// anything, so what is walked and what is charged are the same bytes
-    /// whether it finds the needle or not — and finding none keeps the answer
-    /// the receiver's length, so the `byteLength()` the loop sums stays a
-    /// function of `characters` alone.
-    fn maps_over(characters: usize) -> String {
+    /// The second string is an interpolation of the first rather than the same
+    /// literal, so the two are two objects and the comparison reads both; an
+    /// interpolation of a `String` is a byte copy and calls no intrinsic, so
+    /// the two runs still differ in nothing but `characters`.
+    fn compares_over(characters: usize) -> String {
         let text = "a".repeat(characters);
         format!(
             "
+trait Tagged {{
+  fn tag(self) -> Int
+}}
+
+struct Named {{
+  name: String
+}}
+
+impl Tagged for Named {{
+  fn tag(self) -> Int {{ 0 }}
+}}
+
 export fn main() -> Int {{
   let text = \"{text}\"
+  let left: dyn Tagged = Named(name: text)
+  let right: dyn Tagged = Named(name: \"{{text}}\")
   var total = 0
   var i = 0
   while i < 10 {{
-    total = total + text.replace(\"z\", \"y\").byteLength()
+    if left == right {{
+      total = total + 1
+    }}
     i = i + 1
   }}
   total
@@ -1583,10 +1596,11 @@ export fn main() -> Int {{
     /// for 383 times the wall clock. That measurement was taken while
     /// `String.length` was still an intrinsic; ADR 0064 moved it into
     /// `std.string` and this case became `String.contains`, and ADR 0065 has
-    /// since moved that one too, `String.indexOf` after it and
-    /// `String.toUpper` after that. The case below is `String.replace`, which
-    /// is charged the same way — a reading whose charge is the receiver's byte
-    /// length.
+    /// since moved that one too, `String.indexOf` after it, `String.toUpper`
+    /// after that and `String.replace` last. The case below is `Any.equals`
+    /// over two erased strings, charged the same way — a reading whose charge
+    /// is the bytes it read — plus one unit a value, which is why what is
+    /// asserted is the *difference* between the two runs.
     ///
     /// Two runs of the same shape over receivers a hundred times apart,
     /// making the same number of calls, from the real machinery. The call
@@ -1606,12 +1620,12 @@ export fn main() -> Int {{
             vm.run_entry("m", "main", Vec::new()).expect("it answers");
             vm.boundary()
                 .expect("count_boundary was called")
-                .intrinsic(Intrinsic::StringReplace)
-                .expect("the program calls String.replace")
+                .intrinsic(Intrinsic::AnyEquals)
+                .expect("the program compares two erased values")
         };
 
-        let short = row(&maps_over(10));
-        let long = row(&maps_over(1_000));
+        let short = row(&compares_over(10));
+        let long = row(&compares_over(1_000));
 
         assert_eq!(
             short.calls(),
@@ -1619,12 +1633,16 @@ export fn main() -> Int {{
             "the two runs make the same calls: {short:?} against {long:?}"
         );
         assert!(short.calls() >= 10, "{short:?}");
-        // A hundred times the bytes. Exactly, because the receivers are ASCII
-        // literals and the unit is bytes — which is the other half of what
-        // this pins: a charge in *characters* would be the same two numbers
-        // here, and one in words an eighth of them.
-        assert_eq!(short.work, short.calls() * 10, "{short:?}");
-        assert_eq!(long.work, long.calls() * 1_000, "{long:?}");
+        // What the two runs differ by is the bytes, exactly: 990 more a call,
+        // because the strings are ASCII and the unit is bytes — which is the
+        // other half of what this pins: a charge in *characters* would be the
+        // same number here, and one in words an eighth of it. The one unit a
+        // value the walk also charges is the same in both runs and cancels.
+        assert_eq!(
+            long.work - short.work,
+            short.calls() * 990,
+            "{short:?} against {long:?}"
+        );
     }
 
     /// Ten `==` comparisons of two four-field structs that `differ` in the
@@ -1634,7 +1652,7 @@ export fn main() -> Int {{
     /// programs differ in how far the walk gets and in nothing else: the same
     /// declaration, the same number of comparisons, the same layouts.
     ///
-    /// The two are held as `dyn Tagged` for [`SPLIT_AND_COMPARE`]'s reason:
+    /// The two are held as `dyn Tagged` for [`FORMAT_AND_COMPARE`]'s reason:
     /// since [ADR 0064]'s Decision 3 a struct whose layout is known is walked
     /// by a synthesized function whose work is charged as instructions, and
     /// the walk this file is about — `equal::value`, charging one unit per

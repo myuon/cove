@@ -3,6 +3,10 @@ error[cove::runtime]: `String.replace` cannot use an empty `old`
   |
 8 |   text.replace(old, new)
   |   ^^^^^^^^^^^^^^^^^^^^^^
+    --> std/string.cove:1068:5
+     |
+1068 |     core.refuse(replaceRefused(), emptyNeedleRule(), replaceHelp())
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   --> <e2e>/fail_string_replace_empty/main.cove:30:13
    |
 30 |   let out = rewritten("a,b,c", "", ";")

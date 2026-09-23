@@ -59,6 +59,7 @@ fn find(program: &Program, wanted: impl Fn(&Layout) -> bool) -> Option<LayoutId>
 /// One shape covers an `Array` and a `Vector`'s store, and `growable` is what
 /// tells the two apart — so this is also how `freeze()` finds the `Array` a
 /// store becomes and how `push` finds the larger store it grows into.
+#[cfg(test)]
 pub(super) fn elements(
     program: &Program,
     elem: LayoutId,
@@ -247,32 +248,10 @@ pub(super) fn failed(machine: &mut Machine, dest: Dest, message: &str) -> Result
     case_words(machine, dest, case, &[&[text]])
 }
 
-/// An `Array<String>` of `parts`.
-///
-/// The array is allocated first and rooted, and each string is written into
-/// it as it is made. Nothing is held in a Rust `Vec` across an allocation,
-/// because the array's own words are what hold them: the payload is zeroed,
-/// so the part of it that is not filled in yet traces nothing, and the part
-/// that is holds exactly the strings made so far.
-pub(super) fn strings<S: AsRef<str>>(
-    machine: &mut Machine,
-    parts: &[S],
-) -> Result<u64, RuntimeError> {
-    let text = machine.program().str_layout;
-    let id = elements(machine.program(), text, false)?;
-    let addr = machine.new_object(id, parts.len() as u32)?;
-    let mark = machine.temps();
-    machine.push_temp(addr);
-    let filled = (|machine: &mut Machine| {
-        for (at, part) in parts.iter().enumerate() {
-            let word = machine.new_string(part.as_ref())?;
-            machine.set_payload(addr, at as u32, word);
-        }
-        Ok(())
-    })(machine);
-    machine.release_temps(mark);
-    filled.map(|()| addr)
-}
+// `strings` stood here, building an `Array<String>` from Rust `&str`s with the
+// array rooted while each part was made. `split` was its last caller, and
+// every array of strings is built by a `std.string` body now — `split`,
+// `words`, `chars` — into a `Vector` the frame holds.
 
 /// A `Vector` of `elem` holding `words`, which the caller holds rooted.
 ///

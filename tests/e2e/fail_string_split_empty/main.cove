@@ -22,15 +22,15 @@ fn pieces(text: String, separator: String) -> Array<String> {
 /// Decision 8 gates a migration on the diagnostic being unchanged, and this
 /// file is where "unchanged" is written down.
 ///
-/// **What it will catch is the thing issue
-/// [#461](https://github.com/myuon/cove/issues/461) is about.** Today the
-/// refusal is raised inside `Intrinsic::StringSplit`, so the blame lands on the
-/// call in `pieces` and there is no standard-library frame. A Cove body cannot
-/// raise at all — `ExprKind` has no such form, `Inst::Trap` carries a `StrId`
-/// and not a slot, and it carries no `rule` and no `help` — so the day this
-/// operation moves, both the mechanism and the three lines below have to be
-/// settled first. See `tests/e2e/fail_stringbuilder_byte_range/expected.err`
-/// for what a refusal raised from inside `std/` looks like instead.
+/// **It is what held the move to its word**, and the move happened: issue
+/// [#461](https://github.com/myuon/cove/issues/461) gave a Cove body
+/// `core.refuse` (ADR 0067), and `std.string.split` raises this refusal
+/// itself. The message, the rule, the help and the blamed line in `pieces` are
+/// the bytes the `Intrinsic::StringSplit` arm wrote; what the move added is one
+/// context block, the `std/string.cove` line that raises, labelled `in the
+/// standard library` — ADR 0058's rule, the one
+/// `tests/e2e/fail_stringbuilder_byte_range/expected.err` and `Int.abs`
+/// already follow.
 export fn main() -> Result<Unit, Error> {
   let parts = pieces("a,b,c", "")
   println("{parts.length()}")?

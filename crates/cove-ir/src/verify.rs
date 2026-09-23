@@ -2670,6 +2670,8 @@ mod tests {
     const ENTRY_INT: LayoutId = LayoutId(10);
     /// `Map<Int, Int>`, whose entry [`ENTRY_INT`] is.
     const MAP_INT: LayoutId = LayoutId(11);
+    /// `()`, the answer of an intrinsic that answers nothing.
+    const UNIT: LayoutId = LayoutId(12);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -2758,6 +2760,7 @@ mod tests {
                     value: INT,
                 },
             ),
+            Layout::word("Unit", Repr::Unit),
         ]
     }
 
@@ -3343,54 +3346,55 @@ mod tests {
         let int = |slot| Arg { slot, layout: INT };
         // Slot 0 holds the answer and slot 3 is the `Int` an operand fault is
         // made of. This sample was `String.length` until ADR 0064 moved it
-        // into `std.string`, then `String.trim`, then `String.toUpper` — and
-        // issue #454's Step 5 finished by moving that one too. **There is no
-        // `fixed(&[C::Str], C::Str)` intrinsic left**, so unlike the last two
-        // swaps this one changes the *arity*: `String.replace` is
-        // `fixed(&[C::Str, C::Str, C::Str], C::Str)`, three `String` operands
-        // and a `String` answer.
+        // into `std.string`, then `String.trim`, then `String.toUpper`, then
+        // `String.replace` — and issue #454's Step 3 finished by moving that
+        // one too. **No intrinsic that takes a `String` and answers one is
+        // left**, so the sample is `String.refuseByteRange`: a `String` and two
+        // `Int`s, answering `()`, which is why the fixture has a `Unit` layout
+        // now.
         //
         // What the case is about survives the change exactly, because none of
-        // the three faults is about the number three. The first is a call that
-        // is right and must be silent; the second is one operand too many,
-        // where "too many" is whatever the signature says plus one; the third
-        // is an `Int` at operand 0 where a `String` goes. The answer's class
-        // still matches the signature's, which is what keeps the third fault
-        // the only one the third call reports — `Float.parse` below is the
-        // case about a wrong answer class.
-        let reprs = || vec![Repr::Ref, Repr::Ref, Repr::Ref, Repr::Int];
+        // the three faults is about which operands these are. The first is a
+        // call that is right and must be silent; the second is one operand too
+        // many, where "too many" is whatever the signature says plus one; the
+        // third is an `Int` at operand 0 where a `String` goes. The answer's
+        // class still matches the signature's, which is what keeps the third
+        // fault the only one the third call reports — `Float.parse` below is
+        // the case about a wrong answer class.
+        let reprs = || vec![Repr::Unit, Repr::Ref, Repr::Ref, Repr::Int];
 
-        // `String.replace` over three `String`s, answering a `String`: nothing.
+        // `String.refuseByteRange` over a `String` and two `Int`s, answering
+        // `()`: nothing.
         let held = calling(
-            crate::Intrinsic::StringReplace,
-            STR,
+            crate::Intrinsic::StringRefuseByteRange,
+            UNIT,
             reprs(),
-            vec![string(1), string(2), string(2)],
+            vec![string(1), int(3), int(3)],
         );
         assert_eq!(faults(&held), Vec::<String>::new());
 
         // One operand too many.
         let held = calling(
-            crate::Intrinsic::StringReplace,
-            STR,
+            crate::Intrinsic::StringRefuseByteRange,
+            UNIT,
             reprs(),
-            vec![string(1), string(2), string(2), string(1)],
+            vec![string(1), int(3), int(3), int(3)],
         );
         assert_eq!(
             faults(&held),
-            vec!["`String.replace` takes 3 operand(s), and this call passes 4"]
+            vec!["`String.refuseByteRange` takes 3 operand(s), and this call passes 4"]
         );
 
         // An `Int` where a `String` goes.
         let held = calling(
-            crate::Intrinsic::StringReplace,
-            STR,
+            crate::Intrinsic::StringRefuseByteRange,
+            UNIT,
             reprs(),
-            vec![int(3), string(2), string(2)],
+            vec![int(3), int(3), int(3)],
         );
         assert_eq!(
             faults(&held),
-            vec!["operand 0 of `String.replace` is `Int`, where its signature has String"]
+            vec!["operand 0 of `String.refuseByteRange` is `Int`, where its signature has String"]
         );
 
         // The answer a `Float.parse` writes is a `Result<Float>`, and the
@@ -3475,26 +3479,26 @@ mod tests {
             slot,
             layout: ARRAY_INT,
         };
-        // `String.replace` rather than `String.toUpper`, which issue #454's
-        // Step 5 moved into `std.string`: the refusal is about the operand's
-        // *class* and about the intrinsic's category being `Text`, and
-        // `replace` is that category with the same `C::Str` at operand 0. It
-        // takes three operands where `toUpper` took one, so the call passes
-        // three — otherwise a count fault would stand beside the one under
-        // test and this assertion would be about two things.
-        let string = |slot| Arg { slot, layout: STR };
+        // `String.refuseByteRange`, the one `Text` intrinsic left: it was
+        // `String.toUpper` until issue #454's Step 5 and `String.replace` until
+        // Step 3 finished, and each moved into `std.string`. The refusal is
+        // about the operand's *class* and the intrinsic's category being
+        // `Text`, and this one is that category with the same `C::Str` at
+        // operand 0. The other two operands are the two `Int`s it takes, so
+        // no count fault stands beside the one under test.
+        let int = |slot| Arg { slot, layout: INT };
         let held = calling(
-            crate::Intrinsic::StringReplace,
-            STR,
-            vec![Repr::Ref, Repr::Ref, Repr::Ref],
-            vec![array(1), string(2), string(2)],
+            crate::Intrinsic::StringRefuseByteRange,
+            UNIT,
+            vec![Repr::Unit, Repr::Ref, Repr::Ref, Repr::Int],
+            vec![array(1), int(3), int(3)],
         );
         assert_eq!(
             faults(&held),
             vec![
-                "operand 0 of `String.replace` is the collection `Array<Int>`, and a Text \
-                 intrinsic takes none: a collection operation is a run instruction or the \
-                 standard library's, not an intrinsic (ADR 0058)"
+                "operand 0 of `String.refuseByteRange` is the collection `Array<Int>`, and a \
+                 Text intrinsic takes none: a collection operation is a run instruction or \
+                 the standard library's, not an intrinsic (ADR 0058)"
             ]
         );
 
@@ -3503,9 +3507,9 @@ mod tests {
         // position, so that "not the `Array<String>` `join` names" was a fault
         // with its own wording. Issue #454's Step 3 made that join Cove, and no
         // variant left declares a `Strings` operand at all, so there is nothing
-        // to construct the case out of. The check below it is still here and
-        // still runs: `Class::Strings` remains a *result* class, for `words`,
-        // `chars` and `split`, and `intrinsic.rs`'
+        // to construct the case out of. `Class::Strings` was a *result* class
+        // for `words`, `chars` and `split` after that, and `split` was its last
+        // user; `intrinsic.rs`'
         // `no_intrinsic_is_a_collection_operation` now asserts unconditionally
         // that no operand is one.
 

@@ -1390,23 +1390,11 @@ pub fn call_method(
             // a character begins is a fact about a *representation*, and this
             // arm read it out of Rust's decoder — and issue #454's Step 3,
             // which is where the measurement of what the move cost lives.
-            "split" => {
-                let args = expect_args("String.split", args, 1, span)?;
-                let separator = expect_str("String.split", "separator", &args[0], span)?;
-                if separator.is_empty() {
-                    return Err(empty_needle_error(
-                        "String.split",
-                        "separator",
-                        "use `chars()` to take a string apart character by character",
-                        span,
-                    ));
-                }
-                Ok(Value(Repr::Array(
-                    text.split(separator)
-                        .map(|part| Value(Repr::Str(part.into())))
-                        .collect(),
-                )))
-            }
+            // `split` used to answer here, out of `str::split`. It does not
+            // reach this arm any more: `std.string.split` is a
+            // `core.stringFind` a separator and a `core.stringSlice` a part,
+            // and raises on an empty separator through ADR 0067's
+            // `core.refuse`. Issue #454's Step 3, finished.
             // `join` used to answer here, by pushing each part onto a Rust
             // `String` with the receiver between them and handing the whole
             // thing back. It does not reach this arm any more:
@@ -1449,20 +1437,11 @@ pub fn call_method(
             // not size. `indexOf` then walks the prefix's lead bytes to turn
             // the byte offset that search answers into a character position —
             // the half of the old arm that was never a search at all.
-            "replace" => {
-                let args = expect_args("String.replace", args, 2, span)?;
-                let old = expect_str("String.replace", "old", &args[0], span)?;
-                if old.is_empty() {
-                    return Err(empty_needle_error(
-                        "String.replace",
-                        "old",
-                        "`old` is the text to look for, and an empty `old` names none",
-                        span,
-                    ));
-                }
-                let new = expect_str("String.replace", "new", &args[1], span)?;
-                Ok(Value(Repr::Str(text.replace(old, new).into())))
-            }
+            // `replace` used to answer here, out of `str::replace`. It does
+            // not reach this arm any more: `std.string.replace` counts the
+            // matches with `core.stringFind`, sizes its answer from that and
+            // writes it in append windows, and raises on an empty `old` the
+            // way `split` does. Issue #454's Step 3, finished.
             // `toUpper` and `toLower` used to answer here, out of
             // `str::to_uppercase` and `str::to_lowercase`, which are whatever
             // Unicode case-mapping tables this *toolchain* was built against.
@@ -2024,38 +2003,6 @@ fn wrong_byte_range(text: &str, from: i64, to: i64) -> String {
 // *oracle*, which ADR 0034 keeps as the definition of what a Cove program
 // means rather than as something anything is timed on, and the linear-memory
 // backend never had the table.
-
-/// Reads `value` as a `String`, or reports the type `method` declares for
-/// `parameter` instead.
-fn expect_str<'a>(
-    method: &str,
-    parameter: &str,
-    value: &'a Value,
-    span: Span,
-) -> Result<&'a str, RuntimeError> {
-    match value {
-        Value(Repr::Str(text)) => Ok(text),
-        other => Err(type_error(method, parameter, "String", other, span)),
-    }
-}
-
-/// `split` and `replace` both refuse an empty needle: matching against one
-/// would match between every character rather than answer either method's
-/// question.
-///
-/// The two are told different things afterwards, because the operation they
-/// were reaching for is different. Splitting on nothing is a request for the
-/// characters, which `chars()` answers; replacing nothing is not a request for
-/// anything, so `replace` is told what it is missing rather than offered a
-/// substitute.
-fn empty_needle_error(method: &str, parameter: &str, help: &str, span: Span) -> RuntimeError {
-    RuntimeError::new(format!("`{method}` cannot use an empty `{parameter}`"))
-        .at(span)
-        .with_rule(
-            "An empty separator or search string would match between every character, rather than answer the question the method asks.",
-        )
-        .with_help(help)
-}
 
 /// Names the specific offending part when the invalid value is nested, such
 /// as `` a `Vector` inside `Point.tags` ``, rather than blaming the whole

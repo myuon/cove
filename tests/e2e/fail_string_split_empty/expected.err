@@ -3,6 +3,10 @@ error[cove::runtime]: `String.split` cannot use an empty `separator`
   |
 8 |   text.split(separator)
   |   ^^^^^^^^^^^^^^^^^^^^^
+    --> std/string.cove:1016:5
+     |
+1016 |     core.refuse(splitRefused(), emptyNeedleRule(), splitHelp())
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   --> <e2e>/fail_string_split_empty/main.cove:35:15
    |
 35 |   let parts = pieces("a,b,c", "")

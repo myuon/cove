@@ -5,20 +5,21 @@ use super::listing;
 /// The receiver is the first operand where there is one and the arguments
 /// follow it in source order, which is the one shape every operation in
 /// the table has.
+///
+/// The sample was `s.split(",")` until issue #454's Step 3 moved `split` into
+/// `std.string`; `Float.format` is the last method left on the table that is a
+/// runtime call over a receiver and an argument.
 #[test]
 fn a_builtin_method_is_one_call_over_its_operands() {
     assert_eq!(
-        listing(
-            "fn parts(s: String) -> Array<String> { s.split(\",\") }",
-            "parts"
-        ),
+        listing("fn show(x: Float) -> String { x.format(2) }", "show"),
         "\
-fn @m.parts(String) -> Array
-  frame 3: s0!:ref s1:ref s2:ref
-  local s -> s0:String [0, 3)
-     0  str s2:ref \",\"
-     1  intrinsic-call s1:Array String.split (s0:String s2:String)
-     2  return s1:Array
+fn @m.show(Float) -> String
+  frame 3: s0!:float s1:ref s2:int
+  local x -> s0:Float [0, 3)
+     0  int s2:int 2
+     1  intrinsic-call s1:String Float.format (s0:Float s2:Int)
+     2  return s1:String
 "
     );
 }

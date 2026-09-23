@@ -312,15 +312,6 @@ pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth
     }
 }
 
-/// `split` and `replace` both refuse an empty needle.
-pub(super) fn empty_needle(method: &str, parameter: &str, help: &str) -> RuntimeError {
-    RuntimeError::new(format!("`{method}` cannot use an empty `{parameter}`"))
-        .with_rule(
-            "An empty separator or search string would match between every character, rather than answer the question the method asks.",
-        )
-        .with_help(help)
-}
-
 /// `Float.format` refused a `digits` outside `0..=17`.
 pub(super) fn format_digits(digits: i64) -> RuntimeError {
     RuntimeError::new(format!("`Float.format` cannot use `{digits}` digits")).with_rule(

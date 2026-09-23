@@ -207,7 +207,7 @@ written as a namespace.
 | `isEmpty() -> Bool` |  |  |  | `std.string.isEmpty` |
 | `words() -> Array<String>` |  |  |  | `std.string.words` |
 | `chars() -> Array<String>` |  |  |  | `std.string.chars` |
-| `split(separator: String) -> Array<String>` |  |  |  | `machine` |
+| `split(separator: String) -> Array<String>` |  |  |  | `std.string.split` |
 | `join(parts: Array<String>) -> String` |  |  |  | `std.string.join` |
 | `slice(from: Int, to: Int) -> String` |  |  |  | `std.string.slice` |
 | `trim() -> String` |  |  |  | `std.string.trim` |
@@ -215,7 +215,7 @@ written as a namespace.
 | `startsWith(prefix: String) -> Bool` |  |  |  | `std.string.startsWith` |
 | `endsWith(suffix: String) -> Bool` |  |  |  | `std.string.endsWith` |
 | `indexOf(text: String) -> Option<Int>` |  |  |  | `std.string.indexOf` |
-| `replace(old: String, new: String) -> String` |  |  |  | `machine` |
+| `replace(old: String, new: String) -> String` |  |  |  | `std.string.replace` |
 | `toUpper() -> String` |  |  |  | `std.string.toUpper` |
 | `toLower() -> String` |  |  |  | `std.string.toLower` |
 | `byteLength() -> Int` |  |  |  | `std.string.byteLength` |
