@@ -73,6 +73,7 @@ impl Inst {
             | Inst::DynKind { dst, .. }
             | Inst::DynSameType { dst, .. }
             | Inst::DynSameObject { dst, .. }
+            | Inst::DynNameOrder { dst, .. }
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
             | Inst::DynCount { dst, .. } => f(dst, 1),
@@ -246,6 +247,7 @@ impl Inst {
             | Inst::DynKind { .. }
             | Inst::DynSameType { .. }
             | Inst::DynSameObject { .. }
+            | Inst::DynNameOrder { .. }
             | Inst::DynRead { .. }
             | Inst::DynCase { .. }
             | Inst::DynCount { .. }

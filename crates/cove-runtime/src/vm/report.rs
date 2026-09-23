@@ -1349,21 +1349,23 @@ mod tests {
 
     /// A loop that calls an intrinsic that allocates (`Float.parse` builds
     /// the message of the `Err` it answers) and one that does not
-    /// (`Value.order` walks two keys together and answers one `Int` word),
+    /// (`Value.admitKey` walks a key and answers nothing),
     /// each several times over, so both [`Counting`]'s wiring and the
     /// reconciliation test below have more than one call and more than one
     /// site to work with.
     ///
-    /// **The reading one has moved four times, and each move is a
+    /// **The reading one has moved five times, and each move is a
     /// migration.** It was `String.length` until ADR 0064 made the count
     /// `std.string.length`; it was then `String.contains` until ADR 0065 gave
     /// that a run search to stand on; it was then `String.indexOf`, until ADR
-    /// 0064's next migration wrote that over the same run search; and it was
-    /// then `Any.equals`, until [ADR 0068]'s Phase 2 made `==` on two erased
-    /// values `std.dynamic.equals`, a Cove loop charged by the instruction.
-    /// `Value.order` is the shape for the reasons each of the others was: it
-    /// reads the values it was handed, it charges what it walked, and it
-    /// allocates nothing, because the answer is one word.
+    /// 0064's next migration wrote that over the same run search; it was then
+    /// `Any.equals`, until [ADR 0068]'s Phase 2 made `==` on two erased values
+    /// `std.dynamic.equals`, a Cove loop charged by the instruction; and it was
+    /// then `Value.order`, until the ADR's Phase 3 made the order of two erased
+    /// keys `std.dynamic.order` the same way. `Value.admitKey` is the shape for
+    /// the reasons each of the others was: it reads the value it was handed, it
+    /// charges what it walked, and on the path that admits it allocates
+    /// nothing, because the answer is no word at all.
     ///
     /// **The allocating one has moved twice**, and neither time because a
     /// reader found a run instruction to stand on: it was `String.join` until
@@ -1375,18 +1377,18 @@ mod tests {
     /// row that attributed only the outermost object; nothing left allocates
     /// more than one per call.
     ///
-    /// The ordered keys are **erased**, and that is not decoration. Since
-    /// [ADR 0064]'s Decision 3 an order whose key layout is known is a walk the
-    /// lowering synthesizes and never reaches an intrinsic at all; Decision 4
-    /// leaves exactly one arm that does, and it is a `dyn Trait` key. So a row
-    /// for `Value.order` exists to be read only where a `Set` of erased values
-    /// is being built, which is what `Set.of(left, other)` is: `std.set.of`
-    /// orders its members through `core.order`, and over two boxes that is the
-    /// intrinsic.
+    /// The admitted keys are **erased**, and that is not decoration. Since
+    /// [ADR 0064]'s Decision 3 an admission whose key layout is known is a
+    /// walk the lowering synthesizes, or nothing at all, and reaches the
+    /// intrinsic only to word a refusal; a `dyn Trait` key is the arm that
+    /// reaches it whatever the key holds. So a row for `Value.admitKey` is
+    /// read here where a `Set` of erased values is being built, which is what
+    /// `Set.of(left, other)` is: `std.set.of` admits each member through
+    /// `core.admitKey`, and over a box that is the intrinsic.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
-    const PARSE_AND_ORDER: &str = "
+    const PARSE_AND_ADMIT: &str = "
 trait Tagged {
   fn tag(self) -> Int
 }
@@ -1423,13 +1425,13 @@ export fn main() -> Int {
     /// attributed per variant, and this is the property worth pinning about
     /// that attribution: it is not just present, it tells two operations
     /// apart. `Float.parse` allocates the message of the `Err` it hands back,
-    /// and `Value.order` only reads the keys it is given, so a run of both
+    /// and `Value.admitKey` only reads the keys it is given, so a run of both
     /// must show one row with allocations and one row without — from the
     /// real machinery in `Machine::call_intrinsic`, not from calling
     /// [`Counting::intrinsic_allocated`] directly, which would only prove the
     /// bookkeeping adds correctly and not that it is wired to anything.
     ///
-    /// The `Set` each turn builds allocates, and none of it is `Value.order`'s:
+    /// The `Set` each turn builds allocates, and none of it is `Value.admitKey`'s:
     /// it is `std.set.of`'s own Cove, charged to no intrinsic row — which is
     /// the attribution this is about.
     ///
@@ -1438,7 +1440,7 @@ export fn main() -> Int {
     fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
         use crate::vm::debug::tests::World;
 
-        let world = World::new(PARSE_AND_ORDER);
+        let world = World::new(PARSE_AND_ADMIT);
         let mut vm = world.plain();
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
@@ -1458,15 +1460,15 @@ export fn main() -> Int {
         assert!(parsed.allocations <= vm.allocations(), "{parsed:?}");
         assert!(parsed.words <= vm.allocated_words(), "{parsed:?}");
 
-        let ordered = boundary
-            .intrinsic(Intrinsic::ValueOrder)
-            .expect("the program orders two erased keys");
-        assert!(ordered.calls() > 0, "{ordered:?}");
+        let admitted = boundary
+            .intrinsic(Intrinsic::ValueAdmitKey)
+            .expect("the program admits two erased keys");
+        assert!(admitted.calls() > 0, "{admitted:?}");
         assert_eq!(
-            ordered.allocations, 0,
-            "Value.order walks its operands and answers one word: {ordered:?}"
+            admitted.allocations, 0,
+            "Value.admitKey walks its operand and answers nothing: {admitted:?}"
         );
-        assert_eq!(ordered.words, 0, "{ordered:?}");
+        assert_eq!(admitted.words, 0, "{admitted:?}");
     }
 
     /// **The totals must reconcile exactly with the opcode and site
@@ -1493,7 +1495,7 @@ export fn main() -> Int {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::new(PARSE_AND_ORDER);
+        let world = World::new(PARSE_AND_ADMIT);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();
@@ -1532,39 +1534,37 @@ export fn main() -> Int {
             assert_eq!(work, row.work, "{:?}: {row:?}", row.intrinsic);
         }
         // And the work is not vacuously nought on both sides: this program
-        // calls `Value.order`, which walks what it orders.
+        // calls `Value.admitKey`, which walks what it admits.
         assert!(
             boundary.intrinsics.iter().any(|row| row.work > 0),
-            "a program that orders erased keys examines something: {:?}",
+            "a program that admits erased keys examines something: {:?}",
             boundary.intrinsics
         );
     }
 
-    /// Ten `Set`s of two erased structs, each holding a `String` of
-    /// `characters` ASCII characters and one more that tells the two apart, so
-    /// that two runs of it differ in exactly the one thing the charge is
-    /// supposed to be proportional to.
+    /// Ten renderings of an erased struct holding a `String` of `characters`
+    /// ASCII characters, so that two runs of it differ in exactly the one thing
+    /// the charge is supposed to be proportional to.
     ///
-    /// **The operation has moved six times, and the sixth left no intrinsic
-    /// that compares two values for equality at all.** It was `String.length`
-    /// until ADR 0064 moved the count out of the intrinsics, `String.contains`
-    /// until ADR 0065 gave that a run search, `String.indexOf` until the
-    /// migration that wrote that over the same search, `String.toUpper` until
-    /// issue #454's Step 5, `String.replace` until the end of Step 3, and
-    /// `Any.equals` over two erased strings until ADR 0068's Phase 2 made that
-    /// `std.dynamic.equals`. What is left that charges by the byte is
-    /// `Value.order` over two erased strings, which charges the shorter of the
-    /// two — here both — on top of one unit per value its walk reaches. The
-    /// values are held as `dyn Tagged` because an order whose layout is known
-    /// is a walk the lowering writes and never reaches an intrinsic.
+    /// **The operation has moved seven times, and the seventh left no intrinsic
+    /// that orders two values at all.** It was `String.length` until ADR 0064
+    /// moved the count out of the intrinsics, `String.contains` until ADR 0065
+    /// gave that a run search, `String.indexOf` until the migration that wrote
+    /// that over the same search, `String.toUpper` until issue #454's Step 5,
+    /// `String.replace` until the end of Step 3, `Any.equals` over two erased
+    /// strings until ADR 0068's Phase 2 made that `std.dynamic.equals`, and
+    /// `Value.order` over two until its Phase 3 made that `std.dynamic.order`.
+    /// What is left that charges by the byte is `Value.renderInto` over an
+    /// erased value, which charges the bytes it appended on top of one unit per
+    /// value its walk reaches. The value is held as `dyn Tagged` because a
+    /// rendering whose layout is known is a walk the lowering writes and never
+    /// reaches an intrinsic.
     ///
-    /// The two strings differ in their last byte, because `Set.of` refuses a
-    /// member given twice, and so the order reads every byte of both before it
-    /// answers. The second is an interpolation of the prefix rather than a
-    /// literal, so the two are two objects; an interpolation of a `String` is
-    /// a byte copy and calls no intrinsic, so the two runs still differ in
+    /// The text is an interpolation of a literal rather than the literal, so
+    /// the two runs build it the same way; an interpolation of a `String` is a
+    /// byte copy and calls no intrinsic, so the two runs still differ in
     /// nothing but `characters`.
-    fn orders_over(characters: usize) -> String {
+    fn renders_over(characters: usize) -> String {
         let text = "a".repeat(characters);
         format!(
             "
@@ -1582,13 +1582,12 @@ impl Tagged for Named {{
 
 export fn main() -> Int {{
   let text = \"{text}\"
-  let left: dyn Tagged = Named(name: \"{{text}}b\")
-  let right: dyn Tagged = Named(name: \"{{text}}c\")
+  let shown: dyn Tagged = Named(name: \"{{text}}b\")
   var total = 0
   var i = 0
   while i < 10 {{
-    let keyed = Set.of(left, right)
-    total = total + keyed.length()
+    let rendered = \"{{shown}}\"
+    total = total + rendered.length()
     i = i + 1
   }}
   total
@@ -1608,10 +1607,11 @@ export fn main() -> Int {{
     /// `String.length` was still an intrinsic; ADR 0064 moved it into
     /// `std.string` and this case became `String.contains`, and ADR 0065 has
     /// since moved that one too, `String.indexOf` after it, `String.toUpper`
-    /// after that, `String.replace` and then `Any.equals` last. The case below
-    /// is `Value.order` over two erased strings, charged the same way — a
-    /// reading whose charge is the bytes it read — plus one unit a value,
-    /// which is why what is asserted is the *difference* between the two runs.
+    /// after that, `String.replace`, `Any.equals` and then `Value.order` last.
+    /// The case below is `Value.renderInto` over an erased struct holding a
+    /// string, charged the same way — a walk whose charge is the bytes it
+    /// appended — plus one unit a value, which is why what is asserted is the
+    /// *difference* between the two runs.
     ///
     /// Two runs of the same shape over receivers a hundred times apart,
     /// making the same number of calls, from the real machinery. The call
@@ -1631,12 +1631,12 @@ export fn main() -> Int {{
             vm.run_entry("m", "main", Vec::new()).expect("it answers");
             vm.boundary()
                 .expect("count_boundary was called")
-                .intrinsic(Intrinsic::ValueOrder)
-                .expect("the program orders two erased values")
+                .intrinsic(Intrinsic::ValueRenderInto)
+                .expect("the program renders an erased value")
         };
 
-        let short = row(&orders_over(10));
-        let long = row(&orders_over(1_000));
+        let short = row(&renders_over(10));
+        let long = row(&renders_over(1_000));
 
         assert_eq!(
             short.calls(),
@@ -1645,7 +1645,7 @@ export fn main() -> Int {{
         );
         assert!(short.calls() >= 10, "{short:?}");
         // What the two runs differ by is the bytes, exactly: 990 more a call,
-        // because the strings are ASCII and the unit is bytes — which is the
+        // because the text is ASCII and the unit is bytes — which is the
         // other half of what this pins: a charge in *characters* would be the
         // same number here, and one in words an eighth of it. The one unit a
         // value the walk also charges is the same in both runs and cancels.
@@ -1656,107 +1656,14 @@ export fn main() -> Int {{
         );
     }
 
-    /// Ten `Set`s of two erased four-field structs that differ in the first
-    /// field or only in the last.
-    ///
-    /// A struct is ordered field by field in declaration order, so the two
-    /// programs differ in how far the walk gets and in nothing else: the same
-    /// declaration, the same number of orderings, the same layouts.
-    ///
-    /// It was ten `==` comparisons, of `Any.equals`, until ADR 0068's Phase 2
-    /// made that a Cove loop — where an early exit is charged what it did by
-    /// construction, one instruction at a time, and no column of the report
-    /// has to be taught it. `Value.order` is the walk left that charges a unit
-    /// a value from inside Rust, so it is the one this pins.
-    fn orders_four_fields(early: bool) -> String {
-        let (first, last) = if early { (9, 4) } else { (1, 9) };
-        format!(
-            "
-trait Tagged {{
-  fn tag(self) -> Int
-}}
-
-struct Quad {{
-  a: Int
-  b: Int
-  c: Int
-  d: Int
-}}
-
-impl Tagged for Quad {{
-  fn tag(self) -> Int {{ self.a }}
-}}
-
-export fn main() -> Int {{
-  let x: dyn Tagged = Quad(a: 1, b: 2, c: 3, d: 4)
-  let y: dyn Tagged = Quad(a: {first}, b: 2, c: 3, d: {last})
-  var total = 0
-  var i = 0
-  while i < 10 {{
-    let keyed = Set.of(x, y)
-    total = total + keyed.length()
-    i = i + 1
-  }}
-  total
-}}
-"
-        )
-    }
-
-    /// **An early exit is charged what it did, not what it was handed.**
-    ///
-    /// The charge is made *in* the walk — `key::order` reports one unit per
-    /// value it reaches — rather than computed from the operands' width
-    /// before the comparison begins. The two are the same number only when
-    /// the walk runs to the end, and the difference is what makes the column
-    /// a measurement rather than a second rendering of the layout table.
-    ///
-    /// Two structs that differ in their first field are decided there; two
-    /// that differ only in their last are decided after all four. The exact
-    /// multiples are asserted rather than an inequality, because an inequality
-    /// would hold just as well for a charge that was merely noisy.
-    ///
-    /// **`key::order` charges a unit every time it is entered, and it is
-    /// entered once per step inward as well as once per pair.** The two boxes
-    /// are five entries before a field is compared — the pair of boxes, then
-    /// for each side a step from the box to its address and one from the
-    /// address to the struct it holds — and an `Int` field is three: the pair
-    /// of fields, and a step from each held field to its word. So an early exit
-    /// is `5 + 3` and a whole walk `5 + 4 × 3`, and the *difference* between
-    /// them, nine a call, is the three fields the longer walk reached and the
-    /// shorter did not.
-    #[test]
-    fn an_early_exit_is_charged_less_than_a_whole_walk() {
-        use crate::vm::debug::tests::World;
-
-        let row = |source: &str| {
-            let world = World::new(source);
-            let mut vm = world.plain();
-            vm.count_boundary();
-            vm.run_entry("m", "main", Vec::new()).expect("it answers");
-            vm.boundary()
-                .expect("count_boundary was called")
-                .intrinsic(Intrinsic::ValueOrder)
-                .expect("ordering two erased structs calls Value.order")
-        };
-
-        let early = row(&orders_four_fields(true));
-        let whole = row(&orders_four_fields(false));
-
-        assert_eq!(
-            early.calls(),
-            whole.calls(),
-            "the two runs make the same calls: {early:?} against {whole:?}"
-        );
-        assert!(early.calls() >= 10, "{early:?}");
-        assert_eq!(early.work, early.calls() * 8, "{early:?}");
-        assert_eq!(whole.work, whole.calls() * 17, "{whole:?}");
-        assert_eq!(
-            whole.work - early.work,
-            whole.calls() * 3 * 3,
-            "three more fields were reached, and nothing else differs: \
-             {early:?} against {whole:?}"
-        );
-        assert!(early.work < whole.work);
-    }
+    // `an_early_exit_is_charged_less_than_a_whole_walk` stood here: ten orders
+    // of two erased four-field structs that differed in the first field or in
+    // the last, asserting that a Rust walk charged one unit per value it
+    // reached and so charged an early exit less. It stood on `Any.equals` and
+    // then on `Value.order`, and ADR 0068's Phases 2 and 3 made both Cove
+    // loops, where an early exit is charged what it did by construction — one
+    // instruction at a time — and no column of this report has to be taught
+    // it. The two walks left in Rust never exit early: an admission that
+    // admits and a rendering visit every part of the value, and an admission
+    // that refuses ends the run.
 }

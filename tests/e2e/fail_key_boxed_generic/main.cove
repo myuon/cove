@@ -1,0 +1,38 @@
+use clock.timeout
+use console.println
+
+/// A boxed instantiation of a generic struct, `Cell<Float>`, used as a set
+/// element: the admission refuses the `Float` and names the field `Cell.v`.
+///
+/// `fail_key_boxed_struct`'s row for a generic declaration. The linear-memory
+/// backend names a layout by the instantiation it is —
+/// `fail_key_boxed_generic.Cell<Float>` — and the path is written the way the
+/// interpreter writes it, with the declared name and nothing else: the type
+/// arguments are left off first, and then the module, since the last `.` of a
+/// name like `m.Cell<m.Point>` is inside the brackets.
+///
+/// The cell is boxed through `clock.timeout`, which answers `Result<Any,
+/// Error>`, so that no `impl` has to be written for one instantiation.
+struct Cell<T> {
+  v: T
+}
+
+fn admitCell() -> Result<Unit, Error> {
+  let held = timeout(1s) {
+    let cell: Cell<Float> = Cell(v: 2.5)
+    cell
+  }?
+  let other = timeout(1s) {
+    let cell: Cell<Float> = Cell(v: 3.5)
+    cell
+  }?
+  let keyed = Set.of(held).inserted(other)
+  println("never printed {keyed}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed Cell<Float> as a set element")?
+  admitCell()?
+  Ok(())
+}

@@ -1,7 +1,7 @@
 //! [ADR 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 //! structural observations, over the words the machine holds.
 //!
-//! The eight reflection opcodes are thin: [`super::encoded`] reads a view out
+//! The nine reflection opcodes are thin: [`super::encoded`] reads a view out
 //! of the frame, asks one function here, and writes the answer back. What a
 //! view *is* — three words, the layout of the viewed value, the object that
 //! roots it and the payload word it begins at — is `cove_ir::dynamic`'s; this
@@ -36,6 +36,8 @@
 //! count first. They are refused rather than answered because the
 //! alternative is reading a word as something it is not — the one fault this
 //! machine exists to make loud.
+
+use std::cmp::Ordering;
 
 use cove_ir::bytecode::Op;
 use cove_ir::dynamic::{declared_name, VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
@@ -82,7 +84,7 @@ impl View {
     }
 }
 
-/// Executes one of the eight reflection opcodes `op` in the frame whose first
+/// Executes one of the nine reflection opcodes `op` in the frame whose first
 /// word is `frame`, with slot operands `a`, `b` and `c` of function `id`.
 ///
 /// Out of line on purpose: see the reflection arm of
@@ -130,6 +132,15 @@ pub(crate) fn execute(
             View::read(machine, at(b)),
             View::read(machine, at(c)),
         )),
+        Some(Op::DynNameOrder) => match name_order(
+            machine,
+            View::read(machine, at(b)),
+            View::read(machine, at(c)),
+        )? {
+            Ordering::Less => -1i64 as u64,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        },
         other => unreachable!("{other:?} is not a reflection opcode"),
     };
     machine.mem.set_word_at(at(a), word);
@@ -271,6 +282,38 @@ pub(crate) fn same_type(machine: &Machine, a: View, b: View) -> Result<bool, Run
     let kind = kind_of(machine, left);
     Ok(kind == kind_of(machine, right)
         && (!kind.is_nominal() || declared_name(&left.name) == declared_name(&right.name)))
+}
+
+/// `dyn.name-order`: where the name of the value `a` views sorts against
+/// `b`'s.
+///
+/// [`same_type`]'s names, compared rather than matched: the declared name of a
+/// struct, an enum or a range — qualified, and with any instantiation left
+/// off, so `m.Cell<Duration>` and `m.Cell<Int>` are one name — bytewise, and
+/// then for two enums the names of their cases, bytewise. A kind with no name
+/// sorts before one with a name and two of them are equal, which is the
+/// oracle's `Option` order over the same names.
+///
+/// Both names are the layout table's and are compared where they are, so this
+/// allocates nothing and places no string.
+pub(crate) fn name_order(machine: &Machine, a: View, b: View) -> Result<Ordering, RuntimeError> {
+    let (left, right) = (layout(machine, a.layout)?, layout(machine, b.layout)?);
+    fn name<'l>(machine: &Machine, described: &'l Layout) -> Option<&'l str> {
+        kind_of(machine, described)
+            .is_nominal()
+            .then(|| declared_name(&described.name))
+    }
+    let named = name(machine, left).cmp(&name(machine, right));
+    if named != Ordering::Equal {
+        return Ok(named);
+    }
+    match (&left.shape, &right.shape) {
+        (Shape::Enum { .. }, Shape::Enum { .. }) => {
+            let (one, other) = (enum_case(machine, a, left)?, enum_case(machine, b, right)?);
+            Ok(one.name.as_bytes().cmp(other.name.as_bytes()))
+        }
+        _ => Ok(Ordering::Equal),
+    }
 }
 
 /// `dyn.same-object`: whether the two views denote one `Vector` object.

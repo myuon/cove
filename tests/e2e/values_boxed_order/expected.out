@@ -1,0 +1,12 @@
+names {Zed(n: 1), Alpha(n: 1)}
+generic.cell {Full(5), Full(1ms)}
+generic.struct {Box(v: 5), Box(v: 1ms)}
+result {Err(x), Ok(1)}
+kinds.int-duration {9000000000, 1ns}
+kinds.every {(), true, 1, 1ms, a, Some(1), Leaf(n: 1), [1], {1}, {1: 1}, 0..<1}
+array {[], [1, 2], [1, 2, 3], [1, 3]}
+map {{a: 1}, {a: 1, b: 0}, {a: 2}, {b: 1}}
+range {0..<9, 1..<3, 1..3}
+static 0:leaf 9 1:leaf 1 1:leaf 2 has true
+deep.129 length 2 equal true bottom false shorter false
+deep.1000 length 2 equal true bottom false shorter false

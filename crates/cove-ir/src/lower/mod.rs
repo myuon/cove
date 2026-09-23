@@ -1234,6 +1234,11 @@ struct Pool {
     /// program whose comparisons never reach a box. `Body::dynamic_equals`
     /// fills it in.
     dynamic_equals: Option<FunctionId>,
+    /// `std.dynamic.order`, once a call site has resolved it: what
+    /// `core.order` over two erased keys calls, and what an order walk calls
+    /// where it reaches a boxed part — [`Pool::dynamic_equals`]' arrangement,
+    /// filled in by `Body::dynamic_order`.
+    dynamic_order: Option<FunctionId>,
     /// The instantiations being lowered right now, outermost first.
     ///
     /// A chain rather than a count, because what a program that exceeds the
@@ -1276,6 +1281,7 @@ impl Pool {
             tracked: HashMap::new(),
             leaves: None,
             dynamic_equals: None,
+            dynamic_order: None,
             open: Vec::new(),
         }
     }

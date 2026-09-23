@@ -339,6 +339,7 @@ const DYN_CASE: u8 = Op::DynCase.number();
 const DYN_COUNT: u8 = Op::DynCount.number();
 const DYN_CHILD: u8 = Op::DynChild.number();
 const DYN_SAME_OBJECT: u8 = Op::DynSameObject.number();
+const DYN_NAME_ORDER: u8 = Op::DynNameOrder.number();
 
 /// Whether [`dispatch`] implements this opcode.
 ///
@@ -435,7 +436,8 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::DynCase
         | Op::DynCount
         | Op::DynChild
-        | Op::DynSameObject => true,
+        | Op::DynSameObject
+        | Op::DynNameOrder => true,
     }
 }
 
@@ -3752,8 +3754,8 @@ pub(super) fn dispatch<'s, 'a>(
             }
 
             // ---- reflection ------------------------------------------
-            // ADR 0068's seven observations and issue #493's identity
-            // question, each a read of the frame, one
+            // ADR 0068's seven observations, issue #493's identity
+            // question and Phase 3's name order, each a read of the frame, one
             // question of `super::dynamic`, and a write back. None allocates
             // and none reaches a safepoint, so no `sync` is needed before
             // one: a failure syncs on its own way out, through `fail!`.
@@ -3764,7 +3766,7 @@ pub(super) fn dispatch<'s, 'a>(
             // grew it enough that `native_tier`'s three-hundred-crossing chain
             // overflowed a test thread's stack.
             DYN_OPEN | DYN_KIND | DYN_SAME_TYPE | DYN_READ | DYN_CASE | DYN_COUNT | DYN_CHILD
-            | DYN_SAME_OBJECT => {
+            | DYN_SAME_OBJECT | DYN_NAME_ORDER => {
                 if let Err(error) =
                     dynamic::execute(machine, held.opcode(), base_at, a!(), b!(), c!(), id)
                 {

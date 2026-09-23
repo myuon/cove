@@ -44,7 +44,6 @@ pub enum Intrinsic {
     StringRefuseByteRange,
     FloatToInt,
     FloatParse,
-    ValueOrder,
     ValueAdmitKey,
 }
 
@@ -58,7 +57,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringRefuseByteRange,
     Intrinsic::FloatToInt,
     Intrinsic::FloatParse,
-    Intrinsic::ValueOrder,
     Intrinsic::ValueAdmitKey,
 ];
 
@@ -75,21 +73,21 @@ pub const COUNT: usize = ALL.len();
 impl Intrinsic {
     /// The type the operation belongs to: `Array`, `String`, `Map`, `Int`.
     ///
-    /// `Value` for the two a keyed collection's standard-library body reaches
-    /// through `core.order` and `core.admitKey`, which are rules over any
-    /// key's layout rather than methods of a type, and for
-    /// [`Intrinsic::ValueRenderInto`], which is what `"{x}"` appends for a
-    /// piece of any layout. (`Any` was the receiver of `Any.equals`, `==` on
-    /// two erased values, until [ADR
+    /// `Value` for the one a keyed collection's standard-library body reaches
+    /// through `core.admitKey`, which is a rule over any key's layout rather
+    /// than a method of a type, and for [`Intrinsic::ValueRenderInto`], which
+    /// is what `"{x}"` appends for a piece of any layout. (`Any` was the
+    /// receiver of `Any.equals`, `==` on two erased values, until [ADR
     /// 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    /// Phase 2 made that `std.dynamic.equals`.)
+    /// Phase 2 made that `std.dynamic.equals`; and `Value.order`, which
+    /// `core.order` reached over two erased keys, stood beside `admitKey`
+    /// until the ADR's Phase 3 made it `std.dynamic.order`.)
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "Value",
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatParse => "Float",
-            Intrinsic::ValueOrder => "Value",
             Intrinsic::ValueAdmitKey => "Value",
         }
     }
@@ -101,7 +99,6 @@ impl Intrinsic {
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatParse => "parse",
-            Intrinsic::ValueOrder => "order",
             Intrinsic::ValueAdmitKey => "admitKey",
         }
     }
@@ -158,9 +155,7 @@ impl Intrinsic {
             // Rendering is a walk directed by whatever layout the piece has,
             // which is what makes it a value rule rather than a text one: a
             // `"{items}"` renders an `Array` through it.
-            Intrinsic::ValueRenderInto | Intrinsic::ValueOrder | Intrinsic::ValueAdmitKey => {
-                Category::Value
-            }
+            Intrinsic::ValueRenderInto | Intrinsic::ValueAdmitKey => Category::Value,
         }
     }
 
@@ -187,7 +182,6 @@ impl Intrinsic {
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
-            Intrinsic::ValueOrder => fixed(&[C::Value, C::Value], C::Int),
             // The key, then the method and the role a refusal is worded with.
             Intrinsic::ValueAdmitKey => fixed(&[C::Value, C::Str, C::Str], C::Unit),
         }
@@ -228,8 +222,9 @@ impl Intrinsic {
             //
             // It keeps every one of those after ADR 0064's Decision 3 made
             // the operation a walk `lower::synth` composes, and for the
-            // reason `Intrinsic::ValueOrder` keeps its own (and `Any.equals`
-            // kept its, until ADR 0068 moved it into `std.dynamic`): the arm
+            // reason `Intrinsic::ValueAdmitKey` keeps its own (and `Any.equals`
+            // and `Value.order` kept theirs, until ADR 0068 moved them into
+            // `std.dynamic`): the arm
             // that survives is the one reached from a value
             // whose layout does not say what it is, and that arm is the whole
             // of the runtime's walk. A `Float` and a `Duration` reach it too
@@ -327,16 +322,15 @@ impl Intrinsic {
             // a Cove loop over a view of each box with no depth bound at all
             // (issue #480), and deleted the variant.
 
-            // ADR 0059's keyed intrinsics. The order and the admission each
-            // walk a key as deep as it nests and allocate nothing: the order
-            // answers one `Int` word, the admission nothing at all, and both
-            // raise — a key too deep to walk, and for the admission a key the
-            // language refuses, in the method's words. (The duplicate refusal
-            // that stood beside them is `std.set.of`'s and `std.map.of`'s own
-            // Cove since `core.refuse`, ADR 0067.)
-            Intrinsic::ValueOrder | Intrinsic::ValueAdmitKey => {
-                raise.union(E::READS_MEMORY).union(E::BULK_WORK)
-            }
+            // ADR 0059's last keyed intrinsic. The admission walks a key as
+            // deep as it nests, allocates nothing and answers nothing, and
+            // raises — a key too deep to walk, and a key the language refuses,
+            // in the method's words. (The order stood beside it, answering one
+            // `Int` word, until ADR 0068's Phase 3 made it
+            // `std.dynamic.order`, a Cove loop over a view of each box with no
+            // depth bound; the duplicate refusal is `std.set.of`'s and
+            // `std.map.of`'s own Cove since `core.refuse`, ADR 0067.)
+            Intrinsic::ValueAdmitKey => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
         }
     }
 }
@@ -564,7 +558,6 @@ mod tests {
             "String.refuseByteRange",
             "Float.toInt",
             "Float.parse",
-            "Value.order",
             "Value.admitKey",
         ];
 
@@ -621,7 +614,6 @@ mod tests {
                 | Intrinsic::StringRefuseByteRange
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatParse
-                | Intrinsic::ValueOrder
                 | Intrinsic::ValueAdmitKey => 1,
             }
         }
@@ -679,7 +671,7 @@ mod tests {
     #[test]
     fn display_prints_receiver_dot_operation() {
         assert_eq!(Intrinsic::FloatParse.to_string(), "Float.parse");
-        assert_eq!(Intrinsic::ValueOrder.to_string(), "Value.order");
+        assert_eq!(Intrinsic::ValueAdmitKey.to_string(), "Value.admitKey");
     }
 
     #[test]

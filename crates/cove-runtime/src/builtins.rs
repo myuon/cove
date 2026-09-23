@@ -1096,6 +1096,13 @@ pub fn call_core(
         "dynamicKind" => Ok(Value(Repr::Int(dynamic_kind(&args[0]).code()))),
         "dynamicSameType" => Ok(Value(Repr::Bool(dynamic_same_type(&args[0], &args[1])))),
         "dynamicSameObject" => Ok(Value(Repr::Bool(dynamic_same_object(&args[0], &args[1])))),
+        "dynamicNameOrder" => Ok(Value(Repr::Int(
+            match dynamic_name_order(&args[0], &args[1]) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            },
+        ))),
         "dynamicBool" | "dynamicInt" | "dynamicFloat" | "dynamicDuration" | "dynamicString" => {
             dynamic_read(name, &args[0]).map_err(|error| error.at(span))
         }
@@ -1185,6 +1192,27 @@ pub(crate) fn dynamic_same_object(a: &Value, b: &Value) -> bool {
         (Value(Repr::Vector(a)), Value(Repr::Vector(b))) => Rc::ptr_eq(a, b),
         _ => false,
     }
+}
+
+/// `core.dynamicNameOrder`: the declared names, and then for two enums the
+/// names of their cases, each bytewise — [`dynamic_same_type`]'s question
+/// asked three ways.
+///
+/// A kind with no name sorts before a kind with one, which is `Option`'s
+/// own order over [`dynamic_type_name`]. What it orders is exactly what
+/// [`MapKey`]'s derived order compares first for an `EnumCase` and a
+/// `Struct` — the qualified type name the value carries, and then the case —
+/// which is why `std.dynamic.order` can stand on it: that is the order a key
+/// has always had on this evaluator.
+pub(crate) fn dynamic_name_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    dynamic_type_name(a)
+        .cmp(&dynamic_type_name(b))
+        .then_with(|| match (a.erased(), b.erased()) {
+            (Value(Repr::Enum(x)), Value(Repr::Enum(y))) => {
+                x.case.as_bytes().cmp(y.case.as_bytes())
+            }
+            _ => std::cmp::Ordering::Equal,
+        })
 }
 
 /// The declared name a nominal view's type has, with any instantiation left

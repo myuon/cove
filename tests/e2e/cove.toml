@@ -440,6 +440,14 @@ allow = ["console", "clock"]
 entry = "fail_key_boxed_vector.main"
 allow = ["console", "clock"]
 
+[run.fail_key_boxed_struct]
+entry = "fail_key_boxed_struct.main"
+allow = ["console"]
+
+[run.fail_key_boxed_generic]
+entry = "fail_key_boxed_generic.main"
+allow = ["console", "clock"]
+
 [run.values_interpolation_order]
 entry = "values_interpolation_order.main"
 allow = ["console"]
@@ -547,6 +555,10 @@ allow = ["console", "clock"]
 [run.values_boxed_deep]
 entry = "values_boxed_deep.main"
 allow = ["console"]
+
+[run.values_boxed_order]
+entry = "values_boxed_order.main"
+allow = ["console", "clock"]
 
 [run.values_boxed_generic]
 entry = "values_boxed_generic.main"

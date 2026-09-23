@@ -1,0 +1,5 @@
+/// A struct whose short name sorts first and whose module sorts last: the
+/// other half of `aa.Zed`.
+export struct Alpha {
+  n: Int
+}

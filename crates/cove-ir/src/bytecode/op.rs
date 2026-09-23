@@ -256,8 +256,12 @@ mod base {
     /// answers, which issue #493's cycle rule brought after the seven. Last,
     /// for `CMP_ORDER`'s reason: adding it renumbered nothing already there.
     pub const DYN_SAME_OBJECT: u8 = DYN_CHILD + 1;
+    /// [`crate::Inst::DynNameOrder`], the three-way name comparison ADR
+    /// 0068's Phase 3 brought for `std.dynamic.order`. Last, for
+    /// `CMP_ORDER`'s reason: adding it renumbered nothing already there.
+    pub const DYN_NAME_ORDER: u8 = DYN_SAME_OBJECT + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = DYN_SAME_OBJECT + 1;
+    pub const END: u8 = DYN_NAME_ORDER + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -410,6 +414,8 @@ pub enum Op {
     DynChild,
     /// [`crate::Inst::DynSameObject`].
     DynSameObject,
+    /// [`crate::Inst::DynNameOrder`].
+    DynNameOrder,
 }
 
 /// Which of `a`, `b` and `c` an opcode uses, and for what.
@@ -724,6 +730,7 @@ impl Op {
             Op::DynCount,
             Op::DynChild,
             Op::DynSameObject,
+            Op::DynNameOrder,
         ]);
         all
     }
@@ -836,6 +843,7 @@ impl Op {
             Op::DynCount => base::DYN_COUNT,
             Op::DynChild => base::DYN_CHILD,
             Op::DynSameObject => base::DYN_SAME_OBJECT,
+            Op::DynNameOrder => base::DYN_NAME_ORDER,
         }
     }
 
@@ -1286,6 +1294,12 @@ impl Op {
                 Operand::View,
                 Payload::Empty,
             ),
+            Op::DynNameOrder => fields(
+                Operand::Word(INT_ONLY),
+                Operand::View,
+                Operand::View,
+                Payload::Empty,
+            ),
         }
     }
 }
@@ -1371,7 +1385,9 @@ mod tests {
     /// not five, because which scalar is read is its destination's `Repr`, and
     /// an opcode per scalar would be a second copy of a fact the frame keeps —
     /// and a hundred and ninety once issue #493's cycle rule brought the one
-    /// identity question reflection answers, `DynSameObject`.
+    /// identity question reflection answers, `DynSameObject`, and a hundred and
+    /// ninety-one once ADR 0068's Phase 3 brought `DynNameOrder` for
+    /// `std.dynamic.order`.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1391,9 +1407,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_ninety_opcodes() {
-        assert_eq!(Op::all().len(), 190);
-        assert_eq!(OPCODES, 190);
+    fn there_are_a_hundred_and_ninety_one_opcodes() {
+        assert_eq!(Op::all().len(), 191);
+        assert_eq!(OPCODES, 191);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

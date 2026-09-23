@@ -32,8 +32,9 @@
 //! array or a set. So `core.order` is one `cmp` of `CmpOp::Order` where the
 //! key is a scalar, a `String` or a case index in name order, a call into the
 //! walk `super::synth` composes out of the key's layout where the layout is
-//! known, and a [`Inst::IntrinsicCall`] of `Intrinsic::ValueOrder` only where
-//! the key is erased (ADR 0064, Decisions 3 and 4);
+//! known, and a call of `std.dynamic.order` — Cove over a view of each box,
+//! since ADR 0068's Phase 3 — only where the key is erased (ADR 0064,
+//! Decisions 3 and 4);
 //! `core.admitKey` is nothing at all where the key's layout cannot hold a
 //! refused part, a call into the walk `super::synth` composes out of it where
 //! it can and the layout says which values, and an
@@ -170,6 +171,7 @@ impl Body<'_> {
                 expr,
                 &a.value,
                 &b.value,
+                shapes::BOOL,
                 |dst, a, b| Inst::DynSameType { dst, a, b },
                 want,
             ),
@@ -177,7 +179,16 @@ impl Body<'_> {
                 expr,
                 &a.value,
                 &b.value,
+                shapes::BOOL,
                 |dst, a, b| Inst::DynSameObject { dst, a, b },
+                want,
+            ),
+            ("dynamicNameOrder", [a, b]) => self.core_dynamic_pair(
+                expr,
+                &a.value,
+                &b.value,
+                shapes::INT,
+                |dst, a, b| Inst::DynNameOrder { dst, a, b },
                 want,
             ),
             ("dynamicBool", [view]) => {
@@ -1210,13 +1221,15 @@ impl Body<'_> {
     /// comparison instruction orders exactly as `key::order` does — see
     /// [`synth::ordered_by`] — one [`Inst::Call`] into the function
     /// `super::synth` composes out of the layout where the layout is known
-    /// and wider than that, and one [`Inst::IntrinsicCall`] of
-    /// [`Intrinsic::ValueOrder`] where the key is a box, which is ADR 0064's
-    /// Decision 4 and the only dynamic layout left.
+    /// and wider than that, and one [`Inst::Call`] of `std.dynamic.order`
+    /// where the key is a box, which is ADR 0064's Decision 4 and the only
+    /// dynamic layout left — an `Intrinsic::ValueOrder` until [ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 3 wrote it in Cove over a view of each box.
     ///
     /// **The first of the three is the one to be careful with.** It is what
-    /// makes `cq` — every one of whose map keys is a `String` — execute
-    /// `Value.order` at no site and on no turn, and a synthesis that
+    /// makes `cq` — every one of whose map keys is a `String` — call no order
+    /// walk at any site and on any turn, and a synthesis that
     /// displaced it with a call into a one-instruction function would be a
     /// regression on the one program in this repository that exercises the
     /// path at all. So it is asked first, and it is asked through the same
@@ -1244,13 +1257,50 @@ impl Body<'_> {
                     expr.span,
                 );
             }
-            None if self.is_boxed(layout) => self.intrinsic_call(
-                Intrinsic::ValueOrder,
-                shapes::INT,
-                dst.slot,
-                &[&left, &right],
-                expr.span,
-            ),
+            // The one key with no layout to synthesize from, and since ADR
+            // 0068's Phase 3 a call like any other: `std.dynamic.order`,
+            // written in Cove over a view of each box. `None` is a round that
+            // is lowering the package again with it in the slice, and nothing
+            // this round emits is verified — so the stand-in is a constant,
+            // as `Body::compare_values`' is for `std.dynamic.equals`.
+            None if self.is_boxed(layout) => match self.dynamic_order(expr.span) {
+                Some(callee) => {
+                    let args = self.pool.args.intern(vec![left.arg(), right.arg()]);
+                    self.emit(
+                        Inst::Call {
+                            dst: dst.slot,
+                            callee,
+                            args,
+                        },
+                        expr.span,
+                    );
+                }
+                None => {
+                    self.emit(
+                        Inst::Int {
+                            dst: dst.slot,
+                            value: 0,
+                        },
+                        expr.span,
+                    );
+                }
+            },
+            // A walk that reaches a boxed part calls `std.dynamic.order` from
+            // a function that cannot resolve a name, so it is resolved here
+            // first; a layout with no box an order walk reaches asks for
+            // nothing, and a round that has to lower the package again gets
+            // the stand-in above.
+            None if synth::reaches_a_box(&self.pool.shapes, synth::Operation::Order, layout)
+                && self.dynamic_order(expr.span).is_none() =>
+            {
+                self.emit(
+                    Inst::Int {
+                        dst: dst.slot,
+                        value: 0,
+                    },
+                    expr.span,
+                );
+            }
             None => {
                 let decls = self.plan.decls.len();
                 let callee = synth::function_for(
@@ -1846,20 +1896,23 @@ impl Body<'_> {
         )
     }
 
-    /// `core.dynamicSameType(a, b)` and `core.dynamicSameObject(a, b)`: one
-    /// [`Inst::DynSameType`] or [`Inst::DynSameObject`] over two views,
-    /// answering a `Bool`.
+    /// `core.dynamicSameType(a, b)`, `core.dynamicSameObject(a, b)` and
+    /// `core.dynamicNameOrder(a, b)`: one [`Inst::DynSameType`],
+    /// [`Inst::DynSameObject`] or [`Inst::DynNameOrder`] over two views,
+    /// answering a word of `answer` — a `Bool` for the first two and an `Int`
+    /// for the third.
     fn core_dynamic_pair(
         &mut self,
         expr: &Expr,
         a: &Expr,
         b: &Expr,
+        answer: LayoutId,
         inst: impl FnOnce(Slot, Slot, Slot) -> Inst,
         want: Option<Dest>,
     ) -> Val {
         let left = self.expr(a);
         let right = self.expr(b);
-        let dst = self.answer_at(want, shapes::BOOL);
+        let dst = self.answer_at(want, answer);
         self.emit(inst(dst.slot, left.slot, right.slot), expr.span);
         self.release(right, expr.span);
         self.release(left, expr.span);

@@ -2748,11 +2748,29 @@ export fn main() -> Int {
     assert_eq!(count(cove_ir::Compare::Bool), 5, "{compares:?}");
     assert_eq!(count(cove_ir::Compare::Str), 8, "{compares:?}");
     assert_eq!(count(cove_ir::Compare::Tag), 5, "{compares:?}");
-    let walks = intrinsics("probeOrders")
-        .into_iter()
-        .filter(|intrinsic| *intrinsic == cove_ir::Intrinsic::ValueOrder)
+    // And none of the box's fallback, which was the intrinsic `Value.order`
+    // until ADR 0068's Phase 3 made it a call of `std.dynamic.order`: every
+    // layout here is known, so none of it is routed through reflection.
+    let reflected = function("probeOrders")
+        .code
+        .iter()
+        .filter(|inst| match inst {
+            cove_ir::Inst::Call { callee, .. } => {
+                let called = &program.functions[callee.index()];
+                (&*called.module, &*called.name) == ("std.dynamic", "order")
+            }
+            _ => false,
+        })
         .count();
-    assert_eq!(walks, 0, "a layout the lowering knows is a walk it wrote");
+    assert_eq!(
+        reflected, 0,
+        "a layout the lowering knows is a walk it wrote"
+    );
+    assert_eq!(
+        intrinsics("probeOrders"),
+        Vec::new(),
+        "and no order is an intrinsic any more"
+    );
     assert_eq!(
         intrinsics("probeAdmitted"),
         Vec::new(),
@@ -3929,6 +3947,10 @@ fn probeDescribe(root: DynamicView) -> String {
       if core.dynamicSameType(core.dynamicChild(view, 0), core.dynamicChild(view, 1)) {
         out = \"{out}=\"
       }
+      let named = core.dynamicNameOrder(core.dynamicChild(view, 0), core.dynamicChild(view, 1))
+      if named != 0 {
+        out = \"{out}^{named}\"
+      }
     }
     if core.dynamicSameObject(view, view) {
       out = \"{out}!\"
@@ -4016,6 +4038,7 @@ export fn main() -> String {
         "DynCase",
         "DynSameType",
         "DynSameObject",
+        "DynNameOrder",
     ] {
         assert!(
             walk.code
@@ -4069,7 +4092,7 @@ export fn main() -> String {
     assert_eq!(
         oracle,
         Answer::Value(
-            " k6/13 'bag' k6/2= 1 2 k8/2= 'a' 'b' k9/2=! 3 4 k10/2= 5 6 k11/2 'k' 7 k12/3= 1 4 \
+            " k6/13^-1 'bag' k6/2= 1 2 k8/2= 'a' 'b' k9/2=! 3 4 k10/2= 5 6 k11/2 'k' 7 k12/3= 1 4 \
              false 1.5 2ms true k7#1/1 8 k7#1/1 'bad' k6/2= 9 10 | k7#0/0 | k7#1/1 3 | k7#2/1 \
              'n' | k6/1 k13/0"
                 .to_string()
@@ -4590,5 +4613,529 @@ fn dynamic_equality_allocates_only_to_descend() {
             ("holder", 10),
         ],
         "objects allocated by one comparison"
+    );
+}
+
+/// The declarations [`dynamic_order_agrees_with_map_key_on_every_kind`]'s keys
+/// are built to: [`REFLECTED_KINDS`]' families without the two a key cannot
+/// hold — a `Float` and a `Vector` — and a struct nesting all of them, so that
+/// the machine's layout table has one to box each key at.
+///
+/// Nothing here runs, for [`REFLECTED_KINDS`]' reason.
+const REFLECTED_KEYS: &str = "
+trait Probed {
+  fn probed(self) -> Int
+}
+
+struct Point {
+  x: Int,
+  y: Int
+}
+
+impl Probed for Point {
+  fn probed(self) -> Int {
+    self.x
+  }
+}
+
+struct Named {
+  label: String,
+  at: Point
+}
+
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+export opaque struct Secret {
+  code: Int,
+  note: String
+}
+
+struct Keyed {
+  items: Array<Point>,
+  marks: Array<Mark>,
+  seen: Set<Int>,
+  index: Map<String, Int>,
+  span: Range,
+  wait: Duration,
+  on: Bool,
+  maybe: Option<Int>,
+  outcome: Result<Int, String>,
+  inner: dyn Probed,
+  nested: Array<Array<Int>>,
+  secret: Secret
+}
+
+export fn layouts(k: Keyed, n: Named, a: Array<Int>, o: Option<Point>, t: Array<String>, s: Set<Point>, m: Map<String, Int>) -> Int {
+  0
+}
+";
+
+/// A `Keyed` with every leaf at its base value, except leaf `changed`, which is
+/// moved one step up the order or one step down it — so that each near miss
+/// differs from the base in exactly one place, in a known direction, wherever
+/// in the nesting that place is.
+///
+/// The steps are the ones an order has and an equality does not: a case moved
+/// by its *name* (`Named` to `Plain` is up, to `Count` is down), a map moved by
+/// a key before a value, a sequence lengthened or cut to a prefix, a range made
+/// inclusive, `Err` turned to `Ok`.
+fn reflected_keyed(changed: Option<(usize, bool)>) -> Value {
+    use crate::value::MapKey;
+    let at = |leaf: usize| changed.map(|(one, _)| one) == Some(leaf);
+    let up = changed.is_some_and(|(_, up)| up);
+    let step = |leaf: usize, base: i64| {
+        Value::int(match (at(leaf), up) {
+            (false, _) => base,
+            (true, true) => base + 1,
+            (true, false) => base - 1,
+        })
+    };
+    let mut items = vec![reflected_point(1, 2), reflected_point(3, 4)];
+    if at(0) {
+        items[1] = reflected_point(3, if up { 5 } else { 3 });
+    }
+    if at(15) {
+        if up {
+            items.push(reflected_point(0, 0));
+        } else {
+            items.pop();
+        }
+    }
+    let marks = [
+        Value::enumeration("m.Mark", "Plain", []),
+        Value::enumeration("m.Mark", "Count", [step(1, 7)]),
+        match (at(2), up) {
+            (false, _) => Value::enumeration("m.Mark", "Named", [Value::string("n")]),
+            (true, true) => Value::enumeration("m.Mark", "Plain", []),
+            (true, false) => Value::enumeration("m.Mark", "Count", [Value::int(0)]),
+        },
+    ];
+    let seen = Value::set([
+        MapKey::Int(1),
+        MapKey::Int(step(3, 5).as_int().expect("an `Int`")),
+    ]);
+    let second = match (at(5), up) {
+        (false, _) => "b",
+        (true, true) => "c",
+        (true, false) => "ab",
+    };
+    let index = Value::map([
+        (MapKey::Str("a".to_string()), step(4, 1)),
+        (MapKey::Str(second.to_string()), Value::int(2)),
+    ]);
+    let span = match (at(6), up) {
+        (false, _) => Value::range_of(1, 4, false),
+        (true, true) => Value::range_of(1, 4, true),
+        (true, false) => Value::range_of(0, 4, false),
+    };
+    let on = !(at(8) && !up);
+    let maybe = match (at(9), up) {
+        (false, _) => Value::some(Value::int(8)),
+        (true, true) => Value::some(Value::int(9)),
+        (true, false) => Value::none(),
+    };
+    let outcome = match (at(10), up) {
+        (false, _) => Value::err(Value::string("bad")),
+        (true, true) => Value::ok(Value::int(0)),
+        (true, false) => Value::err(Value::string("bac")),
+    };
+    let nested = match (at(12), up) {
+        (false, _) => vec![Value::int(2), Value::int(3)],
+        (true, true) => vec![Value::int(2), Value::int(3), Value::int(0)],
+        (true, false) => vec![Value::int(2)],
+    };
+    let note = match (at(14), up) {
+        (false, _) => "s",
+        (true, true) => "t",
+        (true, false) => "r",
+    };
+    reflected_struct(
+        "m.Keyed",
+        false,
+        vec![
+            ("items", Value::array(items)),
+            ("marks", Value::array(marks)),
+            ("seen", seen),
+            ("index", index),
+            ("span", span),
+            (
+                "wait",
+                Value::duration(step(7, 2).as_int().expect("an `Int`")),
+            ),
+            ("on", Value::bool(on)),
+            ("maybe", maybe),
+            ("outcome", outcome),
+            (
+                "inner",
+                reflected_dyn(reflected_point(9, step(11, 10).as_int().expect("an `Int`"))),
+            ),
+            (
+                "nested",
+                Value::array([Value::array([Value::int(1)]), Value::array(nested)]),
+            ),
+            (
+                "secret",
+                reflected_struct(
+                    "m.Secret",
+                    true,
+                    vec![("code", step(13, 9)), ("note", Value::string(note))],
+                ),
+            ),
+        ],
+    )
+}
+
+/// How many places [`reflected_keyed`] can change. Leaf 8, a `Bool` that is
+/// already `true`, has no step up, and is left as it is for that direction.
+const REFLECTED_KEY_LEAVES: usize = 16;
+
+/// Every key the corpus orders against every other, each one a box's worth: a
+/// key of every kind, with the edges an order has — an `Int` against a
+/// `Duration` of more nanoseconds, a prefix against its extension, `Err` against
+/// `Ok`, an exclusive range against the inclusive one — and the nested `Keyed`.
+fn reflected_keys() -> Vec<(String, Value)> {
+    use crate::value::MapKey;
+    let named = |label: &str, x: i64| {
+        reflected_struct(
+            "m.Named",
+            false,
+            vec![
+                ("label", Value::string(label)),
+                ("at", reflected_point(x, 0)),
+            ],
+        )
+    };
+    let point_key = |x: i64, y: i64| MapKey::from_value(&reflected_point(x, y)).expect("a key");
+    let mut keys: Vec<(String, Value)> = vec![
+        ("unit".into(), Value::unit()),
+        ("true".into(), Value::bool(true)),
+        ("false".into(), Value::bool(false)),
+        ("int 3".into(), Value::int(3)),
+        ("int -3".into(), Value::int(-3)),
+        ("int large".into(), Value::int(9_000_000_000)),
+        ("duration 3".into(), Value::duration(3)),
+        ("duration -1".into(), Value::duration(-1)),
+        ("string empty".into(), Value::string("")),
+        ("string 3".into(), Value::string("3")),
+        ("string a".into(), Value::string("a")),
+        ("string ab".into(), Value::string("ab")),
+        ("string b".into(), Value::string("b")),
+        ("string e-acute".into(), Value::string("\u{e9}")),
+        ("point".into(), reflected_point(1, 2)),
+        ("point other".into(), reflected_point(1, 3)),
+        ("point dyn".into(), reflected_dyn(reflected_point(1, 2))),
+        ("named".into(), named("a", 1)),
+        ("named other".into(), named("b", 0)),
+        (
+            "mark plain".into(),
+            Value::enumeration("m.Mark", "Plain", []),
+        ),
+        (
+            "mark count".into(),
+            Value::enumeration("m.Mark", "Count", [Value::int(3)]),
+        ),
+        (
+            "mark named".into(),
+            Value::enumeration("m.Mark", "Named", [Value::string("3")]),
+        ),
+        ("some 3".into(), Value::some(Value::int(3))),
+        ("some point".into(), Value::some(reflected_point(1, 2))),
+        ("none".into(), Value::none()),
+        ("ok 3".into(), Value::ok(Value::int(3))),
+        ("err".into(), Value::err(Value::string("3"))),
+        ("array empty".into(), Value::array([])),
+        ("array 1".into(), Value::array([Value::int(1)])),
+        (
+            "array 1 2".into(),
+            Value::array([Value::int(1), Value::int(2)]),
+        ),
+        ("array 2".into(), Value::array([Value::int(2)])),
+        (
+            "array strings".into(),
+            Value::array([Value::string("1"), Value::string("2")]),
+        ),
+        ("set empty".into(), Value::set([])),
+        ("set 1".into(), Value::set([MapKey::Int(1)])),
+        (
+            "set 1 2".into(),
+            Value::set([MapKey::Int(1), MapKey::Int(2)]),
+        ),
+        (
+            "set points".into(),
+            Value::set([point_key(1, 2), point_key(3, 4)]),
+        ),
+        ("map empty".into(), Value::map([])),
+        (
+            "map a1".into(),
+            Value::map([(MapKey::Str("a".to_string()), Value::int(1))]),
+        ),
+        (
+            "map a2".into(),
+            Value::map([(MapKey::Str("a".to_string()), Value::int(2))]),
+        ),
+        (
+            "map b0".into(),
+            Value::map([(MapKey::Str("b".to_string()), Value::int(0))]),
+        ),
+        (
+            "map a1 b0".into(),
+            Value::map([
+                (MapKey::Str("a".to_string()), Value::int(1)),
+                (MapKey::Str("b".to_string()), Value::int(0)),
+            ]),
+        ),
+        ("range 1..<4".into(), Value::range_of(1, 4, false)),
+        ("range 1...4".into(), Value::range_of(1, 4, true)),
+        ("range 0..<9".into(), Value::range_of(0, 9, false)),
+        (
+            "secret".into(),
+            reflected_struct(
+                "m.Secret",
+                true,
+                vec![("code", Value::int(9)), ("note", Value::string("s"))],
+            ),
+        ),
+        (
+            "secret other".into(),
+            reflected_struct(
+                "m.Secret",
+                true,
+                vec![("code", Value::int(9)), ("note", Value::string("t"))],
+            ),
+        ),
+        ("keyed".into(), reflected_keyed(None)),
+    ];
+    // The same keys again as fresh objects, so that "equal" is never "the
+    // same object" by accident.
+    keys.extend([
+        ("named twin".to_string(), named("a", 1)),
+        ("keyed twin".to_string(), reflected_keyed(None)),
+        (
+            "array 1 2 twin".to_string(),
+            Value::array([Value::int(1), Value::int(2)]),
+        ),
+    ]);
+    keys
+}
+
+/// Every pair the order corpus asks about: each key against each, both ways
+/// round, and the `Keyed` against each of its near misses in both directions.
+fn reflected_key_pairs() -> Vec<(String, Value, Value)> {
+    let keys = reflected_keys();
+    let mut pairs = Vec::new();
+    for (left, a) in &keys {
+        for (right, b) in &keys {
+            pairs.push((format!("{left} ? {right}"), a.clone(), b.clone()));
+        }
+    }
+    for leaf in 0..REFLECTED_KEY_LEAVES {
+        for up in [true, false] {
+            let base = reflected_keyed(None);
+            let missed = reflected_keyed(Some((leaf, up)));
+            let way = if up { "up" } else { "down" };
+            pairs.push((
+                format!("keyed ? miss {leaf} {way}"),
+                base.clone(),
+                missed.clone(),
+            ));
+            pairs.push((format!("miss {leaf} {way} ? keyed"), missed, base));
+        }
+    }
+    pairs
+}
+
+/// **`std.dynamic.order` answers what `MapKey`'s derived order answers, on both
+/// evaluators, for every kind and every nesting edge the corpus reaches.**
+///
+/// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 3 moves `Value.order` into Cove and deletes the Rust walk that answered
+/// it on the machine, so the reference is the oracle's own: the `Ord` its
+/// `MapKey` derives, which is the order every `Set` and `Map` on the
+/// interpreter is kept in. The walk is run three ways over each pair:
+///
+/// - on the **oracle**, through `call_core`'s reflection arms and its
+///   `core.order` over scalars;
+/// - on the **machine**, through the reflection instructions, each key boxed at
+///   the boundary exactly as an `Any` parameter boxes it;
+/// - and against `MapKey::cmp`, over the same two keys converted.
+///
+/// The corpus is every key against every key, and then the nested `Keyed`
+/// against each of its near misses — one place moved one step up the order or
+/// down it, at every depth there is a place — which is where the counts that
+/// decide only after every child ties, and the one pair that can be waiting on
+/// them, are exercised: a sequence cut to a prefix inside a struct inside the
+/// root, with siblings after it that are equal.
+#[test]
+fn dynamic_order_agrees_with_map_key_on_every_kind() {
+    fn answers(on_machine: bool) -> Vec<String> {
+        let (sources, program) = checked(REFLECTED_KEYS);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let mut lines = Vec::new();
+        if on_machine {
+            let ir = lowered(&sources, &program);
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            let mut vm = Vm::new(&runtime, &hosts, &ir);
+            for (label, a, b) in reflected_key_pairs() {
+                let said = said(vm.invoke("std.dynamic", "order", vec![a, b]));
+                lines.push(format!("{label}: {said:?}"));
+            }
+        } else {
+            use crate::value::MapKey;
+            let runtime = Runtime::new(program, sources, hosts);
+            let mut interp = Interpreter::new(&runtime);
+            for (label, a, b) in reflected_key_pairs() {
+                let key = |value: &Value| MapKey::from_value(value).expect("every value is a key");
+                let reference = match key(&a).cmp(&key(&b)) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                };
+                let said = said(interp.invoke("std.dynamic", "order", vec![a, b]));
+                assert_eq!(
+                    said,
+                    Answer::Value(reference.to_string()),
+                    "`std.dynamic.order` on the oracle against `MapKey::cmp`: {label}"
+                );
+                lines.push(format!("{label}: {said:?}"));
+            }
+        }
+        lines
+    }
+    let oracle = on_a_deep_stack(|| answers(false));
+    let machine = on_a_deep_stack(|| answers(true));
+    assert_eq!(oracle.len(), machine.len());
+    for (oracle, machine) in oracle.iter().zip(&machine) {
+        assert_eq!(machine, oracle, "the machine against the oracle");
+    }
+    // The corpus is not vacuous: the edges it was built for answer what the
+    // order says they do, and every near miss moved the way it was moved.
+    for wanted in [
+        "int large ? duration -1: Value(\"-1\")",
+        "string ab ? string b: Value(\"-1\")",
+        "err ? ok 3: Value(\"-1\")",
+        "mark count ? mark plain: Value(\"-1\")",
+        "none ? some 3: Value(\"-1\")",
+        "array 1 ? array 1 2: Value(\"-1\")",
+        "array 1 2 ? array 2: Value(\"-1\")",
+        "map a1 ? map a1 b0: Value(\"-1\")",
+        "map a2 ? map b0: Value(\"-1\")",
+        "range 1..<4 ? range 1...4: Value(\"-1\")",
+        "mark plain ? point: Value(\"-1\")",
+        "point ? point dyn: Value(\"0\")",
+        "keyed ? keyed twin: Value(\"0\")",
+        "array 1 2 ? array 1 2 twin: Value(\"0\")",
+    ] {
+        assert!(oracle.iter().any(|said| said == wanted), "{wanted}");
+    }
+    for leaf in 0..REFLECTED_KEY_LEAVES {
+        let down = format!("keyed ? miss {leaf} down: Value(\"1\")");
+        assert!(oracle.contains(&down), "{down}");
+        if leaf != 8 {
+            let up = format!("keyed ? miss {leaf} up: Value(\"-1\")");
+            assert!(oracle.contains(&up), "{up}");
+        }
+    }
+}
+
+/// A second file in `std.dynamic` that orders the same two keys `n` times: a
+/// library file, because a program cannot name the function.
+const REFLECTED_ORDER_REPEAT: &str = "
+/// The sum of `order(a, b)`, `n` times over.
+export fn probeOrderRepeat(a: Any, b: Any, n: Int) -> Int {
+  var total = 0
+  var at = 0
+  while at < n {
+    total = total + order(a, b)
+    at = at + 1
+  }
+  total
+}
+";
+
+/// **Ordering two boxed leaves allocates nothing**, and neither does ordering
+/// two keys one level deep: `std.dynamic.order` makes its two stacks only at the
+/// first child that has children of its own, and keeps what an order adds to
+/// [`dynamic_equality_allocates_only_to_descend`]'s walk — the counts that
+/// decide once every child ties — in two `Int`s rather than a stack.
+///
+/// [`dynamic_equality_allocates_only_to_descend`]'s measurement, over
+/// [`REFLECTED_ORDER_REPEAT`]: two runs over the same two keys, one ordering them
+/// ten times and one not at all, and the difference of the machine's own
+/// allocation counter, per order. A key that really nests pays for its two
+/// stacks once per order, however deep it goes — two vectors, an owner and a
+/// store each — and for their growth: the `Keyed`'s stacks are made with room
+/// for its twelve fields, and its first field's two points go on top of the
+/// eleven fields after it, which grows each store once. Six objects, and never
+/// one per node — and no path, which [`dynamic_equality_allocates_only_to_descend`]
+/// pays four more for where a `Vector` is: a key has none.
+#[test]
+fn dynamic_order_allocates_only_to_descend() {
+    /// A key to order against itself, made afresh for each run.
+    type Made = fn() -> Value;
+    fn allocated() -> Vec<(String, u64)> {
+        let (sources, program) =
+            checked_with_probe(REFLECTED_KEYS, "std.dynamic", REFLECTED_ORDER_REPEAT);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let ir = lowered(&sources, &program);
+        let runtime = Runtime::new(program, sources, hosts.clone());
+        let rows: Vec<(&str, Made)> = vec![
+            ("int", || Value::int(3)),
+            ("string", || Value::string("s")),
+            ("unit", Value::unit),
+            ("none", Value::none),
+            ("point", || reflected_point(1, 2)),
+            ("array", || Value::array([Value::int(1), Value::int(2)])),
+            ("some", || Value::some(Value::int(1))),
+            ("range", || Value::range_of(1, 4, true)),
+            ("set", || {
+                Value::set([crate::value::MapKey::Int(1), crate::value::MapKey::Int(2)])
+            }),
+            ("keyed", || reflected_keyed(None)),
+        ];
+        let mut out = Vec::new();
+        for (label, make) in rows {
+            let mut spent = Vec::new();
+            for turns in [0, 10] {
+                let mut vm = Vm::new(&runtime, &hosts, &ir);
+                let answer = vm.invoke(
+                    "std.dynamic",
+                    "probeOrderRepeat",
+                    vec![make(), make(), Value::int(turns)],
+                );
+                assert_eq!(
+                    answer.map(|value| value.as_int()).ok(),
+                    Some(Some(0)),
+                    "{label}: a key sorts equal to itself"
+                );
+                spent.push(vm.allocations());
+            }
+            out.push((label.to_string(), (spent[1] - spent[0]) / 10));
+        }
+        out
+    }
+    let counted = on_a_deep_stack(allocated);
+    let per_call: Vec<(&str, u64)> = counted
+        .iter()
+        .map(|(label, count)| (label.as_str(), *count))
+        .collect();
+    assert_eq!(
+        per_call,
+        [
+            ("int", 0),
+            ("string", 0),
+            ("unit", 0),
+            ("none", 0),
+            ("point", 0),
+            ("array", 0),
+            ("some", 0),
+            ("range", 0),
+            ("set", 0),
+            ("keyed", 6),
+        ],
+        "objects allocated by one order"
     );
 }

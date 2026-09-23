@@ -1,0 +1,247 @@
+use clock.timeout
+use console.println
+use values_boxed_order.aa
+use values_boxed_order.p
+
+/// The order two erased keys are kept in, for the edges an order has and
+/// equality does not.
+///
+/// [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 3 moved the order of two boxed keys out of Rust and into
+/// `std.dynamic.order`, a Cove walk over a view of each box. An order is
+/// observable only as the ascending order a `Set` iterates and renders in and
+/// as what `contains` finds, so every row below prints a `Set` of boxed values
+/// or a membership, and the answers are the interpreter's, which orders by the
+/// `MapKey` its values convert to: the kinds by rank, then names, then
+/// children, then counts.
+///
+/// # What each row pins
+///
+/// - `names`: two structs declared in two modules, whose qualified names and
+///   short names sort opposite ways — `aa.Zed` before `p.Alpha`, where `Alpha`
+///   is before `Zed`. The qualified name decides, as it always has on both
+///   evaluators.
+/// - `generic`: `Cell<Duration>` against `Cell<Int>`, and a struct's the same
+///   way. A type's name has no type arguments in it, so the payloads decide —
+///   every `Int` before every `Duration`. The machine compared the layout's
+///   whole name here until this phase, `Cell<Duration>` before `Cell<Int>`, and
+///   disagreed with the interpreter.
+/// - `result`: `Err` before `Ok`, by the case's name and not its position.
+/// - `kinds`: an `Int` far larger than a `Duration`, and one value of every
+///   kind a key can be, in one set: the rank decides before the value does.
+/// - `array`: a prefix before what extends it, and an element before a count.
+/// - `map`: key before value, entry by entry, and a prefix before its
+///   extension.
+/// - `range`: an exclusive range before the inclusive one with the same
+///   bounds, because `false < true`.
+/// - `static`: a key whose layout is known and holds a boxed field, which is a
+///   walk the lowering composes that hands the box over to the Cove walk.
+/// - `deep`: keys nested 129 and 1000 levels deep, compared by `contains` —
+///   past the machine's old bound of 128, which stopped the run with "this
+///   value nests too deeply to compare" while the interpreter answered.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+enum Cell<T> {
+  Empty
+  Full(T)
+}
+
+struct Box<T> {
+  v: T
+}
+
+struct Leaf {
+  n: Int
+}
+
+/// A set of erased values, which is what lets a key nest as deep as a
+/// program likes while admitting it stays shallow: a set's members are keys
+/// by construction, so admission does not walk into one, and an order does.
+struct Bag {
+  items: Set<dyn Summary>
+}
+
+/// A key whose layout is known, with one boxed field.
+struct Holder {
+  tag: Int
+  item: dyn Summary
+}
+
+impl Summary for Leaf {
+  fn summarize(self) -> String {
+    "leaf {self.n}"
+  }
+}
+
+impl Summary for Bag {
+  fn summarize(self) -> String {
+    "bag"
+  }
+}
+
+/// `depth` bags, each holding only the one inside it, around `Leaf(bottom)`.
+fn bags(depth: Int, bottom: Int) -> dyn Summary {
+  var built: dyn Summary = Leaf(n: bottom)
+  var at = 0
+  while at < depth {
+    built = Bag(items: Set.of(built))
+    at = at + 1
+  }
+  built
+}
+
+fn namesRow() -> Result<Unit, Error> {
+  let zed = timeout(1s) { aa.Zed(n: 1) }?
+  let alpha = timeout(1s) { p.Alpha(n: 1) }?
+  let held = Set.of(alpha).inserted(zed)
+  println("names {held}")?
+  Ok(())
+}
+
+fn genericRows() -> Result<Unit, Error> {
+  let cellInt = timeout(1s) {
+    let held: Cell<Int> = Cell.Full(5)
+    held
+  }?
+  let cellSpan = timeout(1s) {
+    let held: Cell<Duration> = Cell.Full(1ms)
+    held
+  }?
+  let cells = Set.of(cellSpan).inserted(cellInt)
+  println("generic.cell {cells}")?
+  let boxInt = timeout(1s) {
+    let held: Box<Int> = Box(v: 5)
+    held
+  }?
+  let boxSpan = timeout(1s) {
+    let held: Box<Duration> = Box(v: 1ms)
+    held
+  }?
+  let boxes = Set.of(boxSpan).inserted(boxInt)
+  println("generic.struct {boxes}")?
+  Ok(())
+}
+
+fn resultRow() -> Result<Unit, Error> {
+  let ok = timeout(1s) {
+    let held: Result<Int, String> = Ok(1)
+    held
+  }?
+  let err = timeout(1s) {
+    let held: Result<Int, String> = Err("x")
+    held
+  }?
+  let held = Set.of(ok).inserted(err)
+  println("result {held}")?
+  Ok(())
+}
+
+fn kindRows() -> Result<Unit, Error> {
+  let large = timeout(1s) { 9000000000 }?
+  let short = timeout(1s) { 1ns }?
+  let scalars = Set.of(short).inserted(large)
+  println("kinds.int-duration {scalars}")?
+
+  let range = timeout(1s) { 0..<1 }?
+  let map = timeout(1s) { Map.of(MapEntry(key: 1, value: 1)) }?
+  let set = timeout(1s) { Set.of(1) }?
+  let array = timeout(1s) { [1] }?
+  let structure = timeout(1s) { Leaf(n: 1) }?
+  let enumeration = timeout(1s) {
+    let held: Option<Int> = Some(1)
+    held
+  }?
+  let text = timeout(1s) { "a" }?
+  let span = timeout(1s) { 1ms }?
+  let number = timeout(1s) { 1 }?
+  let flag = timeout(1s) { true }?
+  let unit = timeout(1s) { () }?
+  let every = Set.of(range)
+    .inserted(map)
+    .inserted(set)
+    .inserted(array)
+    .inserted(structure)
+    .inserted(enumeration)
+    .inserted(text)
+    .inserted(span)
+    .inserted(number)
+    .inserted(flag)
+    .inserted(unit)
+  println("kinds.every {every}")?
+  Ok(())
+}
+
+fn arrayRow() -> Result<Unit, Error> {
+  let longer = timeout(1s) { [1, 2, 3] }?
+  let prefix = timeout(1s) { [1, 2] }?
+  let larger = timeout(1s) { [1, 3] }?
+  let empty = timeout(1s) {
+    let held: Array<Int> = []
+    held
+  }?
+  let held = Set.of(larger).inserted(longer).inserted(prefix).inserted(empty)
+  println("array {held}")?
+  Ok(())
+}
+
+fn mapRow() -> Result<Unit, Error> {
+  let keyed = timeout(1s) { Map.of(MapEntry(key: "b", value: 1)) }?
+  let valued = timeout(1s) { Map.of(MapEntry(key: "a", value: 2)) }?
+  let lower = timeout(1s) { Map.of(MapEntry(key: "a", value: 1)) }?
+  let longer = timeout(1s) {
+    Map.of(MapEntry(key: "a", value: 1), MapEntry(key: "b", value: 0))
+  }?
+  let held = Set.of(keyed).inserted(valued).inserted(lower).inserted(longer)
+  println("map {held}")?
+  Ok(())
+}
+
+fn rangeRow() -> Result<Unit, Error> {
+  let inclusive = timeout(1s) { 1..3 }?
+  let exclusive = timeout(1s) { 1..<3 }?
+  let later = timeout(1s) { 0..<9 }?
+  let held = Set.of(inclusive).inserted(exclusive).inserted(later)
+  println("range {held}")?
+  Ok(())
+}
+
+fn staticRow() -> Result<Unit, Error> {
+  let one = Holder(tag: 1, item: Leaf(n: 2))
+  let two = Holder(tag: 1, item: Leaf(n: 1))
+  let three = Holder(tag: 0, item: Leaf(n: 9))
+  let held = Set.of(one).inserted(two).inserted(three)
+  var tags = ""
+  for each in held {
+    tags = "{tags} {each.tag}:{each.item.summarize()}"
+  }
+  println("static{tags} has {held.contains(Holder(tag: 1, item: Leaf(n: 1)))}")?
+  Ok(())
+}
+
+fn deepRows() -> Result<Unit, Error> {
+  for depth in [129, 1000] {
+    let same = bags(depth, 7)
+    let other = bags(depth, 8)
+    let held = Set.of(same).inserted(other)
+    let equal = held.contains(bags(depth, 7))
+    let bottom = held.contains(bags(depth, 9))
+    let shorter = held.contains(bags(depth - 1, 7))
+    println("deep.{depth} length {held.length()} equal {equal} bottom {bottom} shorter {shorter}")?
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  namesRow()?
+  genericRows()?
+  resultRow()?
+  kindRows()?
+  arrayRow()?
+  mapRow()?
+  rangeRow()?
+  staticRow()?
+  deepRows()?
+  Ok(())
+}

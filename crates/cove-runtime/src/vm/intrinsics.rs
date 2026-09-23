@@ -241,13 +241,14 @@ pub(crate) fn call(
 
         // ---- keys --------------------------------------------------------
         //
-        // Two of ADR 0059's three: the order a keyed search in the standard
-        // library asks when one comparison instruction cannot answer it, and
-        // the admission it asks of a key before anything is compared. Each
-        // answers a word or nothing; the admission's `()` is the zero word.
-        // The third, the refusal of a literal with a key twice, is
+        // One of ADR 0059's three: the admission a keyed search in the
+        // standard library asks of a key before anything is compared, which
+        // answers nothing — the zero word. The order that search steps by
+        // stood beside it until ADR 0068's Phase 3 made the order of two
+        // erased keys `std.dynamic.order`, a Cove loop over a view of each
+        // box; a key whose layout is known was already a walk the lowering
+        // writes. The third, the refusal of a literal with a key twice, is
         // `std.set.of`'s and `std.map.of`'s own Cove since ADR 0067.
-        Intrinsic::ValueOrder => key::value_order(machine, frame, dest),
         Intrinsic::ValueAdmitKey => key::admit_key(machine, frame, dest),
     }
 }
@@ -1416,11 +1417,10 @@ mod tests {
     // slot, which needs an operand of the answer's own kind, and no surviving
     // signature has one: `Float.format` answers a `String` over a `Float`,
     // `Float.parse` and `Float.toInt` answer a `Result`, `String.refuseByteRange`
-    // and `Value.admitKey` answer nothing, `Value.renderInto` appends, and
-    // `Value.order` — which answers an `Int` over values of any kind — is
-    // refused by the verifier over a known layout (ADR 0064's Decision 4) and
-    // takes a box over an unknown one, which is not an `Int`. (`Any.equals`
-    // stood beside it, answering a `Bool`, until ADR 0068 moved it into
+    // and `Value.admitKey` answer nothing, and `Value.renderInto` appends.
+    // (`Value.order`, which answered an `Int` over values of any kind but
+    // took a box, which is not an `Int`, and `Any.equals`, which answered a
+    // `Bool` the same way, stood beside them until ADR 0068 moved both into
     // `std.dynamic`.) The discipline the case was about is still held for every arm,
     // mechanically rather than by example: the case below panics under
     // `debug_assertions` on an operand read after the answer was written.

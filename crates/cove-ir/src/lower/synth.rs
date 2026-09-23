@@ -41,18 +41,17 @@
 //! [`LayoutId`] in payload word 0 and is genuinely unknown until the box is
 //! opened. Decision 4 admits exactly one dynamic-layout fallback *per
 //! operation* and the first two are reached from there and from nowhere else.
-//! [`Synth::dynamic`] is the only place in this crate that emits an
-//! [`Intrinsic::ValueOrder`], and [`crate::verify`] refuses one whose operands
-//! are not boxed.
 //!
-//! Equality's fallback is no longer an intrinsic at all. [ADR
+//! Neither fallback is an intrinsic any more. [ADR
 //! 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-//! Phase 2 made it `std.dynamic.equals`, a Cove walk over a view of each box,
-//! and deleted `Intrinsic::AnyEquals`. It has **two** callers, not one:
-//! [`Synth::fallback`], where a walk reaches a boxed part, and
-//! `Body::compare_values`, where `==` itself meets two boxes. Both call the one
-//! function, and `cove-cli`'s `tests/boxed.rs` holds every call of it to erased
-//! operands (Decision 5).
+//! Phase 2 made equality's `std.dynamic.equals`, a Cove walk over a view of
+//! each box, and deleted `Intrinsic::AnyEquals`; its Phase 3 made the order's
+//! `std.dynamic.order` and deleted `Intrinsic::ValueOrder`. Each has **two**
+//! callers, not one: [`Synth::fallback`] and [`Synth::dynamic`], where a walk
+//! reaches a boxed part, and `Body::compare_values` and `Body::core_order`,
+//! where `==` or `core.order` itself meets two boxes. Both call the one
+//! function, and `cove-cli`'s `tests/boxed.rs` holds every call of either to
+//! erased operands (Decision 5).
 //!
 //! # `Value.admitKey`'s boundary is not that boundary, and the reason is the
 //! sentence
@@ -131,8 +130,8 @@
 //!
 //! What [`Operation::Order`] adds is a walk that can *fail*. A `Float` and a
 //! mutable handle are not keys, so where equality falls through to `false`
-//! the order raises — and it raises the sentence the intrinsic raises, which
-//! is a **constant**. Its [`crate::StrId`] is chosen by the lowering that
+//! the order raises — and it raises the sentence `std.dynamic.order` raises,
+//! and the Rust walk did before it, which is a **constant**. Its [`crate::StrId`] is chosen by the lowering that
 //! emits it and loaded into [`Inst::Trap`]'s slot with [`Inst::Str`] — a
 //! precomputed address, not an allocation — exactly as `super::pattern`'s
 //! uncovered `match` and `super::dispatch`'s undispatchable call choose
@@ -641,7 +640,7 @@ fn is_range(shapes: &shapes::Shapes, layout: LayoutId, name: &str, fields: &[Fie
 /// **This is the short circuit, and it is load-bearing.** `core.order` asks
 /// it before anything else and emits the single [`Inst::Cmp`] where it
 /// answers, which is why `cq` — a program whose every map key is a `String` —
-/// executes `Value.order` at no sites and on no turn. A synthesis that
+/// calls no order walk at any site and on any turn. A synthesis that
 /// displaced that instruction with a call to a function would be a
 /// regression on the one program in this repository that exercises the path.
 /// It lives here rather than beside its caller so that the walk and the call
@@ -747,25 +746,37 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
     }
 }
 
-/// Whether an equality walk of `layout` reaches a [`Shape::Boxed`] part —
-/// and so whether it calls `std.dynamic.equals` from [`Synth::fallback`].
+/// Whether a walk of `op` over `layout` reaches a [`Shape::Boxed`] part — and
+/// so whether it calls `std.dynamic.equals` from [`Synth::fallback`], for
+/// [`Operation::Equality`], or `std.dynamic.order` from [`Synth::dynamic`],
+/// for [`Operation::Order`].
 ///
 /// Asked by the call site before it asks [`function_for`], because the walk
 /// cannot resolve a name and the call site can: a layout this answers `true`
-/// for has `std.dynamic.equals` resolved onto the [`Pool`] first, and one it
-/// answers `false` for asks for nothing — so a program whose comparisons never
+/// for has the function resolved onto the [`Pool`] first, and one it answers
+/// `false` for asks for nothing — so a program whose comparisons and keys never
 /// meet a box does not have the module in its slice at all. It follows exactly
-/// the parts [`Synth::compare`] descends into, [`walks`]' `Equality` arm, with
-/// a set of the layouts already seen so that one holding itself terminates.
-pub(super) fn reaches_a_box(shapes: &shapes::Shapes, layout: LayoutId) -> bool {
+/// the parts the walk descends into — a family [`walks`] answers `true` for,
+/// under `op` — with a set of the layouts already seen so that one holding
+/// itself terminates. The two operations do not descend into the same
+/// families, and that is [`walks`]' disagreement again: an order never goes
+/// inside a `Vector`, which is not a key, so a box inside one is not a box an
+/// order reaches.
+pub(super) fn reaches_a_box(shapes: &shapes::Shapes, op: Operation, layout: LayoutId) -> bool {
     let mut seen = std::collections::HashSet::new();
     let mut pending = vec![layout];
     while let Some(at) = pending.pop() {
         if !seen.insert(at) {
             continue;
         }
-        match &shapes.layout(at).shape {
-            Shape::Boxed => return true,
+        let shape = &shapes.layout(at).shape;
+        if matches!(shape, Shape::Boxed) {
+            return true;
+        }
+        if !walks(op, shape) {
+            continue;
+        }
+        match shape {
             Shape::Struct { fields, .. } => pending.extend(fields.iter().map(|field| field.layout)),
             Shape::Enum { cases, .. } => pending.extend(
                 cases
@@ -1885,25 +1896,30 @@ impl Synth<'_> {
         });
     }
 
-    /// ADR 0064's Decision 4 again, for the order.
+    /// ADR 0064's Decision 4 again, for the order, which since [ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 3 is a call to `std.dynamic.order`.
     ///
     /// [`Synth::fallback`]'s argument word for word: a box's family is a
     /// [`LayoutId`] in its own payload word 0, so there is no layout here to
-    /// direct a walk with and the runtime's own walk is what answers. It is
-    /// reached from [`Shape::Boxed`] and from nowhere else, and
-    /// [`crate::verify`] is where that is enforced rather than promised.
+    /// direct a walk with, and what answers is a Cove walk over a view of each
+    /// box. It is reached from [`Shape::Boxed`] and from nowhere else. The
+    /// callee was resolved onto the [`Pool`] by the call site that asked for
+    /// this walk, which asked [`reaches_a_box`] of [`Operation::Order`] first,
+    /// and `cove-cli`'s `tests/boxed.rs` holds every call of it to erased
+    /// operands.
     fn dynamic(&mut self, layout: LayoutId, a: Slot, b: Slot) {
-        let site = self.pool.intrinsic_site(IntrinsicSite {
-            intrinsic: Intrinsic::ValueOrder,
-            result: shapes::INT,
-        });
+        let callee = self.pool.dynamic_order.expect(
+            "an order walk that reaches a box is asked for only after its call site resolved \
+             `std.dynamic.order`",
+        );
         let args = self
             .pool
             .args
             .intern(vec![Arg { slot: a, layout }, Arg { slot: b, layout }]);
-        self.emit(Inst::IntrinsicCall {
+        self.emit(Inst::Call {
             dst: self.answer,
-            site,
+            callee,
             args,
         });
     }

@@ -522,8 +522,9 @@ pub(crate) struct Machine<'a> {
     /// it once, for every arm, in one place.
     ///
     /// **A [`Cell`] rather than a plain `u64`, because the walkers hold the
-    /// machine by shared reference and must.** `equal::equals`,
-    /// `key::value_order`, `key::admit_key` and `intrinsics::render_into`
+    /// machine by shared reference and must.** `key::admit_key` and
+    /// `intrinsics::render_into` — and `equal::equals` and `key::value_order`
+    /// until ADR 0068 moved them into `std.dynamic` —
     /// each narrow their `&mut Machine` to a `&Machine` before they start,
     /// because the value they are walking is borrowed *out of the caller's
     /// frame* — see [`Operands`] — and that borrow lives for the whole walk.
