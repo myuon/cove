@@ -28,7 +28,7 @@ use std::fmt;
 /// One core operation an `IntrinsicCall` may name.
 ///
 /// A variant is named `ReceiverOperation` in upper camel case — `Float`'s
-/// `format` is [`Intrinsic::FloatFormat`] — because that pair is
+/// `parse` is [`Intrinsic::FloatParse`] — because that pair is
 /// the language reference's own naming of it: [`Intrinsic::receiver`] and
 /// [`Intrinsic::operation`] answer the two halves back apart, and
 /// [`Display`](fmt::Display) prints them the way `cove-ir`'s printer and
@@ -43,7 +43,6 @@ pub enum Intrinsic {
     ValueRenderInto,
     StringRefuseByteRange,
     FloatToInt,
-    FloatFormat,
     FloatParse,
     AnyEquals,
     ValueOrder,
@@ -59,7 +58,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::ValueRenderInto,
     Intrinsic::StringRefuseByteRange,
     Intrinsic::FloatToInt,
-    Intrinsic::FloatFormat,
     Intrinsic::FloatParse,
     Intrinsic::AnyEquals,
     Intrinsic::ValueOrder,
@@ -92,7 +90,6 @@ impl Intrinsic {
             Intrinsic::ValueRenderInto => "Value",
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::FloatToInt => "Float",
-            Intrinsic::FloatFormat => "Float",
             Intrinsic::FloatParse => "Float",
             Intrinsic::AnyEquals => "Any",
             Intrinsic::ValueOrder => "Value",
@@ -106,7 +103,6 @@ impl Intrinsic {
             Intrinsic::ValueRenderInto => "renderInto",
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::FloatToInt => "toInt",
-            Intrinsic::FloatFormat => "format",
             Intrinsic::FloatParse => "parse",
             Intrinsic::AnyEquals => "equals",
             Intrinsic::ValueOrder => "order",
@@ -162,9 +158,7 @@ impl Intrinsic {
     pub const fn category(self) -> Category {
         match self {
             Intrinsic::StringRefuseByteRange => Category::Text,
-            Intrinsic::FloatToInt | Intrinsic::FloatFormat | Intrinsic::FloatParse => {
-                Category::Scalar
-            }
+            Intrinsic::FloatToInt | Intrinsic::FloatParse => Category::Scalar,
             // Rendering is a walk directed by whatever layout the piece has,
             // which is what makes it a value rule rather than a text one: a
             // `"{items}"` renders an `Array` through it.
@@ -197,7 +191,6 @@ impl Intrinsic {
             // order `String.sliceBytes` names them.
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
-            Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
             Intrinsic::AnyEquals => fixed(&[C::Value, C::Value], C::Bool),
             Intrinsic::ValueOrder => fixed(&[C::Value, C::Value], C::Int),
@@ -222,7 +215,7 @@ impl Intrinsic {
         // any call that disagrees with [`Intrinsic::signature`] — so the
         // `Err` those checks answered is not a path any verified program has,
         // and the flag says what a program can actually be stopped by: a
-        // refusal the language defines (a digit count past 17, a byte range
+        // refusal the language defines (a byte range
         // outside its string, a key it does not admit), a value nested past what a walk
         // of it may reach, and an exhausted heap — which is why every
         // intrinsic that allocates carries it.
@@ -313,9 +306,9 @@ impl Intrinsic {
             // that takes as a test and for what it costs `cove-native`.
             //
             // The parser left reads a `String` receiver's bytes and allocates
-            // the message an `Err` carries; `format` allocates the `String` it
-            // always answers and refuses a digit count past 17. None of the
-            // three is proportional to anything past the one receiver or the
+            // the message an `Err` carries, and `toInt` allocates the message
+            // its three refusals carry. Neither is proportional to anything
+            // past the one receiver or the
             // one answer, which is short enough that this backend does not
             // charge it as bulk work.
             //
@@ -327,7 +320,11 @@ impl Intrinsic {
             // gave a Cove body `core.refuse` to stop the run with, which is
             // what it does for a radix outside `2..=36`.
             Intrinsic::FloatParse => allocate.union(E::READS_MEMORY),
-            Intrinsic::FloatToInt | Intrinsic::FloatFormat => allocate,
+            // `Float.format` stood beside this, the last `Float` intrinsic that
+            // built a `String`; it is `std.float.format` now, exact fixed-point
+            // decimal over base-`10^9` limbs, refusing a digit count outside
+            // `0..=17` through ADR 0067's `core.refuse`.
+            Intrinsic::FloatToInt => allocate,
 
             // `==` on anything wider than a word walks both operands
             // together, as deep as they nest — past the depth a walk may
@@ -571,7 +568,6 @@ mod tests {
             "Value.renderInto",
             "String.refuseByteRange",
             "Float.toInt",
-            "Float.format",
             "Float.parse",
             "Any.equals",
             "Value.order",
@@ -630,7 +626,6 @@ mod tests {
                 Intrinsic::ValueRenderInto
                 | Intrinsic::StringRefuseByteRange
                 | Intrinsic::FloatToInt
-                | Intrinsic::FloatFormat
                 | Intrinsic::FloatParse
                 | Intrinsic::AnyEquals
                 | Intrinsic::ValueOrder
@@ -690,7 +685,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::FloatFormat.to_string(), "Float.format");
+        assert_eq!(Intrinsic::FloatParse.to_string(), "Float.parse");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

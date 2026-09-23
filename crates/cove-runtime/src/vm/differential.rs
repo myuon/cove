@@ -2843,6 +2843,157 @@ export fn main() -> Int {
     }
 }
 
+/// `Float.format` in Cove answers what Rust's `format!("{:.*}")` answered, on
+/// thousands of binary64 values the corpus did not choose.
+///
+/// `tests/e2e/values_float_format` and `values_float_roundtrip` are the
+/// contract, and they are rows a person picked: the ties, the extremes, the
+/// carries. This is the other half — the property over values nobody picked,
+/// with the arm the body replaced as the oracle, since the arm is gone from the
+/// runtime but `format!` is still in the toolchain. A body that was exact on
+/// every row a reader thought of and wrong on some exponent nobody did would
+/// pass the corpus and fail here.
+///
+/// The values are three populations, because uniform random bits are mostly
+/// huge or tiny and say little about the numbers programs format: raw bit
+/// patterns over the whole range (NaNs and infinities included); integers times
+/// small powers of two, which is where exact ties live; and ordinary decimals
+/// a program writes, `n / 10^j`. Each is formatted at a digit count drawn from
+/// `0..=17`, after thirteen edges — both zeros, both infinities, a NaN, the
+/// least subnormal, the least normal, the largest finite and four ties — at
+/// four digit counts each. The linear-memory backend is asked all of them and
+/// the oracle a prefix that holds every edge, because the tree-walking
+/// interpreter runs the same body a few hundred times slower, and what is asked
+/// of it is agreement rather than coverage.
+#[test]
+fn a_float_formats_as_rusts_formatter_did_across_random_binary64() {
+    let source = "
+export fn formatted(xs: Array<Float>, ds: Array<Int>) -> String {
+  var out: Vector<String> = Vector.of()
+  var at = 0
+  for x in xs {
+    let digits = match ds.get(at) {
+      Some(n) => n
+      None => 0
+    }
+    out.push(x.format(digits))
+    at += 1
+  }
+  \"\\n\".join(out.freeze())
+}
+";
+    // xorshift, seeded, so a failure names a value that can be looked at again.
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    // The edges first, at every digit count, so that the prefix the
+    // interpreter is asked holds them too: random bits almost never make a
+    // zero, and a body that mishandled one — reading a limb nought never
+    // pushed, which one evaluator refuses and the other answers — passed
+    // twenty thousand random rows on the machine before the corpus's
+    // `special.zero.*` rows caught it on the oracle.
+    let edges = [
+        0.0,
+        -0.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        0.5,
+        -0.5,
+        2.5,
+        0.125,
+        1.0,
+    ];
+    let mut cases: Vec<(u64, i64)> = Vec::new();
+    for x in edges {
+        for digits in [0, 1, 2, 17] {
+            cases.push((f64::to_bits(x), digits));
+        }
+    }
+    for round in 0..20_000 {
+        let digits = (next() % 18) as i64;
+        let x = match round % 3 {
+            0 => f64::from_bits(next()),
+            1 => {
+                let m = (next() >> 11) as f64;
+                let shift = (next() % 80) as i32 - 60;
+                let signed = if next() % 2 == 0 { m } else { -m };
+                signed * 2f64.powi(shift)
+            }
+            _ => {
+                let n = (next() % 10_000_000) as f64;
+                let places = (next() % 8) as i32;
+                n / 10f64.powi(places)
+            }
+        };
+        cases.push((x.to_bits(), digits));
+    }
+    let expected = cases
+        .iter()
+        .map(|(bits, digits)| format!("{:.*}", *digits as usize, f64::from_bits(*bits)))
+        .collect::<Vec<_>>();
+
+    let formatted = |cases: Vec<(u64, i64)>, on_machine: bool| -> String {
+        on_a_deep_stack(move || {
+            let xs = Value::array(
+                cases
+                    .iter()
+                    .map(|(bits, _)| Value::float(f64::from_bits(*bits))),
+            );
+            let ds = Value::array(cases.iter().map(|(_, digits)| Value::int(*digits)));
+            let (sources, checked) = checked(source);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let answer = if on_machine {
+                let program = lowered(&sources, &checked);
+                let runtime = Runtime::new(checked, sources, hosts.clone());
+                Vm::new(&runtime, &hosts, &program).invoke("m", "formatted", vec![xs, ds])
+            } else {
+                let runtime = Runtime::new(checked, sources, hosts);
+                Interpreter::new(&runtime).invoke("m", "formatted", vec![xs, ds])
+            };
+            match answer {
+                Ok(value) => value.to_string(),
+                Err(error) => panic!("the body answers: {}", error.message),
+            }
+        })
+    };
+
+    let machine = formatted(cases.clone(), true);
+    let lines = machine.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), cases.len());
+    let mut wrong = Vec::new();
+    for (at, (line, want)) in lines.iter().zip(&expected).enumerate() {
+        if *line != want {
+            wrong.push(format!(
+                "{:#018x} at {} digits: {line} against {want}",
+                cases[at].0, cases[at].1
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} disagree with `format!`, first: {:?}",
+        wrong.len(),
+        cases.len(),
+        &wrong[..wrong.len().min(5)]
+    );
+
+    let prefix = cases[..300].to_vec();
+    let oracle = formatted(prefix, false);
+    assert_eq!(
+        oracle.lines().collect::<Vec<_>>(),
+        lines[..300].to_vec(),
+        "the interpreter formats the first 300 as the machine does"
+    );
+}
+
 /// A refusal a Cove body worded arrives whole on both evaluators — all three
 /// sentences, not the message alone.
 ///

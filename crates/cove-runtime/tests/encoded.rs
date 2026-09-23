@@ -247,12 +247,23 @@ fn the_run_writes_the_recording_a_run_writes() {
     // placed once; and the two helps, 59 and 60 bytes and nine words each.
     // None quotes a value, so none is an interpolation, and each is placed
     // whole.
+    //
+    // It is 1,586 since `Float.format` moved into `std.float`, and the 31 words
+    // are seven literals, found by listing `Program::strings` either side of
+    // the change rather than by counting the source: the three spellings of
+    // the values with no digits, `NaN`, `inf` and `-inf`, two words each; the
+    // refusal's leading piece, 27 bytes and five words, and its tail, `` `
+    // digits ``, two; its rule, 92 bytes and thirteen; and **"no `match` arm
+    // covers this value"**, five, which is not a sentence `std.float` wrote. It
+    // is the trap the lowering puts under every `match` for the arm nothing
+    // covers — `format` matches the `Result` of `toInt` — and no function the
+    // whole-package lowering emitted had needed one before.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1555), capacity_words: Some(1555) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1586), capacity_words: Some(1586) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

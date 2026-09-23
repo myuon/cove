@@ -1580,18 +1580,8 @@ pub fn call_method(
                     MinMax::Max,
                 )))))
             }
-            "format" => {
-                let args = expect_args("Float.format", args, 1, span)?;
-                let Value(Repr::Int(digits)) = &args[0] else {
-                    return Err(type_error("Float.format", "digits", "Int", &args[0], span));
-                };
-                if !(0..=17).contains(digits) {
-                    return Err(format_digits_error(*digits, span));
-                }
-                Ok(Value(Repr::Str(
-                    format!("{:.*}", *digits as usize, x).into(),
-                )))
-            }
+            // `format` used to answer here, out of `format!("{:.*}")`. It is
+            // `std.float.format` now, resolved before this function is asked.
             _ => Err(no_method("Float", name, span)),
         },
         // `d.nanos()`: the one primitive reader left. `micros` through
@@ -1933,19 +1923,6 @@ fn float_to_int(x: f64) -> Value {
         )));
     }
     Value::ok(Value(Repr::Int(truncated as i64)))
-}
-
-/// `Float.format` refused a `digits` outside `0..=17`.
-///
-/// A `Float` carries at most 17 significant decimal digits, so a `digits`
-/// past that asks for padding rather than precision, and a negative `digits`
-/// names nothing.
-fn format_digits_error(digits: i64, span: Span) -> RuntimeError {
-    RuntimeError::new(format!("`Float.format` cannot use `{digits}` digits"))
-        .at(span)
-        .with_rule(
-            "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17.",
-        )
 }
 
 /// What is wrong with the byte range `appendSlice(text, from, to)` names, which

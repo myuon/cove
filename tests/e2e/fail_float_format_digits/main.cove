@@ -13,11 +13,11 @@ fn written(x: Float, digits: Int) -> String {
 ///
 /// A `Float` carries at most 17 significant decimal digits, so an eighteenth
 /// asks for padding rather than for precision and the operation refuses it.
-/// `crates/cove-runtime/src/vm/intrinsics/operand.rs`'s `format_digits`
-/// builds the sentence and
-/// `crates/cove-runtime/src/builtins.rs`'s `format_digits_error` builds it a
-/// second time for the interpreter; this file is what holds the two in
-/// agreement.
+/// `std.float`'s `digitsRefused` and `digitsRule` build the two sentences
+/// now, once, in Cove. They were `format_digits` in the VM's `operand.rs`
+/// and `format_digits_error` in the interpreter's `builtins.rs`, two copies in
+/// Rust, and this file is what held the two in agreement and then held the
+/// move to their words.
 ///
 /// This is the half of `Float.format`'s contract that
 /// `tests/e2e/values_float_format` cannot hold, because a refusal stops the
@@ -26,15 +26,15 @@ fn written(x: Float, digits: Int) -> String {
 /// Decision 8 gates a migration on the diagnostic being unchanged, and this
 /// file is where "unchanged" is written down.
 ///
-/// **It is also what says `Float.format` cannot move yet.** Decision 2 refuses
-/// a primitive "whose policy is a branch on its argument", and names
+/// **It said `Float.format` could not move, until it could.** Decision 2
+/// refuses a primitive "whose policy is a branch on its argument", and names
 /// `format`'s 17 digits as one of the three examples — so the branch belongs
-/// in Cove. A Cove body cannot raise at all
-/// ([issue #461](https://github.com/myuon/cove/issues/461)): `ExprKind` has
-/// no such form, `Inst::Trap` carries a `StrId` rather than a slot, and it
-/// carries no `rule`. `String.split`, `String.replace`, `Int.parseRadix`,
-/// `String.refuseByteRange` and `Value.refuseDuplicate` are behind the same
-/// wall, and `Float.format` is the sixth.
+/// in Cove, and a Cove body could not raise
+/// ([issue #461](https://github.com/myuon/cove/issues/461)). ADR 0067's
+/// `core.refuse` is what it raises with now: the message, the rule and the
+/// blamed line are the ones below, and the one thing the move added is the
+/// `std/float.cove` context block ADR 0058's rule asks for, as `Int.abs` and
+/// `Int.parseRadix` show.
 ///
 /// `Float.parse` is **not**, which is the distinction worth reading these two
 /// files together for: every one of its refusals is an `Err` value carrying a

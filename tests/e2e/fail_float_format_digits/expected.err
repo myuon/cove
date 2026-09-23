@@ -3,6 +3,10 @@ error[cove::runtime]: `Float.format` cannot use `18` digits
   |
 8 |   x.format(digits)
   |   ^^^^^^^^^^^^^^^^
+  --> std/float.cove:65:5
+   |
+65 |     core.refuse(digitsRefused(digits), digitsRule(), "")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   --> <e2e>/fail_float_format_digits/main.cove:44:11
    |
 44 |   println(written(1.5, 18))?

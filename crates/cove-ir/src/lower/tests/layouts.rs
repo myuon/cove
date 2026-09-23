@@ -243,6 +243,14 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "<tag>",
             "Bytes",
             "ByteBuffer",
+            // `std.float`'s limb arithmetic — `scale(limbs: Vector<Int>, ..)`
+            // and its neighbours — is the first non-generic library code whose
+            // *signature* names a `Vector`, and those signatures are interned
+            // ahead of every row below — `Vector<Int>`'s store and then its
+            // handle. The only `Vector` rows before `Float.format` moved into
+            // `std.float` were the two at the end of this list.
+            "Vector",
+            "Vector",
             // `std.int.parse` answers a `Result<Int, Error>`, and `lower`
             // lowers the whole standard library attached to every package, so
             // its two layouts are declared here: the `Error`, and then the

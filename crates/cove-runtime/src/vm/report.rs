@@ -471,6 +471,8 @@ pub struct IntrinsicCalls {
     /// `Float.toInt` and `Float.format` are the only arms left of that shape —
     /// a word in, an allocation out, nothing read off the heap — so they are
     /// the only two a migration could take without moving the carriers again.
+    /// (`Float.format` has since been taken, into `std.float`, and did not move
+    /// them; `Float.toInt` is the one left.)
     ///
     /// **Step 3's `String.join` is the second carrier to go**, so the
     /// carriers fall to eleven and the rest stay at seven. It is the first
@@ -1255,7 +1257,7 @@ mod tests {
             },
             intrinsics: vec![
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::FloatFormat,
+                    intrinsic: Intrinsic::FloatToInt,
                     sites: 1,
                     encoded: 1_000,
                     native: 7,
@@ -1337,7 +1339,7 @@ mod tests {
         );
         assert!(text.contains(
             "           1,000              7       1       1,007        5,035        128,440  \
-             Float.format"
+             Float.toInt"
         ));
         assert!(text.contains(
             "               0              0       3           0            0              0  \
@@ -1345,8 +1347,8 @@ mod tests {
         ));
     }
 
-    /// A loop that calls an intrinsic that allocates (`Float.format` builds
-    /// the string it answers) and one that does not
+    /// A loop that calls an intrinsic that allocates (`Float.parse` builds
+    /// the message of the `Err` it answers) and one that does not
     /// (`Any.equals` walks two values together and answers one `Bool` word),
     /// each several times over, so both [`Counting`]'s wiring and the
     /// reconciliation test below have more than one call and more than one
@@ -1366,11 +1368,12 @@ mod tests {
     /// **The allocating one has moved twice**, and neither time because a
     /// reader found a run instruction to stand on: it was `String.join` until
     /// issue #454's Step 3 wrote that over a `StringBuilder` in Cove, and then
-    /// `String.split` until the end of that step moved it to `std.string` too.
-    /// `Float.format` is the allocating intrinsic left that a plain program
-    /// reaches. It allocates one object where `split` allocated one per part
-    /// and the array, so this no longer catches a row that attributed only the
-    /// outermost object; nothing left allocates more than one per call.
+    /// `String.split` until the end of that step moved it to `std.string` too,
+    /// and then `Float.format` until that moved to `std.float`. `Float.parse`
+    /// on text that is not a number is what is left: it allocates the message
+    /// of the `Err` it answers, one object a call, so this no longer catches a
+    /// row that attributed only the outermost object; nothing left allocates
+    /// more than one per call.
     /// The two compared values are **erased**, and that is not decoration.
     /// Since [ADR 0064]'s Decision 3 a `==` whose operand layout is known is
     /// a walk the lowering synthesizes and never reaches an intrinsic at all;
@@ -1378,7 +1381,7 @@ mod tests {
     /// row for `Any.equals` exists to be read only where a `dyn Trait` is
     /// what is being compared, and a fixture that compared two `Array<Int>`s
     /// would now be asserting about a row that is not there.
-    const FORMAT_AND_COMPARE: &str = "
+    const PARSE_AND_COMPARE: &str = "
 trait Tagged {
   fn tag(self) -> Int
 }
@@ -1406,8 +1409,10 @@ export fn main() -> Int {
     if left == other {
       total = total + 1
     }
-    let shown = 2.5.format(2)
-    total = total + shown.byteLength()
+    let refused = Float.parse(\"a\")
+    if refused.isError() {
+      total = total + 1
+    }
     i = i + 1
   }
   total
@@ -1417,7 +1422,7 @@ export fn main() -> Int {
     /// [ADR 0064]'s Decision 7 asks that allocations and allocated words be
     /// attributed per variant, and this is the property worth pinning about
     /// that attribution: it is not just present, it tells two operations
-    /// apart. `Float.format` allocates the string it hands back, and
+    /// apart. `Float.parse` allocates the message of the `Err` it hands back, and
     /// `Any.equals` only reads the values it is given, so a run
     /// of both
     /// must show one row with allocations and one row without — from the
@@ -1430,25 +1435,25 @@ export fn main() -> Int {
     fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
         use crate::vm::debug::tests::World;
 
-        let world = World::new(FORMAT_AND_COMPARE);
+        let world = World::new(PARSE_AND_COMPARE);
         let mut vm = world.plain();
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
         let boundary = vm.boundary().expect("count_boundary was called");
 
-        let formatted = boundary
-            .intrinsic(Intrinsic::FloatFormat)
-            .expect("the program calls Float.format");
-        assert!(formatted.calls() > 0, "{formatted:?}");
+        let parsed = boundary
+            .intrinsic(Intrinsic::FloatParse)
+            .expect("the program calls Float.parse");
+        assert!(parsed.calls() > 0, "{parsed:?}");
         assert!(
-            formatted.allocations > 0,
-            "Float.format allocates the string it answers: {formatted:?}"
+            parsed.allocations > 0,
+            "Float.parse allocates the message of the Err it answers: {parsed:?}"
         );
-        assert!(formatted.words > 0, "{formatted:?}");
+        assert!(parsed.words > 0, "{parsed:?}");
         // The per-variant total is a subset of the whole run's, never past
         // it — the sanity Decision 7's own measurement leans on.
-        assert!(formatted.allocations <= vm.allocations(), "{formatted:?}");
-        assert!(formatted.words <= vm.allocated_words(), "{formatted:?}");
+        assert!(parsed.allocations <= vm.allocations(), "{parsed:?}");
+        assert!(parsed.words <= vm.allocated_words(), "{parsed:?}");
 
         let compared = boundary
             .intrinsic(Intrinsic::AnyEquals)
@@ -1485,7 +1490,7 @@ export fn main() -> Int {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::new(FORMAT_AND_COMPARE);
+        let world = World::new(PARSE_AND_COMPARE);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();
@@ -1545,7 +1550,7 @@ export fn main() -> Int {
     /// is left that charges by the byte is `Any.equals` over two strings,
     /// which charges the shorter of the two — here both — on top of one unit
     /// per value its walk reaches. The values are held as `dyn Tagged` for
-    /// [`FORMAT_AND_COMPARE`]'s reason: a comparison whose layout is known is
+    /// [`PARSE_AND_COMPARE`]'s reason: a comparison whose layout is known is
     /// a walk the lowering writes and never reaches an intrinsic.
     ///
     /// The second string is an interpolation of the first rather than the same
@@ -1652,7 +1657,7 @@ export fn main() -> Int {{
     /// programs differ in how far the walk gets and in nothing else: the same
     /// declaration, the same number of comparisons, the same layouts.
     ///
-    /// The two are held as `dyn Tagged` for [`FORMAT_AND_COMPARE`]'s reason:
+    /// The two are held as `dyn Tagged` for [`PARSE_AND_COMPARE`]'s reason:
     /// since [ADR 0064]'s Decision 3 a struct whose layout is known is walked
     /// by a synthesized function whose work is charged as instructions, and
     /// the walk this file is about — `equal::value`, charging one unit per

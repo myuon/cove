@@ -1368,6 +1368,20 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.int",
         function: "parseRadix",
     },
+    // `Float.format` is the first `Float` method in the standard library and
+    // `std.float` the file it opened. It was `format!("{:.*}")` behind
+    // `Intrinsic::FloatFormat`, and it waited on issue #461 for its refusal of
+    // a digit count outside `0..=17`; ADR 0067's `core.refuse` answered that,
+    // and the rest — exact fixed-point decimal of the value's own binary
+    // expansion, ties to even — is whole-number arithmetic over base-`10^9`
+    // limbs, which is what #471 found `Float.parse` needs too.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "format",
+        module: "std.float",
+        function: "format",
+    },
     // `Duration.nanos` is not here: it is the one primitive left, and both
     // its forms — the reader and the builder — stay in the machine. Each of
     // its five neighbours is bound twice, once as the method that reads it

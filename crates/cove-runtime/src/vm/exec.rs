@@ -10124,10 +10124,10 @@ pub(crate) mod tests {
     /// surviving variant, chosen because the message has to name *some*
     /// operation and no operation is the right one any more.
     #[test]
-    #[should_panic(expected = "`Float.format` answered a `RuntimeError`")]
+    #[should_panic(expected = "`Float.parse` answered a `RuntimeError`")]
     fn an_intrinsic_that_cannot_raise_must_not_answer_an_error() {
         unraisable(
-            cove_ir::Intrinsic::FloatFormat,
+            cove_ir::Intrinsic::FloatParse,
             &RuntimeError::new("this string's bytes are not valid UTF-8"),
         );
     }

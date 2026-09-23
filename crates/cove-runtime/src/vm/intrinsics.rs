@@ -224,7 +224,7 @@ pub(crate) fn call(
 
         // ---- Float -------------------------------------------------------
         Intrinsic::FloatToInt => scalar::float_to_int(machine, frame, dest),
-        Intrinsic::FloatFormat => scalar::float_format(machine, frame, dest),
+        // `Float.format` is `std.float.format`, exact decimal in Cove.
         Intrinsic::FloatParse => scalar::float_parse(machine, frame, dest),
 
         // `Bool` has no operations: the schema gives it none beyond
@@ -1053,19 +1053,6 @@ mod tests {
     /// as the call it is an argument of.
     pub(super) fn at(layout: LayoutId, words: &[u64]) -> Operand<'_> {
         Operand { layout, words }
-    }
-
-    /// The same, for an operation whose answer is one word.
-    pub(super) fn word(
-        machine: &mut Machine,
-        receiver: &str,
-        operation: &str,
-        operands: &[(Repr, u64)],
-    ) -> Result<u64, RuntimeError> {
-        run(machine, receiver, operation, operands).map(|words| {
-            assert_eq!(words.len(), 1, "`{receiver}.{operation}` answers one word");
-            words[0]
-        })
     }
 
     /// The text of the string object at `addr`.
