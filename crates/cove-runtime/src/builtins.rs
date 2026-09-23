@@ -1208,47 +1208,12 @@ pub fn call_associated(
             };
             Ok(Value(Repr::Duration(*count)))
         }
-        // `Int.parse` in a base other than ten. A `radix` outside `2..=36`
-        // names no notation, so it stops the run the way an empty
-        // `String.split` separator does; text that is not a number in a
-        // radix that does exist is the data's failure and answers `Err`,
-        // which is the same line `Int.parse` draws. Rust's
-        // `i64::from_str_radix` reads a leading `+` or `-` and no digit
-        // separators.
-        //
-        // **`Int.parse` sat above this and is `std.int.parse` now**, reached
-        // the way `String.fromCodePoint` is: through
-        // `cove_schema::builtins::standard_associated_binding`, before this
-        // function is asked. What counts as a number is a policy over a
-        // representation (ADR 0064's Decision 2), and the reading under it is
-        // `core.byteLength` with one `byteAt` a byte. The two could not go
-        // together — the `return Err` below raises, and a Cove body has
-        // nothing to raise with (issue #461) — which is why this receiver has
-        // one arm here and one binding there.
-        ("Int", "parseRadix") => {
-            let args = expect_args("Int.parseRadix", args, 2, span)?;
-            let Value(Repr::Str(text)) = &args[0] else {
-                return Err(type_error(
-                    "Int.parseRadix",
-                    "text",
-                    "String",
-                    &args[0],
-                    span,
-                ));
-            };
-            let Value(Repr::Int(radix)) = &args[1] else {
-                return Err(type_error("Int.parseRadix", "radix", "Int", &args[1], span));
-            };
-            let Some(radix) = (2..=36).contains(radix).then_some(*radix as u32) else {
-                return Err(radix_error(*radix, span));
-            };
-            Ok(match i64::from_str_radix(text, radix) {
-                Ok(value) => Value::ok(Value(Repr::Int(value))),
-                Err(_) => Value::err(Value::error(format!(
-                    "`{text}` is not an Int in radix {radix}"
-                ))),
-            })
-        }
+        // `Int.parse` and `Int.parseRadix` are not here: both are `std.int`
+        // bodies, reached through
+        // `cove_schema::builtins::standard_associated_binding` before this
+        // function is asked. `parseRadix` was the last `Int` arm, because it
+        // raised on a radix outside `2..=36` and a Cove body had nothing to
+        // raise with until ADR 0067's `core.refuse`.
         // Mirrors `Int.parse` exactly in shape. Rust's `f64::from_str`
         // accepts `inf`, `-inf`, and `NaN`, which is why this does too, and
         // it rejects the `_` digit separators a `Float` literal may be
@@ -1989,23 +1954,6 @@ fn float_to_int(x: f64) -> Value {
         )));
     }
     Value::ok(Value(Repr::Int(truncated as i64)))
-}
-
-/// `Int.parseRadix` refused a `radix` outside `2..=36`.
-///
-/// A radix of 1 has no place value and a radix of 0 has no digits, and past
-/// 36 there are no more letters to spell one with. None of those is text the
-/// data got wrong, so none of them is an `Err`: it is the call that is wrong,
-/// and the run stops the way it stops for an empty `String.split` separator.
-fn radix_error(radix: i64, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`Int.parseRadix` cannot read a number in radix `{radix}`"
-    ))
-    .at(span)
-    .with_rule(
-        "A radix is 2 through 36, which is as many digits as the ten numerals and the twenty-six letters afford.",
-    )
-    .with_help("pass a `radix` between 2 and 36, such as 16 for hexadecimal")
 }
 
 /// `Float.format` refused a `digits` outside `0..=17`.

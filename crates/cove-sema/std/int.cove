@@ -187,6 +187,135 @@ fn refuseInt(text: String) -> Result<Int, Error> {
   Err(Error("`{text}` is not an Int"))
 }
 
+/// `text` read as an `Int` written in `radix`, or the `Err` that says it is
+/// not one.
+///
+/// One optional `+` or `-`, then one or more digits, and nothing else: no
+/// space, no separator, no `0x`. A digit is `0` through `9` and then a letter,
+/// in either case, for ten upward, and every digit is below `radix`. That is
+/// the notation this method has read since it existed — it was Rust's
+/// `i64::from_str_radix` — and `tests/e2e/values_int_parse_radix` pinned every
+/// edge of it on both backends before it moved here.
+///
+/// # A radix outside `2..=36` stops the run
+///
+/// A radix of 1 has no place value, 0 has no digits, and past 36 there are no
+/// letters left to spell a digit with. None of those is text the data got
+/// wrong, so none is an `Err`: the call is wrong, and the run stops the way it
+/// stops for an empty `String.split` separator — through `core.refuse`
+/// (ADR 0067), with the three sentences worded below. It is checked first,
+/// before `text` is looked at, so a wrong radix is refused whatever the text.
+///
+/// # The loop is [`parse`]'s, with the radix where the ten was
+///
+/// The accumulator runs negative for [`parse`]'s reason — the least `Int` has
+/// no positive counterpart — and the overflow test is the same two
+/// comparisons against `least / radix` and the digit that is left, which
+/// [`parse`] computes from a constant ten and this from the argument, once per
+/// call. `least / radix` truncates toward zero, which for a negative quotient
+/// is its ceiling: any `value` at or above it times `radix` is at or above
+/// `least`, so the product is never formed where it would not fit.
+export fn parseRadix(text: String, radix: Int) -> Result<Int, Error> {
+  if radix < 2 {
+    core.refuse(radixRefused(radix), radixRule(), radixHelp())
+  }
+  if radix > 36 {
+    core.refuse(radixRefused(radix), radixRule(), radixHelp())
+  }
+  let end = core.byteLength(text)
+  var at = 0
+  var negative = false
+  if end > 0 {
+    let head = text.byteAt(0)
+    if head == '-' {
+      negative = true
+      at = 1
+    } else if head == '+' {
+      at = 1
+    }
+  }
+  if at >= end {
+    return refuseDigits(text, radix)
+  }
+  let least = -9223372036854775807 - 1
+  let leastPart = least / radix
+  let leastDigit = leastPart * radix - least
+  var value = 0
+  while at < end {
+    // The value of the byte as a digit, or 36 where it is none: above every
+    // digit of every radix, so the one comparison below refuses a byte that is
+    // not a digit and a digit that is too large alike. Each range is two
+    // `if`s rather than one `&&`, for `std.string.sliceBytes`' reason — a
+    // comparison that is all an `if` branches on is one instruction — and it
+    // is written here rather than called, so that a digit costs no call.
+    let byte = text.byteAt(at)
+    var digit = 36
+    if byte <= '9' {
+      if byte >= '0' {
+        digit = byte - '0'
+      }
+    } else if byte >= 'a' {
+      if byte <= 'z' {
+        digit = byte - 'a' + 10
+      }
+    } else if byte >= 'A' {
+      if byte <= 'Z' {
+        digit = byte - 'A' + 10
+      }
+    }
+    if digit >= radix {
+      return refuseDigits(text, radix)
+    }
+    if value <= leastPart {
+      if value < leastPart {
+        return refuseDigits(text, radix)
+      }
+      if digit > leastDigit {
+        return refuseDigits(text, radix)
+      }
+    }
+    value = value * radix - digit
+    at += 1
+  }
+  if negative {
+    return Ok(value)
+  }
+  if value == least {
+    return refuseDigits(text, radix)
+  }
+  // A `return` rather than the body's last expression: an `Ok` in tail
+  // position is built aside and copied into the answer, and
+  // `crates/cove-cli/tests/copies.rs` counts that copy once in every program
+  // that lowers this body, where this form has none.
+  return Ok(-value)
+}
+
+/// The `Err` that says `text` spells no `Int` in `radix`: [`refuseInt`]'s
+/// sentence with the radix it was read in.
+fn refuseDigits(text: String, radix: Int) -> Result<Int, Error> {
+  Err(Error("`{text}` is not an Int in radix {radix}"))
+}
+
+/// What [`parseRadix`] says of a radix it cannot read in.
+///
+/// The three sentences were `vm::intrinsics::operand`'s `radix` and `builtins`'
+/// `radix_error`, two copies in Rust; they are these and nowhere else now. A
+/// function of its own so that the refusal is one line of [`parseRadix`] and
+/// the path that reads a number carries no interpolation.
+fn radixRefused(radix: Int) -> String {
+  "`Int.parseRadix` cannot read a number in radix `{radix}`"
+}
+
+/// The rule a radix is held to.
+fn radixRule() -> String {
+  "A radix is 2 through 36, which is as many digits as the ten numerals and the twenty-six letters afford."
+}
+
+/// What [`parseRadix`] suggests instead.
+fn radixHelp() -> String {
+  "pass a `radix` between 2 and 36, such as 16 for hexadecimal"
+}
+
 /// Appends the decimal text of `value` to `buffer`: what `"{value}"` shows.
 ///
 /// Not exported, and nothing a program can name: the lowering calls it for

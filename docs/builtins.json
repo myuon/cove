@@ -233,7 +233,7 @@
       "fields": [],
       "associated": [
         {"name": "parse", "signature": "parse(text: String) -> Result<Int, Error>", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Result<Int, Error>", "implementedBy": "std.int.parse", "host": false},
-        {"name": "parseRadix", "signature": "parseRadix(text: String, radix: Int) -> Result<Int, Error>", "generics": [], "params": [{"name": "text", "type": "String"}, {"name": "radix", "type": "Int"}], "variadic": false, "result": "Result<Int, Error>", "implementedBy": "machine", "host": false}
+        {"name": "parseRadix", "signature": "parseRadix(text: String, radix: Int) -> Result<Int, Error>", "generics": [], "params": [{"name": "text", "type": "String"}, {"name": "radix", "type": "Int"}], "variadic": false, "result": "Result<Int, Error>", "implementedBy": "std.int.parseRadix", "host": false}
       ],
       "methods": [
         {"name": "toFloat", "signature": "toFloat() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},

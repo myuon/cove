@@ -214,11 +214,10 @@ pub(crate) fn call(
         // receiver's bytes with `core.byteLength` and one `byteAt` a byte,
         // into an accumulator that runs negative because Cove traps on
         // overflow and the least `Int` has a magnitude the greatest has not.
-        // `parseRadix` below it cannot follow until issue #461 is decided —
-        // it refuses a radix outside `2..=36` by raising, and a Cove body has
-        // nothing to raise with — and when it is, `parse` becomes its
-        // radix-10 wrapper and this arm goes with it.
-        Intrinsic::IntParseRadix => scalar::int_parse_radix(machine, frame, dest),
+        // `parseRadix` followed it once ADR 0067 gave a Cove body
+        // `core.refuse` to raise with, which is what it does for a radix
+        // outside `2..=36`: it is `std.int.parseRadix`, the same loop with the
+        // radix where the ten was. `Int` has no arm here now.
 
         // ---- Float -------------------------------------------------------
         Intrinsic::FloatToInt => scalar::float_to_int(machine, frame, dest),

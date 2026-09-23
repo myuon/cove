@@ -229,12 +229,21 @@ fn the_run_writes_the_recording_a_run_writes() {
     // thirteen words of template are placed only by a program that builds a
     // `Map` or a `Set` literal — the same "placed by the program that
     // emitted the body" rule, one level further down.
+    //
+    // It is 1,506 since `Int.parseRadix` moved into `std.int` beside `parse`
+    // (issue #454's Step 4, finished by ADR 0067), and the 35 words are four
+    // literals, all of them in a function that is not generic and so placed by
+    // any program that lowers `std.int`: the radix refusal's leading piece,
+    // 48 bytes and seven words; its rule, 103 and fourteen; its help, 59 and
+    // nine; and the leading piece of the `Err` a text that is not a number
+    // gets, 25 and five. Each quoted value's opening backtick is a one-byte run
+    // and is pushed rather than placed (#403).
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1471), capacity_words: Some(1471) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1506), capacity_words: Some(1506) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

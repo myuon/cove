@@ -3,6 +3,10 @@ error[cove::runtime]: `Int.parseRadix` cannot read a number in radix `37`
   |
 4 |   Int.parseRadix(text, radix).unwrapOr(0)
   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> std/int.cove:223:5
+    |
+223 |     core.refuse(radixRefused(radix), radixRule(), radixHelp())
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   --> <e2e>/fail_int_parse_radix/main.cove:13:11
    |
 13 |   let n = read("10", 37)
