@@ -352,45 +352,14 @@ pub(crate) fn is_ascending_and_distinct(
 }
 
 // --- a literal's duplicate --------------------------------------------------
-
-/// `core.refuseDuplicate(key, method, role)`: always the refusal a literal
-/// with `key` twice is given, in `method`'s words and naming the key by
-/// `role`.
-///
-/// ADR 0059 has a standard-library literal *find* a duplicate, as a value
-/// order of equal, and raise it through this — so the sentence is still the
-/// one [`duplicate`] writes, over the key as it renders.
-pub(super) fn refuse_duplicate(machine: &Machine, frame: Frame<'_>) -> Result<(), RuntimeError> {
-    let text = |at: usize| {
-        String::from_utf8_lossy(&machine.string_bytes(frame.word(machine, at))).into_owned()
-    };
-    let key = frame.operand(machine, 0);
-    let mut shown = String::new();
-    let shown = render_value(machine, key.layout, key.words, 0, &mut shown).map(|()| shown);
-    Err(duplicate(&text(1), &text(2), shown))
-}
-
-/// `` `{method}` was given the {role} `{key}` more than once ``.
-///
-/// [`crate::builtins`]' `duplicate_key_error`, over the key as it renders —
-/// which is what `MapKey`'s `Display` is on that side, and why the rendering
-/// is what names it here. The caller does the rendering because a key that
-/// arrived as an operand and one that arrived as a run of words are rendered
-/// by two different readers.
-fn duplicate(method: &str, role: &str, shown: Result<String, RuntimeError>) -> RuntimeError {
-    match shown {
-        Ok(shown) => RuntimeError::new(format!(
-            "`{method}` was given the {role} `{shown}` more than once"
-        ))
-        .with_rule(
-            "A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.",
-        )
-        .with_help(format!("remove the duplicate, or give it a different {role}")),
-        // A key this run cannot render is a key it cannot name, and the
-        // rendering's own refusal says more than a message with a hole in it.
-        Err(error) => error,
-    }
-}
+//
+// `refuse_duplicate` stood here: the refusal a `Set.of` or `Map.of` literal
+// with one key twice is given. It is `std.set.of`'s and `std.map.of`'s own
+// Cove since ADR 0067 gave the standard library `core.refuse`, and the key is
+// named by the interpolation every other `"{value}"` is rather than by
+// `render_value` here and `MapKey`'s `Display` in `builtins` — two renderings
+// held to the same bytes by nothing but `tests/e2e/values_value_refuse_duplicate`,
+// which is now one.
 
 // --- looking through a description -----------------------------------------
 

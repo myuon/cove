@@ -38,11 +38,32 @@ export fn of<T>(items: T...) -> Set<T> {
     core.admitKey(element, "Set.of", "set element")
     let at = seekPlaced(out, element)
     if at >= 0 {
-      core.refuseDuplicate(element, "Set.of", "element")
+      core.refuse(duplicateElement(element), duplicateRule(), duplicateHelp())
     }
     placeAt(out, -at - 1, element)
   }
   core.setFinish(out)
+}
+
+/// What [`of`] says of an element it was given twice.
+///
+/// [`std.map.of`]'s refusal with this type's two words, and raised the same
+/// way: in [`of`]'s own frame, on the line that found the duplicate, out of
+/// sentences built by calls that have returned, so the diagnostic blames what
+/// it blamed when the sentence was the runtime's.
+fn duplicateElement<T>(element: T) -> String {
+  "`Set.of` was given the element `{element}` more than once"
+}
+
+/// The rule every duplicate in a literal is refused under; [`std.map.of`]
+/// states it too, word for word.
+fn duplicateRule() -> String {
+  "A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one."
+}
+
+/// What [`of`] suggests instead.
+fn duplicateHelp() -> String {
+  "remove the duplicate, or give it a different element"
 }
 
 /// This set with `element` in it, as a new set.

@@ -744,12 +744,28 @@ export fn callsOrdersStrings(which: Int) -> Int {
 /// `Machine::allocate` raises when neither the bump nor the collection can satisfy
 /// it. The sentence is the runtime\'s — this crate names errors and never builds
 /// one — so what the differential says is that the *same* sentence arrives.
+///
+/// **The vector is given all its room first**, by pushing one shared `seed`
+/// `n` times, and only then filled with fresh arrays by `set`. So every growth
+/// happens before the first array is made, and the one allocation the second
+/// loop makes is the array literal — which is what makes *it* the allocation
+/// that fails, whatever else the heap already holds. This used to push each
+/// array as it was made, and then which of the two allocations met the refusal
+/// was a fact about how many words of string literals the whole package placed
+/// before the run: moving `Value.refuseDuplicate` into `std.set` and `std.map`
+/// added 35 and moved the failure onto the `push`.
 export fn fillsTheHeap(given: Vector<Array<Int>>, n: Int) -> Int {
   var v = given
+  let seed = [0]
   var at = 0
   while at < n {
+    v.push(seed)
+    at = at + 1
+  }
+  at = 0
+  while at < n {
     let made = [at, at, at, at, at, at, at, at]
-    v.push(made)
+    let was = v.set(at, made)
     at = at + 1
   }
   at + counts(0)
@@ -3441,8 +3457,10 @@ fn a_string_order_from_compiled_code_agrees_with_the_vm() {
 #[test]
 fn an_allocation_that_exhausts_the_heap_raises_the_vm_s_sentence() {
     const SMALL_HEAP_WORDS: usize = 1 << 13;
-    // Enough nine-word arrays to overrun a one-chunk heap several times over.
-    const N: i64 = 4000;
+    // Enough nine-word arrays to overrun a one-chunk heap twice over, and few
+    // enough that the vector's room for all of them — made first, see
+    // `fillsTheHeap` — fits with plenty to spare.
+    const N: i64 = 2000;
     on_each_tier(&["fillsTheHeap"], &["callsFillsTheHeap"]);
 
     let (sources, program) = checked();

@@ -46,11 +46,41 @@ export fn of<K, V>(entries: MapEntry<K, V>...) -> Map<K, V> {
     core.admitKey(entry.key, "Map.of", "map key")
     let at = seekPlaced(out, entry.key)
     if at >= 0 {
-      core.refuseDuplicate(entry.key, "Map.of", "key")
+      core.refuse(duplicateKey(entry.key), duplicateRule(), duplicateHelp())
     }
     placeAt(out, -at - 1, entry)
   }
   core.mapFinish(out)
+}
+
+/// What [`of`] says of a key it was given twice.
+///
+/// The refusal is worded here and raised in [`of`]'s own frame, on the line
+/// that found the duplicate: the three sentences are built by calls that have
+/// returned by the time `core.refuse` stops the run, so the diagnostic blames
+/// what it blamed when the sentence was the runtime's. They were the runtime's
+/// twice over — `vm::intrinsics::key`'s `duplicate` over `render_value` and
+/// `builtins`' `duplicate_key_error` over `MapKey`'s `Display` — held to the
+/// same bytes by nothing but `tests/e2e/values_value_refuse_duplicate`. Now the
+/// words are Cove's and the key is named by the interpolation every other
+/// `"{value}"` is, so there is one rendering to keep right and not two
+/// (ADR 0064's Decision 2, through ADR 0067's `core.refuse`).
+///
+/// A function of its own for `refuseRange`'s reason in `std.string`: the path
+/// that succeeds carries no interpolation, and [`of`]'s refusal stays one line.
+fn duplicateKey<K>(key: K) -> String {
+  "`Map.of` was given the key `{key}` more than once"
+}
+
+/// The rule every duplicate in a literal is refused under; [`std.set.of`]
+/// states it too, word for word.
+fn duplicateRule() -> String {
+  "A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one."
+}
+
+/// What [`of`] suggests instead.
+fn duplicateHelp() -> String {
+  "remove the duplicate, or give it a different key"
 }
 
 /// This map with `key` mapped to `value`, as a new map.

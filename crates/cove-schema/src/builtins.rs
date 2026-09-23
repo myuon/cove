@@ -1739,9 +1739,10 @@ impl CoreIntrinsicSchema {
 ///
 /// A keyed collection's search is Cove over the five ADR 0059 names (#378,
 /// Phase 4): [`CORE_ORDER`], the value order a binary search steps by;
-/// [`CORE_ADMIT_KEY`], the refusal of a key the language does not admit;
-/// [`CORE_REFUSE_DUPLICATE`], the refusal of a literal with a key twice; and
+/// [`CORE_ADMIT_KEY`], the refusal of a key the language does not admit; and
 /// [`CORE_MEMBER_AT`] and [`CORE_ENTRY_AT`], the element reads of a sorted run.
+/// A fifth, `core.refuseDuplicate`, left when ADR 0067 gave the standard
+/// library [`CORE_REFUSE`]: a literal's duplicate is refused in Cove.
 /// A keyed update is Cove over five more (P4-5): [`CORE_VECTOR_WITH_CAPACITY`],
 /// a growable vector with room for exactly the run it will hold;
 /// [`CORE_VECTOR_COPY_FROM_SET`] and [`CORE_VECTOR_COPY_FROM_MAP`], a range of
@@ -1776,7 +1777,6 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_VECTOR_LENGTH,
     CORE_ORDER,
     CORE_ADMIT_KEY,
-    CORE_REFUSE_DUPLICATE,
     CORE_MEMBER_AT,
     CORE_ENTRY_AT,
     CORE_VECTOR_WITH_CAPACITY,
@@ -2303,7 +2303,7 @@ pub const CORE_BYTES_COMMIT: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// has already found to be wrong.
 ///
 /// One `Inst::IntrinsicCall` of `Intrinsic::StringRefuseByteRange`, which never
-/// answers — [`CORE_REFUSE_DUPLICATE`]'s shape, for the same reason. It says
+/// answers — the shape `core.refuseDuplicate` had, for the same reason. It says
 /// which of the five things is wrong in `String.sliceBytes`'s words, the words
 /// `core.bytesExtend` said them in before
 /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md) took
@@ -2338,8 +2338,9 @@ pub const CORE_REFUSE_BYTE_RANGE: CoreIntrinsicSchema = CoreIntrinsicSchema {
 
 /// `core.refuse(message: String, rule: String, help: String) -> Unit`: stop
 /// the run with a refusal the standard library worded. It never answers — a
-/// call is a divergence, the way [`CORE_REFUSE_BYTE_RANGE`]'s and
-/// [`CORE_REFUSE_DUPLICATE`]'s are.
+/// call is a divergence, the way [`CORE_REFUSE_BYTE_RANGE`]'s is and
+/// `core.refuseDuplicate`'s was until it became the first refusal worded
+/// through this.
 ///
 /// Lowers to one `Inst::Trap`, whose three slots are exactly these three
 /// arguments. An empty `rule` or `help` prints no such line, so a refusal
@@ -2487,33 +2488,6 @@ pub const CORE_ORDER: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// part, which is every key a checked program usually has.
 pub const CORE_ADMIT_KEY: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "admitKey",
-    generics: &["T"],
-    params: &[
-        ParamSchema {
-            name: "key",
-            ty: BuiltinType::Param("T"),
-        },
-        ParamSchema {
-            name: "method",
-            ty: BuiltinType::String,
-        },
-        ParamSchema {
-            name: "role",
-            ty: BuiltinType::String,
-        },
-    ],
-    result: BuiltinType::Unit,
-    fresh: false,
-};
-
-/// `core.refuseDuplicate<T>(key: T, method: String, role: String) -> Unit`:
-/// always the refusal of a literal that holds `key` twice, as `` `{method}`
-/// was given the {role} `{key}` more than once ``.
-///
-/// ADR 0059 has a keyed literal *find* its duplicate in Cove, as an order of
-/// `0`, and raise it through this; it never answers.
-pub const CORE_REFUSE_DUPLICATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
-    name: "refuseDuplicate",
     generics: &["T"],
     params: &[
         ParamSchema {

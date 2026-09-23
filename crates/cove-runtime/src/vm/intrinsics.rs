@@ -195,7 +195,7 @@ pub(crate) fn call(
         // Not a method of `String` a program can call: the refusal
         // `std.stringbuilder`'s `appendRange` reaches once its own range check
         // has failed. It never answers, so there is nothing to write into
-        // `dest` — `ValueRefuseDuplicate` below is the same shape.
+        // `dest`.
         Intrinsic::StringRefuseByteRange => text::refuse_byte_range(machine, frame),
         // No byte-counted operation is here any more. All three are
         // `std.string`: `byteLength` over the core intrinsic that is an
@@ -240,14 +240,14 @@ pub(crate) fn call(
 
         // ---- keys --------------------------------------------------------
         //
-        // ADR 0059's three: the order a keyed search in the standard library
-        // asks when one comparison instruction cannot answer it, the
-        // admission it asks of a key before anything is compared, and the
-        // refusal a literal with a key twice is given. Each answers a word or
-        // nothing; the admission's `()` is the zero word.
+        // Two of ADR 0059's three: the order a keyed search in the standard
+        // library asks when one comparison instruction cannot answer it, and
+        // the admission it asks of a key before anything is compared. Each
+        // answers a word or nothing; the admission's `()` is the zero word.
+        // The third, the refusal of a literal with a key twice, is
+        // `std.set.of`'s and `std.map.of`'s own Cove since ADR 0067.
         Intrinsic::ValueOrder => key::value_order(machine, frame, dest),
         Intrinsic::ValueAdmitKey => key::admit_key(machine, frame, dest),
-        Intrinsic::ValueRefuseDuplicate => key::refuse_duplicate(machine, frame),
     }
 }
 
