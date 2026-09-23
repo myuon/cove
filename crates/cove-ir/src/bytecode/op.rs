@@ -1,4 +1,4 @@
-//! The hundred and eighty-two opcodes, and what each one makes of the four
+//! The hundred and eighty-nine opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -241,8 +241,19 @@ mod base {
     /// of the four that is a single machine instruction. Last, for
     /// `CMP_ORDER`'s reason: adding it renumbered nothing already there.
     pub const FLOAT_SQRT: u8 = FLOAT_ROUND + 1;
+    /// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// seven structural observations, one opcode each and in the order
+    /// [`crate::Inst`] declares them. Last, for `CMP_ORDER`'s reason: adding
+    /// them renumbered nothing already there.
+    pub const DYN_OPEN: u8 = FLOAT_SQRT + 1;
+    pub const DYN_KIND: u8 = DYN_OPEN + 1;
+    pub const DYN_SAME_TYPE: u8 = DYN_KIND + 1;
+    pub const DYN_READ: u8 = DYN_SAME_TYPE + 1;
+    pub const DYN_CASE: u8 = DYN_READ + 1;
+    pub const DYN_COUNT: u8 = DYN_CASE + 1;
+    pub const DYN_CHILD: u8 = DYN_COUNT + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = FLOAT_SQRT + 1;
+    pub const END: u8 = DYN_CHILD + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -378,6 +389,21 @@ pub enum Op {
     SharedUnlock,
     Trap,
     AssertFailed,
+    /// [`crate::Inst::DynOpen`]: a view into `a` of the box in `b`.
+    DynOpen,
+    /// [`crate::Inst::DynKind`].
+    DynKind,
+    /// [`crate::Inst::DynSameType`].
+    DynSameType,
+    /// [`crate::Inst::DynRead`]: one opcode for the five scalars, because the
+    /// destination's `Repr` is which one, and the frame already records it.
+    DynRead,
+    /// [`crate::Inst::DynCase`].
+    DynCase,
+    /// [`crate::Inst::DynCount`].
+    DynCount,
+    /// [`crate::Inst::DynChild`].
+    DynChild,
 }
 
 /// Which of `a`, `b` and `c` an opcode uses, and for what.
@@ -407,6 +433,14 @@ pub enum Operand {
     /// be inside the frame, because a run of words copied off the top of a
     /// frame reads or writes the frame above it.
     Value,
+    /// The first slot of an [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)
+    /// view, whose width is [`crate::Program::view_layout`]'s.
+    ///
+    /// [`Operand::Value`] with the layout taken from the program rather than
+    /// from the payload: every view is the same three words, so no reflection
+    /// opcode spends a payload half naming them, and the check is the same
+    /// `fits` over the same program-wide layout `crate::verify` asks.
+    View,
 }
 
 /// An operand whose `Repr` the opcode does not constrain. See
@@ -432,6 +466,18 @@ const TAG: &[Repr] = &[Repr::Tag];
 /// is the other metadata-like integer in this IR and giving it a `Repr` of
 /// its own is a separate change to a separate consumer.
 const SWITCHED: &[Repr] = &[Repr::Tag, Repr::Int];
+/// An `Int` and not a `Duration`: what a reflection answers as a count, a
+/// case or a kind, which `crate::verify` holds to `Repr::Int` alone.
+const INT_ONLY: &[Repr] = &[Repr::Int];
+/// What [`crate::Inst::DynRead`] may write: the four scalar words a view can
+/// hold, and the reference a `String` view answers.
+const READ: &[Repr] = &[
+    Repr::Bool,
+    Repr::Int,
+    Repr::Float,
+    Repr::Duration,
+    Repr::Ref,
+];
 
 /// What the payload's eight bytes are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -663,6 +709,15 @@ impl Op {
         all.extend(MIN_MAXES.map(Op::FloatMinMax));
         all.push(Op::FloatRound);
         all.push(Op::FloatSqrt);
+        all.extend([
+            Op::DynOpen,
+            Op::DynKind,
+            Op::DynSameType,
+            Op::DynRead,
+            Op::DynCase,
+            Op::DynCount,
+            Op::DynChild,
+        ]);
         all
     }
 
@@ -766,6 +821,13 @@ impl Op {
             Op::SharedUnlock => base::SHARED_UNLOCK,
             Op::Trap => base::TRAP,
             Op::AssertFailed => base::ASSERT_FAILED,
+            Op::DynOpen => base::DYN_OPEN,
+            Op::DynKind => base::DYN_KIND,
+            Op::DynSameType => base::DYN_SAME_TYPE,
+            Op::DynRead => base::DYN_READ,
+            Op::DynCase => base::DYN_CASE,
+            Op::DynCount => base::DYN_COUNT,
+            Op::DynChild => base::DYN_CHILD,
         }
     }
 
@@ -1187,6 +1249,29 @@ impl Op {
                 Payload::Empty,
             ),
             Op::AssertFailed => fields(Operand::Word(REF), NONE, NONE, Payload::Empty),
+            // ADR 0068's observations: every view is `Operand::View`, and
+            // every scalar the word its instruction answers. A read's
+            // destination admits the five words a view can hold, and which of
+            // them it is decides what is read — the one opcode whose meaning
+            // depends on its operand's `Repr`, which is why the machine asks
+            // the frame and not the payload.
+            Op::DynOpen => fields(Operand::View, Operand::Word(REF), NONE, Payload::Empty),
+            Op::DynKind => fields(Operand::Word(INT_ONLY), Operand::View, NONE, Payload::Empty),
+            Op::DynSameType => fields(
+                Operand::Word(BOOL),
+                Operand::View,
+                Operand::View,
+                Payload::Empty,
+            ),
+            Op::DynRead => fields(Operand::Word(READ), Operand::View, NONE, Payload::Empty),
+            Op::DynCase => fields(Operand::Word(INT_ONLY), Operand::View, NONE, Payload::Empty),
+            Op::DynCount => fields(Operand::Word(INT_ONLY), Operand::View, NONE, Payload::Empty),
+            Op::DynChild => fields(
+                Operand::View,
+                Operand::View,
+                Operand::Word(INT_ONLY),
+                Payload::Empty,
+            ),
         }
     }
 }
@@ -1267,8 +1352,13 @@ mod tests {
     /// and a hundred and eighty-three once the same step brought
     /// `Float.sqrt`, which is the last name on ADR 0064's Decision 2 list.
     ///
-    /// **And a hundred and eighty-two once that step's last commit took one
-    /// away**: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
+    /// **And a hundred and eighty-nine once ADR 0068's Phase 1 brought its
+    /// seven structural observations**, one opcode each — `DynRead` one and
+    /// not five, because which scalar is read is its destination's `Repr`, and
+    /// an opcode per scalar would be a second copy of a fact the frame keeps.
+    ///
+    /// Before that, a hundred and eighty-two once that step's last commit took
+    /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
     /// lowering emitted it, and its `x as i64` was a second and wrong answer
     /// beside `Float.toInt`'s checked `Result` — so `Op::Convert` is three
     /// opcodes rather than four. That is the third fall in this list and the
@@ -1285,9 +1375,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_eighty_two_opcodes() {
-        assert_eq!(Op::all().len(), 182);
-        assert_eq!(OPCODES, 182);
+    fn there_are_a_hundred_and_eighty_nine_opcodes() {
+        assert_eq!(Op::all().len(), 189);
+        assert_eq!(OPCODES, 189);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

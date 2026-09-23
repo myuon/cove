@@ -832,7 +832,16 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::AddrOfSlot { dst, .. }
             | Inst::AddrOfField { dst, .. }
             | Inst::AddrOfElem { dst, .. }
-            | Inst::AddrOfPart { dst, .. } => mark(dst, 1),
+            | Inst::AddrOfPart { dst, .. }
+            | Inst::DynKind { dst, .. }
+            | Inst::DynSameType { dst, .. }
+            | Inst::DynRead { dst, .. }
+            | Inst::DynCase { dst, .. }
+            | Inst::DynCount { dst, .. } => mark(dst, 1),
+            // A view is the program's view layout's words wherever it lands.
+            Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
+                mark(dst, width(program.view_layout))
+            }
             // A store writes an object or an address rather than a frame
             // word, so it marks nothing; the rest are what `reaches_nothing`
             // refuses. Written out rather than caught by a `_` for the reason
@@ -1495,6 +1504,15 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::Load { dst, addr, .. } => vec![dst, addr],
         Inst::Store { addr, src, .. } => vec![addr, src],
         Inst::Box { dst, src, .. } | Inst::Unbox { dst, src, .. } => vec![dst, src],
+        // A view operand is named by its first word, as every multiword
+        // location is, and an expansion moves a run of words by moving that.
+        Inst::DynOpen { dst, src } => vec![dst, src],
+        Inst::DynKind { dst, view }
+        | Inst::DynRead { dst, view }
+        | Inst::DynCase { dst, view }
+        | Inst::DynCount { dst, view } => vec![dst, view],
+        Inst::DynSameType { dst, a, b } => vec![dst, a, b],
+        Inst::DynChild { dst, view, index } => vec![dst, view, index],
         Inst::IntrinsicCall { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
         Inst::Trap {

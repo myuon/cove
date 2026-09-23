@@ -120,6 +120,15 @@ pub(super) const BYTES: LayoutId = LayoutId(14);
 /// shape says nothing about what it will hold, so it is one program-wide
 /// layout rather than something interned on first use.
 pub(super) const BYTE_BUFFER: LayoutId = LayoutId(15);
+/// The layout every [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)
+/// view occupies: three inline words, see [`crate::dynamic`].
+///
+/// Seeded fixed at index 16, beside [`BYTE_BUFFER`] and for its reason: a
+/// view's words say nothing about what it views, so it is one program-wide
+/// layout rather than something interned on first use — and
+/// [`crate::Program::view_layout`] is how the verifier and the machine find it
+/// without being told at every instruction.
+pub(super) const DYNAMIC_VIEW: LayoutId = LayoutId(16);
 pub(super) const UNIT: LayoutId = LayoutId(2);
 pub(super) const BOOL: LayoutId = LayoutId(3);
 pub(super) const INT: LayoutId = LayoutId(4);
@@ -297,6 +306,7 @@ impl Shapes {
             Layout::word("<tag>", Repr::Tag),
             Layout::object("Bytes", Shape::Bytes),
             Layout::object("ByteBuffer", Shape::ByteBuffer),
+            crate::dynamic::view_layout(INT, REF),
         ];
         Shapes {
             layouts,
@@ -390,6 +400,8 @@ impl Shapes {
             // owner's two words are a length and a store reference whatever
             // bytes it comes to hold.
             Ty::ByteBuffer => Some(BYTE_BUFFER),
+            // One program-wide layout, seeded for `BYTE_BUFFER`'s reason.
+            Ty::DynamicView => Some(DYNAMIC_VIEW),
             Ty::Str => Some(STR),
             // One `Boxed` layout for the whole program, whatever trait was
             // written: what is inside is a question the box answers, from

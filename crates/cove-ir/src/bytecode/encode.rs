@@ -539,6 +539,22 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             build(Op::Unbox, slot(dst)?, slot(src)?, 0, halves(layout.0, 0))
         }
 
+        // ---- reflection -------------------------------------------------------
+        // No payload: every view is `Program::view_layout`'s three words, so
+        // there is no layout to name, and which scalar a read answers is its
+        // destination's `Repr`.
+        Inst::DynOpen { dst, src } => build(Op::DynOpen, slot(dst)?, slot(src)?, 0, 0),
+        Inst::DynKind { dst, view } => build(Op::DynKind, slot(dst)?, slot(view)?, 0, 0),
+        Inst::DynSameType { dst, a, b } => {
+            build(Op::DynSameType, slot(dst)?, slot(a)?, slot(b)?, 0)
+        }
+        Inst::DynRead { dst, view } => build(Op::DynRead, slot(dst)?, slot(view)?, 0, 0),
+        Inst::DynCase { dst, view } => build(Op::DynCase, slot(dst)?, slot(view)?, 0, 0),
+        Inst::DynCount { dst, view } => build(Op::DynCount, slot(dst)?, slot(view)?, 0, 0),
+        Inst::DynChild { dst, view, index } => {
+            build(Op::DynChild, slot(dst)?, slot(view)?, slot(index)?, 0)
+        }
+
         // ---- tasks -------------------------------------------------------------
         Inst::ScopeEnter { dst, name } => {
             build(Op::ScopeEnter, slot(dst)?, 0, 0, halves(name.0, 0))
@@ -1228,6 +1244,20 @@ mod tests {
                 },
             ),
             (0, Inst::AssertFailed { message: 1 }),
+            (0, Inst::DynOpen { dst: 1, src: 2 }),
+            (0, Inst::DynKind { dst: 1, view: 2 }),
+            (0, Inst::DynSameType { dst: 1, a: 2, b: 5 }),
+            (0, Inst::DynRead { dst: 1, view: 2 }),
+            (0, Inst::DynCase { dst: 1, view: 2 }),
+            (0, Inst::DynCount { dst: 1, view: 2 }),
+            (
+                0,
+                Inst::DynChild {
+                    dst: 1,
+                    view: 4,
+                    index: 7,
+                },
+            ),
         ]);
         held
     }

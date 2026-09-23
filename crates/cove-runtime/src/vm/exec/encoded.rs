@@ -108,8 +108,8 @@ use crate::vm::mem::{header_layout, header_len, Overflow};
 use crate::vm::report::{Decline, Outcome};
 
 use super::{
-    compare, float_arith, int_arith, native, null_object, overflowed, reentrant_lock, runs,
-    wrong_arity, ChildState, Frame, Live, Machine, ScopeEntry, SAFEPOINT_STRIDE,
+    compare, dynamic, float_arith, int_arith, native, null_object, overflowed, reentrant_lock,
+    runs, wrong_arity, ChildState, Frame, Live, Machine, ScopeEntry, SAFEPOINT_STRIDE,
 };
 
 // The opcodes this path runs, by the name ADR 0041 gives them rather than by
@@ -331,6 +331,14 @@ const SHARED_UNLOCK: u8 = Op::SharedUnlock.number();
 const TRAP: u8 = Op::Trap.number();
 const ASSERT_FAILED: u8 = Op::AssertFailed.number();
 
+const DYN_OPEN: u8 = Op::DynOpen.number();
+const DYN_KIND: u8 = Op::DynKind.number();
+const DYN_SAME_TYPE: u8 = Op::DynSameType.number();
+const DYN_READ: u8 = Op::DynRead.number();
+const DYN_CASE: u8 = Op::DynCase.number();
+const DYN_COUNT: u8 = Op::DynCount.number();
+const DYN_CHILD: u8 = Op::DynChild.number();
+
 /// Whether [`dispatch`] implements this opcode.
 ///
 /// Exhaustive rather than a `matches!` list, and since the cutover that is
@@ -418,7 +426,14 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::SharedLock
         | Op::SharedUnlock
         | Op::Trap
-        | Op::AssertFailed => true,
+        | Op::AssertFailed
+        | Op::DynOpen
+        | Op::DynKind
+        | Op::DynSameType
+        | Op::DynRead
+        | Op::DynCase
+        | Op::DynCount
+        | Op::DynChild => true,
     }
 }
 
@@ -3732,6 +3747,25 @@ pub(super) fn dispatch<'s, 'a>(
                     machine.mem.payload_addr(addr, 1),
                     width,
                 );
+            }
+
+            // ---- reflection ------------------------------------------
+            // ADR 0068's seven observations, each a read of the frame, one
+            // question of `super::dynamic`, and a write back. None allocates
+            // and none reaches a safepoint, so no `sync` is needed before
+            // one: a failure syncs on its own way out, through `fail!`.
+            //
+            // One call, out of line, rather than seven arms here: this
+            // function's frame is on the Rust stack once per encoded frame a
+            // chain of tier crossings has entered, and the seven arms inlined
+            // grew it enough that `native_tier`'s three-hundred-crossing chain
+            // overflowed a test thread's stack.
+            DYN_OPEN | DYN_KIND | DYN_SAME_TYPE | DYN_READ | DYN_CASE | DYN_COUNT | DYN_CHILD => {
+                if let Err(error) =
+                    dynamic::execute(machine, held.opcode(), base_at, a!(), b!(), c!(), id)
+                {
+                    fail!(error)
+                }
             }
 
             // ---- tasks -----------------------------------------------

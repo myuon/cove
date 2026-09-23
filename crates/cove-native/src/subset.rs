@@ -581,6 +581,18 @@ pub enum Reason {
     /// runtime error rather than an answer, or a jump table with more cases
     /// than an `i32` immediate can hold.
     Operands,
+    /// One of [ADR 0068]'s structural observations of an erased value —
+    /// `Inst::DynOpen` through `Inst::DynChild`.
+    ///
+    /// A family of its own rather than [`Reason::Instruction`], because it is
+    /// not waiting on somebody to write it: the ADR's Phase 1 lowers the seven
+    /// for the encoded machine alone, and whether this tier lowers them
+    /// directly or through narrow runtime helpers is a later phase's
+    /// measurement. A reader sorting a refusal table should see that as one
+    /// deliberate row, not as seven instructions nobody got to.
+    ///
+    /// [ADR 0068]: ../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+    Reflection,
 }
 
 impl std::fmt::Display for Reason {
@@ -591,6 +603,10 @@ impl std::fmt::Display for Reason {
             Reason::NoTerminator => write!(f, "the body does not end in a terminator"),
             Reason::Instruction => write!(f, "an instruction is not lowered"),
             Reason::Operands => write!(f, "an operand is outside a bound"),
+            Reason::Reflection => write!(
+                f,
+                "a reflection observation runs on the encoded machine (ADR 0068, Phase 1)"
+            ),
         }
     }
 }
@@ -1352,6 +1368,25 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
+        // [ADR 0068]'s seven structural observations are refused by name, as
+        // `Reason::Reflection`: Phase 1 lowers them for the encoded machine
+        // alone, so a function holding one runs there, as a function holding
+        // `Inst::Box` or `Inst::Unbox` does today. Listed rather than left to
+        // the fallback so that the day this tier lowers them is an edit to this
+        // arm, and so that a reader looking for why a reflecting walk is not
+        // compiled finds the answer written down. The ADR's Decision 9 allows
+        // either a direct lowering or narrow runtime helpers — never an
+        // operation-level helper — and which is a later phase's measurement to
+        // make.
+        //
+        // [ADR 0068]: ../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+        Inst::DynOpen { .. }
+        | Inst::DynKind { .. }
+        | Inst::DynSameType { .. }
+        | Inst::DynRead { .. }
+        | Inst::DynCase { .. }
+        | Inst::DynCount { .. }
+        | Inst::DynChild { .. } => return Some(Reason::Reflection),
         // [ADR 0065]'s run search, the same helper with [`RunOp::FindBytes`].
         // Bounded as the slice is — four one-word operands the frame has —
         // and over packed bytes alone, which `cove_ir::verify` is what holds:
@@ -1582,6 +1617,59 @@ mod tests {
                     at: Some(2),
                 },
             ]
+        );
+    }
+
+    /// ADR 0068's seven observations are refused as one family, each by name.
+    #[test]
+    fn every_reflection_observation_is_refused_as_reflection() {
+        // A box at 0 and two views at 1..=3 and 4..=6, then an `Int`: every
+        // operand is a slot the frame has, so nothing here is a bound, and
+        // each refusal is the family's.
+        let reprs = vec![
+            Repr::Ref,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+        ];
+        let code = vec![
+            Inst::DynOpen { dst: 1, src: 0 },
+            Inst::DynKind { dst: 7, view: 1 },
+            Inst::DynSameType { dst: 7, a: 1, b: 4 },
+            Inst::DynRead { dst: 7, view: 1 },
+            Inst::DynCase { dst: 7, view: 1 },
+            Inst::DynCount { dst: 7, view: 1 },
+            Inst::DynChild {
+                dst: 4,
+                view: 1,
+                index: 7,
+            },
+            Inst::Return { src: 0 },
+        ];
+        let function = function(reprs, LayoutId(2), code);
+        let program = program(function);
+        let function = program.function(cove_ir::FunctionId(0));
+
+        assert_eq!(
+            refusal(&program, function),
+            Some(Refusal {
+                reason: Reason::Reflection,
+                at: Some(0),
+            })
+        );
+        let reasons: Vec<(Reason, Option<u32>)> = blockers(&program, function)
+            .into_iter()
+            .map(|refused| (refused.reason, refused.at))
+            .collect();
+        assert_eq!(
+            reasons,
+            (0..7)
+                .map(|pc| (Reason::Reflection, Some(pc)))
+                .collect::<Vec<_>>()
         );
     }
 

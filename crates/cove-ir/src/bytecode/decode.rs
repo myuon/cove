@@ -428,6 +428,17 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             help: c,
         },
         Op::AssertFailed => Inst::AssertFailed { message: a },
+        Op::DynOpen => Inst::DynOpen { dst: a, src: b },
+        Op::DynKind => Inst::DynKind { dst: a, view: b },
+        Op::DynSameType => Inst::DynSameType { dst: a, a: b, b: c },
+        Op::DynRead => Inst::DynRead { dst: a, view: b },
+        Op::DynCase => Inst::DynCase { dst: a, view: b },
+        Op::DynCount => Inst::DynCount { dst: a, view: b },
+        Op::DynChild => Inst::DynChild {
+            dst: a,
+            view: b,
+            index: c,
+        },
     })
 }
 

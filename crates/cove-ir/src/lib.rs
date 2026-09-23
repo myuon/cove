@@ -42,6 +42,7 @@
 //! lowering reads its answers rather than recomputing them.
 
 pub mod bytecode;
+pub mod dynamic;
 pub mod flow;
 pub mod inst;
 pub mod intrinsic;
@@ -54,6 +55,7 @@ pub mod repr;
 pub mod verify;
 
 pub use bytecode::{EncodedInst, MAX_FRAME_WORDS};
+pub use dynamic::DynamicKind;
 pub use inst::{
     ArithOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, Pc, Slot, Storage, Validation,
 };

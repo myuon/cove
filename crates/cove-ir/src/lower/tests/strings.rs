@@ -110,7 +110,7 @@ fn @m.show(m.Point) -> String
      8  run-copy.bytes (s11:<ref> s9:Int s5:String s10:Int s8:Int)
      9  clear s11:<ref>
     10  growable-commit.bytes s4:ref s8:int
-    11  call s6:Unit <synth>.renders<m.Point#16> (s0..s1:m.Point s4:ByteBuffer)
+    11  call s6:Unit <synth>.renders<m.Point#17> (s0..s1:m.Point s4:ByteBuffer)
     12  run-finish.bytes s2:ref s4:ref String utf8
     13  return s2:String
 "
@@ -131,7 +131,7 @@ fn a_piece_is_appended_before_the_next_piece_is_evaluated() {
         "show",
     );
     let rendered = listed
-        .find("<synth>.renders<m.Point#16> (s0..s1:m.Point")
+        .find("<synth>.renders<m.Point#17> (s0..s1:m.Point")
         .unwrap_or_else(|| panic!("{listed}"));
     let summed = listed.find("add.int").unwrap_or_else(|| panic!("{listed}"));
     let formatted = listed

@@ -21,7 +21,7 @@
 use std::rc::Rc;
 
 use cove_diag::Span;
-use cove_ir::MinMax;
+use cove_ir::{DynamicKind, MinMax};
 use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY};
 
 use crate::error::RuntimeError;
@@ -93,6 +93,24 @@ pub trait Callable {
     /// that a `Vector` of structs reaches the interpreter's own answer for
     /// each one.
     fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError>;
+
+    /// Where `case` stands among the cases the enum `type_name` declares, in
+    /// declaration order.
+    ///
+    /// [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// `core.dynamicCase` answers a case as the discriminant the machine
+    /// stores, and a value here carries its case by name — so the position is
+    /// a question about the declaration, which only the interpreter reaches.
+    /// `Option` and `Result` are answered by [`call_core`] itself and never
+    /// asked here.
+    ///
+    /// `None` for a type this caller cannot find; the default is that, so a
+    /// caller with no declarations — a test's — reflects on the builtin enums
+    /// alone.
+    fn case_index(&self, type_name: &str, case: &str) -> Option<usize> {
+        let _ = (type_name, case);
+        None
+    }
 }
 
 /// The independent copy `Snapshot` makes of a value that no declared
@@ -1067,12 +1085,209 @@ pub fn call_core(
             );
             Ok(Value(Repr::Map(pairs.into())))
         }
+        // ADR 0068's structural observations. A view here is simply the
+        // erased value it denotes: `Value::erased` is what "a view never
+        // denotes a box" means in a tree of values, and a child is the value
+        // it is — the oracle's allocation is not what the ADR's gate is about.
+        "dynamicOpen" => Ok(args[0].erased().clone()),
+        "dynamicKind" => Ok(Value(Repr::Int(dynamic_kind(&args[0]).code()))),
+        "dynamicSameType" => Ok(Value(Repr::Bool(dynamic_same_type(&args[0], &args[1])))),
+        "dynamicBool" | "dynamicInt" | "dynamicFloat" | "dynamicDuration" | "dynamicString" => {
+            dynamic_read(name, &args[0]).map_err(|error| error.at(span))
+        }
+        "dynamicCase" => dynamic_case(host, &args[0]).map_err(|error| error.at(span)),
+        "dynamicChildCount" => Ok(Value(Repr::Int(dynamic_count(&args[0]) as i64))),
+        "dynamicChild" => {
+            let count = dynamic_count(&args[0]);
+            let Value(Repr::Int(index)) = &args[1] else {
+                return Err(type_error(&shown, "index", "Int", &args[1], span));
+            };
+            match usize::try_from(*index) {
+                Ok(at) if at < count => Ok(dynamic_child(&args[0], at)),
+                _ => Err(dynamic_internal(format!(
+                    "child {index} of a dynamic view with {count} children was asked"
+                ))
+                .at(span)),
+            }
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
         // from a standard-library module on both evaluators.
         _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
     }
+}
+
+/// The [`DynamicKind`] of the value a view denotes: `cove_ir`'s one table,
+/// read off a `Value`'s variant the way the machine reads it off a layout's
+/// shape.
+///
+/// `Dyn` is looked through first, so a view never denotes a box here either.
+/// A struct is a struct whatever its name — `Error` and `MapEntry` included —
+/// unless it is `opaque`, whose fields are the declaring module's; a host
+/// operation used as a value is a function, as the closure the machine builds
+/// for one is; and every handle, module, type and cell is opaque (ADR 0068,
+/// Decision 7).
+pub(crate) fn dynamic_kind(value: &Value) -> DynamicKind {
+    match value.erased() {
+        Value(Repr::Unit) => DynamicKind::Unit,
+        Value(Repr::Bool(_)) => DynamicKind::Bool,
+        Value(Repr::Int(_)) => DynamicKind::Int,
+        Value(Repr::Float(_)) => DynamicKind::Float,
+        Value(Repr::Duration(_)) => DynamicKind::Duration,
+        Value(Repr::Str(_)) => DynamicKind::String,
+        Value(Repr::Struct(s)) if s.opaque => DynamicKind::Opaque,
+        Value(Repr::Struct(_)) => DynamicKind::Struct,
+        Value(Repr::Enum(_)) => DynamicKind::Enum,
+        Value(Repr::Array(_)) => DynamicKind::Array,
+        Value(Repr::Vector(_)) => DynamicKind::Vector,
+        Value(Repr::Set(_)) => DynamicKind::Set,
+        Value(Repr::Map(_)) => DynamicKind::Map,
+        Value(Repr::Range { .. }) => DynamicKind::Range,
+        Value(Repr::Closure(_) | Repr::HostFn(_)) => DynamicKind::Function,
+        Value(
+            Repr::ByteBuffer(_)
+            | Repr::Dyn(_)
+            | Repr::HostModule(_)
+            | Repr::Resource(_)
+            | Repr::Type(_)
+            | Repr::TaskScope(_)
+            | Repr::Task(_)
+            | Repr::Shared(_),
+        ) => DynamicKind::Opaque,
+    }
+}
+
+/// `core.dynamicSameType`: equal kinds and, for the nominal three, equal
+/// declared names.
+///
+/// **The name is the one the value carries, and it is qualified** —
+/// `m.geometry.Point`, `Option`, `Error` — which is the machine's layout name
+/// too once an instantiation is left off it. A value here carries no type
+/// arguments at all, so an `Option<Int>` and an `Option<String>` are one type
+/// without anything being erased.
+pub(crate) fn dynamic_same_type(a: &Value, b: &Value) -> bool {
+    let kind = dynamic_kind(a);
+    kind == dynamic_kind(b) && (!kind.is_nominal() || dynamic_type_name(a) == dynamic_type_name(b))
+}
+
+/// The declared name a nominal view's type has, with any instantiation left
+/// off.
+fn dynamic_type_name(value: &Value) -> Option<&str> {
+    match value.erased() {
+        Value(Repr::Struct(s)) => Some(cove_ir::dynamic::declared_name(&s.type_name)),
+        Value(Repr::Enum(e)) => Some(cove_ir::dynamic::declared_name(&e.type_name)),
+        Value(Repr::Range { .. }) => Some("Range"),
+        _ => None,
+    }
+}
+
+/// `core.dynamicBool` and the four beside it: the scalar a view holds, held to
+/// the kind `name` reads.
+fn dynamic_read(name: &str, view: &Value) -> Result<Value, RuntimeError> {
+    let value = view.erased();
+    let wanted = match name {
+        "dynamicBool" => DynamicKind::Bool,
+        "dynamicInt" => DynamicKind::Int,
+        "dynamicFloat" => DynamicKind::Float,
+        "dynamicDuration" => DynamicKind::Duration,
+        _ => DynamicKind::String,
+    };
+    let found = dynamic_kind(value);
+    if found == wanted {
+        return Ok(value.clone());
+    }
+    Err(dynamic_internal(format!(
+        "a dynamic view of a {} was read as a `{}`",
+        found.name(),
+        wanted.name()
+    )))
+}
+
+/// `core.dynamicCase`: the position of an enum view's case in its declaration.
+///
+/// `Option` and `Result` are the lowering's own order — `None` then `Some`,
+/// `Ok` then `Err`, as `cove_ir`'s `Shapes::of` lays them out — and every
+/// other enum's is its declaration's, which the caller finds.
+fn dynamic_case(host: &dyn Callable, view: &Value) -> Result<Value, RuntimeError> {
+    let Value(Repr::Enum(e)) = view.erased() else {
+        return Err(dynamic_internal(format!(
+            "the case of a dynamic view of a {} was asked",
+            dynamic_kind(view).name()
+        )));
+    };
+    let index = match (&*e.type_name, &*e.case) {
+        ("Option", "None") | ("Result", "Ok") => Some(0),
+        ("Option", "Some") | ("Result", "Err") => Some(1),
+        (type_name, case) => host.case_index(type_name, case),
+    };
+    match index {
+        Some(index) => Ok(Value(Repr::Int(index as i64))),
+        None => Err(dynamic_internal(format!(
+            "the case `{}` of `{}` has no position this evaluator can find",
+            e.case, e.type_name
+        ))),
+    }
+}
+
+/// `core.dynamicChildCount`: how many children a view has, in
+/// [`dynamic_child`]'s order.
+pub(crate) fn dynamic_count(view: &Value) -> usize {
+    match view.erased() {
+        Value(Repr::Struct(s)) if !s.opaque => s.fields.len(),
+        Value(Repr::Enum(e)) => e.payload.len(),
+        Value(Repr::Array(items)) => items.len(),
+        Value(Repr::Vector(storage)) => storage.elements.borrow().len(),
+        Value(Repr::Set(items)) => items.len(),
+        Value(Repr::Map(entries)) => 2 * entries.len(),
+        Value(Repr::Range { .. }) => 3,
+        _ => 0,
+    }
+}
+
+/// `core.dynamicChild`: child `at` of a view, which [`call_core`] has already
+/// held below [`dynamic_count`].
+///
+/// The machine's canonical order: a struct's fields in declaration order, a
+/// case's payload, a sequence's or a set's elements, a map's entries as key
+/// then value, and a range's `start`, `end` and `inclusive` — the three fields
+/// the program's `Range` struct declares. A set member and a map key are
+/// [`MapKey`]s here and are read back as the values they were.
+pub(crate) fn dynamic_child(view: &Value, at: usize) -> Value {
+    match view.erased() {
+        Value(Repr::Struct(s)) => s.fields[at].1.erased().clone(),
+        Value(Repr::Enum(e)) => e.payload[at].erased().clone(),
+        Value(Repr::Array(items)) => items[at].erased().clone(),
+        Value(Repr::Vector(storage)) => storage.elements.borrow()[at].erased().clone(),
+        Value(Repr::Set(items)) => items[at].to_value(),
+        Value(Repr::Map(entries)) => {
+            let (key, value) = &entries[at / 2];
+            if at.is_multiple_of(2) {
+                key.to_value()
+            } else {
+                value.erased().clone()
+            }
+        }
+        Value(Repr::Range {
+            start,
+            end,
+            inclusive_end,
+        }) => match at {
+            0 => Value(Repr::Int(*start)),
+            1 => Value(Repr::Int(*end)),
+            _ => Value(Repr::Bool(*inclusive_end)),
+        },
+        other => unreachable!("a {} has no children", dynamic_kind(other).name()),
+    }
+}
+
+/// The oracle's twin of the machine's internal reflection error: a view asked
+/// a question its kind has no answer to.
+fn dynamic_internal(message: String) -> RuntimeError {
+    RuntimeError::new(format!("internal error: {message}")).with_help(
+        "a dynamic view is read by the standard library's own walks, so this is a bug in the \
+         standard library rather than in the program",
+    )
 }
 
 /// The `MapEntry(key:, value:)` one entry of a map's sorted run is, as a value.
@@ -2022,4 +2237,271 @@ fn count_is_spelled_length(type_name: &str, span: Span) -> RuntimeError {
     .at(span)
     .with_rule("Every sequence reports its element count as `length()`; there is no `count()`.")
     .with_help("write `length()` instead of `count()`")
+}
+
+/// ADR 0068's seven observations as the oracle answers them: `call_core`'s
+/// arms, over the same values the machine's `vm::exec::dynamic` tests box, held
+/// to the same descriptions — so a kind code, a child order or a case index
+/// that differed between the two evaluators would fail one side or the other
+/// against one shared string.
+#[cfg(test)]
+mod dynamic_tests {
+    use std::rc::Rc;
+
+    use cove_diag::{FileId, Span};
+    use cove_ir::DynamicKind;
+
+    use super::{call_core, Callable};
+    use crate::error::RuntimeError;
+    use crate::value::{DynValue, MapKey, Repr, StructValue, Value, VectorStorage};
+
+    /// A caller with no program behind it but the one enum the fixtures
+    /// declare: `m.Mark`, whose cases are `Plain`, `Count` and `Named` in that
+    /// order.
+    struct Probe;
+
+    impl Callable for Probe {
+        fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
+            Value(Repr::Vector(VectorStorage::new(elements)))
+        }
+
+        fn call_value(
+            &mut self,
+            _: &Value,
+            _: &mut Vec<Value>,
+            _: Span,
+        ) -> Result<Value, RuntimeError> {
+            unreachable!("a reflection calls nothing")
+        }
+
+        fn arity(&self, _: &Value) -> Option<usize> {
+            None
+        }
+
+        fn snapshot(&mut self, _: &Value, _: Span) -> Result<Value, RuntimeError> {
+            unreachable!("a reflection copies nothing")
+        }
+
+        fn case_index(&self, type_name: &str, case: &str) -> Option<usize> {
+            match type_name {
+                "m.Mark" => ["Plain", "Count", "Named"]
+                    .iter()
+                    .position(|held| *held == case),
+                _ => None,
+            }
+        }
+    }
+
+    fn span() -> Span {
+        Span::new(FileId(0), 0, 0)
+    }
+
+    /// `core.name(args)`, answered or refused.
+    fn core(name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        call_core(&mut Probe, name, &mut args.clone(), span())
+    }
+
+    fn ask(name: &str, args: Vec<Value>) -> Value {
+        core(name, args).unwrap_or_else(|error| panic!("`core.{name}`: {}", error.message))
+    }
+
+    fn int(value: &Value) -> i64 {
+        value.as_int().expect("an `Int`")
+    }
+
+    /// The oracle's description of a view, in the words the machine's tests
+    /// describe its own in.
+    fn describe(view: &Value) -> String {
+        let code = int(&ask("dynamicKind", vec![view.clone()]));
+        let kind = DynamicKind::from_code(code).unwrap_or_else(|| panic!("kind {code}"));
+        match kind {
+            DynamicKind::Unit => "()".to_string(),
+            DynamicKind::Bool => ask("dynamicBool", vec![view.clone()])
+                .as_bool()
+                .unwrap()
+                .to_string(),
+            DynamicKind::Int => int(&ask("dynamicInt", vec![view.clone()])).to_string(),
+            DynamicKind::Float => format!(
+                "{:?}",
+                ask("dynamicFloat", vec![view.clone()]).as_float().unwrap()
+            ),
+            DynamicKind::Duration => format!(
+                "{}ns",
+                ask("dynamicDuration", vec![view.clone()])
+                    .as_duration_nanos()
+                    .unwrap()
+            ),
+            DynamicKind::String => format!(
+                "{:?}",
+                ask("dynamicString", vec![view.clone()]).as_str().unwrap()
+            ),
+            DynamicKind::Function | DynamicKind::Opaque => {
+                assert_eq!(int(&ask("dynamicChildCount", vec![view.clone()])), 0);
+                kind.name().to_string()
+            }
+            _ => {
+                let mut out = kind.name().to_string();
+                if kind == DynamicKind::Enum {
+                    let case = int(&ask("dynamicCase", vec![view.clone()]));
+                    out.push_str(&format!("#{case}"));
+                }
+                let count = int(&ask("dynamicChildCount", vec![view.clone()]));
+                let children: Vec<String> = (0..count)
+                    .map(|at| describe(&ask("dynamicChild", vec![view.clone(), Value::int(at)])))
+                    .collect();
+                out.push_str(&format!("[{}]", children.join(", ")));
+                out
+            }
+        }
+    }
+
+    /// A `dyn` wrapper around `value`, which is what the oracle's box is.
+    fn erased(value: Value) -> Value {
+        Value(Repr::Dyn(Rc::new(DynValue {
+            trait_name: "m.Probed".into(),
+            value,
+        })))
+    }
+
+    fn point(x: i64, y: i64) -> Value {
+        Value::structure("m.Point", [("x", Value::int(x)), ("y", Value::int(y))])
+    }
+
+    fn inner(label: &str, x: i64, y: i64) -> Value {
+        Value::structure(
+            "m.Inner",
+            [("label", Value::string(label)), ("at", point(x, y))],
+        )
+    }
+
+    /// The machine's `every_kind_is_described_through_the_instructions`, row
+    /// for row.
+    #[test]
+    fn every_kind_is_described_through_the_seven_arms() {
+        let secret = Value(Repr::Struct(Rc::new(StructValue {
+            type_name: "m.Secret".into(),
+            fields: vec![("code".into(), Value::int(9))],
+            opaque: true,
+        })));
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "struct[\"outer\", struct[\"inner\", struct[3, 4]]]",
+                Value::structure(
+                    "m.Outer",
+                    [
+                        ("name", Value::string("outer")),
+                        ("inner", inner("inner", 3, 4)),
+                    ],
+                ),
+            ),
+            ("enum#0[]", Value::enumeration("m.Mark", "Plain", [])),
+            (
+                "enum#1[7]",
+                Value::enumeration("m.Mark", "Count", [Value::int(7)]),
+            ),
+            (
+                "enum#2[\"named\"]",
+                Value::enumeration("m.Mark", "Named", [Value::string("named")]),
+            ),
+            ("enum#1[5]", Value::some(Value::int(5))),
+            ("enum#0[]", Value::none()),
+            ("enum#1[\"only\"]", Value::some(Value::string("only"))),
+            ("enum#0[1]", Value::ok(Value::int(1))),
+            ("enum#1[\"no\"]", Value::err(Value::string("no"))),
+            (
+                "Array[1, 2, 3]",
+                Value::array([Value::int(1), Value::int(2), Value::int(3)]),
+            ),
+            (
+                "Vector[struct[1, 2], struct[3, 4]]",
+                Value(Repr::Vector(VectorStorage::new(vec![
+                    point(1, 2),
+                    point(3, 4),
+                ]))),
+            ),
+            ("Set[1, 5]", Value::set([MapKey::Int(1), MapKey::Int(5)])),
+            (
+                "Map[\"a\", 1, \"b\", 2]",
+                Value::map([
+                    (MapKey::Str("a".to_string()), Value::int(1)),
+                    (MapKey::Str("b".to_string()), Value::int(2)),
+                ]),
+            ),
+            ("Range[1, 4, false]", Value::range_of(1, 4, false)),
+            ("function", Value::host_fn("console", "println")),
+            ("struct[1, 2]", erased(point(1, 2))),
+            (
+                "struct[struct[\"n\", struct[5, 6]]]",
+                Value::structure("m.Holder", [("it", erased(inner("n", 5, 6)))]),
+            ),
+            ("opaque value", secret),
+            ("()", Value::unit()),
+            ("true", Value::bool(true)),
+            ("-7", Value::int(-7)),
+            ("1.5", Value::float(1.5)),
+            ("250ns", Value::duration(250)),
+            ("\"s\"", Value::string("s")),
+        ];
+        for (want, value) in cases {
+            let view = ask("dynamicOpen", vec![erased(value)]);
+            assert_eq!(describe(&view), want);
+        }
+    }
+
+    /// The machine's `same_type_is_kind_and_declared_name`, row for row: the
+    /// name a value carries is qualified, and carries no instantiation.
+    #[test]
+    fn same_type_is_kind_and_declared_name() {
+        let rows: Vec<(Value, Value, bool)> = vec![
+            (Value::some(Value::int(5)), Value::none(), true),
+            (
+                Value::some(Value::int(5)),
+                Value::some(Value::string("x")),
+                true,
+            ),
+            (Value::some(Value::int(5)), Value::ok(Value::int(1)), false),
+            (point(1, 2), point(1, 2), true),
+            (point(1, 2), inner("l", 1, 2), false),
+            (
+                Value::range_of(1, 2, false),
+                Value::range_of(5, 9, true),
+                true,
+            ),
+            (Value::range_of(1, 2, false), point(1, 2), false),
+            (Value::int(3), Value::int(4), true),
+            (Value::int(3), Value::duration(3), false),
+        ];
+        for (a, b, want) in rows {
+            let shown = format!("{a:?} and {b:?}");
+            let same = ask("dynamicSameType", vec![erased(a), erased(b)]);
+            assert_eq!(same.as_bool(), Some(want), "{shown}");
+        }
+    }
+
+    /// The machine's `a_question_the_kind_has_no_answer_to_is_refused`, in the
+    /// same sentences.
+    #[test]
+    fn a_question_the_kind_has_no_answer_to_is_refused() {
+        let view = ask("dynamicOpen", vec![erased(Value::string("t"))]);
+        for (name, args, message) in [
+            (
+                "dynamicInt",
+                vec![view.clone()],
+                "internal error: a dynamic view of a String was read as a `Int`",
+            ),
+            (
+                "dynamicCase",
+                vec![view.clone()],
+                "internal error: the case of a dynamic view of a String was asked",
+            ),
+            (
+                "dynamicChild",
+                vec![view.clone(), Value::int(0)],
+                "internal error: child 0 of a dynamic view with 0 children was asked",
+            ),
+        ] {
+            let error = core(name, args).expect_err("refused");
+            assert_eq!(error.message, message, "`core.{name}`");
+        }
+    }
 }

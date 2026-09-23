@@ -82,6 +82,10 @@ use crate::value::Value;
 /// it reads `Machine`'s private state without widening any of it to the
 /// crate. The loop over the same machine is exactly as privileged as the
 /// machine, and nothing else is.
+/// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// structural observations. A child for `encoded`'s reason: a view is read
+/// out of the machine's memory and the layout table, both of them private.
+pub(crate) mod dynamic;
 pub(crate) mod encoded;
 pub(crate) mod native;
 /// The growable-run core a `ByteBuffer` and a `Vector` share. A child for

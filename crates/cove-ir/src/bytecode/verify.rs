@@ -237,6 +237,18 @@ impl Check<'_> {
                 // The head of a run whose width the payload's layout gives.
                 // The layout half was checked above, so a missing one here is
                 // a fault already reported and this declines to guess.
+                // A view's width is the program's view layout's, which is in
+                // range or the view cannot be checked at all: a program that
+                // names a layout it does not have gets one fault, not one per
+                // operand.
+                Operand::View => {
+                    let layout = self.program.view_layout;
+                    if layout.index() < self.program.layouts.len() {
+                        self.fits(at, slot, layout, &format!("the view at {name}"));
+                    } else if self.function.repr(slot).is_none() {
+                        self.outside(at, name, slot);
+                    }
+                }
                 Operand::Value => match self.named_layout(op, bytes) {
                     Some(layout) => {
                         self.fits(at, slot, layout, &format!("the value at {name}"));

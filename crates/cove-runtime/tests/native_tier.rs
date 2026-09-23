@@ -1165,6 +1165,22 @@ export fn callsSignals(pick: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   signals(pick)
 }
+
+/// ADR 0068's observations, reached from a function the tier compiles.
+///
+/// `stringbuilder.reflects` opens the view, which the tier refuses by name, so
+/// this is the other direction of the crossing from every refused caller
+/// above: compiled code calling a body that runs on the encoded machine.
+export fn reflectsThrough(x: Int, y: Int) -> Int {
+  stringbuilder.reflects(x, y) + counts(0)
+}
+
+/// A refused caller, because the outermost frame is always encoded and the
+/// crossing under test is the one below it.
+export fn callsReflects(x: Int, y: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  reflectsThrough(x, y)
+}
 ";
 
 /// A standard-library body that can fault and that no expansion reaches.
@@ -1174,6 +1190,36 @@ export fn callsSignals(pick: Int) -> Int {
 /// wherever they are called: a fault in the library under a compiled frame
 /// that waits on a library call needs a library call to wait on.
 const PROBE: &str = "\
+trait Reflected {
+  fn reflected(self) -> Int
+}
+
+struct ReflectedAt {
+  x: Int,
+  y: Int
+}
+
+impl Reflected for ReflectedAt {
+  fn reflected(self) -> Int {
+    self.x
+  }
+}
+
+/// [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// structural observations of a boxed `ReflectedAt`: its kind, its child count,
+/// and its two fields read as scalars through a child view each.
+fn reflectsOn(value: dyn Reflected) -> Int {
+  let view = core.dynamicOpen(value)
+  let x = core.dynamicInt(core.dynamicChild(view, 0))
+  let y = core.dynamicInt(core.dynamicChild(view, 1))
+  core.dynamicKind(view) * 1000 + core.dynamicChildCount(view) * 100 + x * 10 + y
+}
+
+/// A standard-library body the native tier refuses, as `Reason::Reflection`.
+export fn reflects(x: Int, y: Int) -> Int {
+  reflectsOn(ReflectedAt(x: x, y: y))
+}
+
 /// `appendByte`, `depth` frames down a recursion no expansion can reach.
 export fn appendByteBelow(var out: StringBuilder, value: Int, depth: Int) {
   if depth > 0 {
@@ -3810,4 +3856,54 @@ fn the_boundary_report_counts_each_quantity_apart() {
     let printed = on_native.to_string();
     assert!(printed.contains("boundary: native -> runtime helper calls"));
     assert!(uncounted.to_string().contains("were not counted"));
+}
+
+/// ADR 0068 Phase 1 lowers its seven observations for the encoded machine
+/// alone: a function that reflects is **refused, by name**, and the run that
+/// reaches it from compiled code answers what the encoded machine answers.
+///
+/// The refusal is `cove_native::Reason::Reflection`'s sentence, at a reflection
+/// instruction — not the fallback's "an instruction is not lowered", which would
+/// put a deliberate phase boundary in the same row as work nobody has started.
+#[test]
+fn a_reflecting_function_is_refused_by_name_and_agrees() {
+    let both = both("callsReflects", vec![Value::int(3), Value::int(4)]);
+    // A struct (kind 6) of two children, whose fields are 3 and 4.
+    assert_eq!(both.vm, Ok("6234".to_string()));
+    assert_eq!(both.native, both.vm, "the tiers agree");
+    assert!(
+        both.tiers.native_to_vm >= 1,
+        "the reflecting body was reached from compiled code and ran on the VM: {:?}",
+        both.tiers
+    );
+
+    let (sources, program) = checked();
+    let lowered = cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+        .expect("the fixture lowers");
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    // `reflects` boxes its argument, and `Inst::Box` is refused as an
+    // unlowered instruction — the same way it was before this phase. The body
+    // that reflects is `reflectsOn`, and its refusal is the family's.
+    let row = native
+        .refusals()
+        .iter()
+        .find(|row| row.name == "std.stringbuilder.reflectsOn")
+        .unwrap_or_else(|| panic!("the reflecting body was refused: {:?}", native.refusals()));
+    assert_eq!(
+        row.reason,
+        cove_native::Reason::Reflection.to_string(),
+        "{row:?}"
+    );
+    assert_eq!(row.instruction.as_deref(), Some("DynOpen"), "{row:?}");
+    assert!(
+        row.blockers.iter().all(|(blocker, _)| blocker
+            .instruction
+            .as_deref()
+            .is_some_and(|op| op.starts_with("Dyn"))),
+        "and every blocker in it is a reflection: {row:?}"
+    );
+    assert!(
+        compiled_names().contains(&format!("{MODULE}.reflectsThrough")),
+        "and its caller compiled, so the crossing was a crossing"
+    );
 }

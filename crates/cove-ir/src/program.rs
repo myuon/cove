@@ -548,6 +548,15 @@ pub struct Program {
     /// The machine should not have to search a table for a shape that is
     /// always the same, and a search that fails has to answer something.
     pub boxed_layout: LayoutId,
+    /// The layout every [ADR 0068](../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)
+    /// view occupies: see [`crate::dynamic`].
+    ///
+    /// A program-wide constant for [`Program::str_layout`]'s reason: every
+    /// view is the same three words whatever it views, so no reflection
+    /// instruction names a layout, and the verifier reads this to know how
+    /// wide a view operand is. A program that reflects on nothing still
+    /// declares it, which costs one row of the table and no word of any frame.
+    pub view_layout: LayoutId,
     /// `module.name` to id, for an entry point named on a command line.
     pub by_name: BTreeMap<(Arc<str>, Arc<str>), FunctionId>,
 }
