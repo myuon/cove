@@ -1552,7 +1552,28 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// **157** is the three programs Phase 3 added existing: `values_boxed_order`
 /// 82, and `fail_key_boxed_struct` and `fail_key_boxed_generic` 75 between
 /// them.
-const FORWARDABLE_COPIES: usize = 10339;
+///
+/// **10,497 since ADR 0068's Phase 3b moved the admission's decision over an
+/// erased key into `std.dynamic.refusesKey`.** The lowering moved it by **0**:
+/// with the four new programs held out and `values_boxed_order` as it was, it
+/// is 10,339 to the copy over the same 225 programs, `prod` 5212 and `ret`
+/// 5226. A boxed admission is a call and a branch where it was one intrinsic
+/// site, and a known key layout holding a box is a walk where it was the
+/// intrinsic, and neither holds a copy a destination would remove.
+/// `std.dynamic`'s new walk holds none either, and it took three drafts, for the
+/// reason every program pays for one: the first read 11,413, four `prod`
+/// copies in every program, because a helper answering a part's view with an
+/// early `return` was expanded where the view was bound or pushed and left it
+/// in a temporary a copy then moved; with the helper ending in its one call it
+/// read 10,955, two still there where the view was bound with a `let`; and with
+/// the child index computed where it is used and a pushing helper that ended in
+/// its `while`, 10,726, one copy of the loop's `()` into the answer before the
+/// `return` in every program. That helper answers the stack's height now, which
+/// its caller wanted anyway. **150** is the
+/// four programs existing — `fail_key_boxed_map_value` and `fail_key_boxed_enum`
+/// 76 between them and `fail_key_boxed_deep_200` and `fail_key_boxed_deep_1000`
+/// 74 — and **8** is the `chain` rows `values_boxed_order` gained.
+const FORWARDABLE_COPIES: usize = 10497;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -712,13 +712,14 @@ fn a_map_is_asked_about_its_values_and_not_its_keys() {
     assert_eq!(listed.matches("load-elem").count(), 1, "{listed}");
 }
 
-/// The two things no walk can be composed for, and the fallback they reach.
+/// The two things no walk can be composed for, and what each reaches.
 ///
-/// A box's family is a word in its own header. A layout that holds itself has
-/// values that nest as deep as they like, where a walk expanded in place is
-/// finite — and handing it over is also what keeps the runtime's depth bound
-/// governing the values that could reach it, which is the one place this
-/// migration does *not* move a bound the two before it moved.
+/// A box's family is a word in its own header, so no walk is composed for it
+/// — and since ADR 0068's Phase 3 it is decided anyway, by
+/// `std.dynamic.refusesKey` over a view of the box, with the intrinsic under
+/// the branch on that answer as it is under a walk's. A layout that holds
+/// itself has values that nest as deep as they like, where a walk expanded in
+/// place is finite, so it still hands the whole key to the runtime.
 #[test]
 fn a_box_and_a_layout_that_holds_itself_reach_the_fallback() {
     let boxed = keyed(
@@ -728,6 +729,10 @@ fn a_box_and_a_layout_that_holds_itself_reach_the_fallback() {
         "dyn Summary",
     );
     assert!(admissions(&boxed) > 0, "no `Value.admitKey` for a box");
+    assert!(
+        reflected(&boxed, "refusesKey") > 0,
+        "no `std.dynamic.refusesKey` for a box"
+    );
     assert_eq!(walks_named(&boxed, "refuses<"), Vec::<String>::new());
 
     let deep = keyed("struct Node { tag: Int, kids: Array<Node> }", "Node");
@@ -736,6 +741,45 @@ fn a_box_and_a_layout_that_holds_itself_reach_the_fallback() {
         "no `Value.admitKey` for a layout that holds itself"
     );
     assert_eq!(walks_named(&deep, "refuses<"), Vec::<String>::new());
+}
+
+/// A known key layout with a box inside it is a walk, and the walk calls
+/// `std.dynamic.refusesKey` at the box.
+///
+/// Until ADR 0068's Phase 3 a box made the whole layout
+/// [`synth::Admission::Dynamic`], and a `Holder` with one erased field handed
+/// the runtime the whole key at every site. Now the box is one part among the
+/// others: the `Int` and the `String` cost nothing, the enum is a `switch`,
+/// and the erased field is one call, left through only where it answers
+/// `true`. The walk still answers a `Bool` and never raises.
+#[test]
+fn a_box_inside_a_known_layout_is_one_call_in_its_walk() {
+    let program = keyed(
+        "trait Summary { fn summarize(self) -> String }\n\
+         struct Booking { id: Int }\n\
+         impl Summary for Booking { fn summarize(self) -> String { \"{self.id}\" } }\n\
+         struct Holder { id: Int, item: dyn Summary, label: String }",
+        "Holder",
+    );
+    assert_eq!(
+        synth::admission(
+            &program.layouts,
+            program
+                .layouts
+                .iter()
+                .position(|layout| &*layout.name == "m.Holder")
+                .map(|at| crate::layout::LayoutId(at as u32))
+                .expect("the program has a `Holder`"),
+        ),
+        synth::Admission::Decided
+    );
+    let listed = synthesized(&program, "refuses<m.Holder");
+    assert!(listed.contains("-> Bool"), "{listed}");
+    assert!(listed.contains("std.dynamic.refusesKey"), "{listed}");
+    assert!(!listed.contains("Value.admitKey"), "{listed}");
+    assert!(!listed.contains("trap"), "{listed}");
+    assert!(reflected(&program, "refusesKey") > 0);
+    assert!(admissions(&program) > 0);
 }
 
 /// **ADR 0064's Decision 4 for the admission, as a fact about every program

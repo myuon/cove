@@ -45,12 +45,17 @@ use clock.now
 ///   builds. It is the rebuild control — the same operation over the same
 ///   bytes on both sides — and it is also the row that says the fallback is
 ///   still reached, because a rule that nothing may use the intrinsic is
-///   satisfied by deleting the arm.
+///   satisfied by deleting the arm. Since ADR 0068's Phase 3b it is no longer
+///   a control: a boxed element is decided by `std.dynamic.refusesKey`, Cove
+///   over a view of the box, and the intrinsic under the branch on its answer
+///   is reached only by a refused key — so an admitting run like this one
+///   reaches `Value.admitKey` on no turn, and this row measures the Cove walk.
 /// - `deep` is a value type that reaches itself. A walk composed out of a
 ///   layout that holds itself would not be finite, so `admission` answers
 ///   `Dynamic` and this one reaches the intrinsic in both builds too — and it
 ///   is the row that says the runtime's depth bound still governs the values
-///   that could reach it.
+///   that could reach it. (That bound is gone since ADR 0068's Phase 3b; the
+///   runtime's walk is a loop over a stack, and this row still reaches it.)
 ///
 /// # What the rows are, and why these
 ///

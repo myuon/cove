@@ -88,6 +88,12 @@ pub(super) const DYNAMIC_EQUALS: (&str, &str) = ("std.dynamic", "equals");
 /// `std.dynamic.order`, which no program can name either.
 pub(super) const DYNAMIC_ORDER: (&str, &str) = ("std.dynamic", "order");
 
+/// The Cove function `core.admitKey` decides an erased key with: ADR 0068's
+/// `std.dynamic.refusesKey`, which no program can name either. It decides and
+/// does not word — the sentence stays `Value.admitKey`'s, under a branch on
+/// what this answers.
+pub(super) const DYNAMIC_REFUSES_KEY: (&str, &str) = ("std.dynamic", "refusesKey");
+
 /// What fills one written parameter of a call.
 ///
 /// The three the language has, and the reason a call site can no longer line
@@ -383,6 +389,34 @@ impl Body<'_> {
             span,
         )?;
         self.pool.dynamic_order = Some(id);
+        Some(id)
+    }
+
+    /// `std.dynamic.refusesKey`, the Cove walk `core.admitKey` decides an
+    /// erased key with, resolved once per lowering and recorded on the
+    /// [`Pool`](super::Pool).
+    ///
+    /// [`Body::dynamic_equals`]' arrangement for ADR 0068's Phase 3, and for
+    /// its reason: an admission walk composed for a known key layout that
+    /// reaches a boxed part calls this from a [`synth`] walk that cannot
+    /// resolve a name, so the call site that asks for the walk resolves it
+    /// first — see [`synth::reaches_a_box`] asked of
+    /// [`synth::Operation::Admission`] — and `Body::core_admit_key` resolves it
+    /// for the boxed key it calls it over directly. `None` is
+    /// [`Body::dynamic_equals`]' `None`.
+    pub(super) fn dynamic_refuses_key(&mut self, span: Span) -> Option<FunctionId> {
+        if let Some(id) = self.pool.dynamic_refuses_key {
+            return Some(id);
+        }
+        let (module, function) = DYNAMIC_REFUSES_KEY;
+        let id = self.library_leaf(
+            module,
+            function,
+            (&[shapes::BOXED], shapes::BOOL),
+            "the admission of an erased key",
+            span,
+        )?;
+        self.pool.dynamic_refuses_key = Some(id);
         Some(id)
     }
 

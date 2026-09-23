@@ -756,3 +756,197 @@ fn admitted(kind: Int) {
 fn notAKey() -> String {
   "this value cannot be a map key or a set element"
 }
+
+/// Whether the erased value `key` is one the language refuses as a map key or
+/// a set element: what `core.admitKey` asks of a key that is a `dyn Trait` or
+/// a Host `Any`, whose concrete type is known only once the box is opened —
+/// and of a boxed part of a key whose layout is known.
+///
+/// Nothing in a program calls this, for [`equals`]' reason. The lowering does,
+/// at every `core.admitKey` of the standard library's whose key is boxed, and
+/// from inside an admission walk it composed for a known key layout wherever
+/// that walk reaches a boxed field, element, payload or map value. Where the
+/// layout is known it never gets here: a key whose layout settles it is
+/// nothing at all, and every other known key is a walk the lowering writes for
+/// its layout (ADR 0064's Decision 3). This is the one fallback for what no
+/// layout describes (ADR 0068's Decisions 4 and 5).
+///
+/// # It decides, and it does not word
+///
+/// The answer is a `Bool`, `true` when the key is refused, and nothing here
+/// raises. What a refusal *says* is
+/// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` with a
+/// `rule:` and a `help:` beside it, and a `path` through a map quotes the
+/// entry's key as it renders — `[7]` — which a view cannot render until ADR
+/// 0068's Phase 4. So the sentence stays the runtime's `Value.admitKey`, which
+/// the lowering runs under a `branch-false` on this answer, at the site, over
+/// the same key: the guarded shape it already emits for a walk composed out of
+/// a known layout. The Rust walk behind it runs only on the path that ends the
+/// run, and a key this admits never reaches it.
+///
+/// # What it answers
+///
+/// Exactly what that Rust walk, `key::admits`, and the oracle's
+/// `MapKey::convert` refuse, kind for kind in [`children`]' table:
+///
+/// - **Refused outright**: a `Float`, whose `NaN` is not equal to itself; a
+///   `Vector`, whose equality could change while a collection holds it; a
+///   function; and every opaque value — a `Shared` cell, a task, a task scope,
+///   a Host resource, a byte run or buffer.
+/// - **Admitted without looking inside**: `()`, a `Bool`, an `Int`, a
+///   `Duration` and a `String`, which have no inside; a `Set`, whose members
+///   were admitted when they were put there, so nesting one never fails; and a
+///   `Range`, which is two `Int`s and a `Bool`.
+/// - **Admitted when every part is**: a struct's fields and an enum's payload,
+///   in whichever case the value is in; an `Array`'s elements; and a `Map`'s
+///   **values only**, since its keys are keys by construction too.
+///
+/// So a `Map` is walked on its odd children, which are its values, and nothing
+/// else is skipped.
+///
+/// # No path is kept, and none is needed
+///
+/// [`equals`] keeps the vectors it is inside, because a value can hold itself
+/// only through a `Vector` and equality descends into one. Admission never
+/// does: a `Vector` is the first thing it refuses, so the walk stops at the
+/// one node that could close a cycle before it could go round it (issue
+/// #493), and what is left is a finite tree.
+///
+/// # There is no nesting bound
+///
+/// [`equals`]' explicit stack rather than a recursion, for its reason (issue
+/// #480): a key nested ten thousand deep is decided exactly as one nested ten
+/// deep is. It is one stack and not two, because an admission looks at one
+/// value; and since the answer is whether *any* part is refused, the order the
+/// parts are visited in cannot change it.
+///
+/// # A value one level deep allocates nothing
+///
+/// [`equals`]' arrangement again. The root is opened and decided before a
+/// stack exists, its parts are decided where they are, and the stack is made
+/// only at the first part that has parts of its own — so a boxed scalar, a
+/// string, a struct of scalars, an `Array<Int>`, a `Some(3)` or a set is
+/// decided without allocating, and a key that really nests pays for its stack
+/// once, however deep it goes.
+fn refusesKey(key: Any) -> Bool {
+  let root = core.dynamicOpen(key)
+  let kind = core.dynamicKind(root)
+  let count = keyParts(root, kind)
+  if count < 0 {
+    return true
+  }
+  // A map's values are its odd children, and every other kind's parts are all
+  // of its children.
+  var at = 0
+  if kind == 11 {
+    at = 1
+  }
+  let step = at + 1
+  while at < count {
+    let part = core.dynamicChild(root, at)
+    let inner = core.dynamicKind(part)
+    let under = keyParts(part, inner)
+    if under < 0 {
+      return true
+    }
+    if under > 0 {
+      return refusesBelow(root, count, at + step, step, part, inner, under)
+    }
+    at = at + step
+  }
+  false
+}
+
+/// The rest of [`refusesKey`] over one stack of views: `part`, of kind
+/// `inner`, is a part of `root` that is not refused and has `under` children
+/// of its own, and `root`'s parts from child `from` on, every `step`th of its
+/// `count` children, are still to be decided.
+///
+/// They all go on the stack before anything is popped — `root`'s remaining
+/// parts, then `part`'s — and each value popped pushes its own parts in turn.
+/// Which is visited first cannot change the answer, so nothing is ordered.
+fn refusesBelow(
+  root: DynamicView,
+  count: Int,
+  from: Int,
+  step: Int,
+  part: DynamicView,
+  inner: Int,
+  under: Int,
+) -> Bool {
+  let parts: Vector<DynamicView> = core.vectorWithCapacity(count + under)
+  var at = from
+  while at < count {
+    stack(parts, core.dynamicChild(root, at))
+    at = at + step
+  }
+  var depth = stackParts(parts, part, inner, under)
+  while depth > 0 {
+    depth = depth - 1
+    let x = core.vectorLoad(parts, depth)
+    core.vectorTruncate(parts, depth)
+    let held = core.dynamicKind(x)
+    let more = keyParts(x, held)
+    if more < 0 {
+      return true
+    }
+    if more > 0 {
+      depth = stackParts(parts, x, held, more)
+    }
+  }
+  false
+}
+
+/// Pushes the parts admission asks about of `view`, of kind `kind`, which has
+/// `count` children — every child, but for a `Map`, whose keys are keys by
+/// construction and whose values are its odd children — and answers how many
+/// views `parts` holds now.
+fn stackParts(
+  parts: Vector<DynamicView>,
+  view: DynamicView,
+  kind: Int,
+  count: Int,
+) -> Int {
+  var at = 0
+  if kind == 11 {
+    at = 1
+  }
+  let step = at + 1
+  while at < count {
+    stack(parts, core.dynamicChild(view, at))
+    at = at + step
+  }
+  core.vectorLength(parts)
+}
+
+/// Whether admission looks inside `view`, of kind `kind`: `-1` where the value
+/// is refused outright, `0` where it is admitted without looking inside, and
+/// otherwise how many children it has, among which its parts are — every one
+/// of them, but for a `Map`'s keys.
+///
+/// The kind codes are [`children`]' table, and the arms are [`refusesKey`]'s
+/// list in code order.
+fn keyParts(view: DynamicView, kind: Int) -> Int {
+  if kind < 3 {
+    return 0
+  }
+  if kind == 3 {
+    return -1
+  }
+  if kind < 6 {
+    return 0
+  }
+  if kind < 9 {
+    return core.dynamicChildCount(view)
+  }
+  if kind == 11 {
+    return core.dynamicChildCount(view)
+  }
+  if kind == 10 {
+    return 0
+  }
+  if kind == 12 {
+    return 0
+  }
+  -1
+}

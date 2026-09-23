@@ -1,0 +1,37 @@
+use clock.timeout
+use console.println
+
+/// Four cases, of which exactly one holds a value the language refuses as a
+/// key: `fail_key_enum_case`'s enum.
+enum Mark {
+  Plain
+  Count(Int)
+  Weight(Float)
+}
+
+/// A boxed `Mark.Weight(1.5)` used as a set element, with the enum at the
+/// root of the key: the admission refuses the payload and names it
+/// `Mark.Weight(0)`, the enum's declared name, its case and the part.
+///
+/// `fail_key_enum_case` roots its path at an array because the two evaluators
+/// once named a type differently at the root. They name it one way now — by
+/// the name its declaration wrote, as `fail_key_boxed_struct` pins for a
+/// struct — and this is the same pin for an enum, decided since ADR 0068's
+/// Phase 3 by `std.dynamic.refusesKey` reading the case over a view of the
+/// box.
+///
+/// The value is boxed through `clock.timeout`, which answers `Result<Any,
+/// Error>`, so that no `impl` has to be written for `Mark`.
+fn admitMark() -> Result<Unit, Error> {
+  let held = timeout(1s) { Mark.Weight(1.5) }?
+  let other = timeout(1s) { Mark.Count(3) }?
+  let keyed = Set.of(held).inserted(other)
+  println("never printed {keyed}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed enum holding a Float as a set element")?
+  admitMark()?
+  Ok(())
+}

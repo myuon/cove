@@ -448,6 +448,22 @@ allow = ["console"]
 entry = "fail_key_boxed_generic.main"
 allow = ["console", "clock"]
 
+[run.fail_key_boxed_map_value]
+entry = "fail_key_boxed_map_value.main"
+allow = ["console", "clock"]
+
+[run.fail_key_boxed_enum]
+entry = "fail_key_boxed_enum.main"
+allow = ["console", "clock"]
+
+[run.fail_key_boxed_deep_200]
+entry = "fail_key_boxed_deep_200.main"
+allow = ["console"]
+
+[run.fail_key_boxed_deep_1000]
+entry = "fail_key_boxed_deep_1000.main"
+allow = ["console"]
+
 [run.values_interpolation_order]
 entry = "values_interpolation_order.main"
 allow = ["console"]

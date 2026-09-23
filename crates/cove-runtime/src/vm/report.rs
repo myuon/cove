@@ -1377,35 +1377,30 @@ mod tests {
     /// row that attributed only the outermost object; nothing left allocates
     /// more than one per call.
     ///
-    /// The admitted keys are **erased**, and that is not decoration. Since
-    /// [ADR 0064]'s Decision 3 an admission whose key layout is known is a
-    /// walk the lowering synthesizes, or nothing at all, and reaches the
-    /// intrinsic only to word a refusal; a `dyn Trait` key is the arm that
-    /// reaches it whatever the key holds. So a row for `Value.admitKey` is
-    /// read here where a `Set` of erased values is being built, which is what
-    /// `Set.of(left, other)` is: `std.set.of` admits each member through
-    /// `core.admitKey`, and over a box that is the intrinsic.
+    /// The admitted keys are **a layout that holds itself**, and that is not
+    /// decoration. Since [ADR 0064]'s Decision 3 an admission whose key layout
+    /// is known is a walk the lowering synthesizes, or nothing at all, and
+    /// reaches the intrinsic only to word a refusal; and since [ADR 0068]'s
+    /// Phase 3 an erased key is decided the same way, by
+    /// `std.dynamic.refusesKey`, so a `dyn Trait` key — what this read until
+    /// then — reaches it only to word one too. A `Node` whose `kids` are
+    /// `Node`s is the arm left that reaches it whatever the key holds: no walk
+    /// composed out of it would be finite, so the runtime decides. So a row for
+    /// `Value.admitKey` is read here where a `Set` of them is being built,
+    /// which is what `Set.of(left, other)` is: `std.set.of` admits each member
+    /// through `core.admitKey`, and over a `Node` that is the intrinsic.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
     const PARSE_AND_ADMIT: &str = "
-trait Tagged {
-  fn tag(self) -> Int
-}
-
-struct Triple {
-  a: Int
-  b: Int
-  c: Int
-}
-
-impl Tagged for Triple {
-  fn tag(self) -> Int { self.a }
+struct Node {
+  tag: Int
+  kids: Array<Node>
 }
 
 export fn main() -> Int {
-  let left: dyn Tagged = Triple(a: 1, b: 2, c: 3)
-  let other: dyn Tagged = Triple(a: 1, b: 9, c: 3)
+  let left = Node(tag: 1, kids: [])
+  let other = Node(tag: 1, kids: [Node(tag: 9, kids: [])])
   var total = 0
   var i = 0
   while i < 50 {
@@ -1462,7 +1457,7 @@ export fn main() -> Int {
 
         let admitted = boundary
             .intrinsic(Intrinsic::ValueAdmitKey)
-            .expect("the program admits two erased keys");
+            .expect("the program admits two keys that hold themselves");
         assert!(admitted.calls() > 0, "{admitted:?}");
         assert_eq!(
             admitted.allocations, 0,
@@ -1537,7 +1532,7 @@ export fn main() -> Int {
         // calls `Value.admitKey`, which walks what it admits.
         assert!(
             boundary.intrinsics.iter().any(|row| row.work > 0),
-            "a program that admits erased keys examines something: {:?}",
+            "a program that admits keys that hold themselves examines something: {:?}",
             boundary.intrinsics
         );
     }

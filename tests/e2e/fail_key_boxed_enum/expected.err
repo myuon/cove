@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `Float` inside `Mark.Weight(0)` as a set element
+  --> <e2e>/fail_key_boxed_enum/main.cove:28:15
+   |
+28 |   let keyed = Set.of(held).inserted(other)
+   |               ^^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_boxed_enum/main.cove:35:3
+   |
+35 |   admitMark()?
+   |   ^^^^^^^^^^^ called from here
+  rule: A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.
+  help: convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`
+1 error(s)

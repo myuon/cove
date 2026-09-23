@@ -152,6 +152,14 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
 /// layout to the intrinsic instead. Nothing else in this repository would
 /// have noticed: the answers would still be right, the corpus green, the
 /// architecture exactly where it was.
+///
+/// A box is held to the same rule since [ADR
+/// 0068](../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 3. Its layout names no walk, but `std.dynamic.refusesKey` decides it
+/// in Cove over a view, so a boxed key is `lower::synth::Admission::Decided`
+/// and its intrinsic is guarded by a call of that function exactly as a known
+/// layout's is guarded by its walk — and a boxed site asked about unguarded is
+/// the same cheap way out, taken for the one layout the migration was about.
 pub fn one_admission_boundary(program: &Program) -> Result<(), Vec<Invalid>> {
     let mut faults = Vec::new();
     for function in &program.functions {
@@ -182,6 +190,15 @@ pub fn one_admission_boundary(program: &Program) -> Result<(), Vec<Invalid>> {
                     "asks `Value.admitKey` about a `{name}`, every value of which is a key; \
                      ADR 0064's Decision 4 admits this fallback where the layout does not \
                      answer, and this one answers"
+                )
+            } else if admission == crate::lower::synth::Admission::Decided
+                && matches!(described.shape, Shape::Boxed)
+                && !guarded_by_a_walk(program, function, pc, arg)
+            {
+                format!(
+                    "passes operand 0 of `Value.admitKey` a `{name}` unguarded; ADR 0068's Phase \
+                     3 decides an erased key in `std.dynamic.refusesKey`, and this fallback words \
+                     the refusal that call found, under the branch on what it answered"
                 )
             } else if admission == crate::lower::synth::Admission::Decided
                 && crate::lower::synth::walks(
@@ -220,6 +237,11 @@ pub fn one_admission_boundary(program: &Program) -> Result<(), Vec<Invalid>> {
 /// back: a call to a body that takes one value of the layout and answers a
 /// `Bool`, a `branch-false` on what it answered that lands past this
 /// instruction, and this instruction. Recognised by shape and never by name.
+///
+/// So a boxed key's guard is accepted by the same test: the body it calls is
+/// `std.dynamic.refusesKey`, which takes one erased value and answers a `Bool`
+/// — the one signature a walk of the box's layout would have had, and the
+/// one `lower::dispatch` checks the function against before it is called.
 fn guarded_by_a_walk(
     program: &Program,
     function: &crate::Function,
@@ -3811,6 +3833,73 @@ mod tests {
             vec![array(1), string(2), string(2)],
         );
         assert_eq!(faults(&held), Vec::<String>::new());
+    }
+
+    /// ADR 0068's Phase 3 for [`one_admission_boundary`]: a boxed key is
+    /// asked about only under the branch on a decision.
+    ///
+    /// Unguarded, it is the cheap way out of the migration — the whole key
+    /// handed to the runtime to decide, where `std.dynamic.refusesKey` decides
+    /// it in Cove. Under a `branch-false` on a call that takes one erased value
+    /// and answers a `Bool` it is the shape `lower::core` emits, recognised by
+    /// shape and not by the callee's name.
+    #[test]
+    fn a_boxed_admission_is_asked_about_only_under_a_decision() {
+        let string = |slot| Arg { slot, layout: STR };
+        let key = Arg {
+            slot: 1,
+            layout: BOXED,
+        };
+        let unguarded = calling(
+            crate::Intrinsic::ValueAdmitKey,
+            UNIT,
+            vec![Repr::Unit, Repr::Ref, Repr::Ref],
+            vec![key, string(2), string(2)],
+        );
+        let faults = |program: &Program| match one_admission_boundary(program) {
+            Ok(()) => Vec::new(),
+            Err(items) => items.into_iter().map(|item| item.what).collect(),
+        };
+        assert_eq!(
+            faults(&unguarded),
+            vec![
+                "passes operand 0 of `Value.admitKey` a `Any` unguarded; ADR 0068's Phase 3 \
+                 decides an erased key in `std.dynamic.refusesKey`, and this fallback words the \
+                 refusal that call found, under the branch on what it answered"
+            ]
+        );
+
+        let site = function(
+            vec![Repr::Unit, Repr::Ref, Repr::Ref, Repr::Bool],
+            UNIT,
+            vec![
+                Inst::Call {
+                    dst: 3,
+                    callee: FunctionId(1),
+                    args: crate::ArgsId(1),
+                },
+                Inst::BranchFalse { cond: 3, to: 3 },
+                Inst::IntrinsicCall {
+                    dst: 0,
+                    site: crate::SiteId(0),
+                    args: crate::ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut decides = function(
+            vec![Repr::Ref, Repr::Bool],
+            crate::lower::shapes_bool(),
+            Vec::new(),
+        );
+        decides.params = vec![BOXED];
+        let mut guarded = program(vec![site, decides]);
+        guarded.intrinsic_sites = vec![crate::IntrinsicSite {
+            intrinsic: crate::Intrinsic::ValueAdmitKey,
+            result: UNIT,
+        }];
+        guarded.args = vec![vec![key, string(2), string(2)], vec![key]];
+        assert_eq!(faults(&guarded), Vec::<String>::new());
     }
 
     /// A closure call's destination is checked like every other call's.

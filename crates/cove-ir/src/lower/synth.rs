@@ -86,6 +86,16 @@
 //! the walk, of one table — `ordered_by`'s arrangement, and `Body::always_admitted`
 //! before this module had an arm for the operation.
 //!
+//! A box is decided the same way since [ADR
+//! 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+//! Phase 3: `std.dynamic.refusesKey`, a Cove walk over a view of the box,
+//! answers the bit — called by `super::core` for a key that is a box, and by
+//! [`Synth::admit`] where a walk reaches a boxed part — and the intrinsic under
+//! the branch still words the refusal. So a boxed layout is
+//! [`Admission::Decided`] like any other layout a walk can answer for, and
+//! `cove-cli`'s `tests/boxed.rs` holds every call of the function to an erased
+//! operand (Decision 5).
+//!
 //! # Three of the four walks allocate nothing, and the fourth allocates by
 //! nature
 //!
@@ -105,7 +115,11 @@
 //!   [`Operation::Admission`] emit only loads, comparisons, branches,
 //!   [`Inst::Trap`]s and calls to walks of their own kind, and no intrinsic
 //!   any of them reaches declares `MAY_ALLOCATE`. Nothing can collect inside
-//!   one. [`Operation::Tracked`] is equality's walk and adds only frame
+//!   one — except inside the one call each makes where it reaches a box, to
+//!   `std.dynamic.equals`, `std.dynamic.order` or `std.dynamic.refusesKey`,
+//!   which allocate a stack of views once a boxed value nests; and that is an
+//!   ordinary call, whose frame and whose caller's are traced like every
+//!   other. [`Operation::Tracked`] is equality's walk and adds only frame
 //!   addresses and loads through them — the path of vector pairs it carries
 //!   lives in the frames of the walks that are inside those pairs — so it
 //!   allocates nothing either.
@@ -387,24 +401,32 @@ pub(crate) enum Admission {
     Decided,
     /// The runtime's own walk is what answers.
     ///
-    /// Three things reach it, and ADR 0064's Decision 4 names only the first:
-    /// a [`Shape::Boxed`], whose family is a [`LayoutId`] in its own payload
-    /// word 0 and is genuinely unknown until the box is opened; a layout that
-    /// holds itself, whose values nest as deep as they like where a walk
-    /// composed here is finite; and a layout nested past [`NESTING`], which
-    /// is the same question asked about code size.
+    /// Two things reach it: a layout that holds itself, whose values nest as
+    /// deep as they like where a walk composed here is finite; and a layout
+    /// nested past [`NESTING`], which is the same question asked about code
+    /// size.
+    ///
+    /// A third reached it until [ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 3, and it was the one ADR 0064's Decision 4 named: a
+    /// [`Shape::Boxed`], whose family is a [`LayoutId`] in its own payload word
+    /// 0 and is genuinely unknown until the box is opened. It is
+    /// [`Admission::Decided`] now — `std.dynamic.refusesKey` decides it, in
+    /// Cove over a view of the box — so a composite holding one is decided by
+    /// a walk that calls that function at the box.
     Dynamic,
 }
 
 /// How deep a key's layout may nest before the admission stops composing and
 /// asks.
 ///
-/// `Body::always_admitted`'s `ADMITTED_DEPTH`, moved here with it. Well
-/// inside the runtime's bound on how deep a key is walked (128 steps, of
-/// which a level of nesting takes at most two), so a layout this shallow has
-/// no value the runtime's walk would stop for its depth — which is what makes
-/// the bound *not* move under this migration, where it moved under the two
-/// before it.
+/// `Body::always_admitted`'s `ADMITTED_DEPTH`, moved here with it. It was
+/// chosen well inside the runtime's bound on how deep a key is walked (128
+/// steps, of which a level of nesting takes at most two), so that a layout
+/// this shallow had no value the runtime's walk would stop for its depth. That
+/// bound is gone since ADR 0068's Phase 3 — the runtime's walk is a loop over
+/// a stack, and words a refusal at any depth — so this is a bound on code size
+/// and nothing else.
 const NESTING: usize = 48;
 
 /// Which of the three [`layout`] is.
@@ -456,7 +478,10 @@ pub(crate) fn admission(layouts: &[Layout], layout: LayoutId) -> Admission {
                     .collect();
                 parts(layouts, &held, path)
             }
-            Shape::Boxed => Admission::Dynamic,
+            // A box is decided by `std.dynamic.refusesKey` over a view of it,
+            // so it is a part a walk can answer for like any other: some of
+            // its values are refused, and a call tells which.
+            Shape::Boxed => Admission::Decided,
             // A `Float`, a `Vector` and the growable run beneath it, a byte
             // run and a byte buffer, a closure, a `Shared` cell, a host
             // handle, a task and a task scope. Every one of them is refused,
@@ -748,8 +773,9 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
 
 /// Whether a walk of `op` over `layout` reaches a [`Shape::Boxed`] part — and
 /// so whether it calls `std.dynamic.equals` from [`Synth::fallback`], for
-/// [`Operation::Equality`], or `std.dynamic.order` from [`Synth::dynamic`],
-/// for [`Operation::Order`].
+/// [`Operation::Equality`], `std.dynamic.order` from [`Synth::dynamic`], for
+/// [`Operation::Order`], or `std.dynamic.refusesKey` from [`Synth::admit`], for
+/// [`Operation::Admission`].
 ///
 /// Asked by the call site before it asks [`function_for`], because the walk
 /// cannot resolve a name and the call site can: a layout this answers `true`
@@ -761,7 +787,8 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
 /// itself terminates. The two operations do not descend into the same
 /// families, and that is [`walks`]' disagreement again: an order never goes
 /// inside a `Vector`, which is not a key, so a box inside one is not a box an
-/// order reaches.
+/// order reaches; and an admission never goes inside a `Set`, or a map's keys,
+/// which are keys by construction.
 pub(super) fn reaches_a_box(shapes: &shapes::Shapes, op: Operation, layout: LayoutId) -> bool {
     let mut seen = std::collections::HashSet::new();
     let mut pending = vec![layout];
@@ -786,6 +813,10 @@ pub(super) fn reaches_a_box(shapes: &shapes::Shapes, op: Operation, layout: Layo
             Shape::Elements { elem, .. } | Shape::Vector { elem } | Shape::Members { elem } => {
                 pending.push(*elem)
             }
+            // An admission asks about a map's values and never its keys, which
+            // are keys by construction, so a box among the keys is not a box
+            // it reaches.
+            Shape::Entries { value, .. } if op == Operation::Admission => pending.push(*value),
             Shape::Entries { key, value } => pending.extend([*key, *value]),
             _ => {}
         }
@@ -2021,8 +2052,10 @@ impl Synth<'_> {
             Admission::Always => return,
             // Unreachable from a walk, because [`admission`] is the greatest
             // of a composite's parts and a call site only makes a function
-            // for a layout that is not this. Written out because "should
-            // never" is not "cannot", and asking is always correct.
+            // for a layout that is not this — a box is not this either since
+            // ADR 0068's Phase 3, and [`Synth::boxed`] decides it. Written out
+            // because "should never" is not "cannot", and asking is always
+            // correct.
             Admission::Dynamic => {
                 self.refuse();
                 return;
@@ -2056,6 +2089,10 @@ impl Synth<'_> {
             // A map is its *values*: the keys are keys by construction, since
             // the map could not have been built otherwise.
             Shape::Entries { key, value } => self.values(key, value, at, path),
+            // A box: no layout says what it holds, so `std.dynamic.refusesKey`
+            // decides it over a view, and the walk leaves where it answers
+            // that the key is refused.
+            Shape::Boxed => self.boxed(layout, at),
             // A `Float`, a `Vector` and the growable run beneath it, a byte
             // run and a byte buffer, a closure, a `Shared` cell, a host
             // handle, a task and a task scope: none of them is a key,
@@ -2096,9 +2133,13 @@ impl Synth<'_> {
             }
             // An arm that has already left needs no jump to the join, and the
             // one it would get would be unreachable: [`Synth::refuse`] leaves
-            // with the answer written, and this is how that is noticed
-            // without reading the instruction back.
-            if self.leaves.last() != Some(&(self.here() - 1)) {
+            // with the answer written, and this is how that is noticed. The
+            // leave has to be the unconditional one: [`Synth::boxed`] leaves
+            // under a branch, and an arm that ends there still falls through.
+            let last = self.here() - 1;
+            let left = self.leaves.last() == Some(&last)
+                && matches!(self.code[last as usize], Inst::Jump { .. });
+            if !left {
                 ends.push(self.emit(Inst::Jump { to: PENDING }));
             }
         }
@@ -2113,6 +2154,43 @@ impl Synth<'_> {
         for end in ends {
             self.patch(end, join);
         }
+    }
+
+    /// A boxed part, at `at`: one call of `std.dynamic.refusesKey` over it,
+    /// and the walk leaves where the answer is `true`.
+    ///
+    /// ADR 0064's Decision 4 for the admission, which since [ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 3 is a Cove walk over a view of the box rather than the whole key
+    /// handed to the runtime. The answer is written straight into the walk's
+    /// own, so where it is `true` the walk leaves with it — under a branch on
+    /// its negation, since the instruction set has only a `branch-false` —
+    /// and where it is `false` the walk goes on to the next part as it would
+    /// after any part that is a key. The callee was resolved onto the
+    /// [`Pool`] by the call site that asked for this walk, which asked
+    /// [`reaches_a_box`] of [`Operation::Admission`] first, and `cove-cli`'s
+    /// `tests/boxed.rs` holds every call of it to an erased operand.
+    fn boxed(&mut self, layout: LayoutId, at: Slot) {
+        let callee = self.pool.dynamic_refuses_key.expect(
+            "an admission walk that reaches a box is asked for only after its call site \
+             resolved `std.dynamic.refusesKey`",
+        );
+        let args = self.pool.args.intern(vec![Arg { slot: at, layout }]);
+        self.emit(Inst::Call {
+            dst: self.answer,
+            callee,
+            args,
+        });
+        let admitted = self.alloc(shapes::BOOL);
+        self.emit(Inst::Not {
+            dst: admitted,
+            a: self.answer,
+        });
+        let at = self.emit(Inst::BranchFalse {
+            cond: admitted,
+            to: PENDING,
+        });
+        self.leaves.push(at);
     }
 
     /// Every element of a run, at the layout its elements have.
