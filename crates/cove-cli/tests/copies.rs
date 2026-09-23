@@ -1478,7 +1478,14 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// Answering from one `Ok` after negating in place was tried as well and moved
 /// nothing, because the copy that is left is the payload's and not the
 /// negation's.
-const FORWARDABLE_COPIES: usize = 9592;
+///
+/// **9,716 since `benches`' `split_rows` landed ahead of `String.split` and
+/// `String.replace` moving**, and all 124 of it is the one program existing: a
+/// `[run.<name>]` table is a program to this survey, and each lowers the whole
+/// of `benches/stringlib` with the standard library under it, whatever entry
+/// it names. Both operations were still Rust arms, so there was no lowering to
+/// attribute any of it to.
+const FORWARDABLE_COPIES: usize = 9716;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
