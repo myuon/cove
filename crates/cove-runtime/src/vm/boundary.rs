@@ -1827,7 +1827,7 @@ mod tests {
             let words = from_value(&mut machine, range, &value).unwrap();
             let back = to_value(&machine, range, &words).unwrap();
             assert_eq!(back.to_string(), shown);
-            assert!(back.eq_value(&value), "{back} is not {value}");
+            assert!(back.eq_value(&value) == Ok(true), "{back} is not {value}");
         }
 
         // The written form survives, so the two are still two values.
@@ -1835,7 +1835,7 @@ mod tests {
         let inclusive = from_value(&mut machine, range, &Value::range_of(1, 3, true)).unwrap();
         let exclusive = to_value(&machine, range, &exclusive).unwrap();
         let inclusive = to_value(&machine, range, &inclusive).unwrap();
-        assert!(!exclusive.eq_value(&inclusive));
+        assert!(exclusive.eq_value(&inclusive) == Ok(false));
     }
 
     /// A world holding one lambda, a closure layout over it, and the one-word

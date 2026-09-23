@@ -551,3 +551,31 @@ allow = ["console"]
 [run.values_boxed_generic]
 entry = "values_boxed_generic.main"
 allow = ["console", "clock"]
+
+[run.fail_equals_cycle_struct]
+entry = "fail_equals_cycle_struct.main"
+allow = ["console"]
+
+[run.fail_equals_cycle_enum]
+entry = "fail_equals_cycle_enum.main"
+allow = ["console"]
+
+[run.fail_equals_cycle_map]
+entry = "fail_equals_cycle_map.main"
+allow = ["console"]
+
+[run.fail_equals_cycle_boxed]
+entry = "fail_equals_cycle_boxed.main"
+allow = ["console"]
+
+[run.fail_equals_cycle_mutual]
+entry = "fail_equals_cycle_mutual.main"
+allow = ["console"]
+
+[run.fail_equals_cycle_contains]
+entry = "fail_equals_cycle_contains.main"
+allow = ["console"]
+
+[run.values_equals_shared]
+entry = "values_equals_shared.main"
+allow = ["console"]

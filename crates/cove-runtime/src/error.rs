@@ -118,6 +118,12 @@ impl RuntimeError {
         self
     }
 
+    /// Whether [`RuntimeError::with_chain`] has attached a chain — after which
+    /// the blame is settled, and nothing further out moves it.
+    pub fn is_chained(&self) -> bool {
+        self.chain.is_some()
+    }
+
     /// The call-site spans of the calls that were live when this was raised,
     /// innermost first, bounded to [`MAX_CALL_CHAIN`] entries by
     /// [`RuntimeError::with_chain`].

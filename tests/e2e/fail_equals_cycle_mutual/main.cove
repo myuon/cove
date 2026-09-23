@@ -1,0 +1,28 @@
+use console.println
+
+struct Peer {
+  name: String
+  others: Vector<Peer>
+}
+
+/// Two peers each holding the other: neither contains itself directly, and the
+/// value still has no end — `a` holds `b`, which holds `a`.
+fn pair() -> Peer {
+  var first: Vector<Peer> = Vector.of()
+  var second: Vector<Peer> = Vector.of()
+  let a = Peer(name: "a", others: first)
+  let b = Peer(name: "b", others: second)
+  first.push(b)
+  second.push(a)
+  a
+}
+
+/// Two such pairs, built apart and alike: the walk goes from one pair of
+/// vectors to the next and back to the first, and `!=` is refused as `==` is.
+export fn main() -> Result<Unit, Error> {
+  let left = pair()
+  let right = pair()
+  println("about to compare two rings of two")?
+  println("never printed {left != right}")?
+  Ok(())
+}

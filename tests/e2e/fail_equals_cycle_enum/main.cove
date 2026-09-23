@@ -1,0 +1,23 @@
+use console.println
+
+/// An enum one of whose cases holds a vector of the enum: the cycle passes
+/// through a payload rather than a field.
+enum Tree {
+  Leaf(Int)
+  Many(Vector<Tree>)
+}
+
+/// Two distinct trees that each contain themselves, one level below a leaf
+/// that is equal in both: the walk compares the leaf, goes round, and meets the
+/// same two vectors again.
+export fn main() -> Result<Unit, Error> {
+  var first: Vector<Tree> = Vector.of(Tree.Leaf(1))
+  let left = Tree.Many(first)
+  first.push(left)
+  var second: Vector<Tree> = Vector.of(Tree.Leaf(1))
+  let right = Tree.Many(second)
+  second.push(right)
+  println("about to compare two trees that contain themselves")?
+  println("never printed {left == right}")?
+  Ok(())
+}

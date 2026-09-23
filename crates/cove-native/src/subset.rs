@@ -141,16 +141,25 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// over `String` keys compiles (#378, Q4.14). `Str` equality and the ordered
 /// comparisons `cmp_str!` answers copy both strings out and stay outside.
 ///
-/// Everything else — [`Compare::Float`], `Str` but for its order,
-/// [`Identity`](Compare::Identity) — is outside the slice. `Identity` would be
-/// one integer comparison and is left out because nothing the raced slice does
-/// asks it, which is the rule this predicate is widened by.
+/// [`Identity`](Compare::Identity) takes equality only — `encoded.rs`'s
+/// `EQ_REF` shares `cmp_word!(true)` with `EQ_BOOL` and `EQ_TAG`, and the
+/// verifier refuses an order over it — and it is one integer comparison of
+/// two words. It was left out for as long as nothing the raced slice did asked
+/// it, which is the rule this predicate is widened by, and it was widened when
+/// something did: the walk the lowering composes for a vector of a layout
+/// that can contain itself looks for its pair of vectors among the pairs it is
+/// inside with `Identity` (issue #493), and refusing it kept every vector of
+/// such a value on the encoded machine, two crossings a node.
+///
+/// Everything else — [`Compare::Float`], and `Str` but for its order — is
+/// outside the slice.
 fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     match on {
         Compare::Int => true,
         Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Order),
+        Compare::Identity => matches!(op, CmpOp::Eq | CmpOp::Ne),
         Compare::Str => op == CmpOp::Order,
-        Compare::Float | Compare::Identity => false,
+        Compare::Float => false,
     }
 }
 
@@ -1368,7 +1377,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
-        // [ADR 0068]'s seven structural observations are refused by name, as
+        // [ADR 0068]'s seven structural observations, and issue #493's identity
+        // question beside them, are refused by name, as
         // `Reason::Reflection`: Phase 1 lowers them for the encoded machine
         // alone, so a function holding one runs there, as a function holding
         // `Inst::Box` or `Inst::Unbox` does today. Listed rather than left to
@@ -1386,7 +1396,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         | Inst::DynRead { .. }
         | Inst::DynCase { .. }
         | Inst::DynCount { .. }
-        | Inst::DynChild { .. } => return Some(Reason::Reflection),
+        | Inst::DynChild { .. }
+        | Inst::DynSameObject { .. } => return Some(Reason::Reflection),
         // [ADR 0065]'s run search, the same helper with [`RunOp::FindBytes`].
         // Bounded as the slice is — four one-word operands the frame has —
         // and over packed bytes alone, which `cove_ir::verify` is what holds:
@@ -1620,7 +1631,22 @@ mod tests {
         );
     }
 
-    /// ADR 0068's seven observations are refused as one family, each by name.
+    /// `Identity` is in the slice for equality and for nothing else, which is
+    /// the division `encoded.rs` makes at `EQ_REF` and `NE_REF` — the walk
+    /// the lowering composes for a vector that can contain itself asks it
+    /// (issue #493) — and a three-way order over it is not one a key has.
+    #[test]
+    fn identity_is_compared_for_equality_alone() {
+        use cove_ir::{CmpOp, Compare};
+        assert!(super::comparison_supported(Compare::Identity, CmpOp::Eq));
+        assert!(super::comparison_supported(Compare::Identity, CmpOp::Ne));
+        for op in [CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge, CmpOp::Order] {
+            assert!(!super::comparison_supported(Compare::Identity, op), "{op:?}");
+        }
+    }
+
+    /// ADR 0068's seven observations and the identity question are refused as
+    /// one family, each by name.
     #[test]
     fn every_reflection_observation_is_refused_as_reflection() {
         // A box at 0 and two views at 1..=3 and 4..=6, then an `Int`: every
@@ -1648,6 +1674,7 @@ mod tests {
                 view: 1,
                 index: 7,
             },
+            Inst::DynSameObject { dst: 7, a: 1, b: 4 },
             Inst::Return { src: 0 },
         ];
         let function = function(reprs, LayoutId(2), code);
@@ -1667,7 +1694,7 @@ mod tests {
             .collect();
         assert_eq!(
             reasons,
-            (0..7)
+            (0..8)
                 .map(|pc| (Reason::Reflection, Some(pc)))
                 .collect::<Vec<_>>()
         );

@@ -106,7 +106,10 @@
 //!   [`Operation::Admission`] emit only loads, comparisons, branches,
 //!   [`Inst::Trap`]s and calls to walks of their own kind, and no intrinsic
 //!   any of them reaches declares `MAY_ALLOCATE`. Nothing can collect inside
-//!   one.
+//!   one. [`Operation::Tracked`] is equality's walk and adds only frame
+//!   addresses and loads through them — the path of vector pairs it carries
+//!   lives in the frames of the walks that are inside those pairs — so it
+//!   allocates nothing either.
 //! - [`Operation::Rendering`] can collect at every append. It still owes no
 //!   [`Inst::Clear`], and the reason is what a clear is *for*: a clear ends
 //!   the **retention** a static [`crate::repr::RefMap`] would otherwise give
@@ -169,6 +172,23 @@
 //!
 //! `tests/e2e/values_value_refuse_duplicate` is the corpus that held the
 //! migration to the bytes the two Rust copies had written, blame included.
+//!
+//! # A value that contains itself
+//!
+//! A struct pushed into a vector it holds has no end, and a walk of its layout
+//! recursed until the machine's stack segment stopped it — or, on the native
+//! tier through a map, the host's. Since issue #493 `==` refuses such a value,
+//! and it does so with the path the comparison is walking and nothing more:
+//! the pairs of vectors, one from each side, it is inside. [`tracked`] decides
+//! which layouts can hold themselves at all — only through a `Vector`, since
+//! everything else a walk descends into is immutable once built — and only
+//! those get [`Operation::Tracked`]'s walks, which carry the path as two
+//! parameters and look a vector pair up on it before going inside. Every other
+//! layout's walk is what it was, instruction for instruction. The refusal is
+//! [`crate::dynamic::CONTAINS_ITSELF`], the sentence `std.dynamic.equals` and
+//! the oracle raise, and it is blamed on the `==` that reached the walk: the
+//! machine does not count a walk's frames as callers (see
+//! [`Function::is_support`]).
 
 use std::sync::Arc;
 
@@ -188,9 +208,10 @@ use super::{Pool, PENDING};
 ///
 /// Not a module any source can name — `<` is not a name character — so a
 /// declaration cannot collide with one and `cove run` cannot reach one. It is
-/// here for a listing, a profile row and a debugger's frame name, which are
-/// the three readers a synthesized function has.
-pub(super) const MODULE: &str = "<synth>";
+/// here for a listing, a profile row and a debugger's frame name, and for
+/// [`Function::is_support`], which is what blames a refusal raised inside a
+/// walk on the `==` that reached it.
+pub(super) const MODULE: &str = crate::program::SYNTHESIZED_MODULE;
 
 /// One layout-directed operation ADR 0064's Decision 3 names.
 ///
@@ -203,6 +224,11 @@ pub(super) const MODULE: &str = "<synth>";
 /// The key of the memo is still the *pair* rather than the layout, so that
 /// adding an operation is a variant here and an arm in [`Synth::body`] rather
 /// than a second memo.
+///
+/// [`Operation::Tracked`] is a variant for that reason and not a sixth
+/// operation: it is `==` again, at the layouts where a value can contain
+/// itself, and a second key is what lets `equals<L>` and `tracks<L>` be two
+/// functions of one layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Operation {
     /// `a == b`: whether two values of one layout are the same value.
@@ -272,6 +298,19 @@ pub(crate) enum Operation {
     ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     Rendering,
+    /// `a == b` at a layout that can reach itself through a `Vector`, carrying
+    /// the pairs of vectors the comparison is inside so that a value holding
+    /// itself is refused rather than walked for ever (issue #493).
+    ///
+    /// [`Operation::Equality`]'s walk, part for part and in the same order,
+    /// with two more parameters: the address of the innermost vector pair on
+    /// the path and how many pairs the path holds. Only a layout [`tracked`]
+    /// answers `true` for has one, and only a function of this operation
+    /// calls one — `equals<L>` for such a layout is a wrapper that starts the
+    /// path empty. So a layout that cannot reach itself through a vector is
+    /// walked exactly as it was before this variant existed, instruction for
+    /// instruction. See [`Synth::tracking`].
+    Tracked,
 }
 
 impl Operation {
@@ -282,6 +321,7 @@ impl Operation {
             Operation::Order => "order",
             Operation::Admission => "refuses",
             Operation::Rendering => "renders",
+            Operation::Tracked => "tracks",
         }
     }
 
@@ -292,6 +332,7 @@ impl Operation {
             Operation::Order => shapes::INT,
             Operation::Admission => shapes::BOOL,
             Operation::Rendering => shapes::UNIT,
+            Operation::Tracked => shapes::BOOL,
         }
     }
 
@@ -307,6 +348,9 @@ impl Operation {
             Operation::Equality | Operation::Order => vec![layout, layout],
             Operation::Admission => vec![layout],
             Operation::Rendering => vec![layout, shapes::BYTE_BUFFER],
+            // The path's innermost pair, as the address of the frame words it
+            // is in, and how many pairs deep the path goes.
+            Operation::Tracked => vec![layout, layout, shapes::ADDR, shapes::INT],
         }
     }
 }
@@ -652,7 +696,7 @@ fn ranks_of(cases: &[Case]) -> Vec<i64> {
 /// refusal, in the same words.
 pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
     match op {
-        Operation::Equality => matches!(
+        Operation::Equality | Operation::Tracked => matches!(
             shape,
             Shape::Struct { .. }
                 | Shape::Enum { .. }
@@ -738,6 +782,96 @@ pub(super) fn reaches_a_box(shapes: &shapes::Shapes, layout: LayoutId) -> bool {
     false
 }
 
+/// Whether an equality walk of `layout` has to carry a path — whether a value
+/// of it can contain itself.
+///
+/// # Only a `Vector` can close a cycle
+///
+/// Every other family an equality walk descends into is immutable once built —
+/// a struct and an enum are values, and an `Array`, a `Set` and a `Map` are
+/// never written after they are made — so a value can only come to hold itself
+/// by being pushed into a vector it already holds. A function value, a
+/// `Shared` cell, a task and every other opaque family is a leaf of the walk
+/// (it is compared as a constant), so a cycle through one is not a cycle the
+/// walk follows.
+///
+/// So a layout needs a path exactly when it lies on a cycle of the walk that
+/// passes through a `Vector`: when it reaches some vector layout that reaches
+/// it back. That is decided here from the layout table, over the parts
+/// [`Synth::compare`] descends into — a struct's fields, every case's parts,
+/// the element of a run, a set and a vector, and a map's entry (or, before the
+/// entry's layout exists, its key and its value, which is what the entry
+/// reaches) — and it is **exact** rather than cautious in both directions:
+///
+/// - A layout that answers `false` cannot hold itself, so its walk ends on
+///   every value, and it is emitted exactly as it was before issue #493.
+/// - A layout that answers `true` is on a cycle with every other layout on it,
+///   so every function the cycle passes through carries the path, and the
+///   path is never dropped between two vectors of one cycle. A layout that
+///   merely *reaches* a cycle — `Array<Node>` over a recursive `Node` — is not
+///   on it, and starts the path empty where it calls in: no vector pair above
+///   it can be met again below it, because nothing below it reaches it.
+///
+/// **A box is a leaf here too**, and that is not caution either. A boxed part
+/// is compared by `std.dynamic.equals`, which follows the box's contents with a
+/// path of its own and never calls back into a walk composed here, so a cycle
+/// that passes through a box is a cycle that walk finds. A static walk that
+/// reaches a box has already handed everything below it over.
+pub(super) fn tracked(pool: &mut Pool, layout: LayoutId) -> bool {
+    if let Some(known) = pool.tracked.get(&layout) {
+        return *known;
+    }
+    let shapes = &pool.shapes;
+    let answer = walks(Operation::Equality, &shapes.layout(layout).shape)
+        && reached(shapes, &parts_of(shapes, layout))
+            .into_iter()
+            .chain([layout])
+            .any(|vector| {
+                matches!(shapes.layout(vector).shape, Shape::Vector { .. })
+                    && reached(shapes, &parts_of(shapes, vector)).contains(&layout)
+            });
+    pool.tracked.insert(layout, answer);
+    answer
+}
+
+/// The layouts an equality walk of `layout` calls a walk of, or compares in
+/// place: [`reaches_a_box`]'s parts, with a map's entry where it has one.
+///
+/// A map's walk compares its entries, so the entry layout is a node of the walk
+/// in its own right. It is looked up rather than made — making it here would
+/// intern a layout the program might not otherwise have had at this point, and
+/// renumber the layouts after it — and where it does not exist yet, its key and
+/// value stand in for it, which reach exactly what it would.
+fn parts_of(shapes: &shapes::Shapes, layout: LayoutId) -> Vec<LayoutId> {
+    match &shapes.layout(layout).shape {
+        Shape::Struct { fields, .. } => fields.iter().map(|field| field.layout).collect(),
+        Shape::Enum { cases, .. } => cases
+            .iter()
+            .flat_map(|case| case.parts.iter().map(|part| part.layout))
+            .collect(),
+        Shape::Elements { elem, .. } | Shape::Vector { elem } | Shape::Members { elem } => {
+            vec![*elem]
+        }
+        Shape::Entries { key, value } => match shapes.existing_entry(*key, *value) {
+            Some(entry) => vec![entry],
+            None => vec![*key, *value],
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Every layout reachable from `from` through [`parts_of`], `from` included.
+fn reached(shapes: &shapes::Shapes, from: &[LayoutId]) -> std::collections::HashSet<LayoutId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = from.to_vec();
+    while let Some(at) = pending.pop() {
+        if seen.insert(at) {
+            pending.extend(parts_of(shapes, at));
+        }
+    }
+    seen
+}
+
 /// The function `op` lowers to at `layout`, synthesizing it if nothing has
 /// asked for it before.
 ///
@@ -801,8 +935,13 @@ pub(super) fn function_for(
         settled: None,
         literal: None,
         punctuation: None,
+        path: None,
     };
-    synth.body(layout, &taken);
+    if op == Operation::Equality && tracked(synth.pool, layout) {
+        synth.start_path(layout, &taken);
+    } else {
+        synth.body(layout, &taken);
+    }
     let end = synth.here();
     for at in std::mem::take(&mut synth.leaves) {
         synth.patch(at, end);
@@ -913,6 +1052,25 @@ struct Synth<'p> {
     /// reason — so one slot serves the whole function, and a walk of ten
     /// fields costs one word rather than nine.
     settled: Option<Slot>,
+    /// What a tracked walk hands the tracked walks it calls: see [`Path`].
+    ///
+    /// `None` in every walk but an [`Operation::Tracked`] one, which is what
+    /// keeps every other walk what it was — [`Synth::compare`] reads this
+    /// before it asks [`tracked`], and a walk with no path calls
+    /// `equals<L>` where one with a path calls `tracks<L>`.
+    path: Option<Path>,
+}
+
+/// The two words a tracked walk forwards to the tracked walks it calls.
+#[derive(Clone, Copy, Debug)]
+struct Path {
+    /// The address of the innermost vector pair on the path: word 0 of a
+    /// `tracks<Vector<…>>` frame, whose first three words are the pair's left
+    /// vector, its right vector and the address of the pair before it.
+    at: Slot,
+    /// How many pairs the path holds. Nought at the root, where `at` is an
+    /// address nothing reads.
+    depth: Slot,
 }
 
 impl Synth<'_> {
@@ -985,6 +1143,7 @@ impl Synth<'_> {
             Operation::Order => self.ordering(layout, taken[0], taken[1]),
             Operation::Admission => self.admission(layout, taken[0]),
             Operation::Rendering => self.rendering(layout, taken[0], taken[1]),
+            Operation::Tracked => self.tracking(layout, taken),
         }
     }
 
@@ -1245,6 +1404,30 @@ impl Synth<'_> {
     fn compare(&mut self, layout: LayoutId, a: Slot, b: Slot) {
         let shape = self.pool.shapes.layout(layout).shape.clone();
         if walks(self.op, &shape) {
+            if let Some(path) = self.path {
+                if tracked(self.pool, layout) {
+                    let callee =
+                        function_for(Operation::Tracked, layout, self.pool, self.decls, self.span);
+                    let args = self.pool.args.intern(vec![
+                        Arg { slot: a, layout },
+                        Arg { slot: b, layout },
+                        Arg {
+                            slot: path.at,
+                            layout: shapes::ADDR,
+                        },
+                        Arg {
+                            slot: path.depth,
+                            layout: shapes::INT,
+                        },
+                    ]);
+                    self.emit(Inst::Call {
+                        dst: self.answer,
+                        callee,
+                        args,
+                    });
+                    return;
+                }
+            }
             let callee = function_for(
                 Operation::Equality,
                 layout,
@@ -2030,6 +2213,275 @@ impl Synth<'_> {
     fn refuse(&mut self) {
         self.constant(true);
         self.leave();
+    }
+
+    // ---- a value that contains itself ------------------------------------
+
+    /// `equals<L>` for a layout [`tracked`] answers `true` for: the path
+    /// started empty, and the tracked walk called with it.
+    ///
+    /// A wrapper rather than the walk itself, so that every caller outside the
+    /// cycle — the `==` at a call site, a walk that merely reaches the cycle —
+    /// calls the `equals<L>` it always did with the two operands it always
+    /// passed. The address is the wrapper's own first word, which a path of
+    /// depth nought never reads: it is there because the parameter is an
+    /// address and a word has to be one.
+    ///
+    /// The wrapper is a call, so `super::inline` never expands it, and the
+    /// address it forms stays in its own frame.
+    fn start_path(&mut self, layout: LayoutId, taken: &[Slot]) {
+        let at = self.alloc(shapes::ADDR);
+        self.emit(Inst::AddrOfSlot { dst: at, slot: 0 });
+        let depth = self.alloc(shapes::INT);
+        self.emit(Inst::Int {
+            dst: depth,
+            value: 0,
+        });
+        let callee = function_for(Operation::Tracked, layout, self.pool, self.decls, self.span);
+        let args = self.pool.args.intern(vec![
+            Arg {
+                slot: taken[0],
+                layout,
+            },
+            Arg {
+                slot: taken[1],
+                layout,
+            },
+            Arg {
+                slot: at,
+                layout: shapes::ADDR,
+            },
+            Arg {
+                slot: depth,
+                layout: shapes::INT,
+            },
+        ]);
+        self.emit(Inst::Call {
+            dst: self.answer,
+            callee,
+            args,
+        });
+    }
+
+    /// `tracks<L>`: [`Synth::equality`] with the path.
+    ///
+    /// A layout that is not a vector forwards the path it was given to the
+    /// tracked walks of its parts and adds nothing to it. A vector **is** a
+    /// pair on the path — the only kind there is — and its walk does two
+    /// things first:
+    ///
+    /// - **It looks for its own pair on the path**, and a pair already there
+    ///   is the refusal: `a` and `b` are the two vectors a walk further up is
+    ///   still inside. The pair is compared by `Compare::Identity`, which is
+    ///   what `is` lowers to, on both sides together — `a == a` has every left
+    ///   equal to its right all the way down, and it is only a cycle when the
+    ///   same two come round again. The look is a loop over `depth` frames and
+    ///   nothing else: three loads a pair, no allocation.
+    /// - **It becomes the path's innermost pair** for everything below it. Its
+    ///   own first three words already are the pair — the two vectors, which
+    ///   are one word each, and the address of the pair before — so the path
+    ///   it hands on is the address of its word 0 and a depth one more. The
+    ///   frame is live for exactly as long as anything below it is being
+    ///   compared, and a frame does not move, so the address is good for as
+    ///   long as anything can read it; and the words are its parameters, which
+    ///   nothing in the walk writes.
+    ///
+    /// The lengths are compared before the pair is looked for, and a pair of
+    /// empty vectors is answered there and never looked for: nothing is under
+    /// it, so it cannot lead back, and a pair on the path is never empty.
+    /// Either order would answer the same — a pair on the path is one whose
+    /// lengths were found equal on the way down, and nothing has changed them
+    /// since — and this one keeps the look off every leaf.
+    fn tracking(&mut self, layout: LayoutId, taken: &[Slot]) {
+        let (a, b, at, depth) = (taken[0], taken[1], taken[2], taken[3]);
+        if !matches!(self.pool.shapes.layout(layout).shape, Shape::Vector { .. }) {
+            self.path = Some(Path { at, depth });
+            self.equality(layout, a, b);
+            return;
+        }
+        debug_assert_eq!(
+            (a, b, at),
+            (0, 1, 2),
+            "a vector's pair is the first three words of its frame"
+        );
+        let Shape::Vector { elem } = self.pool.shapes.layout(layout).shape else {
+            unreachable!("asked only of a vector");
+        };
+        // The lengths first, as `Synth::equality`'s vector arm has them — and
+        // then an empty pair is answered, because nothing is under it to lead
+        // back: a leaf of a tree is a vector with no elements, and most of a
+        // tree is leaves, so this is what keeps the look off most of the walk.
+        let length = self.alloc(shapes::INT);
+        self.emit(Inst::LoadField {
+            dst: length,
+            obj: a,
+            at: shapes::VECTOR_LEN,
+            layout: shapes::INT,
+        });
+        let counterpart = self.alloc(shapes::INT);
+        self.emit(Inst::LoadField {
+            dst: counterpart,
+            obj: b,
+            at: shapes::VECTOR_LEN,
+            layout: shapes::INT,
+        });
+        self.lengths(length, counterpart);
+        // The walk down the path: `pair` from the innermost, `seen` of `depth`.
+        let seen = self.alloc(shapes::INT);
+        self.emit(Inst::Int {
+            dst: seen,
+            value: 0,
+        });
+        let more = self.alloc(shapes::BOOL);
+        self.emit(Inst::Cmp {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: more,
+            a: seen,
+            b: length,
+        });
+        let empty = self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        });
+        // The answer standing is the lengths', which is `true`.
+        self.leaves.push(empty);
+        let pair = self.alloc(shapes::ADDR);
+        self.emit(Inst::Copy {
+            dst: pair,
+            src: at,
+            layout: shapes::ADDR,
+        });
+        let head = self.here();
+        self.emit(Inst::Cmp {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: more,
+            a: seen,
+            b: depth,
+        });
+        let done = self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        });
+        let held = self.alloc(layout);
+        self.emit(Inst::Load {
+            dst: held,
+            addr: pair,
+            layout,
+        });
+        let same = self.alloc(shapes::BOOL);
+        self.emit(Inst::Cmp {
+            on: Compare::Identity,
+            op: CmpOp::Eq,
+            dst: same,
+            a: held,
+            b: a,
+        });
+        let left = self.emit(Inst::BranchFalse {
+            cond: same,
+            to: PENDING,
+        });
+        let word = self.alloc(shapes::ADDR);
+        self.emit(Inst::AddrOfPart {
+            dst: word,
+            addr: pair,
+            at: 1,
+        });
+        self.emit(Inst::Load {
+            dst: held,
+            addr: word,
+            layout,
+        });
+        self.emit(Inst::Cmp {
+            on: Compare::Identity,
+            op: CmpOp::Eq,
+            dst: same,
+            a: held,
+            b,
+        });
+        let right = self.emit(Inst::BranchFalse {
+            cond: same,
+            to: PENDING,
+        });
+        self.contains_itself();
+        let next = self.here();
+        self.patch(left, next);
+        self.patch(right, next);
+        self.emit(Inst::AddrOfPart {
+            dst: word,
+            addr: pair,
+            at: 2,
+        });
+        self.emit(Inst::Load {
+            dst: pair,
+            addr: word,
+            layout: shapes::ADDR,
+        });
+        self.emit(Inst::ArithImm {
+            op: ArithOp::Add,
+            dst: seen,
+            a: seen,
+            value: 1,
+        });
+        self.emit(Inst::Jump { to: head });
+        let end = self.here();
+        self.patch(done, end);
+        // Not on the path: this pair is the path's innermost from here down.
+        let inner = self.alloc(shapes::ADDR);
+        self.emit(Inst::AddrOfSlot {
+            dst: inner,
+            slot: a,
+        });
+        let deeper = self.alloc(shapes::INT);
+        self.emit(Inst::ArithImm {
+            op: ArithOp::Add,
+            dst: deeper,
+            a: depth,
+            value: 1,
+        });
+        self.path = Some(Path {
+            at: inner,
+            depth: deeper,
+        });
+        // The rest of `Synth::equality`'s vector arm: the two stores, and the
+        // elements in them.
+        let store = self.pool.shapes.store_of(elem);
+        let held = self.alloc(store);
+        self.emit(Inst::LoadField {
+            dst: held,
+            obj: a,
+            at: shapes::VECTOR_STORE,
+            layout: store,
+        });
+        let counterheld = self.alloc(store);
+        self.emit(Inst::LoadField {
+            dst: counterheld,
+            obj: b,
+            at: shapes::VECTOR_STORE,
+            layout: store,
+        });
+        self.walk(elem, held, counterheld, length);
+    }
+
+    /// The refusal of a value that contains itself, in
+    /// [`crate::dynamic::CONTAINS_ITSELF`]'s three sentences — the ones
+    /// `std.dynamic.equals` and the oracle raise.
+    fn contains_itself(&mut self) {
+        let message = self.alloc(shapes::STR);
+        let text = self.pool.string(crate::dynamic::CONTAINS_ITSELF);
+        self.emit(Inst::Str { dst: message, text });
+        let rule = self.alloc(shapes::STR);
+        let text = self.pool.string(crate::dynamic::CONTAINS_ITSELF_RULE);
+        self.emit(Inst::Str { dst: rule, text });
+        let help = self.alloc(shapes::STR);
+        let text = self.pool.string(crate::dynamic::CONTAINS_ITSELF_HELP);
+        self.emit(Inst::Str { dst: help, text });
+        self.emit(Inst::Trap {
+            message,
+            rule,
+            help,
+        });
     }
 
     /// ADR 0064's Decision 4: the one dynamic-layout boundary, which since

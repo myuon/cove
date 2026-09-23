@@ -44,13 +44,41 @@
 ///
 /// It answers `false` at the first difference and reads nothing after it.
 ///
+/// # A value that contains itself is refused
+///
+/// A `Vector` is the one value these walks follow that a program can change
+/// after building it, so it is the one that can hold itself: push a struct into
+/// a vector inside that struct, and the value has no end. Comparing it is
+/// **refused**, on the line of the `==` — not answered `false`, which would be a
+/// claim about two values nobody finished comparing, and not left to run until
+/// fuel or a deadline stops it, which would make a limit part of what `==` means
+/// (issue #493).
+///
+/// What is refused is a cycle **on the path being walked**, and nothing else.
+/// The walk keeps the pairs of vectors it is inside — one from each side,
+/// descended into and not yet finished — and a pair it meets again while still
+/// inside it is the refusal. A pair is left when everything under it has been
+/// compared, so a vector reached twice by two routes, which is a part two
+/// fields share and not a cycle, is compared twice like any other part. Whether
+/// two views are one vector is `core.dynamicSameObject`, the one identity
+/// question reflection answers; it is asked here and nowhere a program can see.
+///
+/// The refusal comes at the first pair met again in the order the walk visits,
+/// so a difference visited before it is still `false`. That order is the one
+/// the oracle's `==` and the walks composed for a known layout visit in, and
+/// the three refuse in the same words: `Value::eq_value` and `lower::synth`
+/// raise `cove_ir::dynamic::CONTAINS_ITSELF` and the two sentences beside it,
+/// and [`containsItself`] and the two beside it here are those sentences.
+///
 /// # There is no nesting bound
 ///
 /// The walk is a loop over two explicit stacks of views, one per side, and
 /// never a recursion: a value nested ten thousand deep is compared exactly as
 /// one nested ten deep is, on either evaluator, and neither's call depth is a
 /// limit the language has (issue #480's decision). What bounds it is the work
-/// it does, which is charged an instruction at a time like any other loop.
+/// it does, which is charged an instruction at a time like any other loop. The
+/// path of vectors above is not a bound either: a finite value, however deep,
+/// never meets a pair it is inside.
 ///
 /// Children are pushed last first so that they are popped first first: the
 /// visit is depth first and left to right, which is the order `a == b` has
@@ -64,8 +92,12 @@
 /// opens, a type test and one comparison. The children of the two are then
 /// compared in order where they are, and the two stacks are made only at the
 /// first child that has children of its own — so a struct of scalars, an
-/// `Array<Int>` or a `Some(3)` is compared without allocating, and a value that
-/// really nests pays for its stacks once, however deep it goes.
+/// `Array<Int>`, a `Vector<Int>` or a `Some(3)` is compared without allocating,
+/// and a value that really nests pays for its stacks once, however deep it goes.
+///
+/// The path is made later still: only once a vector with children is descended
+/// into, by [`tracked`]. A value that nests without a vector — structs, enums,
+/// arrays, maps — never pays for it.
 fn equals(a: Any, b: Any) -> Bool {
   let left = core.dynamicOpen(a)
   let right = core.dynamicOpen(b)
@@ -96,6 +128,11 @@ fn equals(a: Any, b: Any) -> Bool {
 /// what is left to visit is `from`'s children and then its later siblings,
 /// `count` in all. They are pushed siblings first and each run last first, so
 /// that `from`'s first child is on top.
+///
+/// This loop keeps no path, and it does not need one until it descends into a
+/// vector: the first vector with children it meets — the root, `from`, or any
+/// pair it pops — hands the walk to [`tracked`], which carries it on from
+/// there with the path made.
 fn deeper(
   left: DynamicView,
   right: DynamicView,
@@ -113,14 +150,31 @@ fn deeper(
   }
   let x = core.dynamicChild(left, from)
   let y = core.dynamicChild(right, from)
+  // The two stacks are always the same height, so one count serves both.
+  var depth = count - 1 - from
+  // Two `if`s rather than one `||`, for `std.string.sliceBytes`' reason.
+  if core.dynamicKind(left) == 9 {
+    let way: Vector<DynamicView> = core.vectorWithCapacity(8)
+    let ends: Vector<Int> = core.vectorWithCapacity(4)
+    // The root's children are everything the stacks will ever hold, so it is
+    // left only when the walk is over.
+    stack(way, left)
+    stack(way, right)
+    mark(ends, 0)
+    return tracked(lefts, rights, way, ends, depth, x, y, under)
+  }
+  if core.dynamicKind(x) == 9 {
+    let way: Vector<DynamicView> = core.vectorWithCapacity(8)
+    let ends: Vector<Int> = core.vectorWithCapacity(4)
+    return tracked(lefts, rights, way, ends, depth, x, y, under)
+  }
   var next = under - 1
   while next >= 0 {
     stack(lefts, core.dynamicChild(x, next))
     stack(rights, core.dynamicChild(y, next))
     next = next - 1
   }
-  // The two stacks are always the same height, so one count serves both.
-  var depth = count - 1 - from + under
+  depth = depth + under
   while depth > 0 {
     depth = depth - 1
     let x = core.vectorLoad(lefts, depth)
@@ -131,14 +185,163 @@ fn deeper(
     if next < -1 {
       return false
     }
-    while next >= 0 {
-      stack(lefts, core.dynamicChild(x, next))
-      stack(rights, core.dynamicChild(y, next))
-      depth = depth + 1
-      next = next - 1
+    if next >= 0 {
+      if core.dynamicKind(x) == 9 {
+        let way: Vector<DynamicView> = core.vectorWithCapacity(8)
+        let ends: Vector<Int> = core.vectorWithCapacity(4)
+        return tracked(lefts, rights, way, ends, depth, x, y, next + 1)
+      }
+      while next >= 0 {
+        stack(lefts, core.dynamicChild(x, next))
+        stack(rights, core.dynamicChild(y, next))
+        depth = depth + 1
+        next = next - 1
+      }
     }
   }
   true
+}
+
+/// The rest of [`deeper`]'s walk once it has a vector to be inside: `x` and
+/// `y` — alike, with `under` children each — expanded above the `depth` pairs
+/// on `lefts` and `rights`, and then those, with the path of vector pairs kept
+/// in `way` and `ends`.
+///
+/// `way` holds the pairs of vectors the walk is inside, outermost first, as a
+/// left view and then a right one; `ends` holds, for each, how high the stacks
+/// were when its children went on — so its children are the pairs at and above
+/// that height, and it is finished once the walk pops a pair below it. The
+/// visit is depth first, so the pairs that are finished are always the
+/// innermost, and leaving them is truncating both.
+///
+/// A vector pair with children is looked for on the path before it is added
+/// to it, and finding it is the refusal. A vector pair without children is
+/// never looked for: nothing can be under it, so it cannot close a cycle, and
+/// a vector on the path is never empty.
+fn tracked(
+  lefts: Vector<DynamicView>,
+  rights: Vector<DynamicView>,
+  way: Vector<DynamicView>,
+  ends: Vector<Int>,
+  depth: Int,
+  x: DynamicView,
+  y: DynamicView,
+  under: Int,
+) -> Bool {
+  var depth = depth
+  // The innermost pair's end, kept beside `ends` so that the question every
+  // pair popped asks — is the innermost pair finished — is one comparison. A
+  // path that holds only the root, or nothing, never finishes: `-1`, or the
+  // root's `0`, is never above a height.
+  var edge = -1
+  let held = core.vectorLength(ends)
+  if held > 0 {
+    edge = core.vectorLoad(ends, held - 1)
+  }
+  if core.dynamicKind(x) == 9 {
+    if onPath(way, x, y) {
+      core.refuse(containsItself(), containsItselfRule(), containsItselfHelp())
+    }
+    stack(way, x)
+    stack(way, y)
+    mark(ends, depth)
+    edge = depth
+  }
+  var next = under - 1
+  while next >= 0 {
+    stack(lefts, core.dynamicChild(x, next))
+    stack(rights, core.dynamicChild(y, next))
+    depth = depth + 1
+    next = next - 1
+  }
+  while depth > 0 {
+    depth = depth - 1
+    let x = core.vectorLoad(lefts, depth)
+    let y = core.vectorLoad(rights, depth)
+    core.vectorTruncate(lefts, depth)
+    core.vectorTruncate(rights, depth)
+    // Every pair whose children all sat above this one is finished: the
+    // innermost first, and then as many outward as ended above it too. A pair
+    // is left once, so the loop turns once a pair over the whole walk.
+    if edge > depth {
+      var inside = core.vectorLength(ends) - 1
+      edge = -1
+      while inside > 0 {
+        let end = core.vectorLoad(ends, inside - 1)
+        if end <= depth {
+          edge = end
+          break
+        }
+        inside = inside - 1
+      }
+      core.vectorTruncate(ends, inside)
+      core.vectorTruncate(way, 2 * inside)
+    }
+    var next = children(x, y) - 1
+    if next < -1 {
+      return false
+    }
+    if next >= 0 {
+      if core.dynamicKind(x) == 9 {
+        if onPath(way, x, y) {
+          core.refuse(
+            containsItself(),
+            containsItselfRule(),
+            containsItselfHelp(),
+          )
+        }
+        stack(way, x)
+        stack(way, y)
+        mark(ends, depth)
+        edge = depth
+      }
+      while next >= 0 {
+        stack(lefts, core.dynamicChild(x, next))
+        stack(rights, core.dynamicChild(y, next))
+        depth = depth + 1
+        next = next - 1
+      }
+    }
+  }
+  true
+}
+
+/// Whether the pair of vectors `x` and `y` is on the path `way`: one entry at
+/// which the left is `x` and the right is `y`.
+///
+/// The pair and not either side alone. `a == a` compares a value with itself
+/// all the way down, so every left is its right, and it is only a cycle when
+/// the *same* two are met again; and two distinct values that each contain
+/// themselves are a cycle as soon as their two vectors come round together,
+/// whatever else either side holds.
+fn onPath(way: Vector<DynamicView>, x: DynamicView, y: DynamicView) -> Bool {
+  var at = core.vectorLength(way)
+  while at > 0 {
+    at = at - 2
+    if core.dynamicSameObject(core.vectorLoad(way, at), x) {
+      if core.dynamicSameObject(core.vectorLoad(way, at + 1), y) {
+        return true
+      }
+    }
+  }
+  false
+}
+
+/// What `==` says of a value that contains itself: `cove_ir::dynamic`'s
+/// `CONTAINS_ITSELF`, word for word, which the oracle and the walks composed
+/// for a known layout raise.
+fn containsItself() -> String {
+  "this value contains itself, so `==` cannot compare it"
+}
+
+/// The rule [`containsItself`] is refused under.
+fn containsItselfRule() -> String {
+  "Equality compares finite structure, and a value that reaches itself through a `Vector` has no end to compare."
+}
+
+/// What [`containsItself`] suggests instead.
+fn containsItselfHelp() -> String {
+  "compare the parts that do not lead back to the value, or use `is` to ask whether two vectors are the same one"
 }
 
 /// How many children `x` and `y` each have if they agree in everything but
@@ -215,4 +418,13 @@ fn stack(views: Vector<DynamicView>, view: DynamicView) {
   core.vectorEnsure(views, 1)
   core.vectorStore(views, at, view)
   core.vectorCommit(views, 1)
+}
+
+/// Pushes `end` onto `ends`: [`stack`] for the heights at which [`tracked`]'s
+/// pairs of vectors are finished.
+fn mark(ends: Vector<Int>, end: Int) {
+  let at = core.vectorLength(ends)
+  core.vectorEnsure(ends, 1)
+  core.vectorStore(ends, at, end)
+  core.vectorCommit(ends, 1)
 }

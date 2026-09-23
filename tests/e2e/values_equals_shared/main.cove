@@ -1,0 +1,124 @@
+use console.println
+
+/// What `==` still answers now that a value containing itself is refused
+/// (issue #493): the refusal is of a cycle on the path the comparison is
+/// walking, so everything that is not one compares as it always did.
+///
+/// - **A shared part is not a cycle.** The same vector reached twice, by two
+///   fields or two elements, is compared twice: the pair is left when its
+///   elements are done, so meeting it again by another route is not meeting
+///   it while still inside it.
+/// - **Depth is not a cycle.** A tree a thousand levels deep through vectors
+///   is compared to the bottom, and so is its twin (issue #480's decision).
+/// - **A difference before the cycle is `false`.** Two values that contain
+///   themselves but differ in a part the walk visits first are unequal; the
+///   walk stops there and never goes round.
+/// - **Identity is unaffected.** `is` is what asks whether two vectors are one,
+///   and two equal vectors that are not one are still `==`.
+///
+/// Every row is asked twice, on a layout the lowering composes a walk for and
+/// on the same values erased, where `std.dynamic.equals` answers.
+trait Named {
+  fn name(self) -> String
+}
+
+/// Two fields that may hold one vector.
+struct Twice {
+  first: Vector<Int>
+  second: Vector<Int>
+}
+
+impl Named for Twice {
+  fn name(self) -> String {
+    "twice"
+  }
+}
+
+/// A layout that reaches itself through a vector, so its walk carries a path.
+struct Node {
+  tag: Int
+  kids: Vector<Node>
+}
+
+impl Named for Node {
+  fn name(self) -> String {
+    "node {self.tag}"
+  }
+}
+
+/// A node whose two children are one node, whose children are one vector.
+fn diamond(bottom: Int) -> Node {
+  let shared: Vector<Node> = Vector.of(Node(tag: bottom, kids: Vector.of()))
+  let middle = Node(tag: 1, kids: shared)
+  Node(tag: 0, kids: Vector.of(middle, middle))
+}
+
+/// `depth` nodes, each the only child of the one above, with `bottom` as the
+/// deepest node's tag.
+fn spine(depth: Int, bottom: Int) -> Node {
+  var built = Node(tag: bottom, kids: Vector.of())
+  var at = 1
+  while at < depth {
+    built = Node(tag: at, kids: Vector.of(built))
+    at = at + 1
+  }
+  built
+}
+
+/// A node that contains itself, below a tag the walk compares first.
+fn looped(tag: Int) -> Node {
+  var kids: Vector<Node> = Vector.of()
+  let node = Node(tag: tag, kids: kids)
+  kids.push(node)
+  node
+}
+
+fn row(label: String, answer: Bool) -> Result<Unit, Error> {
+  println("{label} {answer}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  let numbers: Vector<Int> = Vector.of(1, 2, 3)
+  let twice = Twice(first: numbers, second: numbers)
+  let apart = Twice(first: Vector.of(1, 2, 3), second: Vector.of(1, 2, 3))
+  row("twice.self", twice == twice)?
+  row("twice.apart", twice == apart)?
+  let erased: dyn Named = twice
+  let erasedApart: dyn Named = apart
+  row("twice.boxed", erased == erasedApart)?
+
+  let runs = [numbers, numbers]
+  row("array.shared", runs == [numbers, Vector.of(1, 2, 3)])?
+
+  let top = diamond(7)
+  row("diamond.self", top == top)?
+  row("diamond.twin", top == diamond(7))?
+  row("diamond.bottom", top == diamond(8))?
+  let boxedTop: dyn Named = top
+  let boxedTwin: dyn Named = diamond(7)
+  let boxedBottom: dyn Named = diamond(8)
+  row("diamond.boxed.self", boxedTop == boxedTop)?
+  row("diamond.boxed.twin", boxedTop == boxedTwin)?
+  row("diamond.boxed.bottom", boxedTop == boxedBottom)?
+
+  let deep = spine(1000, 7)
+  row("spine.1000.twin", deep == spine(1000, 7))?
+  row("spine.1000.bottom", deep == spine(1000, 8))?
+  let boxedDeep: dyn Named = deep
+  let boxedDeepTwin: dyn Named = spine(1000, 7)
+  let boxedDeepBottom: dyn Named = spine(1000, 8)
+  row("spine.1000.boxed.twin", boxedDeep == boxedDeepTwin)?
+  row("spine.1000.boxed.bottom", boxedDeep == boxedDeepBottom)?
+
+  row("looped.differ", looped(1) == looped(2))?
+  let boxedOne: dyn Named = looped(1)
+  let boxedTwo: dyn Named = looped(2)
+  row("looped.boxed.differ", boxedOne == boxedTwo)?
+
+  let copy: Vector<Int> = Vector.of(1, 2, 3)
+  row("is.same", numbers is numbers)?
+  row("is.copy", numbers is copy)?
+  row("equal.copy", numbers == copy)?
+  Ok(())
+}

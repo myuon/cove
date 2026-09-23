@@ -8,7 +8,11 @@
 //! after its static type was gone. The instructions from
 //! [`Inst::DynOpen`](crate::Inst::DynOpen) to
 //! [`Inst::DynChild`](crate::Inst::DynChild) are that ability, and this module
-//! is the vocabulary they share.
+//! is the vocabulary they share. [`Inst::DynSameObject`](crate::Inst::DynSameObject)
+//! is the one question beside them that is not about structure: whether two
+//! views are one vector, which the standard library's walk asks to refuse a
+//! value that contains itself (issue #493), and which answers a `Bool` so that
+//! no identity reaches Cove as a number.
 //!
 //! # A view is three words, and none of them is Cove's to read
 //!
@@ -236,6 +240,29 @@ impl DynamicKind {
 pub fn declared_name(name: &str) -> &str {
     name.split_once('<').map_or(name, |(head, _)| head)
 }
+
+/// What `==` says of a value that contains itself (issue #493).
+///
+/// Equality refuses a cycle rather than answering it, on every path that
+/// compares: a walk the lowering composed for a layout that can reach itself
+/// through a `Vector`, `std.dynamic.equals` over two boxes, and the oracle's
+/// `Value::eq_value`. All three raise these three sentences, which are written
+/// once here for the two in Rust; `std/dynamic.cove` spells them out itself,
+/// and the `fail_equals_cycle_*` programs hold the three to one another byte
+/// for byte on every evaluator.
+///
+/// One sentence for `==`, `!=` and `assertEqual`: a walk is shared by every
+/// site that compares its layout, so it cannot say which operator reached it,
+/// and the oracle says what the walk can.
+pub const CONTAINS_ITSELF: &str = "this value contains itself, so `==` cannot compare it";
+
+/// The rule [`CONTAINS_ITSELF`] is refused under.
+pub const CONTAINS_ITSELF_RULE: &str = "Equality compares finite structure, and a value that \
+                                        reaches itself through a `Vector` has no end to compare.";
+
+/// What [`CONTAINS_ITSELF`] suggests instead.
+pub const CONTAINS_ITSELF_HELP: &str = "compare the parts that do not lead back to the value, or \
+                                        use `is` to ask whether two vectors are the same one";
 
 #[cfg(test)]
 mod tests {

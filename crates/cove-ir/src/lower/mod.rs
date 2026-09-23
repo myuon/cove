@@ -1211,6 +1211,10 @@ struct Pool {
     /// a layout that reaches itself finds the number rather than starting
     /// again.
     synthesized: HashMap<(synth::Operation, LayoutId), FunctionId>,
+    /// [`synth::tracked`]'s answer for each layout it has been asked about:
+    /// whether a value of it can contain itself through a `Vector`. A fact
+    /// about the layout table, which only grows, so an answer never changes.
+    tracked: HashMap<LayoutId, bool>,
     /// The three standard-library appends a rendering walk is composed out
     /// of, once the first call site has resolved them.
     ///
@@ -1269,6 +1273,7 @@ impl Pool {
             instances: HashMap::new(),
             instance_ids: HashMap::new(),
             synthesized: HashMap::new(),
+            tracked: HashMap::new(),
             leaves: None,
             dynamic_equals: None,
             open: Vec::new(),

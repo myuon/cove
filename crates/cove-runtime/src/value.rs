@@ -1475,8 +1475,39 @@ impl Value {
     }
 
     /// Value equality. Identity, when available, is explicit and separate.
-    pub fn eq_value(&self, other: &Value) -> bool {
-        match (self.erased(), other.erased()) {
+    ///
+    /// `Err` where the comparison reaches a pair of vectors it is already
+    /// inside: a value that contains itself has no end to compare, and
+    /// `==` refuses it rather than answering `false` or running forever
+    /// (issue #493). What is tracked is the **pair** of vector storages on the
+    /// current path — pushed on entering a pair, popped on leaving it — so a
+    /// vector reached twice by two routes, which is a shared part and not a
+    /// cycle, is compared twice like any other part. Only a `Vector` can close
+    /// a cycle: every other value here is immutable once built, so a value
+    /// that holds itself holds a vector that holds it.
+    ///
+    /// Recursive, and with no bound of its own: a finite value is compared
+    /// however deep it is (issue #480), and the path is what stops an infinite
+    /// one.
+    pub fn eq_value(&self, other: &Value) -> Result<bool, ContainsItself> {
+        self.equal_along(other, &mut Vec::new())
+    }
+
+    /// [`Value::eq_value`] with the pairs of vectors the comparison is inside.
+    fn equal_along(&self, other: &Value, path: &mut Vec<Along>) -> Result<bool, ContainsItself> {
+        // Part for part, stopping at the first that differs.
+        fn all<'v>(
+            parts: impl Iterator<Item = (&'v Value, &'v Value)>,
+            path: &mut Vec<Along>,
+        ) -> Result<bool, ContainsItself> {
+            for (x, y) in parts {
+                if !x.equal_along(y, path)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Ok(match (self.erased(), other.erased()) {
             (Value(Repr::Unit), Value(Repr::Unit)) => true,
             (Value(Repr::Bool(a)), Value(Repr::Bool(b))) => a == b,
             (Value(Repr::Int(a)), Value(Repr::Int(b))) => a == b,
@@ -1484,16 +1515,21 @@ impl Value {
             (Value(Repr::Duration(a)), Value(Repr::Duration(b))) => a == b,
             (Value(Repr::Str(a)), Value(Repr::Str(b))) => a == b,
             (Value(Repr::Array(a)), Value(Repr::Array(b))) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
+                a.len() == b.len() && all(a.iter().zip(b.iter()), path)?
             }
             // Both sides are sorted runs ordered the same way, so two maps
             // with the same keys line up entry-for-entry once both are in
-            // their one true ascending order.
+            // their one true ascending order. Key then value, entry by entry.
             (Value(Repr::Map(a)), Value(Repr::Map(b))) => {
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(b.iter())
-                        .all(|((ka, va), (kb, vb))| ka == kb && va.eq_value(vb))
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                for ((ka, va), (kb, vb)) in a.iter().zip(b.iter()) {
+                    if ka != kb || !va.equal_along(vb, path)? {
+                        return Ok(false);
+                    }
+                }
+                true
             }
             // Two sorted, distinct runs of the same keys are equal exactly
             // when they are the same slice element for element — `Rc<[T]>`'s
@@ -1502,19 +1538,19 @@ impl Value {
             (Value(Repr::Struct(a)), Value(Repr::Struct(b))) => {
                 a.type_name == b.type_name
                     && a.fields.len() == b.fields.len()
-                    && a.fields
-                        .iter()
-                        .zip(b.fields.iter())
-                        .all(|((_, x), (_, y))| x.eq_value(y))
+                    && all(
+                        a.fields
+                            .iter()
+                            .zip(b.fields.iter())
+                            .map(|((_, x), (_, y))| (x, y)),
+                        path,
+                    )?
             }
             (Value(Repr::Enum(a)), Value(Repr::Enum(b))) => {
                 a.type_name == b.type_name
                     && a.case == b.case
                     && a.payload.len() == b.payload.len()
-                    && a.payload
-                        .iter()
-                        .zip(b.payload.iter())
-                        .all(|(x, y)| x.eq_value(y))
+                    && all(a.payload.iter().zip(b.payload.iter()), path)?
             }
             // Ranges compare by the bounds they were written with, so `0..<3`
             // and `0..2` are distinct values even though they yield the same
@@ -1538,14 +1574,43 @@ impl Value {
             // `==` means value equality regardless of mutability, so `Vector`
             // compares its current elements structurally, exactly like
             // `Array`. Storage identity — whether two handles are the same
-            // growable buffer — is the separate question `is` answers.
+            // growable buffer — is the separate question `is` answers, and it
+            // is asked here only of the pair, to find the cycle.
             (Value(Repr::Vector(a)), Value(Repr::Vector(b))) => {
+                let pair = (Rc::as_ptr(a), Rc::as_ptr(b));
+                if path.contains(&pair) {
+                    return Err(ContainsItself);
+                }
                 let a = a.elements.borrow();
                 let b = b.elements.borrow();
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                path.push(pair);
+                let equal = all(a.iter().zip(b.iter()), path)?;
+                path.pop();
+                equal
             }
             _ => false,
-        }
+        })
+    }
+}
+
+/// A pair of vector storages a comparison is inside, left then right.
+type Along = (*const VectorStorage, *const VectorStorage);
+
+/// What [`Value::eq_value`] answers of a value that contains itself: the one
+/// refusal equality has, which the operator raises at its own span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContainsItself;
+
+impl ContainsItself {
+    /// The refusal, in the words every evaluator uses —
+    /// [`cove_ir::dynamic::CONTAINS_ITSELF`] and the two beside it.
+    pub fn refusal(self) -> crate::error::RuntimeError {
+        crate::error::RuntimeError::new(cove_ir::dynamic::CONTAINS_ITSELF)
+            .with_rule(cove_ir::dynamic::CONTAINS_ITSELF_RULE)
+            .with_help(cove_ir::dynamic::CONTAINS_ITSELF_HELP)
     }
 }
 
@@ -2583,10 +2648,10 @@ mod tests {
 
     #[test]
     fn ranges_compare_by_value() {
-        assert!(range(0, 3, false).eq_value(&range(0, 3, false)));
-        assert!(!range(0, 3, false).eq_value(&range(0, 3, true)));
-        assert!(!range(0, 3, false).eq_value(&range(1, 3, false)));
-        assert!(!range(0, 3, false).eq_value(&Value(Repr::Int(0))));
+        assert!(range(0, 3, false).eq_value(&range(0, 3, false)) == Ok(true));
+        assert!(range(0, 3, false).eq_value(&range(0, 3, true)) == Ok(false));
+        assert!(range(0, 3, false).eq_value(&range(1, 3, false)) == Ok(false));
+        assert!(range(0, 3, false).eq_value(&Value(Repr::Int(0))) == Ok(false));
     }
 
     #[test]
@@ -2927,8 +2992,8 @@ mod tests {
         let a = map_of(vec![(MapKey::Str("x".to_string()), Value(Repr::Int(1)))]);
         let b = map_of(vec![(MapKey::Str("x".to_string()), Value(Repr::Int(1)))]);
         let c = map_of(vec![(MapKey::Str("x".to_string()), Value(Repr::Int(2)))]);
-        assert!(a.eq_value(&b));
-        assert!(!a.eq_value(&c));
+        assert!(a.eq_value(&b) == Ok(true));
+        assert!(a.eq_value(&c) == Ok(false));
     }
 
     #[test]
@@ -2936,8 +3001,8 @@ mod tests {
         let a = set_of(vec![MapKey::Int(1), MapKey::Int(2)]);
         let b = set_of(vec![MapKey::Int(2), MapKey::Int(1)]);
         let c = set_of(vec![MapKey::Int(1)]);
-        assert!(a.eq_value(&b));
-        assert!(!a.eq_value(&c));
+        assert!(a.eq_value(&b) == Ok(true));
+        assert!(a.eq_value(&c) == Ok(false));
     }
 
     /// `==` means value equality regardless of mutability, so two separately
@@ -2959,9 +3024,9 @@ mod tests {
             Value(Repr::Int(3)),
         ])));
         let d = Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))])));
-        assert!(a.eq_value(&b));
-        assert!(!a.eq_value(&c));
-        assert!(!a.eq_value(&d));
+        assert!(a.eq_value(&b) == Ok(true));
+        assert!(a.eq_value(&c) == Ok(false));
+        assert!(a.eq_value(&d) == Ok(false));
     }
 
     /// A vector equals itself under `==` too, even though it is a mutable
@@ -2969,7 +3034,7 @@ mod tests {
     #[test]
     fn a_vector_equals_itself_structurally() {
         let a = Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))])));
-        assert!(a.eq_value(&a.clone()));
+        assert!(a.eq_value(&a.clone()) == Ok(true));
     }
 
     #[test]

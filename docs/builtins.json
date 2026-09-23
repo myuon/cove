@@ -54,7 +54,8 @@
     {"name": "dynamicString", "signature": "core.dynamicString(view: DynamicView) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "String", "libraryOnly": true},
     {"name": "dynamicCase", "signature": "core.dynamicCase(view: DynamicView) -> Int", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
     {"name": "dynamicChildCount", "signature": "core.dynamicChildCount(view: DynamicView) -> Int", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
-    {"name": "dynamicChild", "signature": "core.dynamicChild(view: DynamicView, index: Int) -> DynamicView", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "index", "type": "Int"}], "result": "DynamicView", "libraryOnly": true}
+    {"name": "dynamicChild", "signature": "core.dynamicChild(view: DynamicView, index: Int) -> DynamicView", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "index", "type": "Int"}], "result": "DynamicView", "libraryOnly": true},
+    {"name": "dynamicSameObject", "signature": "core.dynamicSameObject(a: DynamicView, b: DynamicView) -> Bool", "generics": [], "params": [{"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true}
   ],
   "types": [
     {

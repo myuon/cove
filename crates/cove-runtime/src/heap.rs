@@ -1190,7 +1190,7 @@ mod tests {
                 .elements
                 .borrow()
                 .first()
-                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
+                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7))) == Ok(true)),
             "the sweep emptied a vector something still holds: {collected:?}"
         );
         assert_eq!(shared.len(), 1);
@@ -1243,7 +1243,7 @@ mod tests {
             held.elements
                 .borrow()
                 .first()
-                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
+                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7))) == Ok(true)),
             "the sweep emptied a vector a temporary still holds: {collected:?}"
         );
     }
@@ -1324,7 +1324,7 @@ mod tests {
                     .elements
                     .borrow()
                     .first()
-                    .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
+                    .is_some_and(|element| element.eq_value(&Value(Repr::Int(7))) == Ok(true)),
                 "the sweep emptied a vector an enum case of arity {arity} \
                  still reaches: {collected:?}"
             );
@@ -1463,7 +1463,7 @@ mod tests {
                 .elements
                 .borrow()
                 .first()
-                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
+                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7))) == Ok(true)),
             "the sweep emptied a vector a closure capture still reaches: {collected:?}"
         );
         assert_eq!(collected.freed_objects, 0);

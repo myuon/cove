@@ -72,6 +72,7 @@ impl Inst {
             | Inst::Spawn { dst, .. }
             | Inst::DynKind { dst, .. }
             | Inst::DynSameType { dst, .. }
+            | Inst::DynSameObject { dst, .. }
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
             | Inst::DynCount { dst, .. } => f(dst, 1),
@@ -244,6 +245,7 @@ impl Inst {
             | Inst::DynOpen { .. }
             | Inst::DynKind { .. }
             | Inst::DynSameType { .. }
+            | Inst::DynSameObject { .. }
             | Inst::DynRead { .. }
             | Inst::DynCase { .. }
             | Inst::DynCount { .. }

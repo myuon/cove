@@ -1,0 +1,25 @@
+use console.println
+
+/// A struct whose vector holds structs like itself: a layout that reaches
+/// itself through a `Vector`, so its comparison is a walk composed for the
+/// layout that carries the pairs of vectors it is inside (issue #493).
+struct Node {
+  kids: Vector<Node>
+}
+
+/// A node pushed into its own vector: a value with no end.
+fn looped() -> Node {
+  var kids: Vector<Node> = Vector.of()
+  let node = Node(kids: kids)
+  kids.push(node)
+  node
+}
+
+/// Comparing it is refused on the `==`, on every evaluator, rather than
+/// answered or run until fuel stops it.
+export fn main() -> Result<Unit, Error> {
+  let node = looped()
+  println("about to compare a node that contains itself")?
+  println("never printed {node == node}")?
+  Ok(())
+}

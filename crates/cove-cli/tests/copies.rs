@@ -210,6 +210,7 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
         | Inst::Settled { dst, .. }
         | Inst::DynKind { dst, .. }
         | Inst::DynSameType { dst, .. }
+        | Inst::DynSameObject { dst, .. }
         | Inst::DynRead { dst, .. }
         | Inst::DynCase { dst, .. }
         | Inst::DynCount { dst, .. } => one(dst),
@@ -1508,7 +1509,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// stood, a walk that calls where it expanded one — adds one. All 82 of the
 /// rise is `tests/e2e/values_boxed_deep` and `values_boxed_generic` existing,
 /// the cases that pin the phase's two behaviour changes.
-const FORWARDABLE_COPIES: usize = 9946;
+///
+/// **10,201 since issue #493 made `==` refuse a value that contains itself.**
+/// The lowering moved it by **0**: with the change's seven new programs held
+/// out and `benches/equals` as it was, it is 9,946 to the copy over the same
+/// 215 programs — the path a tracked walk carries is two parameters it hands
+/// on, not a value it copies, and `std.dynamic`'s path is written so that it
+/// holds none either (an expanded helper answering a literal, and then one
+/// answering a variable, each cost one copy in every program, which is why the
+/// loop that leaves finished pairs is written out where it is used). **250**
+/// is the seven programs existing — `tests/e2e/fail_equals_cycle_struct`,
+/// `_enum`, `_map`, `_boxed`, `_mutual` and `_contains`, and
+/// `values_equals_shared` — and **5** is the two rows `benches/equals` gained
+/// for a layout that can contain itself, `countTree` and `treeRow`.
+const FORWARDABLE_COPIES: usize = 10201;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

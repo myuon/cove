@@ -55,6 +55,14 @@ use clock.now
 /// - `map`, four entries: the same loop over a two-part element, which is
 ///   what a keyed collection's canonical order costs.
 /// - `boxed`, the control above.
+/// - `tree` and `tree.boxed`, a tree of 364 nodes through vectors — three
+///   children a node, six levels — compared with an equal tree built apart,
+///   once as a `Tree` and once erased. A `Tree` holds a `Vector<Tree>`, so it
+///   is a layout that can contain itself, and both of its walks carry the
+///   path of vector pairs that refuses one that does (issue #493): these two
+///   rows are what that costs, on a value that never does. They run for
+///   [`treeTurns`] rather than [`turns`], because one comparison is hundreds
+///   of nodes.
 ///
 /// Every pair is **equal**, which is the walk's worst case: an early exit
 /// stops at the first part that differs and would measure the prefix rather
@@ -84,6 +92,12 @@ use clock.now
 /// compiled and the refused.
 fn turns() -> Int {
   200000
+}
+
+/// How many times the two tree rows compare, which is fewer than [`turns`]
+/// by about the tree's size.
+fn treeTurns() -> Int {
+  2000
 }
 
 /// Instructions a counting callee carries so that it is not expanded into its
@@ -144,6 +158,32 @@ enum Mark {
 /// Something to erase, so that the control row has a trait to be a `dyn` of.
 trait Tagged {
   fn tag(self) -> Int
+}
+
+/// A node with a vector of nodes under it: a layout that reaches itself
+/// through a `Vector`.
+struct Tree {
+  tag: Int
+  kids: Vector<Tree>
+}
+
+impl Tagged for Tree {
+  fn tag(self) -> Int {
+    self.tag
+  }
+}
+
+/// A full tree `levels` deep with `width` children a node, tagged by level.
+fn grow(levels: Int, width: Int) -> Tree {
+  var kids: Vector<Tree> = Vector.of()
+  if levels > 1 {
+    var at = 0
+    while at < width {
+      kids.push(grow(levels - 1, width))
+      at = at + 1
+    }
+  }
+  Tree(tag: levels, kids: kids)
 }
 
 impl Tagged for Triple {
@@ -398,6 +438,47 @@ fn countBoxed(x: dyn Tagged, y: dyn Tagged, rounds: Int) -> Bool {
   out
 }
 
+/// `rounds` comparisons of two equal `Tree`s, and nothing else in the loop.
+fn countTree(x: Tree, y: Tree, rounds: Int) -> Bool {
+  var guard = ballast(rounds)
+  var out = false
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = x == y
+    i = i + 1
+  }
+  if guard < 0 {
+    out = false
+  }
+  out
+}
+
 /// [`countOne`]'s loop with the comparison taken out and nothing put in its
 /// place.
 ///
@@ -493,6 +574,12 @@ fn boxedRow(x: dyn Tagged, y: dyn Tagged, rounds: Int) -> Row {
   Row(micros: (now() - from).micros(), witness: witness)
 }
 
+fn treeRow(x: Tree, y: Tree, rounds: Int) -> Row {
+  let from = now()
+  let witness = countTree(x, y, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
 /// What one comparison cost, in nanoseconds, over `rounds` turns of which
 /// `bare` microseconds were the loop itself.
 fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
@@ -533,6 +620,14 @@ export fn main() -> Result<Unit, Error> {
   let xArray = arrayRow(array, otherArray, rounds)
   let xMap = mapRow(map, otherMap, rounds)
   let xBoxed = boxedRow(boxed, otherBoxed, rounds)
+  let few = treeTurns()
+  let tree = grow(6, 3)
+  let otherTree = grow(6, 3)
+  let boxedTree: dyn Tagged = tree
+  let otherBoxedTree: dyn Tagged = otherTree
+  let fewBare = bareRow(few)
+  let xTree = treeRow(tree, otherTree, few)
+  let xBoxedTree = boxedRow(boxedTree, otherBoxedTree, few)
 
   // What each row answered, checked before any of it is read as a timing: a
   // row whose loop stopped writing would still report a number, and the
@@ -545,6 +640,8 @@ export fn main() -> Result<Unit, Error> {
   assertEqual(xArray.witness, true)?
   assertEqual(xMap.witness, true)?
   assertEqual(xBoxed.witness, true)?
+  assertEqual(xTree.witness, true)?
+  assertEqual(xBoxedTree.witness, true)?
 
   println("bare loop           {bare.micros * 1000 / rounds} ns/turn over {rounds} turn(s)")?
   println("")?
@@ -555,5 +652,9 @@ export fn main() -> Result<Unit, Error> {
   println("array               {perCall(xArray.micros, bare.micros, rounds)}")?
   println("map                 {perCall(xMap.micros, bare.micros, rounds)}")?
   println("boxed               {perCall(xBoxed.micros, bare.micros, rounds)}")?
+  println("tree                {perCall(xTree.micros, fewBare.micros, few)}")?
+  println(
+    "tree.boxed          {perCall(xBoxedTree.micros, fewBare.micros, few)}",
+  )?
   Ok(())
 }

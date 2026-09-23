@@ -1,0 +1,18 @@
+use console.println
+
+struct Node {
+  kids: Vector<Node>
+}
+
+/// `Vector.contains` compares with `==` inside the standard library, so the
+/// refusal is blamed on the call to `contains`, with the `==` it reached shown
+/// as the standard library's — the chain every refusal inside a library body
+/// has, on both evaluators.
+export fn main() -> Result<Unit, Error> {
+  var kids: Vector<Node> = Vector.of()
+  let node = Node(kids: kids)
+  kids.push(node)
+  println("about to search a vector for a node that contains it")?
+  println("never printed {kids.contains(node)}")?
+  Ok(())
+}

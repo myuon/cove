@@ -166,9 +166,20 @@ impl Body<'_> {
                 |dst, view| Inst::DynKind { dst, view },
                 want,
             ),
-            ("dynamicSameType", [a, b]) => {
-                self.core_dynamic_same_type(expr, &a.value, &b.value, want)
-            }
+            ("dynamicSameType", [a, b]) => self.core_dynamic_pair(
+                expr,
+                &a.value,
+                &b.value,
+                |dst, a, b| Inst::DynSameType { dst, a, b },
+                want,
+            ),
+            ("dynamicSameObject", [a, b]) => self.core_dynamic_pair(
+                expr,
+                &a.value,
+                &b.value,
+                |dst, a, b| Inst::DynSameObject { dst, a, b },
+                want,
+            ),
             ("dynamicBool", [view]) => {
                 self.core_dynamic_read(expr, &view.value, shapes::BOOL, want)
             }
@@ -1835,25 +1846,21 @@ impl Body<'_> {
         )
     }
 
-    /// `core.dynamicSameType(a, b)`: one [`Inst::DynSameType`] over two views.
-    fn core_dynamic_same_type(
+    /// `core.dynamicSameType(a, b)` and `core.dynamicSameObject(a, b)`: one
+    /// [`Inst::DynSameType`] or [`Inst::DynSameObject`] over two views,
+    /// answering a `Bool`.
+    fn core_dynamic_pair(
         &mut self,
         expr: &Expr,
         a: &Expr,
         b: &Expr,
+        inst: impl FnOnce(Slot, Slot, Slot) -> Inst,
         want: Option<Dest>,
     ) -> Val {
         let left = self.expr(a);
         let right = self.expr(b);
         let dst = self.answer_at(want, shapes::BOOL);
-        self.emit(
-            Inst::DynSameType {
-                dst: dst.slot,
-                a: left.slot,
-                b: right.slot,
-            },
-            expr.span,
-        );
+        self.emit(inst(dst.slot, left.slot, right.slot), expr.span);
         self.release(right, expr.span);
         self.release(left, expr.span);
         dst

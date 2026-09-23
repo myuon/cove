@@ -1817,14 +1817,16 @@ impl CoreIntrinsicSchema {
 /// keyed finish that relabels it into the new set or map. `Set.toArray` is
 /// [`CORE_SET_SLICE`], a run slice out of a set (P4-7).
 ///
-/// The last eleven are [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// The last twelve are [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 /// structural observations of an erased value, each one instruction:
 /// [`CORE_DYNAMIC_OPEN`] opens a box into a [`CORE_DYNAMIC_VIEW_TYPE`];
 /// [`CORE_DYNAMIC_KIND`], [`CORE_DYNAMIC_SAME_TYPE`], [`CORE_DYNAMIC_CASE`] and
 /// [`CORE_DYNAMIC_CHILD_COUNT`] ask what the viewed value is; the five scalar
 /// reads answer what a scalar view holds; and [`CORE_DYNAMIC_CHILD`] projects
 /// a part. `std.dynamic.equals` is the first standard-library body to call
-/// them, since the ADR's Phase 2: `==` on two erased values.
+/// them, since the ADR's Phase 2: `==` on two erased values. The last,
+/// [`CORE_DYNAMIC_SAME_OBJECT`], is issue #493's: the one identity question,
+/// which that walk asks at a vector to refuse a value that contains itself.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_ENSURE,
@@ -1871,6 +1873,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_DYNAMIC_CASE,
     CORE_DYNAMIC_CHILD_COUNT,
     CORE_DYNAMIC_CHILD,
+    CORE_DYNAMIC_SAME_OBJECT,
 ];
 
 /// Every core intrinsic.
@@ -2912,6 +2915,31 @@ pub const CORE_DYNAMIC_KIND: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// an `Option<Int>` and an `Option<String>` are one type.
 pub const CORE_DYNAMIC_SAME_TYPE: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "dynamicSameType",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "a",
+            ty: BuiltinType::DynamicView,
+        },
+        ParamSchema {
+            name: "b",
+            ty: BuiltinType::DynamicView,
+        },
+    ],
+    result: BuiltinType::Bool,
+    fresh: false,
+};
+
+/// `core.dynamicSameObject(a: DynamicView, b: DynamicView) -> Bool`: whether
+/// the two views denote one heap object.
+///
+/// One `Inst::DynSameObject`. Identity is reflection-internal (issue #493):
+/// the answer is a `Bool`, so no address or number standing for one reaches
+/// Cove, and a view cannot leave the standard library, so neither can the
+/// question. `std.dynamic.equals` asks it at a `Vector`, the one kind these
+/// walks follow that can contain itself.
+pub const CORE_DYNAMIC_SAME_OBJECT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicSameObject",
     generics: &[],
     params: &[
         ParamSchema {
@@ -5559,7 +5587,11 @@ mod tests {
             .iter()
             .filter(|entry| entry.name.starts_with("dynamic"))
             .collect();
-        assert_eq!(dynamic.len(), 11, "the eleven observations of ADR 0068");
+        assert_eq!(
+            dynamic.len(),
+            12,
+            "the eleven observations of ADR 0068, and issue #493's identity question"
+        );
 
         let mut ints: Vec<String> = Vec::new();
         for entry in &dynamic {

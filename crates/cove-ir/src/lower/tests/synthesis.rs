@@ -180,6 +180,50 @@ fn a_layout_that_reaches_itself_is_synthesized_once() {
     );
 }
 
+/// Only a layout that can contain itself through a `Vector` carries a path
+/// (issue #493), and the functions that carry it are exactly the ones on the
+/// cycle.
+///
+/// `Node` holds a `Vector<Node>`, so its walk and its vector's are tracked, and
+/// `equals<m.Node>` is the wrapper that starts the path; `Pair` merely
+/// *holds* a `Node` and is not on the cycle, so it calls that wrapper like any
+/// other caller would. `Tree` reaches itself through an `Array`, which is
+/// immutable, so no value of it can hold itself and its walk is what it was.
+#[test]
+fn only_a_layout_that_reaches_itself_through_a_vector_carries_a_path() {
+    let program = lowered(
+        "struct Node { tag: Int, kids: Vector<Node> }\n\
+         struct Pair { left: Node, right: Node }\n\
+         struct Tree { tag: Int, kids: Array<Tree> }\n\
+         fn same(a: Pair, b: Pair) -> Bool { a == b }\n\
+         fn also(a: Tree, b: Tree) -> Bool { a == b }",
+    );
+    let mut walks = walks_of(&program);
+    for walk in &mut walks {
+        // The layout ids are the table's, and the names are what is asked.
+        if let Some(at) = walk.find('#') {
+            walk.truncate(at);
+        }
+    }
+    walks.sort();
+    assert_eq!(
+        walks,
+        [
+            "equals<Array",
+            "equals<m.Node",
+            "equals<m.Pair",
+            "equals<m.Tree",
+            "tracks<Vector",
+            "tracks<m.Node",
+        ],
+    );
+    let wrapper = synthesized(&program, "equals<m.Node");
+    assert!(wrapper.contains("tracks<m.Node"), "{wrapper}");
+    let vector = synthesized(&program, "tracks<Vector");
+    assert!(vector.contains("trap"), "{vector}");
+    assert!(vector.contains("tracks<m.Node"), "{vector}");
+}
+
 /// The one fallback, and the one place it is reached from.
 ///
 /// A `dyn Trait` keeps its family in its own payload word 0, so there is no
@@ -1173,6 +1217,7 @@ fn no_backend_names_a_synthesized_function() {
         "order<",
         "refuses<",
         "renders<",
+        "tracks<",
         "synth::",
         "lower::synth",
     ];

@@ -1,0 +1,8 @@
+error[cove::runtime]: this value contains itself, so `==` cannot compare it
+  --> <e2e>/fail_equals_cycle_map/main.cove:16:27
+   |
+16 |   println("never printed {index == index}")?
+   |                           ^^^^^^^^^^^^^^
+  rule: Equality compares finite structure, and a value that reaches itself through a `Vector` has no end to compare.
+  help: compare the parts that do not lead back to the value, or use `is` to ask whether two vectors are the same one
+1 error(s)
