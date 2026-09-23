@@ -41,6 +41,7 @@ mod locals;
 mod methods;
 mod patterns;
 mod ranges;
+mod reflection;
 mod slots;
 mod snapshots;
 mod strings;

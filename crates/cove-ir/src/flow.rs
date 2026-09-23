@@ -69,7 +69,16 @@ impl Inst {
             | Inst::AddrOfElem { dst, .. }
             | Inst::AddrOfPart { dst, .. }
             | Inst::ScopeEnter { dst, .. }
-            | Inst::Spawn { dst, .. } => f(dst, 1),
+            | Inst::Spawn { dst, .. }
+            | Inst::DynKind { dst, .. }
+            | Inst::DynSameType { dst, .. }
+            | Inst::DynRead { dst, .. }
+            | Inst::DynCase { dst, .. }
+            | Inst::DynCount { dst, .. } => f(dst, 1),
+            // A view is `Program::view_layout`'s words wherever it is written.
+            Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
+                f(dst, width(program.view_layout))
+            }
             Inst::Clear { slot, layout } => f(slot, width(layout)),
             Inst::Copy { dst, layout, .. }
             | Inst::Load { dst, layout, .. }
@@ -231,7 +240,14 @@ impl Inst {
             | Inst::SharedLock { .. }
             | Inst::SharedUnlock { .. }
             | Inst::Trap { .. }
-            | Inst::AssertFailed { .. } => None,
+            | Inst::AssertFailed { .. }
+            | Inst::DynOpen { .. }
+            | Inst::DynKind { .. }
+            | Inst::DynSameType { .. }
+            | Inst::DynRead { .. }
+            | Inst::DynCase { .. }
+            | Inst::DynCount { .. }
+            | Inst::DynChild { .. } => None,
         }
     }
 

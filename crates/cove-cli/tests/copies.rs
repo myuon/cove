@@ -207,7 +207,16 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
         | Inst::AddrOfPart { dst, .. }
         | Inst::ScopeEnter { dst, .. }
         | Inst::Spawn { dst, .. }
-        | Inst::Settled { dst, .. } => one(dst),
+        | Inst::Settled { dst, .. }
+        | Inst::DynKind { dst, .. }
+        | Inst::DynSameType { dst, .. }
+        | Inst::DynRead { dst, .. }
+        | Inst::DynCase { dst, .. }
+        | Inst::DynCount { dst, .. } => one(dst),
+        // ADR 0068's view, the program's view layout wide.
+        Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
+            Some((dst, width(program.view_layout)))
+        }
         // Writes nothing into a frame location of its own.
         _ => None,
     }

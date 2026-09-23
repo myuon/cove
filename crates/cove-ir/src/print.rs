@@ -495,6 +495,36 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::Unbox { dst, src, layout } => {
             format!("unbox {} {}", v(*dst, *layout), s(*src))
         }
+        // A view is a whole value location of `Program::view_layout`'s three
+        // words, so it is rendered as one — which is also what makes a listing
+        // say which operand is the view and which is the scalar.
+        Inst::DynOpen { dst, src } => {
+            format!("dyn.open {} {}", v(*dst, program.view_layout), s(*src))
+        }
+        Inst::DynKind { dst, view } => {
+            format!("dyn.kind {} {}", s(*dst), v(*view, program.view_layout))
+        }
+        Inst::DynSameType { dst, a, b } => format!(
+            "dyn.same-type {} {} {}",
+            s(*dst),
+            v(*a, program.view_layout),
+            v(*b, program.view_layout)
+        ),
+        Inst::DynRead { dst, view } => {
+            format!("dyn.read {} {}", s(*dst), v(*view, program.view_layout))
+        }
+        Inst::DynCase { dst, view } => {
+            format!("dyn.case {} {}", s(*dst), v(*view, program.view_layout))
+        }
+        Inst::DynCount { dst, view } => {
+            format!("dyn.count {} {}", s(*dst), v(*view, program.view_layout))
+        }
+        Inst::DynChild { dst, view, index } => format!(
+            "dyn.child {} {} {}",
+            v(*dst, program.view_layout),
+            v(*view, program.view_layout),
+            s(*index)
+        ),
         Inst::ScopeEnter { dst, name } => {
             format!("scope.enter {} {:?}", s(*dst), program.string(*name))
         }

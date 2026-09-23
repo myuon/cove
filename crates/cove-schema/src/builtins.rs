@@ -107,6 +107,21 @@ pub enum BuiltinType {
     /// Written only in the core intrinsics' signatures: the type is the
     /// standard library's and not a program's — see [`CORE_BYTE_RUN_TYPE`].
     ByteBuffer,
+    /// `DynamicView`, [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// rooted, read-only structural view of a value whose static type was
+    /// erased.
+    ///
+    /// Written only in the core intrinsics' signatures, for
+    /// [`BuiltinType::ByteBuffer`]'s reason: the type is the standard
+    /// library's and not a program's — see [`CORE_DYNAMIC_VIEW_TYPE`].
+    DynamicView,
+    /// `Any`: a value of some type, the way a Host schema's
+    /// [`HostType::Any`](crate::HostType::Any) is one.
+    ///
+    /// Written only by [`CORE_DYNAMIC_OPEN`], whose operand is a value whose
+    /// static type was erased — a `dyn Trait` or a Host `Any` — and so has no
+    /// type a signature could name more narrowly.
+    Any,
     /// `Array<T>`, the fixed-length immutable sequence.
     Array(&'static BuiltinType),
     /// `Vector<T>`, the growable one.
@@ -156,6 +171,8 @@ impl fmt::Display for BuiltinType {
             BuiltinType::Error => f.write_str("Error"),
             BuiltinType::Duration => f.write_str("Duration"),
             BuiltinType::ByteBuffer => f.write_str("ByteBuffer"),
+            BuiltinType::DynamicView => f.write_str("DynamicView"),
+            BuiltinType::Any => f.write_str("Any"),
             BuiltinType::Array(item) => write!(f, "Array<{item}>"),
             BuiltinType::Vector(item) => write!(f, "Vector<{item}>"),
             BuiltinType::Set(item) => write!(f, "Set<{item}>"),
@@ -1799,6 +1816,15 @@ impl CoreIntrinsicSchema {
 /// and [`CORE_SET_FINISH`] and [`CORE_MAP_FINISH`], the
 /// keyed finish that relabels it into the new set or map. `Set.toArray` is
 /// [`CORE_SET_SLICE`], a run slice out of a set (P4-7).
+///
+/// The last eleven are [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// structural observations of an erased value, each one instruction:
+/// [`CORE_DYNAMIC_OPEN`] opens a box into a [`CORE_DYNAMIC_VIEW_TYPE`];
+/// [`CORE_DYNAMIC_KIND`], [`CORE_DYNAMIC_SAME_TYPE`], [`CORE_DYNAMIC_CASE`] and
+/// [`CORE_DYNAMIC_CHILD_COUNT`] ask what the viewed value is; the five scalar
+/// reads answer what a scalar view holds; and [`CORE_DYNAMIC_CHILD`] projects
+/// a part. No standard-library body calls them yet — `std.dynamic` arrives
+/// with the ADR's Phase 2.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_ENSURE,
@@ -1834,6 +1860,17 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_SET_FINISH,
     CORE_MAP_FINISH,
     CORE_SET_SLICE,
+    CORE_DYNAMIC_OPEN,
+    CORE_DYNAMIC_KIND,
+    CORE_DYNAMIC_SAME_TYPE,
+    CORE_DYNAMIC_BOOL,
+    CORE_DYNAMIC_INT,
+    CORE_DYNAMIC_FLOAT,
+    CORE_DYNAMIC_DURATION,
+    CORE_DYNAMIC_STRING,
+    CORE_DYNAMIC_CASE,
+    CORE_DYNAMIC_CHILD_COUNT,
+    CORE_DYNAMIC_CHILD,
 ];
 
 /// Every core intrinsic.
@@ -2787,6 +2824,207 @@ pub const CORE_SET_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Array(&BuiltinType::Param("T")),
+    fresh: false,
+};
+
+// ------------------------------------------------ ADR 0068's dynamic view
+
+/// The name of the rooted structural view a standard-library module may write
+/// as a type: `let view: DynamicView = core.dynamicOpen(value)`.
+///
+/// [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Decision 1: a read-only view of a value whose static type was erased — a
+/// `dyn Trait` or a Host `Any` — which keeps what it reads rooted for as long
+/// as it is live and never allocates to project a child. Private to the
+/// standard library exactly as [`CORE_BYTE_RUN_TYPE`] is (Decision 6): it is
+/// not in [`BUILTINS`], it has no method, and the checker resolves the name
+/// only in a module `cove_sema::stdlib::is_library_module` answers for. In a
+/// program `DynamicView` names no type, and a package may declare one of its
+/// own.
+///
+/// What a view *is* — which value, rooted where — is below the boundary.
+/// Nothing here answers a layout, a word offset or an address (Decision 2):
+/// the view is the only carrier of a location, and the `core.dynamic*`
+/// entries are the whole of what can be asked of one.
+pub const CORE_DYNAMIC_VIEW_TYPE: &str = "DynamicView";
+
+/// One parameter named `view`, of [`CORE_DYNAMIC_VIEW_TYPE`]: what every
+/// observation but the open takes.
+const VIEW_PARAM: ParamSchema = ParamSchema {
+    name: "view",
+    ty: BuiltinType::DynamicView,
+};
+
+/// `core.dynamicOpen(value: Any) -> DynamicView`: the view of the value a box
+/// holds.
+///
+/// ADR 0068's Decision 1, one `Inst::DynOpen`. The operand must be a value
+/// whose static type was erased — a `dyn Trait` or a Host `Any` — and the
+/// lowering refuses any other, because Decision 5 keeps a statically known
+/// layout off the reflected path. Erasure is looked through: a box inside a box
+/// opens to what the innermost one holds, and a reference to a heap value
+/// opens to the object, so a view never denotes a box.
+pub const CORE_DYNAMIC_OPEN: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicOpen",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "value",
+        ty: BuiltinType::Any,
+    }],
+    result: BuiltinType::DynamicView,
+    fresh: false,
+};
+
+/// `core.dynamicKind(view: DynamicView) -> Int`: which structural kind the
+/// viewed value is, as a code from the one table `cove_ir::DynamicKind`
+/// defines.
+///
+/// One `Inst::DynKind`. From nought: unit, bool, int, float, duration,
+/// string, struct, enum, array, vector, set, map, range, function and opaque.
+pub const CORE_DYNAMIC_KIND: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicKind",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.dynamicSameType(a: DynamicView, b: DynamicView) -> Bool`: whether
+/// the two viewed values have one semantic type.
+///
+/// One `Inst::DynSameType`: the two kinds are equal and, for a struct, an
+/// enum and a range, so are the declared names. Instantiations are erased, so
+/// an `Option<Int>` and an `Option<String>` are one type.
+pub const CORE_DYNAMIC_SAME_TYPE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicSameType",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "a",
+            ty: BuiltinType::DynamicView,
+        },
+        ParamSchema {
+            name: "b",
+            ty: BuiltinType::DynamicView,
+        },
+    ],
+    result: BuiltinType::Bool,
+    fresh: false,
+};
+
+/// `core.dynamicBool(view: DynamicView) -> Bool`: the `Bool` a bool view
+/// holds.
+///
+/// One `Inst::DynRead` into a `Bool` slot. A view of any other kind is an
+/// internal runtime error, not a refusal a program can reach: the caller asks
+/// [`CORE_DYNAMIC_KIND`] first.
+pub const CORE_DYNAMIC_BOOL: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicBool",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Bool,
+    fresh: false,
+};
+
+/// `core.dynamicInt(view: DynamicView) -> Int`: the `Int` an int view holds.
+///
+/// One `Inst::DynRead` into an `Int` slot, held to [`CORE_DYNAMIC_BOOL`]'s
+/// rule.
+pub const CORE_DYNAMIC_INT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicInt",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.dynamicFloat(view: DynamicView) -> Float`: the `Float` a float view
+/// holds.
+///
+/// One `Inst::DynRead` into a `Float` slot, held to [`CORE_DYNAMIC_BOOL`]'s
+/// rule.
+pub const CORE_DYNAMIC_FLOAT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicFloat",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Float,
+    fresh: false,
+};
+
+/// `core.dynamicDuration(view: DynamicView) -> Duration`: the `Duration` a
+/// duration view holds.
+///
+/// One `Inst::DynRead` into a `Duration` slot, held to
+/// [`CORE_DYNAMIC_BOOL`]'s rule.
+pub const CORE_DYNAMIC_DURATION: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicDuration",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Duration,
+    fresh: false,
+};
+
+/// `core.dynamicString(view: DynamicView) -> String`: the `String` a string
+/// view holds.
+///
+/// One `Inst::DynRead` into a reference slot, held to
+/// [`CORE_DYNAMIC_BOOL`]'s rule. It answers the string object the view
+/// already names and allocates nothing: a string is immutable, so the answer
+/// is the value and not a copy of it.
+pub const CORE_DYNAMIC_STRING: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicString",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::String,
+    fresh: false,
+};
+
+/// `core.dynamicCase(view: DynamicView) -> Int`: which case of its enum an
+/// enum view holds, as the case's position in the declaration.
+///
+/// One `Inst::DynCase`. A view of anything but an enum is an internal runtime
+/// error, held to [`CORE_DYNAMIC_BOOL`]'s rule.
+pub const CORE_DYNAMIC_CASE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicCase",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.dynamicChildCount(view: DynamicView) -> Int`: how many children the
+/// viewed value has.
+///
+/// One `Inst::DynCount`: a struct's and a range's fields, the current case's
+/// parts, a sequence's or a set's elements, twice a map's entries — key then
+/// value — and nought for everything else.
+pub const CORE_DYNAMIC_CHILD_COUNT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicChildCount",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.dynamicChild(view: DynamicView, index: Int) -> DynamicView`: the view
+/// of child `index`, in [`CORE_DYNAMIC_CHILD_COUNT`]'s canonical order.
+///
+/// One `Inst::DynChild`, bounds checked below the boundary: an index outside
+/// `0 ..< count` is an internal runtime error, because the caller asked the
+/// count first. The child's view keeps what it reads rooted and allocates
+/// nothing, which is ADR 0068's "no child allocation required merely to
+/// traverse a value".
+pub const CORE_DYNAMIC_CHILD: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicChild",
+    generics: &[],
+    params: &[
+        VIEW_PARAM,
+        ParamSchema {
+            name: "index",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::DynamicView,
     fresh: false,
 };
 
@@ -5286,6 +5524,79 @@ mod tests {
                     entry.receiver,
                     entry.method
                 ),
+            }
+        }
+    }
+
+    /// ADR 0068's Decision 2, as a fact about the table: **no `core.dynamic*`
+    /// entry hands Cove a location.** A view is the one carrier of where a
+    /// value is, so no entry may take or answer an `Int` that is a word offset,
+    /// a `LayoutId` or an address.
+    ///
+    /// Every `Int` in these signatures is listed here with what it means, and
+    /// the list is compared whole: a new entry, or a new `Int` on an old one,
+    /// fails until somebody writes down which of the four harmless meanings it
+    /// has. A name alone could not prove an `Int` harmless, but a list that has
+    /// to be edited is a place the question is asked.
+    #[test]
+    fn no_dynamic_observation_carries_a_raw_location() {
+        let dynamic: Vec<&CoreIntrinsicSchema> = CORE_INTRINSICS
+            .iter()
+            .filter(|entry| entry.name.starts_with("dynamic"))
+            .collect();
+        assert_eq!(dynamic.len(), 11, "the eleven observations of ADR 0068");
+
+        let mut ints: Vec<String> = Vec::new();
+        for entry in &dynamic {
+            for param in entry.params {
+                assert!(
+                    !matches!(param.ty, BuiltinType::Param(_)),
+                    "`core.{}` binds a type parameter, so a caller could hand it anything",
+                    entry.name
+                );
+                if param.ty == BuiltinType::Int {
+                    ints.push(format!("{}({})", entry.name, param.name));
+                }
+            }
+            if entry.result == BuiltinType::Int {
+                ints.push(format!("{} ->", entry.name));
+            }
+            // The one way in is a value whose type was erased, and the one
+            // way to a part is a view: nothing else answers a view.
+            if entry.result == BuiltinType::DynamicView {
+                assert!(
+                    matches!(entry.name, "dynamicOpen" | "dynamicChild"),
+                    "`core.{}` answers a view without opening or projecting one",
+                    entry.name
+                );
+            }
+        }
+        ints.sort();
+        assert_eq!(
+            ints,
+            [
+                // A case's position in its declaration: the discriminant a
+                // `match` already switches on, and not an offset.
+                "dynamicCase ->",
+                // A position among the children `dynamicChildCount` counted.
+                "dynamicChild(index)",
+                // How many children, not how many words.
+                "dynamicChildCount ->",
+                // The value an `Int` view holds.
+                "dynamicInt ->",
+                // A code from `DynamicKind`'s fixed table, not a `LayoutId`.
+                "dynamicKind ->",
+            ]
+        );
+        for entry in &dynamic {
+            for param in entry.params {
+                for word in ["layout", "offset", "address", "at"] {
+                    assert_ne!(
+                        param.name, word,
+                        "`core.{}` takes a parameter named `{word}`",
+                        entry.name
+                    );
+                }
             }
         }
     }

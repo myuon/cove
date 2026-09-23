@@ -361,6 +361,7 @@ fn emit<'a>(
         bytes_layout: shapes::BYTES,
         buffer_layout: shapes::BYTE_BUFFER,
         boxed_layout: shapes::BOXED,
+        view_layout: shapes::DYNAMIC_VIEW,
         strings: pool.strings,
         args: pool.args.lists,
         tables: pool.tables,

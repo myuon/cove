@@ -375,7 +375,16 @@ impl<'p> Flow<'p> {
             | Inst::AddrOfElem { dst, .. }
             | Inst::AddrOfPart { dst, .. }
             | Inst::ScopeEnter { dst, .. }
-            | Inst::Spawn { dst, .. } => f(dst, 1),
+            | Inst::Spawn { dst, .. }
+            | Inst::DynKind { dst, .. }
+            | Inst::DynSameType { dst, .. }
+            | Inst::DynRead { dst, .. }
+            | Inst::DynCase { dst, .. }
+            | Inst::DynCount { dst, .. } => f(dst, 1),
+            // ADR 0068's view, the program's view layout's words.
+            Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
+                f(dst, width(self.program.view_layout))
+            }
             Inst::Clear { slot, layout } => f(slot, width(layout)),
             Inst::Copy { dst, layout, .. }
             | Inst::Load { dst, layout, .. }
@@ -605,6 +614,22 @@ impl<'p> Flow<'p> {
                 f(message, 1);
                 f(rule, 1);
                 f(help, 1);
+            }
+            // A view is read whole — its owner word is what keeps what it
+            // reads alive, so a pass that thought only its first word was
+            // read could free the owner under it.
+            Inst::DynOpen { src, .. } => f(src, 1),
+            Inst::DynKind { view, .. }
+            | Inst::DynRead { view, .. }
+            | Inst::DynCase { view, .. }
+            | Inst::DynCount { view, .. } => f(view, width(self.program.view_layout)),
+            Inst::DynSameType { a, b, .. } => {
+                f(a, width(self.program.view_layout));
+                f(b, width(self.program.view_layout));
+            }
+            Inst::DynChild { view, index, .. } => {
+                f(view, width(self.program.view_layout));
+                f(index, 1);
             }
         }
     }

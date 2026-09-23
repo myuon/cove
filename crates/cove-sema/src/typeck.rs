@@ -434,7 +434,7 @@ use std::sync::Arc;
 use cove_diag::{Diagnostic, FileId, Severity, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
-    CORE_BYTE_RUN_TYPE, CORE_NAMESPACE, MAP_ENTRY, NONE_CASE, SCOPE,
+    CORE_BYTE_RUN_TYPE, CORE_DYNAMIC_VIEW_TYPE, CORE_NAMESPACE, MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -588,6 +588,44 @@ pub const RECURSIVE_TYPE: &str = "cove::type::recursive_type";
 /// Two uses of a local binding ask for different types where its initializer
 /// left one open.
 pub const INFERENCE_CONFLICT: &str = "cove::type::inference_conflict";
+/// A `DynamicView` is written where it could outlive the frame that opened
+/// it: an exported signature, a field, or a closure's capture. ADR 0068,
+/// Decision 9.
+pub const DYNAMIC_VIEW_ESCAPE: &str = "cove::type::dynamic_view_escape";
+
+/// The rule a [`DYNAMIC_VIEW_ESCAPE`] diagnostic quotes.
+///
+/// Only the standard library can write the type at all, so the reader of this
+/// sentence is somebody writing the standard library, and what they need is
+/// the reason the view is narrower than an ordinary value.
+const DYNAMIC_VIEW_ESCAPE_RULE: &str = "A `DynamicView` is a capability to read a value it keeps rooted, not a value: it may be held in a local, a `Vector` of views, and the parameters and results of functions a module does not export, and nowhere it could outlive the walk that opened it.";
+
+/// Whether `ty` holds a `DynamicView` anywhere a value of it could carry one.
+///
+/// ADR 0068's Decision 9 is about where a view can be *held*, so this looks
+/// inside every type that holds values of another — a `Vector<DynamicView>`
+/// in an exported result is the view escaping as surely as a bare one is — and
+/// inside a function type too, because a closure whose parameter is a view is
+/// a way of handing one to whoever calls it.
+fn mentions_dynamic_view(ty: &Ty) -> bool {
+    match ty {
+        Ty::DynamicView => true,
+        Ty::Array(inner)
+        | Ty::Vector(inner)
+        | Ty::Set(inner)
+        | Ty::Option(inner)
+        | Ty::Task(inner)
+        | Ty::Shared(inner) => mentions_dynamic_view(inner),
+        Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
+            mentions_dynamic_view(key) || mentions_dynamic_view(value)
+        }
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(mentions_dynamic_view),
+        Ty::Fn(func) => {
+            func.params.iter().any(mentions_dynamic_view) || mentions_dynamic_view(&func.ret)
+        }
+        _ => false,
+    }
+}
 
 /// The Language Card sentence a task-safety diagnostic quotes.
 ///
@@ -899,9 +937,13 @@ struct ImportEnv {
 /// the *field* of a `StringBuilder`, and a struct is task-safe exactly when its
 /// fields are — so naming it here is what keeps a builder from crossing inside
 /// a wrapper that says nothing about what it holds.
+///
+/// A `DynamicView` is here for ADR 0068's Decision 9 rather than for either of
+/// those: a view keeps an object of the task that opened it rooted from that
+/// task's frame, and no other task's frame is a root of it.
 fn not_task_safe(ty: &Ty) -> Option<&Ty> {
     match ty {
-        Ty::Vector(_) | Ty::ByteBuffer | Ty::Task(_) | Ty::Scope => Some(ty),
+        Ty::Vector(_) | Ty::ByteBuffer | Ty::DynamicView | Ty::Task(_) | Ty::Scope => Some(ty),
         Ty::Shared(_) => None,
         Ty::Array(inner) | Ty::Set(inner) | Ty::Option(inner) => not_task_safe(inner),
         Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
@@ -1077,6 +1119,21 @@ pub enum Ty {
     /// value aliases the same owner, and an append through either is visible
     /// through both — which is why `not_task_safe` names it beside one.
     ByteBuffer,
+    /// `DynamicView`: [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// rooted, read-only structural view of a value whose static type was
+    /// erased.
+    ///
+    /// Only a standard-library module can write it, for [`Ty::ByteBuffer`]'s
+    /// reason, and nothing has a method on it: the `core.dynamic*` intrinsics
+    /// are the whole of what can be done with one — see
+    /// `cove_schema::builtins::CORE_DYNAMIC_VIEW_TYPE`.
+    ///
+    /// It is a capability rather than a value (Decision 9), so where it may
+    /// be *held* is narrower than where a type may be written:
+    /// `Checker::check_dynamic_view_escape` refuses it in an exported
+    /// signature and in a field, `Checker::ident` refuses a closure's
+    /// capture of one, and `not_task_safe` keeps it out of a task.
+    DynamicView,
     Error,
     Range,
     Array(Box<Ty>),
@@ -1611,6 +1668,7 @@ impl fmt::Display for Ty {
             Ty::Str => f.write_str("String"),
             Ty::Duration => f.write_str("Duration"),
             Ty::ByteBuffer => f.write_str("ByteBuffer"),
+            Ty::DynamicView => f.write_str("DynamicView"),
             Ty::Error => f.write_str("Error"),
             Ty::Range => f.write_str("Range"),
             Ty::Scope => f.write_str("Scope"),
@@ -2811,6 +2869,84 @@ impl<'a> Checker<'a> {
         }
 
         self.check_conformance_signatures();
+        self.check_dynamic_view_escape();
+    }
+
+    /// ADR 0068's Decision 9 over the declarations: a `DynamicView` in a field
+    /// or in an exported signature is refused.
+    ///
+    /// A view keeps the object it reads rooted from the frame that holds it,
+    /// and the whole of its safety is that the frame is the only holder. A
+    /// field would let it outlive the walk inside whatever value holds it, and
+    /// an exported signature would hand it to a module that is not the
+    /// standard library — which could not have named the type, and so could
+    /// hold one it cannot describe. A non-exported function is where a walk is
+    /// written, so its parameters and results are exactly where a view
+    /// belongs.
+    ///
+    /// Only the standard library can write the type, so only a
+    /// standard-library module can reach any of these.
+    fn check_dynamic_view_escape(&mut self) {
+        let mut found: Vec<(String, Span)> = Vec::new();
+        for (name, sig) in &self.structs {
+            for field in &sig.fields {
+                if mentions_dynamic_view(&field.ty) {
+                    found.push((
+                        format!("field `{}` of struct `{name}`", field.name),
+                        field.span,
+                    ));
+                }
+            }
+        }
+        for (name, sig) in &self.enums {
+            for case in &sig.cases {
+                if case.payload.iter().any(mentions_dynamic_view) {
+                    found.push((format!("case `{}` of enum `{name}`", case.name), case.span));
+                }
+            }
+        }
+        let exported_functions = self
+            .module
+            .functions
+            .iter()
+            .filter(|(_, entry)| entry.exported)
+            .filter_map(|(name, _)| Some((name.clone(), self.functions.get(name)?)));
+        let exported_methods = self
+            .module
+            .methods
+            .iter()
+            .filter(|(_, entry)| entry.exported)
+            .filter_map(|((owner, name), _)| {
+                let sig = self.methods.get(&(self.key(owner), name.clone()))?;
+                Some((format!("{owner}.{name}"), sig))
+            });
+        for (name, sig) in exported_functions.chain(exported_methods) {
+            for param in &sig.params {
+                if mentions_dynamic_view(&param.ty) {
+                    found.push((
+                        format!("parameter `{}` of exported function `{name}`", param.name),
+                        param.span,
+                    ));
+                }
+            }
+            if mentions_dynamic_view(&sig.ret) {
+                found.push((
+                    format!("the result of exported function `{name}`"),
+                    sig.ret_span,
+                ));
+            }
+        }
+        for (what, span) in found {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    DYNAMIC_VIEW_ESCAPE,
+                    format!("a `DynamicView` cannot be held by the {what}"),
+                )
+                .at(span)
+                .rule(DYNAMIC_VIEW_ESCAPE_RULE)
+                .help("hold the view in a local of the non-exported function that walks it"),
+            );
+        }
     }
 
     /// The signature of one trait method.
@@ -3741,6 +3877,15 @@ impl<'a> Checker<'a> {
             self.check_type_arity(name, 0, args.len(), span);
             return Some(Ty::ByteBuffer);
         }
+        // ADR 0068's view, by the same privilege and for the same reason: the
+        // standard library writes it and a program does not (Decision 6).
+        if name == CORE_DYNAMIC_VIEW_TYPE {
+            if !crate::stdlib::is_library_module(&self.module.name) {
+                return None;
+            }
+            self.check_type_arity(name, 0, args.len(), span);
+            return Some(Ty::DynamicView);
+        }
         let arity = cove_schema::builtin(name)?.parameters.len();
         self.check_type_arity(name, arity, args.len(), span);
         let first = args.first().cloned().unwrap_or(Ty::recovery());
@@ -4528,8 +4673,30 @@ impl<'a> Checker<'a> {
     /// A bare name: a local, a module function, a constructor, a host item,
     /// or a name only the host can explain.
     fn ident(&mut self, name: &str, span: Span, expected: Option<&Expected>) -> Ty {
-        if let Some(binding) = self.lookup(name) {
-            return binding.ty.clone();
+        if let Some((depth, binding)) = self
+            .scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(depth, scope)| scope.get(name).map(|binding| (depth, binding)))
+        {
+            let ty = binding.ty.clone();
+            // A name found below the capture floor is a capture, and a closure
+            // holds a copy of what it captured for as long as the closure
+            // lives — which is exactly the escape ADR 0068's Decision 9
+            // forbids a view. See `Checker::capture_floor`.
+            if depth < self.capture_floor && mentions_dynamic_view(&ty) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DYNAMIC_VIEW_ESCAPE,
+                        format!("a `DynamicView` cannot be captured by a closure, and `{name}` holds one"),
+                    )
+                    .at(span)
+                    .rule(DYNAMIC_VIEW_ESCAPE_RULE)
+                    .help("pass the view to the function as a parameter instead of capturing it"),
+                );
+            }
+            return ty;
         }
         if name == NONE_CASE.name {
             return match expected.map(|e| &e.ty) {
@@ -9504,6 +9671,8 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::Error => Ty::Error,
         BuiltinType::Duration => Ty::Duration,
         BuiltinType::ByteBuffer => Ty::ByteBuffer,
+        BuiltinType::DynamicView => Ty::DynamicView,
+        BuiltinType::Any => Ty::Any,
         BuiltinType::Array(item) => Ty::Array(nested(item)),
         BuiltinType::Vector(item) => Ty::Vector(nested(item)),
         BuiltinType::Set(item) => Ty::Set(nested(item)),
@@ -15708,6 +15877,78 @@ fn secret() -> Int {
             "app",
             "/// A buffer of the package's own.\nexport struct ByteBuffer {\n  size: Int\n}\n\n/// Entry point.\nexport fn main() -> Int {\n  ByteBuffer(size: 3).size\n}\n",
         )]);
+    }
+
+    /// ADR 0068's view is the standard library's for `ByteBuffer`'s reason: a
+    /// standard-library module writes `DynamicView` and every `core.dynamic*`
+    /// call over it, and a program is told the name is no type it can see.
+    #[test]
+    fn only_the_standard_library_can_name_the_dynamic_view() {
+        accepts_modules(&[(
+            "std.stringbuilder",
+            "trait Shown {\n  fn shown(self) -> Int\n}\n\nfn walk(view: DynamicView) -> Int {\n  var total = core.dynamicKind(view)\n  var pending: Vector<DynamicView> = Vector.of(view)\n  let at = 0\n  if core.dynamicChildCount(view) > at {\n    let child = core.dynamicChild(view, at)\n    pending.push(child)\n    total = total + core.dynamicCase(child)\n  }\n  if core.dynamicSameType(view, view) && core.dynamicBool(view) {\n    total = total + core.dynamicInt(view) + core.byteLength(core.dynamicString(view))\n  }\n  let f = core.dynamicFloat(view)\n  let d = core.dynamicDuration(view)\n  total\n}\n\n/// Probe.\nexport fn probe(value: dyn Shown) -> Int {\n  walk(core.dynamicOpen(value))\n}\n",
+        )]);
+        let error = rejects_modules(&[(
+            "app",
+            "/// Entry point.\nexport fn main(view: DynamicView) -> Int {\n  0\n}\n",
+        )]);
+        assert_eq!(error.code, UNKNOWN_TYPE, "{}", error.message);
+        assert_eq!(
+            error.message,
+            "`DynamicView` names no type this module can see"
+        );
+    }
+
+    /// ADR 0068's Decision 9, the declarations' half: a view in an exported
+    /// signature or in a field is refused, where a non-exported function's
+    /// parameter and result are the place a walk is written.
+    #[test]
+    fn a_dynamic_view_does_not_escape_through_a_signature_or_a_field() {
+        let refused = [
+            "/// Probe.\nexport fn probe(view: DynamicView) -> Int {\n  0\n}\n",
+            "trait Shown {\n  fn shown(self) -> Int\n}\n\n/// Probe.\nexport fn probe(value: dyn Shown) -> Vector<DynamicView> {\n  Vector.of(core.dynamicOpen(value))\n}\n",
+            "struct Held {\n  view: DynamicView,\n}\n",
+            "enum Held {\n  Some(Array<DynamicView>),\n}\n",
+        ];
+        for source in refused {
+            let error = rejects_modules(&[("std.stringbuilder", source)]);
+            assert_eq!(
+                error.code, DYNAMIC_VIEW_ESCAPE,
+                "{source}: {}",
+                error.message
+            );
+            assert!(
+                error
+                    .message
+                    .starts_with("a `DynamicView` cannot be held by the "),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    /// ADR 0068's Decision 9, the closures' and the tasks' half: a closure
+    /// may not capture a view, and a view may not cross a task boundary —
+    /// the view roots its object from the frame of the task that opened it.
+    #[test]
+    fn a_dynamic_view_is_not_captured_and_does_not_cross_a_task() {
+        let error = rejects_modules(&[(
+            "std.stringbuilder",
+            "fn walk(view: DynamicView) -> Int {\n  let count = fn() { core.dynamicChildCount(view) }\n  count()\n}\n",
+        )]);
+        assert_eq!(error.code, DYNAMIC_VIEW_ESCAPE, "{}", error.message);
+        assert_eq!(
+            error.message,
+            "a `DynamicView` cannot be captured by a closure, and `view` holds one"
+        );
+        assert_eq!(
+            not_task_safe(&Ty::Vector(Box::new(Ty::DynamicView))),
+            Some(&Ty::Vector(Box::new(Ty::DynamicView)))
+        );
+        assert_eq!(
+            not_task_safe(&Ty::Option(Box::new(Ty::DynamicView))),
+            Some(&Ty::DynamicView)
+        );
     }
 
     /// A package with a module of its own called `core` keeps it: the name is

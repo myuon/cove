@@ -3814,3 +3814,259 @@ export fn main() -> Int {
         assert_eq!(machine, oracle, "`{name}` answers alike");
     }
 }
+
+/// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// seven observations, written in Cove where only the standard library may
+/// write them, answer alike on both evaluators — and on the machine they are
+/// the instructions they name, with no builtin call anywhere in the walk.
+///
+/// No standard-library body reflects yet (`std.dynamic` is Phase 2), so this
+/// installs one the way [`a_core_intrinsic_agrees_and_is_an_instruction`]
+/// installs its probe: a second file in `std.string`. The walk is the shape
+/// Phase 2's will be — iterative, over a `Vector<DynamicView>` work stack, as
+/// issue #480 decided — and it describes every node it reaches: its kind code,
+/// an enum's case, how many children, a scalar's value, and whether its first
+/// two children have one type. The values reach every kind a `dyn` erasure can
+/// carry: a struct holding a nested struct, a `String`, an `Array`, a
+/// `Vector`, a `Set`, a `Map`, a `Range`, a `Float`, a `Duration`, a `Bool`,
+/// an `Option`, a `Result` and another erased value; an enum in each of its
+/// three cases; and a struct holding a closure.
+#[test]
+fn a_dynamic_walk_agrees_and_is_instructions() {
+    const PROBE: &str = "\
+trait ProbeReflected {
+  fn reflected(self) -> Int
+}
+
+struct ProbeAt {
+  x: Int,
+  y: Int
+}
+
+struct ProbeBag {
+  name: String,
+  at: ProbeAt,
+  tags: Array<String>,
+  counts: Vector<Int>,
+  seen: Set<Int>,
+  index: Map<String, Int>,
+  span: Range,
+  ratio: Float,
+  wait: Duration,
+  on: Bool,
+  maybe: Option<Int>,
+  outcome: Result<Int, String>,
+  inner: dyn ProbeReflected
+}
+
+enum ProbeTag {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+struct ProbeHolds {
+  step: fn(Int) -> Int
+}
+
+impl ProbeReflected for ProbeAt {
+  fn reflected(self) -> Int {
+    self.x
+  }
+}
+
+impl ProbeReflected for ProbeBag {
+  fn reflected(self) -> Int {
+    0
+  }
+}
+
+impl ProbeReflected for ProbeTag {
+  fn reflected(self) -> Int {
+    1
+  }
+}
+
+impl ProbeReflected for ProbeHolds {
+  fn reflected(self) -> Int {
+    2
+  }
+}
+
+fn probeText(value: Float) -> String {
+  \"{value}\"
+}
+
+fn probeSpan(value: Duration) -> String {
+  \"{value}\"
+}
+
+fn probeDescribe(root: DynamicView) -> String {
+  var out = \"\"
+  var pending: Vector<DynamicView> = Vector.of(root)
+  while pending.length() > 0 {
+    let view = pending.pop().unwrapOr(root)
+    let kind = core.dynamicKind(view)
+    let count = core.dynamicChildCount(view)
+    if kind == 1 {
+      out = \"{out} {core.dynamicBool(view)}\"
+    } else if kind == 2 {
+      out = \"{out} {core.dynamicInt(view)}\"
+    } else if kind == 3 {
+      out = \"{out} {probeText(core.dynamicFloat(view))}\"
+    } else if kind == 4 {
+      out = \"{out} {probeSpan(core.dynamicDuration(view))}\"
+    } else if kind == 5 {
+      out = \"{out} '{core.dynamicString(view)}'\"
+    } else if kind == 7 {
+      out = \"{out} k7#{core.dynamicCase(view)}/{count}\"
+    } else {
+      out = \"{out} k{kind}/{count}\"
+    }
+    if count >= 2 {
+      if core.dynamicSameType(core.dynamicChild(view, 0), core.dynamicChild(view, 1)) {
+        out = \"{out}=\"
+      }
+    }
+    var at = count - 1
+    while at >= 0 {
+      pending.push(core.dynamicChild(view, at))
+      at = at - 1
+    }
+  }
+  out
+}
+
+fn probeReflect(value: dyn ProbeReflected) -> String {
+  probeDescribe(core.dynamicOpen(value))
+}
+
+/// Every kind a `dyn` erasure reaches, described.
+export fn probeDynamic() -> String {
+  let bag = ProbeBag(name: \"bag\", at: ProbeAt(x: 1, y: 2), tags: [\"a\", \"b\"], counts: Vector.of(3, 4), seen: Set.of(6, 5), index: Map.of(MapEntry(key: \"k\", value: 7)), span: 1..<4, ratio: 1.5, wait: Duration.millis(2), on: true, maybe: Some(8), outcome: Err(\"bad\"), inner: ProbeAt(x: 9, y: 10))
+  let plain = probeReflect(ProbeTag.Plain)
+  let counted = probeReflect(ProbeTag.Count(3))
+  let named = probeReflect(ProbeTag.Named(\"n\"))
+  let holds = probeReflect(ProbeHolds(step: fn(n) { n + 1 }))
+  \"{probeReflect(bag)} |{plain} |{counted} |{named} |{holds}\"
+}
+";
+    const MAIN: &str = "\
+use std.string
+
+export fn main() -> String {
+  string.probeDynamic()
+}
+";
+    fn probed() -> (Arc<SourceMap>, Arc<Checked>) {
+        let mut sources = SourceMap::new();
+        let file = sources.add("m/main.cove", MAIN.to_string());
+        let ast = cove_syntax::parse_file(&sources, file).expect("the program parses");
+        let mut modules = BTreeMap::from([(
+            "m".to_string(),
+            Module {
+                name: "m".to_string(),
+                dir: PathBuf::from("m"),
+                units: vec![Unit {
+                    file,
+                    path: PathBuf::from("m/main.cove"),
+                    ast,
+                }],
+            },
+        )]);
+        for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+            modules.insert(name, module);
+        }
+        let path = PathBuf::from("std/string_reflect.cove");
+        let file = sources.add_library(path.clone(), PROBE);
+        let ast = cove_syntax::parse_file(&sources, file).expect("the probe parses");
+        modules
+            .get_mut("std.string")
+            .expect("the standard library has `std.string`")
+            .units
+            .push(Unit { file, path, ast });
+        let package = Package {
+            root: PathBuf::from("."),
+            config: Config::default(),
+            modules,
+        };
+        match cove_sema::Compiler::new().compile(&package) {
+            Ok(program) => (Arc::new(sources), Arc::new(program)),
+            Err(items) => panic!("the probe checks:\n{}", rendered(&sources, &items)),
+        }
+    }
+
+    let (sources, program) = probed();
+    let ir = lowered(&sources, &program);
+    let walk = ir
+        .functions
+        .iter()
+        .find(|f| &*f.module == "std.string" && &*f.name == "probeDescribe")
+        .expect("the walk was lowered");
+    for wanted in [
+        "DynKind",
+        "DynChild",
+        "DynCount",
+        "DynRead",
+        "DynCase",
+        "DynSameType",
+    ] {
+        assert!(
+            walk.code
+                .iter()
+                .any(|inst| format!("{inst:?}").starts_with(wanted)),
+            "the walk holds a `{wanted}`"
+        );
+    }
+    // The one builtin call left is the text of a `Float` or a `Duration`
+    // scalar the walk has already read — Phase 0's census found that
+    // `Value.renderInto`'s scalar sites are these two, which reflection does not
+    // write — expanded into the walk from `probeText` and `probeSpan`. Nothing
+    // is asked of a box.
+    let called: Vec<String> = walk
+        .code
+        .iter()
+        .filter_map(|inst| match inst {
+            cove_ir::Inst::IntrinsicCall { site, args, .. } => {
+                let first = ir.arg_list(*args).first().map(|arg| arg.layout);
+                let scalar = first.is_some_and(|layout| {
+                    matches!(
+                        ir.layout(layout).shape,
+                        cove_ir::Shape::Word(cove_ir::Repr::Float | cove_ir::Repr::Duration)
+                    )
+                });
+                (!scalar).then(|| format!("{:?}", ir.intrinsic_site(*site).intrinsic))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        called,
+        Vec::<String>::new(),
+        "the walk makes no builtin call over a value"
+    );
+
+    let oracle = on_a_deep_stack(move || {
+        let (sources, program) = probed();
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let runtime = Runtime::new(program, sources, hosts);
+        said(Interpreter::new(&runtime).invoke("m", "main", Vec::new()))
+    });
+    let machine = on_a_deep_stack(move || {
+        let (sources, program) = probed();
+        let ir = lowered(&sources, &program);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let runtime = Runtime::new(program, sources, hosts.clone());
+        said(Vm::new(&runtime, &hosts, &ir).invoke("m", "main", Vec::new()))
+    });
+    assert_eq!(machine, oracle, "the two evaluators describe alike");
+    assert_eq!(
+        oracle,
+        Answer::Value(
+            " k6/13 'bag' k6/2= 1 2 k8/2= 'a' 'b' k9/2= 3 4 k10/2= 5 6 k11/2 'k' 7 k12/3= 1 4 \
+             false 1.5 2ms true k7#1/1 8 k7#1/1 'bad' k6/2= 9 10 | k7#0/0 | k7#1/1 3 | k7#2/1 \
+             'n' | k6/1 k13/0"
+                .to_string()
+        )
+    );
+}

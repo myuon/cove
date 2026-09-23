@@ -3670,6 +3670,20 @@ impl Callable for Interpreter<'_> {
             _ => None,
         }
     }
+
+    /// A declared enum's case by its position in the declaration, which is
+    /// the order `cove_ir`'s `enum_layout` numbers discriminants in; a host
+    /// enum's by its position in the shipped schema, which is the order the
+    /// lowering reads the same cases in. A value's type name is qualified, so
+    /// the module is everything before its last dot.
+    fn case_index(&self, type_name: &str, case: &str) -> Option<usize> {
+        let (module, name) = type_name.rsplit_once('.')?;
+        if let Some((_, decl)) = self.find_enum(module, name) {
+            return decl.cases.iter().position(|held| held.name.node == case);
+        }
+        let declared = cove_schema::hosts::module(module)?.declared_type(name)?;
+        declared.cases.iter().position(|held| *held == case)
+    }
 }
 
 /// A declared function used as a value: a closure over nothing.

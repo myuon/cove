@@ -158,6 +158,47 @@ impl Body<'_> {
             ("setSlice", [items, from, count]) => {
                 self.core_set_slice(expr, &items.value, &from.value, &count.value, want)
             }
+            ("dynamicOpen", [value]) => self.core_dynamic_open(expr, &value.value, want),
+            ("dynamicKind", [view]) => self.core_dynamic_observe(
+                expr,
+                &view.value,
+                shapes::INT,
+                |dst, view| Inst::DynKind { dst, view },
+                want,
+            ),
+            ("dynamicSameType", [a, b]) => {
+                self.core_dynamic_same_type(expr, &a.value, &b.value, want)
+            }
+            ("dynamicBool", [view]) => {
+                self.core_dynamic_read(expr, &view.value, shapes::BOOL, want)
+            }
+            ("dynamicInt", [view]) => self.core_dynamic_read(expr, &view.value, shapes::INT, want),
+            ("dynamicFloat", [view]) => {
+                self.core_dynamic_read(expr, &view.value, shapes::FLOAT, want)
+            }
+            ("dynamicDuration", [view]) => {
+                self.core_dynamic_read(expr, &view.value, shapes::DURATION, want)
+            }
+            ("dynamicString", [view]) => {
+                self.core_dynamic_read(expr, &view.value, shapes::STR, want)
+            }
+            ("dynamicCase", [view]) => self.core_dynamic_observe(
+                expr,
+                &view.value,
+                shapes::INT,
+                |dst, view| Inst::DynCase { dst, view },
+                want,
+            ),
+            ("dynamicChildCount", [view]) => self.core_dynamic_observe(
+                expr,
+                &view.value,
+                shapes::INT,
+                |dst, view| Inst::DynCount { dst, view },
+                want,
+            ),
+            ("dynamicChild", [view, index]) => {
+                self.core_dynamic_child(expr, &view.value, &index.value, want)
+            }
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -1716,6 +1757,135 @@ impl Body<'_> {
     pub(super) fn unit_answer(&mut self, expr: &Expr, want: Option<Dest>) -> Val {
         let dst = self.answer_at(want, shapes::UNIT);
         self.emit(Inst::Unit { dst: dst.slot }, expr.span);
+        dst
+    }
+
+    /// `core.dynamicOpen(value)`: [`Inst::DynOpen`] of the box `value` is.
+    ///
+    /// **Only a box.** ADR 0068's Decision 5 keeps every statically known
+    /// layout on its synthesized fast path, so a call over anything whose
+    /// layout this lowering knows is a gap here rather than a reflection:
+    /// opening it would route a known layout through the dynamic view, which
+    /// is the structural regression the ADR's gate names. A value whose type
+    /// is erased — `dyn Trait`, a Host `Any` — is one reference word to a box,
+    /// and that is the only operand the instruction takes.
+    fn core_dynamic_open(&mut self, expr: &Expr, value: &Expr, want: Option<Dest>) -> Val {
+        let Some(ty) = self.settled_ty(value) else {
+            return self.dead(expr);
+        };
+        let Some(layout) = self.layout(&ty, value.span) else {
+            return self.dead(expr);
+        };
+        if !self.is_boxed(layout) {
+            return self.gap(
+                &format!(
+                    "`core.dynamicOpen` of a `{ty}`, whose layout is known — ADR 0068 reflects \
+                     only on an erased value"
+                ),
+                expr,
+            );
+        }
+        let src = self.expr(value);
+        let dst = self.answer_at(want, shapes::DYNAMIC_VIEW);
+        self.emit(
+            Inst::DynOpen {
+                dst: dst.slot,
+                src: src.slot,
+            },
+            expr.span,
+        );
+        self.release(src, expr.span);
+        dst
+    }
+
+    /// One of ADR 0068's observations that reads one view and writes one word
+    /// of `answer`: `core.dynamicKind`, `core.dynamicCase` and
+    /// `core.dynamicChildCount`.
+    fn core_dynamic_observe(
+        &mut self,
+        expr: &Expr,
+        view: &Expr,
+        answer: LayoutId,
+        inst: fn(Slot, Slot) -> Inst,
+        want: Option<Dest>,
+    ) -> Val {
+        let held = self.expr(view);
+        let dst = self.answer_at(want, answer);
+        self.emit(inst(dst.slot, held.slot), expr.span);
+        self.release(held, expr.span);
+        dst
+    }
+
+    /// `core.dynamicBool`, `core.dynamicInt`, `core.dynamicFloat`,
+    /// `core.dynamicDuration` and `core.dynamicString`: one [`Inst::DynRead`]
+    /// into a word of `answer`, whose `Repr` is which of the five it is.
+    fn core_dynamic_read(
+        &mut self,
+        expr: &Expr,
+        view: &Expr,
+        answer: LayoutId,
+        want: Option<Dest>,
+    ) -> Val {
+        self.core_dynamic_observe(
+            expr,
+            view,
+            answer,
+            |dst, view| Inst::DynRead { dst, view },
+            want,
+        )
+    }
+
+    /// `core.dynamicSameType(a, b)`: one [`Inst::DynSameType`] over two views.
+    fn core_dynamic_same_type(
+        &mut self,
+        expr: &Expr,
+        a: &Expr,
+        b: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let left = self.expr(a);
+        let right = self.expr(b);
+        let dst = self.answer_at(want, shapes::BOOL);
+        self.emit(
+            Inst::DynSameType {
+                dst: dst.slot,
+                a: left.slot,
+                b: right.slot,
+            },
+            expr.span,
+        );
+        self.release(right, expr.span);
+        self.release(left, expr.span);
+        dst
+    }
+
+    /// `core.dynamicChild(view, index)`: one [`Inst::DynChild`], answering a
+    /// view in the location the surrounding form asked for.
+    ///
+    /// The answer may be the same location as the view it is projected from
+    /// — `view = core.dynamicChild(view, 0)` is how a walk descends — and the
+    /// machine reads the whole parent before it writes the child, so that is
+    /// not a hazard to arrange around here.
+    fn core_dynamic_child(
+        &mut self,
+        expr: &Expr,
+        view: &Expr,
+        index: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let parent = self.expr(view);
+        let at = self.expr(index);
+        let dst = self.answer_at(want, shapes::DYNAMIC_VIEW);
+        self.emit(
+            Inst::DynChild {
+                dst: dst.slot,
+                view: parent.slot,
+                index: at.slot,
+            },
+            expr.span,
+        );
+        self.release(at, expr.span);
+        self.release(parent, expr.span);
         dst
     }
 

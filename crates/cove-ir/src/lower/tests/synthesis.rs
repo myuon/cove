@@ -357,7 +357,7 @@ fn an_enum_orders_by_case_name_and_not_by_case_index() {
             "order<"
         ),
         "\
-fn @<synth>.order<m.Mark#16>(m.Mark m.Mark) -> Int
+fn @<synth>.order<m.Mark#17>(m.Mark m.Mark) -> Int
   frame 16: s0!:tag s1!:int s2!:ref s3!:tag s4!:int s5!:ref s6:int s7:int s8:ref s9:ref \
 s10:int s11:ref s12:ref s13:bool s14:ref s15:ref
      0  switch s0:tag [1 3 5] else 7
@@ -988,10 +988,10 @@ fn a_layout_that_reaches_itself_renders_by_calling_itself() {
     );
     assert_eq!(
         walks_named(&program, "renders<"),
-        ["renders<m.Node#16>", "renders<Array#17>"]
+        ["renders<m.Node#17>", "renders<Array#18>"]
     );
     let walk = synthesized(&program, "renders<Array");
-    assert!(walk.contains("<synth>.renders<m.Node#16>"), "{walk}");
+    assert!(walk.contains("<synth>.renders<m.Node#17>"), "{walk}");
 }
 
 /// A program that interpolates only a `String` and an `Int` makes no walk at

@@ -243,6 +243,9 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "<tag>",
             "Bytes",
             "ByteBuffer",
+            // ADR 0068's view, seeded beside the byte buffer's owner for its
+            // reason: one program-wide layout whatever it views.
+            "DynamicView",
             // `std.float`'s limb arithmetic — `scale(limbs: Vector<Int>, ..)`
             // and its neighbours — is the first non-generic library code whose
             // *signature* names a `Vector`, and those signatures are interned

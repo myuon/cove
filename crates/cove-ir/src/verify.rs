@@ -453,6 +453,23 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
+                // ADR 0068's observations. A view's owner is a reference this
+                // pass cannot name the layout of — which object a view roots is
+                // a run-time fact — so every word a reflection writes says no
+                // fact.
+                Inst::DynKind { dst, .. }
+                | Inst::DynSameType { dst, .. }
+                | Inst::DynRead { dst, .. }
+                | Inst::DynCase { dst, .. }
+                | Inst::DynCount { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
+                    let width = words(self.program.view_layout);
+                    poison(&mut objects, dst, width);
+                    poison(&mut funcs, dst, width);
+                }
                 // ADR 0052's two poison `dst` exactly as `RunLoad` does rather
                 // than `identify`ing it the way `Inst::Alloc` and `Inst::Str`
                 // do: `GrowableAlloc` allocates the owner its storage implies —
@@ -1275,6 +1292,57 @@ impl Check<'_> {
                     self.fits(at, dst, layout, "what a box is opened into");
                 }
             }
+            // ---- reflection ----------------------------------------------
+            // ADR 0068's Decision 9, the verifier's half: a view operand is a
+            // whole location of the program's view layout — its three words
+            // with the owner a reference, so the collector traces it — and a
+            // scalar is the word its instruction answers. What a view *views*
+            // is a run-time fact, checked by the machine from the object's
+            // header; what this can hold the lowering to is that nothing reads
+            // a view out of words that are not one.
+            Inst::DynOpen { dst, src } => {
+                self.expect(at, src, &[Repr::Ref]);
+                self.view(at, dst, "what an open answers");
+            }
+            Inst::DynKind { dst, view } => {
+                self.expect(at, dst, &[Repr::Int]);
+                self.view(at, view, "what a kind is asked of");
+            }
+            Inst::DynSameType { dst, a, b } => {
+                self.expect(at, dst, &[Repr::Bool]);
+                self.view(at, a, "the first view a type is compared of");
+                self.view(at, b, "the second view a type is compared of");
+            }
+            // The destination's `Repr` is the whole of which scalar is read,
+            // so it is held to the five a view can answer: the four scalar
+            // words, and the reference a string is.
+            Inst::DynRead { dst, view } => {
+                self.expect(
+                    at,
+                    dst,
+                    &[
+                        Repr::Bool,
+                        Repr::Int,
+                        Repr::Float,
+                        Repr::Duration,
+                        Repr::Ref,
+                    ],
+                );
+                self.view(at, view, "what a scalar is read from");
+            }
+            Inst::DynCase { dst, view } => {
+                self.expect(at, dst, &[Repr::Int]);
+                self.view(at, view, "what a case is asked of");
+            }
+            Inst::DynCount { dst, view } => {
+                self.expect(at, dst, &[Repr::Int]);
+                self.view(at, view, "what a child count is asked of");
+            }
+            Inst::DynChild { dst, view, index } => {
+                self.expect(at, index, &[Repr::Int]);
+                self.view(at, view, "what a child is projected from");
+                self.view(at, dst, "what a projection answers");
+            }
             // ---- tasks ---------------------------------------------------
             Inst::ScopeEnter { dst, name } => {
                 self.expect(at, dst, &[Repr::Scope]);
@@ -1449,6 +1517,34 @@ impl Check<'_> {
                 "a three-way order answers an `Int`, and only `cmp` carries one".to_string(),
             );
         }
+    }
+
+    /// Whether `slot` begins a whole view: a location of
+    /// [`Program::view_layout`], which must itself be the three words
+    /// [`crate::dynamic::VIEW_WORDS`] says a view is.
+    ///
+    /// The second half is checked here rather than trusted because the
+    /// program names its own view layout, and a program whose "view" had no
+    /// reference word would hold an owner the collector never traces — the
+    /// one mistake a view exists to make impossible.
+    fn view(&mut self, at: Option<usize>, slot: Slot, what: &str) -> bool {
+        let layout = self.program.view_layout;
+        if !self.layout_exists(at, layout) {
+            return false;
+        }
+        let described = self.program.layout(layout);
+        if described.words != crate::dynamic::VIEW_WORDS {
+            let name = described.name.clone();
+            self.fault(
+                at,
+                format!(
+                    "{what} is a view, and the program's view layout `{name}` is not the three \
+                     words a view is"
+                ),
+            );
+            return false;
+        }
+        self.fits(at, slot, layout, what)
     }
 
     fn expect(&mut self, at: Option<usize>, slot: Slot, want: &[Repr]) {
@@ -2672,6 +2768,8 @@ mod tests {
     const MAP_INT: LayoutId = LayoutId(11);
     /// `()`, the answer of an intrinsic that answers nothing.
     const UNIT: LayoutId = LayoutId(12);
+    /// ADR 0068's view: `[Int, Ref, Int]`, the program's `view_layout`.
+    const VIEW: LayoutId = LayoutId(13);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -2761,6 +2859,7 @@ mod tests {
                 },
             ),
             Layout::word("Unit", Repr::Unit),
+            crate::dynamic::view_layout(INT, STR),
         ]
     }
 
@@ -2793,6 +2892,7 @@ mod tests {
             layouts: layouts(),
             str_layout: STR,
             boxed_layout: BOXED,
+            view_layout: VIEW,
             ..Program::default()
         }
     }
@@ -2802,6 +2902,163 @@ mod tests {
             Ok(()) => Vec::new(),
             Err(items) => items.into_iter().map(|item| item.what).collect(),
         }
+    }
+
+    /// The frame every reflection fixture below runs in: a box at 0, a view
+    /// at 1..=3, a second view at 4..=6, then an `Int`, a `Bool`, a `Float`,
+    /// a `Duration`, a reference and an `Addr`.
+    fn reflecting(code: Vec<Inst>) -> Program {
+        program(vec![function(
+            vec![
+                Repr::Ref,
+                Repr::Int,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Bool,
+                Repr::Float,
+                Repr::Duration,
+                Repr::Ref,
+                Repr::Addr,
+            ],
+            INT,
+            code.into_iter().chain([Inst::Return { src: 7 }]).collect(),
+        )])
+    }
+
+    /// Every one of ADR 0068's seven observations, well formed: each view
+    /// operand is a whole `[Int, Ref, Int]` location and each scalar is the
+    /// word its instruction answers — and a read into each of the five words
+    /// a view can hold.
+    #[test]
+    fn every_reflection_instruction_is_accepted_over_whole_views() {
+        let held = reflecting(vec![
+            Inst::DynOpen { dst: 1, src: 0 },
+            Inst::DynKind { dst: 7, view: 1 },
+            Inst::DynSameType { dst: 8, a: 1, b: 4 },
+            Inst::DynRead { dst: 8, view: 1 },
+            Inst::DynRead { dst: 7, view: 1 },
+            Inst::DynRead { dst: 9, view: 1 },
+            Inst::DynRead { dst: 10, view: 1 },
+            Inst::DynRead { dst: 11, view: 1 },
+            Inst::DynCase { dst: 7, view: 1 },
+            Inst::DynCount { dst: 7, view: 4 },
+            Inst::DynChild {
+                dst: 4,
+                view: 1,
+                index: 7,
+            },
+        ]);
+        assert_eq!(faults(&held), Vec::<String>::new());
+    }
+
+    /// Each observation refused, once per operand it has: a view that begins
+    /// one word off — so its owner is not a reference the collector traces —
+    /// and a scalar in a word of the wrong kind.
+    #[test]
+    fn every_reflection_instruction_refuses_a_view_or_a_scalar_out_of_place() {
+        let refused: Vec<(Inst, &str)> = vec![
+            (
+                Inst::DynOpen { dst: 2, src: 0 },
+                "what an open answers is `DynamicView`, whose word 0 is int, but slot 2 holds ref",
+            ),
+            (
+                Inst::DynOpen { dst: 1, src: 7 },
+                "slot 7 holds int, but this wants ref",
+            ),
+            (
+                Inst::DynKind { dst: 8, view: 1 },
+                "slot 8 holds bool, but this wants int",
+            ),
+            (
+                Inst::DynKind { dst: 7, view: 0 },
+                "what a kind is asked of is `DynamicView`, whose word 0 is int, but slot 0 holds ref",
+            ),
+            (
+                Inst::DynSameType { dst: 7, a: 1, b: 4 },
+                "slot 7 holds int, but this wants bool",
+            ),
+            (
+                Inst::DynSameType { dst: 8, a: 1, b: 5 },
+                "the second view a type is compared of is `DynamicView`, whose word 0 is int, but \
+                 slot 5 holds ref",
+            ),
+            (
+                Inst::DynRead { dst: 12, view: 1 },
+                "slot 12 holds addr, but this wants bool or int or float or duration or ref",
+            ),
+            (
+                Inst::DynRead { dst: 7, view: 2 },
+                "what a scalar is read from is `DynamicView`, whose word 0 is int, but slot 2 holds \
+                 ref",
+            ),
+            (
+                Inst::DynCase { dst: 9, view: 1 },
+                "slot 9 holds float, but this wants int",
+            ),
+            (
+                Inst::DynCount { dst: 10, view: 1 },
+                "slot 10 holds duration, but this wants int",
+            ),
+            (
+                Inst::DynChild {
+                    dst: 4,
+                    view: 1,
+                    index: 8,
+                },
+                "slot 8 holds bool, but this wants int",
+            ),
+            (
+                Inst::DynChild {
+                    dst: 2,
+                    view: 1,
+                    index: 7,
+                },
+                "what a projection answers is `DynamicView`, whose word 0 is int, but slot 2 holds \
+                 ref",
+            ),
+        ];
+        for (inst, want) in refused {
+            let shown = format!("{inst:?}");
+            assert_eq!(
+                faults(&reflecting(vec![inst])),
+                vec![want.to_string()],
+                "{shown}"
+            );
+        }
+    }
+
+    /// A view cannot run off the top of the frame: its three words are checked
+    /// as a whole location, not as its first word.
+    #[test]
+    fn a_view_that_runs_off_the_frame_is_refused() {
+        let held = reflecting(vec![Inst::DynKind { dst: 7, view: 11 }]);
+        assert_eq!(
+            faults(&held),
+            vec!["what a kind is asked of is `DynamicView`, 3 words at slot 11, and the frame has 13"
+                .to_string()]
+        );
+    }
+
+    /// A program whose view layout is not the three words a view is — here,
+    /// with no reference word — is refused at every view it holds, because an
+    /// owner in a word the collector does not trace is the one thing a view
+    /// may not be.
+    #[test]
+    fn a_view_layout_without_its_owner_word_is_refused() {
+        let mut held = reflecting(vec![Inst::DynKind { dst: 7, view: 1 }]);
+        held.view_layout = POINT;
+        assert_eq!(
+            faults(&held),
+            vec![
+                "what a kind is asked of is a view, and the program's view layout `Point` is not \
+                 the three words a view is"
+                    .to_string()
+            ]
+        );
     }
 
     /// A resource operation is addressed to a `Repr::Host` word, and the

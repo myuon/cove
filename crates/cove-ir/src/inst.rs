@@ -1752,6 +1752,82 @@ pub enum Inst {
         layout: LayoutId,
     },
 
+    // ---- reflection --------------------------------------------------------
+    //
+    // ADR 0068's structural observations of an erased value. Each is one
+    // question about language structure — what kind of value, which case, how
+    // many children, which child, which scalar — and none is named after an
+    // operation of the standard library: equality, order, key admission and
+    // rendering are Cove algorithms over these, not instructions.
+    //
+    // A *view* operand or destination is a run of [`crate::Program::view_layout`]'s
+    // three words: the [`LayoutId`] of the viewed value, the object that roots
+    // it, and the payload word it begins at. That is below the boundary — no
+    // core intrinsic hands a Cove body either number — and it is what lets a
+    // view live in a frame's slots and in a `Vector` without an object of its
+    // own. The owner is a [`Repr::Ref`](crate::Repr::Ref) word, so the
+    // collector traces it wherever the view is, and what the view reads is
+    // reachable for exactly as long as the view is.
+    //
+    // A view never denotes a box or a bare reference word. Opening a box and
+    // projecting a child both *normalise*: where the value's words are a
+    // single reference, it is followed, the object's layout is read from its
+    // own header — a static `<ref>` layout names nothing — and a box is opened
+    // again, through as many boxes as there are. So a heap value is viewed as
+    // `(its header layout, the object, 0)` and an inline value as
+    // `(its layout, the object it is in, where)`.
+    /// `dst = <the view of the value the box in src holds>`.
+    ///
+    /// `src` is one [`Repr::Ref`](crate::Repr::Ref) word, and that it names a
+    /// box is checked at run time from the object's header: the lowering emits
+    /// this only for a value whose static type was erased, and ADR 0068's
+    /// Decision 5 is why it emits it for nothing else.
+    DynOpen { dst: Slot, src: Slot },
+    /// `dst = <the kind code of the value view names>`, an `Int` from
+    /// [`crate::DynamicKind`]'s table.
+    DynKind { dst: Slot, view: Slot },
+    /// `dst = <whether the values a and b view have one semantic type>`, a
+    /// `Bool`.
+    ///
+    /// The kinds are equal and, for a struct, an enum and a range, so are the
+    /// declared names with any instantiation left off: an `Option<Int>` and an
+    /// `Option<String>` are one type, as they are to the oracle, whose values
+    /// carry no type arguments at all.
+    DynSameType { dst: Slot, a: Slot, b: Slot },
+    /// `dst = <the scalar the value view names>`.
+    ///
+    /// Which scalar is the destination slot's [`Repr`](crate::Repr): a
+    /// `Bool`, an `Int`, a `Float` or a `Duration` word is read as that word,
+    /// and a [`Repr::Ref`](crate::Repr::Ref) is the `String` object the view
+    /// already names — no copy, because a string is immutable. A view whose
+    /// kind does not agree with the destination is an internal runtime error:
+    /// the standard library asks [`Inst::DynKind`] first, so a disagreement is
+    /// a bug in it rather than something a program can reach.
+    ///
+    /// One instruction rather than five, because the five differ only in the
+    /// word they write and the frame already says which word that is.
+    DynRead { dst: Slot, view: Slot },
+    /// `dst = <the case index of the enum view names>`, an `Int`; a view of
+    /// anything but an enum is an internal runtime error.
+    DynCase { dst: Slot, view: Slot },
+    /// `dst = <how many children the value view names has>`, an `Int`.
+    ///
+    /// A struct's and a range's fields, the current case's parts, an array's,
+    /// a set's and a vector's elements, and twice a map's entries — key then
+    /// value — and nought for every other kind.
+    DynCount { dst: Slot, view: Slot },
+    /// `dst = <the view of child index of the value view names>`, in
+    /// [`Inst::DynCount`]'s canonical order.
+    ///
+    /// Bounds checked below the boundary: an index outside `0 ..< count` is an
+    /// internal runtime error. **It allocates nothing.** A child inline in its
+    /// parent keeps the parent's owner and adds its offset; a child inside a
+    /// run — an array's, a set's, a map's, a vector's store — has that run as
+    /// its owner; and a child that is a reference is followed. Every one of
+    /// them is a view of three words, which is ADR 0068's "no child allocation
+    /// required merely to traverse a value".
+    DynChild { dst: Slot, view: Slot, index: Slot },
+
     // ---- tasks -------------------------------------------------------------
     /// `dst = <a new task scope, open>`
     ///

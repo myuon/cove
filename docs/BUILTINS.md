@@ -81,6 +81,17 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `setFinish` | `core.setFinish(run: Vector<T>) -> Set<T>` |
 | `mapFinish` | `core.mapFinish(run: Vector<MapEntry<K, V>>) -> Map<K, V>` |
 | `setSlice` | `core.setSlice(items: Set<T>, from: Int, count: Int) -> Array<T>` |
+| `dynamicOpen` | `core.dynamicOpen(value: Any) -> DynamicView` |
+| `dynamicKind` | `core.dynamicKind(view: DynamicView) -> Int` |
+| `dynamicSameType` | `core.dynamicSameType(a: DynamicView, b: DynamicView) -> Bool` |
+| `dynamicBool` | `core.dynamicBool(view: DynamicView) -> Bool` |
+| `dynamicInt` | `core.dynamicInt(view: DynamicView) -> Int` |
+| `dynamicFloat` | `core.dynamicFloat(view: DynamicView) -> Float` |
+| `dynamicDuration` | `core.dynamicDuration(view: DynamicView) -> Duration` |
+| `dynamicString` | `core.dynamicString(view: DynamicView) -> String` |
+| `dynamicCase` | `core.dynamicCase(view: DynamicView) -> Int` |
+| `dynamicChildCount` | `core.dynamicChildCount(view: DynamicView) -> Int` |
+| `dynamicChild` | `core.dynamicChild(view: DynamicView, index: Int) -> DynamicView` |
 
 ## Builtin types
 

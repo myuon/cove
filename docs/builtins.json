@@ -43,7 +43,18 @@
     {"name": "vectorCopyFromMap", "signature": "core.vectorCopyFromMap(out: Vector<MapEntry<K, V>>, at: Int, entries: Map<K, V>, from: Int, count: Int) -> Unit", "generics": ["K", "V"], "params": [{"name": "out", "type": "Vector<MapEntry<K, V>>"}, {"name": "at", "type": "Int"}, {"name": "entries", "type": "Map<K, V>"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Unit", "libraryOnly": true},
     {"name": "setFinish", "signature": "core.setFinish(run: Vector<T>) -> Set<T>", "generics": ["T"], "params": [{"name": "run", "type": "Vector<T>"}], "result": "Set<T>", "libraryOnly": true},
     {"name": "mapFinish", "signature": "core.mapFinish(run: Vector<MapEntry<K, V>>) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "run", "type": "Vector<MapEntry<K, V>>"}], "result": "Map<K, V>", "libraryOnly": true},
-    {"name": "setSlice", "signature": "core.setSlice(items: Set<T>, from: Int, count: Int) -> Array<T>", "generics": ["T"], "params": [{"name": "items", "type": "Set<T>"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Array<T>", "libraryOnly": true}
+    {"name": "setSlice", "signature": "core.setSlice(items: Set<T>, from: Int, count: Int) -> Array<T>", "generics": ["T"], "params": [{"name": "items", "type": "Set<T>"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Array<T>", "libraryOnly": true},
+    {"name": "dynamicOpen", "signature": "core.dynamicOpen(value: Any) -> DynamicView", "generics": [], "params": [{"name": "value", "type": "Any"}], "result": "DynamicView", "libraryOnly": true},
+    {"name": "dynamicKind", "signature": "core.dynamicKind(view: DynamicView) -> Int", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
+    {"name": "dynamicSameType", "signature": "core.dynamicSameType(a: DynamicView, b: DynamicView) -> Bool", "generics": [], "params": [{"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true},
+    {"name": "dynamicBool", "signature": "core.dynamicBool(view: DynamicView) -> Bool", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true},
+    {"name": "dynamicInt", "signature": "core.dynamicInt(view: DynamicView) -> Int", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
+    {"name": "dynamicFloat", "signature": "core.dynamicFloat(view: DynamicView) -> Float", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Float", "libraryOnly": true},
+    {"name": "dynamicDuration", "signature": "core.dynamicDuration(view: DynamicView) -> Duration", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Duration", "libraryOnly": true},
+    {"name": "dynamicString", "signature": "core.dynamicString(view: DynamicView) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "String", "libraryOnly": true},
+    {"name": "dynamicCase", "signature": "core.dynamicCase(view: DynamicView) -> Int", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
+    {"name": "dynamicChildCount", "signature": "core.dynamicChildCount(view: DynamicView) -> Int", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
+    {"name": "dynamicChild", "signature": "core.dynamicChild(view: DynamicView, index: Int) -> DynamicView", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "index", "type": "Int"}], "result": "DynamicView", "libraryOnly": true}
   ],
   "types": [
     {
