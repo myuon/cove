@@ -211,7 +211,11 @@ fn the_server_answers_its_routes_and_stops_when_the_listener_is_empty() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.served,
         [
@@ -369,7 +373,11 @@ fn the_callback_server_serves_both_routes_through_its_middleware() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.served,
         ["200 {\"status\":\"ok\"}", "201 {\"id\":\"b-1\"}"]
@@ -479,7 +487,11 @@ fn config_validates_what_the_environment_supplied() {
 fn values_reports_its_own_collection_lifecycle() {
     let ran = run("values.main", &["console"], Fakes::default());
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         ["Pending", "Confirmed", "2", "2", "2", "1"],
@@ -494,7 +506,11 @@ fn values_reports_its_own_collection_lifecycle() {
 fn traits_reports_both_forms_of_dispatch() {
     let ran = run("traits.main", &["console"], Fakes::default());
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -527,7 +543,11 @@ fn traits_reports_both_forms_of_dispatch() {
 fn rules_decides_every_sample_pull_request() {
     let ran = run("rules.main", &["console"], Fakes::default());
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -567,7 +587,11 @@ fn restricted_reads_only_the_document_the_host_named() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(ran.console, ["5 words"]);
 }
 
@@ -663,7 +687,11 @@ fn cq_summarizes_revenue_by_property() {
         file("bookings.jsonl", BOOKINGS),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -689,7 +717,11 @@ fn cq_normalizes_the_rate_card_into_json_lines() {
         file("rates.csv", RATES),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -721,7 +753,11 @@ fn cq_stops_after_the_limit_it_was_given() {
         file("bookings.jsonl", BOOKINGS),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -759,7 +795,11 @@ fn cq_counts_the_records_it_took_against_the_limit_not_the_good_ones() {
         file("bookings-malformed.jsonl", MALFORMED),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -819,7 +859,11 @@ fn cq_reports_and_skips_the_records_it_cannot_read() {
         file("bookings-malformed.jsonl", MALFORMED),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -865,7 +909,11 @@ fn cq_writes_to_the_file_it_was_given_rather_than_the_console() {
         file("bookings.jsonl", BOOKINGS),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         ["cq: read 4 records, wrote 3 rows to summary.csv"],
@@ -897,7 +945,11 @@ fn cq_writes_to_the_file_it_was_given_rather_than_the_console() {
 fn cq_prints_its_usage_when_asked_for_help() {
     let ran = cq(&["--help"], BTreeMap::new());
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -944,7 +996,7 @@ fn cq_reads_back_the_sample_it_generated() {
     );
 
     assert!(
-        ok(&generated.value).eq_value(&Value::unit()),
+        ok(&generated.value).eq_value(&Value::unit()) == Ok(true),
         "{}",
         generated.value
     );
@@ -970,7 +1022,11 @@ fn cq_reads_back_the_sample_it_generated() {
         generated.files,
     );
 
-    assert!(ok(&read.value).eq_value(&Value::unit()), "{}", read.value);
+    assert!(
+        ok(&read.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        read.value
+    );
     assert_eq!(
         read.console,
         [
@@ -1227,7 +1283,11 @@ fn covecheck_answers_ok_when_every_endpoint_is_healthy() {
 
     let ran = covecheck(&["checks.json"], bodies);
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         *ran.console.last().expect("a summary line"),
         "5 passed, 0 failed, 0 skipped"
@@ -1379,7 +1439,11 @@ fn life_runs_one_world_and_reports_the_same_one_twice() {
         Fakes::default(),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console,
         [
@@ -1424,7 +1488,11 @@ fn life_takes_its_world_from_its_seed_and_writes_a_journal() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
+    assert!(
+        ok(&ran.value).eq_value(&Value::unit()) == Ok(true),
+        "{}",
+        ran.value
+    );
     assert_eq!(
         ran.console.first().map(String::as_str),
         Some("cove-life: seed 42, 8 tick(s) over 12x8 cells")

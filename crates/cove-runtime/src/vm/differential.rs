@@ -3930,6 +3930,9 @@ fn probeDescribe(root: DynamicView) -> String {
         out = \"{out}=\"
       }
     }
+    if core.dynamicSameObject(view, view) {
+      out = \"{out}!\"
+    }
     var at = count - 1
     while at >= 0 {
       pending.push(core.dynamicChild(view, at))
@@ -4012,6 +4015,7 @@ export fn main() -> String {
         "DynRead",
         "DynCase",
         "DynSameType",
+        "DynSameObject",
     ] {
         assert!(
             walk.code
@@ -4065,7 +4069,7 @@ export fn main() -> String {
     assert_eq!(
         oracle,
         Answer::Value(
-            " k6/13 'bag' k6/2= 1 2 k8/2= 'a' 'b' k9/2= 3 4 k10/2= 5 6 k11/2 'k' 7 k12/3= 1 4 \
+            " k6/13 'bag' k6/2= 1 2 k8/2= 'a' 'b' k9/2=! 3 4 k10/2= 5 6 k11/2 'k' 7 k12/3= 1 4 \
              false 1.5 2ms true k7#1/1 8 k7#1/1 'bad' k6/2= 9 10 | k7#0/0 | k7#1/1 3 | k7#2/1 \
              'n' | k6/1 k13/0"
                 .to_string()
@@ -4448,7 +4452,7 @@ fn dynamic_equality_agrees_with_eq_value_on_every_kind() {
             let runtime = Runtime::new(program, sources, hosts);
             let mut interp = Interpreter::new(&runtime);
             for (label, a, b) in reflected_pairs() {
-                let reference = a.eq_value(&b);
+                let reference = a.eq_value(&b).expect("no pair here contains itself");
                 let said = said(interp.invoke("std.dynamic", "equals", vec![a, b]));
                 assert_eq!(
                     said,
@@ -4518,6 +4522,13 @@ export fn probeRepeat(a: Any, b: Any, n: Int) -> Int {
 /// made with room for its thirteen fields, its first field's two elements go
 /// on top of the twelve fields after it, and each store grows once — six
 /// objects, and never one per node.
+///
+/// **And four more for the path** (issue #493): the `Holder`'s `marks` field
+/// is a `Vector` whose elements have children, so the walk descends into a
+/// vector and makes the path of vector pairs it is inside — one vector of
+/// views and one of heights, an owner and a store each, made with room for
+/// four pairs, which one level of vectors never outgrows. Ten, and still never
+/// one per node; a value that nests without a vector does not make the path.
 #[test]
 fn dynamic_equality_allocates_only_to_descend() {
     /// A value to compare with itself, made afresh for each run.
@@ -4576,7 +4587,7 @@ fn dynamic_equality_allocates_only_to_descend() {
             ("point", 0),
             ("array", 0),
             ("some", 0),
-            ("holder", 6),
+            ("holder", 10),
         ],
         "objects allocated by one comparison"
     );

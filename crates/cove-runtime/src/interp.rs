@@ -3516,7 +3516,9 @@ impl<'a> Interpreter<'a> {
             }
             PatternKind::Literal(expr) => {
                 let literal = self.eval(env, expr)?;
-                Ok(value.eq_value(&literal))
+                Ok(value
+                    .eq_value(&literal)
+                    .map_err(|cycle| cycle.refusal().at(expr.span))?)
             }
             PatternKind::Variant { path, payload } => {
                 let Value(Repr::Enum(subject)) = value else {
@@ -3842,7 +3844,9 @@ pub(crate) fn binary(
                 .at(span)
                 .with_rule("`==` means value equality between values of the same type."));
             }
-            let equal = lhs.eq_value(rhs);
+            let equal = lhs
+                .eq_value(rhs)
+                .map_err(|cycle| cycle.refusal().at(span))?;
             Ok(Value(Repr::Bool(if op == BinaryOp::Eq {
                 equal
             } else {
@@ -5331,7 +5335,7 @@ fn renderAll(values: Array<dyn Display>) -> String {
         })));
         let answer = binary(BinaryOp::Eq, object, other, span)
             .expect("two trait objects at one trait are comparable");
-        assert!(answer.eq_value(&Value(Repr::Bool(false))));
+        assert!(answer.eq_value(&Value(Repr::Bool(false))) == Ok(true));
     }
 
     #[test]

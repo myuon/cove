@@ -258,12 +258,20 @@ fn the_run_writes_the_recording_a_run_writes() {
     // is the trap the lowering puts under every `match` for the arm nothing
     // covers — `format` matches the `Result` of `toInt` — and no function the
     // whole-package lowering emitted had needed one before.
+    //
+    // It is 1,624 since issue #493 made `==` refuse a value that contains
+    // itself, and the 38 words are the refusal's three sentences, which
+    // `std.dynamic` writes as literals and every program that lowers it
+    // places: the message, 53 bytes and eight words; the rule, 109 and
+    // fifteen; and the help, 109 and fifteen. A walk the lowering composes for
+    // a layout that can hold itself raises the same three by the same text,
+    // so it adds none of its own.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1586), capacity_words: Some(1586) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1624), capacity_words: Some(1624) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

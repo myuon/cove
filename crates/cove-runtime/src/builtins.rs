@@ -253,7 +253,10 @@ pub fn call_assertion(
                 .at(span)
                 .with_rule("`==` means value equality between values of the same type."));
             }
-            if args[0].eq_value(&args[1]) {
+            if args[0]
+                .eq_value(&args[1])
+                .map_err(|cycle| cycle.refusal().at(span))?
+            {
                 return Ok(Value::ok(Value(Repr::Unit)));
             }
             Ok(assertion_failure(format!(
@@ -1092,6 +1095,7 @@ pub fn call_core(
         "dynamicOpen" => Ok(args[0].erased().clone()),
         "dynamicKind" => Ok(Value(Repr::Int(dynamic_kind(&args[0]).code()))),
         "dynamicSameType" => Ok(Value(Repr::Bool(dynamic_same_type(&args[0], &args[1])))),
+        "dynamicSameObject" => Ok(Value(Repr::Bool(dynamic_same_object(&args[0], &args[1])))),
         "dynamicBool" | "dynamicInt" | "dynamicFloat" | "dynamicDuration" | "dynamicString" => {
             dynamic_read(name, &args[0]).map_err(|error| error.at(span))
         }
@@ -1169,6 +1173,18 @@ pub(crate) fn dynamic_kind(value: &Value) -> DynamicKind {
 pub(crate) fn dynamic_same_type(a: &Value, b: &Value) -> bool {
     let kind = dynamic_kind(a);
     kind == dynamic_kind(b) && (!kind.is_nominal() || dynamic_type_name(a) == dynamic_type_name(b))
+}
+
+/// `core.dynamicSameObject`: whether the two views are one `Vector` — the one
+/// storage a push through either would be seen through, which is what a
+/// vector's identity is in a tree of values, as its object is in the machine's
+/// memory. Nothing else is one object with anything, on either evaluator: the
+/// machine's `dynamic::same_object` says why.
+pub(crate) fn dynamic_same_object(a: &Value, b: &Value) -> bool {
+    match (a.erased(), b.erased()) {
+        (Value(Repr::Vector(a)), Value(Repr::Vector(b))) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
 }
 
 /// The declared name a nominal view's type has, with any instantiation left

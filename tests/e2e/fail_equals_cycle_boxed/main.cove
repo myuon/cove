@@ -1,0 +1,35 @@
+use console.println
+
+trait Shape {
+  fn sides(self) -> Int
+}
+
+/// A struct whose vector holds erased values: the cycle passes through a box,
+/// so `==` on two of them is `std.dynamic.equals`, the Cove walk over a view.
+struct Group {
+  members: Vector<dyn Shape>
+}
+
+impl Shape for Group {
+  fn sides(self) -> Int {
+    0
+  }
+}
+
+/// A group pushed into its own members, erased.
+fn looped() -> dyn Shape {
+  var members: Vector<dyn Shape> = Vector.of()
+  let group = Group(members: members)
+  members.push(group)
+  group
+}
+
+/// Two distinct groups that each contain themselves. Before issue #493 the
+/// Cove walk went round this for as long as fuel lasted, in constant memory.
+export fn main() -> Result<Unit, Error> {
+  let left = looped()
+  let right = looped()
+  println("about to compare two groups that contain themselves")?
+  println("never printed {left == right}")?
+  Ok(())
+}

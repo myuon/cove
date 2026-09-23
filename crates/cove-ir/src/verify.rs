@@ -459,6 +459,7 @@ impl Check<'_> {
                 // fact.
                 Inst::DynKind { dst, .. }
                 | Inst::DynSameType { dst, .. }
+                | Inst::DynSameObject { dst, .. }
                 | Inst::DynRead { dst, .. }
                 | Inst::DynCase { dst, .. }
                 | Inst::DynCount { dst, .. } => {
@@ -1312,6 +1313,11 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Bool]);
                 self.view(at, a, "the first view a type is compared of");
                 self.view(at, b, "the second view a type is compared of");
+            }
+            Inst::DynSameObject { dst, a, b } => {
+                self.expect(at, dst, &[Repr::Bool]);
+                self.view(at, a, "the first view an object is compared of");
+                self.view(at, b, "the second view an object is compared of");
             }
             // The destination's `Repr` is the whole of which scalar is read,
             // so it is held to the five a view can answer: the four scalar
@@ -2935,7 +2941,8 @@ mod tests {
         )])
     }
 
-    /// Every one of ADR 0068's seven observations, well formed: each view
+    /// Every one of ADR 0068's seven observations, and issue #493's identity
+    /// question beside them, well formed: each view
     /// operand is a whole `[Int, Ref, Int]` location and each scalar is the
     /// word its instruction answers — and a read into each of the five words
     /// a view can hold.
@@ -2945,6 +2952,7 @@ mod tests {
             Inst::DynOpen { dst: 1, src: 0 },
             Inst::DynKind { dst: 7, view: 1 },
             Inst::DynSameType { dst: 8, a: 1, b: 4 },
+            Inst::DynSameObject { dst: 8, a: 1, b: 4 },
             Inst::DynRead { dst: 8, view: 1 },
             Inst::DynRead { dst: 7, view: 1 },
             Inst::DynRead { dst: 9, view: 1 },
@@ -2991,6 +2999,15 @@ mod tests {
                 Inst::DynSameType { dst: 8, a: 1, b: 5 },
                 "the second view a type is compared of is `DynamicView`, whose word 0 is int, but \
                  slot 5 holds ref",
+            ),
+            (
+                Inst::DynSameObject { dst: 7, a: 1, b: 4 },
+                "slot 7 holds int, but this wants bool",
+            ),
+            (
+                Inst::DynSameObject { dst: 8, a: 5, b: 1 },
+                "the first view an object is compared of is `DynamicView`, whose word 0 is int, \
+                 but slot 5 holds ref",
             ),
             (
                 Inst::DynRead { dst: 12, view: 1 },

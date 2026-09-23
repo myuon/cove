@@ -1,0 +1,18 @@
+use console.println
+
+/// A struct holding a map whose values are vectors of the struct: the cycle
+/// passes through a map's entries, whose walk is a function of its own.
+struct Index {
+  named: Map<String, Vector<Index>>
+}
+
+/// Before issue #493 this aborted the native tier with a host stack overflow;
+/// it is refused like every other cycle.
+export fn main() -> Result<Unit, Error> {
+  var held: Vector<Index> = Vector.of()
+  let index = Index(named: Map.of(MapEntry(key: "self", value: held)))
+  held.push(index)
+  println("about to compare an index that contains itself")?
+  println("never printed {index == index}")?
+  Ok(())
+}

@@ -1090,7 +1090,7 @@ mod tests {
         let crossed = Transfer::of(&value)
             .expect("an array of task-safe values may cross")
             .into_value();
-        assert!(crossed.eq_value(&value), "{crossed} != {value}");
+        assert!(crossed.eq_value(&value) == Ok(true), "{crossed} != {value}");
     }
 
     #[test]
@@ -1192,7 +1192,7 @@ mod tests {
         let crossed = Transfer::of(&value)
             .expect("an array of structs built only from Ints is task-safe")
             .into_value();
-        assert!(crossed.eq_value(&value), "{crossed} != {value}");
+        assert!(crossed.eq_value(&value) == Ok(true), "{crossed} != {value}");
     }
 
     /// "Immutable task-safe values such as arrays may cross task boundaries"
@@ -1229,7 +1229,7 @@ mod tests {
         let crossed = Transfer::of(&value)
             .expect("an enum payload of Ints is task-safe")
             .into_value();
-        assert!(crossed.eq_value(&value), "{crossed} != {value}");
+        assert!(crossed.eq_value(&value) == Ok(true), "{crossed} != {value}");
     }
 
     /// An enum case's payload is walked exactly like a struct's fields, just
@@ -1262,7 +1262,7 @@ mod tests {
         let crossed = Transfer::of(&value)
             .expect("a map of Ints is task-safe")
             .into_value();
-        assert!(crossed.eq_value(&value), "{crossed} != {value}");
+        assert!(crossed.eq_value(&value) == Ok(true), "{crossed} != {value}");
     }
 
     #[test]
@@ -1292,7 +1292,7 @@ mod tests {
         match crossed {
             Value(Repr::Dyn(d)) => {
                 assert_eq!(&*d.trait_name, "render.Display");
-                assert!(d.value.eq_value(&Value(Repr::Str("hi".into()))));
+                assert!(d.value.eq_value(&Value(Repr::Str("hi".into()))) == Ok(true));
             }
             other => panic!("expected a `Dyn`, found {other}"),
         }
@@ -1337,10 +1337,13 @@ mod tests {
         match crossed {
             Value(Repr::Closure(closure)) => {
                 assert_eq!(closure.captures.len(), 2);
-                assert!(closure.captures[0].1.eq_value(&Value(Repr::Int(1))));
-                assert!(closure.captures[1]
-                    .1
-                    .eq_value(&Value(Repr::Str("a".into()))));
+                assert!(closure.captures[0].1.eq_value(&Value(Repr::Int(1))) == Ok(true));
+                assert!(
+                    closure.captures[1]
+                        .1
+                        .eq_value(&Value(Repr::Str("a".into())))
+                        == Ok(true)
+                );
             }
             other => panic!("expected a `Closure`, found {other}"),
         }

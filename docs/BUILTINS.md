@@ -92,6 +92,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `dynamicCase` | `core.dynamicCase(view: DynamicView) -> Int` |
 | `dynamicChildCount` | `core.dynamicChildCount(view: DynamicView) -> Int` |
 | `dynamicChild` | `core.dynamicChild(view: DynamicView, index: Int) -> DynamicView` |
+| `dynamicSameObject` | `core.dynamicSameObject(a: DynamicView, b: DynamicView) -> Bool` |
 
 ## Builtin types
 

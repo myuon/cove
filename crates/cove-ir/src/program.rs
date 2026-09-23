@@ -293,6 +293,12 @@ pub struct Inlined {
     pub locals: Vec<Local>,
 }
 
+/// The module a function `lower::synth` composed says it is in.
+///
+/// Not a module any source can name — `<` is not a name character — so a
+/// declaration cannot collide with one and `cove run` cannot reach one.
+pub const SYNTHESIZED_MODULE: &str = "<synth>";
+
 /// One lowered function.
 #[derive(Clone, Debug)]
 pub struct Function {
@@ -444,6 +450,22 @@ impl Function {
     /// it to count the library calls that were left calls.
     pub fn is_library(&self) -> bool {
         cove_sema::stdlib::is_library_module(&self.module)
+    }
+
+    /// Whether this is support code the lowering reaches on a program's
+    /// behalf rather than a body a program calls: a walk
+    /// `lower::synth` composed for a layout (module `<synth>`), or
+    /// `std.dynamic`, the Cove walk over an erased value that `==` reaches
+    /// when both of its operands are boxed.
+    ///
+    /// Nothing in a program names either. A program writes `a == b`, and what
+    /// runs is one of these on its behalf — so a refusal raised inside one is
+    /// blamed on the `==` that reached it, as the oracle blames the same
+    /// refusal, which it raises from inside the operator itself and not from
+    /// a body with frames of its own (issue #493). The machine's
+    /// `attach_call_chain` is the one reader.
+    pub fn is_support(&self) -> bool {
+        matches!(&*self.module, SYNTHESIZED_MODULE | "std.dynamic")
     }
 
     /// `module.name`, as a diagnostic writes it.

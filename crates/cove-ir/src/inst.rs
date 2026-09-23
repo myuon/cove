@@ -1794,6 +1794,18 @@ pub enum Inst {
     /// `Option<String>` are one type, as they are to the oracle, whose values
     /// carry no type arguments at all.
     DynSameType { dst: Slot, a: Slot, b: Slot },
+    /// `dst = <whether the values a and b view are one heap object>`, a
+    /// `Bool`.
+    ///
+    /// True when both views denote a whole heap value — at word 0 of their
+    /// owner — and the owner is the same object. An inline value is never one
+    /// object with anything, since it has no object of its own. This is the
+    /// only identity reflection answers, and it answers it as a `Bool`: no
+    /// address, and no integer standing for one, reaches Cove. The standard
+    /// library's walks ask it at a `Vector`, the one kind of value these walks
+    /// follow that can contain itself (issue #493), to refuse a cycle on the
+    /// path they are walking.
+    DynSameObject { dst: Slot, a: Slot, b: Slot },
     /// `dst = <the scalar the value view names>`.
     ///
     /// Which scalar is the destination slot's [`Repr`](crate::Repr): a

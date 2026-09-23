@@ -1,7 +1,7 @@
 //! [ADR 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 //! structural observations, over the words the machine holds.
 //!
-//! The seven reflection opcodes are thin: [`super::encoded`] reads a view out
+//! The eight reflection opcodes are thin: [`super::encoded`] reads a view out
 //! of the frame, asks one function here, and writes the answer back. What a
 //! view *is* — three words, the layout of the viewed value, the object that
 //! roots it and the payload word it begins at — is `cove_ir::dynamic`'s; this
@@ -82,7 +82,7 @@ impl View {
     }
 }
 
-/// Executes one of the seven reflection opcodes `op` in the frame whose first
+/// Executes one of the eight reflection opcodes `op` in the frame whose first
 /// word is `frame`, with slot operands `a`, `b` and `c` of function `id`.
 ///
 /// Out of line on purpose: see the reflection arm of
@@ -125,6 +125,11 @@ pub(crate) fn execute(
         }
         Some(Op::DynCase) => case(machine, View::read(machine, at(b)))? as u64,
         Some(Op::DynCount) => count(machine, View::read(machine, at(b)))? as u64,
+        Some(Op::DynSameObject) => u64::from(same_object(
+            machine,
+            View::read(machine, at(b)),
+            View::read(machine, at(c)),
+        )),
         other => unreachable!("{other:?} is not a reflection opcode"),
     };
     machine.mem.set_word_at(at(a), word);
@@ -266,6 +271,41 @@ pub(crate) fn same_type(machine: &Machine, a: View, b: View) -> Result<bool, Run
     let kind = kind_of(machine, left);
     Ok(kind == kind_of(machine, right)
         && (!kind.is_nominal() || declared_name(&left.name) == declared_name(&right.name)))
+}
+
+/// `dyn.same-object`: whether the two views denote one `Vector` object.
+///
+/// A view of a heap value is `(its header layout, the object, 0)` once
+/// [`settle`] has normalised it, so a view that begins at word 0 of its owner
+/// and has its owner's own layout *is* its owner, and two such views with one
+/// owner are one object. A view of an inline value — a field, a part, an
+/// element of a run, the value inside a box — has a layout its owner's header
+/// does not, even at word 0, and is not a heap object of its own. The owner
+/// that roots a `Vector`'s view is the object the vector *is*, not its store,
+/// which growth replaces, so a vector is recognised however often it has grown.
+/// The collector does not move an object, so for as long as both views are
+/// live the answer is stable.
+///
+/// **Only a vector is ever one object with anything.** A vector is the one
+/// value whose identity the language can observe — a push through one alias is
+/// seen through every other — and so the one whose identity both evaluators
+/// agree on. Whether two equal strings or arrays are one object is an
+/// allocation decision each evaluator makes its own way, and answering it
+/// would let the two disagree about a fact no program is meant to see.
+pub(crate) fn same_object(machine: &Machine, a: View, b: View) -> bool {
+    let vector = |view: View| {
+        view.at == 0
+            && machine.mem.object_layout(view.owner) == view.layout
+            && matches!(
+                machine
+                    .program
+                    .layouts
+                    .get(view.layout.index())
+                    .map(|l| &l.shape),
+                Some(Shape::Vector { .. })
+            )
+    };
+    a.owner == b.owner && vector(a) && vector(b)
 }
 
 /// `dyn.read`: the scalar the viewed value is, as the word a slot of `want`

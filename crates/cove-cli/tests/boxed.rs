@@ -225,8 +225,13 @@ const FALLBACK_SITES: [[usize; 3]; 3] = [[55, 0, 0], [31, 1, 112], [49, 669, 4]]
 ///   `values_value_order` together went 19 to 9, and `values_boxed` stayed at 104
 ///   and `benches/equals` at 1;
 /// - **14** more from the two programs Phase 2 added to pin what it changed,
-///   `values_boxed_deep` and `values_boxed_generic`, 7 each.
-const REFLECTED: usize = 128;
+///   `values_boxed_deep` and `values_boxed_generic`, 7 each;
+/// - **8** more from the programs issue #493 added to pin its refusal of a value
+///   that contains itself: `fail_equals_cycle_boxed` 1 and `values_equals_shared`
+///   7. The lowering moved the count by 0 — 128 with those held out — and the
+///   boxed tree row `benches/equals` gained compares through the `countBoxed` it
+///   already had.
+const REFLECTED: usize = 136;
 
 #[test]
 fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {

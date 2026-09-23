@@ -3492,11 +3492,76 @@ impl<'a> Machine<'a> {
     /// same question from. A machine with no run around it — this module's
     /// own tests — has no sources, and so no library: its errors are left
     /// where they were raised.
-    fn attach_call_chain(&self, error: RuntimeError) -> RuntimeError {
+    ///
+    /// # Support code is not a caller
+    ///
+    /// Before the library rule, an error raised in
+    /// [support code](cove_ir::Function::is_support) — a walk the lowering
+    /// composed for a layout, or `std.dynamic` — is moved out of it
+    /// altogether: its span becomes the first call site outside support code,
+    /// and the support frames in between are not in the chain. A program
+    /// writes `a == b` and the walk runs on its behalf, so the oracle, which
+    /// raises the same refusal from inside the operator, has no frame there
+    /// to show; the `==` is what both of them blame (issue #493). An error
+    /// raised anywhere else is left exactly as it was.
+    fn attach_call_chain(&self, mut error: RuntimeError) -> RuntimeError {
         let sources = self.runtime.map(Runtime::sources);
-        error.with_chain(self.call_chain(), |span| {
+        // A chain already attached was attached here, by a dispatch loop
+        // further in — a native call into the VM runs one of its own — and the
+        // blame it settled is the one to keep, as `with_chain` keeps it.
+        if error.is_chained() {
+            return error;
+        }
+        let mut owners = self.call_owners();
+        let passed = if owners
+            .next()
+            .is_some_and(|owner| self.program.function(owner).is_support())
+        {
+            let within = owners
+                .take_while(|owner| self.program.function(*owner).is_support())
+                .count();
+            // Position `within + 1` is the first outside support code, and it
+            // is chain entry `within`, since the chain starts at position 1.
+            if let Some(site) = self.call_chain().nth(within) {
+                error.span = Some(site);
+            }
+            within + 1
+        } else {
+            0
+        };
+        error.with_chain(self.call_chain().skip(passed), |span| {
             sources.is_some_and(|sources| sources.is_library(span.file))
         })
+    }
+
+    /// Whose code each position [`Machine::call_chain`] reads is in,
+    /// innermost first — beginning one earlier than it, with the owner of the
+    /// failing instruction itself, whose span is the error's own.
+    ///
+    /// A frame at a counter inside expanded bodies is several positions: the
+    /// instruction belongs to the innermost body expanded there, each
+    /// expansion's call site to the body it was expanded into, and the
+    /// outermost one's to the frame's own function. So each frame answers the
+    /// expansions' callees innermost first and then its function, which lines
+    /// up with the spans `call_chain` answers for the same frame.
+    fn call_owners(&self) -> impl Iterator<Item = FunctionId> + '_ {
+        self.frames
+            .iter()
+            .rev()
+            .enumerate()
+            .flat_map(|(depth, frame)| {
+                let function = self.program.function(frame.function);
+                let at = if depth == 0 {
+                    frame.pc
+                } else {
+                    frame.pc.saturating_sub(1)
+                };
+                let mut held: Vec<FunctionId> =
+                    function.inlined_at(at).map(|held| held.callee).collect();
+                held.reverse();
+                held.push(frame.function);
+                held
+            })
     }
 
     /// The call-site spans [`RuntimeError::with_chain`] wants, innermost

@@ -809,6 +809,28 @@ impl Shapes {
         ))
     }
 
+    /// [`Shapes::entry_of`]'s layout if it has been made, and `None` if it has
+    /// not — asked without making it, so that asking renumbers nothing.
+    pub(super) fn existing_entry(&self, key: LayoutId, value: LayoutId) -> Option<LayoutId> {
+        let declared = [
+            (Arc::from(MAP_ENTRY.fields[0].name), key),
+            (Arc::from(MAP_ENTRY.fields[1].name), value),
+        ];
+        let (fields, words) = struct_layout(&declared, &self.layouts);
+        let wanted = Layout::inline(
+            MAP_ENTRY.name,
+            Shape::Struct {
+                fields,
+                opaque: false,
+            },
+            words,
+        );
+        self.layouts
+            .iter()
+            .position(|held| *held == wanted)
+            .map(|at| LayoutId(at as u32))
+    }
+
     /// The layout of a *location* holding a function value.
     ///
     /// One word, and one layout for every signature. See [`Shapes::of`].
