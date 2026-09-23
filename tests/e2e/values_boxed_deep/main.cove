@@ -1,0 +1,97 @@
+use console.println
+
+/// `==` on two erased values nested far deeper than any walk used to follow.
+///
+/// Until [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 2, `==` on two `dyn Trait` values was a Rust walk on the linear-memory
+/// backend that stopped the run at a depth of 128 with "this value nests too
+/// deeply to compare", while the interpreter recursed on for as long as its
+/// stack lasted: two evaluators, two limits, and neither of them the
+/// language's. Issue #480 decided that the language has no nesting bound, and
+/// `std.dynamic.equals` is a loop over two explicit stacks, so every row below
+/// answers — on the interpreter, the encoded VM and the native tier alike.
+///
+/// Two shapes, because a view reaches a child two ways: `Chain` nests through
+/// an enum's payload, one case inside the next, and `Node` through an
+/// `Array`'s elements. Each is compared equal, different at the deepest leaf —
+/// so the walk has to go all the way down to find it — and different at the
+/// top, where it stops at once.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// A chain of links around one number at the bottom, each link holding the
+/// next erased: a value type cannot hold itself, and a box is one word.
+enum Chain {
+  End(Int)
+  Link(dyn Summary)
+}
+
+impl Summary for Chain {
+  fn summarize(self) -> String {
+    "chain"
+  }
+}
+
+/// A tree whose every node but the last has one child.
+struct Node {
+  tag: Int
+  kids: Array<Node>
+}
+
+impl Summary for Node {
+  fn summarize(self) -> String {
+    "node {self.tag}"
+  }
+}
+
+/// `links` links around `End(bottom)`.
+fn chain(links: Int, bottom: Int) -> Chain {
+  var built = Chain.End(bottom)
+  var at = 0
+  while at < links {
+    built = Chain.Link(built)
+    at = at + 1
+  }
+  built
+}
+
+/// `depth` nodes, each the only child of the one above, with `bottom` as the
+/// deepest node's tag.
+fn spine(depth: Int, bottom: Int) -> Node {
+  var built = Node(tag: bottom, kids: [])
+  var at = 1
+  while at < depth {
+    built = Node(tag: at, kids: [built])
+    at = at + 1
+  }
+  built
+}
+
+fn row(label: String, answer: Bool) -> Result<Unit, Error> {
+  println("{label} {answer}")?
+  Ok(())
+}
+
+/// Every depth past the old bound of 128, and one far past it.
+export fn main() -> Result<Unit, Error> {
+  for depth in [129, 200, 1000] {
+    let same: dyn Summary = chain(depth, 7)
+    let also: dyn Summary = chain(depth, 7)
+    let bottom: dyn Summary = chain(depth, 8)
+    let shorter: dyn Summary = chain(depth - 1, 7)
+    row("chain.{depth}.equal", same == also)?
+    row("chain.{depth}.bottom", same == bottom)?
+    row("chain.{depth}.shorter", same == shorter)?
+    row("chain.{depth}.ne", same != bottom)?
+
+    let tree: dyn Summary = spine(depth, 7)
+    let twin: dyn Summary = spine(depth, 7)
+    let leaf: dyn Summary = spine(depth, 8)
+    let top: dyn Summary = Node(tag: 0 - 1, kids: [spine(depth - 1, 7)])
+    row("node.{depth}.equal", tree == twin)?
+    row("node.{depth}.leaf", tree == leaf)?
+    row("node.{depth}.top", tree == top)?
+  }
+  Ok(())
+}

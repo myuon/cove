@@ -66,16 +66,18 @@ fn a_family_that_lives_in_the_heap_is_one_reference() {
     // replaces the store and the only thing that says what a new one looks
     // like is this table.
     //
-    // **Four, not two, and the other two are not this program's.** Issue
+    // **Six, not two, and the other four are not this program's.** Issue
     // #454's Step 3 gave `std.string.chars` a `Vector<String>` of its own, and
-    // `lower` lowers the whole standard library attached to every package, so
-    // a header and a store for *that* instantiation are declared here whatever
-    // the program under test says. What the assertion is about is unchanged and
-    // is the loop below rather than the count: every one of them is **one
-    // reference wide**, which is what "lives in the heap" means as a layout.
+    // ADR 0068's Phase 2 gave `std.dynamic.equals` a `Vector<DynamicView>` for
+    // each of its two stacks; `lower` lowers the whole standard library
+    // attached to every package, so a header and a store for each of *those*
+    // instantiations are declared here whatever the program under test says.
+    // What the assertion is about is unchanged and is the loop below rather
+    // than the count: every one of them is **one reference wide**, which is
+    // what "lives in the heap" means as a layout.
     let held = layouts("fn f(v: Vector<Int>) -> Int { v.length() }");
     let vectors: Vec<&Layout> = held.iter().filter(|it| &*it.name == "Vector").collect();
-    assert_eq!(vectors.len(), 4);
+    assert_eq!(vectors.len(), 6);
     for layout in vectors {
         assert_eq!(layout.words, vec![Repr::Ref]);
     }
@@ -246,6 +248,14 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // ADR 0068's view, seeded beside the byte buffer's owner for its
             // reason: one program-wide layout whatever it views.
             "DynamicView",
+            // `std.dynamic`'s two stacks of views — `stack(views:
+            // Vector<DynamicView>, ..)` is a signature that names a `Vector` —
+            // a store and a handle interned beside `std.float`'s pair below.
+            // Every one of the four is named `Vector`, so which pair comes
+            // first is not something this list can see. ADR 0068's Phase 2
+            // added these two.
+            "Vector",
+            "Vector",
             // `std.float`'s limb arithmetic — `scale(limbs: Vector<Int>, ..)`
             // and its neighbours — is the first non-generic library code whose
             // *signature* names a `Vector`, and those signatures are interned

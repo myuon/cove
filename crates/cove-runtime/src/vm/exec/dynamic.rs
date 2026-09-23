@@ -227,12 +227,15 @@ fn kind_of(machine: &Machine, described: &Layout) -> DynamicKind {
         Shape::Word(Repr::Float) => DynamicKind::Float,
         Shape::Word(Repr::Duration) => DynamicKind::Duration,
         Shape::Str => DynamicKind::String,
-        // An `opaque` struct's fields belong to the module that declared it,
-        // so it is no more readable through a view than through a rendering.
-        Shape::Struct { opaque: true, .. } => DynamicKind::Opaque,
         Shape::Struct { .. } if crate::vm::boundary::is_range(machine.program, described) => {
             DynamicKind::Range
         }
+        // An `opaque` struct is a struct too. Its fields are private to the
+        // module that declared it, and a view is read only by the standard
+        // library's own walks, which compare them as `==` always has and show
+        // none of them: a rendering that prints only the name decides that in
+        // Cove, not here. Decision 7 is about capabilities — a handle, a task, a
+        // cell — and a struct is not one.
         Shape::Struct { .. } => DynamicKind::Struct,
         Shape::Enum { .. } => DynamicKind::Enum,
         Shape::Elements { .. } => DynamicKind::Array,

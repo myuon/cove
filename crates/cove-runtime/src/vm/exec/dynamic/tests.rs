@@ -761,7 +761,10 @@ fn every_kind_is_described_through_the_instructions() {
             "struct[struct[\"n\", struct[5, 6]]]",
             boxed(machine, layouts.holder, &[held]),
         ),
-        ("opaque value", boxed(machine, layouts.secret, &[9])),
+        // An `opaque` struct is a struct: its fields are private to the module
+        // that declared it, and the standard library's walks are what read a
+        // view (ADR 0068's Phase 2 — it was an opaque value in Phase 1).
+        ("struct[9]", boxed(machine, layouts.secret, &[9])),
         ("()", boxed(machine, layouts.unit, &[0])),
         ("true", boxed(machine, layouts.boolean, &[1])),
         ("-7", boxed(machine, layouts.int, &[(-7i64) as u64])),

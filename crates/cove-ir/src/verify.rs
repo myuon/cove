@@ -1834,10 +1834,16 @@ impl Check<'_> {
     /// the first program that hits the arm rather than on whichever program a
     /// corpus happened to hold.
     ///
-    /// It names `Any.equals`, `Value.order` and `Value.renderInto`, which are
-    /// the three of Decision 3's five whose producers have been migrated
-    /// *and* whose fallback is an arm of the walk — so the rule is a fact
-    /// about one instruction and survives `inline` moving it.
+    /// It names `Value.order` and `Value.renderInto`, which are two of
+    /// Decision 3's five whose producers have been migrated *and* whose
+    /// fallback is an arm of the walk — so the rule is a fact about one
+    /// instruction and survives `inline` moving it. It named `Any.equals` as
+    /// well until [ADR
+    /// 0068](../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 2 deleted that variant: equality's fallback is an ordinary call of
+    /// `std.dynamic.equals` now, and a call's operands are held to the
+    /// callee's parameters — two `Any`s — by the rule every call is, with
+    /// `cove-cli`'s `tests/boxed.rs` asserting it of the whole corpus.
     /// `Value.admitKey`'s producer has been migrated too and its rule is
     /// [`one_admission_boundary`], a pass of its own for a reason that is the
     /// operation's rather than this rule's; see there.
@@ -1854,7 +1860,7 @@ impl Check<'_> {
     /// # `Value.renderInto` is reached from more than a box, and that is a
     /// widening rather than a reading
     ///
-    /// The first two are Decision 4 word for word: an operand whose layout is
+    /// `Value.order` is Decision 4 word for word: an operand whose layout is
     /// not [`Shape::Boxed`] is a fault. The rendering admits **four** shapes,
     /// which [`crate::lower::synth::Rendered::Dynamic`] is the list of, in
     /// two kinds:
@@ -1895,7 +1901,7 @@ impl Check<'_> {
         // a handle and not a value of anything — `Intrinsic::signature`
         // gives it as `C::Buffer` — so the rule stops after the first.
         let values = match intrinsic {
-            crate::Intrinsic::AnyEquals | crate::Intrinsic::ValueOrder => 2,
+            crate::Intrinsic::ValueOrder => 2,
             crate::Intrinsic::ValueRenderInto => 1,
             // `Value.admitKey` is checked by [`one_admission_boundary`].
             crate::Intrinsic::ValueAdmitKey => return,

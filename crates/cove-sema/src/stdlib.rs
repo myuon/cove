@@ -118,6 +118,17 @@ static SOURCES: &[StdSource] = &[
         path: "std/stringbuilder.cove",
         text: include_str!("../std/stringbuilder.cove"),
     },
+    // The second file that is not a receiver's methods, and the first with no
+    // export at all: `std.dynamic.equals` is what `==` answers for two erased
+    // values (ADR 0068), and its only caller is the lowering, which resolves it
+    // by name the way it resolves `std.int`'s private `renderInto`. It binds
+    // nothing in `cove_schema::builtins::STANDARD_LIBRARY` and a program cannot
+    // reach it.
+    StdSource {
+        module: "std.dynamic",
+        path: "std/dynamic.cove",
+        text: include_str!("../std/dynamic.cove"),
+    },
 ];
 
 /// Every module name the standard library declares.

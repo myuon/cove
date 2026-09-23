@@ -1221,6 +1221,15 @@ struct Pool {
     /// all three, and `None` for every program that interpolates nothing but
     /// a `String` and an `Int`.
     leaves: Option<synth::Leaves>,
+    /// `std.dynamic.equals`, once a call site has resolved it: what `==` on
+    /// two erased values calls, and what an equality walk calls where it
+    /// reaches a boxed part.
+    ///
+    /// [`Pool::leaves`]' arrangement and for its reason — a synthesized walk
+    /// emits the call and cannot resolve a name — and `None` for every
+    /// program whose comparisons never reach a box. `Body::dynamic_equals`
+    /// fills it in.
+    dynamic_equals: Option<FunctionId>,
     /// The instantiations being lowered right now, outermost first.
     ///
     /// A chain rather than a count, because what a program that exceeds the
@@ -1261,6 +1270,7 @@ impl Pool {
             instance_ids: HashMap::new(),
             synthesized: HashMap::new(),
             leaves: None,
+            dynamic_equals: None,
             open: Vec::new(),
         }
     }

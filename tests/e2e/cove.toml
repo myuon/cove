@@ -543,3 +543,11 @@ allow = ["console"]
 [run.values_boxed]
 entry = "values_boxed.main"
 allow = ["console", "clock"]
+
+[run.values_boxed_deep]
+entry = "values_boxed_deep.main"
+allow = ["console"]
+
+[run.values_boxed_generic]
+entry = "values_boxed_generic.main"
+allow = ["console", "clock"]

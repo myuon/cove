@@ -1,0 +1,7 @@
+cell.empty.int-text true
+cell.empty.text-int true
+cell.empty.ne false
+cell.full.int-text false
+cell.empty-full false
+tagged.int-text true
+tagged.int-text.other false

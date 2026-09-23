@@ -3820,11 +3820,13 @@ export fn main() -> Int {
 /// write them, answer alike on both evaluators — and on the machine they are
 /// the instructions they name, with no builtin call anywhere in the walk.
 ///
-/// No standard-library body reflects yet (`std.dynamic` is Phase 2), so this
-/// installs one the way [`a_core_intrinsic_agrees_and_is_an_instruction`]
-/// installs its probe: a second file in `std.string`. The walk is the shape
-/// Phase 2's will be — iterative, over a `Vector<DynamicView>` work stack, as
-/// issue #480 decided — and it describes every node it reaches: its kind code,
+/// It was written before any standard-library body reflected (`std.dynamic`
+/// arrived with Phase 2 and has its own case below), so it installs one the way
+/// [`a_core_intrinsic_agrees_and_is_an_instruction`] installs its probe: a
+/// second file in `std.string`. The walk is the shape Phase 2's is — iterative,
+/// over a `Vector<DynamicView>` work stack, as issue #480 decided — and it
+/// describes every observation, where `std.dynamic.equals` only compares: it
+/// describes every node it reaches: its kind code,
 /// an enum's case, how many children, a scalar's value, and whether its first
 /// two children have one type. The values reach every kind a `dyn` erasure can
 /// carry: a struct holding a nested struct, a `String`, an `Array`, a
@@ -4068,5 +4070,514 @@ export fn main() -> String {
              'n' | k6/1 k13/0"
                 .to_string()
         )
+    );
+}
+
+/// The declarations [`dynamic_equality_agrees_with_eq_value_on_every_kind`]'s
+/// values are built to: every family a boxed value can hold, so that the
+/// machine's layout table has one to box each value at.
+///
+/// Nothing here runs. A whole-package lowering interns the layout of every
+/// declaration's parameters, and that is all `layouts` is for.
+const REFLECTED_KINDS: &str = "
+trait Probed {
+  fn probed(self) -> Int
+}
+
+struct Point {
+  x: Int,
+  y: Int
+}
+
+impl Probed for Point {
+  fn probed(self) -> Int {
+    self.x
+  }
+}
+
+struct Named {
+  label: String,
+  at: Point
+}
+
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+export opaque struct Secret {
+  code: Int,
+  note: String
+}
+
+struct Holder {
+  items: Array<Point>,
+  marks: Vector<Mark>,
+  seen: Set<Int>,
+  index: Map<String, Int>,
+  span: Range,
+  ratio: Float,
+  wait: Duration,
+  on: Bool,
+  maybe: Option<Int>,
+  outcome: Result<Int, String>,
+  inner: dyn Probed,
+  nested: Array<Array<Int>>,
+  secret: Secret
+}
+
+export fn layouts(h: Holder, n: Named, a: Array<Int>, v: Vector<Int>, d: Vector<Named>, o: Option<Point>, t: Array<String>) -> Int {
+  0
+}
+";
+
+/// A struct value of `name`, `opaque` or not.
+fn reflected_struct(name: &str, opaque: bool, fields: Vec<(&str, Value)>) -> Value {
+    use crate::value::{Repr, StructValue};
+    Value(Repr::Struct(std::rc::Rc::new(StructValue {
+        type_name: name.into(),
+        fields: fields
+            .into_iter()
+            .map(|(field, value)| (field.into(), value))
+            .collect(),
+        opaque,
+    })))
+}
+
+/// `value`, erased behind `m.Probed`, as a `dyn` field holds it.
+fn reflected_dyn(value: Value) -> Value {
+    use crate::value::{DynValue, Repr};
+    Value(Repr::Dyn(std::rc::Rc::new(DynValue {
+        trait_name: "m.Probed".into(),
+        value,
+    })))
+}
+
+fn reflected_vector(items: Vec<Value>) -> Value {
+    use crate::value::{Repr, VectorStorage};
+    Value(Repr::Vector(VectorStorage::new(items)))
+}
+
+fn reflected_point(x: i64, y: i64) -> Value {
+    reflected_struct(
+        "m.Point",
+        false,
+        vec![("x", Value::int(x)), ("y", Value::int(y))],
+    )
+}
+
+/// A `Holder` with every leaf at its base value, except leaf `changed`, which
+/// is given a value of its own type that is not equal to the base's — so that
+/// each near miss differs from the base in exactly one leaf, wherever in the
+/// nesting that leaf is.
+fn reflected_holder(changed: Option<usize>) -> Value {
+    use crate::value::MapKey;
+    let at = |leaf: usize| changed == Some(leaf);
+    let int = |leaf: usize, base: i64| Value::int(if at(leaf) { base + 1 } else { base });
+    let text = |leaf: usize, base: &str| {
+        let text = if at(leaf) {
+            format!("{base}!")
+        } else {
+            base.to_string()
+        };
+        Value::string(text.as_str())
+    };
+    reflected_struct(
+        "m.Holder",
+        false,
+        vec![
+            (
+                "items",
+                Value::array([
+                    reflected_point(1, 2),
+                    reflected_point(3, if at(0) { 5 } else { 4 }),
+                ]),
+            ),
+            (
+                "marks",
+                reflected_vector(vec![
+                    Value::enumeration("m.Mark", "Plain", []),
+                    Value::enumeration("m.Mark", "Count", [int(1, 7)]),
+                    if at(2) {
+                        Value::enumeration("m.Mark", "Count", [Value::int(0)])
+                    } else {
+                        Value::enumeration("m.Mark", "Named", [Value::string("n")])
+                    },
+                ]),
+            ),
+            (
+                "seen",
+                Value::set([MapKey::Int(1), MapKey::Int(if at(3) { 6 } else { 5 })]),
+            ),
+            (
+                "index",
+                Value::map([
+                    (MapKey::Str("a".to_string()), int(4, 1)),
+                    (MapKey::Str("b".to_string()), Value::int(2)),
+                ]),
+            ),
+            ("span", Value::range_of(1, 4, at(5))),
+            ("ratio", Value::float(if at(6) { 1.25 } else { 1.5 })),
+            ("wait", Value::duration(if at(7) { 3 } else { 2 })),
+            ("on", Value::bool(!at(8))),
+            (
+                "maybe",
+                if at(9) {
+                    Value::none()
+                } else {
+                    Value::some(Value::int(8))
+                },
+            ),
+            (
+                "outcome",
+                if at(10) {
+                    Value::ok(Value::int(0))
+                } else {
+                    Value::err(Value::string("bad"))
+                },
+            ),
+            (
+                "inner",
+                reflected_dyn(reflected_point(9, int(11, 10).as_int().unwrap())),
+            ),
+            (
+                "nested",
+                Value::array([
+                    Value::array([Value::int(1)]),
+                    Value::array(if at(12) {
+                        vec![Value::int(2)]
+                    } else {
+                        vec![Value::int(2), Value::int(3)]
+                    }),
+                ]),
+            ),
+            (
+                "secret",
+                reflected_struct(
+                    "m.Secret",
+                    true,
+                    vec![("code", int(13, 9)), ("note", text(14, "s"))],
+                ),
+            ),
+        ],
+    )
+}
+
+/// How many leaves [`reflected_holder`] can change.
+const REFLECTED_LEAVES: usize = 15;
+
+/// Every value the corpus compares against every other, each one a box's worth:
+/// a scalar of each kind with its edges, a string, each structural kind, and
+/// the nested `Holder`.
+fn reflected_values() -> Vec<(String, Value)> {
+    use crate::value::MapKey;
+    let named = |label: &str, x: i64| {
+        reflected_struct(
+            "m.Named",
+            false,
+            vec![
+                ("label", Value::string(label)),
+                ("at", reflected_point(x, 0)),
+            ],
+        )
+    };
+    let mut values: Vec<(String, Value)> = vec![
+        ("unit".into(), Value::unit()),
+        ("true".into(), Value::bool(true)),
+        ("false".into(), Value::bool(false)),
+        ("int 3".into(), Value::int(3)),
+        ("int -3".into(), Value::int(-3)),
+        ("duration 3".into(), Value::duration(3)),
+        ("float 3".into(), Value::float(3.0)),
+        ("float nan".into(), Value::float(f64::NAN)),
+        ("float 0".into(), Value::float(0.0)),
+        ("float -0".into(), Value::float(-0.0)),
+        ("string 3".into(), Value::string("3")),
+        ("string empty".into(), Value::string("")),
+        ("point".into(), reflected_point(1, 2)),
+        ("point other".into(), reflected_point(1, 3)),
+        ("named".into(), named("a", 1)),
+        ("named other".into(), named("b", 1)),
+        (
+            "mark plain".into(),
+            Value::enumeration("m.Mark", "Plain", []),
+        ),
+        (
+            "mark count".into(),
+            Value::enumeration("m.Mark", "Count", [Value::int(3)]),
+        ),
+        (
+            "mark named".into(),
+            Value::enumeration("m.Mark", "Named", [Value::string("3")]),
+        ),
+        ("some 3".into(), Value::some(Value::int(3))),
+        ("some point".into(), Value::some(reflected_point(1, 2))),
+        ("none".into(), Value::none()),
+        ("ok 3".into(), Value::ok(Value::int(3))),
+        ("err".into(), Value::err(Value::string("3"))),
+        (
+            "array 1 2".into(),
+            Value::array([Value::int(1), Value::int(2)]),
+        ),
+        ("array 1".into(), Value::array([Value::int(1)])),
+        ("array empty".into(), Value::array([])),
+        (
+            "vector 1 2".into(),
+            reflected_vector(vec![Value::int(1), Value::int(2)]),
+        ),
+        ("vector empty".into(), reflected_vector(Vec::new())),
+        (
+            "vector named".into(),
+            reflected_vector(vec![named("a", 1), named("b", 2)]),
+        ),
+        (
+            "array strings".into(),
+            Value::array([Value::string("1"), Value::string("2")]),
+        ),
+        (
+            "set 1 2".into(),
+            Value::set([MapKey::Int(1), MapKey::Int(2)]),
+        ),
+        (
+            "map a1".into(),
+            Value::map([(MapKey::Str("a".to_string()), Value::int(1))]),
+        ),
+        ("range 1..<4".into(), Value::range_of(1, 4, false)),
+        ("range 1...4".into(), Value::range_of(1, 4, true)),
+        (
+            "secret".into(),
+            reflected_struct(
+                "m.Secret",
+                true,
+                vec![("code", Value::int(9)), ("note", Value::string("s"))],
+            ),
+        ),
+        (
+            "secret other".into(),
+            reflected_struct(
+                "m.Secret",
+                true,
+                vec![("code", Value::int(9)), ("note", Value::string("t"))],
+            ),
+        ),
+        ("holder".into(), reflected_holder(None)),
+    ];
+    // The same values again as fresh objects, so that "equal" is never
+    // "the same object" by accident.
+    let twins: Vec<(String, Value)> = vec![
+        ("named twin".into(), named("a", 1)),
+        ("holder twin".into(), reflected_holder(None)),
+        (
+            "array 1 2 twin".into(),
+            Value::array([Value::int(1), Value::int(2)]),
+        ),
+    ];
+    values.extend(twins);
+    values
+}
+
+/// Every pair the corpus compares: each value against each, both ways round,
+/// and the `Holder` against each of its near misses — one leaf different, at
+/// every depth the leaves are at.
+fn reflected_pairs() -> Vec<(String, Value, Value)> {
+    let values = reflected_values();
+    let mut pairs = Vec::new();
+    for (left, a) in &values {
+        for (right, b) in &values {
+            pairs.push((format!("{left} == {right}"), a.clone(), b.clone()));
+        }
+    }
+    for leaf in 0..REFLECTED_LEAVES {
+        let base = reflected_holder(None);
+        let missed = reflected_holder(Some(leaf));
+        pairs.push((
+            format!("holder == miss {leaf}"),
+            base.clone(),
+            missed.clone(),
+        ));
+        pairs.push((format!("miss {leaf} == holder"), missed, base));
+    }
+    pairs
+}
+
+/// **`std.dynamic.equals` answers what `eq_value` answers, on both evaluators,
+/// for every kind and every nesting edge the corpus reaches.**
+///
+/// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 2 asks that the Cove walk be compared "against the pinned Rust walk on
+/// every kind and nesting edge". The machine's Rust walk, `Any.equals`, is
+/// deleted by the same change, so the reference is the oracle's own
+/// `Value::eq_value` — what the interpreter's `==` has always asked — and the
+/// walk is run three ways over each pair:
+///
+/// - on the **oracle**, through `call_core`'s reflection arms;
+/// - on the **machine**, through the seven reflection instructions, each value
+///   boxed at the boundary exactly as an `Any` parameter boxes it;
+/// - and against `eq_value`, over the same two values.
+///
+/// The corpus is every value against every value — a scalar of each kind with
+/// its edges (`NaN`, `0.0` against `-0.0`, an `Int` against the `Duration` of the
+/// same count), a `String`, a struct, an enum in each of its cases, `Option`
+/// and `Result`, an `Array` against the `Vector` of the same elements, a `Set`, a
+/// `Map`, both `Range`s, an `opaque` struct, and a struct nesting all of them
+/// — and then that nested struct against each of fifteen near misses, each one
+/// leaf different at a different depth.
+///
+/// **One disagreement is named rather than found here**, because no value in
+/// this corpus can reach it: `eq_value` calls two host resource handles equal
+/// when they name one resource, and the machine — before this change and after
+/// it — calls every handle unequal, itself included, because a boxed handle is
+/// an opaque value (Decision 7). No program in this repository compares two
+/// erased handles; the corpus could not build one without a live resource.
+#[test]
+fn dynamic_equality_agrees_with_eq_value_on_every_kind() {
+    fn answers(on_machine: bool) -> Vec<String> {
+        let (sources, program) = checked(REFLECTED_KINDS);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let mut lines = Vec::new();
+        if on_machine {
+            let ir = lowered(&sources, &program);
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            let mut vm = Vm::new(&runtime, &hosts, &ir);
+            for (label, a, b) in reflected_pairs() {
+                let said = said(vm.invoke("std.dynamic", "equals", vec![a, b]));
+                lines.push(format!("{label}: {said:?}"));
+            }
+        } else {
+            let runtime = Runtime::new(program, sources, hosts);
+            let mut interp = Interpreter::new(&runtime);
+            for (label, a, b) in reflected_pairs() {
+                let reference = a.eq_value(&b);
+                let said = said(interp.invoke("std.dynamic", "equals", vec![a, b]));
+                assert_eq!(
+                    said,
+                    Answer::Value(reference.to_string()),
+                    "`std.dynamic.equals` on the oracle against `eq_value`: {label}"
+                );
+                lines.push(format!("{label}: {said:?}"));
+            }
+        }
+        lines
+    }
+    let oracle = on_a_deep_stack(|| answers(false));
+    let machine = on_a_deep_stack(|| answers(true));
+    assert_eq!(oracle.len(), machine.len());
+    for (oracle, machine) in oracle.iter().zip(&machine) {
+        assert_eq!(machine, oracle, "the machine against the oracle");
+    }
+    // The corpus is not vacuous in either direction: it holds equal pairs and
+    // unequal ones, and the edges it was built for answer what they should.
+    for (wanted, line) in [
+        ("float nan == float nan: Value(\"false\")", true),
+        ("float 0 == float -0: Value(\"true\")", true),
+        ("int 3 == duration 3: Value(\"false\")", true),
+        ("array 1 2 == vector 1 2: Value(\"false\")", true),
+        ("array 1 2 == array 1 2 twin: Value(\"true\")", true),
+        ("holder == holder twin: Value(\"true\")", true),
+        ("secret == secret other: Value(\"false\")", true),
+        ("secret == secret: Value(\"true\")", true),
+        ("array empty == vector empty: Value(\"false\")", true),
+    ] {
+        assert_eq!(oracle.iter().any(|said| said == wanted), line, "{wanted}");
+    }
+    for leaf in 0..REFLECTED_LEAVES {
+        let wanted = format!("holder == miss {leaf}: Value(\"false\")");
+        assert!(oracle.contains(&wanted), "{wanted}");
+    }
+}
+
+/// A second file in `std.dynamic` that calls `equals` `n` times over the same
+/// two values: a library file, because a program cannot name the function.
+const REFLECTED_REPEAT: &str = "
+/// `equals(a, b)`, `n` times over.
+export fn probeRepeat(a: Any, b: Any, n: Int) -> Int {
+  var same = 0
+  var at = 0
+  while at < n {
+    if equals(a, b) {
+      same = same + 1
+    }
+    at = at + 1
+  }
+  same
+}
+";
+
+/// **Comparing two boxed scalars allocates nothing**, and neither does
+/// comparing two values one level deep: `std.dynamic.equals` makes its two
+/// stacks only at the first child that has children of its own.
+///
+/// Read off the machine's own allocation counter — what `--stats` reports as
+/// `allocations` — around two runs of [`REFLECTED_REPEAT`] over the same two
+/// values, one comparing them ten times and one not at all. The boundary boxes
+/// the two arguments identically in both, so the difference is the walk's own,
+/// ten times over. A value that really nests pays for its two stacks once per
+/// comparison — two vectors, an owner and a store each — however deep it goes,
+/// and for their growth, which the last row pins: the `Holder`'s stacks are
+/// made with room for its thirteen fields, its first field's two elements go
+/// on top of the twelve fields after it, and each store grows once — six
+/// objects, and never one per node.
+#[test]
+fn dynamic_equality_allocates_only_to_descend() {
+    /// A value to compare with itself, made afresh for each run.
+    type Made = fn() -> Value;
+    fn allocated() -> Vec<(String, u64)> {
+        let (sources, program) =
+            checked_with_probe(REFLECTED_KINDS, "std.dynamic", REFLECTED_REPEAT);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let ir = lowered(&sources, &program);
+        let runtime = Runtime::new(program, sources, hosts.clone());
+        let rows: Vec<(&str, Made)> = vec![
+            ("int", || Value::int(3)),
+            ("string", || Value::string("s")),
+            ("float", || Value::float(1.5)),
+            ("unit", Value::unit),
+            ("none", Value::none),
+            ("point", || reflected_point(1, 2)),
+            ("array", || Value::array([Value::int(1), Value::int(2)])),
+            ("some", || Value::some(Value::int(1))),
+            ("holder", || reflected_holder(None)),
+        ];
+        let mut out = Vec::new();
+        for (label, make) in rows {
+            let mut spent = Vec::new();
+            for turns in [0, 10] {
+                let mut vm = Vm::new(&runtime, &hosts, &ir);
+                let answer = vm.invoke(
+                    "std.dynamic",
+                    "probeRepeat",
+                    vec![make(), make(), Value::int(turns)],
+                );
+                assert_eq!(
+                    answer.map(|value| value.as_int()).ok(),
+                    Some(Some(turns)),
+                    "{label}"
+                );
+                spent.push(vm.allocations());
+            }
+            out.push((label.to_string(), (spent[1] - spent[0]) / 10));
+        }
+        out
+    }
+    let counted = on_a_deep_stack(allocated);
+    let per_call: Vec<(&str, u64)> = counted
+        .iter()
+        .map(|(label, count)| (label.as_str(), *count))
+        .collect();
+    assert_eq!(
+        per_call,
+        [
+            ("int", 0),
+            ("string", 0),
+            ("float", 0),
+            ("unit", 0),
+            ("none", 0),
+            ("point", 0),
+            ("array", 0),
+            ("some", 0),
+            ("holder", 6),
+        ],
+        "objects allocated by one comparison"
     );
 }

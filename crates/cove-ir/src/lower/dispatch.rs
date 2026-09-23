@@ -75,6 +75,15 @@ use crate::inst::{CmpOp, Compare, Inst, Len, Slot};
 use crate::layout::LayoutId;
 use crate::program::{FunctionId, Table};
 
+/// What a gap names when one of a rendering walk's appends does not take what
+/// the walk passes it.
+const RENDERING: &str = "a rendering walk";
+
+/// The Cove function `==` answers two erased values with: [ADR
+/// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// `std.dynamic.equals`, which no program can name.
+pub(super) const DYNAMIC_EQUALS: (&str, &str) = ("std.dynamic", "equals");
+
 /// What fills one written parameter of a call.
 ///
 /// The three the language has, and the reason a call site can no longer line
@@ -282,19 +291,22 @@ impl Body<'_> {
         let text = self.library_leaf(
             "std.stringbuilder",
             "appendText",
-            &[shapes::BYTE_BUFFER, shapes::STR],
+            (&[shapes::BYTE_BUFFER, shapes::STR], shapes::UNIT),
+            RENDERING,
             span,
         );
         let byte = self.library_leaf(
             "std.stringbuilder",
             "appendByteInto",
-            &[shapes::BYTE_BUFFER, shapes::INT],
+            (&[shapes::BYTE_BUFFER, shapes::INT], shapes::UNIT),
+            RENDERING,
             span,
         );
         let digits = self.library_leaf(
             "std.int",
             "renderInto",
-            &[shapes::INT, shapes::BYTE_BUFFER],
+            (&[shapes::INT, shapes::BYTE_BUFFER], shapes::UNIT),
+            RENDERING,
             span,
         );
         let leaves = synth::Leaves {
@@ -306,19 +318,58 @@ impl Body<'_> {
         Some(leaves)
     }
 
+    /// `std.dynamic.equals`, the Cove walk `==` answers two erased values
+    /// with, resolved once per lowering and recorded on the
+    /// [`Pool`](super::Pool).
+    ///
+    /// [`Body::render_leaves`]'s arrangement for [ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 2, and for its reason: a synthesized equality walk that reaches a
+    /// boxed field emits a call to this from a [`synth`] walk that has no
+    /// `Plan`, so the call site that asks for the walk resolves it first — see
+    /// [`synth::reaches_a_box`] — and [`Body::compare_values`] resolves it for
+    /// the boxed pair it calls it over directly.
+    ///
+    /// The function is not exported. `std.int`'s `renderInto` is not either:
+    /// `Plan::resolve` finds a module's own declarations whether or not a
+    /// program could name them, which is what lets the lowering call a
+    /// standard-library function no program can.
+    ///
+    /// `None` is a round that has to lower the package again with the
+    /// function in its slice, or a gap already reported. The caller emits a
+    /// stand-in that is never verified, because a round that wanted anything is
+    /// discarded whole.
+    pub(super) fn dynamic_equals(&mut self, span: Span) -> Option<FunctionId> {
+        if let Some(id) = self.pool.dynamic_equals {
+            return Some(id);
+        }
+        let (module, function) = DYNAMIC_EQUALS;
+        let id = self.library_leaf(
+            module,
+            function,
+            (&[shapes::BOXED, shapes::BOXED], shapes::BOOL),
+            "`==` on two erased values",
+            span,
+        )?;
+        self.pool.dynamic_equals = Some(id);
+        Some(id)
+    }
+
     /// One standard-library function a lowering composes calls to, found by
     /// module and name and checked against the parameters those calls will
-    /// pass.
+    /// pass and the answer they will read, `(params, returns)`.
     ///
     /// The check is [`Body::call_library`]'s `fits`, asked of layouts the
     /// caller names rather than of operands it holds — because what will be
     /// emitted has not been emitted yet, and a walk that discovered the
-    /// mismatch would discover it with the call already in the code.
+    /// mismatch would discover it with the call already in the code. `what`
+    /// names the composition in the gap a mismatch reports.
     fn library_leaf(
         &mut self,
         module: &str,
         function: &str,
-        params: &[LayoutId],
+        (params, returns): (&[LayoutId], LayoutId),
+        what: &str,
         span: Span,
     ) -> Option<FunctionId> {
         let Some(id) = self.plan.resolve(self.checked, module, function) else {
@@ -338,14 +389,11 @@ impl Body<'_> {
         let fits = !shape.receiver
             && !shape.variadic
             && !shape.is_async
-            && shape.returns == shapes::UNIT
+            && shape.returns == returns
             && shape.params == params;
         if !fits {
             self.errors.push(gap::gap(
-                &format!(
-                    "`{module}.{function}` does not take the operands a rendering walk composes \
-                     it out of"
-                ),
+                &format!("`{module}.{function}` does not take the operands {what} passes it"),
                 span,
             ));
             return None;

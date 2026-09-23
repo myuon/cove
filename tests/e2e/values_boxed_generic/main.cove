@@ -1,0 +1,79 @@
+use clock.timeout
+use console.println
+
+/// `==` on two erased values of one generic declaration at two instantiations.
+///
+/// A value carries its declaration and not its type arguments: `None` is
+/// `None` whichever `Option` it came out of, and so is `Cell.Empty` whichever
+/// `Cell` it is. The interpreter has always answered so — its values have no
+/// type arguments to compare — and so did the linear-memory backend's Rust
+/// walk for `Option` and `Result`, whose layouts are named without them. For a
+/// generic enum a program declares, the layout's name *carries* the
+/// instantiation (`values_boxed_generic.Cell<Int>`), and that walk compared the
+/// whole name: two empty cells boxed at `Int` and at `String` were unequal on
+/// the VM and equal on the interpreter.
+///
+/// [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 2 moved the walk into Cove, over `core.dynamicSameType`, which
+/// compares declared names with the instantiation left off — so the rows below
+/// answer alike on every evaluator, and what they answer is the interpreter's.
+///
+/// The values are boxed through `clock.timeout`, which answers
+/// `Result<Any, Error>`, because that is the one erasure that can hold two
+/// instantiations of one declaration without the program naming a trait for
+/// each: a `dyn` erasure needs an `impl` per type.
+enum Cell<T> {
+  Empty
+  Full(T)
+}
+
+/// A struct with no field that mentions its parameter, so two instantiations of
+/// it hold exactly the same words.
+struct Tagged<T> {
+  tag: Int
+}
+
+fn row(label: String, answer: Bool) -> Result<Unit, Error> {
+  println("{label} {answer}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  let emptyInt = timeout(1ms) {
+    let held: Cell<Int> = Cell.Empty
+    held
+  }?
+  let emptyText = timeout(1ms) {
+    let held: Cell<String> = Cell.Empty
+    held
+  }?
+  let fullInt = timeout(1ms) {
+    let held: Cell<Int> = Cell.Full(1)
+    held
+  }?
+  let fullText = timeout(1ms) {
+    let held: Cell<String> = Cell.Full("1")
+    held
+  }?
+  row("cell.empty.int-text", emptyInt == emptyText)?
+  row("cell.empty.text-int", emptyText == emptyInt)?
+  row("cell.empty.ne", emptyInt != emptyText)?
+  row("cell.full.int-text", fullInt == fullText)?
+  row("cell.empty-full", emptyInt == fullInt)?
+
+  let tagInt = timeout(1ms) {
+    let held: Tagged<Int> = Tagged(tag: 3)
+    held
+  }?
+  let tagText = timeout(1ms) {
+    let held: Tagged<String> = Tagged(tag: 3)
+    held
+  }?
+  let tagOther = timeout(1ms) {
+    let held: Tagged<String> = Tagged(tag: 4)
+    held
+  }?
+  row("tagged.int-text", tagInt == tagText)?
+  row("tagged.int-text.other", tagInt == tagOther)?
+  Ok(())
+}

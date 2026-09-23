@@ -1,0 +1,218 @@
+/// Whether two erased values are equal: what `==` answers when both of its
+/// operands are a `dyn Trait` or a Host `Any`, whose concrete type is known only
+/// once the box is opened.
+///
+/// Nothing in a program calls this. The lowering does, at every `==`, `!=` and
+/// `assertEqual` whose two operands are boxed, and from inside a walk it
+/// composed for a known layout wherever that walk reaches a boxed field,
+/// element or payload. Where the layout is known it never gets here: a
+/// comparison of two `Point`s is a function the lowering writes for `Point`
+/// (ADR 0064's Decision 3), and this is the one fallback for what no layout
+/// describes (ADR 0068's Decisions 4 and 5).
+///
+/// # What it answers
+///
+/// Two values are equal when they have **one semantic type** and then **one
+/// structure**, compared part for part in the order `core.dynamicChild` gives:
+///
+/// - **The type first.** `core.dynamicSameType` holds: the same kind and, for a
+///   struct, an enum and a range, the same declared name. Type arguments are not
+///   part of the name — an `Option<Int>` and an `Option<String>` are one type, and
+///   so are a `m.Cell<Int>` and a `m.Cell<String>` — which is what makes `None`
+///   equal to `None` whichever `Option` it came out of. Two values of different
+///   types are unequal and never an error: an `Int` is not a `Duration` however
+///   many nanoseconds it is, an `Array` is not a `Vector` holding the same
+///   elements, and an `Error` is not the `String` its message is.
+/// - **`()`** is equal to `()`.
+/// - **`Bool`, `Int` and `Duration`** are equal when they are the same value.
+/// - **`Float`** is IEEE 754's `==`: a `NaN` is equal to nothing, itself
+///   included, and `0.0` is equal to `-0.0`.
+/// - **`String`** is equal when the bytes are.
+/// - **A function, and every opaque value** — a Host handle, a task, a task
+///   scope, a `Shared` cell, a byte run — is equal to **nothing, itself
+///   included**. The language gives none of them an equality, and a box does not
+///   give them one (ADR 0068's Decision 7).
+/// - **An enum** is equal when the case is the same and then the case's payload
+///   is, part for part in declaration order.
+/// - **A struct and a range** are equal when their fields are, in declaration
+///   order. An `opaque` struct is a struct here: its fields are private to the
+///   module that declared it, and to this module, which only compares them.
+/// - **An `Array`, a `Vector`, a `Set` and a `Map`** are equal when they hold the
+///   same number of children and the children are equal in order. A `Set` is in
+///   its one ascending order and a `Map` is its entries in that order, key then
+///   value, so two of either with the same members line up.
+///
+/// It answers `false` at the first difference and reads nothing after it.
+///
+/// # There is no nesting bound
+///
+/// The walk is a loop over two explicit stacks of views, one per side, and
+/// never a recursion: a value nested ten thousand deep is compared exactly as
+/// one nested ten deep is, on either evaluator, and neither's call depth is a
+/// limit the language has (issue #480's decision). What bounds it is the work
+/// it does, which is charged an instruction at a time like any other loop.
+///
+/// Children are pushed last first so that they are popped first first: the
+/// visit is depth first and left to right, which is the order `a == b` has
+/// always meant, so the first difference found is the leftmost.
+///
+/// # A value one level deep allocates nothing
+///
+/// Both views are opened and compared before a stack exists, and a pair of
+/// scalars, strings, functions, opaque values, empty collections or cases
+/// without a payload is answered there: comparing two boxed `Int`s is two
+/// opens, a type test and one comparison. The children of the two are then
+/// compared in order where they are, and the two stacks are made only at the
+/// first child that has children of its own — so a struct of scalars, an
+/// `Array<Int>` or a `Some(3)` is compared without allocating, and a value that
+/// really nests pays for its stacks once, however deep it goes.
+fn equals(a: Any, b: Any) -> Bool {
+  let left = core.dynamicOpen(a)
+  let right = core.dynamicOpen(b)
+  let count = children(left, right)
+  var at = 0
+  while at < count {
+    let under = children(
+      core.dynamicChild(left, at),
+      core.dynamicChild(right, at),
+    )
+    if under < 0 {
+      return false
+    }
+    if under > 0 {
+      return deeper(left, right, count, at, under)
+    }
+    at = at + 1
+  }
+  // A `count` of `-1` ran no turn: the two roots were not alike.
+  count >= 0
+}
+
+/// The rest of [`equals`] from child `from` of `left` and `right` on — a pair
+/// that is alike and has `under` children of its own each — over the two
+/// stacks.
+///
+/// Every child before `from` has been compared and had nothing under it, so
+/// what is left to visit is `from`'s children and then its later siblings,
+/// `count` in all. They are pushed siblings first and each run last first, so
+/// that `from`'s first child is on top.
+fn deeper(
+  left: DynamicView,
+  right: DynamicView,
+  count: Int,
+  from: Int,
+  under: Int,
+) -> Bool {
+  let lefts: Vector<DynamicView> = core.vectorWithCapacity(count)
+  let rights: Vector<DynamicView> = core.vectorWithCapacity(count)
+  var at = count - 1
+  while at > from {
+    stack(lefts, core.dynamicChild(left, at))
+    stack(rights, core.dynamicChild(right, at))
+    at = at - 1
+  }
+  let x = core.dynamicChild(left, from)
+  let y = core.dynamicChild(right, from)
+  var next = under - 1
+  while next >= 0 {
+    stack(lefts, core.dynamicChild(x, next))
+    stack(rights, core.dynamicChild(y, next))
+    next = next - 1
+  }
+  // The two stacks are always the same height, so one count serves both.
+  var depth = count - 1 - from + under
+  while depth > 0 {
+    depth = depth - 1
+    let x = core.vectorLoad(lefts, depth)
+    let y = core.vectorLoad(rights, depth)
+    core.vectorTruncate(lefts, depth)
+    core.vectorTruncate(rights, depth)
+    var next = children(x, y) - 1
+    if next < -1 {
+      return false
+    }
+    while next >= 0 {
+      stack(lefts, core.dynamicChild(x, next))
+      stack(rights, core.dynamicChild(y, next))
+      depth = depth + 1
+      next = next - 1
+    }
+  }
+  true
+}
+
+/// How many children `x` and `y` each have if they agree in everything but
+/// their children — the same type, the same scalar, the same case, the same
+/// number of children to compare next — and `-1` if they do not.
+///
+/// One answer rather than a `Bool` and a count asked for separately, because
+/// every caller wants both and the count is one more observation a node.
+///
+/// The kind codes are `cove_ir::DynamicKind`'s one table: 0 unit, 1 bool, 2
+/// int, 3 float, 4 duration, 5 string, 6 struct, 7 enum, 8 array, 9 vector,
+/// 10 set, 11 map, 12 range, 13 function and 14 opaque. The same type is the
+/// same kind, so one kind is asked for. A scalar has no children, and neither
+/// has a function or an opaque value, which is equal to nothing.
+///
+/// The counts are compared even where the type settles them — two structs of
+/// one declaration have one field count, two cases of one enum one payload —
+/// because a count is what a collection is compared by first, and one
+/// comparison for every kind is shorter than a list of the kinds that need it.
+fn children(x: DynamicView, y: DynamicView) -> Int {
+  if !core.dynamicSameType(x, y) {
+    return -1
+  }
+  let kind = core.dynamicKind(x)
+  if kind == 2 {
+    if core.dynamicInt(x) == core.dynamicInt(y) {
+      return 0
+    }
+    return -1
+  }
+  if kind == 5 {
+    if core.dynamicString(x) == core.dynamicString(y) {
+      return 0
+    }
+    return -1
+  }
+  if kind == 1 {
+    if core.dynamicBool(x) == core.dynamicBool(y) {
+      return 0
+    }
+    return -1
+  }
+  if kind == 3 {
+    if core.dynamicFloat(x) == core.dynamicFloat(y) {
+      return 0
+    }
+    return -1
+  }
+  if kind == 4 {
+    if core.dynamicDuration(x) == core.dynamicDuration(y) {
+      return 0
+    }
+    return -1
+  }
+  if kind >= 13 {
+    return -1
+  }
+  if kind == 7 {
+    if core.dynamicCase(x) != core.dynamicCase(y) {
+      return -1
+    }
+  }
+  let count = core.dynamicChildCount(x)
+  if count == core.dynamicChildCount(y) {
+    return count
+  }
+  -1
+}
+
+/// Pushes `view` onto `views`: ADR 0062's ensure, store and commit, written out
+/// rather than called as `std.vector.push`, which is the same four statements.
+fn stack(views: Vector<DynamicView>, view: DynamicView) {
+  let at = core.vectorLength(views)
+  core.vectorEnsure(views, 1)
+  core.vectorStore(views, at, view)
+  core.vectorCommit(views, 1)
+}

@@ -44,7 +44,6 @@ pub enum Intrinsic {
     StringRefuseByteRange,
     FloatToInt,
     FloatParse,
-    AnyEquals,
     ValueOrder,
     ValueAdmitKey,
 }
@@ -59,7 +58,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringRefuseByteRange,
     Intrinsic::FloatToInt,
     Intrinsic::FloatParse,
-    Intrinsic::AnyEquals,
     Intrinsic::ValueOrder,
     Intrinsic::ValueAdmitKey,
 ];
@@ -77,21 +75,20 @@ pub const COUNT: usize = ALL.len();
 impl Intrinsic {
     /// The type the operation belongs to: `Array`, `String`, `Map`, `Int`.
     ///
-    /// `Any` for [`Intrinsic::AnyEquals`], which is `==` on anything wider
-    /// than a word rather than a method a type declares — see the doc
-    /// comment where `cove-runtime` dispatches it. `Value` for the two a
-    /// keyed collection's standard-library body reaches through `core.order`
-    /// and `core.admitKey`, which are rules over any key's layout rather than
-    /// methods of a type either, and for
+    /// `Value` for the two a keyed collection's standard-library body reaches
+    /// through `core.order` and `core.admitKey`, which are rules over any
+    /// key's layout rather than methods of a type, and for
     /// [`Intrinsic::ValueRenderInto`], which is what `"{x}"` appends for a
-    /// piece of any layout.
+    /// piece of any layout. (`Any` was the receiver of `Any.equals`, `==` on
+    /// two erased values, until [ADR
+    /// 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 2 made that `std.dynamic.equals`.)
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::ValueRenderInto => "Value",
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatParse => "Float",
-            Intrinsic::AnyEquals => "Any",
             Intrinsic::ValueOrder => "Value",
             Intrinsic::ValueAdmitKey => "Value",
         }
@@ -104,7 +101,6 @@ impl Intrinsic {
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatParse => "parse",
-            Intrinsic::AnyEquals => "equals",
             Intrinsic::ValueOrder => "order",
             Intrinsic::ValueAdmitKey => "admitKey",
         }
@@ -162,10 +158,9 @@ impl Intrinsic {
             // Rendering is a walk directed by whatever layout the piece has,
             // which is what makes it a value rule rather than a text one: a
             // `"{items}"` renders an `Array` through it.
-            Intrinsic::ValueRenderInto
-            | Intrinsic::AnyEquals
-            | Intrinsic::ValueOrder
-            | Intrinsic::ValueAdmitKey => Category::Value,
+            Intrinsic::ValueRenderInto | Intrinsic::ValueOrder | Intrinsic::ValueAdmitKey => {
+                Category::Value
+            }
         }
     }
 
@@ -192,7 +187,6 @@ impl Intrinsic {
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
-            Intrinsic::AnyEquals => fixed(&[C::Value, C::Value], C::Bool),
             Intrinsic::ValueOrder => fixed(&[C::Value, C::Value], C::Int),
             // The key, then the method and the role a refusal is worded with.
             Intrinsic::ValueAdmitKey => fixed(&[C::Value, C::Str, C::Str], C::Unit),
@@ -234,8 +228,9 @@ impl Intrinsic {
             //
             // It keeps every one of those after ADR 0064's Decision 3 made
             // the operation a walk `lower::synth` composes, and for the
-            // reason `Intrinsic::AnyEquals` and `Intrinsic::ValueOrder` keep
-            // theirs: the arm that survives is the one reached from a value
+            // reason `Intrinsic::ValueOrder` keeps its own (and `Any.equals`
+            // kept its, until ADR 0068 moved it into `std.dynamic`): the arm
+            // that survives is the one reached from a value
             // whose layout does not say what it is, and that arm is the whole
             // of the runtime's walk. A `Float` and a `Duration` reach it too
             // — the two scalars whose text no Cove body writes — and those
@@ -326,11 +321,11 @@ impl Intrinsic {
             // `0..=17` through ADR 0067's `core.refuse`.
             Intrinsic::FloatToInt => allocate,
 
-            // `==` on anything wider than a word walks both operands
-            // together, as deep as they nest — past the depth a walk may
-            // reach, which stops the run — and allocates nothing: the answer
-            // is one `Bool` word.
-            Intrinsic::AnyEquals => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
+            // `==` on two erased values stood here, a walk of both operands
+            // together that allocated nothing and stopped the run past a
+            // depth of 128. ADR 0068's Phase 2 made it `std.dynamic.equals`,
+            // a Cove loop over a view of each box with no depth bound at all
+            // (issue #480), and deleted the variant.
 
             // ADR 0059's keyed intrinsics. The order and the admission each
             // walk a key as deep as it nests and allocate nothing: the order
@@ -569,7 +564,6 @@ mod tests {
             "String.refuseByteRange",
             "Float.toInt",
             "Float.parse",
-            "Any.equals",
             "Value.order",
             "Value.admitKey",
         ];
@@ -627,7 +621,6 @@ mod tests {
                 | Intrinsic::StringRefuseByteRange
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatParse
-                | Intrinsic::AnyEquals
                 | Intrinsic::ValueOrder
                 | Intrinsic::ValueAdmitKey => 1,
             }
@@ -686,7 +679,7 @@ mod tests {
     #[test]
     fn display_prints_receiver_dot_operation() {
         assert_eq!(Intrinsic::FloatParse.to_string(), "Float.parse");
-        assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
+        assert_eq!(Intrinsic::ValueOrder.to_string(), "Value.order");
     }
 
     #[test]

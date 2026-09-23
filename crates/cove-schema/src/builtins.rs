@@ -1823,8 +1823,8 @@ impl CoreIntrinsicSchema {
 /// [`CORE_DYNAMIC_KIND`], [`CORE_DYNAMIC_SAME_TYPE`], [`CORE_DYNAMIC_CASE`] and
 /// [`CORE_DYNAMIC_CHILD_COUNT`] ask what the viewed value is; the five scalar
 /// reads answer what a scalar view holds; and [`CORE_DYNAMIC_CHILD`] projects
-/// a part. No standard-library body calls them yet — `std.dynamic` arrives
-/// with the ADR's Phase 2.
+/// a part. `std.dynamic.equals` is the first standard-library body to call
+/// them, since the ADR's Phase 2: `==` on two erased values.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_ENSURE,
@@ -2847,6 +2847,21 @@ pub const CORE_SET_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// the view is the only carrier of a location, and the `core.dynamic*`
 /// entries are the whole of what can be asked of one.
 pub const CORE_DYNAMIC_VIEW_TYPE: &str = "DynamicView";
+
+/// The name of an erased value a standard-library module may write as a
+/// parameter's type: `fn equals(a: Any, b: Any) -> Bool`.
+///
+/// What a Host schema declares where nothing it does depends on the type, and
+/// what a `dyn Trait` is once its trait has been checked: a box whose family is
+/// a word in its own header. [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 2 needs a Cove function that *takes* one — `std.dynamic.equals`, which
+/// the lowering calls where `==` meets two boxes, and whose first act is
+/// [`CORE_DYNAMIC_OPEN`] — so the standard library needs a way to write the
+/// type, and nothing else does. It is resolved by the privilege
+/// [`CORE_DYNAMIC_VIEW_TYPE`] is and for the same reason (Decision 6): in a
+/// program `Any` names no type, exactly as it did before, and a package may
+/// declare one of its own.
+pub const CORE_ANY_TYPE: &str = "Any";
 
 /// One parameter named `view`, of [`CORE_DYNAMIC_VIEW_TYPE`]: what every
 /// observation but the open takes.

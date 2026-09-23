@@ -5032,9 +5032,15 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 }
 
 /// One intrinsic of each effect class that still has a member, as the pair of
-/// names that resolves to it: a raise (`Any.equals`: a walk too deep to
-/// finish) and a safepoint (`Float.parse`: allocates the message of the
-/// `Err` it answers).
+/// names that resolves to it: a raise (`Value.order`: a key too deep to walk,
+/// or one that is not a key at all) and a safepoint (`Float.parse`: allocates
+/// the message of the `Err` it answers).
+///
+/// **The raise member was `Any.equals`** until ADR 0068's Phase 2 made `==` on
+/// two erased values `std.dynamic.equals` and deleted the variant. `Value.order`
+/// declares exactly what it did — `MAY_RAISE | READS_MEMORY | BULK_WORK`, no
+/// allocation — so it is the same class, and the cases below check the same
+/// protocol over it.
 ///
 /// **There were three, and the third has no member left.** A *plain call* —
 /// neither a safepoint nor a raise, so no publish, no program counter, no
@@ -5062,7 +5068,7 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 /// makes the swap free. So what the case below checks is unchanged: it is a
 /// call whose protocol publishes the unpaid work before the hand-over and tests
 /// the outcome after it.
-pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Any", "equals"), ("Float", "parse")];
+pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Value", "order"), ("Float", "parse")];
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///
