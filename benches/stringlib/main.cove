@@ -514,6 +514,131 @@ fn radixHits(text: String, radix: Int, expected: Int, rounds: Int) -> Int {
   hits
 }
 
+/// `String.split`'s and `String.replace`'s rows, which issue #454's Step 3
+/// added when it moved both into `std.string`.
+///
+/// The same program before and after, so the difference is the operation.
+/// What a split costs is a search per part and an allocation per part, so the
+/// rows vary the two separately:
+///
+/// - **`split.three`** is `a,b,c`, the short case a program writes most;
+/// - **`split.wide`** is a 400-byte line of 100 fields, the CSV case — many
+///   parts, each short;
+/// - **`split.none`** is the same line and a separator it does not hold, so one
+///   search to the end and one part: what finding nothing costs;
+/// - **`split.long.sep`** is `split.wide` joined by a three-byte separator.
+///
+/// A replacement is a search per match and one answer, so its rows vary the
+/// matches:
+///
+/// - **`replace.none`**, nothing to replace, which is what most calls meet;
+/// - **`replace.one`**, one match in 400 bytes;
+/// - **`replace.every`**, `examples/cq`'s CSV quoting — `"` to `""` — on a
+///   field that is a quote every fourth byte, so the answer is longer than the
+///   text;
+/// - **`replace.shrink`**, a three-byte `old` to a one-byte `new`, so the
+///   answer is shorter.
+///
+/// Each row is `parseTurns()` calls with the bare loop subtracted, and each
+/// checks what it answered — a part count or an answer length — before any of
+/// it is read as a timing.
+export fn splitRows() -> Result<Unit, Error> {
+  let rounds = parseTurns()
+  let bareFrom = now()
+  let bare = countBare(rounds)
+  let bareMicros = (now() - bareFrom).micros()
+
+  let fields = fieldsOf(100, ",")
+  let spaced = fieldsOf(100, " | ")
+  let quoted = quotesOf(100)
+  let three = splitRow("a,b,c", ",", rounds)
+  let wide = splitRow(fields, ",", rounds)
+  let none = splitRow(fields, ";", rounds)
+  let longSep = splitRow(spaced, " | ", rounds)
+  let replaceNone = replaceRow(fields, ";", "!", rounds)
+  let replaceOne = replaceRow("{fields}~", "~", "!", rounds)
+  let replaceEvery = replaceRow(quoted, "\"", "\"\"", rounds)
+  let replaceShrink = replaceRow(spaced, " | ", ",", rounds)
+
+  assertEqual(bare, rounds)?
+  assertEqual(three.hits, 3)?
+  assertEqual(wide.hits, 100)?
+  assertEqual(none.hits, 1)?
+  assertEqual(longSep.hits, 100)?
+  assertEqual(replaceNone.hits, fields.byteLength())?
+  assertEqual(replaceOne.hits, fields.byteLength() + 1)?
+  assertEqual(replaceEvery.hits, quoted.byteLength() + 100)?
+  assertEqual(replaceShrink.hits, fields.byteLength())?
+
+  let per = fn(row: ParseRow) {
+    (row.micros - bareMicros) * 1000 / rounds
+  }
+  println("bare loop                          {bareMicros * 1000 / rounds} ns/turn ({bare})")?
+  println("split.three    (5 bytes, 3 parts)  {per(three)} ns/call")?
+  println("split.wide     (399 bytes, 100)    {per(wide)} ns/call")?
+  println("split.none     (399 bytes, 1)      {per(none)} ns/call")?
+  println("split.long.sep (597 bytes, 100)    {per(longSep)} ns/call")?
+  println("replace.none   (399 bytes, 0)      {per(replaceNone)} ns/call")?
+  println("replace.one    (400 bytes, 1)      {per(replaceOne)} ns/call")?
+  println("replace.every  (400 bytes, 100)    {per(replaceEvery)} ns/call")?
+  println("replace.shrink (597 bytes, 99)     {per(replaceShrink)} ns/call")?
+  Ok(())
+}
+
+/// `count` three-byte fields, `f00` to `f99`, between `separator`s.
+fn fieldsOf(count: Int, separator: String) -> String {
+  var out = ""
+  var at = 0
+  while at < count {
+    let tens = at / 10
+    let units = at % 10
+    if at == 0 {
+      out = "f{tens}{units}"
+    } else {
+      out = "{out}{separator}f{tens}{units}"
+    }
+    at += 1
+  }
+  out
+}
+
+/// `count` four-byte runs, each ending in a double quote.
+fn quotesOf(count: Int) -> String {
+  var out = ""
+  var at = 0
+  while at < count {
+    out = "{out}ab\"c"
+    at += 1
+  }
+  out
+}
+
+/// How long `rounds` splits of `text` took, and how many parts the last one
+/// had.
+fn splitRow(text: String, separator: String, rounds: Int) -> ParseRow {
+  let startedAt = now()
+  var parts = 0
+  var round = 0
+  while round < rounds {
+    parts = text.split(separator).length()
+    round += 1
+  }
+  ParseRow(micros: (now() - startedAt).micros(), hits: parts)
+}
+
+/// How long `rounds` replacements in `text` took, and the last answer's
+/// length in bytes.
+fn replaceRow(text: String, old: String, new: String, rounds: Int) -> ParseRow {
+  let startedAt = now()
+  var length = 0
+  var round = 0
+  while round < rounds {
+    length = text.replace(old, new).byteLength()
+    round += 1
+  }
+  ParseRow(micros: (now() - startedAt).micros(), hits: length)
+}
+
 /// The bare loop every row above is measured against.
 fn countBare(rounds: Int) -> Int {
   var total = 0
