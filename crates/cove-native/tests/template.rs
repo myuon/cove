@@ -209,8 +209,8 @@ fn a_copy_moves_every_word_and_does_not_smear() {
 }
 
 #[test]
-fn a_trap_names_its_message_by_id() {
-    suite::a_trap_names_its_message_by_id::<Template>();
+fn a_trap_names_its_sentences_by_address() {
+    suite::a_trap_names_its_sentences_by_address::<Template>();
 }
 
 #[test]

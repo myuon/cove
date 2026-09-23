@@ -798,6 +798,32 @@ pub fn call_core(
             };
             Err(RuntimeError::new(wrong_byte_range(text, *from, *to)).at(span))
         }
+        // Any standard-library body's own refusal, worded in Cove out of
+        // values it computed rather than by this interpreter. The compiled
+        // tier's `TRAP` arm reads the same three strings out of the same
+        // three slots `cove_ir::Inst::Trap` carries, and must answer exactly
+        // this: ADR 0034 makes this evaluator the definition of what a Cove
+        // program means, so an empty `rule` or `help` is absent here the
+        // same way it is there, not a blank line.
+        "refuse" => {
+            let Value(Repr::Str(message)) = &args[0] else {
+                return Err(type_error(&shown, "message", "String", &args[0], span));
+            };
+            let Value(Repr::Str(rule)) = &args[1] else {
+                return Err(type_error(&shown, "rule", "String", &args[1], span));
+            };
+            let Value(Repr::Str(help)) = &args[2] else {
+                return Err(type_error(&shown, "help", "String", &args[2], span));
+            };
+            let mut error = RuntimeError::new(message.to_string());
+            if !rule.is_empty() {
+                error = error.with_rule(rule.to_string());
+            }
+            if !help.is_empty() {
+                error = error.with_help(help.to_string());
+            }
+            Err(error.at(span))
+        }
         // `StringBuilder.finish`'s whole body, which consumes: the bytes are
         // validated once and become the `String`, and the owner is emptied so a
         // read after it is refused rather than answered as an empty buffer.

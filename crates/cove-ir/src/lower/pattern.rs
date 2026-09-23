@@ -141,8 +141,7 @@ impl Body<'_> {
         }
 
         let trap = self.here();
-        let message = self.string("no `match` arm covers this value");
-        self.emit(Inst::Trap { message }, span);
+        self.trap("no `match` arm covers this value", span);
 
         for (index, pending) in failures.into_iter().enumerate() {
             let Reach::Case { index: case } = reach[index] else {
@@ -194,12 +193,43 @@ impl Body<'_> {
                 self.patch(at, next);
             }
         }
-        let message = self.string("no `match` arm covers this value");
-        self.emit(Inst::Trap { message }, span);
+        self.trap("no `match` arm covers this value", span);
         let end = self.here();
         for at in ends {
             self.patch(at, end);
         }
+    }
+
+    /// Raises `message`, with no `rule:` and no `help:` line.
+    ///
+    /// The uncovered-arm default is the lowering's own word, quoting nothing
+    /// computed at run time, so it costs one [`Inst::Str`] per slot rather
+    /// than a body composed at run time — a load of a precomputed address,
+    /// not an allocation, by
+    /// [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md).
+    /// `rule` and `help` share one slot, holding the empty `String`
+    /// [`Inst::Trap`] takes to mean "this sentence is absent".
+    fn trap(&mut self, message: &str, span: Span) {
+        let text = self.string(message);
+        let message = self.temp(shapes::STR).slot;
+        self.emit(Inst::Str { dst: message, text }, span);
+        let empty = self.string("");
+        let rule = self.temp(shapes::STR).slot;
+        self.emit(
+            Inst::Str {
+                dst: rule,
+                text: empty,
+            },
+            span,
+        );
+        self.emit(
+            Inst::Trap {
+                message,
+                rule,
+                help: rule,
+            },
+            span,
+        );
     }
 
     /// One arm: its tests, its bindings, its body, and where it goes when it

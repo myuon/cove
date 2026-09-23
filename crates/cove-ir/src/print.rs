@@ -531,7 +531,11 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         }
         Inst::SharedLock { cell } => format!("shared.lock {}", s(*cell)),
         Inst::SharedUnlock { cell } => format!("shared.unlock {}", s(*cell)),
-        Inst::Trap { message } => format!("trap {:?}", program.string(*message)),
+        Inst::Trap {
+            message,
+            rule,
+            help,
+        } => format!("trap {}, {}, {}", s(*message), s(*rule), s(*help)),
         Inst::AssertFailed { message } => format!("assert.failed {}", s(*message)),
     }
 }

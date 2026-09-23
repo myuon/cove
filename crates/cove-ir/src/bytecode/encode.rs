@@ -581,7 +581,11 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::SharedUnlock { cell } => build(Op::SharedUnlock, slot(cell)?, 0, 0, 0),
 
         // ---- failure ----------------------------------------------------------
-        Inst::Trap { message } => build(Op::Trap, 0, 0, 0, halves(message.0, 0)),
+        Inst::Trap {
+            message,
+            rule,
+            help,
+        } => build(Op::Trap, slot(message)?, slot(rule)?, slot(help)?, 0),
         Inst::AssertFailed { message } => build(Op::AssertFailed, slot(message)?, 0, 0, 0),
     })
 }
@@ -1215,7 +1219,14 @@ mod tests {
             ),
             (0, Inst::SharedLock { cell: 1 }),
             (0, Inst::SharedUnlock { cell: 1 }),
-            (0, Inst::Trap { message: StrId(2) }),
+            (
+                0,
+                Inst::Trap {
+                    message: 1,
+                    rule: 2,
+                    help: 3,
+                },
+            ),
             (0, Inst::AssertFailed { message: 1 }),
         ]);
         held

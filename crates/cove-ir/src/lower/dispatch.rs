@@ -1346,10 +1346,33 @@ impl Body<'_> {
             ends.push(self.emit(Inst::Jump { to: PENDING }, expr.span));
         }
         let trap = self.here();
-        let message = self.string(&format!(
+        // The sentence quotes the trait and method the lowering is dispatching,
+        // which are literals here rather than anything the run computed, so it
+        // costs one `Inst::Str` per slot rather than a body composed at run
+        // time. `rule` and `help` share one slot, holding the empty `String`
+        // `Inst::Trap` takes to mean "this sentence is absent".
+        let text = self.string(&format!(
             "no implementation of `{trait_short}.{method}` for this value"
         ));
-        self.emit(Inst::Trap { message }, expr.span);
+        let message = self.temp(shapes::STR).slot;
+        self.emit(Inst::Str { dst: message, text }, expr.span);
+        let empty = self.string("");
+        let rule = self.temp(shapes::STR).slot;
+        self.emit(
+            Inst::Str {
+                dst: rule,
+                text: empty,
+            },
+            expr.span,
+        );
+        self.emit(
+            Inst::Trap {
+                message,
+                rule,
+                help: rule,
+            },
+            expr.span,
+        );
 
         let width = arms
             .iter()

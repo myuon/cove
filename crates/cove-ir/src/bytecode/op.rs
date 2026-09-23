@@ -1180,7 +1180,12 @@ impl Op {
             Op::Settled => fields(Operand::Word(TASK), Operand::Value, NONE, one(Half::Layout)),
             Op::SharedLock => fields(Operand::Word(REF), NONE, NONE, Payload::Empty),
             Op::SharedUnlock => fields(Operand::Word(REF), NONE, NONE, Payload::Empty),
-            Op::Trap => fields(NONE, NONE, NONE, one(Half::Str)),
+            Op::Trap => fields(
+                Operand::Word(REF),
+                Operand::Word(REF),
+                Operand::Word(REF),
+                Payload::Empty,
+            ),
             Op::AssertFailed => fields(Operand::Word(REF), NONE, NONE, Payload::Empty),
         }
     }

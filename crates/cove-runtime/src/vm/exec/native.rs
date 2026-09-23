@@ -84,7 +84,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cove_ir::{ArgsId, FunctionId, Inst, LayoutId, SiteId, Slot, Storage, StrId};
+use cove_ir::{ArgsId, FunctionId, Inst, LayoutId, SiteId, Slot, Storage};
 use cove_native::{
     Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp,
 };
@@ -1726,9 +1726,10 @@ fn raised(
         Some(Raise::DurationOverflowed) => overflowed("duration arithmetic"),
         Some(Raise::DividedByZero) => divided_by_zero("division"),
         Some(Raise::RemainderByZero) => divided_by_zero("remainder"),
-        Some(Raise::Trapped) => {
-            RuntimeError::new(machine.program.string(StrId(ctx.raise_detail)).to_string())
-        }
+        // The sentences are the heap's rather than the literal table's since
+        // ADR 0067, and `Machine::refusal` is the encoded tier's reader too, so
+        // a refusal says the same three things whichever tier raised it.
+        Some(Raise::Trapped) => machine.refusal(ctx.raise_message, ctx.raise_rule, ctx.raise_help),
         Some(Raise::NullObject) => null_object(),
         // `Machine::element`'s sentence and its rule, word for word.
         Some(Raise::IndexOutOfRange) => RuntimeError::new(format!(

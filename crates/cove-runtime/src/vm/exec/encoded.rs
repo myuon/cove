@@ -3873,9 +3873,19 @@ pub(super) fn dispatch<'s, 'a>(
             }
 
             // ---- failure ---------------------------------------------
+            // The three sentences are read out of slots, not embedded as
+            // constants: a standard-library body builds the refusal it
+            // raises, at runtime, out of values it computed, so the lowering
+            // cannot have written the words down ahead of time. An empty
+            // slot means its sentence is absent — `Machine::refusal` prints
+            // no `rule:` or `help:` line for it, rather than a blank one —
+            // and it is the one function both tiers raise a trap through, so
+            // what a program sees does not depend on which of them ran it.
             TRAP => {
-                let message = program.string(StrId(held.lo())).to_string();
-                fail!(RuntimeError::new(message))
+                let message = machine.mem.word_at(base_at + (a!() as usize));
+                let rule = machine.mem.word_at(base_at + (b!() as usize));
+                let help = machine.mem.word_at(base_at + (c!() as usize));
+                fail!(machine.refusal(message, rule, help))
             }
             // The only instruction that changes nothing the program can read.
             // The bytes are copied, because a run goes on after a failed

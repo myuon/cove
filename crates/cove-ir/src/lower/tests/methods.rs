@@ -236,15 +236,17 @@ fn is_some_is_a_call_the_standard_library_implements() {
         listing("fn has(o: Option<Int>) -> Bool { o.isSome() }", "has"),
         "\
 fn @m.has(Option) -> Bool
-  frame 4: s0!:tag s1!:int s2:bool s3:bool
-  local o -> s0..s1:Option [0, 7)
+  frame 6: s0!:tag s1!:int s2:bool s3:bool s4:ref s5:ref
+  local o -> s0..s1:Option [0, 9)
      0  switch s0:tag [3 1] else 5
      1  bool s2:bool true
-     2  jump 6
+     2  jump 8
      3  bool s2:bool false
-     4  jump 6
-     5  trap \"no `match` arm covers this value\"
-     6  return s2:Bool
+     4  jump 8
+     5  str s4:ref \"no `match` arm covers this value\"
+     6  str s5:ref \"\"
+     7  trap s4:ref, s5:ref, s5:ref
+     8  return s2:Bool
 "
     );
 }
@@ -264,17 +266,19 @@ fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
         ),
         "\
 fn @m.value(Option Int) -> Int
-  frame 6: s0!:tag s1!:int s2!:int s3:int s4:int s5:int
-  local o -> s0..s1:Option [0, 8)
-  local other -> s2:Int [0, 8)
+  frame 8: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:ref s7:ref
+  local o -> s0..s1:Option [0, 10)
+  local other -> s2:Int [0, 10)
      0  switch s0:tag [4 1] else 6
      1  copy s5:Int s1:Int
      2  copy s3:Int s5:Int
-     3  jump 7
+     3  jump 9
      4  copy s3:Int s2:Int
-     5  jump 7
-     6  trap \"no `match` arm covers this value\"
-     7  return s3:Int
+     5  jump 9
+     6  str s6:ref \"no `match` arm covers this value\"
+     7  str s7:ref \"\"
+     8  trap s6:ref, s7:ref, s7:ref
+     9  return s3:Int
 "
     );
 }
@@ -298,18 +302,21 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
         ),
         "\
 fn @m.parse(String) -> Float
-  frame 8: s0!:ref s1:float s2:tag s3:float s4:ref s5:float s6:float s7:float
-  local s -> s0:String [0, 10)
+  frame 10: s0!:ref s1:float s2:tag s3:float s4:ref s5:float s6:float s7:float s8:ref \
+s9:ref
+  local s -> s0:String [0, 12)
      0  intrinsic-call s2..s4:Result Float.parse (s0:String)
      1  float s5:float 0
      2  switch s2:tag [3 6] else 8
      3  copy s7:Float s3:Float
      4  copy s1:Float s7:Float
-     5  jump 9
+     5  jump 11
      6  copy s1:Float s5:Float
-     7  jump 9
-     8  trap \"no `match` arm covers this value\"
-     9  return s1:Float
+     7  jump 11
+     8  str s8:ref \"no `match` arm covers this value\"
+     9  str s9:ref \"\"
+    10  trap s8:ref, s9:ref, s9:ref
+    11  return s1:Float
 "
     );
 }

@@ -1901,12 +1901,38 @@ pub enum Inst {
     SharedUnlock { cell: Slot },
 
     // ---- failure ----------------------------------------------------------
-    /// Fail the run with `message`.
+    /// Fail the run with `message`, `rule`, and `help`.
     ///
     /// This is what an exhausted `match` and a failed `Unbox` reach. It is
     /// not a refusal to run the program: the program ran, and this is what
     /// it did.
-    Trap { message: StrId },
+    ///
+    /// A `RuntimeError` is three printed sentences, not one — `message`,
+    /// `rule`, and `help` — and each slot holds the address of a heap
+    /// `String` (a [`Repr::Ref`](crate::Repr::Ref)), exactly as
+    /// [`AssertFailed`](Inst::AssertFailed)'s `message` does. **An empty
+    /// string means the sentence is absent**: the runtime prints no `rule:`
+    /// or `help:` line for a slot that holds one.
+    ///
+    /// The three are slots rather than [`StrId`]s for the reason
+    /// [`AssertFailed`](Inst::AssertFailed)'s doc gives for its one: a
+    /// standard-library body builds the refusal it raises, and the words
+    /// quote a value the run computed rather than one the lowering could
+    /// have written down as a constant. A `Trap` synthesized by the lowering
+    /// itself — whose sentence is a constant — still pays for a slot, by
+    /// [`Inst::Str`] loading a precomputed address rather than allocating
+    /// one; see [ADR 0045](../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md).
+    Trap {
+        /// The address of the leading sentence, a `String`. Never empty —
+        /// this is the one line a trap always prints.
+        message: Slot,
+        /// The address of the `rule:` sentence, a `String`, or the address
+        /// of an empty `String` when the trap has none.
+        rule: Slot,
+        /// The address of the `help:` sentence, a `String`, or the address
+        /// of an empty `String` when the trap has none.
+        help: Slot,
+    },
 
     /// Record that an assertion failed here, carrying the `String` in
     /// `message`.

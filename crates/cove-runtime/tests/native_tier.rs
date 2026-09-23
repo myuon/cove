@@ -1107,6 +1107,45 @@ export fn callsTrimsAndKeeps(s: String, n: Int) -> Int {
   let also = [n, n]
   trimsAndKeeps(s, n) + also.length()
 }
+
+/// Two enums declare a `Red`, so resolution cannot tell which enum a bare
+/// `Red` pattern belongs to and abstains about exhaustiveness. That is what
+/// leaves a `match`'s default arm *reachable* — every other trap the lowering
+/// writes is unreachable from a checked program by construction — and the
+/// default arm is `Inst::Trap`. `crates/cove-runtime/tests/conformance.rs`
+/// uses the same pair of declarations for the same reason.
+enum TierSignal {
+  Red
+  Green
+}
+
+enum TierPaint {
+  Red
+  Blue
+}
+
+/// A `match` whose default arm the run can reach, and does when `pick` is not
+/// zero.
+///
+/// `counts(0)` is `negates`' guard and is here for its reason: an expanded body
+/// would put the trap on the caller's tier instead of on this one's.
+export fn signals(pick: Int) -> Int {
+  let guard = counts(0)
+  let signal = if pick == 0 {
+    TierSignal.Red
+  } else {
+    TierSignal.Green
+  }
+  match signal {
+    Red => 1
+  }
+}
+
+/// A refused caller, so the trap is reached across the boundary.
+export fn callsSignals(pick: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  signals(pick)
+}
 ";
 
 /// A standard-library body that can fault and that no expansion reaches.
@@ -1348,6 +1387,48 @@ fn a_deep_native_recursion_returns_through_a_reallocation() {
         both.tiers.native_to_native_direct >= DEEP as u64,
         "and every frame of it called the next directly: {:?}",
         both.tiers
+    );
+}
+
+/// **A trap in machine code is the VM's refusal, and the sentences are read out
+/// of slots.**
+///
+/// The one case in this file that enters `Inst::Trap`, and before ADR 0067 there
+/// was none: a trap carried a `StrId`, the code generator stored it as an
+/// immediate, and there was nothing about it a *run* could get wrong. Now the
+/// three sentences are slots the compiled code loads and the runtime reads back
+/// out of the heap, so an arm that stored the wrong word, or stored it to the
+/// wrong field, answers a different refusal — or none — and only a run says so.
+///
+/// Both halves matter. `pick == 0` takes the covered arm, which asserts the
+/// trap's two extra `Inst::Str` loads did not disturb the answer; anything else
+/// reaches the default arm, and the sentence has to be the dispatched one word
+/// for word.
+#[test]
+fn a_trap_in_machine_code_is_the_vm_s_refusal() {
+    on_each_tier(&["signals"], &["callsSignals"]);
+
+    let covered = both("callsSignals", vec![Value::int(0)]);
+    assert_eq!(covered.vm, Ok("1".to_string()), "the covered arm answers 1");
+    assert_eq!(
+        covered.native, covered.vm,
+        "and compiled code answers the same"
+    );
+    assert!(
+        covered.tiers.vm_to_native >= 1,
+        "the crossing into the compiled `match` was taken: {:?}",
+        covered.tiers
+    );
+
+    let uncovered = both("callsSignals", vec![Value::int(1)]);
+    let vm = uncovered
+        .vm
+        .expect_err("the vm traps on the arm nothing covers");
+    let native = uncovered.native.expect_err("and so does compiled code");
+    assert_eq!(native, vm, "the same sentence across the boundary");
+    assert!(
+        vm.contains("no `match` arm covers"),
+        "and it is the lowering's own sentence: {vm}"
     );
 }
 

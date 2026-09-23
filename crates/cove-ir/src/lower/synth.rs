@@ -55,16 +55,16 @@
 //! a `Bool`, an `Int` — and a walk that has composed the answer is done. An
 //! admission answers `()` **or raises**, and what it raises is
 //! `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` with a
-//! `rule:` and a `help:` beside it. [`Inst::Trap`] carries one
-//! [`crate::StrId`] and nothing else.
+//! `rule:` and a `help:` beside it: three sentences, and [`Inst::Trap`] now
+//! takes a slot for each, so the instruction is no longer the wall.
 //!
-//! Every hole in that sentence is something the lowering knows. The two names
-//! are literals at all nine of `std.map`'s and `std.set`'s call sites; the
-//! type is the layout's; the path is composed of field and case names a
-//! *synthesized* walk knows statically per arm. It is not enough, because a
-//! trap is one string and a refusal is three — and a `path` that reaches
-//! through a run or a map quotes an index or a rendered key, which is issue
-//! #461's kind besides.
+//! Every hole in that sentence is something the lowering knows, except one.
+//! The two names are literals at all nine of `std.map`'s and `std.set`'s call
+//! sites; the type is the layout's; the path is composed of field and case
+//! names a *synthesized* walk knows statically per arm — except where it
+//! reaches through a run or a map, where it quotes an index or a rendered
+//! key computed at run time, which is issue #461's kind of hole and not one
+//! this module's walks build.
 //!
 //! So [`Operation::Admission`] does not refuse. It **decides**: a `Bool`,
 //! `true` where the runtime is to be asked, and `super::core` runs the
@@ -122,13 +122,15 @@
 //! What [`Operation::Order`] adds is a walk that can *fail*. A `Float` and a
 //! mutable handle are not keys, so where equality falls through to `false`
 //! the order raises — and it raises the sentence the intrinsic raises, which
-//! is a **constant**. `Inst::Trap`'s [`crate::StrId`] is chosen by the
-//! lowering that emits it, exactly as `super::pattern`'s uncovered `match`
-//! and `super::dispatch`'s undispatchable call choose theirs, so a refusal
-//! whose wording does not quote a value computed at run time is one synthesis
-//! can write. Issue #461 is about the other kind. `Value.order`'s two are not
-//! it, and `Value.admitKey`'s — which carry a rule and a help — are not it
-//! either, for a reason next to it rather than in it.
+//! is a **constant**. Its [`crate::StrId`] is chosen by the lowering that
+//! emits it and loaded into [`Inst::Trap`]'s slot with [`Inst::Str`] — a
+//! precomputed address, not an allocation — exactly as `super::pattern`'s
+//! uncovered `match` and `super::dispatch`'s undispatchable call choose
+//! theirs, so a refusal whose wording does not quote a value computed at run
+//! time is one synthesis can write. Issue #461 is about the other kind.
+//! `Value.order`'s two are not it, and `Value.admitKey`'s — which carry a
+//! rule and a help — are not it either, for a reason next to it rather than
+//! in it.
 //!
 //! # The fifth operation is not here, and it is not waiting
 //!
@@ -160,15 +162,18 @@
 //! rendering, which is [`Operation::Rendering`]'s walk pointed at a
 //! diagnostic instead of at a buffer.
 //!
-//! **And that sentence cannot be raised from IR, twice over.**
-//! [`Inst::Trap`] carries one [`crate::StrId`] and a refusal is three
-//! strings, which is the wall `Value.admitKey` met; and the first of the
-//! three quotes a value computed at run time, which is issue #461's own wall.
-//! `Value.refuseDuplicate` is the only one of `Intrinsic`'s twelve survivors
-//! that meets both. Rendering being composable IR since
-//! [`Operation::Rendering`] landed does not help: a walk can now *build* the
-//! text, and there is still no instruction that raises a message, a rule and
-//! a help out of a `String` a frame holds.
+//! **And that sentence still cannot be raised from IR on its own.**
+//! [`Inst::Trap`] no longer stops at one [`crate::StrId`] — it now takes
+//! three slots, each the address of a `String` a frame holds, so a refusal
+//! of three sentences is not the wall it was. What is left is the first of
+//! the three: it quotes a value computed at run time — `{key}` **as it
+//! renders** — which is issue #461's own wall, the one `Value.admitKey`
+//! also meets. `Value.refuseDuplicate` is the only one of `Intrinsic`'s
+//! twelve survivors that meets it with no producer migrated to ask.
+//! Rendering being composable IR since [`Operation::Rendering`] landed does
+//! not close that wall by itself: a walk can *build* the rendered text, but
+//! composing it into the whole three-sentence refusal and raising it is
+//! work nothing in this module does today.
 //!
 //! What it costs to leave it here is nothing that runs. On `examples/covefmt`
 //! and `examples/cq` it is **0 static sites and 0 dynamic calls**, and that
@@ -244,10 +249,11 @@ pub(crate) enum Operation {
     /// It has to be that way round, and the reason is in the sentence rather
     /// than in the walk. A refusal here is
     /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``
-    /// with a **`rule:` and a `help:` beside it**, and [`Inst::Trap`] carries
-    /// one [`crate::StrId`] and nothing else — so `super::pattern`'s trick of
-    /// choosing the string at the lowering is not enough here, whatever is
-    /// known about the layout. See this module's header.
+    /// with a **`rule:` and a `help:` beside it**, and a `path` that reaches
+    /// through a run or a map quotes an index or a rendered key computed at
+    /// run time — so `super::pattern`'s trick of choosing the string at the
+    /// lowering is not enough here, whatever is known about the layout. See
+    /// this module's header.
     ///
     /// So the answer is a `Bool` and the sense of it is **`true` when the
     /// runtime is to be asked**: a `branch-false` over the intrinsic is one
@@ -1699,33 +1705,54 @@ impl Synth<'_> {
         });
     }
 
+    /// Raises `message`, with no `rule:` and no `help:` line.
+    ///
+    /// [`Synth::not_a_key`], [`Synth::wrong_case`] and [`Synth::no_text`]
+    /// each raise a sentence that is the lowering's own, chosen here and
+    /// quoting nothing computed at run time, so it needs no operand the walk
+    /// would have to build: it costs one [`Inst::Str`] per slot rather than
+    /// a composed body — a load of a precomputed address, not an
+    /// allocation, by
+    /// [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md).
+    /// `rule` and `help` share one slot, holding the empty `String`
+    /// [`Inst::Trap`] takes to mean "this sentence is absent".
+    fn trap(&mut self, message: &str) {
+        let text = self.pool.string(message);
+        let message = self.alloc(shapes::STR);
+        self.emit(Inst::Str { dst: message, text });
+        let empty = self.pool.string("");
+        let rule = self.alloc(shapes::STR);
+        self.emit(Inst::Str {
+            dst: rule,
+            text: empty,
+        });
+        self.emit(Inst::Trap {
+            message,
+            rule,
+            help: rule,
+        });
+    }
+
     /// A value that is not a key, refused in `key::not_a_key`'s words.
     ///
-    /// The sentence is a constant, which is why synthesis may raise it:
-    /// [`Inst::Trap`]'s string is chosen by the lowering that emits it, and
-    /// this one quotes nothing computed at run time. It is not reachable from
-    /// a checked program — `core.admitKey` refuses such a key before a single
+    /// The sentence is the lowering's own and quotes nothing computed at run
+    /// time — see [`Synth::trap`]. It is not reachable from a checked
+    /// program — `core.admitKey` refuses such a key before a single
     /// comparison is made, which is `Map.get`'s and `Set.of`'s first line —
-    /// and it is written out for the reason the runtime's own arm is: "should
-    /// never" is not "cannot", and a silent wrong answer from a comparison
-    /// costs more than the arm that reports one.
+    /// and it is written out for the reason the runtime's own arm is:
+    /// "should never" is not "cannot", and a silent wrong answer from a
+    /// comparison costs more than the arm that reports one.
     fn not_a_key(&mut self) {
-        let message = self
-            .pool
-            .string("this value cannot be a map key or a set element");
-        self.emit(Inst::Trap { message });
+        self.trap("this value cannot be a map key or a set element");
     }
 
     /// A value in a case its layout does not have, in `key::wrong_case`'s
     /// words.
     ///
-    /// Constant too: the name is the layout's, which is known to the
-    /// lowering, and nothing else is quoted.
+    /// The lowering's own sentence again: the name is the layout's, known
+    /// statically, and nothing else is quoted.
     fn wrong_case(&mut self, name: &str) {
-        let message = self
-            .pool
-            .string(&format!("this `{name}` is in a case it does not have"));
-        self.emit(Inst::Trap { message });
+        self.trap(&format!("this `{name}` is in a case it does not have"));
     }
 
     // ---- `core.admitKey(key, method, role)` -----------------------------
@@ -1954,13 +1981,15 @@ impl Synth<'_> {
     ///
     /// **The admission walk never raises, and this is why.** Its refusal is
     /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``
-    /// with a `rule:` and a `help:` beside it, and [`Inst::Trap`] carries one
-    /// [`crate::StrId`]. Every one of those four holes is something the
-    /// lowering knows — the two names are literals at all nine standard-
-    /// library call sites, the type is the layout's, the path is composed of
-    /// field and case names a *synthesized* walk knows statically, and the
-    /// rule and the help are one of two constant pairs — and none of that is
-    /// enough, because a trap is one string and a refusal is three.
+    /// with a `rule:` and a `help:` beside it. Three of those four holes are
+    /// something the lowering knows outright — the two names are literals at
+    /// all nine standard-library call sites, the type is the layout's, and
+    /// the rule and the help are one of two constant pairs. The path is not:
+    /// it is composed of field and case names a *synthesized* walk knows
+    /// statically only until it reaches through a run or a map, where it
+    /// quotes an index or a rendered key computed at run time — issue #461's
+    /// kind of hole, and not one [`Inst::Trap`]'s three slots close by
+    /// themselves.
     ///
     /// So the walk answers the bit and `super::core` runs the intrinsic,
     /// **at the call site, in the caller's frame, over the caller's key**.
@@ -2210,8 +2239,9 @@ impl Synth<'_> {
     ///
     /// The default is an [`Inst::Trap`]. The runtime's own arm words the
     /// same refusal with the discriminant in it — `` is in case {index} `` —
-    /// and a trap carries one [`crate::StrId`], so this one says
-    /// [`Synth::wrong_case`]'s sentence instead: the words `key::wrong_case`
+    /// and rendering that discriminant into text is work this walk does not
+    /// do, so this one says [`Synth::wrong_case`]'s sentence instead: the
+    /// words `key::wrong_case`
     /// already uses, which [`Synth::ranking`] already emits for the same
     /// reading of the same `switch`. Nothing a checked program holds reaches
     /// either — the machine bounds-checks what it reads out of an object
@@ -2470,14 +2500,13 @@ impl Synth<'_> {
 
     /// A value with no text of its own, refused in the runtime's own words.
     ///
-    /// The sentence is a constant, which is why synthesis may raise it, and
-    /// it is [`Synth::not_a_key`]'s argument again. Not reachable from a
-    /// checked program: the families it answers for are word 0 of an enum,
-    /// an address, a host handle, a task and a task scope, and none of them
-    /// is a type a program can interpolate.
+    /// The lowering's own sentence again, [`Synth::not_a_key`]'s argument
+    /// repeated. Not reachable from a checked program: the families it
+    /// answers for are word 0 of an enum, an address, a host handle, a task
+    /// and a task scope, and none of them is a type a program can
+    /// interpolate.
     fn no_text(&mut self) {
-        let message = self.pool.string("this value has no text of its own");
-        self.emit(Inst::Trap { message });
+        self.trap("this value has no text of its own");
     }
 
     /// ADR 0064's Decision 4 for the rendering, widened by two scalars.

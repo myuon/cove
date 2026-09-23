@@ -1147,7 +1147,14 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 })
         }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
-        Inst::Trap { .. } => true,
+        // Three slots since ADR 0067, each holding the address of a sentence
+        // the standard library may have worded, so there are operands to bound
+        // where there were none.
+        Inst::Trap {
+            message,
+            rule,
+            help,
+        } => slot(*message) && slot(*rule) && slot(*help),
         // ---- [ADR 0052]'s growable buffer -----------------------------------
         //
         // An allocation and a finish handed to

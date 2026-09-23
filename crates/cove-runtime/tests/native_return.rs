@@ -827,7 +827,6 @@ fn compare(op: CmpOp, x: i64, y: i64) -> bool {
 unsafe fn leave(ctx: *mut NativeCtx, work: u64, raise: Raise, pc: usize) -> Outcome {
     (*ctx).pending_work = work;
     (*ctx).raise_code = raise.abi();
-    (*ctx).raise_detail = 0;
     (*ctx).raise_pc = pc as u32;
     Outcome::Raised
 }

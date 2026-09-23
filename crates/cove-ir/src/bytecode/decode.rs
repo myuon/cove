@@ -422,7 +422,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
         },
         Op::SharedLock => Inst::SharedLock { cell: a },
         Op::SharedUnlock => Inst::SharedUnlock { cell: a },
-        Op::Trap => Inst::Trap { message: StrId(lo) },
+        Op::Trap => Inst::Trap {
+            message: a,
+            rule: b,
+            help: c,
+        },
         Op::AssertFailed => Inst::AssertFailed { message: a },
     })
 }

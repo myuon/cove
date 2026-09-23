@@ -471,7 +471,6 @@ impl<'p> Flow<'p> {
             | Inst::Str { .. }
             | Inst::Clear { .. }
             | Inst::Jump { .. }
-            | Inst::Trap { .. }
             | Inst::ScopeEnter { .. } => {}
             Inst::Copy { src, layout, .. }
             | Inst::Box { src, layout, .. }
@@ -598,6 +597,15 @@ impl<'p> Flow<'p> {
             Inst::Await { task, .. } | Inst::Cancel { task } => f(task, 1),
             Inst::SharedLock { cell } | Inst::SharedUnlock { cell } => f(cell, 1),
             Inst::AssertFailed { message } => f(message, 1),
+            Inst::Trap {
+                message,
+                rule,
+                help,
+            } => {
+                f(message, 1);
+                f(rule, 1);
+                f(help, 1);
+            }
         }
     }
 
