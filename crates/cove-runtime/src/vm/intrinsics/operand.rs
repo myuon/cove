@@ -321,17 +321,6 @@ pub(super) fn empty_needle(method: &str, parameter: &str, help: &str) -> Runtime
         .with_help(help)
 }
 
-/// `Int.parseRadix` refused a `radix` outside `2..=36`.
-pub(super) fn radix(radix: i64) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`Int.parseRadix` cannot read a number in radix `{radix}`"
-    ))
-    .with_rule(
-        "A radix is 2 through 36, which is as many digits as the ten numerals and the twenty-six letters afford.",
-    )
-    .with_help("pass a `radix` between 2 and 36, such as 16 for hexadecimal")
-}
-
 /// `Float.format` refused a `digits` outside `0..=17`.
 pub(super) fn format_digits(digits: i64) -> RuntimeError {
     RuntimeError::new(format!("`Float.format` cannot use `{digits}` digits")).with_rule(

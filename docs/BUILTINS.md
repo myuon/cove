@@ -275,7 +275,7 @@ written as a namespace.
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
 | `parse(text: String) -> Result<Int, Error>` |  |  | `std.int.parse` |
-| `parseRadix(text: String, radix: Int) -> Result<Int, Error>` |  |  | `machine` |
+| `parseRadix(text: String, radix: Int) -> Result<Int, Error>` |  |  | `std.int.parseRadix` |
 
 **Methods.**
 

@@ -1320,18 +1320,33 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
     // *negative* so that neither end of `Int` needs a magnitude `Int` has not
     // got. `Intrinsic::IntParse` is gone in the same change.
     //
-    // `Int.parseRadix` is **not** here beside it, and the order issue #454
-    // planned — the general one in Cove, this one a radix-10 wrapper over it —
-    // is not available: `parseRadix` refuses a radix outside `2..=36` by
-    // raising, and a Cove body has nothing to raise with (issue #461). This
-    // one never raises. When #461 is decided the wrapper is written and the
-    // two rows here become one.
     StdBinding {
         kind: StdBindingKind::Associated,
         receiver: "Int",
         method: "parse",
         module: "std.int",
         function: "parse",
+    },
+    // `Int.parseRadix`, the same reading in any radix from 2 to 36, which
+    // could not move with `parse` because it refuses a radix outside that by
+    // *raising* and a Cove body had nothing to raise with (issue #461). ADR
+    // 0067's `core.refuse` is what it raises with now. `Intrinsic::IntParseRadix`
+    // is gone in the same change.
+    //
+    // It is a second loop beside `parse`'s rather than the general one with
+    // `parse` a radix-10 wrapper over it, which is what issue #454 planned.
+    // That is still available and was deliberately not taken here: `parse`
+    // refuses in other words (`` `x` is not an Int ``, with no radix), so a
+    // shared loop would answer a verdict each of the two words for itself,
+    // and folding `parse` into it changes `parse`'s own measured numbers in a
+    // change about `parseRadix`. The two are measured side by side in
+    // `benches/stringlib`'s `parse_rows` and `parse_radix_rows`.
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Int",
+        method: "parseRadix",
+        module: "std.int",
+        function: "parseRadix",
     },
     // `Duration.nanos` is not here: it is the one primitive left, and both
     // its forms — the reader and the builder — stay in the machine. Each of

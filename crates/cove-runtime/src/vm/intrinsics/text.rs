@@ -153,7 +153,8 @@
 //! raises on a radix outside `2..=36`, so the order inverted and `parse` alone
 //! became `std.int.parse` — which never raises, because every failure it has
 //! is an `Err` value it builds. Sixteen variants, and #461 now holds six of
-//! them.
+//! them. (It was decided as ADR 0067, and `parseRadix` is `std.int.parseRadix`
+//! now too.)
 //!
 //! **Step 5 took two that #461 does not touch**, and that is the whole of why
 //! it could. Neither `trim` nor `words` refuses anything: every input is text

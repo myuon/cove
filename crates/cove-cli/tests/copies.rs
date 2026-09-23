@@ -1460,7 +1460,25 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `benches`' `parse_radix_rows` — and all 157 of the rise is the three
 /// programs existing: the operation was still the Rust arm, so there was no
 /// lowering to attribute any of it to. 206 programs became 209.
-const FORWARDABLE_COPIES: usize = 9384;
+///
+/// **9,592 since issue #454's Step 4 moved `Int.parseRadix` into `std.int`**,
+/// and the rise of 208 decomposes, measured both ways: with the three programs
+/// above held out it is 9,227 → **9,431, +204, and that is the whole of the
+/// lowering**; the other four are the same effect in the three programs the
+/// corpus added and one more copy in `parse_radix_rows`' own calls.
+///
+/// The +204 is one copy in every program that lowers the body, which is every
+/// program: `std.int.parseRadix` is not generic, so the whole-package lowering
+/// this survey does emits it everywhere, the way it emits `std.int.parse`. The
+/// copy is `return Ok(value)` putting a local into the `Ok`'s payload word —
+/// the shape `parse` has at the same line, and the one issue #302's forwarding
+/// is about. A second copy a program was found and removed before this
+/// landed: the body ended in `Ok(-value)`, which is built aside and copied
+/// into the answer, and `return Ok(-value)` is 209 fewer across the corpus.
+/// Answering from one `Ok` after negating in place was tried as well and moved
+/// nothing, because the copy that is left is the payload's and not the
+/// negation's.
+const FORWARDABLE_COPIES: usize = 9592;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

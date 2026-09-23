@@ -44,7 +44,6 @@ pub enum Intrinsic {
     StringSplit,
     StringReplace,
     StringRefuseByteRange,
-    IntParseRadix,
     FloatToInt,
     FloatFormat,
     FloatParse,
@@ -63,7 +62,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringSplit,
     Intrinsic::StringReplace,
     Intrinsic::StringRefuseByteRange,
-    Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
     Intrinsic::FloatFormat,
     Intrinsic::FloatParse,
@@ -99,7 +97,6 @@ impl Intrinsic {
             Intrinsic::StringSplit => "String",
             Intrinsic::StringReplace => "String",
             Intrinsic::StringRefuseByteRange => "String",
-            Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatFormat => "Float",
             Intrinsic::FloatParse => "Float",
@@ -116,7 +113,6 @@ impl Intrinsic {
             Intrinsic::StringSplit => "split",
             Intrinsic::StringReplace => "replace",
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
-            Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatFormat => "format",
             Intrinsic::FloatParse => "parse",
@@ -176,10 +172,9 @@ impl Intrinsic {
             Intrinsic::StringSplit
             | Intrinsic::StringReplace
             | Intrinsic::StringRefuseByteRange => Category::Text,
-            Intrinsic::IntParseRadix
-            | Intrinsic::FloatToInt
-            | Intrinsic::FloatFormat
-            | Intrinsic::FloatParse => Category::Scalar,
+            Intrinsic::FloatToInt | Intrinsic::FloatFormat | Intrinsic::FloatParse => {
+                Category::Scalar
+            }
             // Rendering is a walk directed by whatever layout the piece has,
             // which is what makes it a value rule rather than a text one: a
             // `"{items}"` renders an `Array` through it.
@@ -213,7 +208,6 @@ impl Intrinsic {
             // The text and the two offsets a refusal is worded with, in the
             // order `String.sliceBytes` names them.
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
-            Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
@@ -332,24 +326,21 @@ impl Intrinsic {
             // both. See `every_intrinsic_left_can_be_refused` for the form
             // that takes as a test and for what it costs `cove-native`.
             //
-            // The two parsers left read a `String` receiver's bytes and
-            // allocate the message an `Err` carries, and `parseRadix` refuses
-            // a radix outside `2..=36`; `format` allocates the `String` it
+            // The parser left reads a `String` receiver's bytes and allocates
+            // the message an `Err` carries; `format` allocates the `String` it
             // always answers and refuses a digit count past 17. None of the
-            // four is proportional to anything past the one receiver or the
+            // three is proportional to anything past the one receiver or the
             // one answer, which is short enough that this backend does not
             // charge it as bulk work.
             //
-            // There were three parsers until issue #454's Step 4, and
-            // `Int.parse` is the one that left: it is `std.int.parse` now, a
-            // `core.byteLength` and one `byteAt` a byte with an accumulator
-            // that runs negative so that neither end of `Int` needs a
-            // magnitude `Int` has not got. `parseRadix` stays for the reason
-            // this comment's other half names — it *refuses* — and `parse`
-            // could go because every failure it has is an `Err` value it
-            // builds. That is the line issue #461 draws through six of the
-            // arms below, and the only reason the two are now apart.
-            Intrinsic::IntParseRadix | Intrinsic::FloatParse => allocate.union(E::READS_MEMORY),
+            // There were three parsers until issue #454's Step 4. `Int.parse`
+            // left first, as `std.int.parse`: a `core.byteLength` and one
+            // `byteAt` a byte with an accumulator that runs negative so that
+            // neither end of `Int` needs a magnitude `Int` has not got.
+            // `Int.parseRadix` followed as `std.int.parseRadix` once ADR 0067
+            // gave a Cove body `core.refuse` to stop the run with, which is
+            // what it does for a radix outside `2..=36`.
+            Intrinsic::FloatParse => allocate.union(E::READS_MEMORY),
             Intrinsic::FloatToInt | Intrinsic::FloatFormat => allocate,
 
             // `==` on anything wider than a word walks both operands
@@ -595,7 +586,6 @@ mod tests {
             "String.split",
             "String.replace",
             "String.refuseByteRange",
-            "Int.parseRadix",
             "Float.toInt",
             "Float.format",
             "Float.parse",
@@ -657,7 +647,6 @@ mod tests {
                 | Intrinsic::StringSplit
                 | Intrinsic::StringReplace
                 | Intrinsic::StringRefuseByteRange
-                | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatFormat
                 | Intrinsic::FloatParse

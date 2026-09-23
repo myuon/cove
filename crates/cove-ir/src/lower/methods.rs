@@ -947,20 +947,16 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
 /// how the call is answered at all — resolved by [`Body::call_associated`]
 /// before it ever reaches here.
 ///
-/// **`Int.parse` is not here, and `Int.parseRadix` is**, which is the one
-/// place this table shows a receiver split between the two mechanisms. Issue
-/// #454's Step 4 moved `parse` to `std.int.parse` — what counts as a number is
-/// a policy over a representation, and the accumulator that reads it runs
-/// negative so that neither end of `Int` needs a magnitude `Int` has not got —
-/// and could not move `parseRadix` with it, because that one refuses a radix
-/// outside `2..=36` by *raising* and a Cove body has nothing to raise with
-/// (issue [#461](https://github.com/myuon/cove/issues/461)). The split is
-/// temporary and the row below is what will go when #461 is decided.
-const ASSOCIATED: &[(&str, &str)] = &[
-    ("Int", "parseRadix"),
-    ("Float", "parse"),
-    ("Duration", "nanos"),
-];
+/// **Neither `Int.parse` nor `Int.parseRadix` is here.** Issue #454's Step 4
+/// moved `parse` to `std.int.parse` — what counts as a number is a policy over
+/// a representation, and the accumulator that reads it runs negative so that
+/// neither end of `Int` needs a magnitude `Int` has not got — and could not
+/// move `parseRadix` with it, because that one refuses a radix outside
+/// `2..=36` by *raising* and a Cove body had nothing to raise with (issue
+/// [#461](https://github.com/myuon/cove/issues/461)). ADR 0067's `core.refuse`
+/// is what it raises with now, and `std.int.parseRadix` is the same loop with
+/// the radix where the ten was.
+const ASSOCIATED: &[(&str, &str)] = &[("Float", "parse"), ("Duration", "nanos")];
 
 /// The [`Convert`] a machine method or associated function is, where it is
 /// one: a word that changes representation, or only `Repr`, and needs no

@@ -21,42 +21,11 @@ use crate::vm::intrinsics::operand::{Dest, Frame};
 use crate::vm::intrinsics::{make, operand};
 
 // --- Int -------------------------------------------------------------------
-
-/// `Int.parseRadix(text, radix) -> Result<Int, Error>`.
-///
-/// A `radix` outside `2..=36` names no notation, so it stops the run the way
-/// an empty `String.split` separator does; text that is not a number in a
-/// radix that does exist is the data's failure and answers `Err`.
-///
-/// **`Int.parse` used to sit above this, and does not any more.** It was
-/// `text.parse::<i64>()`, and issue #454's Step 4 made it `std.int.parse`: a
-/// `core.byteLength` and one `byteAt` a byte, with an accumulator that runs
-/// negative so that `-9223372036854775808` — whose magnitude no `Int` holds —
-/// is read without a trap and `9223372036854775808` answers `Err` without
-/// one. The two variants could not move together and the order issue #454
-/// planned is inverted, because of the `return Err` two lines into the body
-/// below: a radix outside the range *raises*, and a Cove body has nothing to
-/// raise with. That is issue
-/// [#461](https://github.com/myuon/cove/issues/461), and when it is decided
-/// this arm goes too and `parse` becomes a radix-10 call into it.
-pub(super) fn int_parse_radix(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let text = operand::text(machine, frame, 0)?;
-    let radix = operand::int(machine, frame, 1);
-    let Some(base) = (2..=36).contains(&radix).then_some(radix as u32) else {
-        return Err(operand::radix(radix));
-    };
-    match i64::from_str_radix(&text, base) {
-        Ok(value) => make::ok(machine, dest, &[value as u64]),
-        Err(_) => {
-            let message = format!("`{text}` is not an Int in radix {base}");
-            make::failed(machine, dest, &message)
-        }
-    }
-}
+//
+// `int_parse_radix` stood here, the last `Int` operation below the boundary.
+// It raised on a radix outside `2..=36`, which is why it could not move with
+// `Int.parse` in issue #454's Step 4; ADR 0067's `core.refuse` let it follow,
+// and it is `std.int.parseRadix`.
 
 // --- Float -----------------------------------------------------------------
 
@@ -126,62 +95,14 @@ mod tests {
     use crate::vm::intrinsics::tests::{message_of, read, result_of, run, scalar, word, world};
     use cove_ir::Repr;
 
-    /// Text that is not a number is the *data's* failure and answers `Err`; a
-    /// radix that names no notation is the *call's* and stops the run.
-    ///
-    /// **It asked the same pair of `Int.parse` until issue #454's Step 4**,
-    /// which moved that one to `std.int.parse` — and the half it took with it
-    /// is the half this arm could not follow. `parse`'s refusals are all
-    /// `Err` values, so a Cove body builds every one of them; `parseRadix`'s
-    /// radix refusal is a *raise*, which a Cove body has nothing to make
-    /// (issue #461). So the distinction this test is named for now lives
-    /// entirely inside one variant, which is why the `Int.parse` rows are
-    /// gone rather than repointed: what answers them is
-    /// `tests/e2e/values_int_parse`, 103 golden lines against an independent
-    /// oracle.
-    #[test]
-    fn parsing_an_int_separates_bad_data_from_a_bad_call() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let int = scalar(&program, Repr::Int);
-        // A `Result` is a run of words — `[disc, Int]` — and not an object,
-        // so what the answer is read out of is the words themselves.
-        let text = machine.new_string("ff").unwrap();
-        let words = run(
-            &mut machine,
-            "Int",
-            "parseRadix",
-            &[(Repr::Ref, text), (Repr::Int, 16)],
-        )
-        .unwrap();
-        assert_eq!(
-            result_of(&program, int, &words),
-            ("Ok".to_string(), vec![255])
-        );
-        let words = run(
-            &mut machine,
-            "Int",
-            "parseRadix",
-            &[(Repr::Ref, text), (Repr::Int, 10)],
-        )
-        .unwrap();
-        assert_eq!(
-            message_of(&machine, int, &words),
-            "`ff` is not an Int in radix 10"
-        );
-
-        let error = run(
-            &mut machine,
-            "Int",
-            "parseRadix",
-            &[(Repr::Ref, text), (Repr::Int, 1)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Int.parseRadix` cannot read a number in radix `1`"
-        );
-    }
+    // `parsing_an_int_separates_bad_data_from_a_bad_call` stood here and asked
+    // `Int.parseRadix`'s arm the question its name says — text that is not a
+    // number answers `Err`, a radix that names no notation stops the run. The
+    // arm is gone (`std.int.parseRadix`, through ADR 0067's `core.refuse`), and
+    // the question is answered where it can be asked of all three backends:
+    // `tests/e2e/values_int_parse_radix`'s seventy lines against an oracle
+    // written from the notation, and `tests/e2e/fail_int_parse_radix`'s three
+    // sentences and blame.
 
     /// `sqrt`, `round`, `min` and `max` are not here any more: ADR 0064's
     /// last two Phase 1 migrations made the pair `Inst::FloatMinMax` and
