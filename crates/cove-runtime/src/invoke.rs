@@ -380,6 +380,11 @@ fn admits(program: &Program, ty: &Ty, value: &Value, module: &str) -> Result<(),
         // The checker settled nothing here, so there is nothing to hold the
         // value to. See the module docs.
         (Ty::Unknown(_), _) => Ok(()),
+        // An erased position — a standard-library parameter written `Any`,
+        // which only `std.dynamic` writes — admits every value, as the
+        // machine's boundary boxes every value a `Shape::Boxed` destination is
+        // handed. There is nothing to hold the value to but itself.
+        (Ty::Any, _) => Ok(()),
         (Ty::Unit, Value(Repr::Unit))
         | (Ty::Bool, Value(Repr::Bool(_)))
         | (Ty::Int, Value(Repr::Int(_)))

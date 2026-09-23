@@ -183,8 +183,10 @@ fn a_layout_that_reaches_itself_is_synthesized_once() {
 /// The one fallback, and the one place it is reached from.
 ///
 /// A `dyn Trait` keeps its family in its own payload word 0, so there is no
-/// layout here to compose a walk out of and the runtime's own walk is what
-/// answers. This is the test that the fallback still *exists* — the rule
+/// layout here to compose a walk out of, and what answers is
+/// `std.dynamic.equals` — a Cove walk over a view of each box since ADR 0068's
+/// Phase 2, and the runtime's own Rust walk before it. This is the test that
+/// the fallback still *exists* — the rule
 /// below says nothing may reach it wrongly, and a rule nothing can satisfy is
 /// satisfied by deleting the arm.
 #[test]
@@ -196,7 +198,10 @@ fn an_erased_value_reaches_the_one_dynamic_fallback() {
          fn same(a: dyn Summary, b: dyn Summary) -> Bool { a == b }",
     );
     let sites = fallbacks(&program);
-    assert_eq!(sites, 1, "one `Any.equals`, and it is the erased one");
+    assert_eq!(
+        sites, 1,
+        "one `std.dynamic.equals`, and it is the erased one"
+    );
 }
 
 /// **ADR 0064's Decision 4 as a fact about every program this crate lowers.**
@@ -240,7 +245,11 @@ fn no_statically_known_layout_reaches_the_fallback() {
     ];
     for source in known {
         let program = lowered(source);
-        assert_eq!(fallbacks(&program), 0, "`Any.equals` sites in:\n{source}");
+        assert_eq!(
+            fallbacks(&program),
+            0,
+            "`std.dynamic.equals` calls in:\n{source}"
+        );
     }
 
     // And the other direction, because a rule nothing can satisfy is
@@ -757,9 +766,36 @@ fn walks_named(program: &Program, what: &str) -> Vec<String> {
         .collect()
 }
 
-/// How many `Any.equals` sites the program holds.
+/// How many calls of `std.dynamic.equals` the program holds, checking as it
+/// counts that every operand of every one of them is erased.
+///
+/// Equality's fallback was the intrinsic `Any.equals` until ADR 0068's Phase 2
+/// made it this Cove function; the property is [`reached`]'s, asked of a call
+/// instead of an intrinsic site. Unlike the intrinsic, the function has a body,
+/// and a whole-package lowering lowers it — so what is counted is the calls, and
+/// none of them is inside the function itself.
 fn fallbacks(program: &Program) -> usize {
-    reached(program, crate::Intrinsic::AnyEquals)
+    let mut found = 0;
+    for function in &program.functions {
+        for inst in &function.code {
+            let Inst::Call { callee, args, .. } = inst else {
+                continue;
+            };
+            let called = &program.functions[callee.index()];
+            if (&*called.module, &*called.name) != ("std.dynamic", "equals") {
+                continue;
+            }
+            found += 1;
+            for arg in program.arg_list(*args) {
+                assert!(
+                    matches!(program.layout(arg.layout).shape, Shape::Boxed),
+                    "`std.dynamic.equals` was handed a `{}`, whose layout is known",
+                    program.layout(arg.layout).name
+                );
+            }
+        }
+    }
+    found
 }
 
 /// How many `Value.order` sites it holds.

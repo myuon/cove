@@ -434,7 +434,8 @@ use std::sync::Arc;
 use cove_diag::{Diagnostic, FileId, Severity, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
-    CORE_BYTE_RUN_TYPE, CORE_DYNAMIC_VIEW_TYPE, CORE_NAMESPACE, MAP_ENTRY, NONE_CASE, SCOPE,
+    CORE_ANY_TYPE, CORE_BYTE_RUN_TYPE, CORE_DYNAMIC_VIEW_TYPE, CORE_NAMESPACE, MAP_ENTRY,
+    NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -3885,6 +3886,15 @@ impl<'a> Checker<'a> {
             }
             self.check_type_arity(name, 0, args.len(), span);
             return Some(Ty::DynamicView);
+        }
+        // An erased value, by the same privilege: `std.dynamic.equals` takes
+        // the two boxes `==` meets, and a program still cannot name one.
+        if name == CORE_ANY_TYPE {
+            if !crate::stdlib::is_library_module(&self.module.name) {
+                return None;
+            }
+            self.check_type_arity(name, 0, args.len(), span);
+            return Some(Ty::Any);
         }
         let arity = cove_schema::builtin(name)?.parameters.len();
         self.check_type_arity(name, arity, args.len(), span);

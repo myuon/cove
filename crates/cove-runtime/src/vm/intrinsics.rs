@@ -233,12 +233,11 @@ pub(crate) fn call(
 
         // ---- equality ----------------------------------------------------
         //
-        // `==` on anything that is not one word of scalar bits. The receiver
-        // is `Any` because the operation is one rule over every value the
-        // language gives an equality, rather than a method a type declares —
-        // `crates/cove-runtime/src/builtins.rs` has no entry for it, and
-        // `crate::interp` reaches it as an operator.
-        Intrinsic::AnyEquals => equal::equals(machine, frame, dest),
+        // There is no equality arm. `==` on a value whose layout is known is
+        // a walk the lowering synthesizes (ADR 0064's Decision 3), and `==` on
+        // two erased values is `std.dynamic.equals`, a Cove loop over a view
+        // of each box (ADR 0068's Phase 2) — so `Any.equals`, the Rust walk
+        // that answered for a box, has no caller and no variant.
 
         // ---- keys --------------------------------------------------------
         //
@@ -1418,10 +1417,11 @@ mod tests {
     // signature has one: `Float.format` answers a `String` over a `Float`,
     // `Float.parse` and `Float.toInt` answer a `Result`, `String.refuseByteRange`
     // and `Value.admitKey` answer nothing, `Value.renderInto` appends, and
-    // `Value.order` and `Any.equals` — which answer an `Int` and a `Bool` over
-    // values of any kind — are refused by the verifier over a known layout
-    // (ADR 0064's Decision 4) and take a box over an unknown one, which is not
-    // an `Int`. The discipline the case was about is still held for every arm,
+    // `Value.order` — which answers an `Int` over values of any kind — is
+    // refused by the verifier over a known layout (ADR 0064's Decision 4) and
+    // takes a box over an unknown one, which is not an `Int`. (`Any.equals`
+    // stood beside it, answering a `Bool`, until ADR 0068 moved it into
+    // `std.dynamic`.) The discipline the case was about is still held for every arm,
     // mechanically rather than by example: the case below panics under
     // `debug_assertions` on an operand read after the answer was written.
 

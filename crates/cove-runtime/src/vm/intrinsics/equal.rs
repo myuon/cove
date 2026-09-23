@@ -1,11 +1,26 @@
 //! Value equality, over runs of words and over heap objects.
 //!
-//! `==` on anything that is not one word of scalar bits lowers to a call
-//! here. [`crate::value::Value::eq_value`] is the oracle's copy of the same
-//! rule, and this is written twice for the reason the rendering beside it is:
-//! that one walks a materialised tree and this one walks the words the
-//! machine holds, and neither can be had from the other without building what
-//! the other exists to avoid.
+//! **No program reaches this walk any more.** `==` on anything that is not
+//! one word of scalar bits used to lower to `Any.equals`, whose arm was
+//! [`same`]; ADR 0064's Decision 3 made every comparison whose layout is known
+//! a walk the lowering synthesizes, and [ADR
+//! 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+//! Phase 2 made the last one — two erased values — `std.dynamic.equals`, a
+//! Cove loop over a view of each box, and deleted the variant.
+//!
+//! What stays is what other walks share with it: [`unboxed`], which is how
+//! [`super::key`] looks through a box to order a key exactly where `==` would
+//! find it, and [`too_deep`], the sentence it stops at. [`same`] and
+//! [`same_value`] stay with the unit tests below as the layout-directed
+//! reading of a value's words that those two lean on, pinned for the day the
+//! order and the admission (Phase 3) leave as well — and are deleted with
+//! them, in Phase 5, when nothing in this module is anyone's.
+//!
+//! [`crate::value::Value::eq_value`] is the oracle's copy of the same rule,
+//! and this was written twice for the reason the rendering beside it is: that
+//! one walks a materialised tree and this one walks the words the machine
+//! holds, and neither can be had from the other without building what the
+//! other exists to avoid.
 //!
 //! # A value is a run of words, so a comparison is layout-driven
 //!
@@ -44,28 +59,23 @@
 //!
 //! # The walk says how far it got
 //!
-//! `Any.equals` declares `Effects::BULK_WORK` and, until
+//! `Any.equals` declared `Effects::BULK_WORK` and, until
 //! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 //! Decision 7, cost the run one unit of work whether it compared two `Int`s
 //! or two thousand-element arrays. So [`value`] reports **one unit per value
 //! it visits** through [`Machine::examined`], and the string arm of
 //! [`objects`] reports the bytes it compared on top of that: one unit per
 //! scalar, field, element, member or entry-half that the walk actually
-//! reached.
+//! reached — *in the walk*, so that an early exit cost what it did.
 //!
-//! *In the walk*, and not from a size computed up front, because that is what
-//! makes an early exit cost what it did: two structs that differ in their
-//! first field charge two units — the struct and the field — where two equal
-//! ones charge one per field besides. A charge taken from the layout's width
-//! before the comparison began would say the two cost the same, which is
-//! exactly the thing the call count already says and the reason this column
-//! exists.
+//! `std.dynamic.equals` needs none of this: it is charged an instruction at a
+//! time like any other Cove loop, and an early exit runs fewer of them.
 
 use cove_ir::{LayoutId, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
-use crate::vm::intrinsics::operand::{self, Dest, Frame, Operand, Word};
+use crate::vm::intrinsics::operand::{self, Operand, Word};
 
 /// A value: the layout that describes it, and the words it occupies.
 ///
@@ -73,34 +83,14 @@ use crate::vm::intrinsics::operand::{self, Dest, Frame, Operand, Word};
 /// untagged, and a layout describes nothing on its own.
 type Held<'w> = (LayoutId, &'w [u64]);
 
-/// `a == b`, as the `Bool` word `0` or `1`.
-pub(super) fn equals(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let equal = {
-        let machine = &*machine;
-        same(
-            machine,
-            frame.operand(machine, 0),
-            frame.operand(machine, 1),
-        )?
-    };
-    dest.word(machine, equal as u64);
-    Ok(())
-}
-
 /// Whether two values of `layout` are equal, given their words.
 ///
 /// What every reader of a value inside another value asks: an array's
 /// element, a struct's field, an enum's part, the value inside a box.
 ///
-/// Every current caller already holds two [`Operand`]s — possibly of two
-/// different layouts — and reaches [`same`] directly instead, so this
-/// narrower one-layout form has no caller outside this module's own tests,
-/// which use it to exercise the layout-driven walk without an `Operand` on
-/// either side.
+/// No caller outside this module's own tests, which use it to exercise the
+/// layout-directed walk without an `Operand` on either side — see the
+/// module's header for why it stays.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn same_value(
     machine: &Machine,
@@ -113,9 +103,9 @@ pub(super) fn same_value(
 
 /// Whether two operands are equal, each read as the value location it names.
 ///
-/// What a builtin asks — of an argument, and of an element it read out of a
-/// receiver, which is the same question because the two are the same kind of
-/// thing.
+/// What `Any.equals` asked of its two arguments, and what nothing outside this
+/// module's tests asks since ADR 0068's Phase 2 — see the module's header.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn same(
     machine: &Machine,
     a: Operand<'_>,
@@ -609,12 +599,40 @@ pub(super) fn too_deep() -> RuntimeError {
 mod tests {
     use super::*;
     use crate::vm::intrinsics::make;
-    use crate::vm::intrinsics::tests::{elements, named, run, scalar, two_case, vector, world};
+    use crate::vm::intrinsics::tests::{elements, named, scalar, two_case, vector, world};
+
+    /// The layout of the value a one-word operand is, as a test hands one
+    /// over: a scalar's `Repr`'s one-word layout, and a reference's object's
+    /// own. A null one is a `String`, which only stands in for "some family
+    /// that lives in the heap" — every family refuses it in the same words.
+    fn described(machine: &Machine, repr: Repr, word: u64) -> LayoutId {
+        match repr {
+            Repr::Ref if word == 0 => machine.program().str_layout,
+            Repr::Ref => machine.object_layout(word),
+            _ => scalar(machine.program(), repr),
+        }
+    }
+
+    /// [`same`] over two one-word operands, which is what `Any.equals` asked
+    /// of its arguments while it was an intrinsic.
+    fn compared(machine: &Machine, a: (Repr, u64), b: (Repr, u64)) -> Result<bool, RuntimeError> {
+        let operand = |held: &(Repr, u64)| (described(machine, held.0, held.1), [held.1]);
+        let (left, right) = (operand(&a), operand(&b));
+        same(
+            machine,
+            Operand {
+                layout: left.0,
+                words: &left.1,
+            },
+            Operand {
+                layout: right.0,
+                words: &right.1,
+            },
+        )
+    }
 
     fn equal(machine: &mut Machine, a: (Repr, u64), b: (Repr, u64)) -> bool {
-        let answer = run(machine, "Any", "equals", &[a, b]).unwrap();
-        assert_eq!(answer.len(), 1, "`Any.equals` answers a `Bool`");
-        answer[0] != 0
+        compared(machine, a, b).unwrap()
     }
 
     /// An `Array` of `elem` holding `words`, which is the elements' words
@@ -885,39 +903,21 @@ mod tests {
         let mut machine = Machine::new(&program, 1 << 14);
         let int = scalar(&program, Repr::Int);
         let text = machine.new_string("x").unwrap();
-        let error = run(
-            &mut machine,
-            "Any",
-            "equals",
-            &[(Repr::Ref, text), (Repr::Ref, 0)],
-        )
-        .unwrap_err();
+        let error = compared(&machine, (Repr::Ref, text), (Repr::Ref, 0)).unwrap_err();
         assert_eq!(error.message, "this value was read before it was given one");
 
         let dead = machine
             .new_object(elements(machine.program(), int, false), 0)
             .unwrap();
         machine.relabel(dead, LayoutId::FREE, 0, 0);
-        let error = run(
-            &mut machine,
-            "Any",
-            "equals",
-            &[(Repr::Ref, text), (Repr::Ref, dead)],
-        )
-        .unwrap_err();
+        let error = compared(&machine, (Repr::Ref, text), (Repr::Ref, dead)).unwrap_err();
         assert_eq!(error.message, "this value was read after it was reclaimed");
 
         // A box names the family of what it holds, and one that names a
         // family the program does not have cannot be looked through.
         let stray = boxed(&mut machine, int, &[1]);
         machine.set_payload(stray, 0, program.layouts.len() as u64);
-        let error = run(
-            &mut machine,
-            "Any",
-            "equals",
-            &[(Repr::Ref, stray), (Repr::Int, 1)],
-        )
-        .unwrap_err();
+        let error = compared(&machine, (Repr::Ref, stray), (Repr::Int, 1)).unwrap_err();
         assert_eq!(error.message, "this boxed value carries no known type");
     }
 
@@ -932,13 +932,7 @@ mod tests {
         let b = array(&mut machine, text, &[0]);
         machine.set_payload(a, 0, a);
         machine.set_payload(b, 0, b);
-        let error = run(
-            &mut machine,
-            "Any",
-            "equals",
-            &[(Repr::Ref, a), (Repr::Ref, b)],
-        )
-        .unwrap_err();
+        let error = compared(&machine, (Repr::Ref, a), (Repr::Ref, b)).unwrap_err();
         assert_eq!(error.message, "this value nests too deeply to compare");
     }
 }

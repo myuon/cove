@@ -1499,7 +1499,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `tests/e2e/values_boxed`, `fail_key_boxed_float` and `fail_key_boxed_vector`.
 /// All 148 of the rise is the three programs existing — 9,716 with them held out,
 /// over the same 210 programs — because the phase changed no lowering.
-const FORWARDABLE_COPIES: usize = 9864;
+///
+/// **9,946 since ADR 0068's Phase 2 moved `==` on two erased values into
+/// `std.dynamic.equals`.** The lowering moved it by **0**: with the phase's two
+/// new programs held out it is 9,864 to the copy over the same 213 programs, so
+/// `std/dynamic.cove`'s three functions hold no forwardable copy and nothing
+/// the lowering now emits at a boxed comparison — a call where an intrinsic
+/// stood, a walk that calls where it expanded one — adds one. All 82 of the
+/// rise is `tests/e2e/values_boxed_deep` and `values_boxed_generic` existing,
+/// the cases that pin the phase's two behaviour changes.
+const FORWARDABLE_COPIES: usize = 9946;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

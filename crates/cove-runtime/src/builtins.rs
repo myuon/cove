@@ -1124,10 +1124,11 @@ pub fn call_core(
 ///
 /// `Dyn` is looked through first, so a view never denotes a box here either.
 /// A struct is a struct whatever its name — `Error` and `MapEntry` included —
-/// unless it is `opaque`, whose fields are the declaring module's; a host
-/// operation used as a value is a function, as the closure the machine builds
-/// for one is; and every handle, module, type and cell is opaque (ADR 0068,
-/// Decision 7).
+/// and whether or not it is `opaque`: its fields are the declaring module's,
+/// and the only reader of a view is the standard library's own walks, which
+/// compare them as `eq_value` does. A host operation used as a value is a
+/// function, as the closure the machine builds for one is; and every handle,
+/// module, type and cell is opaque (ADR 0068, Decision 7).
 pub(crate) fn dynamic_kind(value: &Value) -> DynamicKind {
     match value.erased() {
         Value(Repr::Unit) => DynamicKind::Unit,
@@ -1136,7 +1137,6 @@ pub(crate) fn dynamic_kind(value: &Value) -> DynamicKind {
         Value(Repr::Float(_)) => DynamicKind::Float,
         Value(Repr::Duration(_)) => DynamicKind::Duration,
         Value(Repr::Str(_)) => DynamicKind::String,
-        Value(Repr::Struct(s)) if s.opaque => DynamicKind::Opaque,
         Value(Repr::Struct(_)) => DynamicKind::Struct,
         Value(Repr::Enum(_)) => DynamicKind::Enum,
         Value(Repr::Array(_)) => DynamicKind::Array,
@@ -1234,7 +1234,7 @@ fn dynamic_case(host: &dyn Callable, view: &Value) -> Result<Value, RuntimeError
 /// [`dynamic_child`]'s order.
 pub(crate) fn dynamic_count(view: &Value) -> usize {
     match view.erased() {
-        Value(Repr::Struct(s)) if !s.opaque => s.fields.len(),
+        Value(Repr::Struct(s)) => s.fields.len(),
         Value(Repr::Enum(e)) => e.payload.len(),
         Value(Repr::Array(items)) => items.len(),
         Value(Repr::Vector(storage)) => storage.elements.borrow().len(),
@@ -2434,7 +2434,7 @@ mod dynamic_tests {
                 "struct[struct[\"n\", struct[5, 6]]]",
                 Value::structure("m.Holder", [("it", erased(inner("n", 5, 6)))]),
             ),
-            ("opaque value", secret),
+            ("struct[9]", secret),
             ("()", Value::unit()),
             ("true", Value::bool(true)),
             ("-7", Value::int(-7)),

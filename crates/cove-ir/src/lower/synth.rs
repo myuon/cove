@@ -40,12 +40,19 @@
 //! [`Shape::Boxed`] — `dyn Trait`, and a Host schema's `Any` — keeps its
 //! [`LayoutId`] in payload word 0 and is genuinely unknown until the box is
 //! opened. Decision 4 admits exactly one dynamic-layout fallback *per
-//! operation* and the first two are reached from there and from nowhere else:
-//! [`Synth::fallback`] is the only place in this crate that emits an
-//! [`Intrinsic::AnyEquals`] and [`Synth::dynamic`] the only place that emits
-//! an [`Intrinsic::ValueOrder`], and [`crate::verify`] refuses either one
-//! whose operands are not boxed. So the intrinsics survive this migration,
-//! and each survives it in one arm rather than in thirty.
+//! operation* and the first two are reached from there and from nowhere else.
+//! [`Synth::dynamic`] is the only place in this crate that emits an
+//! [`Intrinsic::ValueOrder`], and [`crate::verify`] refuses one whose operands
+//! are not boxed.
+//!
+//! Equality's fallback is no longer an intrinsic at all. [ADR
+//! 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+//! Phase 2 made it `std.dynamic.equals`, a Cove walk over a view of each box,
+//! and deleted `Intrinsic::AnyEquals`. It has **two** callers, not one:
+//! [`Synth::fallback`], where a walk reaches a boxed part, and
+//! `Body::compare_values`, where `==` itself meets two boxes. Both call the one
+//! function, and `cove-cli`'s `tests/boxed.rs` holds every call of it to erased
+//! operands (Decision 5).
 //!
 //! # `Value.admitKey`'s boundary is not that boundary, and the reason is the
 //! sentence
@@ -694,6 +701,41 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
         // site has one arm instead of fifteen.
         Operation::Rendering => matches!(rendered(shape), Rendered::Walk),
     }
+}
+
+/// Whether an equality walk of `layout` reaches a [`Shape::Boxed`] part —
+/// and so whether it calls `std.dynamic.equals` from [`Synth::fallback`].
+///
+/// Asked by the call site before it asks [`function_for`], because the walk
+/// cannot resolve a name and the call site can: a layout this answers `true`
+/// for has `std.dynamic.equals` resolved onto the [`Pool`] first, and one it
+/// answers `false` for asks for nothing — so a program whose comparisons never
+/// meet a box does not have the module in its slice at all. It follows exactly
+/// the parts [`Synth::compare`] descends into, [`walks`]' `Equality` arm, with
+/// a set of the layouts already seen so that one holding itself terminates.
+pub(super) fn reaches_a_box(shapes: &shapes::Shapes, layout: LayoutId) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![layout];
+    while let Some(at) = pending.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        match &shapes.layout(at).shape {
+            Shape::Boxed => return true,
+            Shape::Struct { fields, .. } => pending.extend(fields.iter().map(|field| field.layout)),
+            Shape::Enum { cases, .. } => pending.extend(
+                cases
+                    .iter()
+                    .flat_map(|case| case.parts.iter().map(|part| part.layout)),
+            ),
+            Shape::Elements { elem, .. } | Shape::Vector { elem } | Shape::Members { elem } => {
+                pending.push(*elem)
+            }
+            Shape::Entries { key, value } => pending.extend([*key, *value]),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The function `op` lowers to at `layout`, synthesizing it if nothing has
@@ -1990,25 +2032,28 @@ impl Synth<'_> {
         self.leave();
     }
 
-    /// ADR 0064's Decision 4: the one dynamic-layout boundary.
+    /// ADR 0064's Decision 4: the one dynamic-layout boundary, which since
+    /// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 2 is a call to `std.dynamic.equals`.
     ///
     /// A box's family is a [`LayoutId`] in its own payload word 0, so there
-    /// is no layout here to direct a walk with and the runtime's own walk is
-    /// what answers. It is reached from [`Shape::Boxed`] and from nowhere
-    /// else, and [`crate::verify`] is where that is enforced rather than
-    /// promised.
+    /// is no layout here to direct a walk with, and what answers is a Cove
+    /// walk over a view of each box. It is reached from [`Shape::Boxed`] and
+    /// from nowhere else. The callee was resolved onto the [`Pool`] by the call
+    /// site that asked for this walk, which asked [`reaches_a_box`] first, and
+    /// `cove-cli`'s `tests/boxed.rs` holds every call of it to erased operands.
     fn fallback(&mut self, layout: LayoutId, a: Slot, b: Slot) {
-        let site = self.pool.intrinsic_site(IntrinsicSite {
-            intrinsic: Intrinsic::AnyEquals,
-            result: shapes::BOOL,
-        });
+        let callee = self.pool.dynamic_equals.expect(
+            "a walk that reaches a box is asked for only after its call site resolved \
+             `std.dynamic.equals`",
+        );
         let args = self
             .pool
             .args
             .intern(vec![Arg { slot: a, layout }, Arg { slot: b, layout }]);
-        self.emit(Inst::IntrinsicCall {
+        self.emit(Inst::Call {
             dst: self.answer,
-            site,
+            callee,
             args,
         });
     }

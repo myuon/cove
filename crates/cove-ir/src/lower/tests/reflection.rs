@@ -1,8 +1,10 @@
 //! [ADR 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 //! Phase 1: the `core.dynamic*` intrinsics, each one instruction.
 //!
-//! No standard-library body calls them yet — `std.dynamic` is Phase 2 — so
-//! these cases add a unit of their own to `std.stringbuilder`, a module the
+//! They were written before any standard-library body called them —
+//! `std.dynamic` arrived with Phase 2 — and each needs a body shaped to the
+//! one question it asks, so these cases add a unit of their own to
+//! `std.stringbuilder`, a module the
 //! privilege of `core.` is decided by the *name* of. A unit is a file of a
 //! module, so the module keeps every declaration it ships with and gains the
 //! probe beside them.

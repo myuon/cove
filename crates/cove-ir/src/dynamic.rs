@@ -102,7 +102,7 @@ pub fn view_layout(int: LayoutId, reference: LayoutId) -> Layout {
 /// | 3 | [`Float`](DynamicKind::Float) | `Word(Float)` | `Float` |
 /// | 4 | [`Duration`](DynamicKind::Duration) | `Word(Duration)` | `Duration` |
 /// | 5 | [`String`](DynamicKind::String) | `Str` | `Str` |
-/// | 6 | [`Struct`](DynamicKind::Struct) | a `Struct` that is neither the program's `Range` nor `opaque`, `Error` included | `Struct` |
+/// | 6 | [`Struct`](DynamicKind::Struct) | a `Struct` that is not the program's `Range`, `Error` and an `opaque` struct included | `Struct` |
 /// | 7 | [`Enum`](DynamicKind::Enum) | `Enum`, `Option` and `Result` included | `Enum` |
 /// | 8 | [`Array`](DynamicKind::Array) | `Elements` | `Array` |
 /// | 9 | [`Vector`](DynamicKind::Vector) | `Vector` | `Vector` |
@@ -110,7 +110,7 @@ pub fn view_layout(int: LayoutId, reference: LayoutId) -> Layout {
 /// | 11 | [`Map`](DynamicKind::Map) | `Entries` | `Map` |
 /// | 12 | [`Range`](DynamicKind::Range) | the program's `Range` struct | `Range` |
 /// | 13 | [`Function`](DynamicKind::Function) | `Closure` | `Closure`, and a host operation used as a value |
-/// | 14 | [`Opaque`](DynamicKind::Opaque) | every other shape: a `Host`, `Task`, `Scope`, `Addr` or `Tag` word, `Shared`, `Bytes`, `ByteBuffer`, an `opaque` struct | every other value |
+/// | 14 | [`Opaque`](DynamicKind::Opaque) | every other shape: a `Host`, `Task`, `Scope`, `Addr` or `Tag` word, `Shared`, `Bytes`, `ByteBuffer` | every other value |
 ///
 /// The order is the table's and not a ranking: nothing may compare two codes
 /// as numbers, and the ordering between kinds a `Map` key needs is
@@ -118,9 +118,15 @@ pub fn view_layout(int: LayoutId, reference: LayoutId) -> Layout {
 ///
 /// Decision 7 is the last row. A function, a Host handle, a task, a scope and
 /// a synchronized cell do not become readable by being boxed, so they have no
-/// children here and no scalar to read; an `opaque` struct's fields belong to
-/// the module that declared it, so it is opaque here too, exactly as a
-/// rendering shows only its name.
+/// children here and no scalar to read.
+///
+/// **An `opaque` struct is row 6 and not row 14.** It was row 14 until ADR
+/// 0068's Phase 2, on the reading that its fields belong to the module that
+/// declared it. They do, and nothing here changes that: a view is read only by
+/// the standard library's own walks, which are trusted code, and what a walk
+/// shows of one is the walk's decision — equality compares the fields, as `==`
+/// always has on both evaluators, and a rendering shows only the name. Decision
+/// 7 is about capabilities, and a struct whose fields are private is not one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DynamicKind {
     Unit,

@@ -1349,21 +1349,21 @@ mod tests {
 
     /// A loop that calls an intrinsic that allocates (`Float.parse` builds
     /// the message of the `Err` it answers) and one that does not
-    /// (`Any.equals` walks two values together and answers one `Bool` word),
+    /// (`Value.order` walks two keys together and answers one `Int` word),
     /// each several times over, so both [`Counting`]'s wiring and the
     /// reconciliation test below have more than one call and more than one
     /// site to work with.
     ///
-    /// **The reading one has moved three times, and each move is a
+    /// **The reading one has moved four times, and each move is a
     /// migration.** It was `String.length` until ADR 0064 made the count
     /// `std.string.length`; it was then `String.contains` until ADR 0065 gave
     /// that a run search to stand on; it was then `String.indexOf`, until ADR
-    /// 0064's next migration wrote that over the same run search. There is no
-    /// `Text` intrinsic left that reads without allocating — the readers that
-    /// remain all build the string or array they answer — so the sample is
-    /// `Any.equals`, which is the shape for the same three reasons each of the
-    /// others was: it reads the values it was handed, it charges what it
-    /// walked, and it allocates nothing, because the answer is one word.
+    /// 0064's next migration wrote that over the same run search; and it was
+    /// then `Any.equals`, until [ADR 0068]'s Phase 2 made `==` on two erased
+    /// values `std.dynamic.equals`, a Cove loop charged by the instruction.
+    /// `Value.order` is the shape for the reasons each of the others was: it
+    /// reads the values it was handed, it charges what it walked, and it
+    /// allocates nothing, because the answer is one word.
     ///
     /// **The allocating one has moved twice**, and neither time because a
     /// reader found a run instruction to stand on: it was `String.join` until
@@ -1374,14 +1374,19 @@ mod tests {
     /// of the `Err` it answers, one object a call, so this no longer catches a
     /// row that attributed only the outermost object; nothing left allocates
     /// more than one per call.
-    /// The two compared values are **erased**, and that is not decoration.
-    /// Since [ADR 0064]'s Decision 3 a `==` whose operand layout is known is
-    /// a walk the lowering synthesizes and never reaches an intrinsic at all;
-    /// Decision 4 leaves exactly one arm that does, and it is this one. So a
-    /// row for `Any.equals` exists to be read only where a `dyn Trait` is
-    /// what is being compared, and a fixture that compared two `Array<Int>`s
-    /// would now be asserting about a row that is not there.
-    const PARSE_AND_COMPARE: &str = "
+    ///
+    /// The ordered keys are **erased**, and that is not decoration. Since
+    /// [ADR 0064]'s Decision 3 an order whose key layout is known is a walk the
+    /// lowering synthesizes and never reaches an intrinsic at all; Decision 4
+    /// leaves exactly one arm that does, and it is a `dyn Trait` key. So a row
+    /// for `Value.order` exists to be read only where a `Set` of erased values
+    /// is being built, which is what `Set.of(left, other)` is: `std.set.of`
+    /// orders its members through `core.order`, and over two boxes that is the
+    /// intrinsic.
+    ///
+    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+    const PARSE_AND_ORDER: &str = "
 trait Tagged {
   fn tag(self) -> Int
 }
@@ -1398,17 +1403,12 @@ impl Tagged for Triple {
 
 export fn main() -> Int {
   let left: dyn Tagged = Triple(a: 1, b: 2, c: 3)
-  let right: dyn Tagged = Triple(a: 1, b: 2, c: 3)
   let other: dyn Tagged = Triple(a: 1, b: 9, c: 3)
   var total = 0
   var i = 0
   while i < 50 {
-    if left == right {
-      total = total + 1
-    }
-    if left == other {
-      total = total + 1
-    }
+    let keyed = Set.of(left, other)
+    total = total + keyed.length()
     let refused = Float.parse(\"a\")
     if refused.isError() {
       total = total + 1
@@ -1422,20 +1422,23 @@ export fn main() -> Int {
     /// [ADR 0064]'s Decision 7 asks that allocations and allocated words be
     /// attributed per variant, and this is the property worth pinning about
     /// that attribution: it is not just present, it tells two operations
-    /// apart. `Float.parse` allocates the message of the `Err` it hands back, and
-    /// `Any.equals` only reads the values it is given, so a run
-    /// of both
+    /// apart. `Float.parse` allocates the message of the `Err` it hands back,
+    /// and `Value.order` only reads the keys it is given, so a run of both
     /// must show one row with allocations and one row without — from the
     /// real machinery in `Machine::call_intrinsic`, not from calling
     /// [`Counting::intrinsic_allocated`] directly, which would only prove the
     /// bookkeeping adds correctly and not that it is wired to anything.
+    ///
+    /// The `Set` each turn builds allocates, and none of it is `Value.order`'s:
+    /// it is `std.set.of`'s own Cove, charged to no intrinsic row — which is
+    /// the attribution this is about.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     #[test]
     fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
         use crate::vm::debug::tests::World;
 
-        let world = World::new(PARSE_AND_COMPARE);
+        let world = World::new(PARSE_AND_ORDER);
         let mut vm = world.plain();
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
@@ -1455,15 +1458,15 @@ export fn main() -> Int {
         assert!(parsed.allocations <= vm.allocations(), "{parsed:?}");
         assert!(parsed.words <= vm.allocated_words(), "{parsed:?}");
 
-        let compared = boundary
-            .intrinsic(Intrinsic::AnyEquals)
-            .expect("the program compares two erased values");
-        assert!(compared.calls() > 0, "{compared:?}");
+        let ordered = boundary
+            .intrinsic(Intrinsic::ValueOrder)
+            .expect("the program orders two erased keys");
+        assert!(ordered.calls() > 0, "{ordered:?}");
         assert_eq!(
-            compared.allocations, 0,
-            "Any.equals walks its operands and answers one word: {compared:?}"
+            ordered.allocations, 0,
+            "Value.order walks its operands and answers one word: {ordered:?}"
         );
-        assert_eq!(compared.words, 0, "{compared:?}");
+        assert_eq!(ordered.words, 0, "{ordered:?}");
     }
 
     /// **The totals must reconcile exactly with the opcode and site
@@ -1490,7 +1493,7 @@ export fn main() -> Int {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::new(PARSE_AND_COMPARE);
+        let world = World::new(PARSE_AND_ORDER);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();
@@ -1529,35 +1532,39 @@ export fn main() -> Int {
             assert_eq!(work, row.work, "{:?}: {row:?}", row.intrinsic);
         }
         // And the work is not vacuously nought on both sides: this program
-        // calls `Any.equals`, which walks what it compares.
+        // calls `Value.order`, which walks what it orders.
         assert!(
             boundary.intrinsics.iter().any(|row| row.work > 0),
-            "a program that walks strings examines something: {:?}",
+            "a program that orders erased keys examines something: {:?}",
             boundary.intrinsics
         );
     }
 
-    /// Ten `==` comparisons of two erased structs, each holding a `String` of
-    /// `characters` ASCII characters, so that two runs of it differ in exactly
-    /// the one thing the charge is supposed to be proportional to.
+    /// Ten `Set`s of two erased structs, each holding a `String` of
+    /// `characters` ASCII characters and one more that tells the two apart, so
+    /// that two runs of it differ in exactly the one thing the charge is
+    /// supposed to be proportional to.
     ///
-    /// **The operation has moved five times, and the fifth left no `Text`
-    /// intrinsic that reads a receiver it was handed.** It was `String.length`
+    /// **The operation has moved six times, and the sixth left no intrinsic
+    /// that compares two values for equality at all.** It was `String.length`
     /// until ADR 0064 moved the count out of the intrinsics, `String.contains`
     /// until ADR 0065 gave that a run search, `String.indexOf` until the
     /// migration that wrote that over the same search, `String.toUpper` until
-    /// issue #454's Step 5, and `String.replace` until the end of Step 3. What
-    /// is left that charges by the byte is `Any.equals` over two strings,
-    /// which charges the shorter of the two — here both — on top of one unit
-    /// per value its walk reaches. The values are held as `dyn Tagged` for
-    /// [`PARSE_AND_COMPARE`]'s reason: a comparison whose layout is known is
-    /// a walk the lowering writes and never reaches an intrinsic.
+    /// issue #454's Step 5, `String.replace` until the end of Step 3, and
+    /// `Any.equals` over two erased strings until ADR 0068's Phase 2 made that
+    /// `std.dynamic.equals`. What is left that charges by the byte is
+    /// `Value.order` over two erased strings, which charges the shorter of the
+    /// two — here both — on top of one unit per value its walk reaches. The
+    /// values are held as `dyn Tagged` because an order whose layout is known
+    /// is a walk the lowering writes and never reaches an intrinsic.
     ///
-    /// The second string is an interpolation of the first rather than the same
-    /// literal, so the two are two objects and the comparison reads both; an
-    /// interpolation of a `String` is a byte copy and calls no intrinsic, so
-    /// the two runs still differ in nothing but `characters`.
-    fn compares_over(characters: usize) -> String {
+    /// The two strings differ in their last byte, because `Set.of` refuses a
+    /// member given twice, and so the order reads every byte of both before it
+    /// answers. The second is an interpolation of the prefix rather than a
+    /// literal, so the two are two objects; an interpolation of a `String` is
+    /// a byte copy and calls no intrinsic, so the two runs still differ in
+    /// nothing but `characters`.
+    fn orders_over(characters: usize) -> String {
         let text = "a".repeat(characters);
         format!(
             "
@@ -1575,14 +1582,13 @@ impl Tagged for Named {{
 
 export fn main() -> Int {{
   let text = \"{text}\"
-  let left: dyn Tagged = Named(name: text)
-  let right: dyn Tagged = Named(name: \"{{text}}\")
+  let left: dyn Tagged = Named(name: \"{{text}}b\")
+  let right: dyn Tagged = Named(name: \"{{text}}c\")
   var total = 0
   var i = 0
   while i < 10 {{
-    if left == right {{
-      total = total + 1
-    }}
+    let keyed = Set.of(left, right)
+    total = total + keyed.length()
     i = i + 1
   }}
   total
@@ -1602,10 +1608,10 @@ export fn main() -> Int {{
     /// `String.length` was still an intrinsic; ADR 0064 moved it into
     /// `std.string` and this case became `String.contains`, and ADR 0065 has
     /// since moved that one too, `String.indexOf` after it, `String.toUpper`
-    /// after that and `String.replace` last. The case below is `Any.equals`
-    /// over two erased strings, charged the same way — a reading whose charge
-    /// is the bytes it read — plus one unit a value, which is why what is
-    /// asserted is the *difference* between the two runs.
+    /// after that, `String.replace` and then `Any.equals` last. The case below
+    /// is `Value.order` over two erased strings, charged the same way — a
+    /// reading whose charge is the bytes it read — plus one unit a value,
+    /// which is why what is asserted is the *difference* between the two runs.
     ///
     /// Two runs of the same shape over receivers a hundred times apart,
     /// making the same number of calls, from the real machinery. The call
@@ -1625,12 +1631,12 @@ export fn main() -> Int {{
             vm.run_entry("m", "main", Vec::new()).expect("it answers");
             vm.boundary()
                 .expect("count_boundary was called")
-                .intrinsic(Intrinsic::AnyEquals)
-                .expect("the program compares two erased values")
+                .intrinsic(Intrinsic::ValueOrder)
+                .expect("the program orders two erased values")
         };
 
-        let short = row(&compares_over(10));
-        let long = row(&compares_over(1_000));
+        let short = row(&orders_over(10));
+        let long = row(&orders_over(1_000));
 
         assert_eq!(
             short.calls(),
@@ -1650,22 +1656,20 @@ export fn main() -> Int {{
         );
     }
 
-    /// Ten `==` comparisons of two four-field structs that `differ` in the
-    /// first field or not at all.
+    /// Ten `Set`s of two erased four-field structs that differ in the first
+    /// field or only in the last.
     ///
-    /// A struct is compared field by field in declaration order, so the two
+    /// A struct is ordered field by field in declaration order, so the two
     /// programs differ in how far the walk gets and in nothing else: the same
-    /// declaration, the same number of comparisons, the same layouts.
+    /// declaration, the same number of orderings, the same layouts.
     ///
-    /// The two are held as `dyn Tagged` for [`PARSE_AND_COMPARE`]'s reason:
-    /// since [ADR 0064]'s Decision 3 a struct whose layout is known is walked
-    /// by a synthesized function whose work is charged as instructions, and
-    /// the walk this file is about — `equal::value`, charging one unit per
-    /// value it reaches — is what answers for an erased operand. The property
-    /// is unchanged and so is the walk; what changed is which programs reach
-    /// it.
-    fn equals_four_fields(differ: bool) -> String {
-        let first = if differ { 9 } else { 1 };
+    /// It was ten `==` comparisons, of `Any.equals`, until ADR 0068's Phase 2
+    /// made that a Cove loop — where an early exit is charged what it did by
+    /// construction, one instruction at a time, and no column of the report
+    /// has to be taught it. `Value.order` is the walk left that charges a unit
+    /// a value from inside Rust, so it is the one this pins.
+    fn orders_four_fields(early: bool) -> String {
+        let (first, last) = if early { (9, 4) } else { (1, 9) };
         format!(
             "
 trait Tagged {{
@@ -1685,13 +1689,12 @@ impl Tagged for Quad {{
 
 export fn main() -> Int {{
   let x: dyn Tagged = Quad(a: 1, b: 2, c: 3, d: 4)
-  let y: dyn Tagged = Quad(a: {first}, b: 2, c: 3, d: 4)
+  let y: dyn Tagged = Quad(a: {first}, b: 2, c: 3, d: {last})
   var total = 0
   var i = 0
   while i < 10 {{
-    if x == y {{
-      total = total + 1
-    }}
+    let keyed = Set.of(x, y)
+    total = total + keyed.length()
     i = i + 1
   }}
   total
@@ -1702,25 +1705,26 @@ export fn main() -> Int {{
 
     /// **An early exit is charged what it did, not what it was handed.**
     ///
-    /// The charge is made *in* the walk — `equal::value` reports one unit
-    /// per value it reaches — rather than computed from the operands' width
+    /// The charge is made *in* the walk — `key::order` reports one unit per
+    /// value it reaches — rather than computed from the operands' width
     /// before the comparison begins. The two are the same number only when
     /// the walk runs to the end, and the difference is what makes the column
     /// a measurement rather than a second rendering of the layout table.
     ///
-    /// Two structs that differ in their first field are one struct and one
-    /// field. Two equal ones are the struct and all four of its fields. The
-    /// exact multiples are asserted rather than an inequality, because an
-    /// inequality would hold just as well for a charge that was merely noisy.
+    /// Two structs that differ in their first field are decided there; two
+    /// that differ only in their last are decided after all four. The exact
+    /// multiples are asserted rather than an inequality, because an inequality
+    /// would hold just as well for a charge that was merely noisy.
     ///
-    /// **The two boxes are two more values**, and the multiples below say so:
-    /// `equal::value` charges a unit on entry, looks through erasure on the
-    /// left and calls itself, then looks through it on the right and calls
-    /// itself again — three entries before the struct arm is reached at all.
-    /// So an early exit is `3 + 1` and a whole walk `3 + 4`, and the
-    /// *difference* between them is the four minus the one that this is
-    /// really about and is asserted on its own line: the constant is what a
-    /// box costs and the difference is what the walk did.
+    /// **`key::order` charges a unit every time it is entered, and it is
+    /// entered once per step inward as well as once per pair.** The two boxes
+    /// are five entries before a field is compared — the pair of boxes, then
+    /// for each side a step from the box to its address and one from the
+    /// address to the struct it holds — and an `Int` field is three: the pair
+    /// of fields, and a step from each held field to its word. So an early exit
+    /// is `5 + 3` and a whole walk `5 + 4 × 3`, and the *difference* between
+    /// them, nine a call, is the three fields the longer walk reached and the
+    /// shorter did not.
     #[test]
     fn an_early_exit_is_charged_less_than_a_whole_walk() {
         use crate::vm::debug::tests::World;
@@ -1732,12 +1736,12 @@ export fn main() -> Int {{
             vm.run_entry("m", "main", Vec::new()).expect("it answers");
             vm.boundary()
                 .expect("count_boundary was called")
-                .intrinsic(Intrinsic::AnyEquals)
-                .expect("comparing two structs calls Any.equals")
+                .intrinsic(Intrinsic::ValueOrder)
+                .expect("ordering two erased structs calls Value.order")
         };
 
-        let early = row(&equals_four_fields(true));
-        let whole = row(&equals_four_fields(false));
+        let early = row(&orders_four_fields(true));
+        let whole = row(&orders_four_fields(false));
 
         assert_eq!(
             early.calls(),
@@ -1745,11 +1749,11 @@ export fn main() -> Int {{
             "the two runs make the same calls: {early:?} against {whole:?}"
         );
         assert!(early.calls() >= 10, "{early:?}");
-        assert_eq!(early.work, early.calls() * 4, "{early:?}");
-        assert_eq!(whole.work, whole.calls() * 7, "{whole:?}");
+        assert_eq!(early.work, early.calls() * 8, "{early:?}");
+        assert_eq!(whole.work, whole.calls() * 17, "{whole:?}");
         assert_eq!(
             whole.work - early.work,
-            whole.calls() * 3,
+            whole.calls() * 3 * 3,
             "three more fields were reached, and nothing else differs: \
              {early:?} against {whole:?}"
         );

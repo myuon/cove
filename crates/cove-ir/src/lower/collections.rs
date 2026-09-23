@@ -56,9 +56,7 @@ use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START, VECTOR_LEN, V
 use super::synth;
 use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot};
-use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::IntrinsicSite;
 
 impl Body<'_> {
     // ---- literals ---------------------------------------------------------
@@ -1144,10 +1142,15 @@ impl Body<'_> {
     ///
     /// [`crate::Shape::Boxed`] — `dyn Trait`, and a Host schema's `Any` —
     /// keeps its family in payload word 0 and is not known until the box is
-    /// opened. Decision 4 admits exactly one fallback for it, this is it, and
-    /// [`crate::verify`] refuses an `Any.equals` whose operands are anything
-    /// else. `Body::opened` has already unboxed the side that could be, so a
-    /// pair that arrives here boxed is a pair that is boxed on both sides.
+    /// opened. Decision 4 admits exactly one fallback for it, and since [ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 2 that fallback is an ordinary [`Inst::Call`] of
+    /// `std.dynamic.equals`, a Cove walk over a view of each box, rather than
+    /// an [`Inst::IntrinsicCall`] into Rust. `Body::opened` has already
+    /// unboxed the side that could be, so a pair that arrives here boxed is a
+    /// pair that is boxed on both sides — which is what the function takes,
+    /// and what `cove-cli`'s `tests/boxed.rs` holds every call of it to
+    /// (Decision 5).
     ///
     /// `!=` is the same call and an [`Inst::Not`]: one walk rather than a
     /// second one that answers the negation.
@@ -1189,13 +1192,31 @@ impl Body<'_> {
             return;
         }
         if self.is_boxed(a.layout) {
-            let site = self.pool.intrinsic_site(IntrinsicSite {
-                intrinsic: Intrinsic::AnyEquals,
-                result: shapes::BOOL,
-            });
-            let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
-            self.emit(Inst::IntrinsicCall { dst, site, args }, expr.span);
+            // The one operand with no layout to synthesize from, and since ADR
+            // 0068's Phase 2 a call like any other: `std.dynamic.equals`,
+            // written in Cove over a view of each box. `None` is a round that
+            // is lowering the package again with it in the slice, and nothing
+            // this round emits is verified — so the stand-in is a constant.
+            match self.dynamic_equals(expr.span) {
+                Some(callee) => {
+                    let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
+                    self.emit(Inst::Call { dst, callee, args }, expr.span);
+                }
+                None => {
+                    self.emit(Inst::Bool { dst, value: false }, expr.span);
+                }
+            }
         } else {
+            // A walk that reaches a boxed part calls `std.dynamic.equals`
+            // from a function that cannot resolve a name, so it is resolved
+            // here first; a layout with no box in it asks for nothing. A round
+            // that has to lower the package again gets the stand-in above.
+            if synth::reaches_a_box(&self.pool.shapes, a.layout)
+                && self.dynamic_equals(expr.span).is_none()
+            {
+                self.emit(Inst::Bool { dst, value: false }, expr.span);
+                return;
+            }
             let decls = self.plan.decls.len();
             let callee = synth::function_for(
                 synth::Operation::Equality,
