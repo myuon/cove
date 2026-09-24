@@ -568,9 +568,10 @@ pub enum Inst {
     /// after a method, and this is that. `Float.min` and `Float.max` were
     /// `Inst::IntrinsicCall`s carrying the methods' own names until this
     /// replaced them; ADR 0064's census proposed "Cove over typed compare"
-    /// instead, and that route is **blocked** — the body is four instructions
-    /// of float comparison and `crates/cove-native/src/subset.rs` admits
-    /// none of them, so a caller of it is refused and taken back to the VM.
+    /// instead, and that route was **blocked** — the body is four instructions
+    /// of float comparison and `crates/cove-native/src/subset.rs` admitted
+    /// none of them until issue #501, so a caller of it was refused and taken
+    /// back to the VM.
     /// Checked rather than assumed: a caller whose own float work is nothing
     /// at all is refused with `CmpBranch(Float, Ne) at pc 4, also blocked by:
     /// CmpBranch(Float, Lt) x1`, while the same caller over the operation
@@ -684,12 +685,12 @@ pub enum Inst {
     /// would not be renamed if `Float.sqrt` were." This is it, and it is the
     /// last of the four. `Float.sqrt` was an [`Inst::IntrinsicCall`] carrying
     /// the method's own name until this replaced it; the Cove-body route the
-    /// census proposes instead is **blocked**, for the reason it is blocked
+    /// census proposes instead was **blocked**, for the reason it was blocked
     /// for [`Inst::FloatAbs`], [`Inst::FloatMinMax`] and [`Inst::FloatRound`]:
-    /// `crates/cove-native/src/subset.rs` admits no float constant,
-    /// comparison or arithmetic, and a Newton iteration needs all three. That
-    /// was checked by lowering one rather than assumed — see the measurement
-    /// in `benches/floatsqrt`.
+    /// `crates/cove-native/src/subset.rs` admitted no float constant,
+    /// comparison or arithmetic until issue #501, and a Newton iteration needs
+    /// all three. That was checked by lowering one rather than assumed — see
+    /// the measurement in `benches/floatsqrt`.
     ///
     /// # The contract
     ///

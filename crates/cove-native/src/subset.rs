@@ -67,19 +67,19 @@ const PATH: u32 = cove_ir::dynamic::PATH_WORDS.len() as u32;
 /// runtime call this slice does not lower, so a frame holding one is a frame
 /// whose function will be refused anyway.
 ///
-/// [`Repr::Float`] is admitted although almost no float *operation* is
-/// lowered — [`Inst::FloatAbs`], [`Inst::FloatMinMax`], [`Inst::FloatRound`]
-/// and [`Inst::FloatSqrt`] are the four, and none of them is float
-/// *arithmetic* in the sense this slice refuses: one is a mask, one picks one
-/// of its two operands whole, the third is a fixed sequence whose only
-/// addition is of a constant it writes itself, and the fourth is one machine
-/// instruction over one operand. What is still refused is arithmetic the
-/// *program* wrote — an `Inst::Arith` over `Num::Float`, a `ConstFloat`, a
-/// comparison other than `==` — so a Newton iteration written in Cove is refused at each of
-/// the three, which is why `Float.sqrt` is an instruction here and not a
-/// standard-library body. A float slot that is only copied is a run of bits
-/// like any other, and refusing the whole function because one of its frame
-/// slots is a `Float` would refuse it for a reason that is not true.
+/// [`Repr::Float`] is admitted, and since
+/// [issue #501](https://github.com/myuon/cove/issues/501) so is nearly every
+/// float operation a program writes: a constant, `+`, `-`, `*` and `/`, a
+/// negation, and all six comparisons, beside the four typed operations
+/// [`Inst::FloatAbs`], [`Inst::FloatMinMax`], [`Inst::FloatRound`] and
+/// [`Inst::FloatSqrt`]. Each is the one SSE2 instruction IEEE 754 binds to the
+/// same answer the VM's `f64` operation is bound to, so there is nothing to
+/// spell out. What is still refused is `%` over `Num::Float`, whose
+/// `f64::rem` is `fmod` and has no machine instruction, and the three-way
+/// order, which the VM refuses at run time. A float slot that is only copied
+/// is a run of bits like any other, and refusing the whole function because
+/// one of its frame slots is a `Float` would refuse it for a reason that is
+/// not true.
 fn is_lowered(repr: Repr) -> bool {
     match repr {
         Repr::Unit
@@ -161,13 +161,23 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// comparisons `<`, `<=`, `>` and `>=` over `String` are the same helper and
 /// are left out until something asks, and `!=` with them.
 ///
-/// [`Compare::Float`] takes **equality alone**, for the same issue and the same
-/// walk: `std.dynamic`'s pair comparison asks `dynamicFloat(x) ==
+/// [`Compare::Float`] took **equality alone** first, for the same issue and the
+/// same walk: `std.dynamic`'s pair comparison asks `dynamicFloat(x) ==
 /// dynamicFloat(y)` of two boxed `Float`s. It is `ucomisd` and the two flags an
 /// IEEE 754 `==` is — equal, and not unordered — so a `NaN` is equal to nothing
 /// and `0.0` to `-0.0`, which is `f64`'s `==` and `encoded.rs`'s `EQ_FLOAT`.
-/// Every other float comparison, and float arithmetic and constants, is
-/// [issue #501](https://github.com/myuon/cove/issues/501)'s to admit.
+///
+/// It takes **all six** since
+/// [issue #501](https://github.com/myuon/cove/issues/501), because
+/// `std.float.renderInto` — which every `"{x}"` of a `Float` calls since ADR
+/// 0068's Phase 4a — opens with `value != value` and steers by `<` and `>=`,
+/// so a refused float comparison kept every rendering on the encoded machine,
+/// two crossings a value. The same `ucomisd`, and the one IEEE 754 answer each
+/// operator has for an unordered pair: `!=` is true of it, and `<`, `<=`, `>`
+/// and `>=` are false of it, which is `f64`'s operators and `encoded.rs`'s
+/// `cmp_float!` arms. [`CmpOp::Order`] stays outside, because `encoded.rs`
+/// answers `ORDER_FLOAT` with `not_ordered!()` and lowering it would be
+/// lowering a refusal.
 ///
 /// [`Identity`](Compare::Identity) takes equality only — `encoded.rs`'s
 /// `EQ_REF` shares `cmp_word!(true)` with `EQ_BOOL` and `EQ_TAG`, and the
@@ -179,15 +189,15 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// inside with `Identity` (issue #493), and refusing it kept every vector of
 /// such a value on the encoded machine, two crossings a node.
 ///
-/// Everything else — `Float` but for its equality, and `Str` but for its
-/// equality and its order — is outside the slice.
+/// Everything else — `Float`'s order, and `Str` but for its equality and its
+/// order — is outside the slice.
 fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     match on {
         Compare::Int => true,
         Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Order),
         Compare::Identity => matches!(op, CmpOp::Eq | CmpOp::Ne),
         Compare::Str => matches!(op, CmpOp::Eq | CmpOp::Order),
-        Compare::Float => op == CmpOp::Eq,
+        Compare::Float => op != CmpOp::Order,
     }
 }
 
@@ -843,6 +853,11 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
         Inst::Unit { dst } => slot(*dst),
         Inst::Bool { dst, .. } | Inst::Int { dst, .. } => slot(*dst),
+        // `encoded.rs`'s `CONST_FLOAT`, which shares `CONST_INT`'s arm: the
+        // double's bits are the word, stored as they are. Nothing about the
+        // number is looked at, so a `NaN` constant keeps its payload and a
+        // `-0.0` its sign (issue #501).
+        Inst::Float { dst, .. } => slot(*dst),
         // A case index is one word and the word is a compile-time constant, so
         // this is `encoded.rs`'s `FUNC_REF | CONST_TAG` arm: the same store
         // `CONST_INT` makes, of a number the layout already fixed. The layout
@@ -899,8 +914,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             dst,
             a,
         } => slot(*dst) && slot(*a),
-        // `encoded.rs`'s `FLOAT_ABS` arm, and the **one float operation this
-        // slice lowers**. It is here rather than beside the float arithmetic
+        // `encoded.rs`'s `FLOAT_ABS` arm, and the **first float operation this
+        // slice lowered**. It is here rather than beside the float arithmetic
         // and the float comparison it sits between in the IR because it is not
         // arithmetic: it clears bit 63 and touches no other bit, so there is
         // nothing to round, nothing to signal, nothing that quiets a
@@ -1108,27 +1123,43 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && run(*src, layout.width())
                 && slot(*obj)
         }
-        // `encoded.rs`'s `NEG_INT` arm, which is `checked_neg` and nothing else.
+        // `encoded.rs`'s `NEG_INT` arm, which is `checked_neg` and nothing
+        // else, and its `NEG_FLOAT` arm, which is `-x` — the sign bit flipped
+        // and no other bit touched, a `NaN`'s payload and quiet bit included,
+        // and nothing that can raise. Both are one operand in and one word
+        // out, so the bound is one rule; the lowerings are two arms, because
+        // only the first has an overflow to test.
         //
-        // `Num::Float` is not here and falls to `Reason::Instruction`, the same
-        // division `Inst::Arith` above makes. `Inst::FloatAbs`,
-        // `Inst::FloatMinMax`, `Inst::FloatRound` and `Inst::FloatSqrt` *are*
-        // lowered, so the rule is no longer "no float operation": it is that a
-        // float operation is lowered when it has been asked for, and a
-        // negation has not been.
-        // `NEG_FLOAT` cannot raise at all, so the two arms here are not one arm
-        // with a flag.
-        Inst::Neg {
-            num: Num::Int,
-            dst,
-            a,
-        } => slot(*dst) && slot(*a),
+        // The float one was refused until issue #501, as "a float operation
+        // is lowered when it has been asked for, and a negation has not been".
+        // `std.float.renderInto` asked: a negative value is written as `-`
+        // and the rendering of `-value`.
+        Inst::Neg { dst, a, .. } => slot(*dst) && slot(*a),
         Inst::Arith {
             num: Num::Int,
             dst,
             a,
             b,
             ..
+        } => slot(*dst) && slot(*a) && slot(*b),
+        // `encoded.rs`'s `ADD_FLOAT`, `SUB_FLOAT`, `MUL_FLOAT` and `DIV_FLOAT`
+        // arms, which are `float_arith` and so `f64`'s `+`, `-`, `*` and `/`:
+        // each is the one SSE2 instruction IEEE 754 binds to the same
+        // correctly rounded answer, under the round-to-nearest-even `MXCSR`
+        // both tiers run on, and none can raise — a division by nought is an
+        // infinity or a `NaN`, as it is on the VM (issue #501).
+        //
+        // **`Rem` is not among them.** `f64`'s `%` is C's `fmod`, the exact
+        // remainder of a truncating division, and x86-64 has no instruction
+        // for it — SSE has none and x87's `fprem` is a loop. Lowering it would
+        // be a call into the runtime's `fmod`, which is a helper and a
+        // decision of its own, and nothing the rendering reaches writes one.
+        Inst::Arith {
+            num: Num::Float,
+            op: ArithOp::Add | ArithOp::Sub | ArithOp::Mul | ArithOp::Div,
+            dst,
+            a,
+            b,
         } => slot(*dst) && slot(*a) && slot(*b),
         Inst::ArithImm { dst, a, .. } => slot(*dst) && slot(*a),
         Inst::Cmp { on, op, dst, a, b } => {
@@ -1735,15 +1766,27 @@ mod tests {
         }
     }
 
-    /// `String` equality is in the slice beside its order, and `Float`
-    /// equality alone of the float comparisons: what ADR 0068's pair
-    /// comparison asks (issue #494), and not a comparison more.
+    /// `String` equality is in the slice beside its order — what ADR 0068's
+    /// pair comparison asks (issue #494), and not a comparison more — and
+    /// every `Float` comparison but the three-way order the VM refuses, which
+    /// is what `std.float.renderInto` asks (issue #501).
     #[test]
-    fn a_string_and_a_float_are_compared_for_equality() {
+    fn a_string_and_a_float_are_compared_as_far_as_asked() {
         use cove_ir::{CmpOp, Compare};
         for (on, admitted) in [
             (Compare::Str, [CmpOp::Eq, CmpOp::Order].as_slice()),
-            (Compare::Float, [CmpOp::Eq].as_slice()),
+            (
+                Compare::Float,
+                [
+                    CmpOp::Eq,
+                    CmpOp::Ne,
+                    CmpOp::Lt,
+                    CmpOp::Le,
+                    CmpOp::Gt,
+                    CmpOp::Ge,
+                ]
+                .as_slice(),
+            ),
         ] {
             for op in [
                 CmpOp::Eq,
