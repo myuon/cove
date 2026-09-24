@@ -1,11 +1,20 @@
 //! [ADR 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 //! structural observations, over the words the machine holds.
 //!
-//! The nine reflection opcodes are thin: [`super::encoded`] reads a view out
-//! of the frame, asks one function here, and writes the answer back. What a
-//! view *is* — three words, the layout of the viewed value, the object that
-//! roots it and the payload word it begins at — is `cove_ir::dynamic`'s; this
-//! is what those words mean to this machine.
+//! The reflection opcodes are thin: [`super::encoded`] reads a view out of
+//! the frame, asks one function here, and writes the answer back. What a view
+//! *is* — three words, the layout of the viewed value, the object that roots
+//! it and the payload word it begins at — is `cove_ir::dynamic`'s; this is
+//! what those words mean to this machine.
+//!
+//! Nine of them are ADR 0068's Phases 1 to 3. Six more are its Phase 4b-ii's,
+//! for the rendering of an erased value: three names — a struct's, a field's,
+//! a case's — each the address of a literal `cove_ir`'s `lower::names` placed
+//! before the run; whether a struct is `opaque`; an opaque value's text, the
+//! one of them that allocates; and whether a vector is on the path a walk the
+//! lowering composed handed over, which follows that path's frames below the
+//! boundary. Beside them is [`audit_box`], which holds the placed names to the
+//! boxes a run really makes.
 //!
 //! # A view never denotes a box or a bare reference
 //!
@@ -26,7 +35,10 @@
 //! in a run has the run as its owner, and a child that is a reference is
 //! followed. So a walk over a value of any size allocates nothing, which is the
 //! ADR's gate — "no child allocation required merely to traverse a value" —
-//! and `tests` below reads the allocation counter to hold it.
+//! and `tests` below reads the allocation counter to hold it. The one
+//! exception is [`handle_text`], the text of a Host resource, a scope or a task
+//! inside a box, which is a new `String` because which handle it is lives in a
+//! table of the run's; it is not part of any traversal.
 //!
 //! # A disagreement is the standard library's bug
 //!
@@ -40,8 +52,8 @@
 use std::cmp::Ordering;
 
 use cove_ir::bytecode::Op;
-use cove_ir::dynamic::{declared_name, VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
-use cove_ir::{DynamicKind, FunctionId, Layout, LayoutId, Repr, Shape, Slot};
+use cove_ir::dynamic::{declared_name, PATH_DEPTH, PATH_ENTRY, VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
+use cove_ir::{DynamicKind, FunctionId, Layout, LayoutId, LayoutNames, Repr, Shape, Slot, StrId};
 
 use super::{null_object, Machine};
 use crate::error::RuntimeError;
@@ -84,8 +96,11 @@ impl View {
     }
 }
 
-/// Executes one of the nine reflection opcodes `op` in the frame whose first
-/// word is `frame`, with slot operands `a`, `b` and `c` of function `id`.
+/// Executes one of the reflection opcodes that do not allocate, `op`, in the
+/// frame whose first word is `frame`, with slot operands `a`, `b` and `c` of
+/// function `id`: the nine of ADR 0068's Phases 1 to 3, and five of the six
+/// its Phase 4b-ii brought. The sixth, [`handle_text`], allocates, and is an
+/// arm of its own.
 ///
 /// Out of line on purpose: see the reflection arm of
 /// [`super::encoded`]'s dispatch loop, whose stack frame this keeps small.
@@ -141,6 +156,18 @@ pub(crate) fn execute(
             Ordering::Equal => 0,
             Ordering::Greater => 1,
         },
+        Some(Op::DynTypeName) => type_name(machine, View::read(machine, at(b)))?,
+        Some(Op::DynFieldName) => {
+            let index = machine.mem.word_at(at(c)) as i64;
+            field_name(machine, View::read(machine, at(b)), index)?
+        }
+        Some(Op::DynCaseName) => case_name(machine, View::read(machine, at(b)))?,
+        Some(Op::DynOpaque) => u64::from(opaque(machine, View::read(machine, at(b)))?),
+        Some(Op::DynOnPath) => {
+            let entry = machine.mem.word_at(at(c) + PATH_ENTRY as usize);
+            let depth = machine.mem.word_at(at(c) + PATH_DEPTH as usize) as i64;
+            u64::from(on_path(machine, View::read(machine, at(b)), entry, depth))
+        }
         other => unreachable!("{other:?} is not a reflection opcode"),
     };
     machine.mem.set_word_at(at(a), word);
@@ -351,6 +378,183 @@ pub(crate) fn same_object(machine: &Machine, a: View, b: View) -> bool {
     a.owner == b.owner && vector(a) && vector(b)
 }
 
+/// The names placed for the layout a view names, or the internal error a
+/// read of a name `lower::names` never placed is.
+///
+/// The pass places exactly the names a box can need, so a view of a struct or
+/// an enum always finds its own here; a miss is a lowering bug, and it is
+/// refused rather than answered because the alternative is a name made up at
+/// run time — an allocation, and a text nobody checked.
+fn placed<'p>(machine: &Machine<'p>, layout: LayoutId) -> Result<&'p LayoutNames, RuntimeError> {
+    machine
+        .program
+        .names
+        .get(layout.index())
+        .ok_or_else(|| unplaced(machine, layout))
+}
+
+/// A name `lower::names` did not place for `layout`.
+fn unplaced(machine: &Machine, layout: LayoutId) -> RuntimeError {
+    let name = machine
+        .program
+        .layouts
+        .get(layout.index())
+        .map_or("?", |described| &described.name);
+    internal(format!(
+        "a rendering asked for a name of `{name}`, and none was placed for it"
+    ))
+}
+
+/// The address of the placed literal `text`.
+fn literal(machine: &Machine, text: StrId) -> u64 {
+    machine.literal_addr(text)
+}
+
+/// `dyn.type-name`: the name a rendering shows for the struct a view names,
+/// as the address of the literal `lower::names` placed for it.
+pub(crate) fn type_name(machine: &Machine, view: View) -> Result<u64, RuntimeError> {
+    let described = layout(machine, view.layout)?;
+    if !matches!(kind_of(machine, described), DynamicKind::Struct) {
+        return Err(internal(format!(
+            "the name of a dynamic view of a {} was asked",
+            kind_of(machine, described).name()
+        )));
+    }
+    let text = placed(machine, view.layout)?
+        .name
+        .ok_or_else(|| unplaced(machine, view.layout))?;
+    Ok(literal(machine, text))
+}
+
+/// `dyn.field-name`: the name of field `index` of the struct a view names.
+pub(crate) fn field_name(machine: &Machine, view: View, index: i64) -> Result<u64, RuntimeError> {
+    let described = layout(machine, view.layout)?;
+    let fields = match (&described.shape, kind_of(machine, described)) {
+        (Shape::Struct { fields, .. }, DynamicKind::Struct) => fields.len(),
+        (_, kind) => {
+            return Err(internal(format!(
+                "a field name of a dynamic view of a {} was asked",
+                kind.name()
+            )))
+        }
+    };
+    let Some(at) = usize::try_from(index).ok().filter(|at| *at < fields) else {
+        return Err(internal(format!(
+            "the name of field {index} of a dynamic view with {fields} fields was asked"
+        )));
+    };
+    let text = *placed(machine, view.layout)?
+        .parts
+        .get(at)
+        .ok_or_else(|| unplaced(machine, view.layout))?;
+    Ok(literal(machine, text))
+}
+
+/// `dyn.case-name`: the name of the case the enum a view names is in.
+pub(crate) fn case_name(machine: &Machine, view: View) -> Result<u64, RuntimeError> {
+    let described = layout(machine, view.layout)?;
+    if !matches!(described.shape, Shape::Enum { .. }) {
+        return Err(internal(format!(
+            "the case name of a dynamic view of a {} was asked",
+            kind_of(machine, described).name()
+        )));
+    }
+    enum_case(machine, view, described)?;
+    let index = machine.mem.payload(view.owner, view.at) as usize;
+    let text = *placed(machine, view.layout)?
+        .parts
+        .get(index)
+        .ok_or_else(|| unplaced(machine, view.layout))?;
+    Ok(literal(machine, text))
+}
+
+/// `dyn.opaque`: whether the struct a view names was declared `opaque`, which
+/// its layout carries as a flag; `false` for every other view.
+pub(crate) fn opaque(machine: &Machine, view: View) -> Result<bool, RuntimeError> {
+    Ok(matches!(
+        layout(machine, view.layout)?.shape,
+        Shape::Struct { opaque: true, .. }
+    ))
+}
+
+/// `dyn.on-path`: whether the vector a view names is one of the `depth`
+/// entries of the render path whose innermost entry is at address `entry`.
+///
+/// An entry is word 0 of a `rendersTracked<Vector<…>>` frame — a walk
+/// `lower::synth` composed — whose word 0 is the vector it is rendering and
+/// whose word 2 is the address of the entry before it. The frames are live:
+/// every one of them is a caller of the rendering that is asking, so the walk
+/// down them reads words that are there. It compares each entry's vector with
+/// the view's object as [`same_object`] compares two views, and a view that
+/// does not denote a whole vector is on no path. It allocates nothing and
+/// answers nothing but the `Bool`.
+pub(crate) fn on_path(machine: &Machine, view: View, entry: u64, depth: i64) -> bool {
+    let vector = view.at == 0
+        && machine.mem.object_layout(view.owner) == view.layout
+        && matches!(
+            machine
+                .program
+                .layouts
+                .get(view.layout.index())
+                .map(|l| &l.shape),
+            Some(Shape::Vector { .. })
+        );
+    if !vector {
+        return false;
+    }
+    let mut entry = entry;
+    for _ in 0..depth.max(0) {
+        let at = machine.mem.stack_index(entry);
+        if machine.mem.word_at(at) == view.owner {
+            return true;
+        }
+        entry = machine.mem.word_at(at + 2);
+    }
+    false
+}
+
+/// `dyn.handle-text`: the text a rendering shows for the opaque value the
+/// view in slot `src` of the frame at `frame` names, written as a new `String`
+/// into slot `dst`.
+///
+/// A Host resource, a task scope and a task are
+/// [`crate::vm::intrinsics::handle_text`]'s, which `Inst::HandleText` writes
+/// with too, so the two cannot say different things of one handle. A byte
+/// run and a byte buffer are the text the runtime's rendering always gave
+/// them; an address and a case tag are not values, and are refused in its
+/// words. It allocates, so the dispatch loop syncs before it asks.
+#[inline(never)]
+pub(crate) fn handle_text(
+    machine: &mut Machine,
+    frame: usize,
+    dst: Slot,
+    src: Slot,
+) -> Result<(), RuntimeError> {
+    let view = View::read(machine, frame + src as usize);
+    let described = layout(machine, view.layout)?;
+    let mut text = String::new();
+    match &described.shape {
+        Shape::Word(repr @ (Repr::Host | Repr::Scope | Repr::Task)) => {
+            let word = machine.mem.payload(view.owner, view.at);
+            crate::vm::intrinsics::handle_text(machine, *repr, word, &mut text)?;
+        }
+        Shape::Bytes => text.push_str("<byte run>"),
+        Shape::ByteBuffer => text.push_str("<byte buffer>"),
+        Shape::Word(Repr::Addr | Repr::Tag) => {
+            return Err(RuntimeError::new("this value has no text of its own"))
+        }
+        _ => {
+            return Err(internal(format!(
+                "the opaque text of a dynamic view of a {} was asked",
+                kind_of(machine, described).name()
+            )))
+        }
+    }
+    let string = machine.new_string(&text)?;
+    machine.mem.set_word_at(frame + dst as usize, string);
+    Ok(())
+}
+
 /// `dyn.read`: the scalar the viewed value is, as the word a slot of `want`
 /// holds.
 ///
@@ -490,6 +694,174 @@ fn internal(message: String) -> RuntimeError {
         "a dynamic view is read by the standard library's own walks, so this is a bug in the \
          standard library rather than in the program",
     )
+}
+
+// ---- an audit of the placed names -------------------------------------------
+
+/// Whether every box this process makes is audited for its placed names: see
+/// [`audit_box`]. Off unless a survey turns it on.
+static AUDITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What the audit found: one line per nominal layout a box held whose names
+/// `lower::names` did not place.
+static UNPLACED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Turns the audit of [`audit_box`] on or off for every machine in this
+/// process.
+pub(crate) fn audit_placed_names(on: bool) {
+    AUDITING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Every finding the audit has made since the last call, taken.
+pub(crate) fn unplaced_names() -> Vec<String> {
+    std::mem::take(
+        &mut *UNPLACED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
+/// Walks the value in the box at `boxed`, which was made a moment ago, and
+/// records every nominal layout in it whose names were not placed — when the
+/// audit is on, and not otherwise.
+///
+/// # Why this is not the pass asked again
+///
+/// `cove_ir`'s `lower::names` decides which layouts a box can hold from the
+/// program's code: the layout every `Inst::Box` names and the parts its layout
+/// table records, or every layout at all where a Host answers `Any`. A test
+/// that asked that closure whether it covered itself would be the pass judging
+/// itself. This reads the other side: the box that was **actually made**, by
+/// whichever path made it — an `Inst::Box`, or the boundary boxing what a host
+/// answered at a layout of its own search — and the value **actually in it**,
+/// followed through the headers of the objects it reaches, as a view is. A
+/// vector, an array, a set and a map are asked their element's layout too,
+/// from their own header, so that a collection empty when it was boxed still
+/// answers for what can be pushed into it. A box inside is not followed: it was
+/// audited when it was made.
+///
+/// It is for the survey that runs every program in the repository
+/// (`cove-cli`'s `tests/vm_coverage.rs`), and costs a run nothing but one
+/// relaxed load a box when it is off.
+pub(crate) fn audit_box(machine: &Machine, boxed: u64) {
+    if !AUDITING.load(std::sync::atomic::Ordering::Relaxed) || boxed == 0 {
+        return;
+    }
+    let found = unplaced_in(machine, boxed);
+    if !found.is_empty() {
+        let mut held = UNPLACED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        held.extend(found);
+    }
+}
+
+/// [`audit_box`]'s walk of the box at `boxed`, answering the name of every
+/// nominal layout in it whose names were not placed.
+pub(crate) fn unplaced_in(machine: &Machine, boxed: u64) -> Vec<String> {
+    let program = machine.program;
+    let mut found: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut checked: std::collections::HashSet<LayoutId> = std::collections::HashSet::new();
+    let mut pending: Vec<(LayoutId, u64, u32)> =
+        vec![(LayoutId(machine.mem.payload(boxed, 0) as u32), boxed, 1)];
+    let mut named = |layout: LayoutId, found: &mut Vec<String>| {
+        if !checked.insert(layout) {
+            return;
+        }
+        let Some(described) = program.layouts.get(layout.index()) else {
+            return;
+        };
+        let names = program.names.get(layout.index());
+        let whole = match &described.shape {
+            Shape::Struct { .. } if crate::vm::boundary::is_range(program, described) => true,
+            Shape::Struct { fields, opaque } => names.is_some_and(|names| {
+                names.name.is_some() && (*opaque || names.parts.len() == fields.len())
+            }),
+            Shape::Enum { cases, .. } => {
+                names.is_some_and(|names| names.parts.len() == cases.len())
+            }
+            _ => true,
+        };
+        if !whole {
+            found.push(described.name.to_string());
+        }
+    };
+    while let Some((layout, owner, at)) = pending.pop() {
+        let Some(described) = program.layouts.get(layout.index()) else {
+            continue;
+        };
+        named(layout, &mut found);
+        match &described.shape {
+            Shape::Struct { fields, .. } => {
+                pending.extend(
+                    fields
+                        .iter()
+                        .map(|field| (field.layout, owner, at + field.at)),
+                );
+            }
+            Shape::Enum { cases, .. } => {
+                let index = machine.mem.payload(owner, at) as usize;
+                if let Some(case) = cases.get(index) {
+                    pending.extend(
+                        case.parts
+                            .iter()
+                            .map(|part| (part.layout, owner, at + 1 + part.at)),
+                    );
+                }
+            }
+            _ if described.is_one_address() => {
+                let object = machine.mem.payload(owner, at);
+                if object == 0 || !seen.insert(object) {
+                    continue;
+                }
+                let header = machine.mem.object_layout(object);
+                let Some(held) = program.layouts.get(header.index()) else {
+                    continue;
+                };
+                let width = |id: LayoutId| program.layout(id).width();
+                match &held.shape {
+                    // An object a recursion was broken at holds the value's
+                    // own words.
+                    Shape::Struct { .. } | Shape::Enum { .. } => pending.push((header, object, 0)),
+                    Shape::Elements { elem, .. } | Shape::Members { elem } => {
+                        named(*elem, &mut found);
+                        let stride = width(*elem);
+                        for nth in 0..machine.mem.object_len(object) {
+                            pending.push((*elem, object, nth * stride));
+                        }
+                    }
+                    Shape::Vector { elem } => {
+                        named(*elem, &mut found);
+                        let len = machine.mem.payload(object, VECTOR_LEN) as u32;
+                        let store = machine.mem.payload(object, VECTOR_STORE);
+                        if store != 0 {
+                            let stride = width(*elem);
+                            for nth in 0..len {
+                                pending.push((*elem, store, nth * stride));
+                            }
+                        }
+                    }
+                    Shape::Entries { key, value } => {
+                        named(*key, &mut found);
+                        named(*value, &mut found);
+                        let (keys, values) = (width(*key), width(*value));
+                        for nth in 0..machine.mem.object_len(object) {
+                            let entry = nth * (keys + values);
+                            pending.push((*key, object, entry));
+                            pending.push((*value, object, entry + keys));
+                        }
+                    }
+                    // A box inside was audited when it was made; a string, a
+                    // closure, a cell and a byte run hold no name a rendering
+                    // shows.
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 #[cfg(test)]

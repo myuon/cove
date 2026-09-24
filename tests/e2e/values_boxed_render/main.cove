@@ -1,0 +1,233 @@
+use clock.timeout
+use console.println
+
+/// Every kind a box can hold renders as the interpreter shows it, on every
+/// evaluator (ADR 0068's Phase 4b-ii).
+///
+/// The text of an erased value is `std.dynamic.renderInto` on the
+/// linear-memory backend, a Cove walk over a view of the box, where it was the
+/// runtime's `Value.renderInto`; and `Display for Value` on the interpreter.
+/// These rows hold the two to one text byte for byte, kind by kind:
+///
+/// - a scalar of every kind, a `Float` and a `Duration` included, which are
+///   written by `std.float` and `std.duration` inside a box as out of one;
+/// - a `String`, raw at the top and inside a struct alike;
+/// - a struct by its short name — a generic one without its type arguments —
+///   a struct with no fields, an `opaque` struct as its name alone, and the
+///   builtin `Error` as its message;
+/// - an enum with and without a payload, `Option` and `Result` among them;
+/// - a range written both ways;
+/// - an `Array`, a `Vector`, a `Set` and a `Map`, nested in one another and
+///   empty.
+///
+/// A struct or an enum is boxed through `dyn Shown`, and every other value
+/// through `clock.timeout`, whose answer is `Result<Any, Error>` — a value
+/// that crosses that boundary is erased the way a `dyn Trait` is. `Any`
+/// cannot be named in an annotation, so each of those rows prints what it
+/// boxed where it boxed it.
+trait Shown {
+  fn shown(self) -> Int
+}
+
+/// Renders as its name alone, whatever it holds (ADR 0014).
+export opaque struct Token {
+  at: Int
+}
+
+impl Shown for Token {
+  fn shown(self) -> Int {
+    self.at
+  }
+}
+
+/// A struct with no fields.
+struct Nothing { }
+
+impl Shown for Nothing {
+  fn shown(self) -> Int {
+    0
+  }
+}
+
+/// Every scalar kind as a field, so that each is written from inside a box.
+struct Reading {
+  label: String
+  at: Float
+  wait: Duration
+  on: Bool
+  count: Int
+  none: ()
+}
+
+impl Shown for Reading {
+  fn shown(self) -> Int {
+    self.count
+  }
+}
+
+/// An enum whose cases carry nothing, one part, and two.
+enum Mark {
+  Plain
+  Count(Int)
+  Pair(Int, String)
+}
+
+impl Shown for Mark {
+  fn shown(self) -> Int {
+    0
+  }
+}
+
+/// Collections nested in one another, and the two builtin enums.
+struct Nest {
+  grid: Array<Vector<Int>>
+  table: Map<String, Set<Int>>
+  maybe: Option<Array<Int>>
+  outcome: Result<Int, String>
+}
+
+impl Shown for Nest {
+  fn shown(self) -> Int {
+    0
+  }
+}
+
+/// A generic struct, which renders by its declared name alone.
+struct Pair<T> {
+  left: T
+  right: T
+}
+
+fn row(label: String, value: dyn Shown) -> Result<Unit, Error> {
+  println("{label} {value}")?
+  Ok(())
+}
+
+fn scalars() -> Result<Unit, Error> {
+  let unit = timeout(1ms) { () }?
+  println("scalar.unit {unit}")?
+  let yes = timeout(1ms) { true }?
+  println("scalar.bool {yes}")?
+  let int = timeout(1ms) { -42 }?
+  println("scalar.int {int}")?
+  let whole = timeout(1ms) { 2.0 }?
+  println("scalar.float.whole {whole}")?
+  let tenth = timeout(1ms) { 0.1 }?
+  println("scalar.float.tenth {tenth}")?
+  let wait = timeout(1ms) { 90s }?
+  println("scalar.duration {wait}")?
+  let text = timeout(1ms) { "raw text" }?
+  println("scalar.string {text}")?
+  Ok(())
+}
+
+fn structs() -> Result<Unit, Error> {
+  row("struct.opaque", Token(at: 7))?
+  row("struct.empty", Nothing())?
+  row(
+    "struct.reading",
+    Reading(
+      label: "outside",
+      at: 21.5,
+      wait: 1500ms,
+      on: false,
+      count: 3,
+      none: (),
+    ),
+  )?
+  let failed = timeout(1ms) { Error(message: "went wrong") }?
+  println("struct.error {failed}")?
+  let ints = timeout(1ms) { Pair(left: 1, right: 2) }?
+  println("struct.generic.int {ints}")?
+  let texts = timeout(1ms) { Pair(left: "a", right: "b") }?
+  println("struct.generic.text {texts}")?
+  Ok(())
+}
+
+fn enums() -> Result<Unit, Error> {
+  row("enum.plain", Mark.Plain)?
+  row("enum.one", Mark.Count(3))?
+  row("enum.two", Mark.Pair(4, "four"))?
+  let some = timeout(1ms) { Some(3) }?
+  println("enum.some {some}")?
+  let none = timeout(1ms) {
+    let held: Option<Int> = None
+    held
+  }?
+  println("enum.none {none}")?
+  let ok = timeout(1ms) {
+    let held: Result<Int, String> = Ok(1)
+    held
+  }?
+  println("enum.ok {ok}")?
+  let err = timeout(1ms) {
+    let held: Result<Int, String> = Err("no")
+    held
+  }?
+  println("enum.err {err}")?
+  Ok(())
+}
+
+fn ranges() -> Result<Unit, Error> {
+  let inclusive = timeout(1ms) { 1..3 }?
+  println("range.inclusive {inclusive}")?
+  let exclusive = timeout(1ms) { 1..<4 }?
+  println("range.exclusive {exclusive}")?
+  Ok(())
+}
+
+fn collections() -> Result<Unit, Error> {
+  let grid = timeout(1ms) { [[1, 2], [3]] }?
+  println("collection.array.nested {grid}")?
+  let growing = timeout(1ms) {
+    var held: Vector<Array<Int>> = Vector.of()
+    held.push([1])
+    held.push([])
+    held
+  }?
+  println("collection.vector.nested {growing}")?
+  let members = timeout(1ms) { Set.of(3, 1, 2) }?
+  println("collection.set {members}")?
+  let noMembers = timeout(1ms) {
+    let held: Set<Int> = Set.of()
+    held
+  }?
+  println("collection.set.empty {noMembers}")?
+  let entries = timeout(1ms) {
+    let nothing: Array<Int> = []
+    Map.of(MapEntry(key: "b", value: [2]), MapEntry(key: "a", value: nothing))
+  }?
+  println("collection.map {entries}")?
+  let noEntries = timeout(1ms) {
+    let held: Map<String, Int> = Map.of()
+    held
+  }?
+  println("collection.map.empty {noEntries}")?
+  let empty = timeout(1ms) {
+    let held: Array<Int> = []
+    held
+  }?
+  println("collection.array.empty {empty}")?
+  row(
+    "collection.nest",
+    Nest(
+      grid: [Vector.of(1, 2), Vector.of()],
+      table: Map.of(
+        MapEntry(key: "odd", value: Set.of(3, 1)),
+        MapEntry(key: "none", value: Set.of()),
+      ),
+      maybe: Some([5]),
+      outcome: Err("bad"),
+    ),
+  )?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  scalars()?
+  structs()?
+  enums()?
+  ranges()?
+  collections()?
+  Ok(())
+}

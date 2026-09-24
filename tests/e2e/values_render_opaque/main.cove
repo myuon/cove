@@ -17,7 +17,10 @@ use clock.timeout
 /// - an `http.Server` as `<http.Server#{n}>`, the number the host issued,
 ///   unboxed, as a field, as a field of a value erased to `dyn`, and erased to
 ///   `Any` through `clock.timeout`'s answer;
-/// - a `Shared` cell as `<shared>`, unboxed.
+/// - a `Shared` cell as `<shared>`, unboxed and as a field of a value erased
+///   to `dyn`;
+/// - a function as `<fn>`, unboxed — a closure and a declared function alike
+///   — and as a field of a value erased to `dyn`.
 ///
 /// Until ADR 0068's Phase 4b-i the linear-memory backend refused every task
 /// and resource row with "this value has no text of its own", and until its
@@ -26,12 +29,15 @@ use clock.timeout
 /// tables and not in the layout, and `Inst::HandleText` is how a walk the
 /// lowering composed reaches it.
 ///
-/// A `Shared` cell erased to `dyn`, and a function whether erased or not, are
-/// not here yet: each is rendered by the runtime's `Value.renderInto` until ADR
-/// 0068's Phase 4b-ii renders an erased value in Cove — a function's static
-/// layout is one reference word that says nothing of what it holds — and a
-/// row of any would be one more site of a fallback `tests/boxed.rs` holds from
-/// rising.
+/// A `Shared` cell and a function inside a box, and a function outside one,
+/// joined these rows with ADR 0068's Phase 4b-ii. Until then each was rendered
+/// by the runtime's `Value.renderInto` — a function's static layout is one
+/// reference word that says nothing of what it holds — and a row of any would
+/// have been one more site of a fallback `tests/boxed.rs` held from rising.
+/// The box is `std.dynamic.renderInto` now, and a function's word renders
+/// `<fn>` from its layout alone. Neither a cell nor a function can be erased
+/// by itself — `impl` extends a struct or an enum, and neither crosses
+/// `clock.timeout` — so each is boxed as a field.
 trait Summary {
   fn summarize(self) -> String
 }
@@ -56,6 +62,30 @@ impl Summary for Listening {
   }
 }
 
+struct Guarded {
+  cell: Shared<Int>
+}
+
+impl Summary for Guarded {
+  fn summarize(self) -> String {
+    "guarded"
+  }
+}
+
+struct Callback {
+  step: fn(Int) -> Int
+}
+
+impl Summary for Callback {
+  fn summarize(self) -> String {
+    "callback"
+  }
+}
+
+fn increment(value: Int) -> Int {
+  value + 1
+}
+
 export fn main() -> Result<Unit, Error> {
   scope work {
     let t = work.spawn { 1 }
@@ -78,5 +108,16 @@ export fn main() -> Result<Unit, Error> {
 
   let cell = Shared(1)
   println("shared {cell}")?
+  let guarded: dyn Summary = Guarded(cell: cell)
+  println("shared.dyn {guarded}")?
+
+  let step: fn(Int) -> Int = fn(n) {
+    n * 2
+  }
+  println("fn {step}")?
+  let named = increment
+  println("fn.declared {named}")?
+  let callback: dyn Summary = Callback(step: step)
+  println("fn.dyn {callback}")?
   Ok(())
 }

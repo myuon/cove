@@ -387,6 +387,8 @@ fn the_corpus_says_what_the_linear_memory_backend_runs() {
         report.agreed.len()
     );
 
+    every_box_the_corpus_makes_has_its_names_placed(&report);
+
     let mut disagreed: Vec<&str> = report
         .disagreed
         .iter()
@@ -401,6 +403,37 @@ fn the_corpus_says_what_the_linear_memory_backend_runs() {
          `KNOWN_DISAGREEMENTS` names; a program that started answering \
          something the oracle does not is registered by somebody who looked \
          at it, and one that stopped is a line to delete\n\n{text}"
+    );
+}
+
+/// **Every box a program in the repository makes has the names a rendering of
+/// it reads placed** — ADR 0068's Phase 4b-ii, issue #499's decision 4.
+///
+/// A rendering of an erased value reads a struct's name, its fields' names and
+/// an enum's case name as literals the machine placed before the run, and
+/// `cove_ir`'s `lower::names` decides which layouts get them: the layouts an
+/// `Inst::Box` can hold, closed over their parts, or every layout where a Host
+/// answers `Any`. A name read that was never placed is an internal error, so
+/// the choice has to be exact — and asking that pass whether its closure
+/// covers itself would be the pass judging itself.
+///
+/// So the survey turns on the machine's own audit (`Vm::audit_placed_names`),
+/// which walks every box **as it is made**, by whichever path makes it, and the
+/// value actually in it through its objects' headers, and records every
+/// nominal layout it meets whose names were not placed. Over the whole corpus
+/// that list is empty. It is asserted here, where every program already runs,
+/// rather than in a survey of its own that would run the corpus again.
+fn every_box_the_corpus_makes_has_its_names_placed(report: &Report) {
+    let listing: Vec<String> = report
+        .unplaced
+        .iter()
+        .map(|(name, layouts)| format!("  {name}: {}", layouts.join(", ")))
+        .collect();
+    assert!(
+        report.unplaced.is_empty(),
+        "these programs made a box holding a layout whose names were not placed, which a \
+         rendering of it would refuse as an internal error:\n{}",
+        listing.join("\n")
     );
 }
 
@@ -489,6 +522,10 @@ fn survey() -> Report {
     // panic.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
+    // Every box a run makes is walked for the names a rendering of it would
+    // read; see `every_box_the_corpus_makes_has_its_names_placed`.
+    Vm::audit_placed_names(true);
+    let _ = Vm::unplaced_names();
 
     for case in cases {
         let index = indexes
@@ -516,6 +553,12 @@ fn survey() -> Report {
 
         let oracle = on_the_oracle(&case, &prepared, module, entry);
         let machine = on_the_machine(&case, &prepared, &program, module, entry);
+        let mut unplaced = Vm::unplaced_names();
+        if !unplaced.is_empty() {
+            unplaced.sort();
+            unplaced.dedup();
+            report.unplaced.push((case.name.clone(), unplaced));
+        }
         if oracle == machine {
             report.agreed.push(case.name.clone());
         } else {
@@ -525,6 +568,7 @@ fn survey() -> Report {
         }
     }
 
+    Vm::audit_placed_names(false);
     std::panic::set_hook(hook);
     report
 }
@@ -918,6 +962,10 @@ struct Report {
     disagreed: Vec<(String, String)>,
     /// Each program that did not lower, and every gap that stopped it.
     not_lowered: Vec<(String, Vec<Gap>)>,
+    /// Each program that made a box holding a nominal layout whose names the
+    /// lowering did not place, and those layouts: see
+    /// [`every_box_the_corpus_makes_has_its_names_placed`].
+    unplaced: Vec<(String, Vec<String>)>,
 }
 
 impl Report {

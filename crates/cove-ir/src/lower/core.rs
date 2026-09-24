@@ -221,6 +221,52 @@ impl Body<'_> {
             ("dynamicChild", [view, index]) => {
                 self.core_dynamic_child(expr, &view.value, &index.value, want)
             }
+            // ADR 0068's Phase 4b-ii, for the rendering of an erased value: a
+            // placed name is a `String` word, as `Inst::Str`'s answer is.
+            ("dynamicTypeName", [view]) => self.core_dynamic_observe(
+                expr,
+                &view.value,
+                shapes::STR,
+                |dst, view| Inst::DynTypeName { dst, view },
+                want,
+            ),
+            ("dynamicFieldName", [view, index]) => self.core_dynamic_pair(
+                expr,
+                &view.value,
+                &index.value,
+                shapes::STR,
+                |dst, view, index| Inst::DynFieldName { dst, view, index },
+                want,
+            ),
+            ("dynamicCaseName", [view]) => self.core_dynamic_observe(
+                expr,
+                &view.value,
+                shapes::STR,
+                |dst, view| Inst::DynCaseName { dst, view },
+                want,
+            ),
+            ("dynamicOpaque", [view]) => self.core_dynamic_observe(
+                expr,
+                &view.value,
+                shapes::BOOL,
+                |dst, view| Inst::DynOpaque { dst, view },
+                want,
+            ),
+            ("dynamicHandleText", [view]) => self.core_dynamic_observe(
+                expr,
+                &view.value,
+                shapes::STR,
+                |dst, view| Inst::DynHandleText { dst, view },
+                want,
+            ),
+            ("dynamicOnPath", [view, path]) => self.core_dynamic_pair(
+                expr,
+                &view.value,
+                &path.value,
+                shapes::BOOL,
+                |dst, view, path| Inst::DynOnPath { dst, view, path },
+                want,
+            ),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }

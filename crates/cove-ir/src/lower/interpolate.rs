@@ -44,8 +44,9 @@
 //!   collection are ordinary IR the printer, the verifier, the optimizer and
 //!   both code generators can see. A `Float` and a `Duration` are a call of
 //!   their module's `renderInto`, as an `Int` is, since ADR 0068's Phase 4a.
-//!   What is left below is `Value.renderInto`, reached from a value whose
-//!   layout does not say what it is — a box, a bare reference.
+//!   What is left is a box, whose layout does not say what it is: since ADR
+//!   0068's Phase 4b-ii it is `std.dynamic.renderInto`, a Cove walk over a
+//!   view of it, and `Value.renderInto` is gone.
 //!
 //! The first two arms are the **short circuit**, and they are why the two
 //! commonest interpolations in the repository cost what they always did: a
@@ -72,7 +73,7 @@ use super::frame::Val;
 use super::synth;
 use super::{shapes, Body, Dest};
 use crate::inst::{Inst, Storage, Validation};
-use crate::intrinsic::Intrinsic;
+use crate::program::Arg;
 
 /// The bytes a buffer is sized for per piece whose text is not known until it
 /// runs, on top of the literal text's own.
@@ -205,12 +206,9 @@ impl Body<'_> {
     fn render_piece(&mut self, assembly: &Assembly, value: &Val, span: Span) {
         let shape = self.pool.shapes.layout(value.layout).shape.clone();
         match synth::rendered(&shape) {
-            // A layout that does not say what the value is. ADR 0064's
-            // Decision 4 and the whole of what survives this migration;
-            // `crate::verify` refuses an operand that is anything else.
-            synth::Rendered::Dynamic => {
-                self.render_into(Intrinsic::ValueRenderInto, assembly, value, span)
-            }
+            // A box, whose layout does not say what the value is: ADR 0064's
+            // Decision 4, answered in Cove since ADR 0068's Phase 4b-ii.
+            synth::Rendered::Dynamic => self.render_erased(assembly, value, span),
             // A piece whose checked type was not `Ty::Str` or `Ty::Int` and
             // whose layout is one of theirs anyway. The same two appends the
             // short circuit makes, reached the long way round.
@@ -251,12 +249,12 @@ impl Body<'_> {
     /// every append answers, which nothing reads.
     fn render_by_walk(&mut self, assembly: &Assembly, value: &Val, span: Span) {
         if self.render_leaves_for(value.layout, span).is_none() {
-            // A round in which one of the three appends, or a scalar writer
-            // the walk calls, was not in the slice. `Body::reached` has recorded it and `lower_roots` will
-            // lower the package again with it; this round's program is
-            // discarded before it is verified, so the intrinsic standing in
-            // here is never one the boundary rule sees.
-            return self.render_into(Intrinsic::ValueRenderInto, assembly, value, span);
+            // A round in which one of the three appends, a scalar writer or
+            // the rendering of a box the walk calls was not in the slice.
+            // `Body::reached` has recorded it and `lower_roots` will lower the
+            // package again with it; this round's program is discarded before
+            // it is verified, so nothing needs to stand in for the walk.
+            return;
         }
         let decls = self.plan.decls.len();
         let callee = synth::function_for(
@@ -323,16 +321,53 @@ impl Body<'_> {
         }
     }
 
-    /// One call of a rendering intrinsic over `value` and the buffer.
-    fn render_into(&mut self, intrinsic: Intrinsic, assembly: &Assembly, value: &Val, span: Span) {
+    /// `std.dynamic.renderInto` over the box `value` and the buffer, with an
+    /// empty path.
+    ///
+    /// ADR 0068's Phase 4b-ii: the text of an erased value is a Cove walk over
+    /// a view of it. An interpolation is inside no vector, so the path it
+    /// hands over is of depth nought, and its address — the path's own first
+    /// word, which is a place in this frame whatever it holds — is one
+    /// nothing reads. A walk composed for a known layout that reaches a box
+    /// hands over the path it is carrying instead; see `synth`'s `below`.
+    fn render_erased(&mut self, assembly: &Assembly, value: &Val, span: Span) {
+        let Some(callee) = self.dynamic_render(span) else {
+            // Not in this round's slice: see [`Body::render_by_walk`].
+            return;
+        };
+        let path = self.temp(shapes::RENDER_PATH);
+        self.emit(
+            Inst::AddrOfSlot {
+                dst: path.slot,
+                slot: path.slot,
+            },
+            span,
+        );
+        self.emit(
+            Inst::Int {
+                dst: path.slot + crate::dynamic::PATH_DEPTH as crate::inst::Slot,
+                value: 0,
+            },
+            span,
+        );
         let unit = self.temp(shapes::UNIT);
-        self.intrinsic_call(
-            intrinsic,
-            shapes::UNIT,
-            unit.slot,
-            &[value, &assembly.buffer],
+        let args = self.pool.args.intern(vec![
+            value.arg(),
+            assembly.buffer.arg(),
+            Arg {
+                slot: path.slot,
+                layout: shapes::RENDER_PATH,
+            },
+        ]);
+        self.emit(
+            Inst::Call {
+                dst: unit.slot,
+                callee,
+                args,
+            },
             span,
         );
         self.release(unit, span);
+        self.release(path, span);
     }
 }

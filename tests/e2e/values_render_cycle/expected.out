@@ -5,5 +5,8 @@ map M(named: {self: [M(named: {self: […]})]})
 twin Twin(left: [S(v: [])], right: [S(v: [])])
 array [[S(v: [])], [S(v: [])]]
 diamond S(v: [S(v: [S(v: [])]), S(v: [S(v: [])])])
+box.self T(v: [T(v: […])])
+box.mutual P(v: [Q(v: [P(v: […])])])
+box.root T(v: [T(v: […])])
 empty S(v: [])
 empty.vector []

@@ -526,6 +526,42 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             format!("dyn.read {} {}", s(*dst), v(*view, program.view_layout))
         }
         Inst::HandleText { dst, src } => format!("handle.text {} {}", s(*dst), s(*src)),
+        Inst::DynTypeName { dst, view } => {
+            format!(
+                "dyn.type-name {} {}",
+                s(*dst),
+                v(*view, program.view_layout)
+            )
+        }
+        Inst::DynFieldName { dst, view, index } => format!(
+            "dyn.field-name {} {} {}",
+            s(*dst),
+            v(*view, program.view_layout),
+            s(*index)
+        ),
+        Inst::DynCaseName { dst, view } => {
+            format!(
+                "dyn.case-name {} {}",
+                s(*dst),
+                v(*view, program.view_layout)
+            )
+        }
+        Inst::DynOpaque { dst, view } => {
+            format!("dyn.opaque {} {}", s(*dst), v(*view, program.view_layout))
+        }
+        Inst::DynHandleText { dst, view } => {
+            format!(
+                "dyn.handle-text {} {}",
+                s(*dst),
+                v(*view, program.view_layout)
+            )
+        }
+        Inst::DynOnPath { dst, view, path } => format!(
+            "dyn.on-path {} {} {}",
+            s(*dst),
+            v(*view, program.view_layout),
+            v(*path, program.render_path_layout)
+        ),
         Inst::DynCase { dst, view } => {
             format!("dyn.case {} {}", s(*dst), v(*view, program.view_layout))
         }

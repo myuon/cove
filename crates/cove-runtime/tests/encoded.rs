@@ -277,12 +277,22 @@ fn the_run_writes_the_recording_a_run_writes() {
     // holding one, and this fixture orders nothing, so `std.dynamic`, which
     // every whole-package lowering places, is where it arrives from. Its rule
     // and help are the empty string, which the program already held.
+    //
+    // It is 1,659 since ADR 0068's Phase 4b-ii rendered an erased value in
+    // Cove, and the 28 words are fourteen literals of two words each that
+    // `std.dynamic.renderInto` writes and this fixture had not held: the texts
+    // of the kinds with no parts — `()`, `true`, `false`, `<fn>`, `<shared>`,
+    // `[]`, `{}` and the repeat `[…]` — the range operators `..` and `..<`,
+    // the separators `, ` and `: `, and `Error` and `message`, the names the
+    // builtin `Error` is told apart by. A one-byte bracket is pushed as its
+    // byte and places nothing. The names a rendering reads are not here:
+    // this fixture boxes nothing, so `lower::names` places none.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1631), capacity_words: Some(1631) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1659), capacity_words: Some(1659) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

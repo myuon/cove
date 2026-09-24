@@ -115,6 +115,13 @@ pub enum BuiltinType {
     /// [`BuiltinType::ByteBuffer`]'s reason: the type is the standard
     /// library's and not a program's — see [`CORE_DYNAMIC_VIEW_TYPE`].
     DynamicView,
+    /// `RenderPath`, [ADR 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 4b-ii capability: the path of vectors a rendering composed for a
+    /// known layout is inside, handed on where it reaches a box.
+    ///
+    /// Written only in the core intrinsics' signatures, for
+    /// [`BuiltinType::DynamicView`]'s reason — see [`CORE_RENDER_PATH_TYPE`].
+    RenderPath,
     /// `Any`: a value of some type, the way a Host schema's
     /// [`HostType::Any`](crate::HostType::Any) is one.
     ///
@@ -172,6 +179,7 @@ impl fmt::Display for BuiltinType {
             BuiltinType::Duration => f.write_str("Duration"),
             BuiltinType::ByteBuffer => f.write_str("ByteBuffer"),
             BuiltinType::DynamicView => f.write_str("DynamicView"),
+            BuiltinType::RenderPath => f.write_str("RenderPath"),
             BuiltinType::Any => f.write_str("Any"),
             BuiltinType::Array(item) => write!(f, "Array<{item}>"),
             BuiltinType::Vector(item) => write!(f, "Vector<{item}>"),
@@ -1829,6 +1837,14 @@ impl CoreIntrinsicSchema {
 /// which that walk asks at a vector to refuse a value that contains itself.
 /// And [`CORE_DYNAMIC_NAME_ORDER`] is Phase 3's: the same-type question
 /// asked three ways, which `std.dynamic.order` asks once a node.
+///
+/// The last six are Phase 4b-ii's, for `std.dynamic.renderInto`, the
+/// rendering of an erased value (issue #499): [`CORE_DYNAMIC_TYPE_NAME`],
+/// [`CORE_DYNAMIC_FIELD_NAME`] and [`CORE_DYNAMIC_CASE_NAME`] answer the names
+/// a rendering shows, placed before the run; [`CORE_DYNAMIC_OPAQUE`] whether a
+/// struct shows only its name; [`CORE_DYNAMIC_HANDLE_TEXT`] an opaque value's
+/// text; and [`CORE_DYNAMIC_ON_PATH`] whether a vector is on the
+/// [`CORE_RENDER_PATH_TYPE`] a walk composed for a known layout handed over.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_ENSURE,
@@ -1877,6 +1893,12 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_DYNAMIC_CHILD,
     CORE_DYNAMIC_SAME_OBJECT,
     CORE_DYNAMIC_NAME_ORDER,
+    CORE_DYNAMIC_TYPE_NAME,
+    CORE_DYNAMIC_FIELD_NAME,
+    CORE_DYNAMIC_CASE_NAME,
+    CORE_DYNAMIC_OPAQUE,
+    CORE_DYNAMIC_HANDLE_TEXT,
+    CORE_DYNAMIC_ON_PATH,
 ];
 
 /// Every core intrinsic.
@@ -3098,6 +3120,112 @@ pub const CORE_DYNAMIC_CHILD: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::DynamicView,
+    fresh: false,
+};
+
+/// The name of the capability a rendering walk composed for a known layout
+/// hands `std.dynamic.renderInto` where it reaches a box: the path of vectors
+/// the walk is inside (issue #499's decision 3).
+///
+/// Private to the standard library exactly as [`CORE_DYNAMIC_VIEW_TYPE`] is,
+/// and narrower still: nothing can be read out of one. It is passed along and
+/// asked one question, [`CORE_DYNAMIC_ON_PATH`], and what it is below the
+/// boundary — the address of a frame and a count — never reaches Cove.
+pub const CORE_RENDER_PATH_TYPE: &str = "RenderPath";
+
+/// `core.dynamicTypeName(view: DynamicView) -> String`: the name a rendering
+/// shows for the struct a view names — its declared name without type
+/// arguments or module, so `m.Cell<Int>` is `Cell`.
+///
+/// One `Inst::DynTypeName`, which loads a `String` the machine placed before
+/// the run, so it allocates nothing (issue #499's decision 4, option N1). A
+/// view of anything but a struct is an internal runtime error, held to
+/// [`CORE_DYNAMIC_BOOL`]'s rule.
+pub const CORE_DYNAMIC_TYPE_NAME: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicTypeName",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::String,
+    fresh: false,
+};
+
+/// `core.dynamicFieldName(view: DynamicView, index: Int) -> String`: the name
+/// of the struct field [`CORE_DYNAMIC_CHILD`] answers at `index`.
+///
+/// One `Inst::DynFieldName`, placed as [`CORE_DYNAMIC_TYPE_NAME`]'s answer is.
+pub const CORE_DYNAMIC_FIELD_NAME: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicFieldName",
+    generics: &[],
+    params: &[
+        VIEW_PARAM,
+        ParamSchema {
+            name: "index",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::String,
+    fresh: false,
+};
+
+/// `core.dynamicCaseName(view: DynamicView) -> String`: the name of the case
+/// an enum view is in.
+///
+/// One `Inst::DynCaseName`, placed as [`CORE_DYNAMIC_TYPE_NAME`]'s answer is.
+pub const CORE_DYNAMIC_CASE_NAME: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicCaseName",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::String,
+    fresh: false,
+};
+
+/// `core.dynamicOpaque(view: DynamicView) -> Bool`: whether the struct a view
+/// names was declared `export opaque struct`, and so renders as its name
+/// alone (ADR 0014).
+///
+/// One `Inst::DynOpaque`. `false` for every view that is not a struct.
+pub const CORE_DYNAMIC_OPAQUE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicOpaque",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::Bool,
+    fresh: false,
+};
+
+/// `core.dynamicHandleText(view: DynamicView) -> String`: the text a
+/// rendering shows for an opaque value — `<http.Server#1>`, `<task scope
+/// work>`, `<task>` for a Host resource, a task scope and a task.
+///
+/// One `Inst::DynHandleText`, which **allocates** the string: which handle it
+/// is lives in a table of the run's and in no layout, so nothing can place it
+/// before the run. A `String` is immutable, so there is no owner for
+/// [`CoreIntrinsicSchema::fresh`] to make a claim about.
+pub const CORE_DYNAMIC_HANDLE_TEXT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicHandleText",
+    generics: &[],
+    params: &[VIEW_PARAM],
+    result: BuiltinType::String,
+    fresh: false,
+};
+
+/// `core.dynamicOnPath(view: DynamicView, path: RenderPath) -> Bool`: whether
+/// the vector a view names is on the path a walk composed for a known layout
+/// is carrying.
+///
+/// One `Inst::DynOnPath`: the machine follows the path's entries below the
+/// boundary and asks [`CORE_DYNAMIC_SAME_OBJECT`]'s question of each. A path
+/// handed over empty, and a view of anything but a vector, answer `false`.
+pub const CORE_DYNAMIC_ON_PATH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "dynamicOnPath",
+    generics: &[],
+    params: &[
+        VIEW_PARAM,
+        ParamSchema {
+            name: "path",
+            ty: BuiltinType::RenderPath,
+        },
+    ],
+    result: BuiltinType::Bool,
     fresh: false,
 };
 
@@ -5619,9 +5747,9 @@ mod tests {
             .collect();
         assert_eq!(
             dynamic.len(),
-            13,
-            "the eleven observations of ADR 0068, issue #493's identity question and Phase \
-             3's name order"
+            19,
+            "the eleven observations of ADR 0068, issue #493's identity question, Phase 3's \
+             name order and Phase 4b-ii's six for the rendering"
         );
 
         let mut ints: Vec<String> = Vec::new();
@@ -5639,6 +5767,15 @@ mod tests {
             if entry.result == BuiltinType::Int {
                 ints.push(format!("{} ->", entry.name));
             }
+            // A render path is made by the lowering and handed over, and
+            // nothing in the table makes one: Cove can pass it along and ask
+            // `dynamicOnPath` of it, and that is all.
+            assert_ne!(
+                entry.result,
+                BuiltinType::RenderPath,
+                "`core.{}` answers a render path",
+                entry.name
+            );
             // The one way in is a value whose type was erased, and the one
             // way to a part is a view: nothing else answers a view.
             if entry.result == BuiltinType::DynamicView {
@@ -5660,6 +5797,8 @@ mod tests {
                 "dynamicChild(index)",
                 // How many children, not how many words.
                 "dynamicChildCount ->",
+                // A child's position again, for the field whose name is asked.
+                "dynamicFieldName(index)",
                 // The value an `Int` view holds.
                 "dynamicInt ->",
                 // A code from `DynamicKind`'s fixed table, not a `LayoutId`.

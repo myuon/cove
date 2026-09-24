@@ -520,6 +520,29 @@ impl Function {
     }
 }
 
+/// The names a rendering shows for one layout, each a literal placed before
+/// the run: what [`Inst::DynTypeName`], [`Inst::DynFieldName`] and
+/// [`Inst::DynCaseName`] answer (issue #499's decision 4, option N1).
+///
+/// A rendering of an erased value writes a struct's name and its fields'
+/// names and an enum's case name, and none of those is in the value's words —
+/// they are the layout's. Placing them as literals is what lets a rendering
+/// write them without allocating a string per node: an observation is one
+/// load of an address the machine placed before the first instruction, as
+/// [`Inst::Str`] is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayoutNames {
+    /// For a struct, the name a rendering shows for it —
+    /// [`crate::dynamic::shown_name`] of the layout's. `None` for every other
+    /// layout: an enum renders as its case, and a range as its bounds.
+    pub name: Option<StrId>,
+    /// For a struct that is not `opaque`, its fields' names in declaration
+    /// order; for an enum, its cases' names in declaration order. Empty for
+    /// every other layout, and for an `opaque` struct, which renders as its
+    /// name alone.
+    pub parts: Vec<StrId>,
+}
+
 /// A whole lowered package.
 #[derive(Clone, Debug, Default)]
 pub struct Program {
@@ -579,6 +602,22 @@ pub struct Program {
     /// wide a view operand is. A program that reflects on nothing still
     /// declares it, which costs one row of the table and no word of any frame.
     pub view_layout: LayoutId,
+    /// The layout every render path occupies: see
+    /// [`crate::dynamic::render_path_layout`].
+    ///
+    /// A program-wide constant for [`Program::view_layout`]'s reason: every
+    /// path is the same two words, so [`Inst::DynOnPath`] names no layout and
+    /// the verifier reads this to know how wide its path operand is.
+    pub render_path_layout: LayoutId,
+    /// The names a rendering of an erased value shows, placed before the run
+    /// as literals and indexed by [`LayoutId`]: see [`LayoutNames`].
+    ///
+    /// Either empty, for a program in which no value is ever erased, or one
+    /// entry per layout — most of them empty — so that a reflection
+    /// instruction finds a layout's names with one index. See
+    /// `lower::names` for which layouts are given names and why that set is
+    /// exact.
+    pub names: Vec<LayoutNames>,
     /// `module.name` to id, for an entry point named on a command line.
     pub by_name: BTreeMap<(Arc<str>, Arc<str>), FunctionId>,
 }

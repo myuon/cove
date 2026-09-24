@@ -390,8 +390,13 @@ impl Check<'_> {
                     identify(&mut objects, dst, self.program.boxed_layout);
                     poison(&mut funcs, dst, 1);
                 }
-                // A new string, as `Inst::Str`'s is one placed before the run.
-                Inst::HandleText { dst, .. } => {
+                // A new string, as `Inst::Str`'s is one placed before the run —
+                // and a placed name, which is one.
+                Inst::HandleText { dst, .. }
+                | Inst::DynHandleText { dst, .. }
+                | Inst::DynTypeName { dst, .. }
+                | Inst::DynFieldName { dst, .. }
+                | Inst::DynCaseName { dst, .. } => {
                     identify(&mut objects, dst, self.program.str_layout);
                     poison(&mut funcs, dst, 1);
                 }
@@ -490,7 +495,9 @@ impl Check<'_> {
                 | Inst::DynNameOrder { dst, .. }
                 | Inst::DynRead { dst, .. }
                 | Inst::DynCase { dst, .. }
-                | Inst::DynCount { dst, .. } => {
+                | Inst::DynCount { dst, .. }
+                | Inst::DynOpaque { dst, .. }
+                | Inst::DynOnPath { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -1053,7 +1060,6 @@ impl Check<'_> {
                         self.fits(at, dst, called.result, "the answer of a builtin");
                         self.check_signature(at, called, args);
                     }
-                    self.check_one_dynamic_boundary(at, called.intrinsic, args);
                 }
                 self.each_arg(at, args);
             }
@@ -1384,6 +1390,33 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Int]);
                 self.view(at, view, "what a child count is asked of");
             }
+            // A placed name and an opaque value's text are `String`s.
+            Inst::DynTypeName { dst, view } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.view(at, view, "what a type name is asked of");
+            }
+            Inst::DynFieldName { dst, view, index } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.expect(at, index, &[Repr::Int]);
+                self.view(at, view, "what a field name is asked of");
+            }
+            Inst::DynCaseName { dst, view } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.view(at, view, "what a case name is asked of");
+            }
+            Inst::DynOpaque { dst, view } => {
+                self.expect(at, dst, &[Repr::Bool]);
+                self.view(at, view, "what opacity is asked of");
+            }
+            Inst::DynHandleText { dst, view } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.view(at, view, "what an opaque value's text is asked of");
+            }
+            Inst::DynOnPath { dst, view, path } => {
+                self.expect(at, dst, &[Repr::Bool]);
+                self.view(at, view, "what is looked for on a render path");
+                self.path(at, path, "what a vector is looked for on");
+            }
             Inst::DynChild { dst, view, index } => {
                 self.expect(at, index, &[Repr::Int]);
                 self.view(at, view, "what a child is projected from");
@@ -1586,6 +1619,30 @@ impl Check<'_> {
                 format!(
                     "{what} is a view, and the program's view layout `{name}` is not the three \
                      words a view is"
+                ),
+            );
+            return false;
+        }
+        self.fits(at, slot, layout, what)
+    }
+
+    /// Whether `slot` begins a render path: [`Program::render_path_layout`]'s
+    /// words, which must themselves be the two
+    /// [`crate::dynamic::PATH_WORDS`] says a path is — [`Check::view`]'s
+    /// arrangement, for the one instruction that reads a path.
+    fn path(&mut self, at: Option<usize>, slot: Slot, what: &str) -> bool {
+        let layout = self.program.render_path_layout;
+        if !self.layout_exists(at, layout) {
+            return false;
+        }
+        let described = self.program.layout(layout);
+        if described.words != crate::dynamic::PATH_WORDS {
+            let name = described.name.clone();
+            self.fault(
+                at,
+                format!(
+                    "{what} is a render path, and the program's path layout `{name}` is not the \
+                     two words a path is"
                 ),
             );
             return false;
@@ -1862,123 +1919,6 @@ impl Check<'_> {
         cases.iter().any(|case| {
             &*case.name == carrier && case.parts.len() == 1 && carries(case.parts[0].layout)
         }) && cases.iter().any(|case| &*case.name == other)
-    }
-
-    /// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-    /// Decision 4: a layout-directed operation whose operand layout is
-    /// statically known is a walk the lowering synthesized, and the intrinsic
-    /// is reached from an erased value alone.
-    ///
-    /// > It is *one* fallback, reached only from `Shape::Boxed`. A site whose
-    /// > operand layout is statically known may not use it for convenience.
-    ///
-    /// This is that sentence as a check rather than as a promise, and it is
-    /// here rather than in a test over a corpus because *here* is where every
-    /// program this repository compiles arrives — `lower::finish` verifies
-    /// what it produced and panics if the verifier refuses it, so a lowering
-    /// that reached for the fallback to save itself an arm fails loudly on
-    /// the first program that hits the arm rather than on whichever program a
-    /// corpus happened to hold.
-    ///
-    /// It names `Value.renderInto`, which is one of Decision 3's five whose
-    /// producer has been migrated *and* whose fallback is an arm of the walk —
-    /// so the rule is a fact about one instruction and survives `inline`
-    /// moving it. It named `Any.equals` as well until [ADR
-    /// 0068](../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    /// Phase 2 deleted that variant, and `Value.order` until its Phase 3
-    /// deleted that one: each fallback is an ordinary call now, of
-    /// `std.dynamic.equals` and `std.dynamic.order`, and a call's operands are
-    /// held to the callee's parameters — two `Any`s — by the rule every call
-    /// is, with `cove-cli`'s `tests/boxed.rs` asserting it of the whole corpus.
-    /// `Value.admitKey`'s producer has been migrated too and its rule is
-    /// [`one_admission_boundary`], a pass of its own for a reason that is the
-    /// operation's rather than this rule's; see there.
-    ///
-    /// # `Value.refuseDuplicate` has no line here, because it is gone
-    ///
-    /// It was the fifth of Decision 3's five and the one whose producer was
-    /// never migrated: its refusal quoted a key as it renders, and there was
-    /// no instruction to raise that with. ADR 0067 gave `Inst::Trap` three
-    /// slots, and `std.set.of` and `std.map.of` now word the refusal and raise
-    /// it themselves, so the variant this rule would have had to admit every
-    /// layout for does not exist.
-    ///
-    /// # `Value.renderInto` is reached from more than a box, but no longer from a
-    /// scalar
-    ///
-    /// `Value.order` was Decision 4 word for word: an operand whose layout was
-    /// not [`Shape::Boxed`] was a fault. The rendering admits **three** shapes,
-    /// which [`crate::lower::synth::Rendered::Dynamic`] is the list of, and all
-    /// three are a layout that does not say what the value is — a
-    /// `Shape::Boxed`, whose family is a [`LayoutId`] in its own payload word
-    /// 0; a bare `Repr::Ref` word, whose object's family is read off the
-    /// object; and a reclaimed run. Decision 4's own case, more than once.
-    ///
-    /// It admitted two scalars besides until ADR 0068's Phase 4a — a `Float`,
-    /// which renders as the shortest decimal that reads back as itself, and a
-    /// `Duration`, whose unit table was `std.duration`'s policy to write and
-    /// had not been written. Both are written now, by `std.float.renderInto`
-    /// and `std.duration.renderInto`, and this is the one place the list
-    /// shrank: as the paragraph that stood here said it would, every site that
-    /// was still leaning on it fails loudly.
-    ///
-    /// **What the `Value.order` line caught was the cheap way out of the
-    /// migration that added it.** The order's walk has arms that are awkward
-    /// — an enum declared out of name order needs a permutation, a run
-    /// compares its lengths *after* its elements, a `Float` field has to
-    /// raise — and every one of them could have been made to work by handing
-    /// the layout to the intrinsic instead. The same cheap way out is open
-    /// against `std.dynamic.order` now, and `cove-cli`'s `tests/boxed.rs` is
-    /// what says no to it: every call of that function has two erased
-    /// operands, or the corpus fails.
-    fn check_one_dynamic_boundary(
-        &mut self,
-        at: Option<usize>,
-        intrinsic: crate::Intrinsic,
-        args: crate::ArgsId,
-    ) {
-        // How many of the operands are *values* the rule is about.
-        // `Value.renderInto`'s second is the buffer it appends to, which is
-        // a handle and not a value of anything — `Intrinsic::signature`
-        // gives it as `C::Buffer` — so the rule stops after the first.
-        let values = match intrinsic {
-            crate::Intrinsic::ValueRenderInto => 1,
-            // `Value.admitKey` is checked by [`one_admission_boundary`].
-            crate::Intrinsic::ValueAdmitKey => return,
-            _ => return,
-        };
-        if args.index() >= self.program.args.len() {
-            return;
-        }
-        for (index, arg) in self
-            .program
-            .arg_list(args)
-            .to_vec()
-            .into_iter()
-            .enumerate()
-            .take(values)
-        {
-            if arg.layout.index() >= self.program.layouts.len() {
-                continue;
-            }
-            let described = self.program.layout(arg.layout);
-            // `Value.renderInto` is the one intrinsic this rule still names.
-            if crate::lower::synth::rendered(&described.shape)
-                == crate::lower::synth::Rendered::Dynamic
-            {
-                continue;
-            }
-            let name = described.name.clone();
-            let admits = "this fallback from a value whose layout does not say what it is";
-            self.fault(
-                at,
-                format!(
-                    "passes operand {index} of `{intrinsic}` a `{name}`, whose layout it knows \
-                     statically; ADR 0064's Decision 4 admits {admits}, and a known layout is a \
-                     walk `lower::synth` writes"
-                ),
-            );
-        }
     }
 
     fn each_arg(&mut self, at: Option<usize>, args: crate::ArgsId) {
@@ -2806,9 +2746,11 @@ mod tests {
     const UNIT: LayoutId = LayoutId(12);
     /// ADR 0068's view: `[Int, Ref, Int]`, the program's `view_layout`.
     const VIEW: LayoutId = LayoutId(13);
-    /// A `Float` word, which `Value.renderInto` admitted until ADR 0068's
-    /// Phase 4a and refuses now.
-    const FLOAT: LayoutId = LayoutId(14);
+    /// An address word, which a render path's first word is.
+    const ADDR: LayoutId = LayoutId(15);
+    /// ADR 0068's Phase 4b-ii render path: `[Addr, Int]`, the program's
+    /// `render_path_layout`.
+    const PATH: LayoutId = LayoutId(16);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -2899,7 +2841,12 @@ mod tests {
             ),
             Layout::word("Unit", Repr::Unit),
             crate::dynamic::view_layout(INT, STR),
+            // Index 14, a `Float` word, which `Value.renderInto` was refused
+            // until ADR 0068's Phase 4b-ii deleted the intrinsic; kept so that
+            // no index above it moves.
             Layout::word("Float", Repr::Float),
+            Layout::word("<addr>", Repr::Addr),
+            crate::dynamic::render_path_layout(ADDR, INT),
         ]
     }
 
@@ -2933,6 +2880,7 @@ mod tests {
             str_layout: STR,
             boxed_layout: BOXED,
             view_layout: VIEW,
+            render_path_layout: PATH,
             ..Program::default()
         }
     }
@@ -3086,6 +3034,92 @@ mod tests {
             let shown = format!("{inst:?}");
             assert_eq!(
                 faults(&reflecting(vec![inst])),
+                vec![want.to_string()],
+                "{shown}"
+            );
+        }
+    }
+
+    /// ADR 0068's Phase 4b-ii observations, over the frame [`reflecting`]'s
+    /// is, with a render path of `[Addr, Int]` after it: well formed, and each
+    /// refused where an operand is out of place — a name or an opaque value's
+    /// text answered into a word that is not a reference, a field's position
+    /// that is not an `Int`, and a path that begins one word off.
+    #[test]
+    fn the_rendering_s_observations_are_held_to_their_operands() {
+        let rendering = |code: Vec<Inst>| {
+            program(vec![function(
+                vec![
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Bool,
+                    Repr::Addr,
+                    Repr::Int,
+                ],
+                INT,
+                code.into_iter().chain([Inst::Return { src: 4 }]).collect(),
+            )])
+        };
+        let held = rendering(vec![
+            Inst::DynTypeName { dst: 0, view: 1 },
+            Inst::DynFieldName {
+                dst: 0,
+                view: 1,
+                index: 4,
+            },
+            Inst::DynCaseName { dst: 0, view: 1 },
+            Inst::DynOpaque { dst: 5, view: 1 },
+            Inst::DynHandleText { dst: 0, view: 1 },
+            Inst::DynOnPath {
+                dst: 5,
+                view: 1,
+                path: 6,
+            },
+        ]);
+        assert_eq!(faults(&held), Vec::<String>::new());
+        let refused: Vec<(Inst, &str)> = vec![
+            (
+                Inst::DynTypeName { dst: 4, view: 1 },
+                "slot 4 holds int, but this wants ref",
+            ),
+            (
+                Inst::DynFieldName {
+                    dst: 0,
+                    view: 1,
+                    index: 5,
+                },
+                "slot 5 holds bool, but this wants int",
+            ),
+            (
+                Inst::DynCaseName { dst: 5, view: 1 },
+                "slot 5 holds bool, but this wants ref",
+            ),
+            (
+                Inst::DynOpaque { dst: 4, view: 1 },
+                "slot 4 holds int, but this wants bool",
+            ),
+            (
+                Inst::DynHandleText { dst: 0, view: 0 },
+                "what an opaque value's text is asked of is `DynamicView`, whose word 0 is int, \
+                 but slot 0 holds ref",
+            ),
+            (
+                Inst::DynOnPath {
+                    dst: 5,
+                    view: 1,
+                    path: 5,
+                },
+                "what a vector is looked for on is `RenderPath`, whose word 0 is addr, but slot 5 \
+                 holds bool",
+            ),
+        ];
+        for (inst, want) in refused {
+            let shown = format!("{inst:?}");
+            assert_eq!(
+                faults(&rendering(vec![inst])),
                 vec![want.to_string()],
                 "{shown}"
             );
@@ -3763,108 +3797,12 @@ mod tests {
             ]
         );
 
-        // A rendering takes a piece of any layout, and appends it to a byte
-        // buffer and nothing else. No intrinsic takes a list of pieces any
-        // more (#403), so a third operand is a count fault like any other.
-        //
-        // The third line is [`Checking::check_one_dynamic_boundary`]'s, and it
-        // is here rather than in a case of its own because it is a fact about
-        // the same fixture: ADR 0064's Decision 3 made a `Point` a walk, so a
-        // site that hands one to the intrinsic is refused whatever else is
-        // wrong with it.
-        let point = |slot| Arg {
-            slot,
-            layout: POINT,
-        };
-        let held = calling(
-            crate::Intrinsic::ValueRenderInto,
-            INT,
-            vec![Repr::Int, Repr::Int, Repr::Int, Repr::Ref],
-            vec![point(1), string(3)],
-        );
-        assert_eq!(
-            faults(&held),
-            vec![
-                "the answer of `Value.renderInto` is `Int`, where its signature has Unit",
-                "operand 1 of `Value.renderInto` is `String`, where its signature has ByteBuffer",
-                "passes operand 0 of `Value.renderInto` a `Point`, whose layout it knows \
-                 statically; ADR 0064's Decision 4 admits this fallback from a value whose \
-                 layout does not say what it is, and a known layout is a walk `lower::synth` \
-                 writes",
-            ]
-        );
-        let held = calling(
-            crate::Intrinsic::ValueRenderInto,
-            INT,
-            vec![Repr::Int, Repr::Int, Repr::Int, Repr::Ref],
-            vec![point(1), string(3), string(3)],
-        );
-        assert_eq!(
-            faults(&held),
-            vec![
-                "the answer of `Value.renderInto` is `Int`, where its signature has Unit",
-                "`Value.renderInto` takes 2 operand(s), and this call passes 3",
-                "passes operand 0 of `Value.renderInto` a `Point`, whose layout it knows \
-                 statically; ADR 0064's Decision 4 admits this fallback from a value whose \
-                 layout does not say what it is, and a known layout is a walk `lower::synth` \
-                 writes",
-            ]
-        );
-    }
-
-    /// `Value.renderInto` handed a `Float` is refused, and handed a box is not.
-    ///
-    /// A `Float` word was the rendering's widening of Decision 4 until ADR
-    /// 0068's Phase 4a wrote its text in `std.float`; the admitted list lost it
-    /// then, and this is the pin that it did — a lowering that went back to the
-    /// intrinsic for one fails here rather than rendering correctly and
-    /// quietly.
-    #[test]
-    fn a_float_is_no_longer_rendered_below() {
-        let buffer = Arg {
-            slot: 2,
-            layout: STR,
-        };
-        let float = calling(
-            crate::Intrinsic::ValueRenderInto,
-            UNIT,
-            vec![Repr::Unit, Repr::Float, Repr::Ref],
-            vec![
-                Arg {
-                    slot: 1,
-                    layout: FLOAT,
-                },
-                buffer,
-            ],
-        );
-        let faulted = faults(&float);
-        assert!(
-            faulted.iter().any(|fault| fault
-                == "passes operand 0 of `Value.renderInto` a `Float`, whose layout it knows \
-                    statically; ADR 0064's Decision 4 admits this fallback from a value whose \
-                    layout does not say what it is, and a known layout is a walk `lower::synth` \
-                    writes"),
-            "{faulted:?}"
-        );
-        let boxed = calling(
-            crate::Intrinsic::ValueRenderInto,
-            UNIT,
-            vec![Repr::Unit, Repr::Ref, Repr::Ref],
-            vec![
-                Arg {
-                    slot: 1,
-                    layout: BOXED,
-                },
-                buffer,
-            ],
-        );
-        assert!(
-            faults(&boxed)
-                .iter()
-                .all(|fault| !fault.contains("Decision 4")),
-            "{:?}",
-            faults(&boxed)
-        );
+        // A rendering took a piece of any layout and a byte buffer here, and
+        // the rule that a piece whose layout was known was refused. ADR 0068's
+        // Phase 4b-ii deleted `Value.renderInto`: the rendering of an erased
+        // value is a call of `std.dynamic.renderInto`, whose operands are held
+        // to its parameters as every call's are, and `cove-cli`'s
+        // `tests/boxed.rs` holds its value operand to a box.
     }
 
     /// A text or scalar intrinsic handed a collection is refused as that,

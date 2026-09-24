@@ -129,6 +129,14 @@ pub(super) const BYTE_BUFFER: LayoutId = LayoutId(15);
 /// [`crate::Program::view_layout`] is how the verifier and the machine find it
 /// without being told at every instruction.
 pub(super) const DYNAMIC_VIEW: LayoutId = LayoutId(16);
+/// The layout every render path occupies: two inline words, see
+/// [`crate::dynamic::render_path_layout`].
+///
+/// Seeded fixed at index 17, beside [`DYNAMIC_VIEW`] and for its reason: a
+/// path's words say nothing about which walk handed it over, and
+/// [`crate::Program::render_path_layout`] is how the verifier and the machine
+/// find it.
+pub(super) const RENDER_PATH: LayoutId = LayoutId(17);
 pub(super) const UNIT: LayoutId = LayoutId(2);
 pub(super) const BOOL: LayoutId = LayoutId(3);
 pub(super) const INT: LayoutId = LayoutId(4);
@@ -307,6 +315,7 @@ impl Shapes {
             Layout::object("Bytes", Shape::Bytes),
             Layout::object("ByteBuffer", Shape::ByteBuffer),
             crate::dynamic::view_layout(INT, REF),
+            crate::dynamic::render_path_layout(ADDR, INT),
         ];
         Shapes {
             layouts,
@@ -402,6 +411,8 @@ impl Shapes {
             Ty::ByteBuffer => Some(BYTE_BUFFER),
             // One program-wide layout, seeded for `BYTE_BUFFER`'s reason.
             Ty::DynamicView => Some(DYNAMIC_VIEW),
+            // One program-wide layout, seeded for `DYNAMIC_VIEW`'s reason.
+            Ty::RenderPath => Some(RENDER_PATH),
             Ty::Str => Some(STR),
             // One `Boxed` layout for the whole program, whatever trait was
             // written: what is inside is a question the box answers, from

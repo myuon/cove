@@ -103,6 +103,12 @@ pub(super) const DYNAMIC_ORDER: (&str, &str) = ("std.dynamic", "order");
 /// what this answers.
 pub(super) const DYNAMIC_REFUSES_KEY: (&str, &str) = ("std.dynamic", "refusesKey");
 
+/// The Cove function an erased value's text is appended by: ADR 0068's
+/// Phase 4b-ii `std.dynamic.renderInto`, which no program can name either. It
+/// takes the value, the buffer, and the path of vectors the rendering that
+/// reached the box is inside (issue #499's decision 3).
+pub(super) const DYNAMIC_RENDER: (&str, &str) = ("std.dynamic", "renderInto");
+
 /// What fills one written parameter of a call.
 ///
 /// The three the language has, and the reason a call site can no longer line
@@ -364,6 +370,11 @@ impl Body<'_> {
         let float = wants_float.then(|| self.scalar_text(FLOAT_TEXT, shapes::FLOAT, span));
         let duration =
             wants_duration.then(|| self.scalar_text(DURATION_TEXT, shapes::DURATION, span));
+        // A walk that reaches a box calls the rendering of an erased value
+        // there, which a walk cannot resolve either.
+        if synth::reaches_a_box(&self.pool.shapes, synth::Operation::Rendering, layout) {
+            self.dynamic_render(span)?;
+        }
         if let Some(found) = float {
             leaves.float = Some(found?);
         }
@@ -481,6 +492,36 @@ impl Body<'_> {
             span,
         )?;
         self.pool.dynamic_refuses_key = Some(id);
+        Some(id)
+    }
+
+    /// `std.dynamic.renderInto`, the Cove walk an erased value's text is
+    /// appended by, resolved once per lowering and recorded on the
+    /// [`Pool`](super::Pool).
+    ///
+    /// [`Body::dynamic_equals`]' arrangement for ADR 0068's Phase 4b-ii, and
+    /// for its reason: a rendering walk composed for a known layout that
+    /// reaches a boxed part calls this from a [`synth`] walk that cannot
+    /// resolve a name, so [`Body::render_leaves_for`] resolves it first — see
+    /// [`synth::reaches_a_box`] asked of [`synth::Operation::Rendering`] — and
+    /// an interpolation of a box resolves it for the piece it calls it over
+    /// directly. `None` is [`Body::dynamic_equals`]' `None`.
+    pub(super) fn dynamic_render(&mut self, span: Span) -> Option<FunctionId> {
+        if let Some(id) = self.pool.dynamic_render {
+            return Some(id);
+        }
+        let (module, function) = DYNAMIC_RENDER;
+        let id = self.library_leaf(
+            module,
+            function,
+            (
+                &[shapes::BOXED, shapes::BYTE_BUFFER, shapes::RENDER_PATH],
+                shapes::UNIT,
+            ),
+            "the rendering of an erased value",
+            span,
+        )?;
+        self.pool.dynamic_render = Some(id);
         Some(id)
     }
 

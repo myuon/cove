@@ -840,7 +840,13 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
             | Inst::DynCount { dst, .. }
-            | Inst::HandleText { dst, .. } => mark(dst, 1),
+            | Inst::HandleText { dst, .. }
+            | Inst::DynTypeName { dst, .. }
+            | Inst::DynFieldName { dst, .. }
+            | Inst::DynCaseName { dst, .. }
+            | Inst::DynOpaque { dst, .. }
+            | Inst::DynHandleText { dst, .. }
+            | Inst::DynOnPath { dst, .. } => mark(dst, 1),
             // A view is the program's view layout's words wherever it lands.
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 mark(dst, width(program.view_layout))
@@ -1519,6 +1525,12 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         | Inst::DynNameOrder { dst, a, b } => vec![dst, a, b],
         Inst::DynChild { dst, view, index } => vec![dst, view, index],
         Inst::HandleText { dst, src } => vec![dst, src],
+        Inst::DynTypeName { dst, view }
+        | Inst::DynCaseName { dst, view }
+        | Inst::DynOpaque { dst, view }
+        | Inst::DynHandleText { dst, view } => vec![dst, view],
+        Inst::DynFieldName { dst, view, index } => vec![dst, view, index],
+        Inst::DynOnPath { dst, view, path } => vec![dst, view, path],
         Inst::IntrinsicCall { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
         Inst::Trap {

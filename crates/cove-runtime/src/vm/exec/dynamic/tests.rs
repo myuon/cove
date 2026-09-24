@@ -970,3 +970,48 @@ fn a_question_the_kind_has_no_answer_to_is_refused() {
         "internal error: a dynamic view was opened on a `String`, which is not an erased value"
     );
 }
+
+/// The audit of placed names answers, both ways: a box holding a struct whose
+/// names were not placed is named — the struct, and the structs and the enum
+/// inside it — and once the names are placed it finds nothing.
+///
+/// The survey that runs every program in the repository asserts that the audit
+/// found nothing over the whole corpus (`cove-cli`'s `tests/vm_coverage.rs`),
+/// and a nothing is only evidence if the audit can say something. This is where
+/// it is shown to.
+#[test]
+fn the_audit_names_a_boxed_layout_whose_names_were_not_placed() {
+    let unplaced = |fixture: &Fixture| {
+        let mut machine = machine(fixture);
+        let label = string(&mut machine, "l");
+        let name = string(&mut machine, "n");
+        let outer = boxed(&mut machine, fixture.layouts.outer, &[name, label, 1, 2]);
+        let mark = boxed(&mut machine, fixture.layouts.mark, &[1, 5, 0]);
+        let mut found = super::unplaced_in(&machine, outer);
+        found.extend(super::unplaced_in(&machine, mark));
+        found.sort();
+        found
+    };
+    let bare = fixture();
+    assert_eq!(unplaced(&bare), ["m.Inner", "m.Mark", "m.Outer", "m.Point"]);
+
+    let mut named = fixture();
+    let mut names = vec![cove_ir::LayoutNames::default(); named.program.layouts.len()];
+    let text = cove_ir::StrId(0);
+    for layout in [
+        named.layouts.outer,
+        named.layouts.inner,
+        named.layouts.point,
+    ] {
+        names[layout.index()] = cove_ir::LayoutNames {
+            name: Some(text),
+            parts: vec![text, text],
+        };
+    }
+    names[named.layouts.mark.index()] = cove_ir::LayoutNames {
+        name: None,
+        parts: vec![text, text, text],
+    };
+    named.program.names = names;
+    assert_eq!(unplaced(&named), Vec::<String>::new());
+}

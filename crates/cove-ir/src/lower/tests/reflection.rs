@@ -190,4 +190,9 @@ fn every_program_declares_the_view_layout() {
     assert_eq!(&*view.name, "DynamicView");
     assert_eq!(view.words, crate::dynamic::VIEW_WORDS);
     assert!(view.is_opaque());
+    // And the render path beside it, for the same reason.
+    let path = program.layout(program.render_path_layout);
+    assert_eq!(&*path.name, "RenderPath");
+    assert_eq!(path.words, crate::dynamic::PATH_WORDS);
+    assert!(path.is_opaque());
 }

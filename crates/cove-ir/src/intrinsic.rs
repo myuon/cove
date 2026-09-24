@@ -40,7 +40,6 @@ use std::fmt;
 /// directly instead of reconstructing a name to dispatch on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
-    ValueRenderInto,
     StringRefuseByteRange,
     FloatToInt,
     FloatParse,
@@ -53,7 +52,6 @@ pub enum Intrinsic {
 /// walk to check the table has no gap and no duplicate — the two ways a hand-
 /// written list like this one goes wrong.
 pub const ALL: &[Intrinsic] = &[
-    Intrinsic::ValueRenderInto,
     Intrinsic::StringRefuseByteRange,
     Intrinsic::FloatToInt,
     Intrinsic::FloatParse,
@@ -75,8 +73,11 @@ impl Intrinsic {
     ///
     /// `Value` for the one a keyed collection's standard-library body reaches
     /// through `core.admitKey`, which is a rule over any key's layout rather
-    /// than a method of a type, and for [`Intrinsic::ValueRenderInto`], which
-    /// is what `"{x}"` appends for a piece of any layout. (`Any` was the
+    /// than a method of a type. (`Value.renderInto`, what `"{x}"` appended
+    /// for a piece of any layout, stood beside it until [ADR
+    /// 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 4b-ii made the rendering of an erased value
+    /// `std.dynamic.renderInto`. `Any` was the
     /// receiver of `Any.equals`, `==` on two erased values, until [ADR
     /// 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
     /// Phase 2 made that `std.dynamic.equals`; and `Value.order`, which
@@ -84,7 +85,6 @@ impl Intrinsic {
     /// until the ADR's Phase 3 made it `std.dynamic.order`.)
     pub const fn receiver(self) -> &'static str {
         match self {
-            Intrinsic::ValueRenderInto => "Value",
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatParse => "Float",
@@ -95,7 +95,6 @@ impl Intrinsic {
     /// The operation's own name: `split`, `join`, `parse`.
     pub const fn operation(self) -> &'static str {
         match self {
-            Intrinsic::ValueRenderInto => "renderInto",
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatParse => "parse",
@@ -152,10 +151,9 @@ impl Intrinsic {
         match self {
             Intrinsic::StringRefuseByteRange => Category::Text,
             Intrinsic::FloatToInt | Intrinsic::FloatParse => Category::Scalar,
-            // Rendering is a walk directed by whatever layout the piece has,
-            // which is what makes it a value rule rather than a text one: a
-            // `"{items}"` renders an `Array` through it.
-            Intrinsic::ValueRenderInto | Intrinsic::ValueAdmitKey => Category::Value,
+            // Admission is a rule over whatever layout the key has, which is
+            // what makes it a value rule rather than a text one.
+            Intrinsic::ValueAdmitKey => Category::Value,
         }
     }
 
@@ -174,9 +172,6 @@ impl Intrinsic {
             Signature { operands, result }
         }
         match self {
-            // The piece first, then the buffer it is appended to: the value
-            // is the receiver, as it is of every other operation here.
-            Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
             // The text and the two offsets a refusal is worded with, in the
             // order `String.sliceBytes` names them.
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
@@ -214,27 +209,10 @@ impl Intrinsic {
         let raise = E::MAY_RAISE;
         let allocate = E::MAY_ALLOCATE.union(E::MAY_COLLECT).union(raise);
         match self {
-            // Rendering walks whatever value it was handed, which may be a
-            // collection nested arbitrarily deep — past the depth a rendering
-            // may reach, which stops the run — and appends the text to a byte
-            // buffer the caller holds: a write through a handle, and a growth
-            // of the buffer's store when the text does not fit.
-            //
-            // It keeps every one of those after ADR 0064's Decision 3 made
-            // the operation a walk `lower::synth` composes, and for the
-            // reason `Intrinsic::ValueAdmitKey` keeps its own (and `Any.equals`
-            // and `Value.order` kept theirs, until ADR 0068 moved them into
-            // `std.dynamic`): the arm
-            // that survives is the one reached from a value
-            // whose layout does not say what it is, and that arm is the whole
-            // of the runtime's walk. A `Float` and a `Duration` reached it
-            // too until ADR 0068's Phase 4a wrote their text in
-            // `std.float` and `std.duration`; inside a box they still do,
-            // until Phase 4b walks one in Cove.
-            Intrinsic::ValueRenderInto => allocate
-                .union(E::READS_MEMORY)
-                .union(E::WRITES_MEMORY)
-                .union(E::BULK_WORK),
+            // `Value.renderInto` stood here, the rendering of a value whose
+            // layout did not say what it was, until ADR 0068's Phase 4b-ii
+            // made it `std.dynamic.renderInto`: a Cove walk over a view of
+            // the box, which charges its work an instruction at a time.
 
             // `split` and `replace` stood here, the last two readers of a
             // `String` that allocated what they answered, and they left
@@ -555,7 +533,6 @@ mod tests {
     #[test]
     fn the_intrinsic_set_only_shrinks() {
         const MIGRATED_BUT_STILL_HERE: &[&str] = &[
-            "Value.renderInto",
             "String.refuseByteRange",
             "Float.toInt",
             "Float.parse",
@@ -611,8 +588,7 @@ mod tests {
         // match has to name every one of them.
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
-                Intrinsic::ValueRenderInto
-                | Intrinsic::StringRefuseByteRange
+                Intrinsic::StringRefuseByteRange
                 | Intrinsic::FloatToInt
                 | Intrinsic::FloatParse
                 | Intrinsic::ValueAdmitKey => 1,
@@ -814,8 +790,9 @@ mod tests {
                      `String.join` was the one that did, and it is Cove now"
                 );
                 assert!(
-                    *class != Class::Buffer || intrinsic.operation() == "renderInto",
-                    "`{intrinsic}` takes a `ByteBuffer`, which only a rendering may"
+                    *class != Class::Buffer,
+                    "`{intrinsic}` takes a `ByteBuffer`, which only a rendering did, and \
+                     the rendering is `std.dynamic.renderInto` since ADR 0068's Phase 4b-ii"
                 );
                 assert!(
                     *class != Class::Value || intrinsic.category() == Category::Value,

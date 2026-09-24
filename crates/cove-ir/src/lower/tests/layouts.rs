@@ -248,6 +248,9 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // ADR 0068's view, seeded beside the byte buffer's owner for its
             // reason: one program-wide layout whatever it views.
             "DynamicView",
+            // ADR 0068's Phase 4b-ii render path, seeded beside the view for
+            // its reason: one program-wide layout whatever walk handed it over.
+            "RenderPath",
             // `std.dynamic`'s two stacks of views — `stack(views:
             // Vector<DynamicView>, ..)` is a signature that names a `Vector` —
             // a store and a handle interned beside `std.float`'s pair below.

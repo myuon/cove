@@ -619,3 +619,7 @@ allow = ["console"]
 [run.values_render_opaque]
 entry = "values_render_opaque.main"
 allow = ["console", "http", "clock"]
+
+[run.values_boxed_render]
+entry = "values_boxed_render.main"
+allow = ["console", "clock"]

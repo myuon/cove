@@ -36,6 +36,13 @@
 //! `export opaque struct` renders as its bare name, and a builtin `Error`
 //! renders as its message. Neither can be derived here, because by the time a
 //! value is a word the declaration is gone.
+//!
+//! **Since ADR 0068's Phase 4b-ii no rendering a program asks for runs here.**
+//! A value whose layout the lowering knows is a walk it composes, and a box is
+//! `std.dynamic.renderInto`, a Cove walk over a view of it; `Value.renderInto`
+//! is gone. [`render_value`] is left, private, for one reader: `key`'s wording
+//! of a refused key, whose path through a map quotes the entry's key as it
+//! renders — until that wording moves too (ADR 0068's Phase 4c).
 
 use std::cell::Cell;
 use std::fmt::Write as _;
@@ -94,11 +101,12 @@ pub(crate) fn call(
     match intrinsic {
         // ---- rendering ---------------------------------------------------
         //
-        // What `"{x}"` appends for a piece: an `Int` formatted where it goes,
-        // and any other value through the one layout-directed walk. A `String`
-        // piece is not here — it is a byte append window — and neither is the
-        // assembly around them, which is run instructions (#403).
-        Intrinsic::ValueRenderInto => render_into(machine, frame, dest),
+        // `Value.renderInto` stood here, what `"{x}"` appended for a piece
+        // whose layout did not say what it was, until ADR 0068's Phase 4b-ii
+        // made it `std.dynamic.renderInto`, a Cove walk over a view of the
+        // box. Every other piece was already a walk the lowering composes. The
+        // walk below it, `render_value`, is left for one reader: `key`'s
+        // wording of a refused key, which quotes a map key as it renders.
 
         // ---- Array -------------------------------------------------------
         //
@@ -256,45 +264,6 @@ pub(crate) fn call(
         // `std.set.of`'s and `std.map.of`'s own Cove since ADR 0067.
         Intrinsic::ValueAdmitKey => key::admit_key(machine, frame, dest),
     }
-}
-
-/// `Value.renderInto(buffer)`: what `"{p}"` puts in the string, appended to
-/// the byte buffer the interpolation is assembled in.
-///
-/// An operand is a value location, so an inline struct or enum renders as the
-/// value it is rather than as its first word — which is what
-/// `"{Point(x: 1)}"` answering `1` was. The piece is rendered into Rust text
-/// first and appended once, so a growth of the buffer happens after the walk
-/// and never under it.
-///
-/// The piece is rendered when the lowering calls this, which is right after
-/// the piece was evaluated: a later piece that changes what this one showed
-/// cannot change its text (#389).
-///
-/// # What it reports having examined
-///
-/// Two things, and they do not overlap. [`render_value`] reports **one unit
-/// per value it visits**, which is [ADR 0064]'s Decision 7 asked of a walk
-/// over a value; this reports the **bytes it finally appended**, which is the
-/// same decision asked of a copy, and is where every string the walk read
-/// ends up. Charging a string's bytes inside `render_object` as well would
-/// count them twice — the bytes are in `text` by then — so that arm does not,
-/// and this line is where the whole of the text is paid for.
-///
-/// The append is real work that nothing else charges: `Machine::append_text`
-/// is not an `Inst::RunCopy` and takes no chunked poll, so before this a
-/// `"{v}"` over a megabyte of value cost the run one unit.
-///
-/// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-fn render_into(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<(), RuntimeError> {
-    let piece = frame.operand(machine, 0);
-    let mut text = String::new();
-    render_value(machine, piece.layout, piece.words, &mut text)?;
-    let owner = frame.word(machine, 1);
-    machine.examined(text.len() as u64);
-    machine.append_text(owner, text.as_bytes())?;
-    dest.word(machine, 0);
-    Ok(())
 }
 
 /// What a vector the rendering is already inside renders as.
@@ -463,13 +432,12 @@ struct Walk {
     /// renders in full both times. A vector met again **while** it is on it
     /// is one the value holds inside itself, and renders as [`REPEAT`].
     ///
-    /// **The path starts empty at the box**, which is ADR 0068's Phase 4b-i
-    /// and not the rule: this renderer is reached from a static walk only
-    /// through a box, and the vectors that walk is inside are in its frames,
-    /// where this cannot see them. So a cycle that closes through a box
-    /// renders its `[…]` one vector later here than on the oracle, which walks
-    /// the whole value as one path; Phase 4b-ii's Cove renderer continues the
-    /// static walk's path through the box, as issue #499's decision 3 has it.
+    /// **The path starts empty**, and since ADR 0068's Phase 4b-ii that is
+    /// the whole of what this walk is asked: its one caller is `key`'s wording
+    /// of a refused key, which renders a map key, and a key holds no vector.
+    /// The rendering of a box a program asks for is `std.dynamic.renderInto`,
+    /// which continues the static walk's path through the box, as issue #499's
+    /// decision 3 has it.
     inside: Vec<u64>,
 }
 
@@ -514,8 +482,14 @@ impl Walk {
 /// arrives as a [`Step::Value`], and each is reported once, where it is taken
 /// off the stack.
 ///
+/// **Its one caller is `key`'s wording of a refused key** since ADR 0068's
+/// Phase 4b-ii deleted `Value.renderInto`: a map key quoted in a refusal's path
+/// is rendered here, on the path that ends the run. It is private to this
+/// module and its children for that reason, and goes when that wording moves
+/// into Cove (Phase 4c).
+///
 /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-pub(super) fn render_value(
+fn render_value(
     machine: &Machine,
     layout: LayoutId,
     words: &[u64],
@@ -1034,9 +1008,9 @@ fn duration(out: &mut String, ns: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::exec::tests::{budget, Build};
+    use crate::vm::exec::tests::Build;
     use crate::vm::intrinsics::operand::Operand;
-    use cove_ir::{Inst, IntrinsicSite, LayoutId, Program, Repr, Shape, SiteId};
+    use cove_ir::{LayoutId, Program, Repr, Shape};
 
     /// The program every builtin test is run against.
     ///
@@ -1499,179 +1473,12 @@ mod tests {
         machine.payload_run(addr, 0, machine.object_len(addr) * stride)
     }
 
-    /// The text a value the program can build appends to an interpolation's
-    /// buffer, run through the dispatch loop rather than called directly, so
-    /// what is under test is the instruction as well as the operation.
-    ///
-    /// The value is in slot 0 by construction and one word wide; the buffer,
-    /// the `()` the rendering answers and the finished text take the slots
-    /// after it — the assembly the lowering emits for `"{value}"`.
-    fn text_of(build_value: impl FnOnce(&mut Build) -> (Vec<Repr>, Vec<Inst>)) -> String {
-        let mut build = Build::default();
-        let str_layout = build.string_layout();
-        let (reprs, code) = build_value(&mut build);
-        // An operand carries the layout of the location it names, and every
-        // value this fixture builds is one word of it.
-        let held = match reprs[0] {
-            Repr::Ref => str_layout,
-            repr => build.scalar(repr),
-        };
-        rendered(build, held, reprs, code, &[Intrinsic::ValueRenderInto])
-    }
-
-    /// Runs `code`, boxes the value in slot 0 of `held`, then renders the box
-    /// into a fresh buffer through each of `renderings` in turn, and answers
-    /// the finished text.
-    ///
-    /// # Why the value is boxed, which it did not used to be
-    ///
-    /// [ADR 0064]'s Decision 3 made `Value.renderInto` on a piece whose
-    /// layout says what the value is a **walk the lowering composes**, and
-    /// `cove_ir::verify` refuses any site that hands the intrinsic such a
-    /// layout — a rule `crate::vm::exec`'s fixture builder runs like any
-    /// other, because a hand-written program is checked exactly as a lowered
-    /// one is. So a fixture that passed an `Int` where it sits no longer
-    /// describes a program that exists.
-    ///
-    /// Boxing it is not a workaround but the path the arm now *has*: what is
-    /// left below the boundary is a value whose family is a word in its own
-    /// header, the rendering looks through the box (`render_object`'s
-    /// `Shape::Boxed` arm) and reaches `render_value` at the held layout, and
-    /// every assertion below is unchanged to the byte because the text of a
-    /// boxed value is the text of the value.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    fn rendered(
-        mut build: Build,
-        held: LayoutId,
-        mut reprs: Vec<Repr>,
-        mut code: Vec<Inst>,
-        renderings: &[Intrinsic],
-    ) -> String {
-        let str_layout = build.program.str_layout;
-        build.bytes_layout();
-        let buffer_layout = build.buffer_layout();
-        let boxed_layout = build.boxed();
-        let unit = build.scalar(Repr::Unit);
-        let base = reprs.len() as u32;
-        let (erased, capacity, buffer, answer, text) =
-            (base, base + 1, base + 2, base + 3, base + 4);
-        reprs.extend([Repr::Ref, Repr::Int, Repr::Ref, Repr::Unit, Repr::Ref]);
-        let operands = build.args(&[(erased, boxed_layout), (buffer, buffer_layout)]);
-        code.push(Inst::Box {
-            dst: erased,
-            src: 0,
-            layout: held,
-        });
-        code.push(Inst::Int {
-            dst: capacity,
-            value: 16,
-        });
-        code.push(Inst::GrowableAlloc {
-            dst: buffer,
-            capacity,
-            storage: cove_ir::Storage::PackedBytes,
-        });
-        for rendering in renderings {
-            let site = site(
-                &mut build.program,
-                rendering.receiver(),
-                rendering.operation(),
-                unit,
-            );
-            code.push(Inst::IntrinsicCall {
-                dst: answer,
-                site,
-                args: operands,
-            });
-        }
-        code.push(Inst::RunFinish {
-            dst: text,
-            owner: buffer,
-            target: str_layout,
-            validation: cove_ir::Validation::Utf8,
-            storage: cove_ir::Storage::PackedBytes,
-        });
-        code.push(Inst::Return { src: text });
-        let f = build.function("f", &[], &reprs, str_layout, code);
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let word = machine.run(f, &[], &budget()).unwrap();
-        String::from_utf8(machine.string_bytes(word[0])).unwrap()
-    }
-
-    fn site(program: &mut Program, receiver: &str, operation: &str, result: LayoutId) -> SiteId {
-        let intrinsic = Intrinsic::from_names(receiver, operation)
-            .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
-        program
-            .intrinsic_sites
-            .push(IntrinsicSite { intrinsic, result });
-        SiteId(program.intrinsic_sites.len() as u32 - 1)
-    }
-
-    #[test]
-    fn a_scalar_renders_the_way_the_language_shows_it() {
-        assert_eq!(
-            text_of(|_| (vec![Repr::Int], vec![Inst::Int { dst: 0, value: -12 }])),
-            "-12"
-        );
-        assert_eq!(
-            text_of(|_| (
-                vec![Repr::Bool],
-                vec![Inst::Bool {
-                    dst: 0,
-                    value: true
-                }]
-            )),
-            "true"
-        );
-        assert_eq!(
-            text_of(|_| (vec![Repr::Unit], vec![Inst::Unit { dst: 0 }])),
-            "()"
-        );
-        // A float never loses its point, and a duration takes the largest
-        // unit that divides it.
-        assert_eq!(
-            text_of(|_| (
-                vec![Repr::Float],
-                vec![Inst::Float {
-                    dst: 0,
-                    bits: 4.0f64.to_bits()
-                }]
-            )),
-            "4.0"
-        );
-        assert_eq!(
-            text_of(|_| (
-                vec![Repr::Duration],
-                vec![Inst::Int {
-                    dst: 0,
-                    value: 1_500_000_000
-                }]
-            )),
-            "1500ms"
-        );
-    }
-
-    #[test]
-    fn a_string_renders_as_itself_rather_than_quoted() {
-        let mut build = Build::default().strings(&["ha"]);
-        let str_layout = build.string_layout();
-        let code = vec![Inst::Str {
-            dst: 0,
-            text: cove_ir::StrId(0),
-        }];
-        assert_eq!(
-            rendered(
-                build,
-                str_layout,
-                vec![Repr::Ref],
-                code,
-                &[Intrinsic::ValueRenderInto]
-            ),
-            "ha"
-        );
-    }
+    // `text_of`, `rendered` and the cases over them stood here: each ran
+    // `Value.renderInto` through the dispatch loop over a boxed value. ADR
+    // 0068's Phase 4b-ii deleted the intrinsic, and the text of a box is
+    // `std.dynamic.renderInto`'s now, held byte for byte to the oracle by the
+    // `values_*` corpus on every evaluator. `render_value` stays, for `key`'s
+    // wording of a refused key, and the case below still holds it.
 
     /// A compound value is a run of words now, so a rendering reads runs
     /// rather than following an address per field — and an `Option<Point>`
@@ -1708,28 +1515,6 @@ mod tests {
         let _ = int;
     }
 
-    /// Appends go on where the last one ended, and a buffer grows past the
-    /// capacity it was allocated with rather than refusing: twenty renderings
-    /// of `-1234567` are 160 bytes in a sixteen-byte store.
-    #[test]
-    fn renderings_append_in_order_and_grow_the_buffer() {
-        let mut build = Build::default();
-        build.string_layout();
-        let int = build.scalar(Repr::Int);
-        let code = vec![Inst::Int {
-            dst: 0,
-            value: -1_234_567,
-        }];
-        let text = rendered(
-            build,
-            int,
-            vec![Repr::Int],
-            code,
-            &[Intrinsic::ValueRenderInto; 20],
-        );
-        assert_eq!(text, "-1234567".repeat(20));
-    }
-
     // `an_answer_may_be_written_over_its_own_operand` stood here: `x =
     // x.replace("a", "o")` lowered to a call whose destination was `x`, and the
     // case asserted that every arm reads all its operands before it writes
@@ -1741,8 +1526,10 @@ mod tests {
     // than a gap.** An alias needs an answer whose slot can be an operand's
     // slot, which needs an operand of the answer's own kind, and no surviving
     // signature has one: `Float.format` answers a `String` over a `Float`,
-    // `Float.parse` and `Float.toInt` answer a `Result`, `String.refuseByteRange`
-    // and `Value.admitKey` answer nothing, and `Value.renderInto` appends.
+    // `Float.parse` and `Float.toInt` answer a `Result`, and
+    // `String.refuseByteRange` and `Value.admitKey` answer nothing.
+    // (`Value.renderInto`, which appended, stood here until ADR 0068's Phase
+    // 4b-ii.)
     // (`Value.order`, which answered an `Int` over values of any kind but
     // took a box, which is not an `Int`, and `Any.equals`, which answered a
     // `Bool` the same way, stood beside them until ADR 0068 moved both into
@@ -1766,54 +1553,5 @@ mod tests {
             frame.word(machine, 0);
             Ok(())
         });
-    }
-
-    /// A rendering allocates nothing of its own when the text fits.
-    ///
-    /// `Inst::Alloc` is not reached from here: the text is built in Rust and
-    /// copied into the buffer's store, so there is no half-built object for a
-    /// collection to land on, and a store with room is not replaced.
-    #[test]
-    fn rendering_allocates_nothing_when_the_text_fits() {
-        let program = world_with_buffer();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let int = scalar(&program, Repr::Int);
-        let unit = scalar(&program, Repr::Unit);
-        let items = machine
-            .new_object(elements(&program, int, false), 3)
-            .unwrap();
-        for at in 0..3u32 {
-            machine.set_payload(items, at, at as u64 + 1);
-        }
-        let buffer = machine.alloc_buffer(64).unwrap();
-        let before = machine.allocated_words();
-        let answer = in_frame(
-            &mut machine,
-            &[
-                (elements(&program, int, false), &[items]),
-                (program.buffer_layout, &[buffer]),
-            ],
-            unit,
-            render_into,
-        )
-        .unwrap();
-        assert_eq!(answer, vec![0]);
-        assert_eq!(machine.allocated_words() - before, 0);
-        let text = machine.finish_buffer(buffer, program.str_layout, cove_ir::Validation::Utf8);
-        assert_eq!(read(&machine, text.unwrap()), "[1, 2, 3]");
-    }
-
-    /// [`world`], with the byte buffer's two program-wide layouts declared.
-    fn world_with_buffer() -> Program {
-        let mut program = world();
-        program.bytes_layout = LayoutId(program.layouts.len() as u32);
-        program
-            .layouts
-            .push(cove_ir::Layout::object("Bytes", Shape::Bytes));
-        program.buffer_layout = LayoutId(program.layouts.len() as u32);
-        program
-            .layouts
-            .push(cove_ir::Layout::object("ByteBuffer", Shape::ByteBuffer));
-        program
     }
 }

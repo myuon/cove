@@ -184,6 +184,27 @@ impl<'a> Vm<'a> {
     ///
     /// The heap budget is this module's `DEFAULT_HEAP_WORDS`. [`Vm::with_heap_words`]
     /// is the constructor for a caller that needs a different one.
+    /// Turns on or off, for every run in this process, the audit of the names
+    /// a rendering of an erased value reads: every box made is walked, and
+    /// every nominal layout in it whose names `cove_ir`'s lowering did not
+    /// place is recorded for [`Vm::unplaced_names`].
+    ///
+    /// For the survey that runs every program in the repository, which holds
+    /// the lowering's choice of which layouts get names (ADR 0068's Phase
+    /// 4b-ii) to the boxes the runs really made. A run with it off pays one
+    /// relaxed load a box.
+    #[doc(hidden)]
+    pub fn audit_placed_names(on: bool) {
+        exec::dynamic::audit_placed_names(on);
+    }
+
+    /// Every layout the audit [`Vm::audit_placed_names`] turns on found in a
+    /// box without its names placed, since the last call — by name.
+    #[doc(hidden)]
+    pub fn unplaced_names() -> Vec<String> {
+        exec::dynamic::unplaced_names()
+    }
+
     pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Program) -> Vm<'a> {
         Vm::with_heap_words(runtime, hosts, program, DEFAULT_HEAP_WORDS)
     }

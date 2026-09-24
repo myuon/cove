@@ -434,8 +434,8 @@ use std::sync::Arc;
 use cove_diag::{Diagnostic, FileId, Severity, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
-    CORE_ANY_TYPE, CORE_BYTE_RUN_TYPE, CORE_DYNAMIC_VIEW_TYPE, CORE_NAMESPACE, MAP_ENTRY,
-    NONE_CASE, SCOPE,
+    CORE_ANY_TYPE, CORE_BYTE_RUN_TYPE, CORE_DYNAMIC_VIEW_TYPE, CORE_NAMESPACE,
+    CORE_RENDER_PATH_TYPE, MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -591,7 +591,8 @@ pub const RECURSIVE_TYPE: &str = "cove::type::recursive_type";
 pub const INFERENCE_CONFLICT: &str = "cove::type::inference_conflict";
 /// A `DynamicView` is written where it could outlive the frame that opened
 /// it: an exported signature, a field, or a closure's capture. ADR 0068,
-/// Decision 9.
+/// Decision 9 — and a `RenderPath` likewise, which names frames of the walk
+/// that handed it over (ADR 0068's Phase 4b-ii).
 pub const DYNAMIC_VIEW_ESCAPE: &str = "cove::type::dynamic_view_escape";
 
 /// The rule a [`DYNAMIC_VIEW_ESCAPE`] diagnostic quotes.
@@ -601,28 +602,62 @@ pub const DYNAMIC_VIEW_ESCAPE: &str = "cove::type::dynamic_view_escape";
 /// the reason the view is narrower than an ordinary value.
 const DYNAMIC_VIEW_ESCAPE_RULE: &str = "A `DynamicView` is a capability to read a value it keeps rooted, not a value: it may be held in a local, a `Vector` of views, and the parameters and results of functions a module does not export, and nowhere it could outlive the walk that opened it.";
 
-/// Whether `ty` holds a `DynamicView` anywhere a value of it could carry one.
+/// The rule a [`DYNAMIC_VIEW_ESCAPE`] diagnostic about a `RenderPath` quotes.
+const RENDER_PATH_ESCAPE_RULE: &str = "A `RenderPath` is a capability naming the frames of the rendering that handed it over, not a value: it may be held in a local and the parameters of functions a module does not export, and nowhere it could outlive that rendering.";
+
+/// The capability `ty` holds anywhere a value of it could carry one — a
+/// `DynamicView` or a `RenderPath` — by name, or `None`.
+///
+/// [`mentions`] asked of both, so that one set of escape checks holds the
+/// two. A render path is narrower than a view — it names frames rather than
+/// rooting an object, so nothing may keep one past the walk that handed it
+/// over — and the checks that hold a view to a non-exported function's frame
+/// are what hold it there: `std.dynamic`, the one module that writes the
+/// type, only passes it down.
+fn held_capability(ty: &Ty) -> Option<&'static str> {
+    if mentions(ty, &|ty| matches!(ty, Ty::DynamicView)) {
+        return Some(CORE_DYNAMIC_VIEW_TYPE);
+    }
+    if mentions(ty, &|ty| matches!(ty, Ty::RenderPath)) {
+        return Some(CORE_RENDER_PATH_TYPE);
+    }
+    None
+}
+
+/// The rule an escape of the capability `name` is refused under.
+fn escape_rule(name: &str) -> &'static str {
+    if name == CORE_RENDER_PATH_TYPE {
+        RENDER_PATH_ESCAPE_RULE
+    } else {
+        DYNAMIC_VIEW_ESCAPE_RULE
+    }
+}
+
+/// Whether `ty` holds what `found` answers `true` for anywhere a value of it
+/// could carry one: a `DynamicView` or a `RenderPath`, for [`held_capability`].
 ///
 /// ADR 0068's Decision 9 is about where a view can be *held*, so this looks
 /// inside every type that holds values of another — a `Vector<DynamicView>`
 /// in an exported result is the view escaping as surely as a bare one is — and
 /// inside a function type too, because a closure whose parameter is a view is
 /// a way of handing one to whoever calls it.
-fn mentions_dynamic_view(ty: &Ty) -> bool {
+fn mentions(ty: &Ty, found: &dyn Fn(&Ty) -> bool) -> bool {
+    if found(ty) {
+        return true;
+    }
     match ty {
-        Ty::DynamicView => true,
         Ty::Array(inner)
         | Ty::Vector(inner)
         | Ty::Set(inner)
         | Ty::Option(inner)
         | Ty::Task(inner)
-        | Ty::Shared(inner) => mentions_dynamic_view(inner),
+        | Ty::Shared(inner) => mentions(inner, found),
         Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
-            mentions_dynamic_view(key) || mentions_dynamic_view(value)
+            mentions(key, found) || mentions(value, found)
         }
-        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(mentions_dynamic_view),
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(|arg| mentions(arg, found)),
         Ty::Fn(func) => {
-            func.params.iter().any(mentions_dynamic_view) || mentions_dynamic_view(&func.ret)
+            func.params.iter().any(|param| mentions(param, found)) || mentions(&func.ret, found)
         }
         _ => false,
     }
@@ -944,7 +979,12 @@ struct ImportEnv {
 /// task's frame, and no other task's frame is a root of it.
 fn not_task_safe(ty: &Ty) -> Option<&Ty> {
     match ty {
-        Ty::Vector(_) | Ty::ByteBuffer | Ty::DynamicView | Ty::Task(_) | Ty::Scope => Some(ty),
+        Ty::Vector(_)
+        | Ty::ByteBuffer
+        | Ty::DynamicView
+        | Ty::RenderPath
+        | Ty::Task(_)
+        | Ty::Scope => Some(ty),
         Ty::Shared(_) => None,
         Ty::Array(inner) | Ty::Set(inner) | Ty::Option(inner) => not_task_safe(inner),
         Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
@@ -1135,6 +1175,15 @@ pub enum Ty {
     /// signature and in a field, `Checker::ident` refuses a closure's
     /// capture of one, and `not_task_safe` keeps it out of a task.
     DynamicView,
+    /// `RenderPath`: ADR 0068's Phase 4b-ii capability, the path of vectors a
+    /// rendering composed for a known layout is inside, handed to
+    /// `std.dynamic.renderInto` where that rendering reaches a box.
+    ///
+    /// Only a standard-library module can write it, and nothing has a method
+    /// on it: `core.dynamicOnPath` is the one question it answers — see
+    /// `cove_schema::builtins::CORE_RENDER_PATH_TYPE`. It is held to
+    /// [`Ty::DynamicView`]'s escape rules.
+    RenderPath,
     Error,
     Range,
     Array(Box<Ty>),
@@ -1670,6 +1719,7 @@ impl fmt::Display for Ty {
             Ty::Duration => f.write_str("Duration"),
             Ty::ByteBuffer => f.write_str("ByteBuffer"),
             Ty::DynamicView => f.write_str("DynamicView"),
+            Ty::RenderPath => f.write_str("RenderPath"),
             Ty::Error => f.write_str("Error"),
             Ty::Range => f.write_str("Range"),
             Ty::Scope => f.write_str("Scope"),
@@ -2888,11 +2938,12 @@ impl<'a> Checker<'a> {
     /// Only the standard library can write the type, so only a
     /// standard-library module can reach any of these.
     fn check_dynamic_view_escape(&mut self) {
-        let mut found: Vec<(String, Span)> = Vec::new();
+        let mut found: Vec<(&'static str, String, Span)> = Vec::new();
         for (name, sig) in &self.structs {
             for field in &sig.fields {
-                if mentions_dynamic_view(&field.ty) {
+                if let Some(held) = held_capability(&field.ty) {
                     found.push((
+                        held,
                         format!("field `{}` of struct `{name}`", field.name),
                         field.span,
                     ));
@@ -2901,8 +2952,12 @@ impl<'a> Checker<'a> {
         }
         for (name, sig) in &self.enums {
             for case in &sig.cases {
-                if case.payload.iter().any(mentions_dynamic_view) {
-                    found.push((format!("case `{}` of enum `{name}`", case.name), case.span));
+                if let Some(held) = case.payload.iter().find_map(held_capability) {
+                    found.push((
+                        held,
+                        format!("case `{}` of enum `{name}`", case.name),
+                        case.span,
+                    ));
                 }
             }
         }
@@ -2923,29 +2978,36 @@ impl<'a> Checker<'a> {
             });
         for (name, sig) in exported_functions.chain(exported_methods) {
             for param in &sig.params {
-                if mentions_dynamic_view(&param.ty) {
+                if let Some(held) = held_capability(&param.ty) {
                     found.push((
+                        held,
                         format!("parameter `{}` of exported function `{name}`", param.name),
                         param.span,
                     ));
                 }
             }
-            if mentions_dynamic_view(&sig.ret) {
+            if let Some(held) = held_capability(&sig.ret) {
                 found.push((
+                    held,
                     format!("the result of exported function `{name}`"),
                     sig.ret_span,
                 ));
             }
         }
-        for (what, span) in found {
+        for (held, what, span) in found {
+            let help = if held == CORE_RENDER_PATH_TYPE {
+                "hand the path on through the parameters of non-exported functions"
+            } else {
+                "hold the view in a local of the non-exported function that walks it"
+            };
             self.diagnostics.push(
                 Diagnostic::error(
                     DYNAMIC_VIEW_ESCAPE,
-                    format!("a `DynamicView` cannot be held by the {what}"),
+                    format!("a `{held}` cannot be held by the {what}"),
                 )
                 .at(span)
-                .rule(DYNAMIC_VIEW_ESCAPE_RULE)
-                .help("hold the view in a local of the non-exported function that walks it"),
+                .rule(escape_rule(held))
+                .help(help),
             );
         }
     }
@@ -3887,6 +3949,16 @@ impl<'a> Checker<'a> {
             self.check_type_arity(name, 0, args.len(), span);
             return Some(Ty::DynamicView);
         }
+        // ADR 0068's Phase 4b-ii render path, by the same privilege: the
+        // rendering of an erased value takes the one a walk hands over, and a
+        // program cannot name it.
+        if name == CORE_RENDER_PATH_TYPE {
+            if !crate::stdlib::is_library_module(&self.module.name) {
+                return None;
+            }
+            self.check_type_arity(name, 0, args.len(), span);
+            return Some(Ty::RenderPath);
+        }
         // An erased value, by the same privilege: `std.dynamic.equals` takes
         // the two boxes `==` meets, and a program still cannot name one.
         if name == CORE_ANY_TYPE {
@@ -4695,14 +4767,16 @@ impl<'a> Checker<'a> {
             // holds a copy of what it captured for as long as the closure
             // lives — which is exactly the escape ADR 0068's Decision 9
             // forbids a view. See `Checker::capture_floor`.
-            if depth < self.capture_floor && mentions_dynamic_view(&ty) {
+            if let Some(held) = held_capability(&ty).filter(|_| depth < self.capture_floor) {
                 self.diagnostics.push(
                     Diagnostic::error(
                         DYNAMIC_VIEW_ESCAPE,
-                        format!("a `DynamicView` cannot be captured by a closure, and `{name}` holds one"),
+                        format!(
+                            "a `{held}` cannot be captured by a closure, and `{name}` holds one"
+                        ),
                     )
                     .at(span)
-                    .rule(DYNAMIC_VIEW_ESCAPE_RULE)
+                    .rule(escape_rule(held))
                     .help("pass the view to the function as a parameter instead of capturing it"),
                 );
             }
@@ -9682,6 +9756,7 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::Duration => Ty::Duration,
         BuiltinType::ByteBuffer => Ty::ByteBuffer,
         BuiltinType::DynamicView => Ty::DynamicView,
+        BuiltinType::RenderPath => Ty::RenderPath,
         BuiltinType::Any => Ty::Any,
         BuiltinType::Array(item) => Ty::Array(nested(item)),
         BuiltinType::Vector(item) => Ty::Vector(nested(item)),

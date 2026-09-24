@@ -98,6 +98,80 @@ pub fn view_layout(int: LayoutId, reference: LayoutId) -> Layout {
     )
 }
 
+/// What a render path's layout is called, in the table and in a listing.
+pub const RENDER_PATH_NAME: &str = "RenderPath";
+
+/// The render-path word holding the address of the path's innermost entry.
+pub const PATH_ENTRY: u32 = 0;
+
+/// The render-path word holding how many entries the path has, as an `Int`.
+pub const PATH_DEPTH: u32 = 1;
+
+/// The words a render path occupies, in order.
+pub const PATH_WORDS: [Repr; 2] = [Repr::Addr, Repr::Int];
+
+/// The layout of a render path, given the layouts of an address word and of
+/// an `Int` word in the table it is going into.
+///
+/// # What a render path is
+///
+/// Issue #499's decision 3: the path of vectors a rendering is inside does not
+/// restart where the rendering reaches a box. A walk the lowering composed for
+/// a known layout keeps that path in the frames of the
+/// `rendersTracked<Vector<…>>` walks it is inside — an entry is word 0 of such
+/// a frame, whose words 0 and 2 are the vector and the address of the entry
+/// before it — and hands `std.dynamic.renderInto` the address of the innermost
+/// entry and how many there are. These are those two words, as one inline
+/// value.
+///
+/// It is a **capability, not a value**, and narrower than a
+/// [`DYNAMIC_VIEW_NAME`]: nothing can be read out of one. The standard library
+/// can pass it along and ask one question of it,
+/// [`Inst::DynOnPath`](crate::Inst::DynOnPath) — whether a vector a view names
+/// is on it — and the machine walks the frames below the boundary. No address,
+/// depth or identity ever reaches Cove as a number. An untracked walk, and an
+/// interpolation of a box, hands over a path of depth nought, whose address
+/// nothing reads.
+///
+/// Like a view it is an `opaque` struct, so a listing names it, and its
+/// fields are named for what the words hold and are read by no Cove source.
+pub fn render_path_layout(addr: LayoutId, int: LayoutId) -> Layout {
+    let field = |name: &str, layout: LayoutId, at: u32| Field {
+        name: Arc::from(name),
+        layout,
+        at,
+    };
+    Layout::inline(
+        RENDER_PATH_NAME,
+        Shape::Struct {
+            fields: vec![
+                field("entry", addr, PATH_ENTRY),
+                field("depth", int, PATH_DEPTH),
+            ],
+            opaque: true,
+        },
+        PATH_WORDS.to_vec(),
+    )
+}
+
+/// The name a rendering shows for a nominal layout named `name`: the declared
+/// name without its instantiation's type arguments, and then without its
+/// module — `m.Cell<m.Point>` is `Cell`.
+///
+/// The arguments go first, for the reason `cove-runtime`'s `boundary::short`
+/// gives: cutting at the last `.` of `m.Cell<m.Point>` would cut inside the
+/// brackets (#407). The first `<` *after the first character*, so that the
+/// table's own bracketed names are left whole. This is what
+/// [`Inst::DynTypeName`](crate::Inst::DynTypeName) answers, placed before the
+/// run.
+pub fn shown_name(name: &str) -> &str {
+    let declared = match name.char_indices().find(|(at, ch)| *at > 0 && *ch == '<') {
+        Some((at, _)) => &name[..at],
+        None => name,
+    };
+    declared.rsplit('.').next().unwrap_or(declared)
+}
+
 /// The structural kind of a viewed value: what [`Inst::DynKind`](crate::Inst::DynKind)
 /// answers, as [`DynamicKind::code`].
 ///

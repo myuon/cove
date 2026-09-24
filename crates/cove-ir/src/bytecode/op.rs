@@ -265,8 +265,20 @@ mod base {
     /// #499). Last, for `CMP_ORDER`'s reason: adding it renumbered nothing
     /// already there.
     pub const HANDLE_TEXT: u8 = DYN_NAME_ORDER + 1;
+    /// The six observations ADR 0068's Phase 4b-ii brought for
+    /// `std.dynamic.renderInto`, the rendering of an erased value (issue
+    /// #499): three placed names, whether a struct is opaque, an opaque
+    /// value's text, and whether a vector is on the path a walk handed over.
+    /// Last, for `CMP_ORDER`'s reason: adding them renumbered nothing already
+    /// there.
+    pub const DYN_TYPE_NAME: u8 = HANDLE_TEXT + 1;
+    pub const DYN_FIELD_NAME: u8 = DYN_TYPE_NAME + 1;
+    pub const DYN_CASE_NAME: u8 = DYN_FIELD_NAME + 1;
+    pub const DYN_OPAQUE: u8 = DYN_CASE_NAME + 1;
+    pub const DYN_HANDLE_TEXT: u8 = DYN_OPAQUE + 1;
+    pub const DYN_ON_PATH: u8 = DYN_HANDLE_TEXT + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = HANDLE_TEXT + 1;
+    pub const END: u8 = DYN_ON_PATH + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -424,6 +436,18 @@ pub enum Op {
     /// [`crate::Inst::HandleText`]: one opcode for the three handles, because
     /// the source's `Repr` is which one, and the frame already records it.
     HandleText,
+    /// [`crate::Inst::DynTypeName`].
+    DynTypeName,
+    /// [`crate::Inst::DynFieldName`].
+    DynFieldName,
+    /// [`crate::Inst::DynCaseName`].
+    DynCaseName,
+    /// [`crate::Inst::DynOpaque`].
+    DynOpaque,
+    /// [`crate::Inst::DynHandleText`].
+    DynHandleText,
+    /// [`crate::Inst::DynOnPath`].
+    DynOnPath,
 }
 
 /// Which of `a`, `b` and `c` an opcode uses, and for what.
@@ -461,6 +485,10 @@ pub enum Operand {
     /// opcode spends a payload half naming them, and the check is the same
     /// `fits` over the same program-wide layout `crate::verify` asks.
     View,
+    /// The first slot of a render path, whose width is
+    /// [`crate::Program::render_path_layout`]'s: [`Operand::View`]'s
+    /// arrangement, for the one opcode that takes one.
+    Path,
 }
 
 /// An operand whose `Repr` the opcode does not constrain. See
@@ -744,6 +772,14 @@ impl Op {
             Op::DynNameOrder,
         ]);
         all.push(Op::HandleText);
+        all.extend([
+            Op::DynTypeName,
+            Op::DynFieldName,
+            Op::DynCaseName,
+            Op::DynOpaque,
+            Op::DynHandleText,
+            Op::DynOnPath,
+        ]);
         all
     }
 
@@ -857,6 +893,12 @@ impl Op {
             Op::DynSameObject => base::DYN_SAME_OBJECT,
             Op::DynNameOrder => base::DYN_NAME_ORDER,
             Op::HandleText => base::HANDLE_TEXT,
+            Op::DynTypeName => base::DYN_TYPE_NAME,
+            Op::DynFieldName => base::DYN_FIELD_NAME,
+            Op::DynCaseName => base::DYN_CASE_NAME,
+            Op::DynOpaque => base::DYN_OPAQUE,
+            Op::DynHandleText => base::DYN_HANDLE_TEXT,
+            Op::DynOnPath => base::DYN_ON_PATH,
         }
     }
 
@@ -1319,6 +1361,26 @@ impl Op {
                 NONE,
                 Payload::Empty,
             ),
+            // A placed name is a `String` word, as `Op::Str`'s answer is; the
+            // field's position is a count, as `Op::DynChild`'s index is.
+            Op::DynTypeName | Op::DynCaseName | Op::DynHandleText => {
+                fields(Operand::Word(REF), Operand::View, NONE, Payload::Empty)
+            }
+            Op::DynFieldName => fields(
+                Operand::Word(REF),
+                Operand::View,
+                Operand::Word(INT_ONLY),
+                Payload::Empty,
+            ),
+            Op::DynOpaque => fields(Operand::Word(BOOL), Operand::View, NONE, Payload::Empty),
+            // A render path is a run of the program's path layout, as a view
+            // is of its view layout.
+            Op::DynOnPath => fields(
+                Operand::Word(BOOL),
+                Operand::View,
+                Operand::Path,
+                Payload::Empty,
+            ),
         }
     }
 }
@@ -1408,7 +1470,9 @@ mod tests {
     /// ninety-one once ADR 0068's Phase 3 brought `DynNameOrder` for
     /// `std.dynamic.order`, and a hundred and ninety-two once its Phase 4b
     /// brought `HandleText` for the text of a resource, a scope or a task —
-    /// one and not three, for `DynRead`'s reason.
+    /// one and not three, for `DynRead`'s reason — and a hundred and
+    /// ninety-eight once its Phase 4b-ii brought the six observations
+    /// `std.dynamic.renderInto` renders an erased value with.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1428,9 +1492,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_ninety_two_opcodes() {
-        assert_eq!(Op::all().len(), 192);
-        assert_eq!(OPCODES, 192);
+    fn there_are_a_hundred_and_ninety_eight_opcodes() {
+        assert_eq!(Op::all().len(), 198);
+        assert_eq!(OPCODES, 198);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

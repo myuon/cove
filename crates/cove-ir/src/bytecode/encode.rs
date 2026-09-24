@@ -560,6 +560,20 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         // No payload, for `DynRead`'s reason turned round: which handle's text
         // is written is its source's `Repr`.
         Inst::HandleText { dst, src } => build(Op::HandleText, slot(dst)?, slot(src)?, 0, 0),
+        // No payload: a name is found from the view's layout, and a path is
+        // `Program::render_path_layout`'s two words, as a view is three.
+        Inst::DynTypeName { dst, view } => build(Op::DynTypeName, slot(dst)?, slot(view)?, 0, 0),
+        Inst::DynFieldName { dst, view, index } => {
+            build(Op::DynFieldName, slot(dst)?, slot(view)?, slot(index)?, 0)
+        }
+        Inst::DynCaseName { dst, view } => build(Op::DynCaseName, slot(dst)?, slot(view)?, 0, 0),
+        Inst::DynOpaque { dst, view } => build(Op::DynOpaque, slot(dst)?, slot(view)?, 0, 0),
+        Inst::DynHandleText { dst, view } => {
+            build(Op::DynHandleText, slot(dst)?, slot(view)?, 0, 0)
+        }
+        Inst::DynOnPath { dst, view, path } => {
+            build(Op::DynOnPath, slot(dst)?, slot(view)?, slot(path)?, 0)
+        }
         Inst::DynChild { dst, view, index } => {
             build(Op::DynChild, slot(dst)?, slot(view)?, slot(index)?, 0)
         }
@@ -1262,6 +1276,26 @@ mod tests {
             (0, Inst::DynCase { dst: 1, view: 2 }),
             (0, Inst::DynCount { dst: 1, view: 2 }),
             (0, Inst::HandleText { dst: 1, src: 2 }),
+            (0, Inst::DynTypeName { dst: 1, view: 2 }),
+            (
+                0,
+                Inst::DynFieldName {
+                    dst: 1,
+                    view: 2,
+                    index: 5,
+                },
+            ),
+            (0, Inst::DynCaseName { dst: 1, view: 2 }),
+            (0, Inst::DynOpaque { dst: 1, view: 2 }),
+            (0, Inst::DynHandleText { dst: 1, view: 2 }),
+            (
+                0,
+                Inst::DynOnPath {
+                    dst: 1,
+                    view: 2,
+                    path: 5,
+                },
+            ),
             (
                 0,
                 Inst::DynChild {
