@@ -1,0 +1,118 @@
+use console.println
+
+/// Rendering a finite value any number of levels deep succeeds, on every
+/// evaluator (issue #480: the language has no nesting bound).
+///
+/// Until ADR 0068's Phase 4b-i the linear-memory backend's renderer for an
+/// erased value was a Rust recursion that stopped the run at 128 steps with
+/// "this value nests too deeply to render" — a `Chain` 64 links deep — while
+/// the interpreter recursed on for as long as its stack lasted. Both are loops
+/// over a stack now.
+///
+/// Four shapes, each at every depth, and each printed as the length of its
+/// text and the two ends of it, so that the whole of a text hundreds of
+/// kilobytes long is checked without being pinned:
+///
+/// - `node` nests through an `Array`'s elements, a layout the lowering knows,
+///   so it is a static walk that calls itself once a level;
+/// - `peer` nests through a `Vector`'s, which can hold itself, so its static
+///   walk carries the path of vectors it is inside and looks each one up —
+///   which is work proportional to the depth at each level, and why it stops
+///   at a thousand;
+/// - `boxed` is the `node` spine erased at the top, so the whole of it is the
+///   boxed renderer's;
+/// - `chain` is erased at every level, one link inside the next. It stops at
+///   a thousand because the interpreter takes seconds to *build* one ten
+///   thousand links long; `vm::differential`'s
+///   `a_boxed_chain_ten_thousand_links_deep_renders_on_the_machine` renders
+///   that one on the linear-memory backend.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Node {
+  tag: Int
+  kids: Array<Node>
+}
+
+impl Summary for Node {
+  fn summarize(self) -> String {
+    "node {self.tag}"
+  }
+}
+
+struct Peer {
+  tag: Int
+  kids: Vector<Peer>
+}
+
+/// A chain of links around one number at the bottom, each link holding the
+/// next erased: a value type cannot hold itself, and a box is one word.
+enum Chain {
+  End(Int)
+  Link(dyn Summary)
+}
+
+impl Summary for Chain {
+  fn summarize(self) -> String {
+    "chain"
+  }
+}
+
+/// `depth` nodes, each the only child of the one above.
+fn spine(depth: Int) -> Node {
+  var built = Node(tag: 0, kids: [])
+  var at = 1
+  while at < depth {
+    built = Node(tag: at, kids: [built])
+    at = at + 1
+  }
+  built
+}
+
+/// `depth` peers, each the only one in the vector of the one above.
+fn peers(depth: Int) -> Peer {
+  var built = Peer(tag: 0, kids: Vector.of())
+  var at = 1
+  while at < depth {
+    var kids: Vector<Peer> = Vector.of()
+    kids.push(built)
+    built = Peer(tag: at, kids: kids)
+    at = at + 1
+  }
+  built
+}
+
+/// `links` links around `End(7)`.
+fn chain(links: Int) -> Chain {
+  var built = Chain.End(7)
+  var at = 0
+  while at < links {
+    built = Chain.Link(built)
+    at = at + 1
+  }
+  built
+}
+
+/// The length of `text` in bytes, and its first and last thirty characters.
+fn row(label: String, text: String) -> Result<Unit, Error> {
+  let bytes = text.byteLength()
+  let length = text.length()
+  let head = text.slice(0, 30)
+  let tail = text.slice(length - 30, length)
+  println("{label} {bytes} {head} ... {tail}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  for depth in [64, 200, 1000, 10000] {
+    row("node.{depth}", "{spine(depth)}")?
+    let boxed: dyn Summary = spine(depth)
+    row("boxed.{depth}", "{boxed}")?
+  }
+  for depth in [64, 200, 1000] {
+    row("chain.{depth}", "{chain(depth)}")?
+    row("peer.{depth}", "{peers(depth)}")?
+  }
+  Ok(())
+}

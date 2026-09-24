@@ -594,7 +594,7 @@ fn admits(machine: &Machine, names: Names<'_>, key: Key) -> Result<(), RuntimeEr
             Anchor::Named(path) => Some(path),
             Anchor::Entry { base, key, words } => {
                 let mut shown = String::new();
-                render_value(machine, key, &words, 0, &mut shown)?;
+                render_value(machine, key, &words, &mut shown)?;
                 Some(format!("{base}[{shown}]"))
             }
         };

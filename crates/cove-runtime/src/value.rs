@@ -2380,97 +2380,167 @@ pub struct SharedView<'a>(std::marker::PhantomData<&'a SharedCell>);
 pub struct ByteBufferView<'a>(std::marker::PhantomData<&'a ByteBufferStorage>);
 
 /// How a value appears inside string interpolation and `console.println`.
+///
+/// # It is a loop, and it knows which vectors it is inside
+///
+/// The walk is a loop over an explicit stack of `Show`s rather than a
+/// recursion, so a value nested any number of levels deep renders and the
+/// host's stack is not what stops it — issue #480's "no nesting bound", which
+/// the linear-memory backend's renderers keep too. Every step borrows from
+/// `self`, so the walk copies no part of the value, however it is held.
+///
+/// And it carries issue #493's **current path** for the rendering: the
+/// storage of every non-empty `Vector` whose elements are being shown, pushed
+/// when they begin and popped when they end. A vector met again while it is
+/// on the path is one the value holds inside itself, and it renders as `[…]`
+/// (issue #499's decision 2) rather than being walked for ever; a vector met
+/// twice by two routes — a shared DAG — is on the path only while one of them
+/// is being shown, and renders in full both times. An empty vector is never
+/// looked for: nothing is under it, so it cannot lead back. A `Vector` is the
+/// only thing looked for because it is the only thing a value can meet again:
+/// every other container is immutable once built.
+///
+/// **The path runs straight through a `dyn` wrapper**, because this is one
+/// walk of one value (issue #499's decision 3). The linear-memory backend
+/// matches that once its boxed renderer is Cove (ADR 0068's Phase 4b-ii);
+/// until then its box starts a path of its own, and a cycle that closes
+/// through a box renders its `[…]` there one vector later than here.
+///
+/// For every value that does not hold itself, the text is what the recursive
+/// walk this replaced wrote, byte for byte: each `Show` is the work that
+/// walk did at the point it stands for, in the same order.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        // A value with nothing inside it is written at once, which is almost
+        // every piece a program interpolates, and costs no stack.
+        if let Some(written) = self.leaf(f) {
+            return written;
+        }
+        let mut steps = vec![Show::Value(self)];
+        let mut inside: Vec<*const VectorStorage> = Vec::new();
+        while let Some(step) = steps.pop() {
+            match step {
+                Show::Value(value) => match value.leaf(f) {
+                    Some(written) => written?,
+                    None => value.open(f, &mut steps, &mut inside)?,
+                },
+                // A key renders as the value it stands for, which is a value
+                // of its own that `to_value` builds — so it is shown by a walk
+                // of its own. A key holds no vector, so it has no part in the
+                // path, and it nests only as deep as the key was written.
+                Show::Key(key) => write!(f, "{}", key.to_value())?,
+                Show::Text(text) => f.write_str(text)?,
+                Show::Items { items, next } => {
+                    let Some(item) = items.get(next) else {
+                        continue;
+                    };
+                    separate(f, next)?;
+                    steps.push(Show::Items {
+                        items,
+                        next: next + 1,
+                    });
+                    steps.push(Show::Value(item));
+                }
+                Show::Entries { entries, next } => {
+                    let Some((key, value)) = entries.get(next) else {
+                        continue;
+                    };
+                    separate(f, next)?;
+                    steps.push(Show::Entries {
+                        entries,
+                        next: next + 1,
+                    });
+                    steps.push(Show::Value(value));
+                    steps.push(Show::Text(": "));
+                    steps.push(Show::Key(key));
+                }
+                Show::Members { items, next } => {
+                    let Some(item) = items.get(next) else {
+                        continue;
+                    };
+                    separate(f, next)?;
+                    steps.push(Show::Members {
+                        items,
+                        next: next + 1,
+                    });
+                    steps.push(Show::Key(item));
+                }
+                Show::Fields { fields, next } => {
+                    let Some((name, field)) = fields.get(next) else {
+                        continue;
+                    };
+                    separate(f, next)?;
+                    write!(f, "{name}: ")?;
+                    steps.push(Show::Fields {
+                        fields,
+                        next: next + 1,
+                    });
+                    steps.push(Show::Value(field));
+                }
+                Show::Leave => {
+                    inside.pop();
+                    f.write_str("]")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One piece of work `Display for Value` has still to do, borrowed from the
+/// value being shown.
+///
+/// A container is one step that comes back for its next part rather than one
+/// step per part pushed at once, so what the stack holds is proportional to
+/// how deep the value is and not how wide. Each container's closing bracket
+/// is pushed beneath it.
+enum Show<'a> {
+    /// A value, whose text is written or whose parts are pushed.
+    Value(&'a Value),
+    /// A map's key or a set's member.
+    Key(&'a MapKey),
+    /// A closing bracket, or the colon between a key and its value.
+    Text(&'static str),
+    /// An array's elements, a vector's, or an enum case's payload, from the
+    /// `next`th, each preceded by `, ` but the first.
+    Items { items: &'a [Value], next: usize },
+    /// A map's entries from the `next`th, `key: value` apiece.
+    Entries {
+        entries: &'a [(MapKey, Value)],
+        next: usize,
+    },
+    /// A set's members from the `next`th.
+    Members { items: &'a [MapKey], next: usize },
+    /// A struct's fields from the `next`th, `name: value` apiece.
+    Fields {
+        fields: &'a [(Rc<str>, Value)],
+        next: usize,
+    },
+    /// The end of a vector's elements: its closing bracket, and the vector
+    /// off the path.
+    Leave,
+}
+
+/// The `, ` before every part of a container but the first.
+fn separate(f: &mut fmt::Formatter<'_>, next: usize) -> fmt::Result {
+    if next > 0 {
+        f.write_str(", ")?;
+    }
+    Ok(())
+}
+
+impl Value {
+    /// The whole text of a value with nothing inside it for the walk to
+    /// visit, written to `f` — or `None` for a container, which
+    /// [`Value::open`] takes apart.
+    fn leaf(&self, f: &mut fmt::Formatter<'_>) -> Option<fmt::Result> {
+        Some(match self {
             Value(Repr::Unit) => f.write_str("()"),
             Value(Repr::Bool(b)) => write!(f, "{b}"),
             Value(Repr::Int(i)) => write!(f, "{i}"),
             Value(Repr::Float(x)) => write_float(f, *x),
             Value(Repr::Duration(ns)) => write_duration(f, *ns),
             Value(Repr::Str(s)) => f.write_str(s),
-            Value(Repr::Array(items)) => {
-                f.write_str("[")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{item}")?;
-                }
-                f.write_str("]")
-            }
-            Value(Repr::Vector(storage)) => {
-                f.write_str("[")?;
-                for (i, item) in storage.elements.borrow().iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{item}")?;
-                }
-                f.write_str("]")
-            }
-            Value(Repr::Map(entries)) => {
-                f.write_str("{")?;
-                for (i, (k, v)) in entries.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{k}: {v}")?;
-                }
-                f.write_str("}")
-            }
-            Value(Repr::Set(items)) => {
-                f.write_str("{")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{item}")?;
-                }
-                f.write_str("}")
-            }
-            Value(Repr::Struct(s)) => {
-                if &*s.type_name == ERROR.name {
-                    return match s.get(MESSAGE_FIELD.name) {
-                        Some(Value(Repr::Str(m))) => f.write_str(m),
-                        _ => f.write_str(ERROR.name),
-                    };
-                }
-                let short = s.type_name.rsplit('.').next().unwrap_or(&s.type_name);
-                // An opaque type renders as its name and nothing else. Its
-                // fields are the module's own business, and a rendering is
-                // read by whoever the string reaches, so showing them here
-                // would publish through `println` what the checker refuses
-                // to publish through a field access.
-                if s.opaque {
-                    return f.write_str(short);
-                }
-                write!(f, "{short}(")?;
-                for (i, (name, value)) in s.fields.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{name}: {value}")?;
-                }
-                f.write_str(")")
-            }
-            Value(Repr::Enum(e)) => {
-                f.write_str(&e.case)?;
-                if !e.payload.is_empty() {
-                    f.write_str("(")?;
-                    for (i, value) in e.payload.iter().enumerate() {
-                        if i > 0 {
-                            f.write_str(", ")?;
-                        }
-                        write!(f, "{value}")?;
-                    }
-                    f.write_str(")")?;
-                }
-                Ok(())
-            }
-            // A trait object shows the value it holds: the wrapper is a
-            // representation, not something the program put there.
-            Value(Repr::Dyn(d)) => write!(f, "{}", d.value),
             Value(Repr::Closure(_)) => f.write_str("<fn>"),
             // A buffer prints as the handle it is and never as the bytes it
             // holds. Those bytes are not text yet — only `finish()` has checked
@@ -2502,7 +2572,112 @@ impl fmt::Display for Value {
             // would be a read outside a `lock`, which is the one thing the
             // type exists to prevent.
             Value(Repr::Shared(_)) => f.write_str("<shared>"),
+            Value(
+                Repr::Array(_)
+                | Repr::Vector(_)
+                | Repr::Map(_)
+                | Repr::Set(_)
+                | Repr::Struct(_)
+                | Repr::Enum(_)
+                | Repr::Dyn(_),
+            ) => return None,
+        })
+    }
+
+    /// The opening of a container's text, written to `f`, and the steps that
+    /// write the rest of it pushed onto `steps`.
+    fn open<'a>(
+        &'a self,
+        f: &mut fmt::Formatter<'_>,
+        steps: &mut Vec<Show<'a>>,
+        inside: &mut Vec<*const VectorStorage>,
+    ) -> fmt::Result {
+        match self {
+            Value(Repr::Array(items)) => {
+                f.write_str("[")?;
+                steps.push(Show::Text("]"));
+                steps.push(Show::Items { items, next: 0 });
+            }
+            Value(Repr::Vector(storage)) => {
+                // SAFETY: nothing writes a vector's elements while a value is
+                // being shown. This walk runs no Cove code and calls nothing
+                // that could, and a `VectorStorage` is not `Sync`, so no other
+                // thread can reach this one; the reference does not outlive
+                // this `fmt`. A vector that is being written *when* it is
+                // shown — a writer up the stack formatting a value that holds
+                // it — is refused by `try_borrow_unguarded` itself, and is the
+                // same panic `borrow()` was.
+                let elements = unsafe { storage.elements.try_borrow_unguarded() }
+                    .expect("a vector is not written while it is being shown");
+                let at = Rc::as_ptr(storage);
+                if elements.is_empty() {
+                    f.write_str("[]")?;
+                } else if inside.contains(&at) {
+                    f.write_str("[…]")?;
+                } else {
+                    inside.push(at);
+                    f.write_str("[")?;
+                    steps.push(Show::Leave);
+                    steps.push(Show::Items {
+                        items: elements,
+                        next: 0,
+                    });
+                }
+            }
+            Value(Repr::Map(entries)) => {
+                f.write_str("{")?;
+                steps.push(Show::Text("}"));
+                steps.push(Show::Entries { entries, next: 0 });
+            }
+            Value(Repr::Set(items)) => {
+                f.write_str("{")?;
+                steps.push(Show::Text("}"));
+                steps.push(Show::Members { items, next: 0 });
+            }
+            Value(Repr::Struct(s)) => {
+                if &*s.type_name == ERROR.name {
+                    return match s.get(MESSAGE_FIELD.name) {
+                        Some(Value(Repr::Str(m))) => f.write_str(m),
+                        _ => f.write_str(ERROR.name),
+                    };
+                }
+                let short = s.type_name.rsplit('.').next().unwrap_or(&s.type_name);
+                // An opaque type renders as its name and nothing else. Its
+                // fields are the module's own business, and a rendering is
+                // read by whoever the string reaches, so showing them here
+                // would publish through `println` what the checker refuses
+                // to publish through a field access.
+                if s.opaque {
+                    return f.write_str(short);
+                }
+                write!(f, "{short}(")?;
+                steps.push(Show::Text(")"));
+                steps.push(Show::Fields {
+                    fields: &s.fields,
+                    next: 0,
+                });
+            }
+            Value(Repr::Enum(e)) => {
+                f.write_str(&e.case)?;
+                if !e.payload.is_empty() {
+                    f.write_str("(")?;
+                    steps.push(Show::Text(")"));
+                    steps.push(Show::Items {
+                        items: &e.payload,
+                        next: 0,
+                    });
+                }
+            }
+            // A trait object shows the value it holds: the wrapper is a
+            // representation, not something the program put there.
+            Value(Repr::Dyn(d)) => steps.push(Show::Value(&d.value)),
+            leaf => {
+                if let Some(written) = leaf.leaf(f) {
+                    written?;
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -3035,6 +3210,81 @@ mod tests {
     fn a_vector_equals_itself_structurally() {
         let a = Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))])));
         assert!(a.eq_value(&a.clone()) == Ok(true));
+    }
+
+    /// `S(v: vec)` with the struct pushed into its own `vec`, which is the
+    /// one way a value can come to hold itself.
+    fn holding_itself(boxed: bool) -> Value {
+        let storage = VectorStorage::new(Vec::new());
+        let s = Value::structure("m.S", [("v", Value(Repr::Vector(storage.clone())))]);
+        let held = if boxed {
+            Value(Repr::Dyn(Rc::new(DynValue {
+                trait_name: "m.Summary".into(),
+                value: s.clone(),
+            })))
+        } else {
+            s.clone()
+        };
+        storage.elements.borrow_mut().push(held);
+        s
+    }
+
+    /// A vector the rendering is already inside renders as `[…]` (issue #493,
+    /// and issue #499's decision 2), and the path runs straight through a
+    /// `dyn` wrapper because this is one walk of one value (decision 3).
+    #[test]
+    fn a_value_that_holds_itself_shows_its_repeat() {
+        let s = holding_itself(false);
+        assert_eq!(shown(s.clone()), "S(v: [S(v: […])])");
+        let boxed = holding_itself(true);
+        assert_eq!(shown(boxed.clone()), "S(v: [S(v: […])])");
+        // Broken by hand, or the two would outlive the test holding each
+        // other.
+        for value in [s, boxed] {
+            if let Value(Repr::Struct(held)) = &value {
+                if let Some(Value(Repr::Vector(storage))) = held.get("v") {
+                    storage.elements.borrow_mut().clear();
+                }
+            }
+        }
+    }
+
+    /// One vector reached twice by two routes is not a cycle: it is on the
+    /// path only while one of them is being shown, so it shows in full at
+    /// both. An empty vector is never looked for at all.
+    #[test]
+    fn a_vector_shared_by_two_routes_shows_in_full_at_each() {
+        let leaf = Value::structure(
+            "m.S",
+            [("v", Value(Repr::Vector(VectorStorage::new(Vec::new()))))],
+        );
+        let one = Value(Repr::Vector(VectorStorage::new(vec![leaf])));
+        let twin = Value::structure("m.Twin", [("left", one.clone()), ("right", one.clone())]);
+        assert_eq!(shown(twin), "Twin(left: [S(v: [])], right: [S(v: [])])");
+        assert_eq!(
+            shown(Value::array([one.clone(), one])),
+            "[[S(v: [])], [S(v: [])]]"
+        );
+    }
+
+    /// A value nested far past any stack the recursive walk this replaced
+    /// could have used shows, because the walk is a loop (issue #480).
+    ///
+    /// The value is leaked rather than dropped: `Drop` is a recursion of its
+    /// own, and it is not what this test is about.
+    #[test]
+    fn a_value_nested_two_hundred_thousand_deep_shows() {
+        const DEPTH: usize = 200_000;
+        let mut value = Value(Repr::Int(7));
+        for _ in 0..DEPTH {
+            value = Value::array([Value::some(value)]);
+        }
+        let text = shown(value.clone());
+        std::mem::forget(value);
+        assert_eq!(text.len(), DEPTH * "[Some(".len() + 1 + DEPTH * ")]".len());
+        assert!(text.starts_with("[Some([Some("), "{}", &text[..40]);
+        assert!(text.contains("[Some([Some(7)])])"));
+        assert!(text.ends_with(")])])]"), "{}", &text[text.len() - 40..]);
     }
 
     #[test]

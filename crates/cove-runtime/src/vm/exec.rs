@@ -3715,6 +3715,18 @@ impl<'a> Machine<'a> {
             .ok_or_else(|| no_such_handle("task scope").at(span))
     }
 
+    /// The name the scope a `Repr::Scope` word names is bound to — what
+    /// `<task scope {name}>` shows, and the oracle's `TaskScope::name`.
+    ///
+    /// Read from [`ScopeEntry::name`], which [`cove_ir::Inst::ScopeEnter`]
+    /// wrote from the name the lowering gave it.
+    pub(crate) fn scope_name(&self, word: u64) -> Result<Arc<str>, RuntimeError> {
+        word.checked_sub(1)
+            .and_then(|at| self.scopes.get(at as usize))
+            .map(|scope| scope.name.clone())
+            .ok_or_else(|| no_such_handle("task scope"))
+    }
+
     /// The task a `Repr::Task` word names.
     fn child_at(&self, word: u64, span: Span) -> Result<usize, RuntimeError> {
         word.checked_sub(1)

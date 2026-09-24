@@ -1426,7 +1426,7 @@ fn too_deep() -> RuntimeError {
 /// a lowering that reused a slot at a `Repr` it was not fixed at, or a word
 /// read as a `Host` that was never written as one. Reporting it is what keeps
 /// that from being answered with whichever resource the number landed on.
-fn no_such_resource() -> RuntimeError {
+pub(crate) fn no_such_resource() -> RuntimeError {
     RuntimeError::new("this value names a host resource this run was never handed")
 }
 
