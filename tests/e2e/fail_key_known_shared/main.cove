@@ -1,0 +1,44 @@
+use console.println
+
+/// A node whose `next` is a cell another node can be reached through.
+struct Node {
+  next: Option<Shared<Node>>
+  label: String
+}
+
+/// Two nodes whose cells hold each other, and a third that holds the first.
+fn ring() -> Node {
+  let first = Shared(Node(next: None, label: "first"))
+  let second = Shared(Node(next: None, label: "second"))
+  first.lock(fn(var value) {
+    value = Node(next: Some(second), label: "first")
+  })
+  second.lock(fn(var value) {
+    value = Node(next: Some(first), label: "second")
+  })
+  Node(next: Some(first), label: "outer")
+}
+
+/// A `Shared` cell inside a struct, used as a set element: the admission
+/// refuses the cell, and names it `Node.next(0)` — the struct's declared
+/// name, its field, and the payload of the `Some` it is in.
+///
+/// The cell is refused without looking inside, so the ring behind it is never
+/// walked; and rendering the node first shows the cell as `<shared>` for the
+/// same reason. The path is written by the name the declaration wrote on
+/// every evaluator: the survey behind ADR 0068's Phase 4c found the machine
+/// had once qualified it with the module, `fail_key_known_shared.Node`, and
+/// this is the row that pins that it does not.
+fn admitRing() -> Result<Unit, Error> {
+  let outer = ring()
+  println("{outer}")?
+  let keyed = Set.of(outer)
+  println("never printed {keyed.length()}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a node holding a shared cell as a set element")?
+  admitRing()?
+  Ok(())
+}

@@ -1258,6 +1258,16 @@ struct Pool {
     /// [`Pool::dynamic_equals`]' arrangement, filled in by
     /// `Body::dynamic_refuses_key`.
     dynamic_refuses_key: Option<FunctionId>,
+    /// `std.dynamic.refuseKey`, once a call site has resolved it: what
+    /// `core.admitKey` over an erased key calls to word the refusal
+    /// `std.dynamic.refusesKey` found, and what a wording walk calls where the
+    /// part it names is a box — [`Pool::dynamic_equals`]' arrangement, filled
+    /// in by `Body::dynamic_refuse_key`.
+    dynamic_refuse_key: Option<FunctionId>,
+    /// The trail a wording walk hands the wording walks it calls, once a call
+    /// site whose walk calls one has resolved it — [`Pool::leaves`]'
+    /// arrangement, filled in by `Body::wording_trail`. See [`synth::Trail`].
+    trail: Option<synth::Trail>,
     /// `std.dynamic.renderInto`, once a call site has resolved it: what an
     /// interpolation of an erased value calls, and what a rendering walk
     /// calls where it reaches a boxed part — [`Pool::dynamic_equals`]'
@@ -1308,6 +1318,8 @@ impl Pool {
             dynamic_equals: None,
             dynamic_order: None,
             dynamic_refuses_key: None,
+            dynamic_refuse_key: None,
+            trail: None,
             dynamic_render: None,
             open: Vec::new(),
         }

@@ -1008,10 +1008,16 @@ fn the_audit_names_a_boxed_layout_whose_names_were_not_placed() {
             parts: vec![text, text],
         };
     }
+    // An enum's own name is placed too since ADR 0068's Phase 4c: a refused
+    // boxed key's path begins with it, `Mark.Weight(0)`. One without it is
+    // still named by the audit.
     names[named.layouts.mark.index()] = cove_ir::LayoutNames {
         name: None,
         parts: vec![text, text, text],
     };
+    named.program.names = names.clone();
+    assert_eq!(unplaced(&named), ["m.Mark"]);
+    names[named.layouts.mark.index()].name = Some(text);
     named.program.names = names;
     assert_eq!(unplaced(&named), Vec::<String>::new());
 }

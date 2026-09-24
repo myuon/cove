@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `Float` inside `[Span(from: 90s, to: 2m)]` as a set element
+  --> <e2e>/fail_key_boxed_map_key/main.cove:32:15
+   |
+32 |   let keyed = Set.of(held).inserted(other)
+   |               ^^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_boxed_map_key/main.cove:39:3
+   |
+39 |   admitMap()?
+   |   ^^^^^^^^^^ called from here
+  rule: A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.
+  help: convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`
+1 error(s)

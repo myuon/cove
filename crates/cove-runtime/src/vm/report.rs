@@ -1349,23 +1349,25 @@ mod tests {
 
     /// A loop that calls an intrinsic that allocates (`Float.parse` builds
     /// the message of the `Err` it answers) and one that does not
-    /// (`Value.admitKey` walks a key and answers nothing),
+    /// (`Float.toInt` of a number it can convert answers an `Ok` in place),
     /// each several times over, so both [`Counting`]'s wiring and the
     /// reconciliation test below have more than one call and more than one
     /// site to work with.
     ///
-    /// **The reading one has moved five times, and each move is a
-    /// migration.** It was `String.length` until ADR 0064 made the count
+    /// **The one that does not allocate has moved six times, and each move is
+    /// a migration.** It was `String.length` until ADR 0064 made the count
     /// `std.string.length`; it was then `String.contains` until ADR 0065 gave
     /// that a run search to stand on; it was then `String.indexOf`, until ADR
     /// 0064's next migration wrote that over the same run search; it was then
     /// `Any.equals`, until [ADR 0068]'s Phase 2 made `==` on two erased values
-    /// `std.dynamic.equals`, a Cove loop charged by the instruction; and it was
-    /// then `Value.order`, until the ADR's Phase 3 made the order of two erased
-    /// keys `std.dynamic.order` the same way. `Value.admitKey` is the shape for
-    /// the reasons each of the others was: it reads the value it was handed, it
-    /// charges what it walked, and on the path that admits it allocates
-    /// nothing, because the answer is no word at all.
+    /// `std.dynamic.equals`, a Cove loop charged by the instruction; it was
+    /// then `Value.order`, until the ADR's Phase 3 made the order of two
+    /// erased keys `std.dynamic.order` the same way; and it was then
+    /// `Value.admitKey` over a `Node` whose `kids` are `Node`s, until the
+    /// ADR's Phase 4c worded the admission's refusal in Cove and deleted the
+    /// last intrinsic that walked a value. `Float.toInt` is what is left that
+    /// answers without allocating: a conversion that succeeds writes its `Ok`
+    /// where the call asked for it, and only a refusal builds a message.
     ///
     /// **The allocating one has moved twice**, and neither time because a
     /// reader found a run instruction to stand on: it was `String.join` until
@@ -1377,35 +1379,16 @@ mod tests {
     /// row that attributed only the outermost object; nothing left allocates
     /// more than one per call.
     ///
-    /// The admitted keys are **a layout that holds itself**, and that is not
-    /// decoration. Since [ADR 0064]'s Decision 3 an admission whose key layout
-    /// is known is a walk the lowering synthesizes, or nothing at all, and
-    /// reaches the intrinsic only to word a refusal; and since [ADR 0068]'s
-    /// Phase 3 an erased key is decided the same way, by
-    /// `std.dynamic.refusesKey`, so a `dyn Trait` key — what this read until
-    /// then — reaches it only to word one too. A `Node` whose `kids` are
-    /// `Node`s is the arm left that reaches it whatever the key holds: no walk
-    /// composed out of it would be finite, so the runtime decides. So a row for
-    /// `Value.admitKey` is read here where a `Set` of them is being built,
-    /// which is what `Set.of(left, other)` is: `std.set.of` admits each member
-    /// through `core.admitKey`, and over a `Node` that is the intrinsic.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
     const PARSE_AND_ADMIT: &str = "
-struct Node {
-  tag: Int
-  kids: Array<Node>
-}
-
 export fn main() -> Int {
-  let left = Node(tag: 1, kids: [])
-  let other = Node(tag: 1, kids: [Node(tag: 9, kids: [])])
   var total = 0
   var i = 0
   while i < 50 {
-    let keyed = Set.of(left, other)
-    total = total + keyed.length()
+    let whole = (2.5 + 0.0).toInt()
+    if whole.isOk() {
+      total = total + 1
+    }
     let refused = Float.parse(\"a\")
     if refused.isError() {
       total = total + 1
@@ -1420,15 +1403,12 @@ export fn main() -> Int {
     /// attributed per variant, and this is the property worth pinning about
     /// that attribution: it is not just present, it tells two operations
     /// apart. `Float.parse` allocates the message of the `Err` it hands back,
-    /// and `Value.admitKey` only reads the keys it is given, so a run of both
-    /// must show one row with allocations and one row without — from the
-    /// real machinery in `Machine::call_intrinsic`, not from calling
-    /// [`Counting::intrinsic_allocated`] directly, which would only prove the
-    /// bookkeeping adds correctly and not that it is wired to anything.
-    ///
-    /// The `Set` each turn builds allocates, and none of it is `Value.admitKey`'s:
-    /// it is `std.set.of`'s own Cove, charged to no intrinsic row — which is
-    /// the attribution this is about.
+    /// and `Float.toInt` of a number it can convert writes its `Ok` in place,
+    /// so a run of both must show one row with allocations and one row
+    /// without — from the real machinery in `Machine::call_intrinsic`, not
+    /// from calling [`Counting::intrinsic_allocated`] directly, which would
+    /// only prove the bookkeeping adds correctly and not that it is wired to
+    /// anything.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     #[test]
@@ -1455,15 +1435,15 @@ export fn main() -> Int {
         assert!(parsed.allocations <= vm.allocations(), "{parsed:?}");
         assert!(parsed.words <= vm.allocated_words(), "{parsed:?}");
 
-        let admitted = boundary
-            .intrinsic(Intrinsic::ValueAdmitKey)
-            .expect("the program admits two keys that hold themselves");
-        assert!(admitted.calls() > 0, "{admitted:?}");
+        let converted = boundary
+            .intrinsic(Intrinsic::FloatToInt)
+            .expect("the program converts a Float");
+        assert!(converted.calls() > 0, "{converted:?}");
         assert_eq!(
-            admitted.allocations, 0,
-            "Value.admitKey walks its operand and answers nothing: {admitted:?}"
+            converted.allocations, 0,
+            "Float.toInt of a number it converts answers in place: {converted:?}"
         );
-        assert_eq!(admitted.words, 0, "{admitted:?}");
+        assert_eq!(converted.words, 0, "{converted:?}");
     }
 
     /// **The totals must reconcile exactly with the opcode and site
@@ -1528,11 +1508,20 @@ export fn main() -> Int {
             assert_eq!(words, row.words, "{:?}: {row:?}", row.intrinsic);
             assert_eq!(work, row.work, "{:?}: {row:?}", row.intrinsic);
         }
-        // And the work is not vacuously nought on both sides: this program
-        // calls `Value.admitKey`, which walks what it admits.
+        // And the reconciliation is not vacuous: `Float.parse` allocates the
+        // message of every `Err` it answers, so the allocation column has
+        // something on both sides. The work column is nought on both, and
+        // that is a finding rather than a gap: `Value.admitKey` was the last
+        // arm that reported what it walked, and ADR 0068's Phase 4c deleted
+        // it, so no intrinsic left charges examined work at all.
         assert!(
-            boundary.intrinsics.iter().any(|row| row.work > 0),
-            "a program that admits keys that hold themselves examines something: {:?}",
+            boundary.intrinsics.iter().any(|row| row.allocations > 0),
+            "a program that parses text that is not a number allocates: {:?}",
+            boundary.intrinsics
+        );
+        assert!(
+            boundary.intrinsics.iter().all(|row| row.work == 0),
+            "no intrinsic left walks what it is handed: {:?}",
             boundary.intrinsics
         );
     }
@@ -1546,8 +1535,9 @@ export fn main() -> Int {
     // `Value.order`, and ADR 0068's Phase 4b-ii moved the eighth: the rendering
     // of an erased value is `std.dynamic.renderInto`, a Cove loop charged an
     // instruction at a time, so no intrinsic that charges by the byte is left
-    // to hold the property over. `Value.admitKey`, the one that walks, is held
-    // to its per-value charge by the case above.
+    // to hold the property over. `Value.admitKey`, the one that walked, was
+    // held to its per-value charge by the case above until ADR 0068's Phase
+    // 4c deleted it too.
 
     // `an_early_exit_is_charged_less_than_a_whole_walk` stood here: ten orders
     // of two erased four-field structs that differed in the first field or in
@@ -1556,7 +1546,5 @@ export fn main() -> Int {
     // then on `Value.order`, and ADR 0068's Phases 2 and 3 made both Cove
     // loops, where an early exit is charged what it did by construction — one
     // instruction at a time — and no column of this report has to be taught
-    // it. The two walks left in Rust never exit early: an admission that
-    // admits and a rendering visit every part of the value, and an admission
-    // that refuses ends the run.
+    // it. No walk of a value is left in Rust at all since ADR 0068's Phase 4c.
 }

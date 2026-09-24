@@ -533,8 +533,10 @@ impl Function {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LayoutNames {
     /// For a struct, the name a rendering shows for it —
-    /// [`crate::dynamic::shown_name`] of the layout's. `None` for every other
-    /// layout: an enum renders as its case, and a range as its bounds.
+    /// [`crate::dynamic::shown_name`] of the layout's — and for an enum the
+    /// same name, which a refused boxed key's path begins with although a
+    /// rendering shows the case instead. `None` for every other layout: a
+    /// range renders as its bounds.
     pub name: Option<StrId>,
     /// For a struct that is not `opaque`, its fields' names in declaration
     /// order; for an enum, its cases' names in declaration order. Empty for

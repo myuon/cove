@@ -43,7 +43,6 @@ pub enum Intrinsic {
     StringRefuseByteRange,
     FloatToInt,
     FloatParse,
-    ValueAdmitKey,
 }
 
 /// Every [`Intrinsic`], in declaration order.
@@ -55,7 +54,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringRefuseByteRange,
     Intrinsic::FloatToInt,
     Intrinsic::FloatParse,
-    Intrinsic::ValueAdmitKey,
 ];
 
 /// How many variants there are, as the width of a per-variant table.
@@ -71,24 +69,21 @@ pub const COUNT: usize = ALL.len();
 impl Intrinsic {
     /// The type the operation belongs to: `Array`, `String`, `Map`, `Int`.
     ///
-    /// `Value` for the one a keyed collection's standard-library body reaches
-    /// through `core.admitKey`, which is a rule over any key's layout rather
-    /// than a method of a type. (`Value.renderInto`, what `"{x}"` appended
-    /// for a piece of any layout, stood beside it until [ADR
-    /// 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    /// Phase 4b-ii made the rendering of an erased value
-    /// `std.dynamic.renderInto`. `Any` was the
-    /// receiver of `Any.equals`, `==` on two erased values, until [ADR
-    /// 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    /// Phase 2 made that `std.dynamic.equals`; and `Value.order`, which
-    /// `core.order` reached over two erased keys, stood beside `admitKey`
-    /// until the ADR's Phase 3 made it `std.dynamic.order`.)
+    /// (`Value` was the receiver of the four rules over any value's layout
+    /// that [ADR
+    /// 0068](../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)
+    /// moved into Cove: `Value.order` in its Phase 3, `Value.renderInto` in
+    /// Phase 4b-ii, and `Value.admitKey`, which a keyed collection's
+    /// standard-library body reached through `core.admitKey`, in Phase 4c,
+    /// when its refusal was worded in `std.dynamic` and in the walks the
+    /// lowering composes. `Any` was the receiver of `Any.equals`, `==` on two
+    /// erased values, until the ADR's Phase 2 made that
+    /// `std.dynamic.equals`.)
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatParse => "Float",
-            Intrinsic::ValueAdmitKey => "Value",
         }
     }
 
@@ -98,7 +93,6 @@ impl Intrinsic {
             Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatParse => "parse",
-            Intrinsic::ValueAdmitKey => "admitKey",
         }
     }
 
@@ -151,9 +145,8 @@ impl Intrinsic {
         match self {
             Intrinsic::StringRefuseByteRange => Category::Text,
             Intrinsic::FloatToInt | Intrinsic::FloatParse => Category::Scalar,
-            // Admission is a rule over whatever layout the key has, which is
-            // what makes it a value rule rather than a text one.
-            Intrinsic::ValueAdmitKey => Category::Value,
+            // `Value.admitKey` was the last `Category::Value`, a rule over
+            // whatever layout the key has, until ADR 0068's Phase 4c.
         }
     }
 
@@ -177,8 +170,6 @@ impl Intrinsic {
             Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
-            // The key, then the method and the role a refusal is worded with.
-            Intrinsic::ValueAdmitKey => fixed(&[C::Value, C::Str, C::Str], C::Unit),
         }
     }
 
@@ -292,24 +283,20 @@ impl Intrinsic {
             // decimal over base-`10^9` limbs, refusing a digit count outside
             // `0..=17` through ADR 0067's `core.refuse`.
             Intrinsic::FloatToInt => allocate,
-
             // `==` on two erased values stood here, a walk of both operands
             // together that allocated nothing and stopped the run past a
             // depth of 128. ADR 0068's Phase 2 made it `std.dynamic.equals`,
             // a Cove loop over a view of each box with no depth bound at all
             // (issue #480), and deleted the variant.
 
-            // ADR 0059's last keyed intrinsic. The admission walks a key as
-            // deep as it nests, allocates nothing and answers nothing, and
-            // raises a key the language refuses, in the method's words — with
-            // no depth bound since ADR 0068's Phase 3, which decides a boxed
-            // key in Cove, `std.dynamic.refusesKey`, and asks this only to word
-            // the refusal it found. (The order stood beside it, answering one
-            // `Int` word, until ADR 0068's Phase 3 made it
-            // `std.dynamic.order`, a Cove loop over a view of each box with no
-            // depth bound; the duplicate refusal is `std.set.of`'s and
-            // `std.map.of`'s own Cove since `core.refuse`, ADR 0067.)
-            Intrinsic::ValueAdmitKey => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
+            // ADR 0059's three keyed intrinsics stood here, and none is left.
+            // The duplicate refusal is `std.set.of`'s and `std.map.of`'s own
+            // Cove since `core.refuse`, ADR 0067; the order of two erased keys
+            // is `std.dynamic.order` since ADR 0068's Phase 3; and the
+            // admission, which walked a key and raised one the language
+            // refuses in the method's words, is a walk the lowering composes
+            // or `std.dynamic.refusesKey` to decide, and `describes<L>` or
+            // `std.dynamic.refuseKey` to word, since the ADR's Phase 4c.
         }
     }
 }
@@ -532,12 +519,8 @@ mod tests {
     /// operation named after a method never does.
     #[test]
     fn the_intrinsic_set_only_shrinks() {
-        const MIGRATED_BUT_STILL_HERE: &[&str] = &[
-            "String.refuseByteRange",
-            "Float.toInt",
-            "Float.parse",
-            "Value.admitKey",
-        ];
+        const MIGRATED_BUT_STILL_HERE: &[&str] =
+            &["String.refuseByteRange", "Float.toInt", "Float.parse"];
 
         let here: Vec<String> = ALL.iter().map(|one| one.to_string()).collect();
         let allowed: Vec<&str> = MIGRATED_BUT_STILL_HERE.to_vec();
@@ -590,8 +573,7 @@ mod tests {
             match intrinsic {
                 Intrinsic::StringRefuseByteRange
                 | Intrinsic::FloatToInt
-                | Intrinsic::FloatParse
-                | Intrinsic::ValueAdmitKey => 1,
+                | Intrinsic::FloatParse => 1,
             }
         }
         let variants: usize = ALL.iter().map(|intrinsic| count(*intrinsic)).sum();
@@ -648,7 +630,10 @@ mod tests {
     #[test]
     fn display_prints_receiver_dot_operation() {
         assert_eq!(Intrinsic::FloatParse.to_string(), "Float.parse");
-        assert_eq!(Intrinsic::ValueAdmitKey.to_string(), "Value.admitKey");
+        assert_eq!(
+            Intrinsic::StringRefuseByteRange.to_string(),
+            "String.refuseByteRange"
+        );
     }
 
     #[test]

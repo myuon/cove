@@ -353,6 +353,44 @@ pub const CONTAINS_ITSELF_RULE: &str = "Equality compares finite structure, and 
 pub const CONTAINS_ITSELF_HELP: &str = "compare the parts that do not lead back to the value, or \
                                         use `is` to ask whether two vectors are the same one";
 
+/// The rule a `Float` key is refused under: `NaN` is not equal to itself.
+///
+/// A refused key is worded in three places since ADR 0068's Phase 4c — a key
+/// refused whole, at `core.admitKey`'s site, and a part of a known layout,
+/// in the walk `lower::synth` composes for it, both from here; and a part of
+/// a box, by `std.dynamic.refuseKey`, which spells the sentences out itself —
+/// and the oracle's `InvalidKey` says them a fourth time. The `fail_key_*`
+/// programs hold them to one another byte for byte on every evaluator.
+pub const FLOAT_KEY_RULE: &str = "A `Float` cannot be a map key or set element: `NaN` is not \
+                                  equal to itself, which breaks the total order every key needs.";
+
+/// What [`FLOAT_KEY_RULE`]'s refusal suggests instead.
+pub const FLOAT_KEY_HELP: &str = "convert it to a stable key first, such as rounding to an `Int` \
+                                  or formatting it as a `String`";
+
+/// The rule every other value that is not a key is refused under: its
+/// equality could change while a collection holds it. Kept apart from
+/// [`FLOAT_KEY_RULE`] so that nobody later "fixes" `Float` as if it were one
+/// more mutable handle.
+pub const MUTABLE_KEY_RULE: &str = "Mutable handles and structs containing them are not valid \
+                                    map keys: a key's equality must not change while a collection \
+                                    holds it.";
+
+/// What [`MUTABLE_KEY_RULE`]'s refusal suggests instead.
+pub const MUTABLE_KEY_HELP: &str = "use a value built only from `Bool`, `Int`, `Str`, \
+                                    `Duration`, `Unit`, a range, arrays, structs, enum cases, \
+                                    `Map`, or `Set` — all free of mutable handles";
+
+/// The rule and the help a key refused as a `word` is refused under: `Float`
+/// has [`FLOAT_KEY_RULE`]'s, and every other word [`MUTABLE_KEY_RULE`]'s.
+pub fn refused_key(word: &str) -> (&'static str, &'static str) {
+    if word == "Float" {
+        (FLOAT_KEY_RULE, FLOAT_KEY_HELP)
+    } else {
+        (MUTABLE_KEY_RULE, MUTABLE_KEY_HELP)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

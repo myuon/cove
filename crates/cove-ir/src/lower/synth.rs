@@ -53,51 +53,52 @@
 //! function, and `cove-cli`'s `tests/boxed.rs` holds every call of either to
 //! erased operands (Decision 5).
 //!
-//! # `Value.admitKey`'s boundary is not that boundary, and the reason is the
-//! sentence
+//! # The admission is two walks, and the reason is the sentence
 //!
 //! The third user does not fit that paragraph and it is worth saying why
 //! rather than filing it under "nearly". The other two *answer* something —
 //! a `Bool`, an `Int` — and a walk that has composed the answer is done. An
 //! admission answers `()` **or raises**, and what it raises is
 //! `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` with a
-//! `rule:` and a `help:` beside it: three sentences, and [`Inst::Trap`] now
-//! takes a slot for each, so the instruction is no longer the wall.
+//! `rule:` and a `help:` beside it: three sentences, and [`Inst::Trap`] takes a
+//! slot for each (ADR 0067).
 //!
-//! Every hole in that sentence is something the lowering knows, except one.
-//! The two names are literals at all nine of `std.map`'s and `std.set`'s call
-//! sites; the type is the layout's; the path is composed of field and case
-//! names a *synthesized* walk knows statically per arm — except where it
-//! reaches through a run or a map, where it quotes an index or a rendered
-//! key computed at run time, which is issue #461's kind of hole and not one
-//! this module's walks build.
+//! Every hole in that sentence is something the lowering knows, but for the
+//! path. The two names are literals at all nine of `std.map`'s and `std.set`'s
+//! call sites; the type, the rule and the help are the refused part's layout's;
+//! and the path is composed of field and case names a walk knows statically per
+//! arm — except where it reaches through a run or a map, where it quotes an
+//! index or a map's key as it renders, which is text made at run time.
 //!
-//! So [`Operation::Admission`] does not refuse. It **decides**: a `Bool`,
-//! `true` where the runtime is to be asked, and `super::core` runs the
-//! [`Intrinsic::ValueAdmitKey`](crate::Intrinsic::ValueAdmitKey) it would have run anyway, at the site it
-//! would have run it at, over the key it would have run it over. That keeps
-//! the diagnostic byte for byte — including the frame it is blamed on, which
-//! a fallback raised from inside a walk would have added one to (ADR 0058
-//! reads the blame off the live frames). What the walk buys is the admitting
-//! path, which is every path a program that works ever takes: a key the
-//! layout settles reaches no intrinsic at all.
-//!
-//! [`admission`] is the question that decides, asked by the call site and by
-//! the walk, of one table — `ordered_by`'s arrangement, and `Body::always_admitted`
-//! before this module had an arm for the operation.
-//!
-//! A box is decided the same way since [ADR
+//! So the admission is **two** walks. [`Operation::Admission`] **decides**: a
+//! `Bool`, `true` where the key is refused, reading only what decides and
+//! allocating nothing — which is all the path that admits, every path a
+//! program that works takes, ever runs. [`Operation::Description`] **words**:
+//! `super::core` calls it under the branch on that answer, at the site, in the
+//! caller's frame, and it walks the same parts again, writes the path, and
+//! ends in one [`Inst::Trap`]. The runtime's `Value.admitKey` stood under that
+//! branch and worded the refusal in Rust until [ADR
 //! 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-//! Phase 3: `std.dynamic.refusesKey`, a Cove walk over a view of the box,
-//! answers the bit — called by `super::core` for a key that is a box, and by
-//! [`Synth::admit`] where a walk reaches a boxed part — and the intrinsic under
-//! the branch still words the refusal. So a boxed layout is
-//! [`Admission::Decided`] like any other layout a walk can answer for, and
-//! `cove-cli`'s `tests/boxed.rs` holds every call of the function to an erased
-//! operand (Decision 5).
+//! Phase 4c. The diagnostic is what it was byte for byte, blamed where it was:
+//! a wording walk is support code ([`Function::is_support`]), so its trap is
+//! blamed on the `core.admitKey` line that called it.
 //!
-//! # Three of the four walks allocate nothing, and the fourth allocates by
-//! nature
+//! [`admission`] is the question that decides whether either is made, asked
+//! by the call site and by the walks, of one table — `ordered_by`'s
+//! arrangement, and `Body::always_admitted` before this module had an arm for
+//! the operation.
+//!
+//! A box is decided the same way since the ADR's Phase 3 —
+//! `std.dynamic.refusesKey`, a Cove walk over a view of the box, answers the
+//! bit, called by `super::core` for a key that is a box and by [`Synth::admit`]
+//! where a walk reaches a boxed part — and worded the same way since its Phase
+//! 4c, by `std.dynamic.refuseKey`, called by `super::core` and by
+//! [`Synth::describing`] where the part it names is a box. So a boxed layout is
+//! [`Admission::Decided`] like any other layout a walk can answer for, and
+//! `cove-cli`'s `tests/boxed.rs` holds every call of either function to an
+//! erased operand (Decision 5).
+//!
+//! # Three of the walks allocate nothing, and the rest allocate by nature
 //!
 //! This paragraph used to say *nothing here allocates*, as a fact about every
 //! instruction the module emits, and [`Operation::Rendering`] is the arm that
@@ -109,7 +110,7 @@
 //! believed the old sentence would have reasoned wrongly about exactly the
 //! arm that needs the reasoning.
 //!
-//! What is true of all four, and is what the old sentence was reaching for:
+//! What is true of each, and is what the old sentence was reaching for:
 //!
 //! - [`Operation::Equality`], [`Operation::Order`] and
 //!   [`Operation::Admission`] emit only loads, comparisons, branches,
@@ -136,6 +137,12 @@
 //!   adds what [`Operation::Tracked`] adds, frame addresses and loads through
 //!   them, so what it allocates is what the appends under it allocate and not
 //!   one word more.
+//! - [`Operation::Description`] and [`Operation::DescribeAt`] allocate on
+//!   the one path they have, which ends the run: the buffer the path is
+//!   written into, the appends into it and the renderings of the keys it
+//!   quotes, and the sentence the path is finished into. They owe no
+//!   [`Inst::Clear`] for the rendering's reason and a stronger one: nothing
+//!   after the trap they end in reads a frame at all.
 //!
 //! So an arm added later that allocates owes the clears that its own shape
 //! earns, and this one earns none. An arm that held a reference across an
@@ -154,9 +161,10 @@
 //! uncovered `match` and `super::dispatch`'s undispatchable call choose
 //! theirs, so a refusal whose wording does not quote a value computed at run
 //! time is one synthesis can write. Issue #461 is about the other kind.
-//! `Value.order`'s two are not it, and `Value.admitKey`'s — which carry a
-//! rule and a help — are not it either, for a reason next to it rather than
-//! in it.
+//! `Value.order`'s two are not it. The admission's refusal is — its path
+//! quotes an index or a map's key as it renders — and since ADR 0068's Phase
+//! 4c [`Operation::Description`] builds that text at run time into a buffer,
+//! as an interpolation does, and hands the trap the `String` it made.
 //!
 //! # The fifth operation is not here, and it never needed to be
 //!
@@ -222,7 +230,7 @@ use std::sync::Arc;
 use cove_diag::Span;
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD, RANGE};
 
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Pc, Slot};
+use crate::inst::{ArithOp, CmpOp, Compare, Inst, Pc, Slot, Storage, Validation};
 use crate::layout::{Case, Field, Layout, LayoutId, Shape};
 use crate::program::{Arg, Function, FunctionId, Table, TableId};
 use crate::repr::{RefMap, Repr};
@@ -279,23 +287,22 @@ pub(crate) enum Operation {
     /// call site asked; this one answers a question the call site did not
     /// ask — the call site asked for a *refusal*, which is a sentence, and
     /// the walk hands back the one bit that says whether there is one to
-    /// write. Where the bit is set, `super::core` runs the
-    /// [`Intrinsic::ValueAdmitKey`](crate::Intrinsic::ValueAdmitKey) it would have run anyway, at the site it
-    /// would have run it at, and the runtime writes the sentence.
+    /// write. Where the bit is set, `super::core` runs
+    /// [`Operation::Description`]'s walk, at the site, and that walk writes
+    /// the sentence.
     ///
     /// It has to be that way round, and the reason is in the sentence rather
     /// than in the walk. A refusal here is
     /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``
     /// with a **`rule:` and a `help:` beside it**, and a `path` that reaches
     /// through a run or a map quotes an index or a rendered key computed at
-    /// run time — so `super::pattern`'s trick of choosing the string at the
-    /// lowering is not enough here, whatever is known about the layout. See
+    /// run time: text, which the path that admits has no business making. See
     /// this module's header.
     ///
-    /// So the answer is a `Bool` and the sense of it is **`true` when the
-    /// runtime is to be asked**: a `branch-false` over the intrinsic is one
-    /// instruction where a `branch-true` would be two, since the instruction
-    /// set has only the one.
+    /// So the answer is a `Bool` and the sense of it is **`true` when the key
+    /// is refused**: a `branch-false` over the wording is one instruction
+    /// where a `branch-true` would be two, since the instruction set has only
+    /// the one.
     Admission,
     /// `core.renderInto(value, buffer)`: the text of one value of a layout,
     /// appended to the byte buffer an interpolation is being assembled in.
@@ -353,6 +360,28 @@ pub(crate) enum Operation {
     /// reaches no box is rendered exactly as it was before this variant
     /// existed, instruction for instruction. See [`Synth::render_tracking`].
     RenderTracked,
+    /// `core.admitKey(key, method, role)` where [`Operation::Admission`]'s
+    /// walk answered that the key is refused: the refusal, in `method`'s words
+    /// and naming the key by `role`, of the part of it that is refused. ADR
+    /// 0068's Phase 4c; see [`Synth::describing`].
+    ///
+    /// The refusal-path twin of the admission walk, and a function of its own
+    /// rather than an arm of it for the reason the admission walk decides
+    /// without wording: everything a refusal quotes — the path from the key to
+    /// the part, an index, a map's key as it renders — is text, and text is
+    /// work the path that admits never does. So `refuses<L>` still answers one
+    /// bit and allocates nothing, and `describes<L>` runs only once it has
+    /// answered `true`, at the site, in the caller's frame.
+    Description,
+    /// [`Operation::Description`] of a part of a key rather than of the key,
+    /// with the path down to the part on a trail the caller passes: what a
+    /// wording walk calls where it reaches a layout that holds itself, or one
+    /// nested past [`NESTING`], rather than expanding it in place.
+    /// [`Operation::Tracked`]'s arrangement — `describes<L>` starts the trail,
+    /// and every walk below it that is a call is one of these. It returns
+    /// where the part is admitted, which is how its caller learns so: see
+    /// [`Synth::phrase`].
+    DescribeAt,
 }
 
 impl Operation {
@@ -365,6 +394,8 @@ impl Operation {
             Operation::Rendering => "renders",
             Operation::Tracked => "tracks",
             Operation::RenderTracked => "rendersTracked",
+            Operation::Description => "describes",
+            Operation::DescribeAt => "describesAt",
         }
     }
 
@@ -377,6 +408,7 @@ impl Operation {
             Operation::Rendering => shapes::UNIT,
             Operation::Tracked => shapes::BOOL,
             Operation::RenderTracked => shapes::UNIT,
+            Operation::Description | Operation::DescribeAt => shapes::UNIT,
         }
     }
 
@@ -387,7 +419,11 @@ impl Operation {
     /// refusal, and this walk does not word one — and for the rendering the
     /// value and the buffer its text is appended to, in that order, which is
     /// `std.dynamic.renderInto`'s own, and was `Value.renderInto`'s.
-    fn params(self, layout: LayoutId) -> Vec<LayoutId> {
+    ///
+    /// `trail` is the layout of the trail a wording walk of a part is handed,
+    /// a `Vector<String>` — which only the program's own layout table can
+    /// name — and is read by [`Operation::DescribeAt`] alone.
+    fn params(self, layout: LayoutId, trail: Option<LayoutId>) -> Vec<LayoutId> {
         match self {
             Operation::Equality | Operation::Order => vec![layout, layout],
             Operation::Admission => vec![layout],
@@ -401,6 +437,19 @@ impl Operation {
             Operation::RenderTracked => {
                 vec![layout, shapes::BYTE_BUFFER, shapes::ADDR, shapes::INT]
             }
+            // The key and `core.admitKey`'s two names, which is the site's
+            // call; and for a part, the trail of the path down to it after
+            // them.
+            Operation::Description => vec![layout, shapes::STR, shapes::STR],
+            Operation::DescribeAt => vec![
+                layout,
+                shapes::STR,
+                shapes::STR,
+                trail.expect(
+                    "a wording walk of a part is asked for only after its call site resolved the \
+                     trail it is handed",
+                ),
+            ],
         }
     }
 }
@@ -411,13 +460,11 @@ impl Operation {
 /// ADR 0001 admits a key built only from immutable parts and refuses a
 /// `Float`, whose `NaN` is not equal to itself and so has no total order, and
 /// a `Vector` and everything holding one, because a key's equality must not
-/// change while a collection holds it. Which of the three this answers is
-/// what decides, at the call site, between emitting nothing, a call to a
-/// walk, and the intrinsic.
+/// change while a collection holds it. Which of the two this answers is what
+/// decides, at the call site, between emitting nothing and asking.
 ///
 /// The order of the variants is the order of the lattice: a composite is the
-/// **greatest** of its parts, so one part nobody can settle statically makes
-/// the whole value one the runtime is asked about.
+/// **greatest** of its parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Admission {
     /// No value of this layout is ever refused, so asking is nothing at all.
@@ -427,7 +474,7 @@ pub(crate) enum Admission {
     /// call site and the walk ask one question, in one place, of one table.
     /// **It is load-bearing and it is not an optimisation.** Every key
     /// `covefmt` and `cq` use is a `String` or an `Int`, so this is why
-    /// neither program reaches `Value.admitKey` at a single site.
+    /// neither program asks an admission anything at a single site.
     Always,
     /// Some values of this layout are refused and a walk can tell which.
     ///
@@ -436,99 +483,167 @@ pub(crate) enum Admission {
     /// is that the key is refused, which is the one path that does not
     /// continue.
     Decided,
-    /// The runtime's own walk is what answers.
-    ///
-    /// Two things reach it: a layout that holds itself, whose values nest as
-    /// deep as they like where a walk composed here is finite; and a layout
-    /// nested past [`NESTING`], which is the same question asked about code
-    /// size.
-    ///
-    /// A third reached it until [ADR
-    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    /// Phase 3, and it was the one ADR 0064's Decision 4 named: a
-    /// [`Shape::Boxed`], whose family is a [`LayoutId`] in its own payload word
-    /// 0 and is genuinely unknown until the box is opened. It is
-    /// [`Admission::Decided`] now — `std.dynamic.refusesKey` decides it, in
-    /// Cove over a view of the box — so a composite holding one is decided by
-    /// a walk that calls that function at the box.
-    Dynamic,
+    // `Dynamic` stood here until ADR 0068's Phase 4c: the runtime's own walk
+    // answered a layout that holds itself, and one nested past [`NESTING`].
+    // Both are walks of calls now — see [`Synth::admit`] — and a box, the
+    // third it once held, has been `Decided` since the ADR's Phase 3.
 }
 
-/// How deep a key's layout may nest before the admission stops composing and
-/// asks.
+/// How deep a key's layout may nest before a walk stops expanding a part in
+/// place and calls the walk of the part's layout instead.
 ///
-/// `Body::always_admitted`'s `ADMITTED_DEPTH`, moved here with it. It was
-/// chosen well inside the runtime's bound on how deep a key is walked (128
-/// steps, of which a level of nesting takes at most two), so that a layout
-/// this shallow had no value the runtime's walk would stop for its depth. That
-/// bound is gone since ADR 0068's Phase 3 — the runtime's walk is a loop over
-/// a stack, and words a refusal at any depth — so this is a bound on code size
-/// and nothing else.
+/// `Body::always_admitted`'s `ADMITTED_DEPTH`, moved here with it. It was a
+/// bound on how deep the runtime's walk went before that bound was taken away
+/// in ADR 0068's Phase 3, and it is a bound on code size and nothing else: a
+/// layout nested past it is walked by calls, one function a level, exactly as
+/// a layout that holds itself is.
 const NESTING: usize = 48;
 
-/// Which of the three [`layout`] is.
+/// Which of the two [`layout`] is.
 ///
 /// Over a slice of layouts rather than over a [`shapes::Shapes`] because
 /// [`crate::verify`] asks it too, of a finished [`crate::Program`], and the
 /// rule it checks is this one: a question asked in one place of one table.
+///
+/// A composite is the greatest of the parts it can reach, which is every
+/// layout a walk of it descends into — so the answer is a question about the
+/// set of them rather than about any one route there, and a layout that holds
+/// itself asks it of a finite set. `struct Node { tag: Int, kids: Array<Node>
+/// }` reaches `Node`, `Array<Node>` and `Int`, and every one of them is a key,
+/// so however deep a `Node` nests it is [`Admission::Always`] — which is what
+/// the runtime's walk found about each value of it, one node at a time, until
+/// ADR 0068's Phase 4c asked the layout instead.
 pub(crate) fn admission(layouts: &[Layout], layout: LayoutId) -> Admission {
-    fn walk(layouts: &[Layout], layout: LayoutId, path: &mut Vec<LayoutId>) -> Admission {
-        if layout.index() >= layouts.len() {
-            return Admission::Dynamic;
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![layout];
+    while let Some(at) = pending.pop() {
+        if !seen.insert(at) {
+            continue;
         }
-        if path.contains(&layout) || path.len() >= NESTING {
-            return Admission::Dynamic;
-        }
-        path.push(layout);
-        // A composite is the greatest of its parts, walked one at a time
-        // because each of them may push onto the same path.
-        fn parts(layouts: &[Layout], held: &[LayoutId], path: &mut Vec<LayoutId>) -> Admission {
-            let mut answer = Admission::Always;
-            for one in held {
-                answer = answer.max(walk(layouts, *one, path));
-            }
-            answer
-        }
-        let answer = match &layouts[layout.index()].shape {
+        let Some(described) = layouts.get(at.index()) else {
+            return Admission::Decided;
+        };
+        match &described.shape {
             // The scalars a key may be, and the string.
-            Shape::Word(Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration) | Shape::Str => {
-                Admission::Always
-            }
+            Shape::Word(Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration) | Shape::Str => {}
             // A set's members are keys by construction, so nesting one never
             // fails and nothing inside it is asked about.
-            Shape::Members { .. } => Admission::Always,
+            Shape::Members { .. } => {}
             // An array is its element, and a map is its *value*: a map's keys
             // are keys by construction too, so only its values need asking.
             Shape::Elements {
                 elem,
                 growable: false,
-            } => walk(layouts, *elem, path),
-            Shape::Entries { value, .. } => walk(layouts, *value, path),
+            } => pending.push(*elem),
+            Shape::Entries { value, .. } => pending.push(*value),
             Shape::Struct { fields, .. } => {
-                let held: Vec<LayoutId> = fields.iter().map(|field| field.layout).collect();
-                parts(layouts, &held, path)
+                pending.extend(fields.iter().map(|field| field.layout));
             }
-            Shape::Enum { cases, .. } => {
-                let held: Vec<LayoutId> = cases
+            Shape::Enum { cases, .. } => pending.extend(
+                cases
                     .iter()
-                    .flat_map(|case| case.parts.iter().map(|part| part.layout))
-                    .collect();
-                parts(layouts, &held, path)
-            }
+                    .flat_map(|case| case.parts.iter().map(|part| part.layout)),
+            ),
             // A box is decided by `std.dynamic.refusesKey` over a view of it,
             // so it is a part a walk can answer for like any other: some of
-            // its values are refused, and a call tells which.
-            Shape::Boxed => Admission::Decided,
-            // A `Float`, a `Vector` and the growable run beneath it, a byte
-            // run and a byte buffer, a closure, a `Shared` cell, a host
-            // handle, a task and a task scope. Every one of them is refused,
-            // whatever value it holds, and a walk that met one knows so.
-            _ => Admission::Decided,
-        };
-        path.pop();
-        answer
+            // its values are refused, and a call tells which. And a `Float`, a
+            // `Vector` and the growable run beneath it, a byte run and a byte
+            // buffer, a closure, a `Shared` cell, a host handle, a task and a
+            // task scope: every one of them is refused, whatever value it
+            // holds, and a walk that met one knows so.
+            _ => return Admission::Decided,
+        }
     }
-    walk(layouts, layout, &mut Vec::new())
+    Admission::Always
+}
+
+/// Whether every value of `layout` is refused as a key, whatever it holds: a
+/// part the walks name as the refused part the moment they meet it, and a key
+/// the call site refuses in a literal sentence.
+///
+/// Every family [`admission`] answers [`Admission::Decided`] for by itself —
+/// not through a part — except a box, whose value decides.
+pub(crate) fn refused_whole(shape: &Shape) -> bool {
+    !matches!(
+        shape,
+        Shape::Word(Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration)
+            | Shape::Str
+            | Shape::Members { .. }
+            | Shape::Elements {
+                growable: false,
+                ..
+            }
+            | Shape::Entries { .. }
+            | Shape::Struct { .. }
+            | Shape::Enum { .. }
+            | Shape::Boxed
+    )
+}
+
+/// What a refusal calls a value of `layout`, which [`refused_whole`] answers
+/// `true` for: the words the machine's Rust walk named it by, which
+/// `std.dynamic.refuseKey` names a boxed one by too.
+///
+/// `operand::layout_name` in `cove-runtime`, for the families that reach it.
+/// A task, a task scope and a host handle are named as the machine named them
+/// and not as the oracle does — `a task` where the oracle says `Task` — which
+/// is a disagreement older than this function and one it keeps rather than
+/// settles (ADR 0068's Phase 4c keeps every refusal byte for byte).
+pub(crate) fn refused_word(shape: &Shape) -> &'static str {
+    match shape {
+        Shape::Word(Repr::Float) => "Float",
+        Shape::Word(Repr::Host) => "a host resource",
+        Shape::Word(Repr::Task) => "a task",
+        Shape::Word(Repr::Scope) => "a task scope",
+        Shape::Word(Repr::Addr) => "a place",
+        Shape::Word(Repr::Tag) => "an enum case",
+        // A bare reference word is a function value's location, whose object
+        // is a closure.
+        Shape::Word(_) | Shape::Closure { .. } => "fn",
+        Shape::Vector { .. } | Shape::Elements { .. } => "Vector",
+        Shape::Shared { .. } => "Shared",
+        Shape::Bytes => "<byte run>",
+        Shape::ByteBuffer => "<byte buffer>",
+        _ => "nothing",
+    }
+}
+
+/// The map keys a refusal of `layout` can quote: the key layout of every map
+/// an admission walk of it reaches, whose values it asks about and whose
+/// entries it names by the key as that key renders — `[7]`.
+///
+/// Asked by the call site before it asks for the wording walk, because
+/// rendering a key is a walk of the key's own and the call site is what
+/// resolves the functions one calls ([`reaches_a_scalar`]'s reason).
+pub(super) fn quoted_keys(shapes: &shapes::Shapes, layout: LayoutId) -> Vec<LayoutId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![layout];
+    let mut keys = Vec::new();
+    while let Some(at) = pending.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        match &shapes.layout(at).shape {
+            Shape::Elements {
+                elem,
+                growable: false,
+            } => pending.push(*elem),
+            Shape::Entries { key, value } => {
+                keys.push(*key);
+                pending.push(*value);
+            }
+            Shape::Struct { fields, .. } => {
+                pending.extend(fields.iter().map(|field| field.layout));
+            }
+            Shape::Enum { cases, .. } => pending.extend(
+                cases
+                    .iter()
+                    .flat_map(|case| case.parts.iter().map(|part| part.layout)),
+            ),
+            _ => {}
+        }
+    }
+    keys
 }
 
 /// The three standard-library appends a rendering walk is composed out of.
@@ -569,6 +684,93 @@ pub(super) struct Leaves {
     /// `std.duration.renderInto(value, buffer)`: the text of a `Duration`,
     /// in [`Leaves::float`]'s arrangement.
     pub(super) duration: Option<FunctionId>,
+}
+
+/// The trail a wording walk hands the wording walks it calls: the layout of a
+/// `Vector<String>` and the five `std.dynamic` functions that make, lengthen,
+/// measure, cut and read one. See [`Synth::phrase`].
+///
+/// [`Leaves`]' arrangement: resolving a name is `Plan`'s and `Body`'s, so the
+/// call site that asks for a wording walk that can call another resolves
+/// these first — [`needs_trail`] says whether it can — and the walk reads
+/// them from the [`Pool`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Trail {
+    /// `Vector<String>` in this program's layout table.
+    pub(super) layout: LayoutId,
+    /// `std.dynamic.newTrail() -> Vector<String>`.
+    pub(super) new: FunctionId,
+    /// `std.dynamic.trailPush(trail, piece)`.
+    pub(super) push: FunctionId,
+    /// `std.dynamic.trailLength(trail) -> Int`.
+    pub(super) length: FunctionId,
+    /// `std.dynamic.trailCut(trail, depth)`.
+    pub(super) cut: FunctionId,
+    /// `std.dynamic.trailText(trail) -> String`.
+    pub(super) text: FunctionId,
+}
+
+/// Whether a wording walk of `layout` calls another rather than expanding
+/// everything in place: whether its walk meets a layout it is already inside
+/// — one that holds itself — or nests past [`NESTING`]. [`Synth::phrase`]'s
+/// own question, asked of the layout table, so that the call site resolves a
+/// [`Trail`] exactly where a walk will hand one on.
+pub(super) fn needs_trail(shapes: &shapes::Shapes, layout: LayoutId) -> bool {
+    fn parts(shapes: &shapes::Shapes, layout: LayoutId) -> Vec<LayoutId> {
+        match &shapes.layout(layout).shape {
+            Shape::Struct { fields, .. } => fields.iter().map(|field| field.layout).collect(),
+            Shape::Enum { cases, .. } => cases
+                .iter()
+                .flat_map(|case| case.parts.iter().map(|part| part.layout))
+                .collect(),
+            Shape::Elements {
+                elem,
+                growable: false,
+            } => vec![*elem],
+            Shape::Entries { value, .. } => vec![*value],
+            _ => Vec::new(),
+        }
+    }
+    // The walk descends only into what is not admitted outright, and never
+    // into a part it can settle from the layout; so it is the walkable layouts
+    // it can reach that decide, with the longest chain of them below each.
+    fn deepest(
+        shapes: &shapes::Shapes,
+        layout: LayoutId,
+        on: &mut Vec<LayoutId>,
+        memo: &mut std::collections::HashMap<LayoutId, Option<usize>>,
+    ) -> Option<usize> {
+        if let Some(known) = memo.get(&layout) {
+            return *known;
+        }
+        if on.contains(&layout) {
+            return None;
+        }
+        if admission(shapes.all(), layout) == Admission::Always
+            || !walks(Operation::Admission, &shapes.layout(layout).shape)
+        {
+            return Some(0);
+        }
+        on.push(layout);
+        let mut below = Some(0);
+        for part in parts(shapes, layout) {
+            below = match (below, deepest(shapes, part, on, memo)) {
+                (Some(most), Some(this)) => Some(most.max(this)),
+                _ => None,
+            };
+        }
+        on.pop();
+        let answer = below.map(|depth| depth + 1);
+        memo.insert(layout, answer);
+        answer
+    }
+    deepest(
+        shapes,
+        layout,
+        &mut Vec::new(),
+        &mut std::collections::HashMap::new(),
+    )
+    .is_none_or(|depth| depth > NESTING)
 }
 
 /// How a value of one layout becomes text.
@@ -791,8 +993,8 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
         // again: a set's members are keys by construction, so [`admission`]
         // answers [`Admission::Always`] for one and a call site never gets
         // this far. What is left is the four families whose parts have to be
-        // looked at.
-        Operation::Admission => matches!(
+        // looked at. The wording walk descends where the deciding one does.
+        Operation::Admission | Operation::Description | Operation::DescribeAt => matches!(
             shape,
             Shape::Struct { .. }
                 | Shape::Enum { .. }
@@ -1139,7 +1341,7 @@ pub(super) fn function_for(
 
     // The parameters are laid out from slot 0 in order, each as wide as its
     // layout, and the answer sits after the last of them.
-    let params = op.params(layout);
+    let params = op.params(layout, pool.trail.map(|trail| trail.layout));
     let mut reprs: Vec<Repr> = Vec::new();
     let mut taken: Vec<Slot> = Vec::with_capacity(params.len());
     for param in &params {
@@ -1161,6 +1363,7 @@ pub(super) fn function_for(
         literal: None,
         punctuation: None,
         path: None,
+        words: None,
     };
     if op == Operation::Equality && tracked(synth.pool, layout) {
         synth.start_path(layout, &taken);
@@ -1174,6 +1377,9 @@ pub(super) fn function_for(
         synth.patch(at, end);
     }
     synth.emit(Inst::Return { src: answer });
+    // A wording walk's refusal is written once, after the return, and every
+    // refused part it can name jumps to it: see [`Synth::refuse_with`].
+    synth.worded();
 
     let function = Function {
         module: Arc::from(MODULE),
@@ -1288,6 +1494,57 @@ struct Synth<'p> {
     /// `tracks<L>`; [`Synth::render`] reads it before it asks
     /// [`render_tracked`], and calls `renders<L>` or `rendersTracked<L>`.
     path: Option<Path>,
+    /// What a wording walk words its refusal with: see [`Words`]. `None` in
+    /// every walk but an [`Operation::Description`] or an
+    /// [`Operation::DescribeAt`] one.
+    words: Option<Words>,
+}
+
+/// The slots a wording walk writes its refusal out of, and the jumps to the
+/// refusal it writes once at its end.
+///
+/// A refusal is `` `{method}` cannot use a `{type}` inside `{path}` as a
+/// {role} `` and a rule and a help, and all but the path are known the moment
+/// the walk meets the refused part: the two names are the walk's parameters,
+/// and the type, the rule and the help are the part's layout's. So each part
+/// the walk can name sets three strings and jumps, and the sentence is
+/// assembled at one place rather than at each of them.
+#[derive(Clone, Debug)]
+struct Words {
+    /// `core.admitKey`'s method, a parameter.
+    method: Slot,
+    /// And its role, a parameter.
+    role: Slot,
+    /// The byte buffer the path to the refused part is spelled into: made by
+    /// `describes<L>` before it walks, and by `describesAt<L>` at the one part
+    /// it names.
+    path: Slot,
+    /// The trail a `describesAt<L>` was handed — the path down to its value —
+    /// and `None` in `describes<L>`, whose value is the key. See
+    /// [`Synth::phrase`].
+    trail: Option<Slot>,
+    /// What stands between the method and the path, type included:
+    /// `` ` cannot use a `Float` inside ` ``.
+    lead: Slot,
+    /// The rule the part is refused under.
+    rule: Slot,
+    /// And the help.
+    help: Slot,
+    /// Every jump to the refusal, patched once it is written.
+    refusals: Vec<Pc>,
+}
+
+/// One step of the path a wording walk names a refused part by, carried down
+/// the walk and written only at the part: see [`Synth::describing`].
+#[derive(Clone, Debug)]
+enum Piece {
+    /// Text the layout says: a struct's name at the root, `.field`, `(0)`.
+    Text(String),
+    /// An element of an array, `[i]`, by the slot its index is in.
+    Index(Slot),
+    /// A value of a map, `[{key}]`, by the layout of the map's key and the
+    /// slot the entry — key first — is in.
+    Key(LayoutId, Slot),
 }
 
 /// The two words a tracked walk forwards to the tracked walks it calls.
@@ -1379,6 +1636,8 @@ impl Synth<'_> {
             Operation::Rendering => self.rendering(layout, taken[0], taken[1]),
             Operation::Tracked => self.tracking(layout, taken),
             Operation::RenderTracked => self.render_tracking(layout, taken),
+            Operation::Description => self.describing(layout, taken, None),
+            Operation::DescribeAt => self.describing(layout, taken, Some(taken[3])),
         }
     }
 
@@ -2200,8 +2459,8 @@ impl Synth<'_> {
 
     // ---- `core.admitKey(key, method, role)` -----------------------------
 
-    /// The whole of an admission walk: whether this value is one the runtime
-    /// is to be asked to refuse.
+    /// The whole of an admission walk: whether this value is one the language
+    /// refuses as a key.
     ///
     /// Three things make this a different shape of walk from the other two,
     /// and every one of them follows from the call site having asked for a
@@ -2219,14 +2478,14 @@ impl Synth<'_> {
     /// other two reach a nested layout through [`function_for`], which is
     /// what makes `equals<Array<Row>>` call `equals<Row>`; here the nested
     /// part is written into this same function, because a part that settles
-    /// is *nothing* and a call around nothing is not a saving. [`admission`]
-    /// is what makes the expansion finite: a layout that holds itself, or one
-    /// nested past [`NESTING`], is [`Admission::Dynamic`] and never reaches a
-    /// walk at all, so what is expanded here is a finite tree of inline
-    /// containment.
+    /// is *nothing* and a call around nothing is not a saving. What keeps the
+    /// expansion finite is [`Synth::admit`]'s one exception: a layout already
+    /// being expanded — one that holds itself — or one nested past
+    /// [`NESTING`] is a call of its own walk instead.
     ///
     /// **It never raises**, and the `false` it falls through with is the
-    /// whole of its good path. See [`Synth::refuse`].
+    /// whole of its good path. The refusal is [`Operation::Description`]'s,
+    /// which the call site runs where this answers `true`.
     fn admission(&mut self, layout: LayoutId, at: Slot) {
         let mut path = Vec::new();
         self.admit(layout, at, &mut path);
@@ -2238,25 +2497,21 @@ impl Synth<'_> {
     /// One value of `layout`, at `at`: nothing where every value of it is a
     /// key, and otherwise whatever reading decides.
     fn admit(&mut self, layout: LayoutId, at: Slot, path: &mut Vec<LayoutId>) {
-        match admission(self.pool.shapes.all(), layout) {
+        if admission(self.pool.shapes.all(), layout) == Admission::Always {
             // Nothing at all. This is the arm that makes the walk small:
             // every scalar, every string, every set, and every composite
             // built only out of those.
-            Admission::Always => return,
-            // Unreachable from a walk, because [`admission`] is the greatest
-            // of a composite's parts and a call site only makes a function
-            // for a layout that is not this — a box is not this either since
-            // ADR 0068's Phase 3, and [`Synth::boxed`] decides it. Written out
-            // because "should never" is not "cannot", and asking is always
-            // correct.
-            Admission::Dynamic => {
-                self.refuse();
-                return;
-            }
-            Admission::Decided => {}
+            return;
         }
         if path.contains(&layout) || path.len() >= NESTING {
-            self.refuse();
+            // A layout that holds itself is a walk of calls: `refuses<Node>`
+            // calls `refuses<Node>` for each `Node` a `Node` holds. What bounds
+            // the recursion is the machine's stack segment, as it bounds
+            // `equals<Node>`'s — the language sets no bound of its own (issue
+            // #480's decision B), and a key deeper than the stack is an error
+            // the run reports. A layout nested past [`NESTING`] is the same
+            // call for the sake of the code's size.
+            self.called(layout, at);
             return;
         }
         let shape = self.pool.shapes.layout(layout).shape.clone();
@@ -2304,9 +2559,9 @@ impl Synth<'_> {
     /// a bare [`Inst::Jump`] under the rest.
     ///
     /// The default is [`Synth::refuse`] and not a [`Inst::Trap`], for the
-    /// reason every other arm's is: the runtime's own walk answers a
-    /// discriminant no case names with a sentence of its own, and handing the
-    /// question over is what keeps that sentence the one a reader sees. The
+    /// reason every other arm's is: this walk decides and never raises, and
+    /// the wording walk the call site runs next meets the same discriminant at
+    /// the same `switch` and refuses it in [`Synth::wrong_case`]'s words. The
     /// machine bounds-checks what it reads out of an object rather than
     /// taking the lowering's word for it, which is the same reason a `match`
     /// the checker proved exhaustive still carries a default.
@@ -2367,6 +2622,40 @@ impl Synth<'_> {
         let callee = self.pool.dynamic_refuses_key.expect(
             "an admission walk that reaches a box is asked for only after its call site \
              resolved `std.dynamic.refusesKey`",
+        );
+        let args = self.pool.args.intern(vec![Arg { slot: at, layout }]);
+        self.emit(Inst::Call {
+            dst: self.answer,
+            callee,
+            args,
+        });
+        let admitted = self.alloc(shapes::BOOL);
+        self.emit(Inst::Not {
+            dst: admitted,
+            a: self.answer,
+        });
+        let at = self.emit(Inst::BranchFalse {
+            cond: admitted,
+            to: PENDING,
+        });
+        self.leaves.push(at);
+    }
+
+    /// A part of `layout` at `at` decided by a call of `layout`'s own walk,
+    /// `refuses<layout>`, rather than expanded in place: [`Synth::boxed`]'s
+    /// shape, over a walk this module composes.
+    ///
+    /// [`Synth::admit`] asks for it where the layout is already being
+    /// expanded — it holds itself — or is nested past [`NESTING`].
+    /// [`function_for`] records a function's number before it walks the body,
+    /// so a walk that calls itself finds the number rather than starting again.
+    fn called(&mut self, layout: LayoutId, at: Slot) {
+        let callee = function_for(
+            Operation::Admission,
+            layout,
+            self.pool,
+            self.decls,
+            self.span,
         );
         let args = self.pool.args.intern(vec![Arg { slot: at, layout }]);
         self.emit(Inst::Call {
@@ -2467,39 +2756,559 @@ impl Synth<'_> {
         self.patch(each.done, end);
     }
 
-    /// This value is one the runtime is to be asked about: `true`, and leave.
+    /// This value is refused: `true`, and leave.
     ///
     /// **The admission walk never raises, and this is why.** Its refusal is
     /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``
-    /// with a `rule:` and a `help:` beside it. Three of those four holes are
-    /// something the lowering knows outright — the two names are literals at
-    /// all nine standard-library call sites, the type is the layout's, and
-    /// the rule and the help are one of two constant pairs. The path is not:
-    /// it is composed of field and case names a *synthesized* walk knows
-    /// statically only until it reaches through a run or a map, where it
-    /// quotes an index or a rendered key computed at run time — issue #461's
-    /// kind of hole, and not one [`Inst::Trap`]'s three slots close by
-    /// themselves.
+    /// with a `rule:` and a `help:` beside it, and the path quotes an index or
+    /// a map's key as it renders wherever the walk reaches through a run or a
+    /// map: text, which the path that admits — every path a program that works
+    /// takes — has no business building. So this walk answers the bit, and the
+    /// call site runs [`Operation::Description`]'s walk where it is `true`,
+    /// **at the call site, in the caller's frame, over the caller's key**, and
+    /// that walk words the refusal.
     ///
-    /// So the walk answers the bit and `super::core` runs the intrinsic,
-    /// **at the call site, in the caller's frame, over the caller's key**.
-    /// That is not tidiness either: the sentence names the path from the key
-    /// to the part that is wrong, the blame chain is read off the live frames
-    /// (ADR 0058), and a fallback raised from inside a walk would have added
-    /// a frame of its own and a second `in the standard library` label
-    /// pointing at the line the first one already pointed at. Decision 8 asks
-    /// that the diagnostic not change, and this is what that costs.
-    ///
-    /// Every point this is reached from is one the runtime really does
-    /// refuse — a `Float`, a `Vector`, a handle, a discriminant no case names
-    /// — so the intrinsic that follows the `true` raises rather than
-    /// answering, and the extra walk it does is on the one path that ends the
-    /// run. The `Admission::Dynamic` arms above are the exception and they
-    /// are unreachable from a walk, because a composite holding one is
-    /// `Dynamic` itself and never gets a walk.
+    /// Every point this is reached from is one the language really does
+    /// refuse — a `Float`, a `Vector`, a handle, a discriminant no case names —
+    /// so the wording walk that follows the `true` raises rather than
+    /// answering, and the walk it does again is on the one path that ends the
+    /// run.
     fn refuse(&mut self) {
         self.constant(true);
         self.leave();
+    }
+
+    // ---- the refusal `core.admitKey` words ---------------------------------
+
+    /// The whole of a wording walk: the refusal of a key an admission walk of
+    /// `layout` refused, in the words of the parameters `taken[1]` and
+    /// `taken[2]` — `core.admitKey`'s method and role. ADR 0068's Phase 4c.
+    ///
+    /// **It walks the parts [`Synth::admission`] walks, in its order, and
+    /// names the first it meets that is refused.** That is the order the
+    /// oracle's `MapKey::convert` visits in — depth first, a struct's fields
+    /// and a case's parts in declaration order, an array's elements and a
+    /// map's values in order — and a part every value of which is a key is not
+    /// looked at. It is expanded in place for the admission walk's reason, and
+    /// it calls a walk exactly where that walk calls one: at a layout that
+    /// holds itself or is nested past [`NESTING`], which is
+    /// [`Operation::DescribeAt`], and at a box, which is
+    /// `std.dynamic.refuseKey`, Cove over a view of it.
+    ///
+    /// **The path is written only at the part it names.** Every piece of it is
+    /// known where the walk is — a struct's name at the root, a field's name, a
+    /// case's part, the slot an index or a map's entry is in — so the walk
+    /// carries the pieces as [`Piece`]s, and a refused part spells the whole
+    /// of them into a buffer and jumps to the one sentence [`Synth::worded`]
+    /// writes after the function's return. An admitted part costs no text.
+    ///
+    /// A walk it calls cannot see its caller's pieces, so at a call they are
+    /// written onto a trail the callee is handed (see [`Synth::phrase`]), and
+    /// `trail` is that parameter of a [`Operation::DescribeAt`] walk: the path
+    /// down to its value, which its refused part's path begins with. A
+    /// [`Operation::Description`] walk is the one whose value is the key: a
+    /// struct and an enum there begin the path with their own name,
+    /// `Reading.weight`, `Mark.Weight(0)`, and every other family with nothing,
+    /// `[0]`, `[7]`.
+    ///
+    /// **It is blamed on the site.** The walk is support code
+    /// ([`Function::is_support`]), so the refusal its [`Inst::Trap`] raises
+    /// is blamed on the `core.admitKey` line that called it, with that line's
+    /// `in the standard library` block — where the runtime's `Value.admitKey`
+    /// was blamed until this walk replaced it.
+    fn describing(&mut self, layout: LayoutId, taken: &[Slot], trail: Option<Slot>) {
+        self.emit(Inst::Unit { dst: self.answer });
+        let root = trail.is_none();
+        // The buffer a refused part spells its path into. A walk of the key
+        // makes it now; a walk of a part makes it only at the part it names,
+        // which most calls of one — a part that is admitted — never reach.
+        let path = self.alloc(shapes::BYTE_BUFFER);
+        if root {
+            self.bytes(path, 32);
+        }
+        let lead = self.alloc(shapes::STR);
+        let rule = self.alloc(shapes::STR);
+        let help = self.alloc(shapes::STR);
+        self.words = Some(Words {
+            method: taken[1],
+            role: taken[2],
+            path,
+            trail,
+            lead,
+            rule,
+            help,
+            refusals: Vec::new(),
+        });
+        let mut pieces = Vec::new();
+        let mut nest = Vec::new();
+        self.describe(layout, taken[0], root, &mut pieces, &mut nest);
+        // Every part was admitted. That is the answer a walk of a part gives
+        // its caller, which goes on to the next; a walk of the key its
+        // admission walk refused cannot get here, and returns rather than
+        // stopping the run with a sentence about nothing.
+    }
+
+    /// A new byte buffer in `slot`, with room for `room` bytes.
+    fn bytes(&mut self, slot: Slot, room: i64) {
+        let capacity = self.alloc(shapes::INT);
+        self.emit(Inst::Int {
+            dst: capacity,
+            value: room,
+        });
+        self.emit(Inst::GrowableAlloc {
+            dst: slot,
+            capacity,
+            storage: Storage::PackedBytes,
+        });
+    }
+
+    /// One value of `layout` at `at`, whose parts are walked: a struct, an
+    /// enum, an array or a map. `pieces` is the path to it, and `root` whether
+    /// it is the key itself.
+    fn describe(
+        &mut self,
+        layout: LayoutId,
+        at: Slot,
+        root: bool,
+        pieces: &mut Vec<Piece>,
+        nest: &mut Vec<LayoutId>,
+    ) {
+        let described = self.pool.shapes.layout(layout);
+        let name = described.name.clone();
+        let shape = described.shape.clone();
+        nest.push(layout);
+        match shape {
+            Shape::Struct { fields, .. } => {
+                if root {
+                    pieces.push(Piece::Text(short(declared(&name)).to_string()));
+                }
+                for field in &fields {
+                    let step = Piece::Text(format!(".{}", field.name));
+                    self.phrase(field.layout, at + field.at as Slot, step, pieces, nest);
+                }
+                if root {
+                    pieces.pop();
+                }
+            }
+            Shape::Enum { cases, .. } => self.phrases(&cases, &name, at, root, pieces, nest),
+            Shape::Elements {
+                elem,
+                growable: false,
+            } => {
+                let each = self.over(at);
+                let held = self.alloc(elem);
+                self.emit(Inst::LoadElem {
+                    dst: held,
+                    obj: at,
+                    index: each.index,
+                    layout: elem,
+                });
+                self.phrase(elem, held, Piece::Index(each.index), pieces, nest);
+                self.around(each);
+            }
+            Shape::Entries { key, value } => {
+                let entry = self.pool.shapes.entry_of(key, value);
+                let keys = self.pool.shapes.words(key).len() as Slot;
+                let each = self.over(at);
+                let held = self.alloc(entry);
+                self.emit(Inst::LoadElem {
+                    dst: held,
+                    obj: at,
+                    index: each.index,
+                    layout: entry,
+                });
+                self.phrase(value, held + keys, Piece::Key(key, held), pieces, nest);
+                self.around(each);
+            }
+            // [`walks`] is what sends a layout here, and it sends only these.
+            _ => self.trap("this value's refusal has no path to name"),
+        }
+        nest.pop();
+    }
+
+    /// The parts of whichever case this value is in: [`Synth::cases`]' one
+    /// `switch`, and at the root the enum's name and the case's before the
+    /// part, `Mark.Weight(0)`.
+    ///
+    /// The default is [`Synth::wrong_case`]'s trap, which is where the
+    /// admission walk's default sends a discriminant no case names.
+    fn phrases(
+        &mut self,
+        cases: &[Case],
+        name: &str,
+        at: Slot,
+        root: bool,
+        pieces: &mut Vec<Piece>,
+        nest: &mut Vec<LayoutId>,
+    ) {
+        let switch = self.emit(Inst::Switch {
+            on: at,
+            table: TableId(0),
+        });
+        let mut targets = Vec::with_capacity(cases.len());
+        let mut ends = Vec::with_capacity(cases.len());
+        for case in cases {
+            targets.push(self.here());
+            if root {
+                pieces.push(Piece::Text(format!(
+                    "{}.{}",
+                    short(declared(name)),
+                    case.name
+                )));
+            }
+            for (nth, part) in case.parts.iter().enumerate() {
+                // A part's offset is within the payload region, which begins
+                // after the discriminant.
+                let step = Piece::Text(format!("({nth})"));
+                self.phrase(part.layout, at + 1 + part.at as Slot, step, pieces, nest);
+            }
+            if root {
+                pieces.pop();
+            }
+            ends.push(self.emit(Inst::Jump { to: PENDING }));
+        }
+        let default = self.here();
+        self.wrong_case(name);
+        let table = self.pool.table(Table { targets, default });
+        let Inst::Switch { table: held, .. } = &mut self.code[switch as usize] else {
+            unreachable!("the switch was emitted a few lines above");
+        };
+        *held = table;
+        let join = self.here();
+        for end in ends {
+            self.patch(end, join);
+        }
+    }
+
+    /// One part of a value, of `layout` at `at`, reached by `step`: nothing
+    /// where every value of it is a key; the refusal where every value of it
+    /// is refused; and otherwise what the admission walk did there.
+    ///
+    /// - **In place**, where the admission walk expanded the part in place.
+    /// - **A call of `describesAt<L>`**, where it called `refuses<L>`: a layout
+    ///   the walk is already inside, or one nested past [`NESTING`]. The
+    ///   pieces down to the part are spelled into one `String` and pushed onto
+    ///   the trail — made here if this is the key's walk — the call is made,
+    ///   and the trail is cut back when it comes back, because a call that
+    ///   comes back found nothing refused. **The part is not decided first**:
+    ///   the call is the decision and the description in one visit, so a key
+    ///   whose layout holds itself is walked once however deep the refused part
+    ///   is, where asking `refuses<L>` of every part on the way down would walk
+    ///   what is below each of them again.
+    /// - **A call of `std.dynamic.refuseKey`**, at a box, under the branch on
+    ///   what `std.dynamic.refusesKey` decided of it: Cove words it, over a
+    ///   view of the box, handed the path down to the box as a `String`.
+    fn phrase(
+        &mut self,
+        layout: LayoutId,
+        at: Slot,
+        step: Piece,
+        pieces: &mut Vec<Piece>,
+        nest: &mut Vec<LayoutId>,
+    ) {
+        if admission(self.pool.shapes.all(), layout) == Admission::Always {
+            return;
+        }
+        let shape = self.pool.shapes.layout(layout).shape.clone();
+        pieces.push(step);
+        if refused_whole(&shape) {
+            self.spell_path(pieces);
+            self.refuse_with(&shape);
+        } else if matches!(shape, Shape::Boxed) {
+            let decide = self.pool.dynamic_refuses_key.expect(
+                "a wording walk that reaches a box is asked for only after its call site resolved \
+                 `std.dynamic.refusesKey`",
+            );
+            let skip = self.asked(decide, layout, at);
+            let anchor = self.spelled(pieces);
+            self.erased(layout, at, anchor);
+            self.leave();
+            let past = self.here();
+            self.patch(skip, past);
+        } else if nest.contains(&layout) || nest.len() >= NESTING {
+            self.hand_on(layout, at, pieces);
+        } else {
+            self.describe(layout, at, false, pieces, nest);
+        }
+        pieces.pop();
+    }
+
+    /// A part of `layout` at `at` handed to `describesAt<layout>` with the
+    /// trail down to it: see [`Synth::phrase`].
+    fn hand_on(&mut self, layout: LayoutId, at: Slot, pieces: &[Piece]) {
+        let trail = self.trail();
+        let words = self.words.clone().expect("a wording walk has its words");
+        let depth = self.alloc(shapes::INT);
+        let held = match words.trail {
+            // A walk of a part lengthens the trail it was handed, and cuts it
+            // back to this length after the call.
+            Some(handed) => {
+                self.called_with(trail.length, depth, &[(handed, trail.layout)]);
+                handed
+            }
+            // The key's walk starts one, which nothing after the call reads.
+            None => {
+                let made = self.alloc(trail.layout);
+                self.called_with(trail.new, made, &[]);
+                made
+            }
+        };
+        let piece = self.alloc(shapes::BYTE_BUFFER);
+        self.bytes(piece, 16);
+        self.spell_into(piece, pieces);
+        let text = self.alloc(shapes::STR);
+        self.finished(text, piece);
+        let unit = self.answer;
+        self.called_with(
+            trail.push,
+            unit,
+            &[(held, trail.layout), (text, shapes::STR)],
+        );
+        let callee = function_for(
+            Operation::DescribeAt,
+            layout,
+            self.pool,
+            self.decls,
+            self.span,
+        );
+        self.called_with(
+            callee,
+            unit,
+            &[
+                (at, layout),
+                (words.method, shapes::STR),
+                (words.role, shapes::STR),
+                (held, trail.layout),
+            ],
+        );
+        if words.trail.is_some() {
+            self.called_with(
+                trail.cut,
+                unit,
+                &[(held, trail.layout), (depth, shapes::INT)],
+            );
+        }
+    }
+
+    /// One call of `callee` over `args`, answering into `dst`.
+    fn called_with(&mut self, callee: FunctionId, dst: Slot, args: &[(Slot, LayoutId)]) {
+        let args = self.pool.args.intern(
+            args.iter()
+                .map(|(slot, layout)| Arg {
+                    slot: *slot,
+                    layout: *layout,
+                })
+                .collect(),
+        );
+        self.emit(Inst::Call { dst, callee, args });
+    }
+
+    /// The `String` the bytes of `buffer` are, into `dst`.
+    fn finished(&mut self, dst: Slot, buffer: Slot) {
+        self.emit(Inst::RunFinish {
+            dst,
+            owner: buffer,
+            target: shapes::STR,
+            validation: Validation::Utf8,
+            storage: Storage::PackedBytes,
+        });
+    }
+
+    /// The [`Trail`] functions, which the call site resolved.
+    fn trail(&self) -> Trail {
+        self.pool.trail.expect(
+            "a wording walk that calls another is asked for only after its call site resolved \
+             the trail it hands on",
+        )
+    }
+
+    /// A call of the deciding walk `decide` over the part at `at`, and the
+    /// branch past what follows it where the part is admitted: that branch's
+    /// program counter, to be patched.
+    fn asked(&mut self, decide: FunctionId, layout: LayoutId, at: Slot) -> Pc {
+        let refused = self.alloc(shapes::BOOL);
+        let args = self.pool.args.intern(vec![Arg { slot: at, layout }]);
+        self.emit(Inst::Call {
+            dst: refused,
+            callee: decide,
+            args,
+        });
+        self.emit(Inst::BranchFalse {
+            cond: refused,
+            to: PENDING,
+        })
+    }
+
+    /// Spells the whole path to the part `pieces` ends at into the walk's
+    /// buffer: the trail the walk was handed first, if it was handed one —
+    /// whose buffer is made here, at the one part it names — and then
+    /// `pieces`.
+    fn spell_path(&mut self, pieces: &[Piece]) {
+        let words = self.words.clone().expect("a wording walk has its words");
+        if let Some(handed) = words.trail {
+            self.bytes(words.path, 32);
+            let trail = self.trail();
+            let before = self.alloc(shapes::STR);
+            self.called_with(trail.text, before, &[(handed, trail.layout)]);
+            let text = self.leaves().text;
+            self.append(text, words.path, before, shapes::STR);
+        }
+        self.spell_into(words.path, pieces);
+    }
+
+    /// The whole path to the part `pieces` ends at, as a `String`: what
+    /// [`Synth::spell_path`] spells, finished.
+    fn spelled(&mut self, pieces: &[Piece]) -> Slot {
+        let words = self.words.clone().expect("a wording walk has its words");
+        self.spell_path(pieces);
+        let anchor = self.alloc(shapes::STR);
+        self.finished(anchor, words.path);
+        anchor
+    }
+
+    /// Appends the path `pieces` spell to `buffer`: the static text of them
+    /// one literal at a time between the ones that are read at run time — an
+    /// index, through `std.int.renderInto`, and a map's key, as it renders.
+    fn spell_into(&mut self, buffer: Slot, pieces: &[Piece]) {
+        let mut text = String::new();
+        for piece in pieces {
+            match piece {
+                Piece::Text(more) => text.push_str(more),
+                Piece::Index(index) => {
+                    text.push('[');
+                    self.literal(buffer, &text);
+                    text.clear();
+                    let digits = self.leaves().digits;
+                    self.number(digits, *index, shapes::INT, buffer);
+                    text.push(']');
+                }
+                Piece::Key(key, entry) => {
+                    text.push('[');
+                    self.literal(buffer, &text);
+                    text.clear();
+                    self.render(*key, *entry, buffer);
+                    text.push(']');
+                }
+            }
+        }
+        self.literal(buffer, &text);
+    }
+
+    /// The refusal of a part every value of which is refused, of `shape`:
+    /// what it is called, and the rule and the help, set for
+    /// [`Synth::worded`]'s sentence, and the jump to it.
+    ///
+    /// A `Float` is refused under a rule of its own — `NaN` is not equal to
+    /// itself, which breaks the total order every key needs — and everything
+    /// else because its equality could change while a collection holds it;
+    /// the two are [`crate::dynamic`]'s, and the oracle's and
+    /// `std.dynamic.refuseKey`'s word for word.
+    fn refuse_with(&mut self, shape: &Shape) {
+        let words = self.words.clone().expect("a wording walk has its words");
+        let word = refused_word(shape);
+        let lead = self
+            .pool
+            .string(&format!("` cannot use a `{word}` inside `"));
+        let (rule, help) = crate::dynamic::refused_key(word);
+        let rule = self.pool.string(rule);
+        let help = self.pool.string(help);
+        self.emit(Inst::Str {
+            dst: words.lead,
+            text: lead,
+        });
+        self.emit(Inst::Str {
+            dst: words.rule,
+            text: rule,
+        });
+        self.emit(Inst::Str {
+            dst: words.help,
+            text: help,
+        });
+        let jump = self.emit(Inst::Jump { to: PENDING });
+        if let Some(words) = self.words.as_mut() {
+            words.refusals.push(jump);
+        }
+    }
+
+    /// A boxed part, at `at`, that `std.dynamic.refusesKey` refused:
+    /// `std.dynamic.refuseKey` handed the box, the two names and `anchor`, the
+    /// path down to the box, which it continues through a view of the box and
+    /// words. It never answers.
+    ///
+    /// Its last operand is the path of vectors a map key it quotes renders
+    /// under, which is empty: a key holds no vector. It is made as an
+    /// interpolation of a box makes one (see `Body::render_erased`).
+    fn erased(&mut self, layout: LayoutId, at: Slot, anchor: Slot) {
+        let callee = self.pool.dynamic_refuse_key.expect(
+            "a wording walk that reaches a box is asked for only after its call site resolved \
+             `std.dynamic.refuseKey`",
+        );
+        let words = self.words.clone().expect("a wording walk has its words");
+        let quoted = self.alloc(shapes::RENDER_PATH);
+        self.emit(Inst::AddrOfSlot {
+            dst: quoted,
+            slot: quoted,
+        });
+        self.emit(Inst::Int {
+            dst: quoted + crate::dynamic::PATH_DEPTH as Slot,
+            value: 0,
+        });
+        let unit = self.answer;
+        self.called_with(
+            callee,
+            unit,
+            &[
+                (at, layout),
+                (words.method, shapes::STR),
+                (words.role, shapes::STR),
+                (anchor, shapes::STR),
+                (quoted, shapes::RENDER_PATH),
+            ],
+        );
+    }
+
+    /// The sentence a wording walk's refused parts jump to, written once after
+    /// the function's return, and the [`Inst::Trap`] that raises it.
+    ///
+    /// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``:
+    /// the path the buffer holds, finished into a `String`, and the rest
+    /// appended around it into a buffer of its own — the method and the role
+    /// as the site passed them, and the type in the lead the part set. The
+    /// path is never empty here, because the part a walk names is always
+    /// inside the value it was handed; a key refused whole is the call site's
+    /// literal sentence, and never a walk.
+    ///
+    /// Nothing for a walk that is not a wording walk, or one with no part it
+    /// can name.
+    fn worded(&mut self) {
+        let Some(words) = self.words.take() else {
+            return;
+        };
+        if words.refusals.is_empty() {
+            return;
+        }
+        let here = self.here();
+        for at in &words.refusals {
+            self.patch(*at, here);
+        }
+        let path = self.alloc(shapes::STR);
+        self.finished(path, words.path);
+        let message = self.alloc(shapes::BYTE_BUFFER);
+        self.bytes(message, 64);
+        let text = self.leaves().text;
+        self.literal(message, "`");
+        self.append(text, message, words.method, shapes::STR);
+        self.append(text, message, words.lead, shapes::STR);
+        self.append(text, message, path, shapes::STR);
+        self.literal(message, "` as a ");
+        self.append(text, message, words.role, shapes::STR);
+        let sentence = self.alloc(shapes::STR);
+        self.finished(sentence, message);
+        self.emit(Inst::Trap {
+            message: sentence,
+            rule: words.rule,
+            help: words.help,
+        });
     }
 
     // ---- a value that contains itself ------------------------------------

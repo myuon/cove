@@ -109,17 +109,6 @@ impl<'a> Frame<'a> {
     pub(super) fn word(self, machine: &Machine, at: usize) -> u64 {
         machine.operand_word(self.base, self.args[at].slot)
     }
-
-    /// Operand `at` as the value location it is: its layout, and its words
-    /// borrowed out of the frame.
-    #[inline]
-    pub(super) fn operand<'m>(self, machine: &'m Machine, at: usize) -> Operand<'m> {
-        let arg = self.args[at];
-        Operand {
-            layout: arg.layout,
-            words: machine.operand_words(self.base, arg.slot, arg.layout),
-        }
-    }
 }
 
 /// Where an intrinsic's answer goes: slot `slot` of the frame based at
@@ -149,6 +138,11 @@ impl Dest {
     }
 
     /// Writes a one-word answer.
+    ///
+    /// Only this crate's tests write one: `Value.admitKey`'s zero word was the
+    /// last arm's until ADR 0068's Phase 4c, and every intrinsic left answers
+    /// a `Result` or nothing it writes.
+    #[cfg(test)]
     #[inline]
     pub(super) fn word(self, machine: &mut Machine, word: u64) {
         machine.answer_word(self.base, self.slot, word);
@@ -223,94 +217,12 @@ pub(super) fn text(machine: &Machine, frame: Frame<'_>, at: usize) -> Result<Str
 // against a caller that might arrive; `Machine`'s scratch pool went with it.
 // [`text`] is what the arms that are left use, as they always did.
 
-/// What the language calls the value in `word`, read as `repr`.
-///
-/// [`crate::value::Value::type_name`] is the oracle's copy of this, and the
-/// two are written twice for the reason [`super`]'s rendering is: one reads a
-/// materialised tree and one reads the heap, and neither can be had from the
-/// other without building what the other exists to avoid.
-///
-/// A family is named by its *shape* rather than by its layout's name wherever
-/// the shape decides it — an `Array` is an `Array` whatever the lowering
-/// called the layout — and by the layout's name for a struct or an enum,
-/// where the name is the declaration's and is the whole of what the reader
-/// wants.
-pub(super) fn type_name(machine: &Machine, repr: Repr, word: u64) -> String {
-    match repr {
-        Repr::Unit => "Unit".to_string(),
-        Repr::Bool => "Bool".to_string(),
-        Repr::Int => "Int".to_string(),
-        Repr::Float => "Float".to_string(),
-        Repr::Duration => "Duration".to_string(),
-        Repr::Ref => object_name(machine, word, 0),
-        // Neither is a value, so neither has a type the language names. A
-        // message that reached one is reporting on this run's bookkeeping,
-        // which is a lowering bug, and saying so is more use than a type.
-        Repr::Addr => "a place".to_string(),
-        Repr::Host => "a host resource".to_string(),
-        Repr::Task => "a task".to_string(),
-        Repr::Scope => "a task scope".to_string(),
-        Repr::Tag => "an enum case".to_string(),
-    }
-}
-
-/// What the object at `addr` is called.
-fn object_name(machine: &Machine, addr: u64, depth: usize) -> String {
-    if addr == 0 {
-        return "nothing".to_string();
-    }
-    if depth >= super::MAX_DEPTH {
-        return "a value that nests too deeply to name".to_string();
-    }
-    let id = machine.object_layout(addr);
-    let layout = machine.program().layout(id);
-    match &layout.shape {
-        // Erasure is looked through, because `Value::type_name` is asked of
-        // an `erased()` value everywhere a comparison or a refusal asks it.
-        // Payload word 0 is the layout of what the box holds, so the name is
-        // that layout's — one lookup rather than a tag and a guess.
-        Shape::Boxed => {
-            let held = LayoutId(machine.payload(addr, 0) as u32);
-            match machine.program().layouts.get(held.index()) {
-                Some(_) => layout_name(machine, held, machine.payload(addr, 1), depth + 1),
-                None => "a value of no known type".to_string(),
-            }
-        }
-        _ => layout_name(machine, id, addr, depth),
-    }
-}
-
-/// What a value location of `layout` is called, given its first word.
-///
-/// A family is named by its *shape* wherever the shape decides it — an
-/// `Array` is an `Array` whatever the lowering called the layout — and by the
-/// layout's name for a struct or an enum, where the name is the
-/// declaration's and is the whole of what the reader wants.
-pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth: usize) -> String {
-    let described = machine.program().layout(layout);
-    match &described.shape {
-        Shape::Word(repr) => type_name(machine, *repr, first),
-        Shape::Str => "String".to_string(),
-        // Reached only by a debugger or an internal error message: no source
-        // expression ever holds one of these, so there is no name a Cove
-        // program would recognise. See `Shape::Bytes`.
-        Shape::Bytes => "<byte run>".to_string(),
-        // Likewise: an owner is named by the standard-library wrapper a program
-        // declares over it, and until there is one there is no name to give.
-        Shape::ByteBuffer => "<byte buffer>".to_string(),
-        Shape::Struct { .. } | Shape::Enum { .. } => described.name.to_string(),
-        Shape::Elements { growable, .. } => if *growable { "Vector" } else { "Array" }.to_string(),
-        Shape::Vector { .. } => "Vector".to_string(),
-        Shape::Members { .. } => "Set".to_string(),
-        Shape::Entries { .. } => "Map".to_string(),
-        Shape::Closure { .. } => "fn".to_string(),
-        // `Value::type_name`'s word for one. A cell is a handle, and what it
-        // holds is reachable only under a `lock`, so the name is the handle's.
-        Shape::Shared { .. } => "Shared".to_string(),
-        Shape::Boxed => object_name(machine, first, depth + 1),
-        Shape::Free => "nothing".to_string(),
-    }
-}
+// `type_name`, `object_name` and `layout_name` stood here: what the machine
+// called a value a key refusal named — `Float`, `Vector`, `Shared`, `fn`,
+// `a task` — read off a word and a layout. Their one caller was
+// `key::admit_key`'s wording, and ADR 0068's Phase 4c moved it into
+// `std.dynamic.keyWord` for a box and `cove_ir::lower::synth::refused_word`
+// for a known layout, which say those words exactly.
 
 /// A reference slot that was read before anything was written to it.
 ///

@@ -1844,8 +1844,11 @@ impl Memory {
     /// The `words` words at `slot` of the frame based at `base`, borrowed.
     ///
     /// [`Memory::slot`] for a value location wider than a word: what an
-    /// intrinsic reads a wide operand through, in place, rather than copying
-    /// it out first (#378, P5-4).
+    /// intrinsic read a wide operand through, in place, rather than copying it
+    /// out first (#378, P5-4), until ADR 0068's Phase 4c deleted the last
+    /// intrinsic with a wide operand, `Value.admitKey`. Only this crate's
+    /// tests read one now.
+    #[cfg(test)]
     #[inline(always)]
     pub(crate) fn slots(&self, base: u64, slot: u32, words: u32) -> &[u64] {
         let at = base + slot as u64;

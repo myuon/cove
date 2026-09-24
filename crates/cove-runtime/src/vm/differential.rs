@@ -2776,11 +2776,25 @@ export fn main() -> Int {
         Vec::new(),
         "an admission that cannot refuse is removed"
     );
-    assert_eq!(
-        intrinsics("probeFloat"),
-        vec![cove_ir::Intrinsic::ValueAdmitKey]
-    );
-    assert!(intrinsics("probeNested").contains(&cove_ir::Intrinsic::ValueAdmitKey));
+    // Neither refusal is an intrinsic since ADR 0068's Phase 4c deleted
+    // `Value.admitKey`. A `Float` key is refused whole, so its refusal is the
+    // site's own literal sentence and one trap; a key that nests one is
+    // decided by the walk the lowering composed for its layout, and worded by
+    // the walk it composed to word it, `describes<L>`, under the branch on
+    // the answer.
+    assert_eq!(intrinsics("probeFloat"), Vec::new());
+    assert!(function("probeFloat")
+        .code
+        .iter()
+        .any(|inst| matches!(inst, cove_ir::Inst::Trap { .. })));
+    assert_eq!(intrinsics("probeNested"), Vec::new());
+    assert!(function("probeNested").code.iter().any(|inst| match inst {
+        cove_ir::Inst::Call { callee, .. } => {
+            let called = &program.functions[callee.index()];
+            called.is_support() && called.name.starts_with("describes<")
+        }
+        _ => false,
+    }));
     // The duplicate's refusal is `std.set.of`'s own Cove since ADR 0067, so
     // what the probe reaches is no intrinsic at all: the sentence is an
     // interpolation of a layout the lowering knows, which is a walk it wrote.
@@ -5701,6 +5715,141 @@ fn dynamic_key_refusal_agrees_with_map_key_on_every_kind() {
         !all.iter()
             .any(|said| said.starts_with("keyed") && said.ends_with("Value(\"true\")")),
         "a `Keyed` is a key: {all:?}"
+    );
+}
+
+/// Code that boxes the layouts [`reflected_admissions`] roots a refused path
+/// at: a `Holder`, and the `Option<Float>` of `some float`.
+///
+/// A refusal names the struct or the enum at the root of its path and a
+/// struct's fields, and `std.dynamic.refuseKey` reads those names off
+/// `lower::names`, which places them for the layouts a program's code boxes and
+/// for every layout of a program a Host answers `Any` to. A value the tests
+/// hand a library function straight through the embedding boundary is neither,
+/// so the names are placed here the way a program's own boxes place them.
+const REFLECTED_WORDING_LAYOUTS: &str = "
+impl Probed for Holder {
+  fn probed(self) -> Int {
+    0
+  }
+}
+
+struct Wrapped {
+  maybe: Option<Float>
+}
+
+impl Probed for Wrapped {
+  fn probed(self) -> Int {
+    0
+  }
+}
+
+export fn boxing(h: Holder, w: Wrapped) -> Array<dyn Probed> {
+  [h, w]
+}
+";
+
+/// A file in `std.dynamic` that admits an erased key as `Set.of` does: a
+/// library file, because only the standard library can call `core.admitKey`.
+const REFLECTED_ADMIT_PROBE: &str = "
+/// `1`, or the refusal of `key` as a set element.
+export fn probeAdmitErased(key: Any) -> Int {
+  core.admitKey(key, \"Set.of\", \"set element\")
+  1
+}
+";
+
+/// **The refusal of an erased key is the oracle's, sentence for sentence, for
+/// every kind and every place a refused part can be.**
+///
+/// ADR 0068's Phase 4c moved the *wording* of `core.admitKey`'s refusal of a
+/// box into Cove, `std.dynamic.refuseKey`, and deleted the Rust walk that
+/// worded it. The oracle words it where it always has, `builtins`'
+/// `invalid_key_error` over `MapKey::convert`'s path. So each value of
+/// [`reflected_admissions`] and [`reflected_keys`] is handed to
+/// [`REFLECTED_ADMIT_PROBE`] on both evaluators, boxed at the boundary on the
+/// machine, and the three sentences each says are compared — the message with
+/// its path, which quotes a map's key as it renders, the rule and the help —
+/// or the answer, for a key.
+#[test]
+fn dynamic_key_wording_agrees_with_the_oracle_on_every_kind() {
+    type Values = fn() -> Vec<(String, Value)>;
+    type Sentences = (String, Option<String>, Option<String>);
+    fn answers(source: String, values: Values, on_machine: bool) -> Vec<(String, Sentences)> {
+        let (sources, program) = checked_with_probe(&source, "std.dynamic", REFLECTED_ADMIT_PROBE);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let whole = |outcome: Result<Value, crate::error::RuntimeError>| match outcome {
+            Ok(value) => (format!("{value}"), None, None),
+            Err(error) => (
+                error.message,
+                error.rule.map(|rule| rule.to_string()),
+                error.help.map(|help| help.to_string()),
+            ),
+        };
+        let mut lines = Vec::new();
+        if on_machine {
+            let ir = lowered(&sources, &program);
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            let mut vm = Vm::new(&runtime, &hosts, &ir);
+            for (label, value) in values() {
+                let said = whole(vm.invoke("std.dynamic", "probeAdmitErased", vec![value]));
+                lines.push((label, said));
+            }
+        } else {
+            let runtime = Runtime::new(program, sources, hosts);
+            let mut interp = Interpreter::new(&runtime);
+            for (label, value) in values() {
+                let said = whole(interp.invoke("std.dynamic", "probeAdmitErased", vec![value]));
+                lines.push((label, said));
+            }
+        }
+        lines
+    }
+    let runs: [(String, Values); 2] = [
+        (
+            format!("{REFLECTED_KINDS}{REFLECTED_ADMISSION_LAYOUTS}{REFLECTED_WORDING_LAYOUTS}"),
+            reflected_admissions,
+        ),
+        (REFLECTED_KEYS.to_string(), reflected_keys),
+    ];
+    let mut all = Vec::new();
+    for (source, values) in runs {
+        let oracle = {
+            let source = source.clone();
+            on_a_deep_stack(move || answers(source, values, false))
+        };
+        let machine = on_a_deep_stack(move || answers(source, values, true));
+        assert_eq!(oracle.len(), machine.len());
+        for (oracle, machine) in oracle.iter().zip(&machine) {
+            assert_eq!(machine, oracle, "the machine against the oracle");
+        }
+        all.extend(oracle);
+    }
+    // Not vacuous: a refusal at each place a refused part can be, a path
+    // through a map quoting its key, and a key admitted.
+    let message = |label: &str| {
+        all.iter()
+            .find(|(held, _)| held == label)
+            .map(|(_, said)| said.0.clone())
+            .unwrap_or_else(|| panic!("no row `{label}`"))
+    };
+    assert_eq!(
+        message("map a vector"),
+        "`Set.of` cannot use a `Vector` inside `[a]` as a set element"
+    );
+    assert_eq!(
+        message("map 7 float"),
+        "`Set.of` cannot use a `Float` inside `[7]` as a set element"
+    );
+    assert_eq!(
+        message("float 3"),
+        "`Set.of` cannot use a `Float` as a set element"
+    );
+    assert_eq!(message("keyed"), "1");
+    assert!(
+        all.iter()
+            .any(|(_, said)| said.1.as_deref() == Some(cove_ir::dynamic::MUTABLE_KEY_RULE)),
+        "a refusal under the mutable-handle rule: {all:?}"
     );
 }
 

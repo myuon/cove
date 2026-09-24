@@ -1,0 +1,31 @@
+use console.println
+
+/// Three cases, of which exactly one holds a value the language refuses as a
+/// key: `fail_key_enum_case`'s enum.
+enum Mark {
+  Plain
+  Count(Int)
+  Weight(Float)
+}
+
+/// Asks a `Set<Mark>` whether it holds `Mark.Weight(1.5)`: the admission
+/// refuses the payload and names it `Mark.Weight(0)` — the enum's declared
+/// name, its case and the part.
+///
+/// `fail_key_boxed_enum`'s row for a layout the lowering knows: the enum is at
+/// the root of the key, so it names itself, which `fail_key_enum_case` avoids
+/// by rooting its path at an array. The two evaluators once named a type
+/// differently at the root; since ADR 0068's Phase 4c the sentence is the
+/// synthesized wording walk's, and it names the enum as the oracle does.
+fn search() -> Result<Unit, Error> {
+  let marks = Set.of(Mark.Plain, Mark.Count(3))
+  let found = marks.contains(Mark.Weight(1.5))
+  println("never printed {found}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to search a set of marks for one holding a Float")?
+  search()?
+  Ok(())
+}

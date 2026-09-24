@@ -780,20 +780,17 @@ fn notAKey() -> String {
 /// # It decides, and it does not word
 ///
 /// The answer is a `Bool`, `true` when the key is refused, and nothing here
-/// raises. What a refusal *says* is
-/// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` with a
-/// `rule:` and a `help:` beside it, and a `path` through a map quotes the
-/// entry's key as it renders — `[7]` — which a view cannot render until ADR
-/// 0068's Phase 4. So the sentence stays the runtime's `Value.admitKey`, which
-/// the lowering runs under a `branch-false` on this answer, at the site, over
-/// the same key: the guarded shape it already emits for a walk composed out of
-/// a known layout. The Rust walk behind it runs only on the path that ends the
-/// run, and a key this admits never reaches it.
+/// raises. What a refusal *says* is [`refuseKey`]'s, which the lowering calls
+/// under a `branch-false` on this answer, at the site, over the same key: the
+/// guarded shape it emits for a walk composed out of a known layout too. So a
+/// key this admits never reaches the wording, and a key it refuses is walked
+/// twice — once to decide, allocating nothing, and once to name the part that
+/// is wrong, on the path that ends the run.
 ///
 /// # What it answers
 ///
-/// Exactly what that Rust walk, `key::admits`, and the oracle's
-/// `MapKey::convert` refuse, kind for kind in [`children`]' table:
+/// Exactly what the oracle's `MapKey::convert` refuses, kind for kind in
+/// [`children`]' table:
 ///
 /// - **Refused outright**: a `Float`, whose `NaN` is not equal to itself; a
 ///   `Vector`, whose equality could change while a collection holds it; a
@@ -957,6 +954,288 @@ fn keyParts(view: DynamicView, kind: Int) -> Int {
   -1
 }
 
+/// The refusal of the erased value `key` as a map key or a set element, in
+/// `method`'s words and naming the key by `role`: what `core.admitKey` raises
+/// where [`refusesKey`] answered that the key is refused.
+///
+/// Nothing in a program calls this, for [`equals`]' reason. The lowering does,
+/// at every `core.admitKey` of the standard library's whose key is boxed, under
+/// the branch on what `refusesKey` answered — and from inside the wording walk
+/// it composed for a known key layout, `describes<L>`, wherever the part that
+/// is refused is a box. It never answers: every call ends the run, through
+/// `core.refuse`.
+///
+/// # What it says
+///
+/// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} ``, and
+/// without the `inside` where the key itself is what is refused, with the rule
+/// and the help beside it that [`refuseAt`] chooses. It is what the oracle's
+/// `builtins::invalid_key_error` says over `MapKey::convert`'s path, and what
+/// the machine's Rust walk said until ADR 0068's Phase 4c moved it here:
+///
+/// - **the part named is the first refused one** in the order that walk
+///   visited — depth first, and a struct's fields, a case's parts, an array's
+///   elements and a map's values each in order — which [`refusesKey`]' own
+///   walk reaches too, in whatever order it likes, because it only decides;
+/// - **the path** begins at `anchor`, the path a walk composed for a known
+///   layout had built down to the box, or nothing at a box that is the key.
+///   Where it begins at nothing, a struct begins it with its name and an enum
+///   with its name and its case — `Reading.weight`, `Mark.Weight(0)` — and
+///   everything else with nothing at all; after that a field is `.name`, a
+///   case's part `(0)`, an element `[0]` and a map's value its key as that key
+///   renders, `[7]`;
+/// - **the type** is [`keyWord`]'s.
+///
+/// `quoted` is the path a map key renders under, which [`renderView`] asks
+/// for. A key holds no vector, so there is nothing on it to meet again, and the
+/// lowering hands over an empty one.
+///
+/// # There is no nesting bound
+///
+/// [`renderBelow`]'s two stacks — the containers the walk is inside and, for
+/// each, the child it is in — for [`equals`]' reason (issue #480): a key
+/// refused a thousand levels down is named a thousand levels down. The stacks
+/// are also the path, so nothing is built until the part is found, and a part
+/// that is admitted costs no text.
+fn refuseKey(
+  key: Any,
+  method: String,
+  role: String,
+  anchor: String,
+  quoted: RenderPath,
+) {
+  let root = core.dynamicOpen(key)
+  let kind = core.dynamicKind(root)
+  if keyParts(root, kind) < 0 {
+    refuseAt(method, role, root, kind, anchor)
+    return
+  }
+  let views: Vector<DynamicView> = core.vectorWithCapacity(8)
+  let ats: Vector<Int> = core.vectorWithCapacity(8)
+  stack(views, root)
+  mark(ats, -1)
+  var depth = 1
+  while depth > 0 {
+    let top = depth - 1
+    let parent = core.vectorLoad(views, top)
+    // A map's parts are its values, its odd children: its keys are keys by
+    // construction. Every other container's parts are all of its children.
+    var next = core.vectorLoad(ats, top) + 1
+    if core.dynamicKind(parent) == 11 {
+      next = next + 1
+    }
+    if next < core.dynamicChildCount(parent) {
+      core.vectorStore(ats, top, next)
+      let part = core.dynamicChild(parent, next)
+      let inner = core.dynamicKind(part)
+      let under = keyParts(part, inner)
+      if under < 0 {
+        refuseAt(method, role, part, inner, trail(views, ats, anchor, quoted))
+        return
+      }
+      if under > 0 {
+        stack(views, part)
+        mark(ats, -1)
+        depth = depth + 1
+      }
+    } else {
+      core.vectorTruncate(views, top)
+      core.vectorTruncate(ats, top)
+      depth = top
+    }
+  }
+  // Every part was admitted, which a key `refusesKey` refused cannot be; the
+  // run goes on rather than stopping with a sentence about nothing.
+  ()
+}
+
+/// The path [`refuseKey`] names its part by: `anchor`, and then, for each
+/// container on `views` outermost first, the step to the child `ats` says the
+/// walk is in.
+fn trail(
+  views: Vector<DynamicView>,
+  ats: Vector<Int>,
+  anchor: String,
+  quoted: RenderPath,
+) -> String {
+  let path = core.bytesAllocate(32)
+  stringbuilder.appendText(path, anchor)
+  // Only a key that is the root names itself: a part further in is named by
+  // the path that reached it.
+  var root = core.byteLength(anchor) == 0
+  let depth = core.vectorLength(views)
+  var at = 0
+  while at < depth {
+    let view = core.vectorLoad(views, at)
+    let kind = core.dynamicKind(view)
+    let child = core.vectorLoad(ats, at)
+    if kind == 6 {
+      if root {
+        stringbuilder.appendText(path, core.dynamicTypeName(view))
+      }
+      stringbuilder.appendByteInto(path, '.')
+      stringbuilder.appendText(path, core.dynamicFieldName(view, child))
+    } else if kind == 7 {
+      if root {
+        stringbuilder.appendText(path, core.dynamicTypeName(view))
+        stringbuilder.appendByteInto(path, '.')
+        stringbuilder.appendText(path, core.dynamicCaseName(view))
+      }
+      stringbuilder.appendByteInto(path, '(')
+      int.renderInto(child, path)
+      stringbuilder.appendByteInto(path, ')')
+    } else if kind == 11 {
+      stringbuilder.appendByteInto(path, '[')
+      renderView(core.dynamicChild(view, child - 1), path, quoted)
+      stringbuilder.appendByteInto(path, ']')
+    } else {
+      stringbuilder.appendByteInto(path, '[')
+      int.renderInto(child, path)
+      stringbuilder.appendByteInto(path, ']')
+    }
+    root = false
+    at = at + 1
+  }
+  core.bytesFinish(path)
+}
+
+/// Stops the run with the refusal of `view`, of kind `kind`, reached at
+/// `path` — or at the key itself, where `path` is empty.
+///
+/// A `Float` is refused for a reason of its own — `NaN` is not equal to
+/// itself, which breaks the total order every key needs — and every other
+/// value because its equality could change while a collection holds it, so
+/// the two are refused under two rules and kept apart, so that nobody later
+/// "fixes" `Float` as if it were one more mutable handle.
+fn refuseAt(
+  method: String,
+  role: String,
+  view: DynamicView,
+  kind: Int,
+  path: String,
+) {
+  let word = keyWord(view, kind)
+  var message = "`{method}` cannot use a `{word}` as a {role}"
+  if core.byteLength(path) > 0 {
+    message = "`{method}` cannot use a `{word}` inside `{path}` as a {role}"
+  }
+  if kind == 3 {
+    core.refuse(message, floatKeyRule(), floatKeyHelp())
+  } else {
+    core.refuse(message, mutableKeyRule(), mutableKeyHelp())
+  }
+}
+
+/// What a refusal calls a value of kind `kind` that is not a key: the words
+/// the machine's Rust walk called it by, which a walk composed for a known
+/// layout calls it by too — `Float`, `Vector`, `fn`, `Shared`, and for the
+/// three handles a box can hold, `a task`, `a task scope` and `a host
+/// resource`.
+///
+/// Which handle an opaque value is lives in the run's tables and no layout, so
+/// it is told by the text a rendering shows for it, `core.dynamicHandleText`'s:
+/// `<task>`, `<task scope {name}>`, and a Host resource's `<{module}.{Type}#{n}>`,
+/// which is neither. It is the one observation here that allocates, and it is
+/// made once, on the path that ends the run.
+fn keyWord(view: DynamicView, kind: Int) -> String {
+  if kind == 3 {
+    return "Float"
+  }
+  if kind == 9 {
+    return "Vector"
+  }
+  if kind == 13 {
+    return "fn"
+  }
+  if kind == 15 {
+    return "Shared"
+  }
+  let text = core.dynamicHandleText(view)
+  if text == "<task>" {
+    return "a task"
+  }
+  if text.startsWith("<task scope ") {
+    return "a task scope"
+  }
+  "a host resource"
+}
+
+/// A new trail: the path a wording walk composed for a known key layout has
+/// come down, a piece a step, which the walks it calls continue.
+///
+/// A walk of a layout that holds itself is a walk of calls, `describesAt<L>`
+/// calling itself for each value of `L` it holds, and a call cannot see the
+/// pieces of path its caller knows. So the caller writes them here before the
+/// call, as one `String` a step, and cuts them off again with [`trailCut`]
+/// when the call comes back — a value it came back from was admitted, and is
+/// not on the path. The walk that names the refused part reads the whole of
+/// it with [`trailText`]. Nothing is walked twice: a part is decided and
+/// described by the same visit, which keeps the refusal of a key nested `n`
+/// deep a matter of `n` steps rather than `n` times `n`.
+fn newTrail() -> Vector<String> {
+  core.vectorWithCapacity(8)
+}
+
+/// Adds `piece` to the end of `trail`: [`stack`] for the pieces of a path.
+fn trailPush(trail: Vector<String>, piece: String) {
+  let at = core.vectorLength(trail)
+  core.vectorEnsure(trail, 1)
+  core.vectorStore(trail, at, piece)
+  core.vectorCommit(trail, 1)
+}
+
+/// How many pieces `trail` holds, which is where a caller cuts it back to.
+fn trailLength(trail: Vector<String>) -> Int {
+  core.vectorLength(trail)
+}
+
+/// Cuts `trail` back to its first `depth` pieces: the walk it was lengthened
+/// for came back, so what it named was admitted.
+fn trailCut(trail: Vector<String>, depth: Int) {
+  core.vectorTruncate(trail, depth)
+}
+
+/// The pieces of `trail`, in order, as one `String`: the path to the value a
+/// wording walk was called for.
+fn trailText(trail: Vector<String>) -> String {
+  let pieces = core.vectorLength(trail)
+  var bytes = 0
+  var at = 0
+  while at < pieces {
+    bytes = bytes + core.byteLength(core.vectorLoad(trail, at))
+    at = at + 1
+  }
+  let path = core.bytesAllocate(bytes)
+  at = 0
+  while at < pieces {
+    stringbuilder.appendText(path, core.vectorLoad(trail, at))
+    at = at + 1
+  }
+  core.bytesFinish(path)
+}
+
+/// The rule a `Float` key is refused under: `cove_ir::dynamic`'s
+/// `FLOAT_KEY_RULE`, word for word, which a walk composed for a known layout
+/// raises and the oracle's `InvalidKey::rule` says.
+fn floatKeyRule() -> String {
+  "A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs."
+}
+
+/// What [`floatKeyRule`]'s refusal suggests instead.
+fn floatKeyHelp() -> String {
+  "convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`"
+}
+
+/// The rule every other value that is not a key is refused under.
+fn mutableKeyRule() -> String {
+  "Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it."
+}
+
+/// What [`mutableKeyRule`]'s refusal suggests instead.
+fn mutableKeyHelp() -> String {
+  "use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles"
+}
+
 /// The text of an erased value, appended to `buffer`: what `"{x}"` puts in a
 /// string when `x` is a `dyn Trait` or a Host `Any`, whose concrete type is
 /// known only once the box is opened.
@@ -1033,6 +1312,35 @@ fn keyParts(view: DynamicView, kind: Int) -> Int {
 /// with its byte or its text bound before the window opens.
 fn renderInto(value: Any, buffer: ByteBuffer, path: RenderPath) {
   let root = core.dynamicOpen(value)
+  let kind = core.dynamicKind(root)
+  if written(root, kind, buffer, path) {
+    return
+  }
+  opening(root, kind, buffer)
+  let count = core.dynamicChildCount(root)
+  var at = 0
+  while at < count {
+    between(root, kind, at, buffer)
+    let child = core.dynamicChild(root, at)
+    let inner = core.dynamicKind(child)
+    if !written(child, inner, buffer, path) {
+      renderBelow(root, at, child, inner, buffer, path)
+      return
+    }
+    at = at + 1
+  }
+  closing(kind, buffer)
+}
+
+/// [`renderInto`] of a value already viewed: `root`'s text, appended to
+/// `buffer`.
+///
+/// What [`trail`] quotes a map's key with, which it holds as a view rather
+/// than as a box. The body is `renderInto`'s after the open, written out
+/// rather than called from it, so that the rendering of a box — which every
+/// interpolation of one is — pays no call more for a caller that only a
+/// refusal has.
+fn renderView(root: DynamicView, buffer: ByteBuffer, path: RenderPath) {
   let kind = core.dynamicKind(root)
   if written(root, kind, buffer, path) {
     return

@@ -818,21 +818,18 @@ impl InvalidKey {
     /// `NaN != NaN` breaks the total order a key needs, which has nothing to
     /// do with mutability. Stating that separately keeps anyone from later
     /// "fixing" `Float` as if it were just another mutable-handle case.
+    ///
+    /// The sentences are `cove_ir::dynamic`'s, which the linear-memory
+    /// backend's refusals are written from too, so the two evaluators state
+    /// them once in Rust (ADR 0068's Phase 4c); `std.dynamic` spells them out
+    /// for a boxed key.
     pub fn rule(&self) -> &'static str {
-        if self.type_name == "Float" {
-            "A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs."
-        } else {
-            "Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it."
-        }
+        cove_ir::dynamic::refused_key(&self.type_name).0
     }
 
     /// A corrected textual example, tailored to the same distinction.
     pub fn help(&self) -> String {
-        if self.type_name == "Float" {
-            "convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`".to_string()
-        } else {
-            "use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles".to_string()
-        }
+        cove_ir::dynamic::refused_key(&self.type_name).1.to_string()
     }
 }
 

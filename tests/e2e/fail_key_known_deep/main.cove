@@ -1,0 +1,50 @@
+use console.println
+
+/// `fail_key_enum_case`'s enum, whose `Weight` case is refused.
+enum Mark {
+  Plain
+  Count(Int)
+  Weight(Float)
+}
+
+/// A value type that holds itself, through an array: whether a `Tree` may be
+/// a key is decided by every mark in it, however deep.
+struct Tree {
+  mark: Mark
+  kids: Array<Tree>
+}
+
+/// `depth` trees, each the only kid of the one above, around a leaf whose
+/// mark is `bottom`.
+fn chain(depth: Int, bottom: Mark) -> Tree {
+  var built = Tree(mark: bottom, kids: [])
+  var at = 0
+  while at < depth {
+    built = Tree(mark: Mark.Count(at), kids: [built])
+    at = at + 1
+  }
+  built
+}
+
+/// A key two hundred trees deep whose last mark holds a `Float`, used as a
+/// set element: the admission refuses it and names the mark, two hundred
+/// `.kids[0]`s down.
+///
+/// A walk of a layout that holds itself cannot be expanded in place, so since
+/// ADR 0068's Phase 4c it is a walk of calls — `refuses<Tree>` calling itself
+/// for each tree a tree holds, and `describesAt<Tree>` the same for the words
+/// — where it was the runtime's whole until then. What bounds it is the
+/// machine's stack segment, as it bounds `equals<Tree>`: the language sets no
+/// bound of its own (issue #480), and two hundred is far inside it.
+fn admitDeep() -> Result<Unit, Error> {
+  let held = chain(200, Mark.Weight(1.5))
+  let keyed = Set.of(held)
+  println("never printed {keyed.length()}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a tree 200 deep as a set element")?
+  admitDeep()?
+  Ok(())
+}

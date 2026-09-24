@@ -1,30 +1,33 @@
 //! The order a `Map` and a `Set` are kept in, over runs of words and heap
-//! objects.
+//! objects, **as this crate's tests state it.**
 //!
 //! A `Set` iterates and renders in ascending element order and a `Map` in
 //! ascending key order, so the order is *part of the value* rather than an
 //! implementation's leftovers — which is why both are sorted runs here and a
 //! lookup is a binary search. This is the comparison that search is over.
 //!
-//! **Nothing in a run asks this module for an order any more.** A key whose
-//! layout is known is ordered by one comparison instruction or by a walk
-//! `cove_ir::lower::synth` composes for its layout, and since [ADR
+//! **Nothing in a run asks this module anything any more, and it is compiled
+//! only for tests.** A key whose layout is known is ordered by one comparison
+//! instruction or by a walk `cove_ir::lower::synth` composes for its layout,
+//! and since [ADR
 //! 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-//! Phase 3 an erased key is ordered by `std.dynamic.order`, Cove over a view
-//! of each box. What is left here that runs is the *admission*, [`admit_key`].
-//! [`order`] stays, under `cfg(test)`, as this crate's tests' statement of the
-//! order in the machine's own words: [`is_ascending_and_distinct`] checks
-//! every keyed finish a test makes against it.
+//! Phase 3 an erased key is ordered by `std.dynamic.order`, Cove over a view of
+//! each box. The admission was the last thing here that ran — `Value.admitKey`,
+//! which walked a key and worded the refusal of one the language does not
+//! admit — until the ADR's Phase 4c worded that refusal in Cove and in the walks
+//! the lowering composes, and deleted the intrinsic, its walk and the rendering
+//! of a map key it quoted. What is left is [`order`], as this crate's tests'
+//! statement of the order in the machine's own words:
+//! [`is_ascending_and_distinct`] checks every keyed finish a test makes against
+//! it, and the unit tests at the end pin it — so that the order the oracle's
+//! `MapKey` derives is written down a second time beside the Cove that now
+//! answers it.
 //!
 //! [`crate::value::MapKey`] is the oracle's copy of it: a value converted to
 //! the shapes a key may take, ordered by the `Ord` its declaration derives.
-//! The two are written twice for the reason [`super`]'s rendering and
-//! [`super::equal`]'s equality are — one reads a materialised tree and one
-//! reads the heap, and neither can be had from the other without building
-//! what the other exists to avoid. What keeps them saying the same thing is
-//! that a `Map` built here and materialised at the boundary is re-sorted by
-//! `MapKey`'s own `Ord` on the way out: a disagreement shows up as an order
-//! that changed while crossing.
+//! What keeps the two saying the same thing is that a `Map` built here and
+//! materialised at the boundary is re-sorted by `MapKey`'s own `Ord` on the way
+//! out: a disagreement shows up as an order that changed while crossing.
 //!
 //! # A value is a run of words, and an operand is one of them
 //!
@@ -33,13 +36,6 @@
 //! are inline: a `Point` member of a `Set<Point>` is two words *where the
 //! member is*. Everything below therefore compares a [`Key`], which is either
 //! the run of words a known layout describes or one operand word.
-//!
-//! The two halves exist because a [`cove_ir::IntrinsicSite`] carries no layout for
-//! its operands and an argument list is base slots that need not be adjacent,
-//! so the machine cannot know how wide an operand is and an operand stays one
-//! word. A set's member and a map's key are not so restricted — the receiver's
-//! own layout says what they are — which is why a search compares a value of a
-//! known layout against an operand rather than two operands.
 //!
 //! # The order between families is the order the variants are declared in
 //!
@@ -79,73 +75,25 @@
 //! value's name exactly: `m.Cell<Duration>` and `m.Cell<Int>` are one type to
 //! the order, and their payloads decide, as they do on the oracle.
 //!
-//! A refusal's path shows a type the other way, by the name its declaration
-//! wrote: [`short`] of [`declared_name`], which is what `MapKey::convert`
-//! shows and what every pinned `fail_key_*` diagnostic says — `S.v`, never
-//! `m.S.v` or `m.Cell<Float>.v`. The type arguments go first, because the last
-//! `.` of `m.Cell<m.Point>` is inside the brackets.
+//! # The walk says how far it got, and where it stops
 //!
-//! # What is refused
-//!
-//! ADR 0001 draws the line at mutability: a key's equality must not be able to
-//! change while a collection holds it. So a `Vector` and everything that holds
-//! one is refused, and a `Float` is refused for the unrelated reason that
-//! `NaN` is not equal to itself, which breaks the total order every key needs.
-//! [`check`] is that question asked of a value, and its refusals are
-//! [`crate::builtins`]' word for word, path included.
-//!
-//! # Both walks say how far they got
-//!
-//! `core.order` and `core.admitKey` both declared `Effects::BULK_WORK` while
-//! both were intrinsics — `core.admitKey` still does — and, until
-//! [ADR 0064](../../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-//! Decision 7, cost the run one unit of work whichever key they were handed —
-//! a `Duration`, or a `Map` of arrays of structs. So [`order`] and [`admits`]
-//! each report **one unit per value they visit** through
-//! [`Machine::examined`], and the string arm of `order` reports the bytes it
-//! compared besides.
-//!
-//! The report is made in the walk rather than from the key's size, for
-//! [`super::equal`]'s reason: an order that answers at the first field of a
-//! struct has done one field's work, and a charge taken up front would say
-//! otherwise. `admitKey` walks twice when it refuses — once with nothing to
-//! name and once to build the path — and is charged for both, because it
-//! really did walk twice.
-//!
-//! # The admission has no nesting bound
-//!
-//! [`order`] stops at [`super::MAX_DEPTH`], and is asked only by this crate's
-//! tests. [`admits`] does not: it is a loop over a stack, so a key refused a
-//! thousand levels down is refused with the sentence the oracle words, where
-//! it once said the key "nests too deeply to compare". Since [ADR
-//! 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-//! Phase 3 decides a boxed key in Cove, `std.dynamic.refusesKey`, with no
-//! bound either, a bound left here would have been one this evaluator alone
-//! had on the path that words the refusal.
+//! [`order`] reports **one unit per value it visits** through
+//! [`Machine::examined`], and the string arm reports the bytes it compared
+//! besides, for [`super::equal`]'s reason: an order that answers at the first
+//! field of a struct has done one field's work. It stops at
+//! [`super::MAX_DEPTH`], which no program meets, because no program asks it.
 
-#[cfg(test)]
 use std::cmp::Ordering;
-use std::fmt::Write as _;
 
 use cove_ir::{Field, LayoutId, Part, Program, Repr, Shape};
 
 use cove_ir::dynamic::declared_name;
 
 use crate::error::RuntimeError;
-use crate::vm::boundary::{is_range, short};
+use crate::vm::boundary::is_range;
 use crate::vm::exec::Machine;
-#[cfg(test)]
-use crate::vm::intrinsics::operand::Operand;
-use crate::vm::intrinsics::operand::{self, Dest, Frame};
-use crate::vm::intrinsics::{equal, render_value};
-
-/// What a `Map`'s key argument is called in a refusal.
-#[cfg(test)]
-pub(super) const MAP_KEY: &str = "map key";
-
-/// What a `Set`'s element argument is called in one.
-#[cfg(test)]
-pub(super) const SET_ELEMENT: &str = "set element";
+use crate::vm::intrinsics::equal;
+use crate::vm::intrinsics::operand::{self, Operand};
 
 /// A value on its way through the order.
 ///
@@ -182,46 +130,10 @@ impl Step {
     }
 }
 
-/// Whether `operand` may be a key or an element of a set at all.
-///
-/// Asked of the whole value before anything is compared, which is where the
-/// oracle asks it: `Map.get` converts its argument to a `MapKey` before it
-/// looks at a single entry, so a `Float` is refused by an empty map as loudly
-/// as by a full one.
-#[cfg(test)]
-pub(super) fn check(
-    machine: &Machine,
-    method: &str,
-    role: &str,
-    operand: Operand<'_>,
-) -> Result<(), RuntimeError> {
-    admits(
-        machine,
-        Some((method, role)),
-        Key::Held(operand.layout, operand.words),
-    )
-}
-
-/// The same, of a value that arrived as the words of a known layout.
-///
-/// What `Map.of` asks of the key it read out of a `MapEntry`: a key that is a
-/// struct is a run of words rather than an address, so there is no operand to
-/// ask about and the layout is what says which words are what.
-#[cfg(test)]
-pub(super) fn check_value(
-    machine: &Machine,
-    method: &str,
-    role: &str,
-    layout: LayoutId,
-    words: &[u64],
-) -> Result<(), RuntimeError> {
-    admits(machine, Some((method, role)), Key::Held(layout, words))
-}
-
 /// Where the value `a` sorts relative to the value `b`, both of `layout`.
 ///
-/// Both are keys: every word that reaches this either passed [`check`] or was
-/// written into a sorted run by something that did.
+/// Both are keys: every word that reaches this was admitted by
+/// `core.admitKey`, or was written into a sorted run by something that was.
 #[cfg(test)]
 pub(super) fn cmp_value(
     machine: &Machine,
@@ -265,50 +177,17 @@ fn cmp_held(
 // `value_order` stood here: `core.order(a, b)` for two erased keys, the one
 // arm of ADR 0059's `value-order` a layout could not answer. ADR 0068's Phase
 // 3 made it `std.dynamic.order`, a Cove loop over a view of each box, and
-// deleted `Intrinsic::ValueOrder`. [`order`] below is what it walked, kept for
-// this crate's tests alone: [`is_ascending_and_distinct`] checks a keyed
-// finish's run with it, and the unit tests at the end pin it — so that the
-// order the oracle's `MapKey` derives is written down a second time, in the
-// machine's words, beside the Cove that now answers it.
-
-/// `core.admitKey(key, method, role)`: nothing, or the refusal [`check`]
-/// makes of a key the language does not admit, in `method`'s words and
-/// naming the key by `role`.
-///
-/// The two names are `String` objects the standard library wrote as
-/// literals, and they are read only when the key is refused: the walk is
-/// asked once with nothing to name, and asked again with the names only when
-/// it failed. It is the same walk over the same words both times, so the
-/// second answers the refusal the first found.
-///
-/// Where the key's layout says which of its values are keys, and where it is
-/// a box, the lowering asks this only under a branch on a walk that already
-/// decided the key is refused — a walk it composed for the layout, or
-/// `std.dynamic.refusesKey` for a box ([ADR
-/// 0068](../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-/// Phase 3) — so there the first walk only finds again what Cove found, and
-/// the run ends on the second. It decides for itself only where the layout
-/// holds itself or nests past what a walk is composed for.
-pub(super) fn admit_key(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    {
-        let machine = &*machine;
-        let key = frame.operand(machine, 0);
-        let held = Key::Held(key.layout, key.words);
-        if admits(machine, None, held).is_err() {
-            let text = |at: usize| {
-                String::from_utf8_lossy(&machine.string_bytes(frame.word(machine, at))).into_owned()
-            };
-            let (method, role) = (text(1), text(2));
-            admits(machine, Some((&method, &role)), held)?;
-        }
-    }
-    dest.word(machine, 0);
-    Ok(())
-}
+// deleted `Intrinsic::ValueOrder`.
+//
+// `admit_key` stood beside it: `core.admitKey(key, method, role)`, nothing or
+// the refusal of a key the language does not admit, which walked the key twice
+// — once to decide and once, where that failed, to build the path to the part
+// that is wrong and quote a map's key in it as the key renders. ADR 0068's
+// Phase 3 moved the deciding into `std.dynamic.refusesKey` for a box, and its
+// Phase 4c moved the wording into `std.dynamic.refuseKey` and into the walk
+// `lower::synth` composes for a known layout, `describes<L>`, and deleted
+// `Intrinsic::ValueAdmitKey`, the walk, and the private rendering of a value
+// it quoted keys with.
 
 /// Whether the `len` units of the run at `addr` are ascending and distinct by
 /// the key each begins with: `stride` words a unit, of which the first
@@ -450,348 +329,15 @@ fn run(words: &[u64], at: u32, width: u32) -> &[u64] {
     words.get(at..at + width).unwrap_or(&[])
 }
 
-// --- admitting a key -------------------------------------------------------
-
-/// What a refusal is worded with: `core.admitKey`'s method and role.
-///
-/// `None` is the first of [`admit_key`]'s two walks, which only decides: it
-/// builds no path and renders no map key, so a key it admits costs no string
-/// at all.
-type Names<'n> = Option<(&'n str, &'n str)>;
-
-/// The path to one part still to be admitted, from the value that was asked
-/// about.
-enum Anchor {
-    /// The root, where a bare value has no name to anchor a path to and a
-    /// struct or an enum invents one from its own type name the first time a
-    /// path is needed — and every part of a walk that only decides.
-    Root,
-    /// A path already written.
-    Named(String),
-    /// A map's value, named by its entry's key as that key renders: `base`,
-    /// then `[{key}]`. The key is rendered only when the value is reached,
-    /// which is where the recursive walk this replaced rendered it, so a
-    /// refusal found earlier renders none of the keys after it.
-    Entry {
-        base: String,
-        key: LayoutId,
-        words: Vec<u64>,
-    },
-}
-
-/// One entry of [`admits`]' stack: a value, or where a run is up to.
-///
-/// A run is a cursor rather than its elements pushed at once, so that the
-/// stack holds one entry a run however long it is — the walk is depth first,
-/// and an element's own parts are finished before the cursor is read again.
-enum Pending {
-    /// One value, and the path to it.
-    One(Anchor, Step),
-    /// An array's elements from `at` on, of `len` in all, each of `elem`.
-    /// `base` is the path the array is at, when there is one to write.
-    Elements {
-        addr: u64,
-        elem: LayoutId,
-        at: u32,
-        len: u32,
-        base: Option<String>,
-    },
-    /// A map's values from entry `at` on, of `len` in all.
-    Values {
-        addr: u64,
-        pairs: Pairs,
-        at: u32,
-        len: u32,
-        base: Option<String>,
-    },
-}
-
-impl Step {
-    /// The step that is `key`, owned.
-    fn of(key: Key) -> Step {
-        match key {
-            Key::Word(repr, word) => Step::Word(repr, word),
-            Key::Held(layout, words) => Step::Held(layout, words.to_vec()),
-        }
-    }
-}
-
-/// Whether `key` may be a key, and when it may not, the refusal worded with
-/// `names`, naming the part that is wrong rather than blaming the whole value.
-///
-/// # There is no nesting bound
-///
-/// A loop over an explicit stack, depth first and left to right — which is
-/// the order `MapKey::convert` visits in, so the part named is the one the
-/// oracle names — and never a recursion. So a key nested ten thousand deep is
-/// refused in the words it would be refused in at ten, and is admitted where
-/// the oracle admits it, rather than stopping at a bound only this evaluator
-/// had (issue #480's decision, which ADR 0068's Phase 3 carried here). What
-/// bounds it is the work it reports through [`Machine::examined`], one unit a
-/// value, as before.
-///
-/// A key cannot hold itself: the one node that could close a cycle is a
-/// `Vector`, and this refuses the first one it meets without looking inside
-/// (issue #493). A heap graph that went round anyway would be one no program
-/// can build.
-fn admits(machine: &Machine, names: Names<'_>, key: Key) -> Result<(), RuntimeError> {
-    let mut pending = vec![Pending::One(Anchor::Root, Step::of(key))];
-    while let Some(top) = pending.last_mut() {
-        let (anchor, step) = match top {
-            Pending::One(..) => match pending.pop() {
-                Some(Pending::One(anchor, step)) => (anchor, step),
-                _ => unreachable!("the top of the stack was a value a moment ago"),
-            },
-            Pending::Elements {
-                addr,
-                elem,
-                at,
-                len,
-                base,
-            } => {
-                if *at == *len {
-                    pending.pop();
-                    continue;
-                }
-                let index = *at;
-                *at += 1;
-                let anchor = match base {
-                    Some(base) => Anchor::Named(format!("{base}[{index}]")),
-                    None => Anchor::Root,
-                };
-                (
-                    anchor,
-                    Step::Held(*elem, element(machine, *addr, *elem, index)),
-                )
-            }
-            Pending::Values {
-                addr,
-                pairs,
-                at,
-                len,
-                base,
-            } => {
-                if *at == *len {
-                    pending.pop();
-                    continue;
-                }
-                let index = *at;
-                *at += 1;
-                let anchor = match base {
-                    Some(base) => Anchor::Entry {
-                        base: base.clone(),
-                        key: pairs.key,
-                        words: pairs.key_words(machine, *addr, index),
-                    },
-                    None => Anchor::Root,
-                };
-                let value = pairs.value_words(machine, *addr, index);
-                (anchor, Step::Held(pairs.value, value))
-            }
-        };
-        let anchor = match anchor {
-            Anchor::Root => None,
-            Anchor::Named(path) => Some(path),
-            Anchor::Entry { base, key, words } => {
-                let mut shown = String::new();
-                render_value(machine, key, &words, &mut shown)?;
-                Some(format!("{base}[{shown}]"))
-            }
-        };
-        admit_one(machine, names, anchor.as_deref(), step, &mut pending)?;
-    }
-    Ok(())
-}
-
-/// One value popped off [`admits`]' stack: looked through to a family, and
-/// then admitted outright, refused, or its parts pushed.
-fn admit_one(
-    machine: &Machine,
-    names: Names<'_>,
-    anchor: Option<&str>,
-    step: Step,
-    pending: &mut Vec<Pending>,
-) -> Result<(), RuntimeError> {
-    // One value visited, and one more for every description looked through,
-    // which is what the recursion this replaced reported: every element,
-    // field and part is pushed and popped once, so one report here is one per
-    // value and no value twice.
-    machine.examined(1);
-    let mut step = step;
-    while let Some(next) = inward(machine, step.key())? {
-        machine.examined(1);
-        step = next;
-    }
-    let (method, role) = names.unwrap_or(("", ""));
-    match step.key() {
-        Key::Word(repr, word) => match repr {
-            Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration => Ok(()),
-            Repr::Ref => admit_object(machine, names, anchor, word, pending),
-            // Every other `Repr` is refused by the name the language gives it,
-            // which for a `Float` is the one rejection with a rule of its own.
-            _ => Err(refused(
-                method,
-                role,
-                anchor,
-                &operand::type_name(machine, repr, word),
-            )),
-        },
-        Key::Held(layout, words) => admit_value(machine, names, anchor, layout, words, pending),
-    }
-}
-
-/// Whether the object at `addr` may be a key, and its parts pushed where that
-/// depends on them.
-///
-/// Only the families that *live in* the heap reach this. A struct and an enum
-/// are inline, so [`inward`] has already turned an address naming one into
-/// the words it holds.
-fn admit_object(
-    machine: &Machine,
-    names: Names<'_>,
-    anchor: Option<&str>,
-    addr: u64,
-    pending: &mut Vec<Pending>,
-) -> Result<(), RuntimeError> {
-    if addr == 0 {
-        return Err(operand::null_value());
-    }
-    let layout = machine.program().layout(machine.object_layout(addr));
-    // The path the parts are at, where there is one to write.
-    let base = || names.map(|_| path(anchor, String::new));
-    match &layout.shape {
-        Shape::Str => Ok(()),
-        Shape::Free => Err(operand::reclaimed()),
-        // An array is fixed-length and immutable, so its equality cannot
-        // change and every element decides for itself. A growable run is a
-        // `Vector`'s store, and refusing it is refusing the vector.
-        Shape::Elements {
-            elem,
-            growable: false,
-        } => {
-            pending.push(Pending::Elements {
-                addr,
-                elem: *elem,
-                at: 0,
-                len: machine.object_len(addr),
-                base: base(),
-            });
-            Ok(())
-        }
-        // A set's members are keys by construction, so nesting one never
-        // fails and nothing inside it is walked.
-        Shape::Members { .. } => Ok(()),
-        // A map's keys are keys by construction too; only its values need
-        // asking, and the first one that cannot be is why nesting a `Map` as
-        // a key can still fail. The path names the entry by its key, exactly
-        // as the key would render anywhere else.
-        Shape::Entries { .. } => {
-            pending.push(Pending::Values {
-                addr,
-                pairs: pairs_of(machine, addr),
-                at: 0,
-                len: machine.object_len(addr),
-                base: base(),
-            });
-            Ok(())
-        }
-        _ => {
-            let (method, role) = names.unwrap_or(("", ""));
-            Err(refused(
-                method,
-                role,
-                anchor,
-                &operand::type_name(machine, Repr::Ref, addr),
-            ))
-        }
-    }
-}
-
-/// Whether the value `words`, read as `layout`, may be a key, and its parts
-/// pushed where that depends on them.
-///
-/// Only the inline families reach this: a layout that describes a value
-/// living in the heap has already reduced to the address it holds. The parts
-/// go on last first, so that the first is the first popped.
-fn admit_value(
-    machine: &Machine,
-    names: Names<'_>,
-    anchor: Option<&str>,
-    layout: LayoutId,
-    words: &[u64],
-    pending: &mut Vec<Pending>,
-) -> Result<(), RuntimeError> {
-    let program = machine.program();
-    let described = program.layout(layout);
-    match &described.shape {
-        // A `Range` is an immutable value with a stable equality, so it is a
-        // key like any other and there is nothing inside it to walk.
-        Shape::Struct { .. } if is_range(program, described) => Ok(()),
-        Shape::Struct { fields, .. } => {
-            let base =
-                names.map(|_| path(anchor, || short(declared_name(&described.name)).to_string()));
-            for field in fields.iter().rev() {
-                let anchor = match &base {
-                    Some(base) => Anchor::Named(format!("{base}.{}", field.name)),
-                    None => Anchor::Root,
-                };
-                pending.push(Pending::One(
-                    anchor,
-                    Step::of(field_of(program, words, field)),
-                ));
-            }
-            Ok(())
-        }
-        Shape::Enum { cases, .. } => {
-            let index = words.first().copied().unwrap_or_default();
-            let case = cases
-                .get(index as usize)
-                .ok_or_else(|| wrong_case(&described.name))?;
-            let base = names.map(|_| {
-                path(anchor, || {
-                    format!("{}.{}", short(declared_name(&described.name)), case.name)
-                })
-            });
-            for (at, part) in case.parts.iter().enumerate().rev() {
-                let anchor = match &base {
-                    Some(base) => Anchor::Named(format!("{base}({at})")),
-                    None => Anchor::Root,
-                };
-                pending.push(Pending::One(
-                    anchor,
-                    Step::of(part_of(program, words, part)),
-                ));
-            }
-            Ok(())
-        }
-        Shape::Free => Err(operand::reclaimed()),
-        _ => {
-            let (method, role) = names.unwrap_or(("", ""));
-            // Named at depth nought: a value's name is its own layout's, and
-            // how deep in the key it sits says nothing about it.
-            Err(refused(
-                method,
-                role,
-                anchor,
-                &operand::layout_name(
-                    machine,
-                    layout,
-                    words.first().copied().unwrap_or_default(),
-                    0,
-                ),
-            ))
-        }
-    }
-}
-
-/// The anchor a nested part is reached through, or the one this value invents
-/// for itself when it is the root.
-fn path(anchor: Option<&str>, own: impl FnOnce() -> String) -> String {
-    match anchor {
-        Some(anchor) => anchor.to_string(),
-        None => own(),
-    }
-}
+// --- admitting a key --------------------------------------------------------
+//
+// `admits` stood here, with the stack of `Pending` values and the `Anchor`s it
+// named each by: the walk `Value.admitKey` decided and worded a key with, a
+// loop over an explicit stack with no nesting bound since ADR 0068's Phase 3.
+// Its refusal is `std.dynamic.refuseKey`'s and `describes<L>`'s since the
+// ADR's Phase 4c, word for word and path for path — the `fail_key_*` programs
+// hold both to the oracle's `MapKey::convert` on every evaluator — and the
+// cases that pinned it here went with it.
 
 // --- ordering two keys -----------------------------------------------------
 
@@ -1130,39 +676,6 @@ fn family<'w>(machine: &Machine, key: Key<'w>) -> Result<Family<'w>, RuntimeErro
 
 // --- refusals --------------------------------------------------------------
 
-/// `` `{method}` cannot use a `{type}` as a {role} ``, and the same naming the
-/// part it is nested in.
-///
-/// [`crate::builtins`]' `invalid_key_error` word for word, over the path
-/// [`admits`] built rather than the one `MapKey::convert` did. The rule and
-/// the help are [`crate::value::InvalidKey`]'s two, restated here for the
-/// reason [`operand`]'s messages are restated: a refusal is the *language's*,
-/// and the differential corpus compares the text.
-fn refused(method: &str, role: &str, anchor: Option<&str>, type_name: &str) -> RuntimeError {
-    let path = anchor.unwrap_or_default();
-    let mut message = format!("`{method}` cannot use a `{type_name}`");
-    if !path.is_empty() {
-        write!(message, " inside `{path}`").expect("a string never fails to be written to");
-    }
-    write!(message, " as a {role}").expect("a string never fails to be written to");
-    // A `Float` is excluded for a reason distinct from every other rejection —
-    // `NaN != NaN` breaks the total order a key needs, which has nothing to do
-    // with mutability — and the two answers are kept apart so that nobody
-    // later "fixes" `Float` as if it were one more mutable handle.
-    let (rule, help) = if type_name == "Float" {
-        (
-            "A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.",
-            "convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`",
-        )
-    } else {
-        (
-            "Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.",
-            "use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles",
-        )
-    };
-    RuntimeError::new(message).with_rule(rule).with_help(help)
-}
-
 /// A value in a case its layout does not have.
 ///
 /// [`super::equal`] answers the same event in the same words: a case index is
@@ -1174,8 +687,8 @@ fn wrong_case(name: &str) -> RuntimeError {
 /// A value reached the ordering without being something a key may be.
 ///
 /// Not the oracle's, and not reachable from a checked program: every word
-/// compared here either passed [`check`] or was written into a sorted run by
-/// something that did. It is written out because "should never" is not
+/// compared here was admitted by `core.admitKey`, or was written into a sorted
+/// run by something that was. It is written out because "should never" is not
 /// "cannot", and a silent wrong answer from a comparison costs more than the
 /// arm that reports one.
 #[cfg(test)]
@@ -1186,7 +699,6 @@ fn not_a_key() -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::exec::tests::Build;
     use crate::vm::intrinsics::make;
     use crate::vm::intrinsics::tests::{
         at, elements as array_layout, named, scalar, two_case, world,
@@ -1241,13 +753,6 @@ mod tests {
         machine.set_payload(addr, 0, held.0 as u64);
         machine.set_payload_run(addr, 1, words);
         addr
-    }
-
-    /// Two operands, which is what an argument and an argument are.
-    /// An operand naming the object at `addr`, whose layout its own header
-    /// states — which is what a lowering would have put in the argument.
-    fn object<'w>(machine: &Machine, addr: &'w u64) -> Operand<'w> {
-        at(machine.object_layout(*addr), std::slice::from_ref(addr))
     }
 
     fn cmp(machine: &Machine, a: (Repr, u64), b: (Repr, u64)) -> Ordering {
@@ -1511,7 +1016,6 @@ mod tests {
             cmp(&machine, (Repr::Int, 3), (Repr::Ref, held)),
             Ordering::Equal
         );
-        check(&machine, "Set.of", SET_ELEMENT, at(boxes, &[held])).unwrap();
 
         // A boxed `Point` is a `Point`, so it sorts among the structs and a
         // member of a `Set<Point>` finds it.
@@ -1526,141 +1030,13 @@ mod tests {
         );
     }
 
-    /// A `Float` is refused with the rule that is its own, and a `Vector`
-    /// with the rule about mutable handles.
-    #[test]
-    fn a_float_and_a_vector_are_refused_in_the_oracles_words() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let floats = scalar(&program, Repr::Float);
-        let error = check(
-            &machine,
-            "Set.of",
-            SET_ELEMENT,
-            at(floats, &[1.5f64.to_bits()]),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Set.of` cannot use a `Float` as a set element"
-        );
-        assert_eq!(
-            error.rule.as_deref(),
-            Some("A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.")
-        );
-
-        let items = make::vector_of(&mut machine, int, &[1]).unwrap();
-        let error = check(&machine, "Map.get", MAP_KEY, object(&machine, &items)).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Map.get` cannot use a `Vector` as a map key"
-        );
-        assert_eq!(
-            error.rule.as_deref(),
-            Some("Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.")
-        );
-    }
-
-    /// The path names the part that cannot be a key rather than blaming the
-    /// whole value, and it is built the way `MapKey::convert` builds one: a
-    /// struct anchors on its own name, an enum on its name and case, an array
-    /// and a map on nothing at all.
-    #[test]
-    fn a_refusal_names_the_nested_part_it_is_about() {
-        let mut build = Build::default();
-        let string = build.layout("String", Shape::Str);
-        build.program.str_layout = string;
-        let int = build.word("Int", Repr::Int);
-        let float = build.word("Float", Repr::Float);
-        let held = build.structure("Held", &[("tag", int), ("weight", float)]);
-        build.layout(
-            "Array",
-            Shape::Elements {
-                elem: held,
-                growable: false,
-            },
-        );
-        let option = build.enumeration("Option", &[("None", vec![]), ("Some", vec![float])]);
-        build.layout(
-            "Map",
-            Shape::Entries {
-                key: int,
-                value: float,
-            },
-        );
-        let program = build.done();
-        let mut machine = machine(&program);
-
-        let error = check_value(
-            &machine,
-            "Set.of",
-            SET_ELEMENT,
-            held,
-            &[1, 1.5f64.to_bits()],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Set.of` cannot use a `Float` inside `Held.weight` as a set element"
-        );
-
-        // An array at the root anchors on nothing, so the path is the index
-        // alone — and a struct inside it extends that. The elements are
-        // inline, at the `Held` layout's width.
-        let items = array(&mut machine, held, &[1, 1.5f64.to_bits()]);
-        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &items)).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Set.of` cannot use a `Float` inside `[0].weight` as a set element"
-        );
-
-        let error = check_value(
-            &machine,
-            "Map.inserted",
-            MAP_KEY,
-            option,
-            &[1, 1.5f64.to_bits()],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Map.inserted` cannot use a `Float` inside `Option.Some(0)` as a map key"
-        );
-
-        // A map's *values* are what nesting one as a key still asks about,
-        // and the entry is named by the key as it renders.
-        let entries = map(&mut machine, int, float, &[7, 1.5f64.to_bits()]);
-        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &entries)).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Set.of` cannot use a `Float` inside `[7]` as a set element"
-        );
-    }
-
-    /// A set's members and a map's keys are keys by construction, so nesting
-    /// one never asks again.
-    #[test]
-    fn a_nested_set_is_admitted_without_walking_it() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let members = set(&mut machine, int, &[1, 2]);
-        check(&machine, "Set.of", SET_ELEMENT, object(&machine, &members)).unwrap();
-        let entries = map(&mut machine, int, int, &[1, 2]);
-        check(&machine, "Set.of", SET_ELEMENT, object(&machine, &entries)).unwrap();
-    }
-
     /// An object that holds itself is a legal heap graph and not a legal
     /// key, so the order stops rather than running out of native stack.
     ///
     /// This asked the admission too until ADR 0068's Phase 3 took its nesting
-    /// bound away, and the admission has no answer to give it now: an `Array`
-    /// that holds itself is one no program can build — a key can reach itself
-    /// only through a `Vector`, which the admission refuses without looking
-    /// inside — and a walk with no bound walks it for as long as it is let.
-    /// [`a_key_ten_thousand_deep_is_worded_rather_than_bounded`] is what the
-    /// admission is held to instead.
+    /// bound away: an `Array` that holds itself is one no program can build —
+    /// a key can reach itself only through a `Vector`, which the admission
+    /// refuses without looking inside.
     #[test]
     fn a_cycle_stops_rather_than_recursing_forever() {
         let program = world();
@@ -1680,68 +1056,24 @@ mod tests {
         assert_eq!(error.message, "this value nests too deeply to compare");
     }
 
-    /// A key nested ten thousand arrays deep is admitted, and refused in the
-    /// words the oracle uses, rather than stopped by a depth.
-    ///
-    /// The admission is a loop over a stack since ADR 0068's Phase 3, and the
-    /// bound it had — 128 steps, which "nests too deeply to compare" — is
-    /// gone, because `std.dynamic.refusesKey` decides a boxed key with none
-    /// and a refusal it finds is worded here. So this is the case a recursion
-    /// would have overflowed the native stack at, on a test thread's stack.
-    ///
-    /// The chain is arrays whose one element is the next array, each at the
-    /// `String` layout's one-word width, and whose last holds a box: a `Float`
-    /// in it is refused at the bottom, with a path of ten thousand `[0]`s, and
-    /// an `Int` in it admits the whole key.
-    #[test]
-    fn a_key_ten_thousand_deep_is_worded_rather_than_bounded() {
-        const DEPTH: usize = 10_000;
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 20);
-        let text = program.str_layout;
-        let chain = |machine: &mut Machine, bottom: u64| {
-            let mut held = bottom;
-            for _ in 0..DEPTH {
-                held = array(machine, text, &[held]);
-            }
-            held
-        };
-        let float = scalar(&program, Repr::Float);
-        let refused = boxed(&mut machine, float, &[1.5f64.to_bits()]);
-        let top = chain(&mut machine, refused);
-        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &top)).unwrap_err();
-        assert_eq!(
-            error.message,
-            format!(
-                "`Set.of` cannot use a `Float` inside `{}` as a set element",
-                "[0]".repeat(DEPTH)
-            )
-        );
-
-        let int = scalar(&program, Repr::Int);
-        let admitted = boxed(&mut machine, int, &[7]);
-        let top = chain(&mut machine, admitted);
-        check(&machine, "Set.of", SET_ELEMENT, object(&machine, &top)).unwrap();
-    }
-
-    /// The two things only this representation can go wrong at.
+    /// The two things only this representation can go wrong at: a null
+    /// reference, and an address the sweeper reclaimed underneath it.
     #[test]
     fn a_null_or_reclaimed_reference_is_refused() {
         let program = world();
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
-        // The layout is the one a lowering would have passed — the static
-        // type of the argument — and the word is what went wrong: a null
-        // reference, and then an address the sweeper reclaimed underneath it.
-        let arrays = array_layout(&program, int, false);
-        let null = 0;
-        let error = check(&machine, "Set.of", SET_ELEMENT, at(arrays, &[null])).unwrap_err();
+        let error = order(
+            &machine,
+            Key::Word(Repr::Ref, 0),
+            Key::Word(Repr::Ref, 0),
+            0,
+        )
+        .unwrap_err();
         assert_eq!(error.message, "this value was read before it was given one");
 
         let dead = array(&mut machine, int, &[]);
         machine.relabel(dead, LayoutId::FREE, 0, 0);
-        let error = check(&machine, "Set.of", SET_ELEMENT, at(arrays, &[dead])).unwrap_err();
-        assert_eq!(error.message, "this value was read after it was reclaimed");
         let error = order(
             &machine,
             Key::Word(Repr::Ref, dead),

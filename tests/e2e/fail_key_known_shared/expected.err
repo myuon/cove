@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `Shared` inside `Node.next(0)` as a set element
+  --> <e2e>/fail_key_known_shared/main.cove:35:15
+   |
+35 |   let keyed = Set.of(outer)
+   |               ^^^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_known_shared/main.cove:42:3
+   |
+42 |   admitRing()?
+   |   ^^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

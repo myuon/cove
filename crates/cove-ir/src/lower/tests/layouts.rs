@@ -259,6 +259,14 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // added these two.
             "Vector",
             "Vector",
+            // And `std.dynamic`'s trail of path pieces, `Vector<String>` —
+            // `trailPush(trail: Vector<String>, ..)` and its neighbours, ADR
+            // 0068's Phase 4c — which moved the pair `std.string.chars` once
+            // interned at the end of this list up here, where the signatures
+            // of `std.dynamic` are interned. It is still one pair: a layout is
+            // interned once, whichever signature names it first.
+            "Vector",
+            "Vector",
             // `std.float`'s limb arithmetic — `scale(limbs: Vector<Int>, ..)`
             // and its neighbours — is the first non-generic library code whose
             // *signature* names a `Vector`, and those signatures are interned
@@ -305,18 +313,15 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // the wrapper's layout is interned however little the program under
             // test has to do with it.
             "std.stringbuilder.StringBuilder",
-            // Two rows and one type: `std.string.chars` builds its answer in a
-            // `Vector<String>`, and a vector is a header and the store beneath
-            // it, which are two layouts for the reason
+            // Two rows stood here and one type: `std.string.chars` builds its
+            // answer in a `Vector<String>`, and a vector is a header and the
+            // store beneath it, which are two layouts for the reason
             // `a_family_that_lives_in_the_heap_is_one_reference` gives —
-            // growth replaces the store and the only thing that says what a new
-            // one looks like is this table. Issue #454's Step 3 put them here,
-            // and they are the first `Vector` rows a program that names no
-            // vector has ever had: `std.map`, `std.set` and `std.vector` all
-            // deal in a `Vector<T>` whose `T` is a parameter, and a generic
-            // signature interns nothing until a program instantiates it.
-            "Vector",
-            "Vector",
+            // growth replaces the store and the only thing that says what a
+            // new one looks like is this table. Issue #454's Step 3 put them
+            // here, as the first `Vector` rows a program that names no vector
+            // had, and ADR 0068's Phase 4c moved them up, to `std.dynamic`'s
+            // trail.
         ]
     );
 }
