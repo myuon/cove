@@ -1,0 +1,117 @@
+use console.println
+
+/// A value that holds itself renders its repeat as `[…]` (issue #493, and
+/// issue #499's decisions 1 and 2).
+///
+/// A rendering keeps the vectors it is inside on a path: a vector is pushed
+/// when its elements begin and popped when they end. A non-empty vector met
+/// again while it is on the path is one the value holds inside itself, and it
+/// renders as `[…]` rather than being walked for ever. A vector met twice by
+/// two routes — a shared DAG — is not a cycle: it is on the path only while
+/// one of them is being rendered, so it renders in full at each occurrence. An
+/// empty vector renders `[]` and is never looked for.
+///
+/// Every value here is rendered through a layout the lowering knows, so every
+/// row is a static walk on the linear-memory backend. A cycle through a box
+/// is not here: until ADR 0068's Phase 4b-ii the box's renderer starts a path
+/// of its own.
+struct S {
+  v: Vector<S>
+}
+
+/// Two types that each hold a vector of the other.
+struct A {
+  v: Vector<B>
+}
+
+struct B {
+  v: Vector<A>
+}
+
+/// A cycle through an enum's payload.
+enum E {
+  Leaf(Int)
+  Many(Vector<E>)
+}
+
+/// A cycle through a map's values.
+struct M {
+  named: Map<String, Vector<M>>
+}
+
+/// One vector in two fields of one struct.
+struct Twin {
+  left: Vector<S>
+  right: Vector<S>
+}
+
+/// `s` pushed into its own `v`.
+fn itself() -> S {
+  var held: Vector<S> = Vector.of()
+  let s = S(v: held)
+  held.push(s)
+  s
+}
+
+/// `a.v` holds `b`, and `b.v` holds `a`.
+fn mutual() -> A {
+  var first: Vector<B> = Vector.of()
+  var second: Vector<A> = Vector.of()
+  let a = A(v: first)
+  let b = B(v: second)
+  first.push(b)
+  second.push(a)
+  a
+}
+
+/// A `Many` whose vector holds a leaf and then the `Many` itself.
+fn cyclicEnum() -> E {
+  var held: Vector<E> = Vector.of()
+  let e = E.Many(held)
+  held.push(E.Leaf(1))
+  held.push(e)
+  e
+}
+
+/// An `M` whose map's one value is a vector holding the `M`.
+fn cyclicMap() -> M {
+  var held: Vector<M> = Vector.of()
+  let m = M(named: Map.of(MapEntry(key: "self", value: held)))
+  held.push(m)
+  m
+}
+
+/// A vector of one leaf, to be reached twice.
+fn shared() -> Vector<S> {
+  var held: Vector<S> = Vector.of()
+  held.push(S(v: Vector.of()))
+  held
+}
+
+/// `top` holds `b` and `c`, and both of them hold the one vector `d`.
+fn diamond() -> S {
+  let d = shared()
+  let b = S(v: d)
+  let c = S(v: d)
+  var kids: Vector<S> = Vector.of()
+  kids.push(b)
+  kids.push(c)
+  S(v: kids)
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("self {itself()}")?
+  println("mutual {mutual()}")?
+  println("enum {cyclicEnum()}")?
+  println("map {cyclicMap()}")?
+
+  let one = shared()
+  println("twin {Twin(left: one, right: one)}")?
+  println("array {[one, one]}")?
+  println("diamond {diamond()}")?
+
+  println("empty {S(v: Vector.of())}")?
+  let none: Vector<S> = Vector.of()
+  println("empty.vector {none}")?
+  Ok(())
+}

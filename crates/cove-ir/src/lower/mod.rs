@@ -1215,6 +1215,10 @@ struct Pool {
     /// whether a value of it can contain itself through a `Vector`. A fact
     /// about the layout table, which only grows, so an answer never changes.
     tracked: HashMap<LayoutId, bool>,
+    /// [`synth::render_tracked`]'s answer for each layout it has been asked
+    /// about: whether a rendering of it carries the path of vectors it is
+    /// inside. [`Pool::tracked`]'s arrangement, for the rendering's own rule.
+    render_tracked: HashMap<LayoutId, bool>,
     /// The three standard-library appends a rendering walk is composed out
     /// of, once the first call site has resolved them.
     ///
@@ -1285,6 +1289,7 @@ impl Pool {
             instance_ids: HashMap::new(),
             synthesized: HashMap::new(),
             tracked: HashMap::new(),
+            render_tracked: HashMap::new(),
             leaves: None,
             dynamic_equals: None,
             dynamic_order: None,

@@ -1589,7 +1589,21 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// handed and then copied into its loop counter, where the counter is now
 /// computed from the limb below. **3** is the `duration` row
 /// `benches/rendering` gained, `countDuration` and `durationRow`.
-const FORWARDABLE_COPIES: usize = 10500;
+///
+/// **10,622 since ADR 0068's Phase 4b-i gave a rendering the path of vectors
+/// it is inside.** The lowering moved it by **0**: with the three new programs
+/// held out and `benches/rendering` as it was, it is 10,500 to the copy over
+/// the same 229 programs. A layout whose rendering carries the path has a
+/// wrapper that starts it and a tracked walk that forwards it, and both hand
+/// their operands straight to a call, so neither holds a copy; the programs
+/// that have one — those with a layout on a cycle through a `Vector` or
+/// reaching a box — gained sixteen functions between them and 161 fewer
+/// instructions, because a wrapper is a call `lower::inline` does not expand
+/// where the walk it replaced was. **118** is the three programs existing —
+/// `values_render_cycle` 43, `values_render_deep` 39 and
+/// `values_render_opaque` 36 — and **4** is the `tree` row `benches/rendering`
+/// gained, `countTree` and `treeRow`.
+const FORWARDABLE_COPIES: usize = 10622;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

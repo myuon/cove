@@ -61,6 +61,13 @@ use clock.now
 ///   loop written in Rust.
 /// - `map`, four entries of `Int` to `Point`: the same loop at the `MapEntry`
 ///   layout's width, with a nested walk under each value.
+/// - `tree`, a tree of 364 nodes through vectors — three children a node, six
+///   levels — rendered whole. A `Tree` holds a `Vector<Tree>`, so it is a
+///   layout that can contain itself, and its walks carry the path of vectors
+///   they are inside, which renders a repeat as `[…]` (issue #493, and issue
+///   #499's decisions 1 and 2): this row is what that costs, on a value that
+///   never holds itself. It runs for [`treeTurns`] rather than [`turns`],
+///   because one rendering is hundreds of nodes.
 ///
 /// # The loops are in callees, and they are padded
 ///
@@ -73,6 +80,12 @@ use clock.now
 /// — so that it is not expanded into [`Row`]'s maker.
 fn turns() -> Int {
   20000
+}
+
+/// How many times the tree row renders, which is fewer than [`turns`] by
+/// about the tree's size.
+fn treeTurns() -> Int {
+  200
 }
 
 /// A trait with one conformance, so that a `dyn Tagged` is a box whose
@@ -100,6 +113,26 @@ enum Mark {
   Plain
   Count(Int)
   Named(String)
+}
+
+/// A node with a vector of nodes under it: a layout that reaches itself
+/// through a `Vector`.
+struct Tree {
+  tag: Int
+  kids: Vector<Tree>
+}
+
+/// A full tree `levels` deep with `width` children a node, tagged by level.
+fn grow(levels: Int, width: Int) -> Tree {
+  var kids: Vector<Tree> = Vector.of()
+  if levels > 1 {
+    var at = 0
+    while at < width {
+      kids.push(grow(levels - 1, width))
+      at = at + 1
+    }
+  }
+  Tree(tag: levels, kids: kids)
 }
 
 /// Instructions a counting callee carries so that it is not expanded into its
@@ -553,6 +586,47 @@ fn countBoxed(value: dyn Tagged, rounds: Int) -> String {
   out
 }
 
+/// `rounds` interpolations of one `Tree`, and nothing else in the loop.
+fn countTree(value: Tree, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
 /// What one row measured: the microseconds its loop took, and what its last
 /// turn rendered.
 ///
@@ -624,6 +698,12 @@ fn boxedRow(value: dyn Tagged, rounds: Int) -> Row {
   Row(micros: (now() - from).micros(), witness: witness)
 }
 
+fn treeRow(value: Tree, rounds: Int) -> Row {
+  let from = now()
+  let witness = countTree(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
 /// What one rendering cost, in nanoseconds, over `rounds` turns of which
 /// `bare` microseconds were the loop itself.
 fn perCall(micros: Int, bare: Int, rounds: Int) -> Int {
@@ -654,6 +734,10 @@ export fn main() -> Result<Unit, Error> {
   let xFloat = floatRow(1.5, rounds)
   let xDuration = durationRow(1500ms, rounds)
   let xBoxed = boxedRow(held, rounds)
+  let few = treeTurns()
+  let tree = grow(6, 3)
+  let fewBare = bareRow(few)
+  let xTree = treeRow(tree, few)
 
   // What each row rendered, checked before any of it is read as a timing.
   // These are the same strings `tests/e2e/values_value_render_into` pins, so
@@ -672,6 +756,10 @@ export fn main() -> Result<Unit, Error> {
   assertEqual(xFloat.witness, "1.5")?
   assertEqual(xDuration.witness, "1500ms")?
   assertEqual(xBoxed.witness, "Point(id: 5, label: label)")?
+  // The tree's text is 364 nodes long; its length and its two ends are
+  // what is checked, and `tests/e2e/values_render_cycle` pins the shape.
+  assertEqual(xTree.witness.byteLength(), 8492)?
+  assertEqual(xTree.witness.slice(0, 31), "Tree(tag: 6, kids: [Tree(tag: 5")?
 
   println("bare loop           {bare.micros * 1000 / rounds} ns/turn over {rounds} turn(s)")?
   println("")?
@@ -687,5 +775,6 @@ export fn main() -> Result<Unit, Error> {
     "duration            {perCall(xDuration.micros, bare.micros, rounds)}",
   )?
   println("boxed               {perCall(xBoxed.micros, bare.micros, rounds)}")?
+  println("tree                {perCall(xTree.micros, fewBare.micros, few)}")?
   Ok(())
 }

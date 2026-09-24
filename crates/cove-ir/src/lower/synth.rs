@@ -132,7 +132,10 @@
 //!   What a rendering walk retains is one element of the run it is walking,
 //!   in a slot the next turn overwrites, until its own frame is popped a few
 //!   instructions later. That is the position `super::tails` exists to drop
-//!   a clear *from*.
+//!   a clear *from*. [`Operation::RenderTracked`] is the rendering's walk and
+//!   adds what [`Operation::Tracked`] adds, frame addresses and loads through
+//!   them, so what it allocates is what the appends under it allocate and not
+//!   one word more.
 //!
 //! So an arm added later that allocates owes the clears that its own shape
 //! earns, and this one earns none. An arm that held a reference across an
@@ -202,6 +205,17 @@
 //! the oracle raise, and it is blamed on the `==` that reached the walk: the
 //! machine does not count a walk's frames as callers (see
 //! [`Function::is_support`]).
+//!
+//! The rendering meets the same values and answers them differently: issue
+//! #499's decisions 1 and 2 have a vector the rendering is already inside
+//! render as `[…]`, so `struct S { v: Vector<S> }` with `s` pushed into its own
+//! `v` is `S(v: [S(v: […])])`. [`render_tracked`] decides which layouts carry
+//! that path — the same cycles, and for a reason of the rendering's own every
+//! layout whose walk reaches a box — and only those get
+//! [`Operation::RenderTracked`]'s walks, which carry it exactly as
+//! [`Operation::Tracked`]'s do: in the frames of the vectors being rendered,
+//! with no allocation. Every other layout's rendering is what it was,
+//! instruction for instruction.
 
 use std::sync::Arc;
 
@@ -325,6 +339,21 @@ pub(crate) enum Operation {
     /// walked exactly as it was before this variant existed, instruction for
     /// instruction. See [`Synth::tracking`].
     Tracked,
+    /// `core.renderInto(value, buffer)` at a layout whose rendering carries
+    /// the vectors it is inside, so that a value holding itself renders its
+    /// repeat as `[…]` rather than being walked for ever (issue #493, and
+    /// issue #499's decisions 2 and 3).
+    ///
+    /// [`Operation::Tracked`]'s arrangement for the rendering: the
+    /// [`Operation::Rendering`] walk, part for part and append for append,
+    /// with two more parameters — the address of the innermost vector on the
+    /// path and how many vectors the path holds. Only a layout
+    /// [`render_tracked`] answers `true` for has one, and only a function of
+    /// this operation calls one: `renders<L>` for such a layout is a wrapper
+    /// that starts the path empty. So a layout that is on no cycle and
+    /// reaches no box is rendered exactly as it was before this variant
+    /// existed, instruction for instruction. See [`Synth::render_tracking`].
+    RenderTracked,
 }
 
 impl Operation {
@@ -336,6 +365,7 @@ impl Operation {
             Operation::Admission => "refuses",
             Operation::Rendering => "renders",
             Operation::Tracked => "tracks",
+            Operation::RenderTracked => "rendersTracked",
         }
     }
 
@@ -347,6 +377,7 @@ impl Operation {
             Operation::Admission => shapes::BOOL,
             Operation::Rendering => shapes::UNIT,
             Operation::Tracked => shapes::BOOL,
+            Operation::RenderTracked => shapes::UNIT,
         }
     }
 
@@ -365,6 +396,12 @@ impl Operation {
             // The path's innermost pair, as the address of the frame words it
             // is in, and how many pairs deep the path goes.
             Operation::Tracked => vec![layout, layout, shapes::ADDR, shapes::INT],
+            // The same two words after the rendering's own pair: the path's
+            // innermost vector, as the address of the frame word it is in,
+            // and how many vectors deep the path goes.
+            Operation::RenderTracked => {
+                vec![layout, shapes::BYTE_BUFFER, shapes::ADDR, shapes::INT]
+            }
         }
     }
 }
@@ -779,7 +816,9 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
         // small at every site and `super::sweep` stands the function down,
         // so what it costs is nothing, and what it buys is that the call
         // site has one arm instead of fifteen.
-        Operation::Rendering => matches!(rendered(shape), Rendered::Walk),
+        Operation::Rendering | Operation::RenderTracked => {
+            matches!(rendered(shape), Rendered::Walk)
+        }
     }
 }
 
@@ -942,14 +981,121 @@ fn parts_of(shapes: &shapes::Shapes, layout: LayoutId) -> Vec<LayoutId> {
 
 /// Every layout reachable from `from` through [`parts_of`], `from` included.
 fn reached(shapes: &shapes::Shapes, from: &[LayoutId]) -> std::collections::HashSet<LayoutId> {
+    reached_by(shapes, from, parts_of)
+}
+
+/// Every layout reachable from `from` through `parts`, `from` included.
+fn reached_by(
+    shapes: &shapes::Shapes,
+    from: &[LayoutId],
+    parts: fn(&shapes::Shapes, LayoutId) -> Vec<LayoutId>,
+) -> std::collections::HashSet<LayoutId> {
     let mut seen = std::collections::HashSet::new();
     let mut pending = from.to_vec();
     while let Some(at) = pending.pop() {
         if seen.insert(at) {
-            pending.extend(parts_of(shapes, at));
+            pending.extend(parts(shapes, at));
         }
     }
     seen
+}
+
+/// Whether a rendering walk of `layout` has to carry the path of vectors it
+/// is inside — [`tracked`]'s question, asked for the rendering.
+///
+/// # The rule
+///
+/// A layout's rendering is tracked when **either**
+///
+/// - it lies on a cycle of the rendering walk that passes through a
+///   `Vector` — it reaches some vector layout that reaches it back, which is
+///   [`tracked`]'s rule over the parts [`Synth::rendering`] descends into
+///   ([`shown_parts`]); **or**
+/// - its walk **reaches a box**.
+///
+/// So a `Vector` is tracked exactly when its element walk can reach the same
+/// vector layout again, or reaches a box; and every layout between such a
+/// vector and the place the path is read — the vector again, or the box — is
+/// tracked too, so that the path is handed on and never dropped on the way.
+///
+/// # Why a box counts as reaching anything
+///
+/// For equality a box is a leaf, because `std.dynamic.equals` follows the
+/// box's contents with a path of its own. The rendering does **not** restart
+/// the path at a box — issue #499's decision 3: the path the static walk is
+/// carrying continues into the dynamic renderer — and a box can hold a value
+/// of any layout, including the vector a walk above it is inside. So a walk
+/// that reaches a box is, as far as the layout table can tell, on a cycle
+/// through whatever vector the box holds, and it carries the path there.
+/// The rule asks only whether the box is reached, and not whether some vector
+/// that reaches the box exists: that would be a question about layouts that
+/// may not have been interned yet, and the answer here, like [`tracked`]'s, is
+/// a fact about the layout and its parts alone, so it never changes.
+///
+/// **In ADR 0068's Phase 4b-i the box does not read the path yet.** A box is
+/// still rendered by the runtime's `Value.renderInto`, whose walk starts a
+/// path of its own at the box; the static walks carry theirs as far as the
+/// box and no further. So a cycle that closes through a box renders its
+/// `[…]` one vector later than the oracle's, which walks the whole value as
+/// one path. Phase 4b-ii's Cove renderer is what reads the path at the box.
+///
+/// Every other layout — one on no cycle through a vector and reaching no box —
+/// answers `false`, and its walk is emitted exactly as it was before issue
+/// #493 reached the rendering.
+pub(super) fn render_tracked(pool: &mut Pool, layout: LayoutId) -> bool {
+    if let Some(known) = pool.render_tracked.get(&layout) {
+        return *known;
+    }
+    let shapes = &pool.shapes;
+    let answer = walks(Operation::Rendering, &shapes.layout(layout).shape) && {
+        let below = reached_by(shapes, &shown_parts(shapes, layout), shown_parts);
+        below
+            .iter()
+            .any(|at| matches!(shapes.layout(*at).shape, Shape::Boxed))
+            || below.iter().copied().chain([layout]).any(|vector| {
+                matches!(shapes.layout(vector).shape, Shape::Vector { .. })
+                    && reached_by(shapes, &shown_parts(shapes, vector), shown_parts)
+                        .contains(&layout)
+            })
+    };
+    pool.render_tracked.insert(layout, answer);
+    answer
+}
+
+/// The layouts a rendering walk of `layout` renders a part of — the parts
+/// [`Synth::rendering`] hands to [`Synth::render`], and nothing else.
+///
+/// Not [`parts_of`], because the rendering does not descend where equality
+/// does: an opaque struct renders as its name and nothing inside it, the
+/// builtin `Error` as its message alone, a `Range` as two numbers; and a map
+/// renders its key and its value one at a time rather than comparing whole
+/// entries. A layout that is not a walk of its own — a scalar, a string, a
+/// box — has no parts here, which is what makes a box a node the walk
+/// reaches and never goes inside.
+fn shown_parts(shapes: &shapes::Shapes, layout: LayoutId) -> Vec<LayoutId> {
+    let described = shapes.layout(layout);
+    if !walks(Operation::Rendering, &described.shape) {
+        return Vec::new();
+    }
+    match &described.shape {
+        Shape::Struct { opaque: true, .. } => Vec::new(),
+        Shape::Struct { fields, .. } if is_error(&described.name, fields) => {
+            vec![fields[0].layout]
+        }
+        Shape::Struct { fields, .. } if is_range(shapes, layout, &described.name, fields) => {
+            Vec::new()
+        }
+        Shape::Struct { fields, .. } => fields.iter().map(|field| field.layout).collect(),
+        Shape::Enum { cases, .. } => cases
+            .iter()
+            .flat_map(|case| case.parts.iter().map(|part| part.layout))
+            .collect(),
+        Shape::Elements { elem, .. } | Shape::Vector { elem } | Shape::Members { elem } => {
+            vec![*elem]
+        }
+        Shape::Entries { key, value } => vec![*key, *value],
+        _ => Vec::new(),
+    }
 }
 
 /// The function `op` lowers to at `layout`, synthesizing it if nothing has
@@ -1019,6 +1165,8 @@ pub(super) fn function_for(
     };
     if op == Operation::Equality && tracked(synth.pool, layout) {
         synth.start_path(layout, &taken);
+    } else if op == Operation::Rendering && render_tracked(synth.pool, layout) {
+        synth.start_render_path(layout, &taken);
     } else {
         synth.body(layout, &taken);
     }
@@ -1134,21 +1282,28 @@ struct Synth<'p> {
     settled: Option<Slot>,
     /// What a tracked walk hands the tracked walks it calls: see [`Path`].
     ///
-    /// `None` in every walk but an [`Operation::Tracked`] one, which is what
-    /// keeps every other walk what it was — [`Synth::compare`] reads this
-    /// before it asks [`tracked`], and a walk with no path calls
-    /// `equals<L>` where one with a path calls `tracks<L>`.
+    /// `None` in every walk but an [`Operation::Tracked`] or an
+    /// [`Operation::RenderTracked`] one, which is what keeps every other walk
+    /// what it was — [`Synth::compare`] reads this before it asks [`tracked`],
+    /// and a walk with no path calls `equals<L>` where one with a path calls
+    /// `tracks<L>`; [`Synth::render`] reads it before it asks
+    /// [`render_tracked`], and calls `renders<L>` or `rendersTracked<L>`.
     path: Option<Path>,
 }
 
 /// The two words a tracked walk forwards to the tracked walks it calls.
 #[derive(Clone, Copy, Debug)]
 struct Path {
-    /// The address of the innermost vector pair on the path: word 0 of a
-    /// `tracks<Vector<…>>` frame, whose first three words are the pair's left
-    /// vector, its right vector and the address of the pair before it.
+    /// The address of the innermost entry on the path.
+    ///
+    /// For equality, word 0 of a `tracks<Vector<…>>` frame, whose first three
+    /// words are the pair's left vector, its right vector and the address of
+    /// the pair before it. For the rendering, word 0 of a
+    /// `rendersTracked<Vector<…>>` frame, whose first three words are the
+    /// vector, the buffer and the address of the entry before it. Either way
+    /// word 2 is the link, which is what one walk down the path follows.
     at: Slot,
-    /// How many pairs the path holds. Nought at the root, where `at` is an
+    /// How many entries the path holds. Nought at the root, where `at` is an
     /// address nothing reads.
     depth: Slot,
 }
@@ -1224,6 +1379,7 @@ impl Synth<'_> {
             Operation::Admission => self.admission(layout, taken[0]),
             Operation::Rendering => self.rendering(layout, taken[0], taken[1]),
             Operation::Tracked => self.tracking(layout, taken),
+            Operation::RenderTracked => self.render_tracking(layout, taken),
         }
     }
 
@@ -2691,11 +2847,27 @@ impl Synth<'_> {
             // one would be reading it without taking it.
             Shape::Shared { .. } => self.literal(buffer, "<shared>"),
             Shape::Closure { .. } => self.literal(buffer, "<fn>"),
-            // An address is a place, a handle is the host's, and a task or a
-            // scope is the scheduler's; interpolating one would be putting
-            // this run's bookkeeping into a string a program prints. A tag is
-            // not a value either, for a reason of its own: it is word 0 of an
-            // enum, and an enum renders whole through its layout.
+            // A task shows as the handle it is and never as the value it
+            // will produce, which is observable only through `await` or the
+            // scope settling it — `Display for Value`'s `<task>`, and all of
+            // it is in the layout.
+            Shape::Word(Repr::Task) => self.literal(buffer, "<task>"),
+            // An address is a place and not a value; interpolating one would
+            // be putting this run's bookkeeping into a string a program
+            // prints. A tag is not a value either, for a reason of its own: it
+            // is word 0 of an enum, and an enum renders whole through its
+            // layout.
+            //
+            // A host resource and a task scope are here too, and unlike those
+            // two a program can interpolate either (issue #499). Their text —
+            // `<{module}.{Type}#{n}>`, `<task scope {name}>` — names *which*
+            // one, and that is in the run's resource table and the scheduler's
+            // scope table rather than in the layout: every resource is the one
+            // `<host>` layout and every scope the one `TaskScope`. A walk has
+            // nothing to write it from, and ADR 0068's gate forbids handing a
+            // known layout to `Value.renderInto` instead. So these two still
+            // refuse on a static walk; a box renders them, because the
+            // runtime's renderer reads both tables.
             //
             // Everything else — a `String`, an `Int`, a `Float`, a
             // `Duration`, a box — is not a walk at all, so [`walks`] made no
@@ -2737,6 +2909,41 @@ impl Synth<'_> {
                 self.number(callee, at, shapes::DURATION, buffer);
             }
             Rendered::Walk => {
+                // A tracked walk hands its path to the tracked walk of a part
+                // that carries one; see [`render_tracked`]. Only an
+                // [`Operation::RenderTracked`] walk has a path to hand on.
+                if let Some(path) = self.path {
+                    if render_tracked(self.pool, layout) {
+                        let callee = function_for(
+                            Operation::RenderTracked,
+                            layout,
+                            self.pool,
+                            self.decls,
+                            self.span,
+                        );
+                        let args = self.pool.args.intern(vec![
+                            Arg { slot: at, layout },
+                            Arg {
+                                slot: buffer,
+                                layout: shapes::BYTE_BUFFER,
+                            },
+                            Arg {
+                                slot: path.at,
+                                layout: shapes::ADDR,
+                            },
+                            Arg {
+                                slot: path.depth,
+                                layout: shapes::INT,
+                            },
+                        ]);
+                        self.emit(Inst::Call {
+                            dst: self.answer,
+                            callee,
+                            args,
+                        });
+                        return;
+                    }
+                }
                 let callee = function_for(
                     Operation::Rendering,
                     layout,
@@ -3127,10 +3334,11 @@ impl Synth<'_> {
     /// A value with no text of its own, refused in the runtime's own words.
     ///
     /// The lowering's own sentence again, [`Synth::not_a_key`]'s argument
-    /// repeated. Not reachable from a checked program: the families it
-    /// answers for are word 0 of an enum, an address, a host handle, a task
-    /// and a task scope, and none of them is a type a program can
-    /// interpolate.
+    /// repeated. The families it answers for are word 0 of an enum and an
+    /// address, which no checked program can interpolate, and a host handle
+    /// and a task scope, which issue #499 found a program can: see
+    /// [`Synth::rendering`]'s last arm for why a walk cannot write their text.
+    /// A task was here too, and renders as `<task>` now.
     fn no_text(&mut self) {
         self.trap("this value has no text of its own");
     }
@@ -3140,6 +3348,11 @@ impl Synth<'_> {
     ///
     /// See [`Rendered::Dynamic`], which is the list, and `crate::verify`,
     /// which is where the list is enforced rather than promised.
+    ///
+    /// A tracked walk reaches here with a path, and in Phase 4b-i it does not
+    /// hand the path on: the intrinsic takes a value and a buffer and starts a
+    /// path of its own. See [`render_tracked`] for what that leaves inexact
+    /// until Phase 4b-ii.
     fn below(&mut self, layout: LayoutId, at: Slot, buffer: Slot) {
         let site = self.pool.intrinsic_site(IntrinsicSite {
             intrinsic: Intrinsic::ValueRenderInto,
@@ -3157,6 +3370,221 @@ impl Synth<'_> {
             site,
             args,
         });
+    }
+
+    // ---- a rendering that contains itself --------------------------------
+
+    /// `renders<L>` for a layout [`render_tracked`] answers `true` for: the
+    /// path started empty, and the tracked walk called with it.
+    ///
+    /// [`Synth::start_path`] for the rendering, and a wrapper for its reason:
+    /// every caller outside the cycle — an interpolation, a walk that merely
+    /// reaches the cycle — calls the `renders<L>` it always did with the two
+    /// operands it always passed. The address is the wrapper's own first
+    /// word, which a path of depth nought never reads.
+    fn start_render_path(&mut self, layout: LayoutId, taken: &[Slot]) {
+        let at = self.alloc(shapes::ADDR);
+        self.emit(Inst::AddrOfSlot { dst: at, slot: 0 });
+        let depth = self.alloc(shapes::INT);
+        self.emit(Inst::Int {
+            dst: depth,
+            value: 0,
+        });
+        let callee = function_for(
+            Operation::RenderTracked,
+            layout,
+            self.pool,
+            self.decls,
+            self.span,
+        );
+        let args = self.pool.args.intern(vec![
+            Arg {
+                slot: taken[0],
+                layout,
+            },
+            Arg {
+                slot: taken[1],
+                layout: shapes::BYTE_BUFFER,
+            },
+            Arg {
+                slot: at,
+                layout: shapes::ADDR,
+            },
+            Arg {
+                slot: depth,
+                layout: shapes::INT,
+            },
+        ]);
+        self.emit(Inst::Call {
+            dst: self.answer,
+            callee,
+            args,
+        });
+    }
+
+    /// `rendersTracked<L>`: [`Synth::rendering`] with the path.
+    ///
+    /// A layout that is not a vector forwards the path it was given to the
+    /// tracked walks of its parts and adds nothing to it. A vector **is** an
+    /// entry of the path — the only kind there is, because a `Vector` is the
+    /// only node a value can meet again: everything else a rendering descends
+    /// into is immutable once built — and its walk does two things before it
+    /// renders its elements:
+    ///
+    /// - **It looks for itself on the path**, and finding itself is the
+    ///   repeat: this vector is one a rendering further up is still inside,
+    ///   so it renders as `[…]` and nothing is walked below it (issue #499's
+    ///   decision 2). The look is by `Compare::Identity`, which is what `is`
+    ///   lowers to, one load and one comparison an entry, and a loop over
+    ///   `depth` frames and nothing else — no allocation.
+    /// - **It becomes the path's innermost entry** for everything below it.
+    ///   Its own first three words already are the entry — the vector, the
+    ///   buffer, and the address of the entry before — so the path it hands
+    ///   on is the address of its word 0 and a depth one more. The frame is
+    ///   live for exactly as long as anything below it is being rendered, and
+    ///   that is exactly the span decision 1 of issue #499 gives an entry:
+    ///   pushed on descent, popped when the vector's rendering completes. So
+    ///   a vector met twice by two routes — a shared DAG — is on the path only
+    ///   while one of them is being rendered, and renders in full both times.
+    ///
+    /// **An empty vector is never looked for.** Its length is read first, and
+    /// one of nought renders `[]` without the look: nothing is under it, so
+    /// it cannot lead back, and a vector on the path is never empty. The two
+    /// words that would push it are written and read by nothing, because
+    /// there is nothing below it to read them. The leaf of a tree is a vector
+    /// with no elements and most of a tree is leaves, so this is what keeps
+    /// the look off most of the walk.
+    fn render_tracking(&mut self, layout: LayoutId, taken: &[Slot]) {
+        let (at, buffer, path, depth) = (taken[0], taken[1], taken[2], taken[3]);
+        let Shape::Vector { elem } = self.pool.shapes.layout(layout).shape else {
+            self.path = Some(Path { at: path, depth });
+            self.rendering(layout, at, buffer);
+            return;
+        };
+        debug_assert_eq!(
+            (at, buffer, path),
+            (0, 1, 2),
+            "a vector's path entry is the first three words of its frame"
+        );
+        self.emit(Inst::Unit { dst: self.answer });
+        let len = self.alloc(shapes::INT);
+        self.emit(Inst::LoadField {
+            dst: len,
+            obj: at,
+            at: shapes::VECTOR_LEN,
+            layout: shapes::INT,
+        });
+        // The walk down the path: `entry` from the innermost, `seen` of
+        // `depth` — and before it, the empty vector's way past it.
+        let seen = self.alloc(shapes::INT);
+        self.emit(Inst::Int {
+            dst: seen,
+            value: 0,
+        });
+        let more = self.alloc(shapes::BOOL);
+        self.emit(Inst::Cmp {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: more,
+            a: seen,
+            b: len,
+        });
+        let empty = self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        });
+        let entry = self.alloc(shapes::ADDR);
+        self.emit(Inst::Copy {
+            dst: entry,
+            src: path,
+            layout: shapes::ADDR,
+        });
+        let head = self.here();
+        self.emit(Inst::Cmp {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: more,
+            a: seen,
+            b: depth,
+        });
+        let absent = self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        });
+        let held = self.alloc(layout);
+        self.emit(Inst::Load {
+            dst: held,
+            addr: entry,
+            layout,
+        });
+        let same = self.alloc(shapes::BOOL);
+        self.emit(Inst::Cmp {
+            on: Compare::Identity,
+            op: CmpOp::Eq,
+            dst: same,
+            a: held,
+            b: at,
+        });
+        let other = self.emit(Inst::BranchFalse {
+            cond: same,
+            to: PENDING,
+        });
+        // On the path: the repeat, and nothing below it.
+        self.literal(buffer, "[…]");
+        let repeat = self.emit(Inst::Jump { to: PENDING });
+        let next = self.here();
+        self.patch(other, next);
+        let word = self.alloc(shapes::ADDR);
+        self.emit(Inst::AddrOfPart {
+            dst: word,
+            addr: entry,
+            at: 2,
+        });
+        self.emit(Inst::Load {
+            dst: entry,
+            addr: word,
+            layout: shapes::ADDR,
+        });
+        self.emit(Inst::ArithImm {
+            op: ArithOp::Add,
+            dst: seen,
+            a: seen,
+            value: 1,
+        });
+        self.emit(Inst::Jump { to: head });
+        let walk = self.here();
+        self.patch(absent, walk);
+        self.patch(empty, walk);
+        // Not on the path: this vector is the path's innermost from here down.
+        let inner = self.alloc(shapes::ADDR);
+        self.emit(Inst::AddrOfSlot {
+            dst: inner,
+            slot: at,
+        });
+        let deeper = self.alloc(shapes::INT);
+        self.emit(Inst::ArithImm {
+            op: ArithOp::Add,
+            dst: deeper,
+            a: depth,
+            value: 1,
+        });
+        self.path = Some(Path {
+            at: inner,
+            depth: deeper,
+        });
+        // The rest of [`Synth::vector`]: the store, and the elements in it
+        // over the length the vector carries.
+        let store = self.pool.shapes.store_of(elem);
+        let elements = self.alloc(store);
+        self.emit(Inst::LoadField {
+            dst: elements,
+            obj: at,
+            at: shapes::VECTOR_STORE,
+            layout: store,
+        });
+        self.joined(elem, elements, len, buffer, "[", "]");
+        let end = self.here();
+        self.patch(repeat, end);
     }
 
     /// The three appends this walk is composed out of.

@@ -1123,6 +1123,88 @@ fn a_layout_that_reaches_itself_renders_by_calling_itself() {
     assert!(walk.contains("<synth>.renders<m.Node#17>"), "{walk}");
 }
 
+/// Only a rendering that can meet a vector again carries the path of vectors
+/// it is inside (issue #493 for the rendering, and issue #499's decisions 1
+/// to 3), and the functions that carry it are exactly `synth::render_tracked`'s.
+///
+/// - `Node` holds a `Vector<Node>`, so its rendering and its vector's are on a
+///   cycle and tracked, and `renders<m.Node>` is the wrapper that starts the
+///   path. `Pair` merely *holds* a `Node` and is on no cycle, so it calls that
+///   wrapper like any other caller would.
+/// - `Tree` reaches itself through an `Array`, which is immutable, so no value
+///   of it can hold itself and its rendering is what it was.
+/// - `Held` holds a box, and a box can hold anything — the vector a walk above
+///   it is inside included — so it and the `Vector<Held>` above it carry the
+///   path as far as the box, where Phase 4b-ii's renderer will read it.
+#[test]
+fn only_a_rendering_that_can_meet_a_vector_again_carries_a_path() {
+    let program = lowered(
+        "trait Summary { fn summarize(self) -> String }\n\
+         struct Node { tag: Int, kids: Vector<Node> }\n\
+         struct Pair { left: Node, right: Node }\n\
+         struct Tree { tag: Int, kids: Array<Tree> }\n\
+         struct Held { item: dyn Summary }\n\
+         fn a(x: Pair) -> String { \"{x}\" }\n\
+         fn b(x: Tree) -> String { \"{x}\" }\n\
+         fn c(x: Vector<Held>) -> String { \"{x}\" }",
+    );
+    let mut walks = walks_of(&program);
+    for walk in &mut walks {
+        // The layout ids are the table's, and the names are what is asked.
+        if let Some(at) = walk.find('#') {
+            walk.truncate(at);
+        }
+    }
+    walks.sort();
+    assert_eq!(
+        walks,
+        [
+            "renders<Array",
+            "renders<Vector",
+            "renders<m.Node",
+            "renders<m.Pair",
+            "renders<m.Tree",
+            "rendersTracked<Vector",
+            "rendersTracked<Vector",
+            "rendersTracked<m.Held",
+            "rendersTracked<m.Node",
+        ],
+    );
+    let wrapper = synthesized(&program, "renders<m.Node");
+    assert!(wrapper.contains("rendersTracked<m.Node"), "{wrapper}");
+    let pair = synthesized(&program, "renders<m.Pair");
+    assert!(pair.contains("<synth>.renders<m.Node"), "{pair}");
+    assert!(!pair.contains("rendersTracked"), "{pair}");
+    let tree = synthesized(&program, "renders<Array");
+    assert!(!tree.contains("rendersTracked"), "{tree}");
+    assert!(!tree.contains("identity"), "{tree}");
+}
+
+/// A tracked vector looks itself up on the path with `is` before it renders
+/// its elements, and renders `[…]` where it finds itself — and it allocates
+/// nothing to do it: the path is its own frame words, linked through word 2.
+#[test]
+fn a_tracked_vector_looks_itself_up_and_renders_its_repeat() {
+    let program = lowered(
+        "struct Node { tag: Int, kids: Vector<Node> }\n\
+         fn a(x: Node) -> String { \"{x}\" }",
+    );
+    let vector = synthesized(&program, "rendersTracked<Vector");
+    assert!(vector.contains("[…]"), "{vector}");
+    assert!(vector.contains("identity"), "{vector}");
+    assert!(vector.contains("addr-of-slot"), "{vector}");
+    assert!(vector.contains("rendersTracked<m.Node"), "{vector}");
+    let allocates = |line: &str| {
+        line.split_whitespace()
+            .nth(1)
+            .is_some_and(|op| op == "alloc" || op.starts_with("growable-alloc"))
+    };
+    assert!(vector
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some("load")));
+    assert!(!vector.lines().any(allocates), "{vector}");
+}
+
 /// A program that interpolates only a `String` and an `Int` makes no walk at
 /// all, and that is the **short circuit** `Body::append_piece`'s two leading
 /// arms are.

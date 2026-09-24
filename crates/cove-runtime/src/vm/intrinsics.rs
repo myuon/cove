@@ -37,6 +37,7 @@
 //! renders as its message. Neither can be derived here, because by the time a
 //! value is a word the declaration is gone.
 
+use std::cell::Cell;
 use std::fmt::Write as _;
 
 use cove_ir::{Intrinsic, LayoutId, Repr, Shape};
@@ -58,11 +59,15 @@ mod scalar;
 mod seq;
 mod text;
 
-/// How deep a rendering may nest.
+/// How deep the recursive walks still in this module may nest: [`equal`]'s,
+/// which no program reaches, and [`operand`]'s naming of a value.
 ///
 /// For the reason [`crate::vm::boundary`]'s limit exists: an object graph
-/// can hold itself and a renderer that met one would recurse until the native
-/// stack ran out.
+/// can hold itself and a walk that met one would recurse until the native
+/// stack ran out. The rendering was bounded by this too until ADR 0068's
+/// Phase 4b-i made it a loop over a stack with the vectors it is inside on a
+/// path, which is what issue #480's "no nesting bound" and issue #493's cycle
+/// rule ask of it.
 const MAX_DEPTH: usize = 128;
 
 /// Runs `intrinsic` over the operands `frame` names, writing its answer into
@@ -284,7 +289,7 @@ pub(crate) fn call(
 fn render_into(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<(), RuntimeError> {
     let piece = frame.operand(machine, 0);
     let mut text = String::new();
-    render_value(machine, piece.layout, piece.words, 0, &mut text)?;
+    render_value(machine, piece.layout, piece.words, &mut text)?;
     let owner = frame.word(machine, 1);
     machine.examined(text.len() as u64);
     machine.append_text(owner, text.as_bytes())?;
@@ -292,7 +297,15 @@ fn render_into(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<()
     Ok(())
 }
 
-/// The text of `word`, read as `repr`, appended to `out`.
+/// What a vector the rendering is already inside renders as.
+///
+/// Issue #499's decision 2, and `Display for Value`'s marker for the same
+/// value: the brackets a vector always has, around the ellipsis that says
+/// what is inside them has been shown already, further out.
+const REPEAT: &str = "[…]";
+
+/// The text of `word`, read as `repr`, appended to `out` — or, for a
+/// reference, the object it names pushed onto `steps` to be rendered next.
 ///
 /// The width-one case of [`render_value`], and what every walk below reaches
 /// when it gets down to one word of scalar bits or one address.
@@ -300,7 +313,7 @@ fn render(
     machine: &Machine,
     repr: Repr,
     word: u64,
-    depth: usize,
+    walk: &mut Walk,
     out: &mut String,
 ) -> Result<(), RuntimeError> {
     match repr {
@@ -309,20 +322,156 @@ fn render(
         Repr::Int => write!(out, "{}", word as i64).expect("a string never fails to be written to"),
         Repr::Float => float(out, f64::from_bits(word)),
         Repr::Duration => duration(out, word as i64),
-        Repr::Ref => return render_object(machine, word, depth, out),
-        // None of them is a value: an address is a place, a handle is the
-        // host's, and a task or a scope is the scheduler's. Interpolating one
-        // would be putting this run's bookkeeping into a string a program
-        // prints.
+        Repr::Ref => return render_object(machine, word, walk, out),
+        // A handle shows as what it names, identity included — `Display for
+        // Value`'s `<{handle}>`, which is `<{module}.{Type}#{n}>`: two
+        // connections are told apart by the number the host issued and by
+        // nothing else. The module, the type and the number are the run's
+        // resource table's, which is why a walk the lowering composed cannot
+        // write this and hands the word here (issue #499).
+        Repr::Host => {
+            let handle = machine
+                .resource(word)
+                .ok_or_else(crate::vm::boundary::no_such_resource)?;
+            write!(out, "<{handle}>").expect("a string never fails to be written to");
+        }
+        // A scope shows the name it is bound to, which is the scheduler's
+        // entry for it rather than anything in the layout.
+        Repr::Scope => {
+            let name = machine.scope_name(word)?;
+            write!(out, "<task scope {name}>").expect("a string never fails to be written to");
+        }
+        // A task shows as the handle it is, never as the value it will
+        // produce: that value is observable only through `await` or the scope
+        // settling it. A walk writes this one itself; it is here for a task
+        // inside a box.
+        Repr::Task => out.push_str("<task>"),
+        // An address is a place and not a value; interpolating one would be
+        // putting this run's bookkeeping into a string a program prints.
         //
         // A tag is not a value either, for a reason of its own: it is word 0
         // of an enum and an enum renders whole, through its layout, as the
         // case it holds. A tag reaching here alone is a lowering bug.
-        Repr::Addr | Repr::Host | Repr::Task | Repr::Scope | Repr::Tag => {
+        Repr::Addr | Repr::Tag => {
             return Err(RuntimeError::new("this value has no text of its own"))
         }
     }
     Ok(())
+}
+
+/// One piece of work a rendering has still to do.
+///
+/// The walk is a loop over a stack of these rather than a recursion, so a
+/// value nests as deep as it likes and the host's stack is not what stops it
+/// — issue #480 decided that the language has no nesting bound, and this was
+/// the last renderer with one (`MAX_DEPTH`, 128 steps, which a boxed value
+/// nested 64 levels deep ran out of). The work a step stands for is the work
+/// the recursive walk did at that point, in the same order, so the text is
+/// the same byte for byte.
+///
+/// A run, a struct's fields and an enum's parts are one step each that comes
+/// back for its next part, rather than one step per part pushed at once: what
+/// the stack holds is proportional to how deep the value is, not how wide.
+///
+/// A step that reads a value location names its words by where they start in
+/// [`Walk::words`], which is a stack too: a step's words are on top of it
+/// whenever the step is taken, and are taken off when it is done. So a walk
+/// allocates its two stacks and nothing per value.
+enum Step {
+    /// A value location of `layout`: its `width` words, from `from`.
+    Value {
+        layout: LayoutId,
+        from: usize,
+        width: usize,
+    },
+    /// A closing bracket, or the colon between a key and its value.
+    Text(&'static str),
+    /// A struct's fields from the `next`th; its words are from `from`.
+    Fields {
+        layout: LayoutId,
+        from: usize,
+        next: usize,
+    },
+    /// The parts of the case an enum holds, from the `next`th; its words are
+    /// from `from`.
+    Parts {
+        layout: LayoutId,
+        case: usize,
+        from: usize,
+        next: usize,
+    },
+    /// The units of a run of elements or members at `addr`, from the
+    /// `next`th, each preceded by `, ` but the first.
+    Run {
+        addr: u64,
+        elem: LayoutId,
+        len: u32,
+        next: u32,
+    },
+    /// A map's entries, `key: value` apiece, from the `next`th.
+    Entries {
+        addr: u64,
+        key: LayoutId,
+        value: LayoutId,
+        len: u32,
+        next: u32,
+    },
+    /// The end of a vector: its closing bracket, and the vector off the path.
+    Leave,
+}
+
+/// A rendering in progress: what is left to do, the words it is done over,
+/// and the vectors it is inside.
+struct Walk {
+    steps: Vec<Step>,
+    /// The words of every value location a step on [`Walk::steps`] reads,
+    /// in the order the steps were pushed.
+    words: Vec<u64>,
+    /// The addresses of the non-empty vectors whose elements are being
+    /// rendered, outermost first — issue #493's current path, for the
+    /// rendering.
+    ///
+    /// An address is pushed when a vector's elements begin and popped by its
+    /// [`Step::Leave`], when they end, so a vector met twice by two routes —
+    /// a shared DAG — is on it only while one of them is being rendered, and
+    /// renders in full both times. A vector met again **while** it is on it
+    /// is one the value holds inside itself, and renders as [`REPEAT`].
+    ///
+    /// **The path starts empty at the box**, which is ADR 0068's Phase 4b-i
+    /// and not the rule: this renderer is reached from a static walk only
+    /// through a box, and the vectors that walk is inside are in its frames,
+    /// where this cannot see them. So a cycle that closes through a box
+    /// renders its `[…]` one vector later here than on the oracle, which walks
+    /// the whole value as one path; Phase 4b-ii's Cove renderer continues the
+    /// static walk's path through the box, as issue #499's decision 3 has it.
+    inside: Vec<u64>,
+}
+
+impl Walk {
+    /// Pushes a step over the `width` words of the object at `addr` from
+    /// payload word `at`, copied onto [`Walk::words`].
+    fn object(&mut self, machine: &Machine, layout: LayoutId, addr: u64, at: u32, width: u32) {
+        let from = self.words.len();
+        self.words
+            .extend((0..width).map(|offset| machine.payload(addr, at + offset)));
+        self.steps.push(Step::Value {
+            layout,
+            from,
+            width: width as usize,
+        });
+    }
+
+    /// Pushes a step over `width` words that are already on
+    /// [`Walk::words`] from `at`, copied onto its top.
+    fn part(&mut self, layout: LayoutId, at: usize, width: usize) {
+        let from = self.words.len();
+        self.words.extend_from_within(at..at + width);
+        self.steps.push(Step::Value {
+            layout,
+            from,
+            width,
+        });
+    }
 }
 
 /// The text of the value location of `layout` holding `words`, appended to
@@ -333,27 +482,216 @@ fn render(
 /// following an address per field. This is the same walk
 /// [`crate::vm::boundary`] makes, and it is written twice for the reason the
 /// module docs give.
-fn render_value(
+///
+/// It reports one unit per value it visits, which is [ADR 0064]'s Decision 7
+/// asked of a walk over a value: every field, element, member and entry-half
+/// arrives as a [`Step::Value`], and each is reported once, where it is taken
+/// off the stack.
+///
+/// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+pub(super) fn render_value(
     machine: &Machine,
     layout: LayoutId,
     words: &[u64],
-    depth: usize,
     out: &mut String,
 ) -> Result<(), RuntimeError> {
-    // One value visited, reported for [`render_into`]'s reason. Every field,
-    // element, member and entry-half of the walk arrives here — `render` and
-    // `render_object` are reached from here and return to here — so one
-    // report here is one per value and no value twice. The bytes are not
-    // reported here: `render_into` reports the whole of the text once.
-    machine.examined(1);
-    if depth >= MAX_DEPTH {
-        return Err(too_deep());
+    let mut walk = SPARE.with(Cell::take).unwrap_or_else(|| Walk {
+        steps: Vec::new(),
+        words: Vec::new(),
+        inside: Vec::new(),
+    });
+    let answer = walk_value(machine, layout, words, &mut walk, out);
+    walk.steps.clear();
+    walk.words.clear();
+    walk.inside.clear();
+    walk.steps.shrink_to(SPARE_ROOM);
+    walk.words.shrink_to(SPARE_ROOM);
+    walk.inside.shrink_to(SPARE_ROOM);
+    SPARE.with(|spare| spare.set(Some(walk)));
+    answer
+}
+
+thread_local! {
+    /// The stacks the last rendering on this thread was done over, emptied,
+    /// for the next one to use.
+    ///
+    /// A rendering allocates its stacks and nothing per value, and keeping
+    /// them is what makes it allocate nothing at all once a thread has
+    /// rendered once: `benches/rendering`'s `boxed` row, one small struct in a
+    /// box, was one allocation a rendering before the walk was a loop, and
+    /// would be two more without this. A rendering runs no Cove code, so no
+    /// second one can begin on this thread while this one holds them.
+    static SPARE: Cell<Option<Walk>> = const { Cell::new(None) };
+}
+
+/// How many entries each of a spare [`Walk`]'s stacks keeps room for, so that
+/// one rendering nested far deeper than the rest does not keep its stacks'
+/// memory for the rest of the run.
+const SPARE_ROOM: usize = 256;
+
+/// [`render_value`]'s walk, over stacks it is handed empty.
+fn walk_value(
+    machine: &Machine,
+    layout: LayoutId,
+    words: &[u64],
+    walk: &mut Walk,
+    out: &mut String,
+) -> Result<(), RuntimeError> {
+    let program = machine.program();
+    walk.words.extend_from_slice(words);
+    walk.steps.push(Step::Value {
+        layout,
+        from: 0,
+        width: words.len(),
+    });
+    while let Some(step) = walk.steps.pop() {
+        match step {
+            Step::Value {
+                layout,
+                from,
+                width,
+            } => {
+                // One value visited, reported for [`render_into`]'s reason.
+                // The bytes are not reported here: `render_into` reports the
+                // whole of the text once.
+                machine.examined(1);
+                value(machine, layout, from, width, walk, out)?;
+            }
+            Step::Text(text) => out.push_str(text),
+            Step::Fields { layout, from, next } => {
+                let Shape::Struct { fields, .. } = &program.layout(layout).shape else {
+                    unreachable!("a struct's fields are asked of a struct");
+                };
+                let Some(field) = fields.get(next) else {
+                    out.push(')');
+                    walk.words.truncate(from);
+                    continue;
+                };
+                if next > 0 {
+                    out.push_str(", ");
+                }
+                write!(out, "{}: ", field.name).expect("a string never fails to be written to");
+                let at = from + field.at as usize;
+                let width = program.layout(field.layout).width() as usize;
+                if at + width > walk.words.len() {
+                    return Err(short_run(&field.name));
+                }
+                walk.steps.push(Step::Fields {
+                    layout,
+                    from,
+                    next: next + 1,
+                });
+                walk.part(field.layout, at, width);
+            }
+            Step::Parts {
+                layout,
+                case,
+                from,
+                next,
+            } => {
+                let described = program.layout(layout);
+                let Shape::Enum { cases, .. } = &described.shape else {
+                    unreachable!("an enum's parts are asked of an enum");
+                };
+                let Some(part) = cases[case].parts.get(next) else {
+                    out.push(')');
+                    walk.words.truncate(from);
+                    continue;
+                };
+                if next > 0 {
+                    out.push_str(", ");
+                }
+                let at = from + 1 + part.at as usize;
+                let width = program.layout(part.layout).width() as usize;
+                if at + width > walk.words.len() {
+                    return Err(short_run(&described.name));
+                }
+                walk.steps.push(Step::Parts {
+                    layout,
+                    case,
+                    from,
+                    next: next + 1,
+                });
+                walk.part(part.layout, at, width);
+            }
+            Step::Run {
+                addr,
+                elem,
+                len,
+                next,
+            } => {
+                if next == len {
+                    continue;
+                }
+                if next > 0 {
+                    out.push_str(", ");
+                }
+                let stride = program.layout(elem).width();
+                walk.steps.push(Step::Run {
+                    addr,
+                    elem,
+                    len,
+                    next: next + 1,
+                });
+                walk.object(machine, elem, addr, next * stride, stride);
+            }
+            Step::Entries {
+                addr,
+                key,
+                value,
+                len,
+                next,
+            } => {
+                if next == len {
+                    continue;
+                }
+                if next > 0 {
+                    out.push_str(", ");
+                }
+                let widths = (program.layout(key).width(), program.layout(value).width());
+                let stride = widths.0 + widths.1;
+                walk.steps.push(Step::Entries {
+                    addr,
+                    key,
+                    value,
+                    len,
+                    next: next + 1,
+                });
+                // The value's words beneath the key's, so that the key, which
+                // is rendered first, is on top.
+                walk.object(machine, value, addr, next * stride + widths.0, widths.1);
+                walk.steps.push(Step::Text(": "));
+                walk.object(machine, key, addr, next * stride, widths.0);
+            }
+            Step::Leave => {
+                walk.inside.pop();
+                out.push(']');
+            }
+        }
     }
-    let deeper = depth + 1;
+    Ok(())
+}
+
+/// One value location's own text — `layout`, over the `width` words on top of
+/// `walk`'s from `from` — with whatever is inside it pushed onto `walk` to be
+/// rendered next.
+fn value(
+    machine: &Machine,
+    layout: LayoutId,
+    from: usize,
+    width: usize,
+    walk: &mut Walk,
+    out: &mut String,
+) -> Result<(), RuntimeError> {
     let program = machine.program();
     let described = program.layout(layout);
+    let words = &walk.words[from..from + width];
     match &described.shape {
-        Shape::Word(repr) => return render(machine, *repr, at(words, 0)?, depth, out),
+        Shape::Word(repr) => {
+            let word = at(words, 0)?;
+            walk.words.truncate(from);
+            return render(machine, *repr, word, walk, out);
+        }
         // A builtin `Error` renders as the message it carries, not as the
         // struct it happens to be. The oracle special-cases it in
         // `Display for Value` for the reason this one does: a program that
@@ -366,13 +704,19 @@ fn render_value(
                 && fields.first().map(|field| &*field.name) == Some(MESSAGE_FIELD.name) =>
         {
             let field = &fields[0];
-            render_value(
-                machine,
-                field.layout,
-                run(program, words, field)?,
-                deeper,
-                out,
-            )?;
+            let at = field.at as usize;
+            let part = program.layout(field.layout).width() as usize;
+            if at + part > width {
+                return Err(short_run(&field.name));
+            }
+            // The message takes the struct's place on the stack of words.
+            walk.words.copy_within(from + at..from + at + part, from);
+            walk.words.truncate(from + part);
+            walk.steps.push(Step::Value {
+                layout: field.layout,
+                from,
+                width: part,
+            });
         }
         // An opaque type renders as its name and nothing else. Its fields are
         // the declaring module's own business, and a rendering is read by
@@ -386,7 +730,10 @@ fn render_value(
         // cuts at the *last* `.` — which, for a qualified argument, is
         // inside the brackets. Stripping the arguments first leaves only
         // the module-qualified declared name for `short` to cut at.
-        Shape::Struct { opaque: true, .. } => out.push_str(short(declared(&described.name))),
+        Shape::Struct { opaque: true, .. } => {
+            out.push_str(short(declared(&described.name)));
+            walk.words.truncate(from);
+        }
         // A `Range` renders as the operator it was written with: `1..3` and
         // `1..<4` cover the same values and are two different renderings,
         // because they are two different values — `==` on ranges compares the
@@ -396,8 +743,9 @@ fn render_value(
             let end = at(words, 1)? as i64;
             let operator = if at(words, 2)? != 0 { ".." } else { "..<" };
             write!(out, "{start}{operator}{end}").expect("a string never fails to be written to");
+            walk.words.truncate(from);
         }
-        Shape::Struct { fields, .. } => {
+        Shape::Struct { .. } => {
             // The declared name without its module, which is what the
             // public `Display` shows. The layout carries the qualified
             // *instantiation* — type arguments included — because a layout
@@ -406,20 +754,11 @@ fn render_value(
             // argument's own `.` instead (#407).
             write!(out, "{}(", short(declared(&described.name)))
                 .expect("a string never fails to be written to");
-            for (nth, field) in fields.iter().enumerate() {
-                if nth > 0 {
-                    out.push_str(", ");
-                }
-                write!(out, "{}: ", field.name).expect("a string never fails to be written to");
-                render_value(
-                    machine,
-                    field.layout,
-                    run(program, words, field)?,
-                    deeper,
-                    out,
-                )?;
-            }
-            out.push(')');
+            walk.steps.push(Step::Fields {
+                layout,
+                from,
+                next: 0,
+            });
         }
         // The collector no longer reads the discriminant — the payload
         // region's reference map is static — but a *reader* still must:
@@ -434,34 +773,35 @@ fn render_value(
                 ))
             })?;
             out.push_str(&case.name);
-            if !case.parts.is_empty() {
+            if case.parts.is_empty() {
+                walk.words.truncate(from);
+            } else {
                 out.push('(');
-                for (nth, part) in case.parts.iter().enumerate() {
-                    if nth > 0 {
-                        out.push_str(", ");
-                    }
-                    let from = 1 + part.at as usize;
-                    let width = program.layout(part.layout).width() as usize;
-                    let held = words
-                        .get(from..from + width)
-                        .ok_or_else(|| short_run(&described.name))?;
-                    render_value(machine, part.layout, held, deeper, out)?;
-                }
-                out.push(')');
+                walk.steps.push(Step::Parts {
+                    layout,
+                    case: index as usize,
+                    from,
+                    next: 0,
+                });
             }
         }
         Shape::Free => return Err(reclaimed()),
         // Everything left lives in the heap, so the location is one address.
-        _ => return render_object(machine, at(words, 0)?, depth, out),
+        _ => {
+            let addr = at(words, 0)?;
+            walk.words.truncate(from);
+            return render_object(machine, addr, walk, out);
+        }
     }
     Ok(())
 }
 
-/// The text of the object at `addr`, appended to `out`.
+/// The text of the object at `addr`, appended to `out`, with whatever is
+/// inside it pushed onto `walk` to be rendered next.
 fn render_object(
     machine: &Machine,
     addr: u64,
-    depth: usize,
+    walk: &mut Walk,
     out: &mut String,
 ) -> Result<(), RuntimeError> {
     if addr == 0 {
@@ -469,10 +809,6 @@ fn render_object(
             "this value was read before it was given one",
         ));
     }
-    if depth >= MAX_DEPTH {
-        return Err(too_deep());
-    }
-    let deeper = depth + 1;
     let program = machine.program();
     let id = machine.object_layout(addr);
     let layout = program.layout(id);
@@ -488,8 +824,7 @@ fn render_object(
         // recursion at holds the value's own inline words as its payload, and
         // `Layout::payload_words` answers that same width.
         Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {
-            let words = machine.payload_run(addr, 0, layout.width());
-            return render_value(machine, id, &words, depth, out);
+            walk.object(machine, id, addr, 0, layout.width());
         }
         // A cell shows as the handle it is rather than as what it currently
         // holds, which is `Display for Value`'s answer for the same value:
@@ -504,62 +839,67 @@ fn render_object(
         // the whole reason the two are separate: a store is as long as the
         // last growth made it, and the elements past the length are the
         // spare room, not the value.
+        //
+        // A vector is also the only object a value can meet again — every
+        // other family here is immutable once built — so it is the one that
+        // is looked for on the path (see [`Walk::inside`]). An empty one is
+        // never looked for and never pushed: nothing is under it, so it
+        // cannot lead back.
         Shape::Vector { elem } => {
             let len = machine.payload(addr, 0) as u32;
             let store = machine.payload(addr, 1);
-            out.push('[');
-            if store != 0 {
-                joined(machine, store, *elem, len, ", ", deeper, out)?;
+            if len == 0 || store == 0 {
+                out.push_str("[]");
+            } else if walk.inside.contains(&addr) {
+                out.push_str(REPEAT);
+            } else {
+                walk.inside.push(addr);
+                out.push('[');
+                walk.steps.push(Step::Leave);
+                walk.steps.push(Step::Run {
+                    addr: store,
+                    elem: *elem,
+                    len,
+                    next: 0,
+                });
             }
-            out.push(']');
         }
         // An `Array` and a vector's store render alike, which is why one
         // shape covers both — and the stride is the element's width, so an
         // `Array<Point>` renders two words at a time.
         Shape::Elements { elem, .. } => {
             out.push('[');
-            joined(
-                machine,
+            walk.steps.push(Step::Text("]"));
+            walk.steps.push(Step::Run {
                 addr,
-                *elem,
-                machine.object_len(addr),
-                ", ",
-                deeper,
-                out,
-            )?;
-            out.push(']');
+                elem: *elem,
+                len: machine.object_len(addr),
+                next: 0,
+            });
         }
         // A set and a map both render inside braces, which is how the
         // language writes them and why they are ordered families rather than
         // hashed ones: the order is part of what a program sees.
         Shape::Members { elem } => {
             out.push('{');
-            joined(
-                machine,
+            walk.steps.push(Step::Text("}"));
+            walk.steps.push(Step::Run {
                 addr,
-                *elem,
-                machine.object_len(addr),
-                ", ",
-                deeper,
-                out,
-            )?;
-            out.push('}');
+                elem: *elem,
+                len: machine.object_len(addr),
+                next: 0,
+            });
         }
         Shape::Entries { key, value } => {
-            let widths = (program.layout(*key).width(), program.layout(*value).width());
-            let stride = widths.0 + widths.1;
             out.push('{');
-            for nth in 0..machine.object_len(addr) {
-                if nth > 0 {
-                    out.push_str(", ");
-                }
-                let one = machine.payload_run(addr, nth * stride, widths.0);
-                let other = machine.payload_run(addr, nth * stride + widths.0, widths.1);
-                render_value(machine, *key, &one, deeper, out)?;
-                out.push_str(": ");
-                render_value(machine, *value, &other, deeper, out)?;
-            }
-            out.push('}');
+            walk.steps.push(Step::Text("}"));
+            walk.steps.push(Step::Entries {
+                addr,
+                key: *key,
+                value: *value,
+                len: machine.object_len(addr),
+                next: 0,
+            });
         }
         // Erasure is looked through: a `dyn Display` shows the value it
         // holds, because the wrapper is a representation and not something
@@ -571,33 +911,10 @@ fn render_object(
                 .layouts
                 .get(held.index())
                 .ok_or_else(|| RuntimeError::new("this boxed value carries no known type"))?;
-            let words = machine.payload_run(addr, 1, described.width());
-            return render_value(machine, held, &words, deeper, out);
+            walk.object(machine, held, addr, 1, described.width());
         }
         Shape::Closure { .. } => out.push_str("<fn>"),
         Shape::Free => return Err(reclaimed()),
-    }
-    Ok(())
-}
-
-/// `len` elements of `elem` from the payload of `addr`, rendered and joined
-/// into `out`.
-fn joined(
-    machine: &Machine,
-    addr: u64,
-    elem: LayoutId,
-    len: u32,
-    between: &str,
-    depth: usize,
-    out: &mut String,
-) -> Result<(), RuntimeError> {
-    let stride = machine.program().layout(elem).width();
-    for nth in 0..len {
-        if nth > 0 {
-            out.push_str(between);
-        }
-        let words = machine.payload_run(addr, nth * stride, stride);
-        render_value(machine, elem, &words, depth, out)?;
     }
     Ok(())
 }
@@ -608,23 +925,6 @@ fn at(words: &[u64], at: usize) -> Result<u64, RuntimeError> {
         .get(at)
         .copied()
         .ok_or_else(|| short_run("value location"))
-}
-
-/// The words of `field` within a struct's run.
-fn run<'w>(
-    program: &cove_ir::Program,
-    words: &'w [u64],
-    field: &cove_ir::Field,
-) -> Result<&'w [u64], RuntimeError> {
-    let at = field.at as usize;
-    let width = program.layout(field.layout).width() as usize;
-    words
-        .get(at..at + width)
-        .ok_or_else(|| short_run(&field.name))
-}
-
-fn too_deep() -> RuntimeError {
-    RuntimeError::new("this value nests too deeply to render")
 }
 
 /// A value location held fewer words than its layout says it has.
@@ -1359,26 +1659,25 @@ mod tests {
         let option = two_case(&program, "Option", "Some", point);
 
         let mut out = String::new();
-        render_value(&machine, point, &[1, (-2i64) as u64], 0, &mut out).unwrap();
+        render_value(&machine, point, &[1, (-2i64) as u64], &mut out).unwrap();
         assert_eq!(out, "Point(x: 1, y: -2)");
 
         // `[disc, x, y]`: the `Point` is inline in the payload region.
         let mut out = String::new();
-        render_value(&machine, option, &[1, 1, (-2i64) as u64], 0, &mut out).unwrap();
+        render_value(&machine, option, &[1, 1, (-2i64) as u64], &mut out).unwrap();
         assert_eq!(out, "Some(Point(x: 1, y: -2))");
 
         let mut out = String::new();
-        render_value(&machine, option, &[0, 0, 0], 0, &mut out).unwrap();
+        render_value(&machine, option, &[0, 0, 0], &mut out).unwrap();
         assert_eq!(out, "None");
 
         // An `Array<Point>` is a run of two-word elements, walked at that
         // stride.
-        let items = machine
-            .new_object(elements(&program, point, false), 2)
-            .unwrap();
+        let run = elements(&program, point, false);
+        let items = machine.new_object(run, 2).unwrap();
         machine.set_payload_run(items, 0, &[1, 2, 3, 4]);
         let mut out = String::new();
-        render(&machine, Repr::Ref, items, 0, &mut out).unwrap();
+        render_value(&machine, run, &[items], &mut out).unwrap();
         assert_eq!(out, "[Point(x: 1, y: 2), Point(x: 3, y: 4)]");
         let _ = int;
     }

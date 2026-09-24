@@ -1,0 +1,66 @@
+use console.println
+use http
+use clock.timeout
+
+/// A task and a host resource render as the interpreter's opaque text on
+/// every evaluator (issue #499's decision 7).
+///
+/// Each is a handle to something that is not a Cove value — a thread, a thing
+/// the host owns — so each renders as what it names and never as what it
+/// holds:
+///
+/// - a `Task` as `<task>`, unboxed, as a field, and as a field of a value
+///   erased to `dyn`;
+/// - an `http.Server` as `<http.Server#{n}>`, the number the host issued, as a
+///   field of a value erased to `dyn`, and erased to `Any` through
+///   `clock.timeout`'s answer.
+///
+/// Until ADR 0068's Phase 4b-i the linear-memory backend refused every row
+/// with "this value has no text of its own".
+///
+/// A resource rendered through a layout the lowering knows — unboxed, or as a
+/// field — and a task scope, which is only ever unboxed, are not here: their
+/// text is in the run's resource and scope tables and not in the layout, and
+/// how a static walk reaches it is open (issue #499).
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Holder {
+  t: Task<Int>
+}
+
+impl Summary for Holder {
+  fn summarize(self) -> String {
+    "holder"
+  }
+}
+
+struct Listening {
+  server: http.Server
+}
+
+impl Summary for Listening {
+  fn summarize(self) -> String {
+    "listening"
+  }
+}
+
+export fn main() -> Result<Unit, Error> {
+  scope work {
+    let t = work.spawn { 1 }
+    println("task {t}")?
+    println("task.field {Holder(t: t)}")?
+    let held: dyn Summary = Holder(t: t)
+    println("task.dyn {held}")?
+    await t
+  }
+
+  let server = http.listen(0)?
+  let listening: dyn Summary = Listening(server: server)
+  println("server.dyn {listening}")?
+  let erased = timeout(10s) { server }?
+  println("server.any {erased}")?
+  server.close()?
+  Ok(())
+}

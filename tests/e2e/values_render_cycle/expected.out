@@ -1,0 +1,9 @@
+self S(v: [S(v: […])])
+mutual A(v: [B(v: [A(v: […])])])
+enum Many([Leaf(1), Many([…])])
+map M(named: {self: [M(named: {self: […]})]})
+twin Twin(left: [S(v: [])], right: [S(v: [])])
+array [[S(v: [])], [S(v: [])]]
+diamond S(v: [S(v: [S(v: [])]), S(v: [S(v: [])])])
+empty S(v: [])
+empty.vector []

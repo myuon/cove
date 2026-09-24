@@ -265,7 +265,23 @@ fn count(program: &Program) -> Counts {
 /// intrinsic at the one field. The `duration` row `benches/rendering` gained
 /// adds no site. What is left below is what is inside a box, which Phase 4b
 /// walks in Cove.
-const FALLBACK_SITES: [[usize; 3]; 2] = [[43, 1, 115], [71, 0, 4]];
+///
+/// **ADR 0068's Phase 4b-i took `Value.renderInto`'s boxed column from 71 to
+/// 70, and the lowering took it to 65.** Measured with the three programs it
+/// added held out and `benches/rendering` as it was, over the same 229
+/// programs, the column is 65 and the synthesized count 612: a layout whose
+/// rendering reaches a box now carries the path of vectors it is inside to the
+/// box (Phase 4b-ii's renderer reads it there), so its `renders<L>` is a
+/// wrapper around a tracked walk — sixteen more functions — and the wrapper is
+/// a call `lower::inline` does not expand, where the walk it replaced was
+/// expanded into its callers with the intrinsic site in it:
+/// `values_value_admit_key` holds four boxed rendering sites fewer and
+/// `values_value_order` two. Then `values_render_deep` added 2 and
+/// `values_render_opaque` 3, which is what they are for. The known column did
+/// not move: a host resource and a task scope still refuse on a static walk,
+/// because their text is in the run's tables and handing their layouts to the
+/// intrinsic would raise it (issue #499).
+const FALLBACK_SITES: [[usize; 3]; 2] = [[43, 1, 115], [70, 0, 4]];
 
 /// The whole-corpus calls of `std.dynamic.equals`, of `std.dynamic.order` and of
 /// `std.dynamic.refusesKey`, which may fall and may never rise: the reflected

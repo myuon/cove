@@ -607,3 +607,15 @@ allow = ["console"]
 [run.values_equals_shared]
 entry = "values_equals_shared.main"
 allow = ["console"]
+
+[run.values_render_cycle]
+entry = "values_render_cycle.main"
+allow = ["console"]
+
+[run.values_render_deep]
+entry = "values_render_deep.main"
+allow = ["console"]
+
+[run.values_render_opaque]
+entry = "values_render_opaque.main"
+allow = ["console", "http", "clock"]

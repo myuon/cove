@@ -5788,3 +5788,65 @@ fn dynamic_key_refusal_allocates_only_to_descend() {
         "objects allocated by one decision"
     );
 }
+
+/// A value erased at every level, ten thousand levels deep, renders on the
+/// linear-memory backend (issue #480: the language has no nesting bound).
+///
+/// Until ADR 0068's Phase 4b-i the boxed renderer was a Rust recursion that
+/// stopped at 128 steps — a chain of 64 links. `tests/e2e/values_render_deep`
+/// pins the same chain on all three evaluators but stops at a thousand links,
+/// because the interpreter takes seconds to *build* one ten thousand long;
+/// this is that row, on the machine alone, and the text is checked whole.
+#[test]
+fn a_boxed_chain_ten_thousand_links_deep_renders_on_the_machine() {
+    const SOURCE: &str = "trait Summary { fn summarize(self) -> String }
+enum Chain {
+  End(Int)
+  Link(dyn Summary)
+}
+impl Summary for Chain {
+  fn summarize(self) -> String { \"chain\" }
+}
+fn chain(links: Int) -> Chain {
+  var built = Chain.End(7)
+  var at = 0
+  while at < links {
+    built = Chain.Link(built)
+    at = at + 1
+  }
+  built
+}
+export fn deep() -> String { \"{chain(10000)}\" }
+";
+    let answer = on_a_deep_stack(|| on_the_machine(SOURCE, "deep", Vec::new()));
+    let expected = format!("{}End(7){}", "Link(".repeat(10_000), ")".repeat(10_000));
+    assert_eq!(answer, Answer::Value(expected));
+}
+
+/// A cycle wholly inside a box renders its repeat as `[…]` on the machine's
+/// boxed renderer exactly where the oracle does, because the whole of the
+/// path is the box's (issue #499's decision 2).
+///
+/// A cycle that passes *through* a box is not here: until ADR 0068's Phase
+/// 4b-ii the static walk's path stops at the box and the boxed renderer starts
+/// its own, so the machine renders that repeat one vector later.
+#[test]
+fn a_cycle_wholly_inside_a_box_renders_its_repeat_on_both() {
+    const SOURCE: &str = "trait Summary { fn summarize(self) -> String }
+struct S { v: Vector<S> }
+impl Summary for S {
+  fn summarize(self) -> String { \"s\" }
+}
+export fn shown() -> String {
+  var held: Vector<S> = Vector.of()
+  let s = S(v: held)
+  held.push(s)
+  let boxed: dyn Summary = s
+  \"{boxed}\"
+}
+";
+    assert_eq!(
+        agree(SOURCE, "shown", Vec::new()),
+        Answer::Value("S(v: [S(v: […])])".to_string())
+    );
+}
