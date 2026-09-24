@@ -730,6 +730,129 @@ unsafe extern "C" fn order_str(ctx: *mut NativeCtx, a: u64, b: u64) -> i64 {
     machine.order_strings(a, b)
 }
 
+/// The reflection helper: one of [ADR 0068]'s structural observations, handed
+/// over as the observation it is.
+///
+/// See [`cove_native::DynamicFn`] for the contract. What runs here is the
+/// encoded dispatch loop's reflection arm and nothing else: the same
+/// [`super::dynamic::execute`] — or, for the one observation that allocates,
+/// the same [`super::dynamic::handle_text`] — handed the same opcode and the
+/// same three slots of the same frame. So the view's words are read out of the
+/// frame and written back into it by one piece of code on both tiers, and a
+/// refusal is one sentence: there is no second `settle`, no second kind table,
+/// and no operation above the observation. That last is ADR 0068's Decision 9 —
+/// "narrow runtime helpers", never "an operation-level equality/order/render
+/// helper" — and it is why `std.dynamic`'s walks compile around this call
+/// rather than being handed to it.
+///
+/// The frame is the top of the machine's frame stack, which is the compiled
+/// function's own: a native frame is pushed before a word of it runs, by
+/// `open` or by the call helper. The observation's slots are relative to it,
+/// exactly as the encoded arm's are to `base_at`.
+///
+/// Fourteen observations are **not a safepoint**, and nothing here makes one:
+/// no work is charged and no pointer republished, which is a promise about
+/// `execute` — it allocates nothing and moves nothing, ADR 0068's own gate — so
+/// under `debug_assertions` it is checked, as [`intrinsic`] checks its plain
+/// calls. The program counter is synchronised only on a refusal, so the error
+/// names this instruction's span; the encoded arm's `fail!` does the same.
+///
+/// # Safety
+///
+/// As [`safepoint`]. `a`, `b` and `c` are slots of the top frame that
+/// `cove_native`'s subset predicate bounded.
+///
+/// [ADR 0068]: ../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+unsafe extern "C" fn dynamic(ctx: *mut NativeCtx, pc: u32, op: u32, a: u32, b: u32, c: u32) -> u32 {
+    const HANDLE_TEXT: u32 = cove_ir::bytecode::Op::DynHandleText.number() as u32;
+    if op == HANDLE_TEXT {
+        return dynamic_at_safepoint(ctx, pc, a, b);
+    }
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+
+    // One borrow that ends before compiled code runs again; see the module's
+    // aliasing note.
+    let answered = {
+        let machine = &mut *machine;
+        let frame = *machine.frames.last().expect("a native frame is executing");
+        let at = machine.mem.stack_index(frame.base);
+        #[cfg(debug_assertions)]
+        let before = (machine.mem.words_ptr(), machine.collected().collections);
+        let answered = super::dynamic::execute(
+            machine,
+            op as u8,
+            at,
+            a as Slot,
+            b as Slot,
+            c as Slot,
+            frame.function,
+        );
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            before == (machine.mem.words_ptr(), machine.collected().collections),
+            "a reflection observation moved the stack or collected, but compiled code \
+             calls it as no safepoint, so the pointers it cached are stale"
+        );
+        answered.map_err(|error| {
+            machine.sync(pc as usize);
+            error.at(machine.span(frame.function, pc as usize))
+        })
+    };
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
+}
+
+/// [`dynamic`] for `Inst::DynHandleText`, the observation that allocates: an
+/// opaque value's text is a new `String`, so this is [`alloc`]'s three steps
+/// in front of [`super::dynamic::handle_text`], and both pointers republished
+/// after it.
+///
+/// Out of line so that the fourteen that allocate nothing are the short path,
+/// as [`intrinsic_at_safepoint`] is.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+#[inline(never)]
+unsafe fn dynamic_at_safepoint(ctx: *mut NativeCtx, pc: u32, dst: u32, view: u32) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+
+    let answered = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let frame = *machine.frames.last().expect("a native frame is executing");
+        // An index into the segment, which a collection or a grown stack
+        // leaves where it was.
+        let at = machine.mem.stack_index(frame.base);
+        machine
+            .safepoint(budget, frame.function, pc as usize)
+            .and_then(|()| super::dynamic::handle_text(machine, at, dst as Slot, view as Slot))
+            .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
+    };
+    // The text was allocated, and the safepoint may have grown the stack, so
+    // both pointers compiled code cached are stale.
+    republish(ctx, host);
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
+}
+
 /// [`field_load`], the other direction: one
 /// [`Inst::StoreField`](cove_ir::Inst::StoreField). See
 /// [`cove_native::FieldStoreFn`]. `from` is the linear address the words are
@@ -1548,6 +1671,7 @@ unsafe fn enter<const MASK: u64>(
         .over_heap((*host).table())
         .over_literals(machine.literals_ptr())
         .over_payload_words(machine.fixed_payload_words_ptr())
+        .over_dyn_layouts(machine.dyn_layouts_ptr())
         // What is left of the stride, not a fresh one: this call is entered
         // with whatever the encoded tier has run and not yet charged, and
         // compiled code's poll has to land where the dispatch loop's own would
@@ -2069,6 +2193,7 @@ pub fn helpers() -> NativeHelpers {
         field_load,
         field_store,
         order_str,
+        dynamic,
     }
 }
 
@@ -2101,6 +2226,7 @@ pub fn helpers_counting() -> NativeHelpers {
         field_load: counted_field_load,
         field_store: counted_field_store,
         order_str: counted_order_str,
+        dynamic: counted_dynamic,
     }
 }
 
@@ -2259,6 +2385,27 @@ counted!(
     /// allocates nor moves anything.
     counted_order_str => order_str.order_str(a: u64, b: u64) -> i64
 );
+/// [`dynamic`], counted, and charged to the observation it names as well as to
+/// the helper, as [`counted_growable`] is.
+///
+/// # Safety
+///
+/// As [`dynamic`].
+unsafe extern "C" fn counted_dynamic(
+    ctx: *mut NativeCtx,
+    pc: u32,
+    op: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    if let Some(counting) = (*machine).counting.as_deref_mut() {
+        counting.helpers.charge_dynamic(op);
+    }
+    dynamic(ctx, pc, op, a, b, c)
+}
 
 /// Which component of the call path a variant of the helper does **twice**.
 ///
@@ -2353,6 +2500,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         field_load,
         field_store,
         order_str,
+        dynamic,
     }
 }
 
@@ -2754,7 +2902,8 @@ unsafe fn again_ctx(
     )
     .over_heap((*host).table())
     .over_literals(machine.literals_ptr())
-    .over_payload_words(machine.fixed_payload_words_ptr());
+    .over_payload_words(machine.fixed_payload_words_ptr())
+    .over_dyn_layouts(machine.dyn_layouts_ptr());
     std::hint::black_box(&ctx);
     std::hint::black_box(machine.mem.stack_index(base) as u64);
     std::hint::black_box(machine.mem.stack_index(into.base) as u64);
@@ -2883,7 +3032,8 @@ unsafe fn mediation_again(
         )
         .over_heap((*host).table())
         .over_literals(machine.literals_ptr())
-        .over_payload_words(machine.fixed_payload_words_ptr());
+        .over_payload_words(machine.fixed_payload_words_ptr())
+        .over_dyn_layouts(machine.dyn_layouts_ptr());
         std::hint::black_box(&held);
         std::hint::black_box(machine.mem.stack_index(callee_base) as u64);
         std::hint::black_box(machine.mem.stack_index(caller_base) as u64);

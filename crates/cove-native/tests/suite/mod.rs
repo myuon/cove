@@ -779,6 +779,92 @@ pub fn forget_ordered() {
     ORDERED.with(|held| held.borrow_mut().clear());
 }
 
+// --- the reflection helper ----------------------------------------------------
+
+/// One observation compiled code handed back through
+/// [`DynamicFn`](cove_native::DynamicFn), with the unpaid work it had published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Observed {
+    pub pc: u32,
+    pub op: u32,
+    pub a: u32,
+    pub b: u32,
+    pub c: u32,
+    pub work: u64,
+}
+
+thread_local! {
+    /// The `NativeCtx::dyn_layouts` table the next entry is given, one word per
+    /// layout of the program it runs; empty publishes none. See
+    /// [`publish_descriptors`].
+    pub static DYN_LAYOUTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Every observation this thread's compiled code handed to the runtime, in
+    /// order.
+    pub static OBSERVED: RefCell<Vec<Observed>> = const { RefCell::new(Vec::new()) };
+    /// What the next one answers, taken from the front.
+    pub static OBSERVED_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The runtime's reflection helper, as a test double.
+///
+/// A real one is `cove-runtime`'s `vm::exec::dynamic::execute`, over the frame on
+/// top of the machine's frame stack; this one has no frame stack, so it records
+/// the hand-over — the observation's opcode and its three slots, and the work
+/// published before it — and writes nothing. What it can check is the protocol:
+/// that fourteen observations publish nothing before the call and the one that
+/// allocates publishes its block's work, which it then charges, as [`alloc`]
+/// does.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+unsafe extern "C" fn dynamic(ctx: *mut NativeCtx, pc: u32, op: u32, a: u32, b: u32, c: u32) -> u32 {
+    OBSERVED.with(|held| {
+        held.borrow_mut().push(Observed {
+            pc,
+            op,
+            a,
+            b,
+            c,
+            work: (*ctx).pending_work,
+        })
+    });
+    if op == u32::from(cove_ir::bytecode::Op::DynHandleText.number()) {
+        (*ctx).pending_work = 0;
+    }
+    let answer = OBSERVED_ANSWERS.with(|held| {
+        let mut held = held.borrow_mut();
+        (!held.is_empty()).then(|| held.remove(0))
+    });
+    answer.unwrap_or(Outcome::Returned.abi())
+}
+
+pub fn observed() -> Vec<Observed> {
+    OBSERVED.with(|held| held.borrow().clone())
+}
+
+pub fn forget_observed() {
+    OBSERVED.with(|held| held.borrow_mut().clear());
+    OBSERVED_ANSWERS.with(|held| held.borrow_mut().clear());
+    DYN_LAYOUTS.with(|held| held.borrow_mut().clear());
+}
+
+/// Publishes `descriptors` as the next entries' `NativeCtx::dyn_layouts`, one
+/// word per layout of the program: a kind code, a name number shifted by
+/// `DYN_NAME_SHIFT` and a field count shifted by `DYN_COUNT_SHIFT`, as
+/// `cove-runtime`'s `dynamic::descriptors` builds them. Written out by each
+/// case rather than derived, because this crate cannot ask the runtime's
+/// classification — which is the point of the literal expectations above.
+pub fn publish_descriptors(descriptors: &[u64]) {
+    DYN_LAYOUTS.with(|held| *held.borrow_mut() = descriptors.to_vec());
+}
+
+/// Scripts what the next observations answer.
+pub fn observed_answers(outcomes: &[Outcome]) {
+    OBSERVED_ANSWERS
+        .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
+}
+
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
@@ -792,6 +878,7 @@ pub fn helpers() -> NativeHelpers {
         field_load,
         field_store,
         order_str,
+        dynamic,
     }
 }
 
@@ -1471,8 +1558,12 @@ pub fn enter_with_tables<A: Arm>(
         .over_payload_words(match payload_words.is_empty() {
             true => std::ptr::null(),
             false => payload_words.as_ptr(),
-        })
-        .polling_at(POLL_AT.with(Cell::get));
+        });
+    let descriptors = DYN_LAYOUTS.with(|held| held.borrow().clone());
+    if !descriptors.is_empty() {
+        ctx = ctx.over_dyn_layouts(descriptors.as_ptr());
+    }
+    let mut ctx = ctx.polling_at(POLL_AT.with(Cell::get));
     let entry = jit.entry(compiled);
     // Safety: `ctx.words` is `held`, `base` indexes into it, the functions below
     // are all built with frames that fit inside the prefix, and the destination
@@ -3797,19 +3888,13 @@ pub fn a_string_order_is_the_runtimes_leaf<A: Arm>() {
     forget_ordered();
 }
 
-/// A `String`'s order is the only `String` comparison in the slice: equality and
-/// the ordered forms `cmp_str!` answers copy both strings out, and still refuse
-/// the function.
-pub fn only_a_strings_order_is_in_the_slice<A: Arm>() {
+/// A `String`'s order and its equality are the only `String` comparisons in the
+/// slice: `!=` and the ordered forms `cmp_str!` answers still refuse the
+/// function, until something asks for them.
+pub fn only_a_strings_order_and_equality_are_in_the_slice<A: Arm>() {
     assert!(compiles::<A>(&ordering_strings()));
-    for op in [
-        CmpOp::Eq,
-        CmpOp::Ne,
-        CmpOp::Lt,
-        CmpOp::Le,
-        CmpOp::Gt,
-        CmpOp::Ge,
-    ] {
+    assert!(compiles::<A>(&equating(Compare::Str)));
+    for op in [CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
         let held = program(function(
             vec![Repr::Ref, Repr::Ref, Repr::Bool],
             BOOL,
@@ -3826,6 +3911,318 @@ pub fn only_a_strings_order_is_in_the_slice<A: Arm>() {
         ));
         assert!(!compiles::<A>(&held), "`Str` {op:?} is outside the slice");
     }
+}
+
+/// `a == b` into `s2`, then the same question fused with its branch into `s3`,
+/// which lands on a block writing `7` into `s4` when it is false and falls
+/// through to one writing `9` when it is true; answering `s2`. Slots `s0` and
+/// `s1` are the two operands, of whichever representation `on` compares.
+///
+/// The fused form is what a Cove `if a == b` lowers to, and the one
+/// `std.dynamic`'s pair comparison holds for a `Float`; the unfused one is what
+/// its `String` comparison and the rendering's name test are.
+pub fn equating(on: Compare) -> Program {
+    let operand = match on {
+        Compare::Float => Repr::Float,
+        _ => Repr::Ref,
+    };
+    program(function(
+        vec![operand, operand, Repr::Bool, Repr::Bool, Repr::Int],
+        BOOL,
+        vec![
+            Inst::Cmp {
+                on,
+                op: CmpOp::Eq,
+                dst: 2,
+                a: 0,
+                b: 1,
+            },
+            Inst::CmpBranch {
+                on,
+                op: CmpOp::Eq,
+                dst: 3,
+                a: 1,
+                b: 0,
+                target: 4,
+            },
+            Inst::Int { dst: 4, value: 9 },
+            Inst::Return { src: 2 },
+            Inst::Int { dst: 4, value: 7 },
+            Inst::Return { src: 2 },
+        ],
+    ))
+}
+
+/// **A `String`'s equality is the leaf order helper, its answer tested against
+/// nought** — which is `encoded.rs`'s `EQ_STR`, because `cmp_str!` is
+/// `compare(Eq, compare_strings(x, y))` and `compare_strings` is that order
+/// `.cmp(&0)`.
+///
+/// Every pair of [`ordered_strings`], the null reference among them: a null is
+/// the empty string to the order, so it is *equal* to the empty string and not
+/// refused. Each instruction is one hand-over with the two words, and neither is
+/// a safepoint.
+pub fn a_string_equality_is_the_leaf_order_against_nought<A: Arm>() {
+    let mut heap = Heap::new(2);
+    let strings = ordered_strings(&mut heap);
+    let text = |name: &str| -> Vec<u8> {
+        match name {
+            "null" | "empty" => Vec::new(),
+            "straddling" => b"abcdefghijklmnop".to_vec(),
+            other => other.as_bytes().to_vec(),
+        }
+    };
+    let held = equating(Compare::Str);
+    for (x, a) in &strings {
+        for (y, b) in &strings {
+            forget_polls();
+            forget_ordered();
+            let equal = text(x) == text(y);
+            let mut words = vec![*a, *b, 0xdead, 0xdead, 0xdead];
+            let answer = run_over::<A>(&held, &mut words, 0, &heap);
+            assert_eq!(answer.outcome, Outcome::Returned, "{x} against {y}");
+            assert_eq!(words[2], u64::from(equal), "{x} == {y}");
+            assert_eq!(words[3], u64::from(equal), "{y} == {x}, fused");
+            assert_eq!(
+                words[4],
+                if equal { 9 } else { 7 },
+                "{x} and {y}: the branch"
+            );
+            assert_eq!(answer.returned[0], u64::from(equal), "{x} == {y}");
+            assert_eq!(ordered(), vec![(*a, *b), (*b, *a)], "{x} against {y}");
+            assert!(polls().is_empty(), "{x} against {y}: no safepoint");
+        }
+    }
+    forget_ordered();
+}
+
+/// The pairs [`a_float_equality_is_ieee`] compares, as the bits of each operand
+/// and whether IEEE 754's `==` holds of them — which is `f64`'s `==`, and so
+/// `encoded.rs`'s `EQ_FLOAT` arm, `cmp_float!(|x, y| x == y)`.
+pub const EQUALITIES: &[(&str, u64, u64, bool)] = &[
+    (
+        "one and one",
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        true,
+    ),
+    (
+        "one and two",
+        0x3ff0_0000_0000_0000,
+        0x4000_0000_0000_0000,
+        false,
+    ),
+    ("nought and minus nought", 0, 0x8000_0000_0000_0000, true),
+    ("minus nought and nought", 0x8000_0000_0000_0000, 0, true),
+    (
+        "a NaN and itself",
+        0x7ff8_0000_0000_0000,
+        0x7ff8_0000_0000_0000,
+        false,
+    ),
+    (
+        "a NaN and one",
+        0x7ff8_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        false,
+    ),
+    (
+        "one and a NaN",
+        0x3ff0_0000_0000_0000,
+        0x7ff8_0000_0000_0000,
+        false,
+    ),
+    (
+        "a signalling NaN and itself",
+        0x7ff0_0000_0000_0001,
+        0x7ff0_0000_0000_0001,
+        false,
+    ),
+    (
+        "a negative NaN with a payload",
+        0xfff8_0000_dead_beef,
+        0xfff8_0000_dead_beef,
+        false,
+    ),
+    (
+        "infinity and itself",
+        0x7ff0_0000_0000_0000,
+        0x7ff0_0000_0000_0000,
+        true,
+    ),
+    (
+        "infinity and minus infinity",
+        0x7ff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+        false,
+    ),
+    ("the least subnormal and itself", 1, 1, true),
+    ("the least subnormal and nought", 1, 0, false),
+    (
+        "two doubles one ulp apart",
+        0x3ff0_0000_0000_0000,
+        0x3ff0_0000_0000_0001,
+        false,
+    ),
+];
+
+/// **A `Float`'s equality is IEEE 754's**: equal and not unordered, so a `NaN`
+/// is equal to nothing, itself included, and `0.0` is equal to `-0.0`.
+///
+/// Both forms, over [`EQUALITIES`] — whose expectations are checked against
+/// `f64`'s own `==` here, so a row cannot say something `f64` does not.
+pub fn a_float_equality_is_ieee<A: Arm>() {
+    let held = equating(Compare::Float);
+    for (what, a, b, equal) in EQUALITIES {
+        assert_eq!(
+            f64::from_bits(*a) == f64::from_bits(*b),
+            *equal,
+            "{what}: the row is `f64`'s"
+        );
+        forget_polls();
+        let mut words = vec![*a, *b, 0xdead, 0xdead, 0xdead];
+        let answer = run::<A>(&held, &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+        assert_eq!(words[2], u64::from(*equal), "{what}");
+        assert_eq!(words[3], u64::from(*equal), "{what}, fused");
+        assert_eq!(words[4], if *equal { 9 } else { 7 }, "{what}: the branch");
+        assert_eq!(
+            (words[0], words[1]),
+            (*a, *b),
+            "{what}: the operands are read and not written"
+        );
+    }
+}
+
+/// `Float`'s equality is the only float comparison in the slice, which is what
+/// issue #494 asked for; the rest are issue #501's.
+pub fn only_a_floats_equality_is_in_the_slice<A: Arm>() {
+    assert!(compiles::<A>(&equating(Compare::Float)));
+    for op in [CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
+        let held = program(function(
+            vec![Repr::Float, Repr::Float, Repr::Bool],
+            BOOL,
+            vec![
+                Inst::Cmp {
+                    on: Compare::Float,
+                    op,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::Return { src: 2 },
+            ],
+        ));
+        assert!(!compiles::<A>(&held), "`Float` {op:?} is outside the slice");
+    }
+}
+
+/// A frame holding a view at `s0..=s2` and another at `s4..=s6`, an `Int` at
+/// `s3` and `s7` and a reference at `s8`; three observations over them — a
+/// kind, a child and an opaque value's text — and a return of `s3`.
+pub fn observing() -> Program {
+    program(function(
+        vec![
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+        ],
+        INT,
+        vec![
+            Inst::DynKind { dst: 3, view: 0 },
+            Inst::DynChild {
+                dst: 4,
+                view: 0,
+                index: 7,
+            },
+            Inst::DynHandleText { dst: 8, view: 4 },
+            Inst::Return { src: 3 },
+        ],
+    ))
+}
+
+/// **An observation is handed to the reflection helper as itself** — its own
+/// opcode and its three slots in the bytecode's order — and the protocol around
+/// it is read off whether it allocates: a kind and a child publish nothing and
+/// are no safepoint, and an opaque value's text publishes the block's work and
+/// is.
+///
+/// The frame after each call is the frame: the return reads `s3` after three
+/// calls, the last of which could have moved the stack.
+pub fn an_observation_is_handed_over_as_itself<A: Arm>() {
+    use cove_ir::bytecode::Op;
+    forget_polls();
+    forget_observed();
+    // Every layout asks, so the kind is the helper's too.
+    publish_descriptors(&[cove_native::DYN_ASK; 32]);
+    let mut words = vec![0; 9];
+    words[3] = 6;
+    let answer = run::<A>(&observing(), &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(answer.returned[0], 6, "the frame after the calls");
+    let op = |op: Op| u32::from(op.number());
+    assert_eq!(
+        observed(),
+        vec![
+            Observed {
+                pc: 0,
+                op: op(Op::DynKind),
+                a: 3,
+                b: 0,
+                c: 0,
+                work: 0,
+            },
+            Observed {
+                pc: 1,
+                op: op(Op::DynChild),
+                a: 4,
+                b: 0,
+                c: 7,
+                work: 0,
+            },
+            Observed {
+                pc: 2,
+                op: op(Op::DynHandleText),
+                a: 8,
+                b: 4,
+                c: 0,
+                work: 4,
+            },
+        ],
+        "one hand-over per observation; only the allocating one publishes the block's work"
+    );
+    assert_eq!(
+        answer.pending_work, 0,
+        "the helper charged what it was handed"
+    );
+    assert!(polls().is_empty(), "an observation is not a poll");
+    forget_observed();
+}
+
+/// An observation the runtime refused leaves with the outcome it answered, and
+/// publishes the work it had not: a leaf publishes nothing before the call, so
+/// the way out is where the block's charge is handed over.
+pub fn an_observation_the_runtime_refused_leaves_with_that_outcome<A: Arm>() {
+    forget_polls();
+    forget_observed();
+    observed_answers(&[Outcome::Raised]);
+    publish_descriptors(&[cove_native::DYN_ASK; 32]);
+    let mut words = vec![0; 9];
+    let answer = run::<A>(&observing(), &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(observed().len(), 1, "nothing after the refusal ran");
+    assert_eq!(
+        answer.pending_work, 4,
+        "the block's work, published on the way out"
+    );
+    assert_eq!(answer.returned[0], UNWRITTEN, "and nothing was returned");
+    forget_observed();
 }
 
 /// A `Bool` equality *is* inside the slice, which is the other side of the
@@ -7706,4 +8103,347 @@ pub fn a_load_and_a_store_reach_either_region<A: Arm>() {
         (601, 602),
         "the run moved rather than smearing"
     );
+}
+
+// --- the observations answered inline -----------------------------------------
+
+/// One observation over two views, at `s0..=s2` and `s3..=s5`, an `Int` index at
+/// `s6` and a destination at `s7` of `answer`'s representation, answering `s7`.
+pub fn observing_one(answer: Repr, inst: Inst) -> Program {
+    program(function(
+        vec![
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            answer,
+        ],
+        INT,
+        vec![inst, Inst::Return { src: 7 }],
+    ))
+}
+
+/// A descriptor as `cove-runtime`'s `dynamic::descriptors` writes one.
+pub fn descriptor(kind: cove_ir::DynamicKind, name: u64, fields: u64) -> u64 {
+    kind.code() as u64
+        | name << cove_native::DYN_NAME_SHIFT
+        | fields << cove_native::DYN_COUNT_SHIFT
+}
+
+/// The table [`the_cheap_observations_are_answered_inline`] publishes, by the
+/// suite's own layout ids: the ids mean only what this table says.
+fn inline_table() -> Vec<u64> {
+    use cove_ir::DynamicKind as K;
+    let mut table = vec![descriptor(K::Unit, 0, 0); 32];
+    table[0] = cove_native::DYN_ASK;
+    table[INT.index()] = descriptor(K::Int, 0, 0);
+    table[BOOL.index()] = descriptor(K::Bool, 0, 0);
+    table[FLOAT.index()] = descriptor(K::Float, 0, 0);
+    table[DURATION.index()] = descriptor(K::Duration, 0, 0);
+    table[REF.index()] = descriptor(K::String, 0, 0);
+    // Two structs of one declared name — two instantiations — and one of another.
+    table[PAIR.index()] = descriptor(K::Struct, 1, 2);
+    table[REF_PAIR.index()] = descriptor(K::Struct, 1, 2);
+    table[HOST_PAIR.index()] = descriptor(K::Struct, 2, 3);
+    table[OPTION_INT.index()] = descriptor(K::Enum, 3, 0);
+    table[ARRAY_INT.index()] = descriptor(K::Array, 0, 0);
+    table[SET_INT.index()] = descriptor(K::Set, 0, 0);
+    table[MAP_INT.index()] = descriptor(K::Map, 0, 0);
+    table[VECTOR.index()] = descriptor(K::Vector, 0, 0);
+    table
+}
+
+/// Runs `inst` over two views and an index, with [`inline_table`] published,
+/// answering the destination word and the observations handed to the helper.
+fn observe_inline<A: Arm>(
+    answer: Repr,
+    inst: Inst,
+    words: [u64; 7],
+    heap: &Heap,
+) -> (Answer, Vec<Observed>) {
+    forget_observed();
+    publish_descriptors(&inline_table());
+    let mut frame = words.to_vec();
+    frame.push(0xdead);
+    let answered = run_over::<A>(&observing_one(answer, inst), &mut frame, 0, heap);
+    let observed = observed();
+    forget_observed();
+    (answered, observed)
+}
+
+/// **Six observations are answered in emitted code, from the view's words and
+/// the descriptor table, without a call** — the kind, the type test, a scalar
+/// read, a case, a child count and the identity question — and each answer is
+/// the one `cove-runtime`'s `vm::exec::dynamic` gives for a layout with that
+/// descriptor: its kind; kind and name number compared; the payload word at
+/// `at`, or the owner for a `String`; an enum's first word; a struct's field
+/// count, a run's header length, twice a map's, a vector's length word, and
+/// nought for a scalar; and one owner viewed twice at word 0 as its own
+/// `Vector` header.
+pub fn the_cheap_observations_are_answered_inline<A: Arm>() {
+    let mut heap = Heap::new(2);
+    // A pair at 40 whose second word is 77, an array of five, a map of three
+    // entries, a vector of length four, an enum in case 1.
+    let pair = heap.object(40, PAIR, 0);
+    heap.set(42, 77);
+    let array = heap.object(50, ARRAY_INT, 5);
+    let map = heap.object(60, MAP_INT, 3);
+    let vector = heap.object(70, VECTOR, 0);
+    heap.set(71, 4);
+    let option = heap.object(80, OPTION_INT, 0);
+    heap.set(81, 1);
+    let int = |dst| Inst::DynRead { dst, view: 0 };
+    let cases: Vec<(&str, Repr, Inst, [u64; 7], u64)> = vec![
+        (
+            "the kind of a struct",
+            Repr::Int,
+            Inst::DynKind { dst: 7, view: 0 },
+            [PAIR.0 as u64, pair, 0, 0, 0, 0, 0],
+            6,
+        ),
+        (
+            "the kind of a vector",
+            Repr::Int,
+            Inst::DynKind { dst: 7, view: 3 },
+            [0, 0, 0, VECTOR.0 as u64, vector, 0, 0],
+            9,
+        ),
+        (
+            "an `Int` read at word 1",
+            Repr::Int,
+            int(7),
+            [INT.0 as u64, pair, 1, 0, 0, 0, 0],
+            77,
+        ),
+        (
+            "a `String` read is its owner",
+            Repr::Ref,
+            int(7),
+            [REF.0 as u64, pair, 0, 0, 0, 0, 0],
+            pair,
+        ),
+        (
+            "a case",
+            Repr::Int,
+            Inst::DynCase { dst: 7, view: 0 },
+            [OPTION_INT.0 as u64, option, 0, 0, 0, 0, 0],
+            1,
+        ),
+        (
+            "a struct's count",
+            Repr::Int,
+            Inst::DynCount { dst: 7, view: 0 },
+            [PAIR.0 as u64, pair, 0, 0, 0, 0, 0],
+            2,
+        ),
+        (
+            "an array's count",
+            Repr::Int,
+            Inst::DynCount { dst: 7, view: 0 },
+            [ARRAY_INT.0 as u64, array, 0, 0, 0, 0, 0],
+            5,
+        ),
+        (
+            "a map's count, key then value",
+            Repr::Int,
+            Inst::DynCount { dst: 7, view: 0 },
+            [MAP_INT.0 as u64, map, 0, 0, 0, 0, 0],
+            6,
+        ),
+        (
+            "a vector's count",
+            Repr::Int,
+            Inst::DynCount { dst: 7, view: 0 },
+            [VECTOR.0 as u64, vector, 0, 0, 0, 0, 0],
+            4,
+        ),
+        (
+            "a scalar has no children",
+            Repr::Int,
+            Inst::DynCount { dst: 7, view: 0 },
+            [INT.0 as u64, pair, 1, 0, 0, 0, 0],
+            0,
+        ),
+        (
+            "two instantiations of one struct",
+            Repr::Bool,
+            Inst::DynSameType { dst: 7, a: 0, b: 3 },
+            [PAIR.0 as u64, pair, 0, REF_PAIR.0 as u64, pair, 0, 0],
+            1,
+        ),
+        (
+            "two structs of two names",
+            Repr::Bool,
+            Inst::DynSameType { dst: 7, a: 0, b: 3 },
+            [PAIR.0 as u64, pair, 0, HOST_PAIR.0 as u64, pair, 0, 0],
+            0,
+        ),
+        (
+            "an `Int` and a `Bool`",
+            Repr::Bool,
+            Inst::DynSameType { dst: 7, a: 0, b: 3 },
+            [INT.0 as u64, pair, 1, BOOL.0 as u64, pair, 1, 0],
+            0,
+        ),
+        (
+            "one vector twice",
+            Repr::Bool,
+            Inst::DynSameObject { dst: 7, a: 0, b: 3 },
+            [VECTOR.0 as u64, vector, 0, VECTOR.0 as u64, vector, 0, 0],
+            1,
+        ),
+        (
+            "two owners",
+            Repr::Bool,
+            Inst::DynSameObject { dst: 7, a: 0, b: 3 },
+            [VECTOR.0 as u64, vector, 0, VECTOR.0 as u64, array, 0, 0],
+            0,
+        ),
+        (
+            "an inline value in one owner",
+            Repr::Bool,
+            Inst::DynSameObject { dst: 7, a: 0, b: 3 },
+            [INT.0 as u64, pair, 1, INT.0 as u64, pair, 1, 0],
+            0,
+        ),
+        (
+            "a struct viewed as itself",
+            Repr::Bool,
+            Inst::DynSameObject { dst: 7, a: 0, b: 3 },
+            [PAIR.0 as u64, pair, 0, PAIR.0 as u64, pair, 0, 0],
+            0,
+        ),
+        (
+            "a layout the header is not",
+            Repr::Bool,
+            Inst::DynSameObject { dst: 7, a: 0, b: 3 },
+            [
+                ARRAY_INT.0 as u64,
+                vector,
+                0,
+                ARRAY_INT.0 as u64,
+                vector,
+                0,
+                0,
+            ],
+            0,
+        ),
+    ];
+    for (what, answer, inst, words, expected) in cases {
+        let (answered, observed) = observe_inline::<A>(answer, inst, words, &heap);
+        assert_eq!(answered.outcome, Outcome::Returned, "{what}");
+        assert_eq!(answered.returned[0], expected, "{what}");
+        assert_eq!(observed, Vec::new(), "{what}: answered without the helper");
+    }
+}
+
+/// **What the table does not settle is the helper's, whole**: a layout it
+/// marks `DYN_ASK`, a layout past it, a scalar read of another kind, an enum's
+/// part count, and two views of a null owner. Each is one hand-over of the
+/// observation as it is, and what the helper answers is what the instruction
+/// answers — here nothing, so the destination keeps what it held.
+pub fn an_observation_the_table_cannot_settle_is_the_helpers<A: Arm>() {
+    use cove_ir::bytecode::Op;
+    let heap = Heap::new(1);
+    let cases: Vec<(&str, Repr, Inst, [u64; 7], Op)> = vec![
+        (
+            "a reclaimed layout",
+            Repr::Int,
+            Inst::DynKind { dst: 7, view: 0 },
+            [0, 1, 0, 0, 0, 0, 0],
+            Op::DynKind,
+        ),
+        (
+            "a layout past the table",
+            Repr::Int,
+            Inst::DynKind { dst: 7, view: 0 },
+            [100, 1, 0, 0, 0, 0, 0],
+            Op::DynKind,
+        ),
+        (
+            "a word past any `u32`",
+            Repr::Int,
+            Inst::DynKind { dst: 7, view: 0 },
+            [1 << 40, 1, 0, 0, 0, 0, 0],
+            Op::DynKind,
+        ),
+        (
+            "an `Int` read of a `Bool`",
+            Repr::Int,
+            Inst::DynRead { dst: 7, view: 0 },
+            [BOOL.0 as u64, 1, 0, 0, 0, 0, 0],
+            Op::DynRead,
+        ),
+        (
+            "a case of a struct",
+            Repr::Int,
+            Inst::DynCase { dst: 7, view: 0 },
+            [PAIR.0 as u64, 1, 0, 0, 0, 0, 0],
+            Op::DynCase,
+        ),
+        (
+            "an enum's count",
+            Repr::Int,
+            Inst::DynCount { dst: 7, view: 0 },
+            [OPTION_INT.0 as u64, 1, 0, 0, 0, 0, 0],
+            Op::DynCount,
+        ),
+        (
+            "a reclaimed type",
+            Repr::Bool,
+            Inst::DynSameType { dst: 7, a: 0, b: 3 },
+            [INT.0 as u64, 1, 0, 0, 1, 0, 0],
+            Op::DynSameType,
+        ),
+        (
+            "a null owner twice",
+            Repr::Bool,
+            Inst::DynSameObject { dst: 7, a: 0, b: 3 },
+            [VECTOR.0 as u64, 0, 0, VECTOR.0 as u64, 0, 0, 0],
+            Op::DynSameObject,
+        ),
+        (
+            "a `Unit` read, which no kind is",
+            Repr::Unit,
+            Inst::DynRead { dst: 7, view: 0 },
+            [INT.0 as u64, 1, 0, 0, 0, 0, 0],
+            Op::DynRead,
+        ),
+    ];
+    for (what, answer, inst, words, op) in cases {
+        let (answered, observed) = observe_inline::<A>(answer, inst.clone(), words, &heap);
+        assert_eq!(answered.outcome, Outcome::Returned, "{what}");
+        assert_eq!(
+            answered.returned[0], 0xdead,
+            "{what}: the double writes nothing"
+        );
+        let seen = observation_of(&inst);
+        assert_eq!(
+            observed,
+            vec![Observed {
+                pc: 0,
+                op: u32::from(op.number()),
+                a: seen.0,
+                b: seen.1,
+                c: seen.2,
+                work: 0,
+            }],
+            "{what}: one hand-over, of the observation as it is"
+        );
+    }
+}
+
+/// The three slots an observation hands over, in the bytecode's order.
+fn observation_of(inst: &Inst) -> (u32, u32, u32) {
+    match *inst {
+        Inst::DynKind { dst, view }
+        | Inst::DynRead { dst, view }
+        | Inst::DynCase { dst, view }
+        | Inst::DynCount { dst, view } => (dst, view, 0),
+        Inst::DynSameType { dst, a, b } | Inst::DynSameObject { dst, a, b } => (dst, a, b),
+        ref other => panic!("{other:?} is not a case here"),
+    }
 }

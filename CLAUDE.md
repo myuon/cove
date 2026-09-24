@@ -167,8 +167,8 @@ This has already been got wrong once, and the shape is what to remember rather
 than the file: a change re-pointed one of that file's fixtures at a new
 operation, every command above passed, and the pull request was red on a loop
 the tier had refused. The subset the tier compiles is much narrower than Cove —
-`crates/cove-native/src/subset.rs` is the whole list, and it admits no float
-constant, comparison or arithmetic — so a fixture is compiled only if someone
+`crates/cove-native/src/subset.rs` is the whole list, and of floats it admits
+only `==` — no float constant, ordered comparison or arithmetic — so a fixture is compiled only if someone
 ran the step that compiles it.
 
 ### The five commands are not the whole job

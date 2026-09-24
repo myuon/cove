@@ -105,9 +105,10 @@
 //! It is honoured by the rule above and by nothing else. **The code generator
 //! never keeps a Cove value in a register across an instruction boundary**, so
 //! at every place a collection can happen — the safepoint helper, the call
-//! helper, and now [`AllocFn`], [`IntrinsicFn`], [`GrowableFn`] and
-//! [`RunCopyFn`], which are all the calls it emits that can reach one
-//! ([`OrderStrFn`] is a leaf and cannot) — every live reference is already in
+//! helper, and now [`AllocFn`], [`IntrinsicFn`], [`GrowableFn`], [`RunCopyFn`]
+//! and [`DynamicFn`]'s one allocating observation, which are all the calls it
+//! emits that can reach one ([`OrderStrFn`] is a leaf and cannot, and neither
+//! can [`DynamicFn`]'s other fourteen) — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
 //! walks for an encoded frame, and there is no spill sequence, because there is
 //! nothing anywhere else to spill.
@@ -1173,6 +1174,99 @@ pub type RunCopyFn = unsafe extern "C" fn(
 /// `Compare::Str` operand types guarantee.
 pub type OrderStrFn = unsafe extern "C" fn(ctx: *mut NativeCtx, a: u64, b: u64) -> i64;
 
+/// What the reflection helper is: one of [ADR 0068]'s structural observations
+/// of an erased value — [`Inst::DynOpen`](cove_ir::Inst::DynOpen) through
+/// [`Inst::DynOnPath`](cove_ir::Inst::DynOnPath) — answered by the runtime,
+/// **one observation per call**.
+///
+/// The ADR's Decision 9 is the whole of the rule this signature is written to:
+/// "The native tier either lowers these observations directly or calls narrow
+/// runtime helpers. It does not call an operation-level equality/order/render
+/// helper." So what crosses here is never `std.dynamic.equals` or a rendering:
+/// it is one `dyn.kind`, one `dyn.child`, one `dyn.read`, and the Cove walk
+/// that asks them stays compiled around the call. Which observation is `op`,
+/// the observation's own [`cove_ir::bytecode::Op`] number, and `a`, `b` and `c`
+/// are its three slot operands in the order the bytecode encodes them — the
+/// destination, then the view or the first of two views, then the second view,
+/// the index or the render path, nought where there is none. The runtime hands
+/// those four numbers to the very function the encoded dispatch loop's
+/// reflection arm calls, so the two tiers cannot come to answer one
+/// observation two ways: there is no second copy of `settle`, of the kind
+/// table or of any refusal's sentence, and the view's three words are read out
+/// of the frame and written back into it by the code that already does that for
+/// the VM.
+///
+/// # Why a helper, and why one
+///
+/// Every observation needs the program's layout table — which layout is a
+/// `Vector`, where a struct's field `i` begins, which case an enum is in and
+/// what its parts are — and [`child`]'s and `open`'s normalisation follows
+/// references and opens boxes through as many headers as there are. None of it
+/// is in the frame, and emitted code would need the table published as data
+/// and every refusal named by a [`Raise`]; a crossing that allocates nothing
+/// and moves nothing is a few nanoseconds against that.
+///
+/// It is one helper rather than fifteen for [`GrowableFn`]'s reason: every
+/// property the boundary cares about is shared by the fourteen that do not
+/// allocate, and the fifteenth is told apart by its `op` on both sides.
+///
+/// # A leaf that may raise, and one member that is a safepoint
+///
+/// Fourteen of the fifteen **allocate nothing, collect nothing and move
+/// nothing**, which is ADR 0068's own gate — "no child allocation required
+/// merely to traverse a value" — seen from this side. So for them the call is
+/// [`FieldLoadFn`]'s protocol: no unpaid work is published before it, the frame
+/// pointer generated code cached is still the frame after it, and the outcome
+/// is tested because an observation may refuse — a view of a reclaimed value,
+/// a child past the count, a scalar read of the wrong kind, a consumed vector.
+/// Those are the runtime's sentences, and the helper is holding one when it
+/// answers [`Outcome::Raised`].
+///
+/// [`Inst::DynHandleText`](cove_ir::Inst::DynHandleText) is the fifteenth. The
+/// text of a Host handle, a scope or a task is a new `String`, so the call is
+/// [`AllocFn`]'s protocol: the unpaid work is published before it, the helper
+/// synchronises the program counter and takes [ADR 0040]'s three steps before
+/// it allocates, and generated code re-derives both republished pointers after
+/// it. Nothing a program renders in a loop reaches it.
+///
+/// # Safety
+///
+/// As [`FieldLoadFn`], and for `DynHandleText` as [`AllocFn`]. `a`, `b` and
+/// `c` name slots of the frame on top of the runtime's frame stack, which
+/// `crate::subset`'s `supported` bounded — a view as three words, a render
+/// path as two.
+///
+/// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+/// [`child`]: cove_ir::Inst::DynChild
+pub type DynamicFn =
+    unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, op: u32, a: u32, b: u32, c: u32) -> u32;
+
+/// What a [`NativeCtx::dyn_layouts`] entry's low byte holds when emitted code is
+/// not to answer an observation of that layout itself: a reclaimed layout,
+/// which the runtime refuses in its own words, or a name the table could not
+/// number. Every fast path that finds it takes [`DynamicFn`] instead.
+pub const DYN_ASK: u64 = 0xff;
+
+/// The bits of a [`NativeCtx::dyn_layouts`] entry that are the layout's
+/// [`cove_ir::DynamicKind`] code.
+pub const DYN_KIND_MASK: u64 = 0xff;
+
+/// Where a [`NativeCtx::dyn_layouts`] entry's name number begins: 24 bits, the
+/// same for two nominal layouts exactly when their declared names are one name,
+/// and nought for a kind with no name.
+pub const DYN_NAME_SHIFT: u32 = 8;
+
+/// The bits of a [`NativeCtx::dyn_layouts`] entry that answer
+/// `dyn.same-type`: the kind and the name number together, so two layouts are
+/// one semantic type exactly when these agree.
+pub const DYN_TYPE_MASK: u64 = 0xffff_ffff;
+
+/// Where a [`NativeCtx::dyn_layouts`] entry's child count begins: the field
+/// count of a struct or a range, the one kind whose count is a fact about the
+/// layout rather than about the value.
+pub const DYN_COUNT_SHIFT: u32 = 32;
+
 /// Which run instruction a [`RunCopyFn`] was handed.
 ///
 /// `#[repr(u32)]` with the values written out, for [`GrowableOp`]'s reason. The
@@ -1257,6 +1351,8 @@ pub struct NativeHelpers {
     /// See [`OrderStrFn`]. The one leaf: called with nothing published before
     /// it and nothing re-derived after it.
     pub order_str: OrderStrFn,
+    /// See [`DynamicFn`].
+    pub dynamic: DynamicFn,
 }
 
 /// The mutable state one native call reads and writes.
@@ -1350,6 +1446,29 @@ pub struct NativeCtx {
     /// Null for a caller whose compiled code loads no field, [`NativeCtx::literals`]'s
     /// rule. [`NativeCtx::over_payload_words`] is how a caller with fields says so.
     pub fixed_payload_words: *const u32,
+    /// Every layout's reflection descriptor, in `LayoutId` order: the facts
+    /// [ADR 0068]'s cheapest observations need, as one word a layout.
+    ///
+    /// | bits | holds |
+    /// |---|---|
+    /// | 0–7 | the layout's [`cove_ir::DynamicKind`] code, or [`DYN_ASK`] |
+    /// | 8–31 | a number for its declared name, nought for a kind with none |
+    /// | 32–63 | a struct's or a range's field count, nought otherwise |
+    ///
+    /// Built by the runtime from the same classification its own reflection arm
+    /// makes, so what an emitted `dyn.kind`, `dyn.read`, `dyn.case`,
+    /// `dyn.count`, `dyn.same-type` or `dyn.same-object` answers is what the
+    /// encoded machine answers of that layout — and every case the table does
+    /// not settle, a reclaimed layout, an enum's parts, a scalar read of the
+    /// wrong kind, is handed to [`DynamicFn`], which is that arm.
+    ///
+    /// Published **once**, [`NativeCtx::fixed_payload_words`]' rule and for its
+    /// reason, and null for a caller whose compiled code observes nothing.
+    /// Its length is the program's layout count, which the code generator
+    /// knows and bounds every index against.
+    ///
+    /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+    pub dyn_layouts: *const u64,
     /// The linear address of word zero of the task's stack segment.
     ///
     /// What [`NativeCtx::words`] points *at*, as a number in the one address
@@ -1484,6 +1603,7 @@ impl NativeCtx {
             chunks: std::ptr::null(),
             literals: std::ptr::null(),
             fixed_payload_words: std::ptr::null(),
+            dyn_layouts: std::ptr::null(),
             stack_origin,
             pending_work: 0,
             // "Poll at every backedge", which is what compiled code did before
@@ -1527,6 +1647,15 @@ impl NativeCtx {
     /// changes, so it is a builder rather than a field a helper republishes.
     pub fn over_payload_words(mut self, fixed_payload_words: *const u32) -> Self {
         self.fixed_payload_words = fixed_payload_words;
+        self
+    }
+
+    /// The same context, over the table `dyn_layouts` begins.
+    ///
+    /// See [`NativeCtx::dyn_layouts`], and [`NativeCtx::over_payload_words`] for
+    /// why it is a builder.
+    pub fn over_dyn_layouts(mut self, dyn_layouts: *const u64) -> Self {
+        self.dyn_layouts = dyn_layouts;
         self
     }
 
@@ -1644,6 +1773,7 @@ mod tests {
         assert!(ctx.chunks.is_null());
         assert!(ctx.literals.is_null());
         assert!(ctx.fixed_payload_words.is_null());
+        assert!(ctx.dyn_layouts.is_null());
 
         let addrs = [7u64, 9];
         let ctx = ctx.over_literals(addrs.as_ptr());

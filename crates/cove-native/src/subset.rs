@@ -38,6 +38,12 @@ use crate::abi::Raise;
 /// than anything the corpus lowers, and a `covefmt.Token` is three.
 const MAX_RUN_WORDS: u32 = 16;
 
+/// The words a [`cove_ir::dynamic`] view occupies in a frame.
+const VIEW: u32 = cove_ir::dynamic::VIEW_WORDS.len() as u32;
+
+/// The words a [`cove_ir::dynamic`] render path occupies in a frame.
+const PATH: u32 = cove_ir::dynamic::PATH_WORDS.len() as u32;
+
 /// Whether a slot of this `Repr` is one this slice will touch.
 ///
 /// The scalars, and [`Repr::Ref`] — see [`crate::abi`]'s "References are live
@@ -69,7 +75,7 @@ const MAX_RUN_WORDS: u32 = 16;
 /// addition is of a constant it writes itself, and the fourth is one machine
 /// instruction over one operand. What is still refused is arithmetic the
 /// *program* wrote — an `Inst::Arith` over `Num::Float`, a `ConstFloat`, a
-/// comparison — so a Newton iteration written in Cove is refused at each of
+/// comparison other than `==` — so a Newton iteration written in Cove is refused at each of
 /// the three, which is why `Float.sqrt` is an instruction here and not a
 /// standard-library body. A float slot that is only copied is a run of bits
 /// like any other, and refusing the whole function because one of its frame
@@ -135,11 +141,33 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// ADR 0059's three-way [`CmpOp::Order`] is in the slice over the same three,
 /// because `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG` arm is one
 /// signed comparison of the two words for all of them. A `String`'s order is
-/// in the slice too, and only its order: `ORDER_STR` walks two objects' bytes,
-/// which is handed to [`OrderStrFn`](crate::abi::OrderStrFn), a leaf helper
-/// that cannot allocate, raise or move anything — so a standard-library search
-/// over `String` keys compiles (#378, Q4.14). `Str` equality and the ordered
-/// comparisons `cmp_str!` answers copy both strings out and stay outside.
+/// in the slice too: `ORDER_STR` walks two objects' bytes, which is handed to
+/// [`OrderStrFn`](crate::abi::OrderStrFn), a leaf helper that cannot allocate,
+/// raise or move anything — so a standard-library search over `String` keys
+/// compiles (#378, Q4.14).
+///
+/// A `String`'s **equality** is the same helper and one test of its answer, and
+/// it is in the slice since issue #494. `encoded.rs`'s `cmp_str!` is
+/// `compare(op, machine.compare_strings(x, y))`, and `compare_strings` is
+/// `order_strings(x, y).cmp(&0)` — the leaf's own function — so `==` is "the
+/// order is nought" on both tiers by construction rather than by a second
+/// walk of the bytes. It was left outside while the note here said `cmp_str!`
+/// copied both strings out, which stopped being true when `order_strings`
+/// began comparing the payloads where they are. What asked for it is ADR
+/// 0068's `std.dynamic`: the pair comparison under every boxed `==` compares
+/// two `String` views with it, and the rendering compares a placed name with
+/// `"Error"`, so a refused `Str` equality kept both walks on the encoded
+/// machine after every observation they make was lowered. The ordered
+/// comparisons `<`, `<=`, `>` and `>=` over `String` are the same helper and
+/// are left out until something asks, and `!=` with them.
+///
+/// [`Compare::Float`] takes **equality alone**, for the same issue and the same
+/// walk: `std.dynamic`'s pair comparison asks `dynamicFloat(x) ==
+/// dynamicFloat(y)` of two boxed `Float`s. It is `ucomisd` and the two flags an
+/// IEEE 754 `==` is — equal, and not unordered — so a `NaN` is equal to nothing
+/// and `0.0` to `-0.0`, which is `f64`'s `==` and `encoded.rs`'s `EQ_FLOAT`.
+/// Every other float comparison, and float arithmetic and constants, is
+/// [issue #501](https://github.com/myuon/cove/issues/501)'s to admit.
 ///
 /// [`Identity`](Compare::Identity) takes equality only — `encoded.rs`'s
 /// `EQ_REF` shares `cmp_word!(true)` with `EQ_BOOL` and `EQ_TAG`, and the
@@ -151,15 +179,72 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// inside with `Identity` (issue #493), and refusing it kept every vector of
 /// such a value on the encoded machine, two crossings a node.
 ///
-/// Everything else — [`Compare::Float`], and `Str` but for its order — is
-/// outside the slice.
+/// Everything else — `Float` but for its equality, and `Str` but for its
+/// equality and its order — is outside the slice.
 fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     match on {
         Compare::Int => true,
         Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Order),
         Compare::Identity => matches!(op, CmpOp::Eq | CmpOp::Ne),
-        Compare::Str => op == CmpOp::Order,
-        Compare::Float => false,
+        Compare::Str => matches!(op, CmpOp::Eq | CmpOp::Order),
+        Compare::Float => op == CmpOp::Eq,
+    }
+}
+
+/// One of [ADR 0068]'s structural observations, as the operands the reflection
+/// helper is handed: the observation's own bytecode opcode and its three slots
+/// in the order the bytecode encodes them — destination, then view or first
+/// view, then second view, index or render path, nought where there is none.
+///
+/// The order is the bytecode's rather than one chosen here because the runtime
+/// hands these four numbers to the function the encoded dispatch loop's
+/// reflection arm calls with the bytecode's own fields, which is what keeps one
+/// observation from being answered two ways; see
+/// [`DynamicFn`](crate::abi::DynamicFn).
+///
+/// [ADR 0068]: ../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Observation {
+    /// The observation's [`cove_ir::bytecode::Op`] number.
+    pub(crate) op: u8,
+    pub(crate) a: Slot,
+    pub(crate) b: Slot,
+    pub(crate) c: Slot,
+    /// Whether the observation allocates, which is
+    /// [`Inst::DynHandleText`] and nothing else: the call is then a safepoint.
+    pub(crate) allocates: bool,
+}
+
+/// The [`Observation`] `inst` is, or `None` for every instruction that is not
+/// one.
+pub(crate) fn observation(inst: &Inst) -> Option<Observation> {
+    use cove_ir::bytecode::Op;
+    let of = |op: Op, a: Slot, b: Slot, c: Slot| {
+        Some(Observation {
+            op: op.number(),
+            a,
+            b,
+            c,
+            allocates: op == Op::DynHandleText,
+        })
+    };
+    match *inst {
+        Inst::DynOpen { dst, src } => of(Op::DynOpen, dst, src, 0),
+        Inst::DynKind { dst, view } => of(Op::DynKind, dst, view, 0),
+        Inst::DynSameType { dst, a, b } => of(Op::DynSameType, dst, a, b),
+        Inst::DynRead { dst, view } => of(Op::DynRead, dst, view, 0),
+        Inst::DynCase { dst, view } => of(Op::DynCase, dst, view, 0),
+        Inst::DynCount { dst, view } => of(Op::DynCount, dst, view, 0),
+        Inst::DynChild { dst, view, index } => of(Op::DynChild, dst, view, index),
+        Inst::DynSameObject { dst, a, b } => of(Op::DynSameObject, dst, a, b),
+        Inst::DynNameOrder { dst, a, b } => of(Op::DynNameOrder, dst, a, b),
+        Inst::DynTypeName { dst, view } => of(Op::DynTypeName, dst, view, 0),
+        Inst::DynFieldName { dst, view, index } => of(Op::DynFieldName, dst, view, index),
+        Inst::DynCaseName { dst, view } => of(Op::DynCaseName, dst, view, 0),
+        Inst::DynOpaque { dst, view } => of(Op::DynOpaque, dst, view, 0),
+        Inst::DynHandleText { dst, view } => of(Op::DynHandleText, dst, view, 0),
+        Inst::DynOnPath { dst, view, path } => of(Op::DynOnPath, dst, view, path),
+        _ => None,
     }
 }
 
@@ -590,18 +675,6 @@ pub enum Reason {
     /// runtime error rather than an answer, or a jump table with more cases
     /// than an `i32` immediate can hold.
     Operands,
-    /// One of [ADR 0068]'s structural observations of an erased value —
-    /// `Inst::DynOpen` through `Inst::DynChild`.
-    ///
-    /// A family of its own rather than [`Reason::Instruction`], because it is
-    /// not waiting on somebody to write it: the ADR's Phase 1 lowers the seven
-    /// for the encoded machine alone, and whether this tier lowers them
-    /// directly or through narrow runtime helpers is a later phase's
-    /// measurement. A reader sorting a refusal table should see that as one
-    /// deliberate row, not as seven instructions nobody got to.
-    ///
-    /// [ADR 0068]: ../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
-    Reflection,
 }
 
 impl std::fmt::Display for Reason {
@@ -612,10 +685,6 @@ impl std::fmt::Display for Reason {
             Reason::NoTerminator => write!(f, "the body does not end in a terminator"),
             Reason::Instruction => write!(f, "an instruction is not lowered"),
             Reason::Operands => write!(f, "an operand is outside a bound"),
-            Reason::Reflection => write!(
-                f,
-                "a reflection observation runs on the encoded machine (ADR 0068, Phase 1)"
-            ),
         }
     }
 }
@@ -1377,34 +1446,37 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
-        // [ADR 0068]'s seven structural observations, and issue #493's identity
-        // question and Phase 3's name order beside them, are refused by name, as
-        // `Reason::Reflection`: Phase 1 lowers them for the encoded machine
-        // alone, so a function holding one runs there, as a function holding
-        // `Inst::Box` or `Inst::Unbox` does today. Listed rather than left to
-        // the fallback so that the day this tier lowers them is an edit to this
-        // arm, and so that a reader looking for why a reflecting walk is not
-        // compiled finds the answer written down. The ADR's Decision 9 allows
-        // either a direct lowering or narrow runtime helpers — never an
-        // operation-level helper — and which is a later phase's measurement to
-        // make.
+        // [ADR 0068]'s structural observations, all fifteen, each handed to
+        // [`DynamicFn`](crate::abi::DynamicFn) as one observation — the ADR's
+        // Decision 9, "narrow runtime helpers", and never an operation-level
+        // one: the Cove walk that asks them is what compiles around the call
+        // (issue #494). They were refused by name as a family of their own
+        // until then, so that a reflecting walk ran on the encoded machine and
+        // every boxed `==` made from compiled code crossed to it.
+        //
+        // What is bounded is what the helper reads out of this frame and
+        // writes back into it, which is [`Inst::Call`]'s rule: a view is
+        // `cove_ir::dynamic::VIEW_WORDS`' three words wherever it is an operand
+        // or a destination, and a render path `PATH_WORDS`' two. Every slot the
+        // bytecode encodes is one the helper resolves against the top frame, so
+        // a run past this frame would be a read of the next one.
         //
         // [ADR 0068]: ../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
-        Inst::DynOpen { .. }
-        | Inst::DynKind { .. }
-        | Inst::DynSameType { .. }
-        | Inst::DynRead { .. }
-        | Inst::DynCase { .. }
-        | Inst::DynCount { .. }
-        | Inst::DynChild { .. }
-        | Inst::DynSameObject { .. }
-        | Inst::DynNameOrder { .. }
-        | Inst::DynTypeName { .. }
-        | Inst::DynFieldName { .. }
-        | Inst::DynCaseName { .. }
-        | Inst::DynOpaque { .. }
-        | Inst::DynHandleText { .. }
-        | Inst::DynOnPath { .. } => return Some(Reason::Reflection),
+        Inst::DynOpen { dst, src } => run(*dst, VIEW) && slot(*src),
+        Inst::DynChild { dst, view, index } => run(*dst, VIEW) && run(*view, VIEW) && slot(*index),
+        Inst::DynSameType { dst, a, b }
+        | Inst::DynSameObject { dst, a, b }
+        | Inst::DynNameOrder { dst, a, b } => slot(*dst) && run(*a, VIEW) && run(*b, VIEW),
+        Inst::DynFieldName { dst, view, index } => slot(*dst) && run(*view, VIEW) && slot(*index),
+        Inst::DynOnPath { dst, view, path } => slot(*dst) && run(*view, VIEW) && run(*path, PATH),
+        Inst::DynKind { dst, view }
+        | Inst::DynRead { dst, view }
+        | Inst::DynCase { dst, view }
+        | Inst::DynCount { dst, view }
+        | Inst::DynTypeName { dst, view }
+        | Inst::DynCaseName { dst, view }
+        | Inst::DynOpaque { dst, view }
+        | Inst::DynHandleText { dst, view } => slot(*dst) && run(*view, VIEW),
         // ADR 0068's Phase 4b's text of a resource, a scope or a task, refused
         // by name. Its source is a `Host`, `Scope` or `Task` word, which this
         // tier keeps in no slot, so a function holding one is refused whole as
@@ -1663,15 +1735,43 @@ mod tests {
         }
     }
 
-    /// ADR 0068's seven observations, the identity question, the name order
-    /// and Phase 4b-ii's six for the rendering are refused as one family, each
-    /// by name.
+    /// `String` equality is in the slice beside its order, and `Float`
+    /// equality alone of the float comparisons: what ADR 0068's pair
+    /// comparison asks (issue #494), and not a comparison more.
     #[test]
-    fn every_reflection_observation_is_refused_as_reflection() {
+    fn a_string_and_a_float_are_compared_for_equality() {
+        use cove_ir::{CmpOp, Compare};
+        for (on, admitted) in [
+            (Compare::Str, [CmpOp::Eq, CmpOp::Order].as_slice()),
+            (Compare::Float, [CmpOp::Eq].as_slice()),
+        ] {
+            for op in [
+                CmpOp::Eq,
+                CmpOp::Ne,
+                CmpOp::Lt,
+                CmpOp::Le,
+                CmpOp::Gt,
+                CmpOp::Ge,
+                CmpOp::Order,
+            ] {
+                assert_eq!(
+                    super::comparison_supported(on, op),
+                    admitted.contains(&op),
+                    "{on:?} {op:?}"
+                );
+            }
+        }
+    }
+
+    /// Every one of ADR 0068's observations is in the slice since issue #494 —
+    /// the seven, the identity question, the name order and Phase 4b-ii's six
+    /// for the rendering — each handed to the reflection helper as one
+    /// observation, so a function that reflects has nothing left to refuse.
+    #[test]
+    fn every_reflection_observation_is_admitted() {
         // A box at 0 and two views at 1..=3 and 4..=6, then an `Int`, a
         // reference, a `Bool` and a render path at 10..=11: every operand is a
-        // slot the frame has, so nothing here is a bound, and each refusal is
-        // the family's.
+        // slot the frame has.
         let reprs = vec![
             Repr::Ref,
             Repr::Int,
@@ -1716,27 +1816,71 @@ mod tests {
             },
             Inst::Return { src: 0 },
         ];
+        let observations = code.len() - 1;
         let function = function(reprs, LayoutId(2), code);
         let program = program(function);
         let function = program.function(cove_ir::FunctionId(0));
 
-        assert_eq!(
-            refusal(&program, function),
-            Some(Refusal {
-                reason: Reason::Reflection,
-                at: Some(0),
-            })
-        );
-        let reasons: Vec<(Reason, Option<u32>)> = blockers(&program, function)
-            .into_iter()
-            .map(|refused| (refused.reason, refused.at))
+        assert_eq!(refusal(&program, function), None);
+        assert_eq!(blockers(&program, function), Vec::new());
+        // And each is the observation the helper is handed: its own opcode,
+        // and its three slots in the bytecode's order.
+        let handed: Vec<Observation> = function.code[..observations]
+            .iter()
+            .map(|inst| observation(inst).expect("an observation"))
             .collect();
+        assert_eq!(handed.len(), 15);
         assert_eq!(
-            reasons,
-            (0..15)
-                .map(|pc| (Reason::Reflection, Some(pc)))
-                .collect::<Vec<_>>()
+            handed[6],
+            Observation {
+                op: cove_ir::bytecode::Op::DynChild.number(),
+                a: 4,
+                b: 1,
+                c: 7,
+                allocates: false,
+            }
         );
+        assert_eq!(
+            handed.iter().filter(|seen| seen.allocates).count(),
+            1,
+            "`DynHandleText` and nothing else allocates"
+        );
+        assert!(handed[13].allocates);
+        assert_eq!(observation(&Inst::Return { src: 0 }), None);
+    }
+
+    /// A view is three words and a render path two, wherever either is an
+    /// operand, so a view that begins at the frame's last slot is a bound
+    /// exceeded — the helper would read the words after this frame.
+    #[test]
+    fn a_view_past_the_frame_is_refused_as_a_bound() {
+        let reprs = vec![Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int];
+        for code in [
+            // The view at 3 has only 3 and 4.
+            vec![Inst::DynKind { dst: 1, view: 3 }, Inst::Return { src: 0 }],
+            // The destination view at 3 likewise.
+            vec![Inst::DynOpen { dst: 3, src: 0 }, Inst::Return { src: 0 }],
+            // A render path at 4 has one word of its two.
+            vec![
+                Inst::DynOnPath {
+                    dst: 1,
+                    view: 1,
+                    path: 4,
+                },
+                Inst::Return { src: 0 },
+            ],
+        ] {
+            let function = function(reprs.clone(), LayoutId(2), code);
+            let program = program(function);
+            let function = program.function(cove_ir::FunctionId(0));
+            assert_eq!(
+                refusal(&program, function),
+                Some(Refusal {
+                    reason: Reason::Operands,
+                    at: Some(0),
+                })
+            );
+        }
     }
 
     /// A stub refuses the whole function, so there is no instruction census

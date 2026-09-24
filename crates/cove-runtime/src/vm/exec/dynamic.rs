@@ -53,7 +53,10 @@ use std::cmp::Ordering;
 
 use cove_ir::bytecode::Op;
 use cove_ir::dynamic::{declared_name, PATH_DEPTH, PATH_ENTRY, VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
-use cove_ir::{DynamicKind, FunctionId, Layout, LayoutId, LayoutNames, Repr, Shape, Slot, StrId};
+use cove_ir::{
+    DynamicKind, FunctionId, Layout, LayoutId, LayoutNames, Program, Repr, Shape, Slot, StrId,
+};
+use cove_native::{DYN_ASK, DYN_COUNT_SHIFT, DYN_NAME_SHIFT};
 
 use super::{null_object, Machine};
 use crate::error::RuntimeError;
@@ -115,20 +118,37 @@ pub(crate) fn execute(
     id: FunctionId,
 ) -> Result<(), RuntimeError> {
     let at = |slot: Slot| frame + slot as usize;
-    let word = match Op::from_number(op) {
-        Some(Op::DynOpen) => {
+    // The opcodes as constants rather than through `Op::from_number`, whose
+    // table is behind a `LazyLock`: this is asked once per observation on both
+    // tiers, and the native tier's reflection helper asks nothing else.
+    const OPEN: u8 = Op::DynOpen.number();
+    const CHILD: u8 = Op::DynChild.number();
+    const KIND: u8 = Op::DynKind.number();
+    const SAME_TYPE: u8 = Op::DynSameType.number();
+    const READ: u8 = Op::DynRead.number();
+    const CASE: u8 = Op::DynCase.number();
+    const COUNT: u8 = Op::DynCount.number();
+    const SAME_OBJECT: u8 = Op::DynSameObject.number();
+    const NAME_ORDER: u8 = Op::DynNameOrder.number();
+    const TYPE_NAME: u8 = Op::DynTypeName.number();
+    const FIELD_NAME: u8 = Op::DynFieldName.number();
+    const CASE_NAME: u8 = Op::DynCaseName.number();
+    const OPAQUE: u8 = Op::DynOpaque.number();
+    const ON_PATH: u8 = Op::DynOnPath.number();
+    let word = match op {
+        OPEN => {
             let boxed = machine.mem.word_at(at(b));
             open(machine, boxed)?.write(machine, at(a));
             return Ok(());
         }
-        Some(Op::DynChild) => {
+        CHILD => {
             let view = View::read(machine, at(b));
             let index = machine.mem.word_at(at(c)) as i64;
             child(machine, view, index)?.write(machine, at(a));
             return Ok(());
         }
-        Some(Op::DynKind) => kind(machine, View::read(machine, at(b)))?.code() as u64,
-        Some(Op::DynSameType) => u64::from(same_type(
+        KIND => kind(machine, View::read(machine, at(b)))?.code() as u64,
+        SAME_TYPE => u64::from(same_type(
             machine,
             View::read(machine, at(b)),
             View::read(machine, at(c)),
@@ -136,18 +156,18 @@ pub(crate) fn execute(
         // The one opcode whose meaning is its destination's `Repr`: which
         // scalar is read is the word the frame says `a` is, and a view whose
         // kind disagrees is refused rather than reinterpreted.
-        Some(Op::DynRead) => {
+        READ => {
             let want = machine.program.function(id).repr(a).unwrap_or(Repr::Unit);
             read(machine, View::read(machine, at(b)), want)?
         }
-        Some(Op::DynCase) => case(machine, View::read(machine, at(b)))? as u64,
-        Some(Op::DynCount) => count(machine, View::read(machine, at(b)))? as u64,
-        Some(Op::DynSameObject) => u64::from(same_object(
+        CASE => case(machine, View::read(machine, at(b)))? as u64,
+        COUNT => count(machine, View::read(machine, at(b)))? as u64,
+        SAME_OBJECT => u64::from(same_object(
             machine,
             View::read(machine, at(b)),
             View::read(machine, at(c)),
         )),
-        Some(Op::DynNameOrder) => match name_order(
+        NAME_ORDER => match name_order(
             machine,
             View::read(machine, at(b)),
             View::read(machine, at(c)),
@@ -156,19 +176,19 @@ pub(crate) fn execute(
             Ordering::Equal => 0,
             Ordering::Greater => 1,
         },
-        Some(Op::DynTypeName) => type_name(machine, View::read(machine, at(b)))?,
-        Some(Op::DynFieldName) => {
+        TYPE_NAME => type_name(machine, View::read(machine, at(b)))?,
+        FIELD_NAME => {
             let index = machine.mem.word_at(at(c)) as i64;
             field_name(machine, View::read(machine, at(b)), index)?
         }
-        Some(Op::DynCaseName) => case_name(machine, View::read(machine, at(b)))?,
-        Some(Op::DynOpaque) => u64::from(opaque(machine, View::read(machine, at(b)))?),
-        Some(Op::DynOnPath) => {
+        CASE_NAME => case_name(machine, View::read(machine, at(b)))?,
+        OPAQUE => u64::from(opaque(machine, View::read(machine, at(b)))?),
+        ON_PATH => {
             let entry = machine.mem.word_at(at(c) + PATH_ENTRY as usize);
             let depth = machine.mem.word_at(at(c) + PATH_DEPTH as usize) as i64;
             u64::from(on_path(machine, View::read(machine, at(b)), entry, depth))
         }
-        other => unreachable!("{other:?} is not a reflection opcode"),
+        other => unreachable!("{:?} is not a reflection opcode", Op::from_number(other)),
     };
     machine.mem.set_word_at(at(a), word);
     Ok(())
@@ -263,6 +283,14 @@ pub(crate) fn kind(machine: &Machine, view: View) -> Result<DynamicKind, Runtime
 /// The kind of a value of `described`, which [`settle`] has already made
 /// neither a box nor a bare reference.
 fn kind_of(machine: &Machine, described: &Layout) -> DynamicKind {
+    classify(machine.program, described)
+}
+
+/// [`kind_of`] over a program rather than a machine: the one classification,
+/// which the dispatch loop's reflection arm asks through [`kind_of`] and
+/// [`descriptors`] asks once per layout before a run, so that what compiled
+/// code reads out of the table is what this arm answers.
+fn classify(program: &Program, described: &Layout) -> DynamicKind {
     match &described.shape {
         Shape::Word(Repr::Unit) => DynamicKind::Unit,
         Shape::Word(Repr::Bool) => DynamicKind::Bool,
@@ -270,7 +298,7 @@ fn kind_of(machine: &Machine, described: &Layout) -> DynamicKind {
         Shape::Word(Repr::Float) => DynamicKind::Float,
         Shape::Word(Repr::Duration) => DynamicKind::Duration,
         Shape::Str => DynamicKind::String,
-        Shape::Struct { .. } if crate::vm::boundary::is_range(machine.program, described) => {
+        Shape::Struct { .. } if crate::vm::boundary::is_range(program, described) => {
             DynamicKind::Range
         }
         // An `opaque` struct is a struct too. Its fields are private to the
@@ -296,6 +324,54 @@ fn kind_of(machine: &Machine, described: &Layout) -> DynamicKind {
             DynamicKind::Opaque
         }
     }
+}
+
+/// Every layout's reflection descriptor, in `LayoutId` order: the table
+/// `cove_native::NativeCtx::dyn_layouts` publishes to compiled code.
+///
+/// One word a layout — its kind code, a number for its declared name, and a
+/// struct's or a range's field count — from [`classify`] and
+/// [`declared_name`], the two functions [`kind`], [`same_type`] and [`count`]
+/// answer from, so an observation compiled code answers out of the table is the
+/// one this arm answers. What the table cannot settle it marks
+/// `cove_native::DYN_ASK`, and compiled code hands that observation to the
+/// reflection helper, which is [`execute`]:
+///
+/// - a reclaimed layout, which [`layout`] refuses in its own words;
+/// - a program with more declared names than the 24 bits hold, whose nominal
+///   layouts past the last number all ask — a bound, not a family.
+///
+/// Built once before the run, and allocating nothing afterwards.
+pub(crate) fn descriptors(program: &Program) -> std::sync::Arc<[u64]> {
+    let mut names: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    program
+        .layouts
+        .iter()
+        .map(|described| {
+            if matches!(described.shape, Shape::Free) {
+                return DYN_ASK;
+            }
+            let kind = classify(program, described);
+            let name = if kind.is_nominal() {
+                let next = names.len() as u64 + 1;
+                let number = *names.entry(declared_name(&described.name)).or_insert(next);
+                if number >= 1 << (DYN_COUNT_SHIFT - DYN_NAME_SHIFT) {
+                    return DYN_ASK;
+                }
+                number
+            } else {
+                0
+            };
+            let fields = match &described.shape {
+                Shape::Struct { fields, .. } => fields.len() as u64,
+                _ => 0,
+            };
+            if fields >= 1 << (64 - DYN_COUNT_SHIFT) {
+                return DYN_ASK;
+            }
+            kind.code() as u64 | name << DYN_NAME_SHIFT | fields << DYN_COUNT_SHIFT
+        })
+        .collect()
 }
 
 /// `dyn.same-type`: whether the two viewed values have one semantic type.

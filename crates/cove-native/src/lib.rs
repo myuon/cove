@@ -135,9 +135,10 @@
 pub mod abi;
 
 pub use abi::{
-    AllocFn, CallFn, CloseFn, Entry, GrowableFn, GrowableOp, IntrinsicFn, IntrinsicProtocol,
-    NativeCtx, NativeHelpers, OpenFn, Opened, OrderStrFn, Outcome, Raise, RunCopyFn, RunOp,
-    SafepointFn, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    AllocFn, CallFn, CloseFn, DynamicFn, Entry, GrowableFn, GrowableOp, IntrinsicFn,
+    IntrinsicProtocol, NativeCtx, NativeHelpers, OpenFn, Opened, OrderStrFn, Outcome, Raise,
+    RunCopyFn, RunOp, SafepointFn, DYN_ASK, DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_NAME_SHIFT,
+    DYN_TYPE_MASK, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 
 /// Native execution is not available here.

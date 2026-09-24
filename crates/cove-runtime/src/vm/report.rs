@@ -115,6 +115,15 @@ pub struct HelperCalls {
     /// [`OrderStrFn`](cove_native::abi::OrderStrFn): a `String` key's
     /// three-way order, the one leaf helper.
     pub order_str: u64,
+    /// [`DynamicFn`](cove_native::DynamicFn): one of ADR 0068's structural
+    /// observations of an erased value.
+    pub dynamic: u64,
+    /// The same calls, by the observation each one named, indexed by its place
+    /// in this module's `OBSERVATIONS` — the order the report prints them in —
+    /// for [`growable_ops`](Self::growable_ops)' reason: which observations a
+    /// reflecting walk asks, and how many of each, is what says what a boxed
+    /// `==` costs compiled (issue #494).
+    pub dynamic_ops: [u64; OBSERVATIONS.len()],
 }
 
 impl HelperCalls {
@@ -124,7 +133,7 @@ impl HelperCalls {
     }
 
     /// Each helper's name, as `NativeHelpers` spells the field, and its count.
-    pub fn rows(self) -> [(&'static str, u64); 11] {
+    pub fn rows(self) -> [(&'static str, u64); 12] {
         [
             ("safepoint", self.safepoint),
             ("call", self.call),
@@ -137,6 +146,7 @@ impl HelperCalls {
             ("field_load", self.field_load),
             ("field_store", self.field_store),
             ("order_str", self.order_str),
+            ("dynamic", self.dynamic),
         ]
     }
 
@@ -156,6 +166,28 @@ impl HelperCalls {
         if let Some(count) = self.run_copy_ops.get_mut(op as usize) {
             *count += 1;
         }
+    }
+
+    /// Charges one `dynamic` call of the observation whose opcode is `op`, as
+    /// [`charge_growable`](Self::charge_growable) does.
+    pub(crate) fn charge_dynamic(&mut self, op: u32) {
+        self.dynamic += 1;
+        if let Some(at) = OBSERVATIONS
+            .iter()
+            .position(|observation| u32::from(observation.number()) == op)
+        {
+            self.dynamic_ops[at] += 1;
+        }
+    }
+
+    /// Each observation compiled code asked, with its count, in
+    /// [`OBSERVATIONS`] order.
+    pub(crate) fn dynamic_rows(self) -> Vec<(Op, u64)> {
+        OBSERVATIONS
+            .iter()
+            .zip(self.dynamic_ops)
+            .map(|(op, calls)| (*op, calls))
+            .collect()
     }
 
     /// Each `growable` operation compiled code called for, with its count, in
@@ -184,6 +216,30 @@ pub const GROWABLE_OPS: usize = 10;
 
 /// How many [`RunOp`]s there are, for [`GROWABLE_OPS`]' reason.
 pub const RUN_OPS: usize = 5;
+
+/// ADR 0068's structural observations, as the opcodes compiled code hands
+/// [`DynamicFn`](cove_native::DynamicFn), in the order the report prints them.
+///
+/// Every opcode the bytecode calls a reflection is here, and a test holds the
+/// two together, so an observation added to the IR without a row here fails
+/// rather than being charged to the helper's total and to no row.
+pub(crate) const OBSERVATIONS: [Op; 15] = [
+    Op::DynOpen,
+    Op::DynKind,
+    Op::DynSameType,
+    Op::DynRead,
+    Op::DynCase,
+    Op::DynCount,
+    Op::DynChild,
+    Op::DynSameObject,
+    Op::DynNameOrder,
+    Op::DynTypeName,
+    Op::DynFieldName,
+    Op::DynCaseName,
+    Op::DynOpaque,
+    Op::DynHandleText,
+    Op::DynOnPath,
+];
 
 /// How many [`Decline`]s there are, for [`GROWABLE_OPS`]' reason: the length of
 /// [`Decline::ALL`], so that a reason added to the enum without a column here
@@ -1097,7 +1153,7 @@ impl fmt::Display for BoundaryReport {
                 )?;
                 for (name, calls) in helpers.rows() {
                     writeln!(f, "  {name:<12} {:>14}", thousands(calls))?;
-                    // The operations under the two helpers that serve several,
+                    // The operations under the three helpers that serve several,
                     // indented once more and only where one ran, so a report
                     // of a run that never grew anything reads as it did.
                     let ops: Vec<(String, u64)> = match name {
@@ -1108,6 +1164,11 @@ impl fmt::Display for BoundaryReport {
                             .collect(),
                         "run_copy" => helpers
                             .run_copy_rows()
+                            .into_iter()
+                            .map(|(op, calls)| (format!("{op:?}"), calls))
+                            .collect(),
+                        "dynamic" => helpers
+                            .dynamic_rows()
                             .into_iter()
                             .map(|(op, calls)| (format!("{op:?}"), calls))
                             .collect(),
@@ -1182,6 +1243,26 @@ mod tests {
         assert!((0..RUN_OPS as u32).all(|code| RunOp::from_abi(code).is_some()));
         assert_eq!(RunOp::from_abi(RUN_OPS as u32), None);
         assert_eq!(DECLINES, Decline::ALL.len());
+    }
+
+    /// [`OBSERVATIONS`] is every reflection opcode the bytecode has — each
+    /// `Dyn` opcode, once — so an observation compiled code hands over is always
+    /// charged to a row of its own.
+    #[test]
+    fn every_observation_has_a_row() {
+        let reflections: Vec<Op> = Op::all()
+            .into_iter()
+            .filter(|op| format!("{op:?}").starts_with("Dyn"))
+            .collect();
+        assert_eq!(reflections.len(), OBSERVATIONS.len(), "{reflections:?}");
+        assert!(reflections.iter().all(|op| OBSERVATIONS.contains(op)));
+        let mut calls = HelperCalls::default();
+        calls.charge_dynamic(u32::from(Op::DynChild.number()));
+        calls.charge_dynamic(u32::from(Op::DynChild.number()));
+        calls.charge_dynamic(u32::from(Op::Return.number()));
+        assert_eq!(calls.dynamic, 3, "a number no arm emits is still a call");
+        assert!(calls.dynamic_rows().contains(&(Op::DynChild, 2)));
+        assert_eq!(calls.total(), 3);
     }
 
     /// Every reason sits at its own index and answers to its own name, which is
