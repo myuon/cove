@@ -36,15 +36,16 @@
 //!   reached through [`Body::call_library`] and expanded where the inliner
 //!   finds it worth it, as any call is;
 //! - anything else is [`Body::render_piece`], which asks
-//!   [`synth::rendered`] and gets back one of four answers. Almost always it
+//!   [`synth::rendered`] and gets back one of six answers. Almost always it
 //!   is a **walk**: [ADR 0064]'s Decision 3 composes one private function per
 //!   `(rendering, layout)` pair, out of this module's own two appends and
-//!   `std.int.renderInto`, so an `Error`, an opaque value, a `Range`, a
-//!   struct, an enum and every collection are ordinary IR the printer, the
-//!   verifier, the optimizer and both code generators can see. What is left
-//!   below is `Value.renderInto`, reached from a value whose layout does not
-//!   say what it is — a box, a bare reference — and from a `Float` or a
-//!   `Duration`, whose text no Cove body writes.
+//!   `std.int`'s, `std.float`'s and `std.duration`'s `renderInto`, so an
+//!   `Error`, an opaque value, a `Range`, a struct, an enum and every
+//!   collection are ordinary IR the printer, the verifier, the optimizer and
+//!   both code generators can see. A `Float` and a `Duration` are a call of
+//!   their module's `renderInto`, as an `Int` is, since ADR 0068's Phase 4a.
+//!   What is left below is `Value.renderInto`, reached from a value whose
+//!   layout does not say what it is — a box, a bare reference.
 //!
 //! The first two arms are the **short circuit**, and they are why the two
 //! commonest interpolations in the repository cost what they always did: a
@@ -66,6 +67,7 @@
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
 
+use super::dispatch::{DURATION_TEXT, FLOAT_TEXT};
 use super::frame::Val;
 use super::synth;
 use super::{shapes, Body, Dest};
@@ -183,12 +185,7 @@ impl Body<'_> {
                 self.append_by(TEXT_APPEND, assembly, value, span);
             }
             Some(Ty::Int) if value.layout == shapes::INT => {
-                let (module, function) = INT_RENDERING;
-                if let Some(unit) =
-                    self.call_library(module, function, &[value, &assembly.buffer], span)
-                {
-                    self.release(unit, span);
-                }
+                self.render_by(INT_RENDERING, assembly, value, span);
             }
             _ => self.render_piece(assembly, value, span),
         }
@@ -208,10 +205,9 @@ impl Body<'_> {
     fn render_piece(&mut self, assembly: &Assembly, value: &Val, span: Span) {
         let shape = self.pool.shapes.layout(value.layout).shape.clone();
         match synth::rendered(&shape) {
-            // A layout that does not say what the value is, or a scalar
-            // whose text no Cove body spells. ADR 0064's Decision 4 and the
-            // whole of what survives this migration; `crate::verify` refuses
-            // an operand that is anything else.
+            // A layout that does not say what the value is. ADR 0064's
+            // Decision 4 and the whole of what survives this migration;
+            // `crate::verify` refuses an operand that is anything else.
             synth::Rendered::Dynamic => {
                 self.render_into(Intrinsic::ValueRenderInto, assembly, value, span)
             }
@@ -221,15 +217,28 @@ impl Body<'_> {
             synth::Rendered::Text => {
                 self.append_by(TEXT_APPEND, assembly, value, span);
             }
-            synth::Rendered::Digits => {
-                let (module, function) = INT_RENDERING;
-                if let Some(unit) =
-                    self.call_library(module, function, &[value, &assembly.buffer], span)
-                {
-                    self.release(unit, span);
-                }
-            }
+            synth::Rendered::Digits => self.render_by(INT_RENDERING, assembly, value, span),
+            // ADR 0068's Phase 4a: a `Float` and a `Duration` are written by
+            // `std.float` and `std.duration` in Cove, as an `Int` is by
+            // `std.int`.
+            synth::Rendered::Float => self.render_by(FLOAT_TEXT, assembly, value, span),
+            synth::Rendered::Duration => self.render_by(DURATION_TEXT, assembly, value, span),
             synth::Rendered::Walk => self.render_by_walk(assembly, value, span),
+        }
+    }
+
+    /// A call of one of the standard-library functions that write a scalar's
+    /// text, `(module, name)`, over the piece and the buffer: the value
+    /// first, the buffer second.
+    fn render_by(
+        &mut self,
+        (module, function): (&str, &str),
+        assembly: &Assembly,
+        value: &Val,
+        span: Span,
+    ) {
+        if let Some(unit) = self.call_library(module, function, &[value, &assembly.buffer], span) {
+            self.release(unit, span);
         }
     }
 
@@ -241,9 +250,9 @@ impl Body<'_> {
     /// level of nesting costs no `String`. What the call answers is the `()`
     /// every append answers, which nothing reads.
     fn render_by_walk(&mut self, assembly: &Assembly, value: &Val, span: Span) {
-        if self.render_leaves(span).is_none() {
-            // A round in which one of the three appends was not in the
-            // slice. `Body::reached` has recorded it and `lower_roots` will
+        if self.render_leaves_for(value.layout, span).is_none() {
+            // A round in which one of the three appends, or a scalar writer
+            // the walk calls, was not in the slice. `Body::reached` has recorded it and `lower_roots` will
             // lower the package again with it; this round's program is
             // discarded before it is verified, so the intrinsic standing in
             // here is never one the boundary rule sees.

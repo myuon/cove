@@ -1891,29 +1891,24 @@ impl Check<'_> {
     /// it themselves, so the variant this rule would have had to admit every
     /// layout for does not exist.
     ///
-    /// # `Value.renderInto` is reached from more than a box, and that is a
-    /// widening rather than a reading
+    /// # `Value.renderInto` is reached from more than a box, but no longer from a
+    /// scalar
     ///
     /// `Value.order` was Decision 4 word for word: an operand whose layout was
-    /// not [`Shape::Boxed`] was a fault. The rendering admits **four** shapes,
-    /// which [`crate::lower::synth::Rendered::Dynamic`] is the list of, in
-    /// two kinds:
+    /// not [`Shape::Boxed`] was a fault. The rendering admits **three** shapes,
+    /// which [`crate::lower::synth::Rendered::Dynamic`] is the list of, and all
+    /// three are a layout that does not say what the value is — a
+    /// `Shape::Boxed`, whose family is a [`LayoutId`] in its own payload word
+    /// 0; a bare `Repr::Ref` word, whose object's family is read off the
+    /// object; and a reclaimed run. Decision 4's own case, more than once.
     ///
-    /// - a layout that does not say what the value is — a `Shape::Boxed`,
-    ///   whose family is a [`LayoutId`] in its own payload word 0, and a bare
-    ///   `Repr::Ref` word, whose object's family is read off the object.
-    ///   Decision 4's own case, twice;
-    /// - a scalar whose text no Cove body can write — a `Float`, which
-    ///   renders as the shortest decimal that reads back as itself, and a
-    ///   `Duration`, whose unit table is `std.duration`'s policy to write and
-    ///   has not been written.
-    ///
-    /// It is a **leaf** rule and not a whole-layout one, which is what keeps
-    /// it narrow: a `Point { x: Float, y: Float }` is still a walk, and what
-    /// goes below is the two words and not the name, the labels and the
-    /// punctuation around them. And it is checked here rather than assumed,
-    /// so the day `Float`'s rendering becomes Cove the list shrinks in one
-    /// place and every site that was leaning on it fails loudly.
+    /// It admitted two scalars besides until ADR 0068's Phase 4a — a `Float`,
+    /// which renders as the shortest decimal that reads back as itself, and a
+    /// `Duration`, whose unit table was `std.duration`'s policy to write and
+    /// had not been written. Both are written now, by `std.float.renderInto`
+    /// and `std.duration.renderInto`, and this is the one place the list
+    /// shrank: as the paragraph that stood here said it would, every site that
+    /// was still leaning on it fails loudly.
     ///
     /// **What the `Value.order` line caught was the cheap way out of the
     /// migration that added it.** The order's walk has arms that are awkward
@@ -1962,8 +1957,7 @@ impl Check<'_> {
                 continue;
             }
             let name = described.name.clone();
-            let admits = "this fallback from a value whose layout does not say what it is, and \
-                          from a `Float` or a `Duration`, whose text no Cove body writes";
+            let admits = "this fallback from a value whose layout does not say what it is";
             self.fault(
                 at,
                 format!(
@@ -2800,6 +2794,9 @@ mod tests {
     const UNIT: LayoutId = LayoutId(12);
     /// ADR 0068's view: `[Int, Ref, Int]`, the program's `view_layout`.
     const VIEW: LayoutId = LayoutId(13);
+    /// A `Float` word, which `Value.renderInto` admitted until ADR 0068's
+    /// Phase 4a and refuses now.
+    const FLOAT: LayoutId = LayoutId(14);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -2890,6 +2887,7 @@ mod tests {
             ),
             Layout::word("Unit", Repr::Unit),
             crate::dynamic::view_layout(INT, STR),
+            Layout::word("Float", Repr::Float),
         ]
     }
 
@@ -3750,8 +3748,8 @@ mod tests {
                 "operand 1 of `Value.renderInto` is `String`, where its signature has ByteBuffer",
                 "passes operand 0 of `Value.renderInto` a `Point`, whose layout it knows \
                  statically; ADR 0064's Decision 4 admits this fallback from a value whose \
-                 layout does not say what it is, and from a `Float` or a `Duration`, whose \
-                 text no Cove body writes, and a known layout is a walk `lower::synth` writes",
+                 layout does not say what it is, and a known layout is a walk `lower::synth` \
+                 writes",
             ]
         );
         let held = calling(
@@ -3767,9 +3765,64 @@ mod tests {
                 "`Value.renderInto` takes 2 operand(s), and this call passes 3",
                 "passes operand 0 of `Value.renderInto` a `Point`, whose layout it knows \
                  statically; ADR 0064's Decision 4 admits this fallback from a value whose \
-                 layout does not say what it is, and from a `Float` or a `Duration`, whose \
-                 text no Cove body writes, and a known layout is a walk `lower::synth` writes",
+                 layout does not say what it is, and a known layout is a walk `lower::synth` \
+                 writes",
             ]
+        );
+    }
+
+    /// `Value.renderInto` handed a `Float` is refused, and handed a box is not.
+    ///
+    /// A `Float` word was the rendering's widening of Decision 4 until ADR
+    /// 0068's Phase 4a wrote its text in `std.float`; the admitted list lost it
+    /// then, and this is the pin that it did — a lowering that went back to the
+    /// intrinsic for one fails here rather than rendering correctly and
+    /// quietly.
+    #[test]
+    fn a_float_is_no_longer_rendered_below() {
+        let buffer = Arg {
+            slot: 2,
+            layout: STR,
+        };
+        let float = calling(
+            crate::Intrinsic::ValueRenderInto,
+            UNIT,
+            vec![Repr::Unit, Repr::Float, Repr::Ref],
+            vec![
+                Arg {
+                    slot: 1,
+                    layout: FLOAT,
+                },
+                buffer,
+            ],
+        );
+        let faulted = faults(&float);
+        assert!(
+            faulted.iter().any(|fault| fault
+                == "passes operand 0 of `Value.renderInto` a `Float`, whose layout it knows \
+                    statically; ADR 0064's Decision 4 admits this fallback from a value whose \
+                    layout does not say what it is, and a known layout is a walk `lower::synth` \
+                    writes"),
+            "{faulted:?}"
+        );
+        let boxed = calling(
+            crate::Intrinsic::ValueRenderInto,
+            UNIT,
+            vec![Repr::Unit, Repr::Ref, Repr::Ref],
+            vec![
+                Arg {
+                    slot: 1,
+                    layout: BOXED,
+                },
+                buffer,
+            ],
+        );
+        assert!(
+            faults(&boxed)
+                .iter()
+                .all(|fault| !fault.contains("Decision 4")),
+            "{:?}",
+            faults(&boxed)
         );
     }
 

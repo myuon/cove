@@ -70,3 +70,97 @@ export fn ofMinutes(count: Int) -> Duration {
 export fn ofHours(count: Int) -> Duration {
   Duration.nanos(count * 3_600_000_000_000)
 }
+
+/// Appends the text of `value` to `buffer`: what `"{value}"` shows.
+///
+/// Not exported, and nothing a program can name: the lowering calls it for
+/// every `Duration` piece of an interpolation and every `Duration` part of a
+/// value it renders, as it calls `std.int.renderInto` for an `Int`. ADR 0068's
+/// Phase 4a moved it here from the `Duration` arm of the Rust intrinsic
+/// `Value.renderInto`, whose bytes it writes; that arm still renders a
+/// `Duration` held inside a box until Phase 4b, and it is the oracle's
+/// `write_duration` besides.
+///
+/// # The text of a `Duration`
+///
+/// **The count in the largest unit that divides the value exactly, and the
+/// unit's suffix**, the units being the literal suffixes the lexer reads, `h`,
+/// `m`, `s`, `ms`, `us` and `ns`: `2h`, `90s` rather than `1.5m`, `1500ms`,
+/// `1us`, `999ns`. Nought has no largest unit and is `0ns`. A negative
+/// duration keeps its sign, `-5ms`, and the least one, which no unit above a
+/// nanosecond divides, is its whole count of nanoseconds. So the text is
+/// always a literal that reads back as the same value.
+///
+/// # How
+///
+/// Five remainders pick the unit — nought is left at nanoseconds rather than
+/// taken by the first — and the count is written by `std.int.renderInto`'s
+/// loop, copied here because one standard-library module cannot name
+/// another's private function: on the non-positive side of nought, where the
+/// least `Int` has a counterpart, so nothing in it can overflow. The suffix is
+/// one letter and, for the three below a second, an `s`, each bound before its
+/// append window.
+fn renderInto(value: Duration, buffer: ByteBuffer) {
+  let nanos = value.nanos()
+  var factor = 1
+  var letter = 'n'
+  var second = true
+  if nanos != 0 {
+    if nanos % 3_600_000_000_000 == 0 {
+      factor = 3_600_000_000_000
+      letter = 'h'
+      second = false
+    } else if nanos % 60_000_000_000 == 0 {
+      factor = 60_000_000_000
+      letter = 'm'
+      second = false
+    } else if nanos % 1_000_000_000 == 0 {
+      factor = 1_000_000_000
+      letter = 's'
+      second = false
+    } else if nanos % 1_000_000 == 0 {
+      factor = 1_000_000
+      letter = 'm'
+    } else if nanos % 1_000 == 0 {
+      factor = 1_000
+      letter = 'u'
+    }
+  }
+  var rest = nanos / factor
+  if rest < 0 {
+    let minus = '-'
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, minus)
+    core.bytesCommit(buffer, 1)
+  } else {
+    rest = -rest
+  }
+  let tenth = rest / 10
+  var power = -1
+  while tenth <= power {
+    power = power * 10
+  }
+  while power < 0 {
+    let digit = rest / power
+    let byte = '0' + digit
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, byte)
+    core.bytesCommit(buffer, 1)
+    rest = rest - digit * power
+    power = power / 10
+  }
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, at, letter)
+  core.bytesCommit(buffer, 1)
+  if second {
+    let s = 's'
+    let end = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, end, s)
+    core.bytesCommit(buffer, 1)
+  }
+  return
+}

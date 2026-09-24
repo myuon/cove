@@ -30,7 +30,7 @@ use clock.now
 /// it. So this file is run twice over the same bytes — once by a `cove` built
 /// at the migration's parent and once by a `cove` built after it.
 ///
-/// # Four of the rows are controls, and each controls something different
+/// # The rows that are not walks, and what each is for
 ///
 /// - `string` and `int` are the **short circuit**. `Body::append_piece` reads
 ///   the piece's checked type first and answers a `String` with one
@@ -38,10 +38,13 @@ use clock.now
 ///   without ever asking a layout anything. They are the two commonest
 ///   interpolations in the repository and a synthesis that displaced either of
 ///   them would show up here as the one regression this change could cause.
-/// - `float` is the **widening**. A `Float` renders as the shortest decimal
-///   that reads back as itself, and no Cove body writes that — so it reaches
-///   `Value.renderInto` in both builds, and it is the row that says ADR 0064's
-///   Decision 4 is still reached for a reason that is not a box.
+/// - `float` was the **widening**. A `Float` renders as the shortest decimal
+///   that reads back as itself, and until ADR 0068's Phase 4a no Cove body
+///   wrote that, so it reached `Value.renderInto` in both builds of ADR 0064's
+///   migration. Since Phase 4a it is `std.float.renderInto`, and `duration`
+///   beside it `std.duration.renderInto`, which Phase 4a added the row for:
+///   the two are that phase's before-and-after, the Rust arm against the Cove
+///   body, run by a `cove` built at its parent and one built after it.
 /// - `boxed` is Decision 4 itself: a `dyn Tagged`, whose family is a word in
 ///   its own header and for which no walk can be composed. It reaches the
 ///   intrinsic in both builds too, and it is the rebuild control — the same
@@ -468,6 +471,47 @@ fn countFloat(value: Float, rounds: Int) -> String {
   out
 }
 
+/// `rounds` interpolations of one `Duration`, and nothing else in the loop.
+fn countDuration(value: Duration, rounds: Int) -> String {
+  var guard = ballast(rounds)
+  var out = ""
+  var i = 0
+  if rounds < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < rounds {
+    out = "{value}"
+    i = i + 1
+  }
+  if guard < 0 {
+    out = "stopped"
+  }
+  out
+}
+
 /// `rounds` interpolations of one `dyn Tagged`, and nothing else in the loop.
 fn countBoxed(value: dyn Tagged, rounds: Int) -> String {
   var guard = ballast(rounds)
@@ -568,6 +612,12 @@ fn floatRow(value: Float, rounds: Int) -> Row {
   Row(micros: (now() - from).micros(), witness: witness)
 }
 
+fn durationRow(value: Duration, rounds: Int) -> Row {
+  let from = now()
+  let witness = countDuration(value, rounds)
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
 fn boxedRow(value: dyn Tagged, rounds: Int) -> Row {
   let from = now()
   let witness = countBoxed(value, rounds)
@@ -602,6 +652,7 @@ export fn main() -> Result<Unit, Error> {
   let xArray = arrayRow(numbers, rounds)
   let xMap = mapRow(table, rounds)
   let xFloat = floatRow(1.5, rounds)
+  let xDuration = durationRow(1500ms, rounds)
   let xBoxed = boxedRow(held, rounds)
 
   // What each row rendered, checked before any of it is read as a timing.
@@ -619,6 +670,7 @@ export fn main() -> Result<Unit, Error> {
     "\{1: Point(id: 1, label: one), 2: Point(id: 2, label: two), 3: Point(id: 3, label: three), 4: Point(id: 4, label: four)\}",
   )?
   assertEqual(xFloat.witness, "1.5")?
+  assertEqual(xDuration.witness, "1500ms")?
   assertEqual(xBoxed.witness, "Point(id: 5, label: label)")?
 
   println("bare loop           {bare.micros * 1000 / rounds} ns/turn over {rounds} turn(s)")?
@@ -631,6 +683,9 @@ export fn main() -> Result<Unit, Error> {
   println("array               {perCall(xArray.micros, bare.micros, rounds)}")?
   println("map                 {perCall(xMap.micros, bare.micros, rounds)}")?
   println("float               {perCall(xFloat.micros, bare.micros, rounds)}")?
+  println(
+    "duration            {perCall(xDuration.micros, bare.micros, rounds)}",
+  )?
   println("boxed               {perCall(xBoxed.micros, bare.micros, rounds)}")?
   Ok(())
 }

@@ -1018,23 +1018,24 @@ fn a_map_renders_a_key_and_a_value_at_the_entry_s_width() {
     assert_eq!(literals(&program, "renders<Map"), [", ", ": "]);
 }
 
-/// **The widening, as a fact rather than as a sentence.**
+/// **The widening is gone, as a fact rather than as a sentence.**
 ///
-/// A `Float` is the one scalar the walk hands back, because the text of one
-/// is the shortest decimal that reads back as itself and no Cove body writes
-/// that. So a struct holding one is *still a walk* — its name, its labels and
-/// its brackets are composed here — and what goes below is the one word.
-///
-/// The other direction matters as much: the `Int` field beside it does **not**
-/// reach the intrinsic, so the count is one and not two.
+/// A `Float` was the one scalar the walk handed back until ADR 0068's Phase
+/// 4a, because no Cove body wrote the shortest decimal that reads back as the
+/// value. `std.float.renderInto` writes it now, so a struct holding one is a
+/// walk all the way down: its name, its labels and its brackets are composed
+/// here, the `Int` beside it is `std.int`'s call and the `Float` is
+/// `std.float`'s — and nothing reaches the intrinsic.
 #[test]
-fn a_float_field_is_the_only_part_that_reaches_the_fallback() {
+fn a_float_field_is_a_call_of_the_cove_writer() {
     let program = rendering("struct Reading { id: Int, at: Float }", "Reading");
     assert_eq!(
         literals(&program, "renders<m.Reading"),
         ["Reading(id: ", ", at: "]
     );
-    assert_eq!(renderings(&program), 1);
+    let walk = synthesized(&program, "renders<m.Reading");
+    assert!(walk.contains("std.float.renderInto"), "{walk}");
+    assert_eq!(renderings(&program), 0);
 }
 
 /// **ADR 0064's Decision 4 for the rendering, over every family that has a
@@ -1063,6 +1064,14 @@ fn no_statically_known_layout_reaches_the_rendering_fallback() {
          fn j(x: Token) -> String { \"{x}\" }\n\
          fn k(x: Unit) -> String { \"{x}\" }\n\
          fn l(x: Error) -> String { \"{x}\" }",
+        // The two scalars that went below until ADR 0068's Phase 4a, alone
+        // and as parts of a walk.
+        "struct Sample { at: Float, wait: Duration }\n\
+         fn a(x: Float) -> String { \"{x}\" }\n\
+         fn b(x: Duration) -> String { \"{x}\" }\n\
+         fn c(x: Sample) -> String { \"{x}\" }\n\
+         fn d(x: Array<Float>) -> String { \"{x}\" }\n\
+         fn e(x: Option<Duration>) -> String { \"{x}\" }",
         // A recursion, which is the one that has to reach itself rather than
         // give up and hand the cycle to the runtime.
         "struct Node { tag: Int, kids: Array<Node> }\n\
@@ -1078,8 +1087,9 @@ fn no_statically_known_layout_reaches_the_rendering_fallback() {
     }
 
     // And the other direction, because a rule nothing can satisfy is
-    // satisfied by deleting the arm. Three reach it and each is a different
-    // reason: an erased value, a `Float` and a `Duration`.
+    // satisfied by deleting the arm. One reaches it, an erased value; the
+    // `Float` and the `Duration` beside it reached it too until ADR 0068's
+    // Phase 4a, and do not now.
     let program = lowered(
         "trait Summary { fn summarize(self) -> String }\n\
          struct Booking { id: Int }\n\
@@ -1088,7 +1098,7 @@ fn no_statically_known_layout_reaches_the_rendering_fallback() {
          fn b(x: Float) -> String { \"{x}\" }\n\
          fn c(x: Duration) -> String { \"{x}\" }",
     );
-    assert_eq!(renderings(&program), 3);
+    assert_eq!(renderings(&program), 1);
 }
 
 /// A layout that reaches itself is synthesized once and calls itself, which
@@ -1169,7 +1179,7 @@ fn literals(program: &Program, what: &str) -> Vec<String> {
 /// operation.
 ///
 /// `reached`'s second half, written apart because this operation's admitted
-/// list is four shapes and not one: see `synth::Rendered::Dynamic`.
+/// list is three shapes and not one: see `synth::Rendered::Dynamic`.
 fn renderings(program: &Program) -> usize {
     let mut found = 0;
     for function in &program.functions {

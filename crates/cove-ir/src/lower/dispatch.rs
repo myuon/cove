@@ -74,6 +74,7 @@ use super::{Body, CallShape, Dest, PENDING};
 use crate::inst::{CmpOp, Compare, Inst, Len, Slot};
 use crate::layout::LayoutId;
 use crate::program::{FunctionId, Table};
+use crate::repr::Repr;
 
 /// What a gap names when one of a rendering walk's appends does not take what
 /// the walk passes it.
@@ -83,6 +84,14 @@ const RENDERING: &str = "a rendering walk";
 /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 /// `std.dynamic.equals`, which no program can name.
 pub(super) const DYNAMIC_EQUALS: (&str, &str) = ("std.dynamic", "equals");
+
+/// The Cove function a `Float`'s text is appended by: ADR 0068's Phase 4a
+/// moved it out of `Value.renderInto`. Not exported, like `std.int`'s.
+pub(super) const FLOAT_TEXT: (&str, &str) = ("std.float", "renderInto");
+
+/// The Cove function a `Duration`'s text is appended by, beside
+/// [`FLOAT_TEXT`].
+pub(super) const DURATION_TEXT: (&str, &str) = ("std.duration", "renderInto");
 
 /// The Cove function `core.order` answers two erased keys with: ADR 0068's
 /// `std.dynamic.order`, which no program can name either.
@@ -323,9 +332,64 @@ impl Body<'_> {
             text: text?,
             byte: byte?,
             digits: digits?,
+            float: None,
+            duration: None,
         };
         self.pool.leaves = Some(leaves);
         Some(leaves)
+    }
+
+    /// [`Body::render_leaves`], and then whichever of `std.float`'s and
+    /// `std.duration`'s `renderInto` a rendering walk of `layout` calls.
+    ///
+    /// The two scalar writers are resolved only for a walk that reaches
+    /// their type — [`synth::reaches_a_scalar`] — for the reason
+    /// [`synth::Leaves::float`] gives: a program whose renderings never meet
+    /// a `Float` keeps `std.float`'s writer out of its slice, as one whose
+    /// comparisons never meet a box keeps `std.dynamic` out of it. Both are
+    /// asked about before either answer is read, so that a walk needing both
+    /// converges in one more round rather than two.
+    ///
+    /// `None` is [`Body::render_leaves`]' `None`.
+    pub(super) fn render_leaves_for(
+        &mut self,
+        layout: LayoutId,
+        span: Span,
+    ) -> Option<synth::Leaves> {
+        let mut leaves = self.render_leaves(span)?;
+        let wants_float = leaves.float.is_none()
+            && synth::reaches_a_scalar(&self.pool.shapes, layout, Repr::Float);
+        let wants_duration = leaves.duration.is_none()
+            && synth::reaches_a_scalar(&self.pool.shapes, layout, Repr::Duration);
+        let float = wants_float.then(|| self.scalar_text(FLOAT_TEXT, shapes::FLOAT, span));
+        let duration =
+            wants_duration.then(|| self.scalar_text(DURATION_TEXT, shapes::DURATION, span));
+        if let Some(found) = float {
+            leaves.float = Some(found?);
+        }
+        if let Some(found) = duration {
+            leaves.duration = Some(found?);
+        }
+        self.pool.leaves = Some(leaves);
+        Some(leaves)
+    }
+
+    /// One of the two standard-library functions that append a scalar's
+    /// text, `(module, name)`, found and checked against the value and the
+    /// buffer a walk passes it.
+    fn scalar_text(
+        &mut self,
+        (module, function): (&str, &str),
+        value: LayoutId,
+        span: Span,
+    ) -> Option<FunctionId> {
+        self.library_leaf(
+            module,
+            function,
+            (&[value, shapes::BYTE_BUFFER], shapes::UNIT),
+            RENDERING,
+            span,
+        )
     }
 
     /// `std.dynamic.equals`, the Cove walk `==` answers two erased values

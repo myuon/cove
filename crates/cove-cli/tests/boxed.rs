@@ -93,8 +93,10 @@ const REFLECTED_FUNCTIONS: [(&str, &str); 3] = [
 /// - **boxed**: the operand is `Shape::Boxed`, and the concrete layout is known
 ///   only when the box is opened — the reflection walk's population;
 /// - **scalar**: the operand is a `Float` or a `Duration` word, which
-///   `Value.renderInto` renders because no Cove body writes those two scalars'
-///   text. It is not a dynamic value at all, and a `DynamicView` does not move it;
+///   `Value.renderInto` rendered because no Cove body wrote those two scalars'
+///   text. It is not a dynamic value at all, and a `DynamicView` did not move
+///   it: ADR 0068's Phase 4a did, by writing both in Cove, and the column is
+///   nought for `Value.renderInto` now;
 /// - **known**: any other layout — the operand's layout is known and the site is
 ///   still there, which is issue #476's shape for `Value.admitKey`: the
 ///   synthesized walk *decides*, and the intrinsic stays at the site to word the
@@ -252,7 +254,18 @@ fn count(program: &Program) -> Counts {
 /// `values_boxed_order` moved none. What fell is the *executed* count, which a
 /// static census cannot see: an admitting run reaches `Value.admitKey` on no
 /// turn, where it reached it on every boxed lookup.
-const FALLBACK_SITES: [[usize; 3]; 2] = [[43, 1, 115], [71, 669, 4]];
+///
+/// **ADR 0068's Phase 4a emptied `Value.renderInto`'s scalar column, 669 to
+/// 0.** A `Float` and a `Duration` are written by `std.float.renderInto` and
+/// `std.duration.renderInto` now, called where the intrinsic stood — at a piece
+/// of an interpolation, and at a part of a walk the lowering composes, which is
+/// why none is left inside a synthesized function either. The boxed and known
+/// columns did not move, 71 and 4, and neither did the synthesized count, 596:
+/// a walk over a struct holding a `Float` was already a walk, with the
+/// intrinsic at the one field. The `duration` row `benches/rendering` gained
+/// adds no site. What is left below is what is inside a box, which Phase 4b
+/// walks in Cove.
+const FALLBACK_SITES: [[usize; 3]; 2] = [[43, 1, 115], [71, 0, 4]];
 
 /// The whole-corpus calls of `std.dynamic.equals`, of `std.dynamic.order` and of
 /// `std.dynamic.refusesKey`, which may fall and may never rise: the reflected

@@ -1573,7 +1573,23 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// four programs existing — `fail_key_boxed_map_value` and `fail_key_boxed_enum`
 /// 76 between them and `fail_key_boxed_deep_200` and `fail_key_boxed_deep_1000`
 /// 74 — and **8** is the `chain` rows `values_boxed_order` gained.
-const FORWARDABLE_COPIES: usize = 10497;
+///
+/// **10,500 since ADR 0068's Phase 4a moved a `Float`'s and a `Duration`'s
+/// text into `std.float.renderInto` and `std.duration.renderInto`.** The
+/// lowering moved it by **0**: with `benches/rendering` as it was, it is 10,497
+/// to the copy over the same 229 programs, `prod` 5292 and `ret` 5304. A piece
+/// or a walk part of either type is a call where it was one intrinsic site,
+/// which holds no copy. The two writers hold none either, and it took a second
+/// draft, for the reason every program pays for one — neither body is generic,
+/// so both are lowered into all 229: the first read **11,211**, three copies in
+/// every program and a few more in six, all of them a local handed to a new
+/// name straight after it was made — `twoTo`'s answer, which is gone now that
+/// the power of two is built where it is used; the duration's `count` bound
+/// again as the `rest` it is negated into; and the top limb a comparison was
+/// handed and then copied into its loop counter, where the counter is now
+/// computed from the limb below. **3** is the `duration` row
+/// `benches/rendering` gained, `countDuration` and `durationRow`.
+const FORWARDABLE_COPIES: usize = 10500;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
