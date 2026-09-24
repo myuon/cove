@@ -199,8 +199,43 @@ fn a_string_order_is_the_runtimes_leaf() {
 }
 
 #[test]
-fn only_a_strings_order_is_in_the_slice() {
-    suite::only_a_strings_order_is_in_the_slice::<Template>();
+fn only_a_strings_order_and_equality_are_in_the_slice() {
+    suite::only_a_strings_order_and_equality_are_in_the_slice::<Template>();
+}
+
+#[test]
+fn a_string_equality_is_the_leaf_order_against_nought() {
+    suite::a_string_equality_is_the_leaf_order_against_nought::<Template>();
+}
+
+#[test]
+fn a_float_equality_is_ieee() {
+    suite::a_float_equality_is_ieee::<Template>();
+}
+
+#[test]
+fn only_a_floats_equality_is_in_the_slice() {
+    suite::only_a_floats_equality_is_in_the_slice::<Template>();
+}
+
+#[test]
+fn an_observation_is_handed_over_as_itself() {
+    suite::an_observation_is_handed_over_as_itself::<Template>();
+}
+
+#[test]
+fn an_observation_the_runtime_refused_leaves_with_that_outcome() {
+    suite::an_observation_the_runtime_refused_leaves_with_that_outcome::<Template>();
+}
+
+#[test]
+fn the_cheap_observations_are_answered_inline() {
+    suite::the_cheap_observations_are_answered_inline::<Template>();
+}
+
+#[test]
+fn an_observation_the_table_cannot_settle_is_the_helpers() {
+    suite::an_observation_the_table_cannot_settle_is_the_helpers::<Template>();
 }
 
 #[test]
@@ -517,6 +552,7 @@ fn direct_helpers() -> NativeHelpers {
         field_load: shared.field_load,
         field_store: shared.field_store,
         order_str: shared.order_str,
+        dynamic: shared.dynamic,
     }
 }
 

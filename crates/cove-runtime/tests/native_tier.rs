@@ -1168,9 +1168,10 @@ export fn callsSignals(pick: Int) -> Int {
 
 /// ADR 0068's observations, reached from a function the tier compiles.
 ///
-/// `stringbuilder.reflects` opens the view, which the tier refuses by name, so
-/// this is the other direction of the crossing from every refused caller
-/// above: compiled code calling a body that runs on the encoded machine.
+/// `stringbuilder.reflects` boxes its argument, which the tier refuses as an
+/// unlowered `Inst::Box`, and hands the box to a body that opens the view and
+/// reads it — which the tier compiles since issue #494, every observation in
+/// it handed to the reflection helper one at a time.
 export fn reflectsThrough(x: Int, y: Int) -> Int {
   stringbuilder.reflects(x, y) + counts(0)
 }
@@ -1180,6 +1181,57 @@ export fn reflectsThrough(x: Int, y: Int) -> Int {
 export fn callsReflects(x: Int, y: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   reflectsThrough(x, y)
+}
+
+/// Every observation of every kind, reached from the VM. See
+/// `stringbuilder.observesEverything`, which the tier compiles.
+export fn observesEverything(n: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  stringbuilder.observesEverythingOf(n)
+}
+
+/// A view held across a collection. See `stringbuilder.holdsAView`.
+export fn holdsAView(name: String, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  stringbuilder.holdsAViewOf(name, n)
+}
+
+trait Looped {
+  fn looped(self) -> Int
+}
+
+/// A value that contains itself through a box: its vector holds it, erased.
+struct Loop {
+  v: Vector<dyn Looped>
+}
+
+impl Looped for Loop {
+  fn looped(self) -> Int {
+    1
+  }
+}
+
+/// A `Loop` whose vector holds the loop itself, boxed. The box is an
+/// `Inst::Box`, so this is refused.
+export fn makesALoop(n: Int) -> Loop {
+  var held: Vector<dyn Looped> = Vector.of()
+  let loop = Loop(v: held)
+  held.push(loop)
+  loop
+}
+
+/// A loop rendered: the walk the lowering composed for `Loop` keeps the path of
+/// vectors it is inside in its own frames, and hands it to
+/// `std.dynamic.renderInto` at the box, whose `dyn.on-path` walks those frames
+/// back — compiled frames, when this runs on the native tier.
+export fn rendersALoop(loop: Loop, n: Int) -> String {
+  \"{loop}/{n + counts(0)}\"
+}
+
+/// A refused caller of the two above.
+export fn rendersMadeLoop(n: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  rendersALoop(makesALoop(n), n)
 }
 ";
 
@@ -1215,9 +1267,160 @@ fn reflectsOn(value: dyn Reflected) -> Int {
   core.dynamicKind(view) * 1000 + core.dynamicChildCount(view) * 100 + x * 10 + y
 }
 
-/// A standard-library body the native tier refuses, as `Reason::Reflection`.
+/// A standard-library body the native tier refuses for its `Inst::Box`, around
+/// one it compiles.
 export fn reflects(x: Int, y: Int) -> Int {
   reflectsOn(ReflectedAt(x: x, y: y))
+}
+
+/// One field of every kind a view can have but `Unit`, for
+/// [`observesEverything`]: the scalars, a string, a struct, an enum, the four
+/// collections, a range, a function, a synchronized cell, and an opaque struct
+/// whose one field is a byte buffer — an opaque value with a text of its own.
+struct Everything {
+  b: Bool,
+  i: Int,
+  f: Float,
+  d: Duration,
+  s: String,
+  at: ReflectedAt,
+  o: Option<Int>,
+  a: Array<Int>,
+  v: Vector<Int>,
+  set: Set<Int>,
+  m: Map<String, Int>,
+  r: Range,
+  step: fn(Int) -> Int,
+  cell: Shared<Int>,
+  buf: StringBuilder
+}
+
+impl Reflected for Everything {
+  fn reflected(self) -> Int {
+    self.i
+  }
+}
+
+/// Every one of ADR 0068's observations but `dyn.on-path`, over every kind: the
+/// root's name, kind and count, and for each field its name, kind, count, what
+/// it holds, and how it compares with the root and with itself.
+fn observesEverything(value: dyn Reflected) -> String {
+  let root = core.dynamicOpen(value)
+  let count = core.dynamicChildCount(root)
+  var text = \"{core.dynamicTypeName(root)}:{core.dynamicKind(root)}:{count}\"
+  var at = 0
+  while at < count {
+    let child = core.dynamicChild(root, at)
+    let kind = core.dynamicKind(child)
+    let same = core.dynamicSameType(child, root)
+    let order = core.dynamicNameOrder(child, root)
+    let back = core.dynamicNameOrder(root, child)
+    let itself = core.dynamicSameObject(child, child)
+    let whole = core.dynamicSameObject(child, root)
+    text = \"{text} {core.dynamicFieldName(root, at)}={kind}/{core.dynamicChildCount(child)}/{shown(child, kind)}/{same}/{order}/{back}/{itself}/{whole}\"
+    at = at + 1
+  }
+  text
+}
+
+/// What a view of `kind` holds, as text.
+fn shown(view: DynamicView, kind: Int) -> String {
+  if kind == 1 {
+    return \"{core.dynamicBool(view)}\"
+  }
+  if kind == 2 {
+    return \"{core.dynamicInt(view)}\"
+  }
+  if kind == 3 {
+    return \"{core.dynamicFloat(view)}\"
+  }
+  if kind == 4 {
+    return \"{core.dynamicDuration(view)}\"
+  }
+  if kind == 5 {
+    return core.dynamicString(view)
+  }
+  if kind == 6 {
+    if core.dynamicOpaque(view) {
+      return \"{core.dynamicTypeName(view)}!{core.dynamicHandleText(core.dynamicChild(view, 0))}\"
+    }
+    return \"{core.dynamicTypeName(view)}.{core.dynamicFieldName(view, 0)}\"
+  }
+  if kind == 7 {
+    return \"{core.dynamicCaseName(view)}#{core.dynamicCase(view)}\"
+  }
+  if kind == 11 {
+    return \"{core.dynamicString(core.dynamicChild(view, 0))}{core.dynamicInt(core.dynamicChild(view, 1))}\"
+  }
+  if kind == 12 {
+    return \"{core.dynamicInt(core.dynamicChild(view, 1))}\"
+  }
+  if kind >= 8 {
+    if kind <= 10 {
+      return \"{core.dynamicInt(core.dynamicChild(view, 0))}\"
+    }
+  }
+  \"-\"
+}
+
+/// [`observesEverything`] of one boxed [`Everything`], built from `n`. The box
+/// is an `Inst::Box`, which the native tier refuses, so this body runs on the
+/// encoded machine and the observations in the one it calls do not.
+export fn observesEverythingOf(n: Int) -> String {
+  let value = Everything(
+    b: n > 0,
+    i: n,
+    f: 1.5,
+    d: 3ms,
+    s: \"text\",
+    at: ReflectedAt(x: n, y: 2),
+    o: Some(4),
+    a: [1, 2, 3],
+    v: Vector.of(5, 6),
+    set: Set.of(3, 1),
+    m: Map.of(MapEntry(key: \"k\", value: 9)),
+    r: 0..n,
+    step: fn(x) { x + 1 },
+    cell: Shared(7),
+    buf: StringBuilder.withCapacity(8),
+  )
+  observesEverything(value)
+}
+
+/// A struct whose string is a heap object of its own, for [`holdsAView`].
+struct HeldAt {
+  name: String,
+  y: Int
+}
+
+impl Reflected for HeldAt {
+  fn reflected(self) -> Int {
+    self.y
+  }
+}
+
+/// A view held across a loop that allocates, in a compiled frame.
+///
+/// The box is referenced by nothing but the root view once it is opened, and the
+/// string by nothing but the child view, so a collection during the loop has to
+/// find both in the view's owner words — the frame's reference map — or it
+/// sweeps the string and the length read after the loop is reclaimed words.
+fn holdsAView(value: dyn Reflected, n: Int) -> Int {
+  let root = core.dynamicOpen(value)
+  let name = core.dynamicChild(root, 0)
+  var made = 0
+  var at = 0
+  while at < n {
+    let run = [at, at + 1, at + 2, at + 3, at + 4, at + 5, at + 6, at + 7]
+    made = made + run.length()
+    at = at + 1
+  }
+  core.dynamicString(name).byteLength() * 1000 + core.dynamicInt(core.dynamicChild(root, 1)) + made
+}
+
+/// [`holdsAView`] of a fresh boxed [`HeldAt`]; refused for its box.
+export fn holdsAViewOf(name: String, n: Int) -> Int {
+  holdsAView(HeldAt(name: \"{name}{n}\", y: 7), n)
 }
 
 /// `appendByte`, `depth` frames down a recursion no expansion can reach.
@@ -3858,52 +4061,194 @@ fn the_boundary_report_counts_each_quantity_apart() {
     assert!(uncounted.to_string().contains("were not counted"));
 }
 
-/// ADR 0068 Phase 1 lowers its seven observations for the encoded machine
-/// alone: a function that reflects is **refused, by name**, and the run that
-/// reaches it from compiled code answers what the encoded machine answers.
+/// ADR 0068's observations are **compiled** since issue #494: a function that
+/// reflects runs on the native tier, each observation handed to the reflection
+/// helper, and answers what the encoded machine answers.
 ///
-/// The refusal is `cove_native::Reason::Reflection`'s sentence, at a reflection
-/// instruction — not the fallback's "an instruction is not lowered", which would
-/// put a deliberate phase boundary in the same row as work nobody has started.
+/// Until then the body was refused by name, as `Reason::Reflection`, and every
+/// reflecting walk made from compiled code crossed to the encoded machine.
 #[test]
-fn a_reflecting_function_is_refused_by_name_and_agrees() {
+fn a_reflecting_function_compiles_and_agrees() {
     let both = both("callsReflects", vec![Value::int(3), Value::int(4)]);
     // A struct (kind 6) of two children, whose fields are 3 and 4.
     assert_eq!(both.vm, Ok("6234".to_string()));
     assert_eq!(both.native, both.vm, "the tiers agree");
-    assert!(
-        both.tiers.native_to_vm >= 1,
-        "the reflecting body was reached from compiled code and ran on the VM: {:?}",
-        both.tiers
-    );
 
+    let names = compiled_names();
+    assert!(
+        names.contains(&"std.stringbuilder.reflectsOn".to_string()),
+        "the reflecting body compiled"
+    );
+    assert!(
+        names.contains(&format!("{MODULE}.reflectsThrough")),
+        "and so did the caller that reaches it"
+    );
     let (sources, program) = checked();
     let lowered = cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
         .expect("the fixture lowers");
     let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
-    // `reflects` boxes its argument, and `Inst::Box` is refused as an
-    // unlowered instruction — the same way it was before this phase. The body
-    // that reflects is `reflectsOn`, and its refusal is the family's.
-    let row = native
-        .refusals()
-        .iter()
-        .find(|row| row.name == "std.stringbuilder.reflectsOn")
-        .unwrap_or_else(|| panic!("the reflecting body was refused: {:?}", native.refusals()));
+    let observation = |op: Option<&str>| op.is_some_and(|op| op.starts_with("Dyn"));
+    assert!(
+        native
+            .refusals()
+            .iter()
+            .all(|row| !observation(row.instruction.as_deref())
+                && row
+                    .blockers
+                    .iter()
+                    .all(|(blocker, _)| !observation(blocker.instruction.as_deref()))),
+        "and no refusal anywhere names an observation: {:?}",
+        native.refusals()
+    );
+}
+
+/// **Every observation of every kind compiles and agrees** (issue #494).
+///
+/// `stringbuilder.observesEverything` asks each of ADR 0068's observations but
+/// `dyn.on-path` of a boxed struct with one field of every kind a view can have
+/// but `Unit` — the scalars, a string, a struct, an enum, the four collections,
+/// a range, a function, a `Shared` cell (kind 15) and an opaque struct whose
+/// field is a byte buffer, whose text is the one observation that allocates —
+/// and renders the answers. The body is compiled, so every observation in it is
+/// either emitted or handed to the reflection helper, and the text is held to
+/// the encoded machine's byte for byte.
+#[test]
+fn every_observation_of_every_kind_compiles_and_agrees() {
+    on_each_tier(&[], &["observesEverything"]);
+    let names = compiled_names();
+    for body in [
+        "std.stringbuilder.observesEverything",
+        "std.stringbuilder.shown",
+    ] {
+        assert!(
+            names.contains(&body.to_string()),
+            "`{body}` is meant to be compiled"
+        );
+    }
+    for n in [0, 3] {
+        let both = both("observesEverything", vec![Value::int(n)]);
+        let text = both.vm.clone().expect("the encoded machine answers");
+        for piece in [
+            "Everything:6:15",
+            " b=1/0/",
+            " i=2/0/",
+            " f=3/0/1.5/",
+            " d=4/0/3ms/",
+            " s=5/0/text/",
+            " at=6/2/ReflectedAt.x/",
+            " o=7/1/Some#1/",
+            " a=8/3/1/",
+            " v=9/2/5/",
+            " set=10/2/1/",
+            " m=11/2/k9/",
+            " r=12/3/",
+            " step=13/0/",
+            " cell=15/0/",
+            " buf=6/1/StringBuilder!<byte buffer>/",
+        ] {
+            assert!(text.contains(piece), "`{piece}` in {text}");
+        }
+        assert!(
+            text.contains(" v=9/2/5/false/-1/1/true/false"),
+            "a vector is itself and nothing else: {text}"
+        );
+        assert_eq!(both.native, both.vm, "n = {n}: the tiers agree");
+    }
+}
+
+/// **A view keeps what it views alive, in a compiled frame, across a
+/// collection** — ADR 0068's "a live view keeps its owner reachable across
+/// allocation and safepoints", held by the native tier's frame map.
+///
+/// `stringbuilder.holdsAView` opens a box nothing else names and projects the
+/// string field nothing else names, then allocates in a loop; the length read
+/// afterwards is through the child view. A session over a small heap calls it
+/// until a collection has happened, as [`a_cleared_slot_is_not_a_root_and_a_live_one_still_is`]
+/// does, and every call is held to the encoded machine's answer.
+#[test]
+fn a_view_held_across_a_collection_keeps_its_owner() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const TURNS: i64 = 40;
+    let name = "a name long enough to be its own heap object";
+    on_each_tier(&[], &["holdsAView"]);
+    assert!(
+        compiled_names().contains(&"std.stringbuilder.holdsAView".to_string()),
+        "the body holding the view is compiled"
+    );
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let mut session = vm
+        .native_session(
+            MODULE,
+            "holdsAView",
+            vec![Value::string(name), Value::int(TURNS)],
+        )
+        .expect("the session opens");
+    let words = session.arguments().to_vec();
+    let expected = session
+        .call(&cove_runtime::NothingCompiled, &words)
+        .expect("the vm answers");
+    let length = (name.len() + TURNS.to_string().len()) as u64;
     assert_eq!(
-        row.reason,
-        cove_native::Reason::Reflection.to_string(),
-        "{row:?}"
+        expected,
+        vec![length * 1000 + 7 + 8 * TURNS as u64],
+        "the fixture answers the name's length, the second field and the runs"
     );
-    assert_eq!(row.instruction.as_deref(), Some("DynOpen"), "{row:?}");
+    let before = session.collections();
+    let mut calls = 0;
+    while session.collections() == before && calls < 20_000 {
+        let answered = session
+            .call(&native, &words)
+            .expect("the native tier answers");
+        assert_eq!(answered, expected, "call {calls} answered wrongly");
+        calls += 1;
+    }
     assert!(
-        row.blockers.iter().all(|(blocker, _)| blocker
-            .instruction
-            .as_deref()
-            .is_some_and(|op| op.starts_with("Dyn"))),
-        "and every blocker in it is a reflection: {row:?}"
+        session.collections() > before,
+        "no collection ran in {calls} call(s), so this case proved nothing"
     );
-    assert!(
-        compiled_names().contains(&format!("{MODULE}.reflectsThrough")),
-        "and its caller compiled, so the crossing was a crossing"
-    );
+}
+
+/// **`dyn.on-path` walks a path kept in compiled frames.**
+///
+/// `rendersALoop` interpolates a `Loop` whose vector holds the loop itself,
+/// boxed. The walk the lowering composed for `Loop` keeps the vectors it is
+/// inside in its own frames and hands `std.dynamic.renderInto` the address of
+/// the innermost at the box; the observation follows those frames back through
+/// the words each entry holds. Here every frame on that path is a compiled one,
+/// so the addresses are the ones compiled code formed — a linear address the
+/// segment's origin was added to, as the encoded machine forms it — and the
+/// repeat is found and shown as `[…]` on both tiers alike.
+#[test]
+fn on_path_follows_a_path_through_compiled_frames() {
+    on_each_tier(&["rendersALoop"], &["makesALoop", "rendersMadeLoop"]);
+    let names = compiled_names();
+    for body in ["std.dynamic.renderInto", "std.dynamic.written"] {
+        assert!(
+            names.contains(&body.to_string()),
+            "`{body}` is meant to be compiled"
+        );
+    }
+    for segment in [Segment::First, Segment::Later] {
+        let both = both_on(segment, "rendersMadeLoop", vec![Value::int(2)]);
+        assert_eq!(
+            both.vm,
+            Ok("Loop(v: [Loop(v: […])])/2".to_string()),
+            "{segment:?}"
+        );
+        assert_eq!(both.native, both.vm, "{segment:?}: the tiers agree");
+    }
 }

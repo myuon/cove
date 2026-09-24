@@ -1021,3 +1021,54 @@ fn the_audit_names_a_boxed_layout_whose_names_were_not_placed() {
     named.program.names = names;
     assert_eq!(unplaced(&named), Vec::<String>::new());
 }
+
+/// **The descriptor table compiled code reads is this arm's own answers**, for
+/// every layout of the fixture and every pair of them: the kind `dyn.kind`
+/// answers, the same-type test `dyn.same-type` answers, and a struct's or a
+/// range's field count, which is what `dyn.count` answers of one. A reclaimed
+/// layout asks, because this arm refuses it. So a native `dyn.kind` read out of
+/// `NativeCtx::dyn_layouts` cannot say what the encoded machine would not
+/// (issue #494).
+#[test]
+fn the_descriptor_table_is_this_arms_own_answers() {
+    use super::{descriptors, kind, same_type, View};
+    use cove_native::{DYN_ASK, DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_TYPE_MASK};
+    let fixture = fixture();
+    let machine = machine(&fixture);
+    let table = descriptors(&fixture.program);
+    assert_eq!(table.len(), fixture.program.layouts.len());
+    let view = |at: usize| View {
+        layout: LayoutId(at as u32),
+        owner: 1,
+        at: 0,
+    };
+    for (at, described) in fixture.program.layouts.iter().enumerate() {
+        if matches!(described.shape, Shape::Free) {
+            assert_eq!(table[at], DYN_ASK, "{}", described.name);
+            assert!(kind(&machine, view(at)).is_err());
+            continue;
+        }
+        let answered = kind(&machine, view(at)).expect("a layout the program has");
+        assert_eq!(
+            table[at] & DYN_KIND_MASK,
+            answered.code() as u64,
+            "{}",
+            described.name
+        );
+        if let Shape::Struct { fields, .. } = &described.shape {
+            assert_eq!(table[at] >> DYN_COUNT_SHIFT, fields.len() as u64);
+        }
+        for (other, beside) in fixture.program.layouts.iter().enumerate() {
+            if matches!(beside.shape, Shape::Free) {
+                continue;
+            }
+            assert_eq!(
+                table[at] & DYN_TYPE_MASK == table[other] & DYN_TYPE_MASK,
+                same_type(&machine, view(at), view(other)).expect("two layouts it has"),
+                "{} and {}",
+                described.name,
+                beside.name
+            );
+        }
+    }
+}

@@ -33,12 +33,14 @@ use cove_ir::{
 };
 
 use crate::abi::{
-    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Outcome, Raise, RunOp,
-    HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, DYN_ASK,
+    DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
+    HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset, supported,
-    windows, word_finish, BufferWindow, ByteStore, Reserve, WordFinish,
+    by_zero_of, byte_store, leaders, literal_offset, observation, overflow_of, reserve,
+    slot_offset, supported, windows, word_finish, BufferWindow, ByteStore, Observation, Reserve,
+    WordFinish,
 };
 use crate::{IntrinsicCode, Unavailable, WindowCode};
 
@@ -48,6 +50,7 @@ const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
 const OFF_FIXED_PAYLOAD_WORDS: i32 = offset_of!(NativeCtx, fixed_payload_words) as i32;
+const OFF_DYN_LAYOUTS: i32 = offset_of!(NativeCtx, dyn_layouts) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_POLL_AT: i32 = offset_of!(NativeCtx, poll_at) as i32;
@@ -110,8 +113,8 @@ const HEAP_SPARE: u8 = R15;
 // The SSE registers this arm uses, which are scratch in the same sense the
 // integer scratch registers are: nothing lives in one between two
 // instructions, because every value of a frame lives in the frame. Only
-// `Inst::Convert(IntToFloat)`, `Inst::FloatMinMax`, `Inst::FloatRound` and
-// `Inst::FloatSqrt` touch them at all.
+// `Inst::Convert(IntToFloat)`, `Inst::FloatMinMax`, `Inst::FloatRound`,
+// `Inst::FloatSqrt` and a float `==` touch them at all.
 const XMM0: u8 = 0;
 const XMM2: u8 = 2;
 const XMM3: u8 = 3;
@@ -147,6 +150,7 @@ const CC_B: u8 = 0x2;
 const CC_AE: u8 = 0x3;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
+const CC_NP: u8 = 0xb;
 const CC_L: u8 = 0xc;
 const CC_GE: u8 = 0xd;
 const CC_LE: u8 = 0xe;
@@ -307,6 +311,7 @@ struct Helpers {
     field_load: usize,
     field_store: usize,
     order_str: usize,
+    dynamic: usize,
 }
 
 impl Jit {
@@ -335,6 +340,7 @@ impl Jit {
                 field_load: helpers.field_load as usize,
                 field_store: helpers.field_store as usize,
                 order_str: helpers.order_str as usize,
+                dynamic: helpers.dynamic as usize,
             },
             code: Vec::new(),
             finalized: false,
@@ -445,6 +451,7 @@ struct Emit<'a> {
     field_load: usize,
     field_store: usize,
     order_str: usize,
+    dynamic: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
     direct: bool,
     /// Which IR instruction is being emitted.
@@ -513,6 +520,7 @@ impl<'a> Emit<'a> {
             field_load: helpers.field_load,
             field_store: helpers.field_store,
             order_str: helpers.order_str,
+            dynamic: helpers.dynamic,
             direct,
             pc: 0,
             code: Vec::new(),
@@ -1096,6 +1104,23 @@ impl<'a> Emit<'a> {
                 a,
                 b,
             } => self.order_str(*dst, *a, *b),
+            // `encoded.rs`'s `EQ_STR` and `EQ_FLOAT`, the two equalities
+            // `crate::subset` admits over those two. See [`Emit::str_equal`]
+            // and [`Emit::float_equal`].
+            Inst::Cmp {
+                on: Compare::Str,
+                op: CmpOp::Eq,
+                dst,
+                a,
+                b,
+            } => self.str_equal(*dst, *a, *b),
+            Inst::Cmp {
+                on: Compare::Float,
+                op: CmpOp::Eq,
+                dst,
+                a,
+                b,
+            } => self.float_equal(*dst, *a, *b),
             // `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG`, which
             // `crate::subset` admits for those three and no other.
             Inst::Cmp {
@@ -1124,6 +1149,30 @@ impl<'a> Emit<'a> {
                 self.load_slot(RAX, *a);
                 self.mov_imm64(RCX, *value);
                 self.compare(*op, *dst);
+            }
+            // The same two equalities fused with their branch: each leaves the
+            // flags `compare` leaves, the stored word tested against zero.
+            Inst::CmpBranch {
+                on: Compare::Str,
+                op: CmpOp::Eq,
+                dst,
+                a,
+                b,
+                target,
+            } => {
+                self.str_equal(*dst, *a, *b);
+                self.branch_when_false(pc, *target);
+            }
+            Inst::CmpBranch {
+                on: Compare::Float,
+                op: CmpOp::Eq,
+                dst,
+                a,
+                b,
+                target,
+            } => {
+                self.float_equal(*dst, *a, *b);
+                self.branch_when_false(pc, *target);
             }
             Inst::CmpBranch {
                 on: _,
@@ -1176,7 +1225,12 @@ impl<'a> Emit<'a> {
             // `encoded.rs`'s `INTRINSIC_CALL` arm, through the one helper. See
             // [`Emit::intrinsic_call`].
             Inst::IntrinsicCall { dst, site, args } => self.intrinsic_call(*dst, *site, *args),
-            other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
+            // ADR 0068's observations, one each through the reflection helper.
+            // See [`Emit::observe`].
+            other => match observation(other) {
+                Some(seen) => self.observation(other.clone(), seen),
+                None => unreachable!("`supported` admitted {other:?}, which is not lowered"),
+            },
         }
     }
 
@@ -2202,6 +2256,287 @@ impl<'a> Emit<'a> {
             .charge(which, Some((self.code.len() - started) as u64));
     }
 
+    /// One of [ADR 0068]'s structural observations: emitted inline where the
+    /// view's three words and [`NativeCtx::dyn_layouts`] answer it, and handed
+    /// to [`Emit::observe`] otherwise.
+    ///
+    /// Six are answered here, and each is the reflection arm's function read
+    /// against the table the runtime built from that function's own
+    /// classification:
+    ///
+    /// - **`dyn.kind`** is the descriptor's low byte;
+    /// - **`dyn.same-type`** is the two descriptors' kind and name number
+    ///   compared, which is `same_type`'s "the kinds agree, and for a nominal
+    ///   kind so do the declared names";
+    /// - **`dyn.read`** is a payload word — or, for a `String`, the owner the
+    ///   view already names — once the kind is the one the destination's `Repr`
+    ///   reads;
+    /// - **`dyn.case`** is the payload word of an enum;
+    /// - **`dyn.count`** is a struct's or a range's field count from the table,
+    ///   an array's or a set's header length, twice a map's, or a vector's length
+    ///   word, and nought for every kind with no children;
+    /// - **`dyn.same-object`** is `same_object`'s whole test: one owner, both
+    ///   views at word 0 with the owner's own header layout, and that layout a
+    ///   `Vector`.
+    ///
+    /// **Everything else is the helper, whole**, and so is every case above the
+    /// table does not settle: a layout past the table or marked
+    /// [`DYN_ASK`](crate::abi::DYN_ASK) — a reclaimed one, which the runtime
+    /// refuses in its own words — a scalar read of the wrong kind, an enum's
+    /// part count, which is its case's, and a null owner. The cold path is
+    /// [`Emit::observe`] from the start of the instruction, so a refusal is the
+    /// runtime's sentence at this instruction's span, and nothing here names an
+    /// error. No fast path writes anything before it has decided it answers.
+    ///
+    /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+    fn observation(&mut self, inst: Inst, seen: Observation) {
+        use cove_ir::dynamic::{VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
+        use cove_ir::{DynamicKind, Repr};
+        // The table's length is an `imm32` every index is compared with; a
+        // program with more layouts than that has every observation handed over.
+        if i32::try_from(self.program.layouts.len()).is_err() {
+            return self.observe(seen);
+        }
+        let code = |kind: DynamicKind| kind.code() as i32;
+        let cold = self.label();
+        let done = self.label();
+        match inst {
+            Inst::DynKind { dst, view } => {
+                self.load_slot(RAX, view + VIEW_LAYOUT);
+                self.descriptor(RAX, cold);
+                self.and_imm32(RAX, DYN_KIND_MASK as i32);
+                self.cmp_imm32(RAX, DYN_ASK as i32);
+                self.jcc(CC_E, Target::Label(cold));
+                self.store_slot(dst, RAX);
+            }
+            Inst::DynSameType { dst, a, b } => {
+                self.load_slot(RAX, a + VIEW_LAYOUT);
+                self.descriptor(RAX, cold);
+                self.refuse_ask(RAX, cold);
+                self.load_slot(RCX, b + VIEW_LAYOUT);
+                self.descriptor(RCX, cold);
+                self.refuse_ask(RCX, cold);
+                // `DYN_TYPE_MASK` is the low half, and a 32-bit move is that mask.
+                debug_assert_eq!(DYN_TYPE_MASK, u64::from(u32::MAX));
+                self.mov_rr32(RAX, RAX);
+                self.mov_rr32(RCX, RCX);
+                self.cmp_rr(RAX, RCX);
+                self.setcc(CC_E);
+                self.movzx_eax_al();
+                self.store_slot(dst, RAX);
+            }
+            Inst::DynRead { dst, view } => {
+                let want = match self.function.reprs.get(dst as usize) {
+                    Some(Repr::Bool) => code(DynamicKind::Bool),
+                    Some(Repr::Int) => code(DynamicKind::Int),
+                    Some(Repr::Float) => code(DynamicKind::Float),
+                    Some(Repr::Duration) => code(DynamicKind::Duration),
+                    Some(Repr::Ref) => code(DynamicKind::String),
+                    // No kind reads as this, so every read of it is the
+                    // runtime's refusal.
+                    _ => return self.observe(seen),
+                };
+                self.load_slot(RAX, view + VIEW_LAYOUT);
+                self.descriptor(RAX, cold);
+                self.and_imm32(RAX, DYN_KIND_MASK as i32);
+                self.cmp_imm32(RAX, want);
+                self.jcc(CC_NE, Target::Label(cold));
+                if want == code(DynamicKind::String) {
+                    // The string is immutable, so the object *is* the value.
+                    self.load_slot(RAX, view + VIEW_OWNER);
+                } else {
+                    self.view_payload(RAX, view);
+                }
+                self.store_slot(dst, RAX);
+            }
+            Inst::DynCase { dst, view } => {
+                self.load_slot(RAX, view + VIEW_LAYOUT);
+                self.descriptor(RAX, cold);
+                self.and_imm32(RAX, DYN_KIND_MASK as i32);
+                self.cmp_imm32(RAX, code(DynamicKind::Enum));
+                self.jcc(CC_NE, Target::Label(cold));
+                self.view_payload(RAX, view);
+                self.store_slot(dst, RAX);
+            }
+            Inst::DynCount { dst, view } => {
+                let fields = self.label();
+                let length = self.label();
+                let entries = self.label();
+                let vector = self.label();
+                let answer = self.label();
+                self.load_slot(RAX, view + VIEW_LAYOUT);
+                self.descriptor(RAX, cold);
+                self.mov_rr(RCX, RAX);
+                self.and_imm32(RCX, DYN_KIND_MASK as i32);
+                for (kind, to) in [
+                    (DYN_ASK as i32, cold),
+                    (code(DynamicKind::Struct), fields),
+                    (code(DynamicKind::Range), fields),
+                    // A case's parts are the case's, which the table cannot say.
+                    (code(DynamicKind::Enum), cold),
+                    (code(DynamicKind::Array), length),
+                    (code(DynamicKind::Set), length),
+                    (code(DynamicKind::Map), entries),
+                    (code(DynamicKind::Vector), vector),
+                ] {
+                    self.cmp_imm32(RCX, kind);
+                    self.jcc(CC_E, Target::Label(to));
+                }
+                // Every other kind has no children.
+                self.xor_rr(RAX, RAX);
+                self.jmp(Target::Label(answer));
+                self.bind(fields);
+                self.shr_imm8(RAX, DYN_COUNT_SHIFT as u8);
+                self.jmp(Target::Label(answer));
+                // A heap value is its whole object, so the header is the
+                // collection's.
+                self.bind(length);
+                self.load_slot(RAX, view + VIEW_OWNER);
+                self.object_len(RAX);
+                self.jmp(Target::Label(answer));
+                self.bind(entries);
+                self.load_slot(RAX, view + VIEW_OWNER);
+                self.object_len(RAX);
+                self.add_rr(RAX, RAX);
+                self.jmp(Target::Label(answer));
+                // Payload word 0 of a `Vector` is its length.
+                self.bind(vector);
+                self.load_slot(RAX, view + VIEW_OWNER);
+                self.add_imm32(RAX, 1);
+                self.heap_word(RAX);
+                self.bind(answer);
+                self.store_slot(dst, RAX);
+            }
+            Inst::DynSameObject { dst, a, b } => {
+                let no = self.label();
+                let answer = self.label();
+                self.load_slot(RAX, a + VIEW_OWNER);
+                self.load_slot(RCX, b + VIEW_OWNER);
+                self.cmp_rr(RAX, RCX);
+                self.jcc(CC_NE, Target::Label(no));
+                self.test_rr(RAX, RAX);
+                self.jcc(CC_E, Target::Label(cold));
+                for at in [a + VIEW_AT, b + VIEW_AT] {
+                    self.load_slot(RDX, at);
+                    self.test_rr(RDX, RDX);
+                    self.jcc(CC_NE, Target::Label(no));
+                }
+                // One owner, so one header: both layouts have to be it.
+                self.load_slot(RDX, a + VIEW_LAYOUT);
+                self.load_slot(RCX, b + VIEW_LAYOUT);
+                self.cmp_rr(RDX, RCX);
+                self.jcc(CC_NE, Target::Label(no));
+                self.mov_rr(RCX, RAX);
+                self.heap_word(RCX);
+                self.shr_imm8(RCX, 32);
+                self.cmp_rr(RCX, RDX);
+                self.jcc(CC_NE, Target::Label(no));
+                // A layout the program does not have is no vector, as
+                // `same_object`'s `get` says.
+                self.descriptor(RDX, no);
+                self.and_imm32(RDX, DYN_KIND_MASK as i32);
+                self.cmp_imm32(RDX, code(DynamicKind::Vector));
+                self.jcc(CC_NE, Target::Label(no));
+                self.mov_imm32(RAX, 1);
+                self.jmp(Target::Label(answer));
+                self.bind(no);
+                self.xor_rr(RAX, RAX);
+                self.bind(answer);
+                self.store_slot(dst, RAX);
+            }
+            _ => return self.observe(seen),
+        }
+        self.jmp(Target::Label(done));
+        self.bind(cold);
+        self.observe(seen);
+        self.bind(done);
+    }
+
+    /// The [`NativeCtx::dyn_layouts`] entry of the layout id in `reg`, into
+    /// `reg` — or `outside` taken, for an id past the table, compared unsigned
+    /// so that a word with any high bit set is past it too. [`HEAP_TABLE`] is
+    /// the scratch, as it is in [`Emit::heap_ptr`].
+    fn descriptor(&mut self, reg: u8, outside: usize) {
+        let layouts = i32::try_from(self.program.layouts.len())
+            .expect("`Emit::observation` bounded the table");
+        self.cmp_imm32(reg, layouts);
+        self.jcc(CC_AE, Target::Label(outside));
+        self.load(HEAP_TABLE, CTX, OFF_DYN_LAYOUTS);
+        self.shl_imm8(reg, 3);
+        self.add_rr(reg, HEAP_TABLE);
+        self.load(reg, reg, 0);
+    }
+
+    /// Takes `cold` when the descriptor in `reg` is [`DYN_ASK`]'s, leaving `reg`
+    /// as it was. `RDX` is the scratch.
+    fn refuse_ask(&mut self, reg: u8, cold: usize) {
+        self.mov_rr(RDX, reg);
+        self.and_imm32(RDX, DYN_KIND_MASK as i32);
+        self.cmp_imm32(RDX, DYN_ASK as i32);
+        self.jcc(CC_E, Target::Label(cold));
+    }
+
+    /// `payload(owner, at)` of the view whose first word is slot `view`: the
+    /// word the viewed scalar is, into `reg`, which is not `RCX`.
+    fn view_payload(&mut self, reg: u8, view: Slot) {
+        use cove_ir::dynamic::{VIEW_AT, VIEW_OWNER};
+        debug_assert_ne!(reg, RCX);
+        self.load_slot(reg, view + VIEW_OWNER);
+        self.load_slot(RCX, view + VIEW_AT);
+        self.add_rr(reg, RCX);
+        // The header is one word, so a payload word is one past it.
+        self.add_imm32(reg, 1);
+        self.heap_word(reg);
+    }
+
+    /// One of [ADR 0068]'s structural observations, handed to
+    /// [`DynamicFn`](crate::abi::DynamicFn) as the observation it is: its
+    /// opcode and its three slots, in the bytecode's order.
+    ///
+    /// Six integer arguments and no `base`, which is [`Emit::field_call`]'s
+    /// shape: the runtime reads and writes the view's words in the frame on top
+    /// of its own frame stack, which is this one. The protocol is read off the
+    /// one fact [`Observation::allocates`] carries:
+    ///
+    /// - **fourteen of the fifteen are a leaf that may raise.** Nothing is
+    ///   published before the call, because nothing is charged at one, and
+    ///   [`FRAME`] is still the frame after it, because the helper can neither
+    ///   grow the stack nor commit a chunk; an answer other than `Returned`
+    ///   publishes [`WORK`] on the way out, for [`Emit::field_call`]'s reason;
+    /// - **`DynHandleText` is a safepoint**, because it allocates the text:
+    ///   [`WORK`] is published and cleared before the call and the frame
+    ///   pointer dropped after it, exactly as [`Emit::allocate`] does.
+    ///
+    /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+    fn observe(&mut self, seen: Observation) {
+        if seen.allocates {
+            self.store(CTX, OFF_PENDING_WORK, WORK);
+            self.xor_rr(WORK, WORK);
+        }
+        self.mov_rr(RDI, CTX);
+        self.mov_imm32(RSI, self.pc as i32);
+        self.mov_imm32(RDX, i32::from(seen.op));
+        self.mov_imm32(RCX, seen.a as i32);
+        self.mov_imm32(R8, seen.b as i32);
+        self.mov_imm32(R9, seen.c as i32);
+        self.mov_imm64(RAX, self.dynamic as i64);
+        self.call(RAX);
+
+        let on = self.label();
+        self.test_rr32(RAX, RAX);
+        self.jcc(CC_E, Target::Label(on));
+        if !seen.allocates {
+            // `RAX` holds the outcome `leave_answered` returns: one store of
+            // `WORK` and nothing else.
+            self.store(CTX, OFF_PENDING_WORK, WORK);
+        }
+        self.leave_answered();
+        self.bind(on);
+        if seen.allocates {
+            self.frame_live = false;
+        }
+    }
+
     /// `encoded.rs`'s `LEN` arm, whole: the null refusal and the header's low
     /// half.
     ///
@@ -2605,6 +2940,57 @@ impl<'a> Emit<'a> {
         self.mov_imm64(RAX, self.order_str as i64);
         self.call(RAX);
         self.store_slot(dst, RAX);
+    }
+
+    /// `encoded.rs`'s `EQ_STR`: [`Emit::order_str`]'s call, and its answer
+    /// tested against nought.
+    ///
+    /// `cmp_str!` is `compare(Eq, machine.compare_strings(x, y))`, and
+    /// `compare_strings` is `order_strings(x, y).cmp(&0)` — the very function
+    /// the leaf helper is — so this is that arm by construction: the same walk
+    /// of the payloads where they are, with a null address read as the empty
+    /// string, and the same `Bool`. The leaf's contract is [`Emit::order_str`]'s,
+    /// so nothing is published before the call and [`FRAME`] survives it.
+    ///
+    /// It leaves the flags [`Emit::compare`] leaves, the stored word tested
+    /// against zero, so that a fused branch reads them.
+    fn str_equal(&mut self, dst: Slot, a: Slot, b: Slot) {
+        self.load_slot(RSI, a);
+        self.load_slot(RDX, b);
+        self.mov_rr(RDI, CTX);
+        self.mov_imm64(RAX, self.order_str as i64);
+        self.call(RAX);
+        self.test_rr(RAX, RAX);
+        self.setcc(CC_E);
+        self.movzx_eax_al();
+        self.store_slot(dst, RAX);
+        self.test_rr(RAX, RAX);
+    }
+
+    /// `encoded.rs`'s `EQ_FLOAT`: IEEE 754's `==`, which is `f64`'s.
+    ///
+    /// `ucomisd` sets `ZF` for equal *and* for unordered, and `PF` for
+    /// unordered alone, so equality is `ZF` and not `PF` — two `setcc`s and an
+    /// `and`. That is what makes a `NaN` equal to nothing, itself included, and
+    /// `0.0` equal to `-0.0`, which compare equal. `ucomisd` is the quiet
+    /// comparison: a signalling `NaN` sets `MXCSR`'s invalid flag, which is
+    /// masked and which Cove cannot observe, and touches no register but the
+    /// flags.
+    ///
+    /// It leaves the flags [`Emit::compare`] leaves, for a fused branch.
+    fn float_equal(&mut self, dst: Slot, a: Slot, b: Slot) {
+        self.frame();
+        let a_at = slot_offset(a).expect("`supported` bounded every slot");
+        let b_at = slot_offset(b).expect("`supported` bounded every slot");
+        self.movsd_load(XMM0, FRAME, a_at);
+        self.ucomisd_load(XMM0, FRAME, b_at);
+        self.setcc(CC_E);
+        self.setcc_cl(CC_NP);
+        self.movzx_eax_al();
+        self.movzx_ecx_cl();
+        self.and_rr(RAX, RCX);
+        self.store_slot(dst, RAX);
+        self.test_rr(RAX, RAX);
     }
 
     fn order(&mut self, dst: Slot) {
@@ -3269,6 +3655,16 @@ impl<'a> Emit<'a> {
         self.byte(0x0f);
         self.byte(0x11);
         self.modrm_mem(src, base, disp);
+    }
+
+    /// `ucomisd xmm, [base + disp]`: the unordered compare of two doubles,
+    /// into `ZF`, `PF` and `CF` — all three set when either is a `NaN`.
+    fn ucomisd_load(&mut self, dst: u8, base: u8, disp: i32) {
+        self.byte(0x66);
+        self.rex(false, dst, base);
+        self.byte(0x0f);
+        self.byte(0x2e);
+        self.modrm_mem(dst, base, disp);
     }
 
     /// `movapd xmm, xmm`: a whole register copied.
