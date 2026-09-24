@@ -227,11 +227,10 @@ impl Intrinsic {
             // `std.dynamic`): the arm
             // that survives is the one reached from a value
             // whose layout does not say what it is, and that arm is the whole
-            // of the runtime's walk. A `Float` and a `Duration` reach it too
-            // — the two scalars whose text no Cove body writes — and those
-            // are one word and no walk at all, but an effect list is a bound
-            // on what a caller must be ready for rather than a description of
-            // the commonest call.
+            // of the runtime's walk. A `Float` and a `Duration` reached it
+            // too until ADR 0068's Phase 4a wrote their text in
+            // `std.float` and `std.duration`; inside a box they still do,
+            // until Phase 4b walks one in Cove.
             Intrinsic::ValueRenderInto => allocate
                 .union(E::READS_MEMORY)
                 .union(E::WRITES_MEMORY)

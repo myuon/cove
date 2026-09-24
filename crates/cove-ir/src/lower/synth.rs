@@ -294,9 +294,10 @@ pub(crate) enum Operation {
     /// **It is a composition of calls rather than of comparisons.** The
     /// other three end at an [`Inst::Cmp`]; every leaf of this one is a
     /// `call`, of `std.stringbuilder`'s `appendText` or `appendByteInto` for
-    /// a literal and of `std.int`'s `renderInto` for a number. Those are the
-    /// same three bodies `super::interpolate` already appends a piece
-    /// through, reached the same way, so no lowering writes [ADR 0062]'s
+    /// a literal and of `std.int`'s, `std.float`'s or `std.duration`'s
+    /// `renderInto` for a number. Those are the same bodies
+    /// `super::interpolate` already appends a piece through, reached the same
+    /// way, so no lowering writes [ADR 0062]'s
     /// ensure-store-commit window a second time. [`Leaves`] is how a walk
     /// gets at them, because resolving a name is `Plan` and `Body`'s and a
     /// [`Pool`] has neither.
@@ -519,6 +520,19 @@ pub(super) struct Leaves {
     /// `std.int.renderInto(value, buffer)`: the decimal text of an `Int`,
     /// one digit at a time.
     pub(super) digits: FunctionId,
+    /// `std.float.renderInto(value, buffer)`: the text of a `Float`, once a
+    /// call site has asked for a walk that reaches one.
+    ///
+    /// Not resolved with the three above, because it is not needed by every
+    /// walk: a program that renders a struct of `Int`s would otherwise have
+    /// `std.float`'s writer, and `format` under it, in its slice and its
+    /// literals in its heap. `Body::render_leaves_for` fills it in when
+    /// [`reaches_a_scalar`] says the walk it is about to ask for meets a
+    /// `Float`.
+    pub(super) float: Option<FunctionId>,
+    /// `std.duration.renderInto(value, buffer)`: the text of a `Duration`,
+    /// in [`Leaves::float`]'s arrangement.
+    pub(super) duration: Option<FunctionId>,
 }
 
 /// How a value of one layout becomes text.
@@ -538,42 +552,40 @@ pub(crate) enum Rendered {
     Text,
     /// One digit at a time, by [`Leaves::digits`].
     Digits,
+    /// `std.float.renderInto(value, buffer)`: a `Float`'s text, written in
+    /// Cove since ADR 0068's Phase 4a.
+    ///
+    /// The shortest decimal that reads back as the value, and `.0` after a
+    /// whole number, which `crates/cove-sema/std/float.cove` says in full.
+    /// A walk reaches it through [`Leaves::float`], which the call site that
+    /// asks for the walk fills in when [`reaches_a_scalar`] says it needs to.
+    Float,
+    /// `std.duration.renderInto(value, buffer)`: a `Duration`'s count in the
+    /// largest unit that divides it exactly, and the unit's suffix.
+    /// [`Rendered::Float`]'s arrangement.
+    Duration,
     /// A walk [`Synth::rendering`] writes.
     Walk,
     /// The runtime's own rendering walk.
     ///
-    /// ADR 0064's Decision 4, and **this is the operation whose fallback is
-    /// reached from more than a [`Shape::Boxed`]** — which is a real
-    /// widening of that decision rather than a reading of it, and is written
-    /// down here because [`crate::verify`] checks exactly this list.
+    /// ADR 0064's Decision 4, and only that since ADR 0068's Phase 4a: a
+    /// **layout that does not say what the value is**. A [`Shape::Boxed`]
+    /// keeps its [`LayoutId`] in payload word 0, and a bare `Repr::Ref` word
+    /// is an address whose object's family is read off the object. There is
+    /// nothing here for a walk to be directed by. [`crate::verify`] checks
+    /// exactly this list.
     ///
-    /// Four shapes reach it, in two kinds:
-    ///
-    /// - a **layout that does not say what the value is**. A [`Shape::Boxed`]
-    ///   keeps its [`LayoutId`] in payload word 0, and a bare `Repr::Ref`
-    ///   word is an address whose object's family is read off the object.
-    ///   There is nothing here for a walk to be directed by. This is
-    ///   Decision 4 exactly as the other three operations have it.
-    /// - a **scalar whose text no Cove body can write**. A `Float` renders
-    ///   as the shortest decimal that reads back as itself, which is Rust's
-    ///   `{}` and is a dragon-4 class algorithm; `Float.format` is not it,
-    ///   and ADR 0064's own census puts that variant's migration (row 24) at
-    ///   a phase this one does not wait for. A `Duration` renders in the
-    ///   largest of six units that divides it exactly, which *is* ordinary
-    ///   Cove — a table and a remainder — but it is `std.duration`'s policy
-    ///   to write rather than a walk's to inline, and no `std.duration`
-    ///   function renders one today.
-    ///
-    /// So a `Float` field of a struct reaches the intrinsic at that field
-    /// and the struct around it is still a walk. That is the whole of what
-    /// the widening buys, and it is why it is a *leaf* rule rather than a
-    /// whole-layout one: a `Point { x: Float, y: Float }` that fell back
-    /// whole would take its name, its field labels and its punctuation back
-    /// below with it.
+    /// It was widened by two scalars until Phase 4a, a `Float` and a
+    /// `Duration`, whose text no Cove body wrote then; they are
+    /// [`Rendered::Float`] and [`Rendered::Duration`] now, and a `Float`
+    /// field of a struct is a call from the struct's walk rather than the
+    /// intrinsic at that field. What stays below is what is inside a box —
+    /// a `Float` there is still the Rust arm until Phase 4b walks a box in
+    /// Cove.
     Dynamic,
 }
 
-/// Which of the four [`Rendered`] a value of this shape is.
+/// Which of the six [`Rendered`] a value of this shape is.
 ///
 /// Asked of a [`Shape`] and not of a [`LayoutId`] because every answer is
 /// decided by the family alone — which is what lets [`crate::verify`] ask it
@@ -583,12 +595,12 @@ pub(crate) fn rendered(shape: &Shape) -> Rendered {
     match shape {
         Shape::Str => Rendered::Text,
         Shape::Word(Repr::Int) => Rendered::Digits,
+        Shape::Word(Repr::Float) => Rendered::Float,
+        Shape::Word(Repr::Duration) => Rendered::Duration,
         // See [`Rendered::Dynamic`]. `Shape::Free` is here for the reason a
         // reclaimed run is not a value: there is nothing to walk, and the
         // runtime's own arm is the one that says so.
-        Shape::Boxed | Shape::Free | Shape::Word(Repr::Ref | Repr::Float | Repr::Duration) => {
-            Rendered::Dynamic
-        }
+        Shape::Boxed | Shape::Free | Shape::Word(Repr::Ref) => Rendered::Dynamic,
         _ => Rendered::Walk,
     }
 }
@@ -756,7 +768,7 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
                 | Shape::Entries { .. }
         ),
         // The rendering's list is a *complement* and not a list, because
-        // every family has text and only four of them have text a walk
+        // every family has text and only a handful of them have text a walk
         // cannot compose. It is [`rendered`] and nothing else, for that
         // function's reason: the call site asks the same question of the
         // same table.
@@ -790,6 +802,32 @@ pub(crate) fn walks(op: Operation, shape: &Shape) -> bool {
 /// order reaches; and an admission never goes inside a `Set`, or a map's keys,
 /// which are keys by construction.
 pub(super) fn reaches_a_box(shapes: &shapes::Shapes, op: Operation, layout: LayoutId) -> bool {
+    reaches(shapes, op, layout, |shape| matches!(shape, Shape::Boxed))
+}
+
+/// Whether a rendering walk of `layout` reaches a part that is one word of
+/// `repr` — and so whether it calls `std.float.renderInto`, for a
+/// `Repr::Float`, or `std.duration.renderInto`, for a `Repr::Duration`.
+///
+/// [`reaches_a_box`]'s question, asked for [`Rendered::Float`] and
+/// [`Rendered::Duration`] and for its reason: the walk cannot resolve a name,
+/// so the call site resolves the callee first, and a program whose renderings
+/// never meet the scalar does not have the function in its slice. The layout
+/// itself counts, so a piece that *is* a `Float` answers `true`.
+pub(super) fn reaches_a_scalar(shapes: &shapes::Shapes, layout: LayoutId, repr: Repr) -> bool {
+    reaches(shapes, Operation::Rendering, layout, |shape| {
+        *shape == Shape::Word(repr)
+    })
+}
+
+/// Whether a walk of `op` over `layout` reaches a part `found` answers `true`
+/// for, following exactly the parts the walk descends into.
+fn reaches(
+    shapes: &shapes::Shapes,
+    op: Operation,
+    layout: LayoutId,
+    found: impl Fn(&Shape) -> bool,
+) -> bool {
     let mut seen = std::collections::HashSet::new();
     let mut pending = vec![layout];
     while let Some(at) = pending.pop() {
@@ -797,7 +835,7 @@ pub(super) fn reaches_a_box(shapes: &shapes::Shapes, op: Operation, layout: Layo
             continue;
         }
         let shape = &shapes.layout(at).shape;
-        if matches!(shape, Shape::Boxed) {
+        if found(shape) {
             return true;
         }
         if !walks(op, shape) {
@@ -2667,8 +2705,9 @@ impl Synth<'_> {
     }
 
     /// One part of a rendering: the append where the layout is one, a call
-    /// where it is a walk of its own, and the fallback where it is a layout
-    /// that does not say what the value is or a scalar no Cove body spells.
+    /// where it is a walk of its own or a scalar a standard-library body
+    /// spells, and the fallback where it is a layout that does not say what
+    /// the value is.
     ///
     /// The one place [`rendered`] is read at run-time-emitting time, and the
     /// same question `super::interpolate` asks of a whole piece.
@@ -2681,24 +2720,21 @@ impl Synth<'_> {
             }
             Rendered::Digits => {
                 let callee = self.leaves().digits;
-                // `std.int.renderInto` takes the value *first* and the
-                // buffer second, where the two appends take the buffer
-                // first. Each is its own declaration's order.
-                let args = self.pool.args.intern(vec![
-                    Arg {
-                        slot: at,
-                        layout: shapes::INT,
-                    },
-                    Arg {
-                        slot: buffer,
-                        layout: shapes::BYTE_BUFFER,
-                    },
-                ]);
-                self.emit(Inst::Call {
-                    dst: self.answer,
-                    callee,
-                    args,
-                });
+                self.number(callee, at, shapes::INT, buffer);
+            }
+            Rendered::Float => {
+                let callee = self.leaves().float.expect(
+                    "a walk that reaches a `Float` is asked for only after its call site \
+                     resolved `std.float.renderInto`",
+                );
+                self.number(callee, at, shapes::FLOAT, buffer);
+            }
+            Rendered::Duration => {
+                let callee = self.leaves().duration.expect(
+                    "a walk that reaches a `Duration` is asked for only after its call site \
+                     resolved `std.duration.renderInto`",
+                );
+                self.number(callee, at, shapes::DURATION, buffer);
             }
             Rendered::Walk => {
                 let callee = function_for(
@@ -2723,6 +2759,27 @@ impl Synth<'_> {
             }
             Rendered::Dynamic => self.below(layout, at, buffer),
         }
+    }
+
+    /// A call of one of the three standard-library functions that write a
+    /// scalar's text — `std.int`'s, `std.float`'s or `std.duration`'s
+    /// `renderInto` — over the word at `at`.
+    ///
+    /// Each takes the value *first* and the buffer second, where the two
+    /// appends take the buffer first. Each is its own declaration's order.
+    fn number(&mut self, callee: FunctionId, at: Slot, layout: LayoutId, buffer: Slot) {
+        let args = self.pool.args.intern(vec![
+            Arg { slot: at, layout },
+            Arg {
+                slot: buffer,
+                layout: shapes::BYTE_BUFFER,
+            },
+        ]);
+        self.emit(Inst::Call {
+            dst: self.answer,
+            callee,
+            args,
+        });
     }
 
     /// A struct: the builtin `Error` and `Range`, an opaque type's bare
@@ -3078,7 +3135,8 @@ impl Synth<'_> {
         self.trap("this value has no text of its own");
     }
 
-    /// ADR 0064's Decision 4 for the rendering, widened by two scalars.
+    /// ADR 0064's Decision 4 for the rendering: a layout that does not say
+    /// what the value is.
     ///
     /// See [`Rendered::Dynamic`], which is the list, and `crate::verify`,
     /// which is where the list is enforced rather than promised.

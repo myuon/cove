@@ -3012,6 +3012,407 @@ export fn formatted(xs: Array<Float>, ds: Array<Int>) -> String {
     );
 }
 
+/// What `Value.renderInto` wrote for a `Float` when it was Rust, and what the
+/// oracle's `write_float` still writes: `NaN` whatever the sign bit, `inf` and
+/// `-inf`, a whole number with `{:.1}` — its exact digits and `.0` — and
+/// anything else with `{}`, the shortest digits that read back as the value,
+/// laid out with no exponent.
+///
+/// Written here rather than called, so that the expectation is the formatter
+/// and not a helper the subject could share.
+fn float_text(x: f64) -> String {
+    if x.is_nan() {
+        "NaN".to_string()
+    } else if x.is_infinite() {
+        if x < 0.0 { "-inf" } else { "inf" }.to_string()
+    } else if x.fract() == 0.0 {
+        format!("{x:.1}")
+    } else {
+        format!("{x}")
+    }
+}
+
+/// What `Value.renderInto` wrote for a `Duration`: the count in the largest of
+/// `h`, `m`, `s`, `ms`, `us` and `ns` that divides it exactly, and `0ns` for
+/// nought.
+fn duration_text(nanos: i64) -> String {
+    if nanos == 0 {
+        return "0ns".to_string();
+    }
+    for (factor, suffix) in [
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "m"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+        (1_000, "us"),
+        (1, "ns"),
+    ] {
+        if nanos % factor == 0 {
+            return format!("{}{suffix}", nanos / factor);
+        }
+    }
+    unreachable!("every count is a whole number of nanoseconds")
+}
+
+/// Runs `m.rendered` over `args` on the machine or on the oracle, and answers
+/// its `String`.
+fn rendered_lines(source: &'static str, args: Vec<Value>, on_machine: bool) -> String {
+    let (sources, checked) = checked(source);
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let answer = if on_machine {
+        let program = lowered(&sources, &checked);
+        let runtime = Runtime::new(checked, sources, hosts.clone());
+        Vm::new(&runtime, &hosts, &program).invoke("m", "rendered", args)
+    } else {
+        let runtime = Runtime::new(checked, sources, hosts);
+        Interpreter::new(&runtime).invoke("m", "rendered", args)
+    };
+    match answer {
+        Ok(value) => value.to_string(),
+        Err(error) => panic!("the body answers: {}", error.message),
+    }
+}
+
+/// `"{x}"` of a `Float` is `std.float.renderInto` since ADR 0068's Phase 4a,
+/// and it writes what the Rust arm wrote, byte for byte, across the edges and
+/// 200,000 random bit patterns — and 100,000 more drawn where the fast path
+/// and the ties are.
+///
+/// The edges come first, so that the prefix the oracle is asked holds them:
+/// both zeros; `NaN` with either sign bit; both infinities; `2^52 - 0.5`, the
+/// last value with a half below `2^52`, and `2^52 + 0.5`, which is not one;
+/// `2^53` and `2^63`, where the whole-number path stops fitting an `Int`;
+/// `1e23`, whose exact digits are not its shortest; the largest finite value,
+/// the least normal one and subnormals down to `5e-324`; `0.1`, `0.2`, `0.3`
+/// and `1/3`; the neighbours of every power of ten a double reaches, where
+/// the shortest spelling can cross into the next decade (the double nearest
+/// `1e-7` is below it, and prints as `0.0000001`); every power of two, where
+/// the interval below the value is half the one above; values with seventeen
+/// significant digits; and `2^50 + 0.25` and `2^50 + 0.75`, whose shortest
+/// spellings are a tie between two neighbours.
+///
+/// **That last pair is where Rust and Ryu disagree.** Rust breaks a tie
+/// upward — `1125899906842624.25` is `1125899906842624.3` — where Ryu breaks
+/// it to even and answers `.2`. The bytes are the contract, so the Cove body
+/// follows Rust's Dragon4, and this row is what holds it there.
+#[test]
+fn a_float_renders_as_rusts_formatter_did_across_random_binary64() {
+    renders_a_quarter_of_the_float_corpus(0);
+}
+
+/// [`a_float_renders_as_rusts_formatter_did_across_random_binary64`]'s second
+/// quarter.
+#[test]
+fn a_float_renders_as_rusts_formatter_did_second_quarter() {
+    renders_a_quarter_of_the_float_corpus(1);
+}
+
+/// [`a_float_renders_as_rusts_formatter_did_across_random_binary64`]'s third
+/// quarter.
+#[test]
+fn a_float_renders_as_rusts_formatter_did_third_quarter() {
+    renders_a_quarter_of_the_float_corpus(2);
+}
+
+/// [`a_float_renders_as_rusts_formatter_did_across_random_binary64`]'s fourth
+/// quarter.
+#[test]
+fn a_float_renders_as_rusts_formatter_did_fourth_quarter() {
+    renders_a_quarter_of_the_float_corpus(3);
+}
+
+/// The corpus: the edges, and then the random rows, all drawn from one seed so
+/// that a failure names a value that can be looked at again. Answers the cases
+/// and how many of them are edges.
+fn float_render_corpus() -> (Vec<f64>, usize) {
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut cases: Vec<f64> = vec![
+        0.0,
+        -0.0,
+        f64::NAN,
+        -f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        4_503_599_627_370_495.5,
+        4_503_599_627_370_496.5,
+        9_007_199_254_740_992.0,
+        9_223_372_036_854_775_808.0,
+        -9_223_372_036_854_775_808.0,
+        1e23,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::from_bits(0x000f_ffff_ffff_ffff),
+        f64::from_bits(0x0008_0000_0000_0000),
+        f64::from_bits(3),
+        f64::from_bits(2),
+        f64::from_bits(1),
+        0.1,
+        0.2,
+        0.3,
+        1.0 / 3.0,
+        -1.0 / 3.0,
+        0.1 + 0.2,
+        // `3.14159`, which clippy takes for an approximation of π when it is
+        // written as a literal.
+        314_159.0 / 100_000.0,
+        std::f64::consts::E,
+        std::f64::consts::PI,
+        2f64.powi(50) + 0.25,
+        2f64.powi(50) + 0.75,
+        // Seventeen significant digits, above one and below a thousandth.
+        f64::from_bits(0x419d_6f34_540c_a458),
+        f64::from_bits(0x3f20_2e85_be18_0b74),
+    ];
+    for exponent in -1074..=64 {
+        cases.push(2f64.powi(exponent));
+        cases.push(-2f64.powi(exponent));
+    }
+    for exponent in -324..=24 {
+        let power: f64 = format!("1e{exponent}").parse().expect("a power of ten");
+        for step in [-2i64, -1, 0, 1, 2] {
+            cases.push(f64::from_bits(power.to_bits().wrapping_add_signed(step)));
+        }
+    }
+    let edges = cases.len();
+    for _ in 0..200_000 {
+        cases.push(f64::from_bits(next()));
+    }
+    for round in 0..100_000 {
+        let x = match round % 4 {
+            // Where the fast path is: a significand at a scale a program
+            // writes, from a thousandth to `2^52`.
+            0 => {
+                let exponent = (next() % 62) as i32 - 62;
+                (next() >> 11) as f64 * 2f64.powi(exponent)
+            }
+            // A decimal a person would type.
+            1 => (next() % 100_000_000) as f64 / 10f64.powi((next() % 12) as i32),
+            // Near a tie: a power of two and a few low bits.
+            2 => {
+                let exponent = (next() % 53) as i32;
+                let bits = (next() % 64) as f64 / 64.0;
+                2f64.powi(exponent) + bits * 2f64.powi(exponent - 52 + (next() % 8) as i32)
+            }
+            // Just below a thousandth, where the fast path hands over.
+            _ => 0.001 * (1.0 - (next() % 1000) as f64 / 1e6),
+        };
+        cases.push(if next() % 2 == 0 { x } else { -x });
+    }
+    (cases, edges)
+}
+
+/// Every batch of [`float_render_corpus`] whose index is `part` modulo four,
+/// on the machine against the formatter — and for the first quarter, the
+/// edges and the first 400 random rows on the oracle as well.
+///
+/// Four tests over one corpus rather than one, so that the harness runs them
+/// on four threads: the machine takes about twenty seconds over all of it,
+/// most of that in the whole numbers from `2^63` up, which `std.float.format`
+/// writes, and in the values below a thousandth, which `far` does. One test
+/// would be the longest thing in `cove-runtime`'s suite by itself.
+fn renders_a_quarter_of_the_float_corpus(part: usize) {
+    let source = "
+export fn rendered(xs: Array<Float>) -> String {
+  var out: Vector<String> = Vector.of()
+  for x in xs {
+    out.push(\"{x}\")
+  }
+  \"\\n\".join(out.freeze())
+}
+";
+    let (cases, edges) = float_render_corpus();
+    let expected = cases.iter().map(|x| float_text(*x)).collect::<Vec<_>>();
+
+    // In batches, so that no answer is one string of tens of megabytes.
+    let batch = 20_000;
+    let mut wrong = Vec::new();
+    let mut rendered = 0;
+    for (at, chunk) in cases.chunks(batch).enumerate() {
+        if at % 4 != part {
+            continue;
+        }
+        let chunk = chunk.to_vec();
+        let count = chunk.len();
+        let answer = on_a_deep_stack(move || {
+            rendered_lines(
+                source,
+                vec![Value::array(chunk.into_iter().map(Value::float))],
+                true,
+            )
+        });
+        let lines = answer.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), count);
+        for (offset, line) in lines.into_iter().enumerate() {
+            let index = at * batch + offset;
+            if line != expected[index] {
+                wrong.push(format!(
+                    "{:#018x}: {line} against {}",
+                    cases[index].to_bits(),
+                    expected[index]
+                ));
+            }
+        }
+        rendered += count;
+    }
+    assert!(rendered > 0);
+    assert!(
+        wrong.is_empty(),
+        "{} of {} disagree with the Rust formatter, first: {:?}",
+        wrong.len(),
+        rendered,
+        &wrong[..wrong.len().min(5)]
+    );
+    if part != 0 {
+        return;
+    }
+
+    // The oracle is the tree-walking interpreter's Rust arm, asked the edges
+    // and the first few hundred random rows.
+    let prefix = cases[..edges + 400].to_vec();
+    let oracle = on_a_deep_stack(move || {
+        rendered_lines(
+            source,
+            vec![Value::array(prefix.into_iter().map(Value::float))],
+            false,
+        )
+    });
+    assert_eq!(
+        oracle.lines().collect::<Vec<_>>(),
+        expected[..edges + 400].to_vec(),
+        "the interpreter renders the edges and the first 400 random rows as the formatter does"
+    );
+}
+
+/// `"{d}"` of a `Duration` is `std.duration.renderInto` since ADR 0068's
+/// Phase 4a, and it writes what the Rust arm wrote: every unit's boundary and
+/// the count one below it, negatives, the two extremes — `i64::MIN` in `ns`,
+/// because no larger unit divides it — and random counts at every scale.
+#[test]
+fn a_duration_renders_as_the_rust_arm_did() {
+    let source = "
+export fn rendered(counts: Array<Int>) -> String {
+  var out: Vector<String> = Vector.of()
+  for count in counts {
+    let d = Duration.nanos(count)
+    out.push(\"{d}\")
+  }
+  \"\\n\".join(out.freeze())
+}
+";
+    let mut counts: Vec<i64> = vec![0, 1, -1, i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1];
+    for factor in [
+        1i64,
+        1_000,
+        1_000_000,
+        1_000_000_000,
+        60_000_000_000,
+        3_600_000_000_000,
+    ] {
+        for times in [1i64, 2, 7, 59, 60, 61, 1000, 1001, 3600] {
+            let at = factor.saturating_mul(times);
+            counts.extend([at, at - 1, at + 1, -at, 1 - at, -at - 1]);
+        }
+    }
+    let mut state: u64 = 0x5851_f42d_4c95_7f2d;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for round in 0..20_000 {
+        let count = match round % 3 {
+            0 => next() as i64,
+            // A whole number of some unit, so the larger suffixes are met.
+            1 => {
+                let factor = [1_000i64, 1_000_000, 1_000_000_000, 60_000_000_000][round % 4];
+                (next() % 1_000_000) as i64 * factor
+            }
+            _ => (next() % 10_000_000_000) as i64 - 5_000_000_000,
+        };
+        counts.push(count);
+    }
+    let expected = counts
+        .iter()
+        .map(|nanos| duration_text(*nanos))
+        .collect::<Vec<_>>();
+    let all = counts.clone();
+    let machine = on_a_deep_stack(move || {
+        rendered_lines(
+            source,
+            vec![Value::array(all.into_iter().map(Value::int))],
+            true,
+        )
+    });
+    let lines = machine.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines, expected,
+        "the machine renders every duration as the Rust arm did"
+    );
+    let prefix = counts[..500].to_vec();
+    let oracle = on_a_deep_stack(move || {
+        rendered_lines(
+            source,
+            vec![Value::array(prefix.into_iter().map(Value::int))],
+            false,
+        )
+    });
+    assert_eq!(oracle.lines().collect::<Vec<_>>(), lines[..500].to_vec());
+}
+
+/// A `Float` and a `Duration` inside a value the lowering walks: a struct's
+/// fields, an array's elements and an enum's payload each call the Cove
+/// writer from the walk, and answer what the oracle's Rust arm answers.
+#[test]
+fn a_float_and_a_duration_render_inside_a_walk() {
+    let source = "
+struct Sample {
+  ratio: Float
+  wait: Duration
+}
+
+enum Reading {
+  Level(Float)
+  Late(Duration)
+}
+
+export fn rendered(x: Float, count: Int) -> String {
+  let d = Duration.nanos(count)
+  let sample = Sample(ratio: x, wait: d)
+  let readings = [Reading.Level(x), Reading.Late(d)]
+  \"{sample} {[x, 2.5]} {[d, 2s]} {readings} {Some(x)} {[1.5]}\"
+}
+";
+    for (x, count) in [
+        (1.5, 2_000_000_000i64),
+        (-0.0, 0),
+        (0.1, 1_500),
+        (1e23, -3_600_000_000_000),
+        (5e-324, i64::MIN),
+        (f64::NAN, 1),
+    ] {
+        let want = format!(
+            "Sample(ratio: {x}, wait: {d}) [{x}, 2.5] [{d}, 2s] [Level({x}), Late({d})] Some({x}) [1.5]",
+            x = float_text(x),
+            d = duration_text(count),
+        );
+        let machine = on_a_deep_stack(move || {
+            rendered_lines(source, vec![Value::float(x), Value::int(count)], true)
+        });
+        let oracle = on_a_deep_stack(move || {
+            rendered_lines(source, vec![Value::float(x), Value::int(count)], false)
+        });
+        assert_eq!(machine, want);
+        assert_eq!(oracle, want);
+    }
+}
+
 /// A refusal a Cove body worded arrives whole on both evaluators — all three
 /// sentences, not the message alone.
 ///
@@ -4047,24 +4448,18 @@ export fn main() -> String {
             "the walk holds a `{wanted}`"
         );
     }
-    // The one builtin call left is the text of a `Float` or a `Duration`
+    // No builtin call is left at all. The text of a `Float` or a `Duration`
     // scalar the walk has already read — Phase 0's census found that
-    // `Value.renderInto`'s scalar sites are these two, which reflection does not
-    // write — expanded into the walk from `probeText` and `probeSpan`. Nothing
-    // is asked of a box.
+    // `Value.renderInto`'s scalar sites were these two, which reflection does
+    // not write — is `std.float.renderInto` and `std.duration.renderInto`
+    // since Phase 4a, reached from `probeText` and `probeSpan`. Nothing is
+    // asked of a box.
     let called: Vec<String> = walk
         .code
         .iter()
         .filter_map(|inst| match inst {
-            cove_ir::Inst::IntrinsicCall { site, args, .. } => {
-                let first = ir.arg_list(*args).first().map(|arg| arg.layout);
-                let scalar = first.is_some_and(|layout| {
-                    matches!(
-                        ir.layout(layout).shape,
-                        cove_ir::Shape::Word(cove_ir::Repr::Float | cove_ir::Repr::Duration)
-                    )
-                });
-                (!scalar).then(|| format!("{:?}", ir.intrinsic_site(*site).intrinsic))
+            cove_ir::Inst::IntrinsicCall { site, .. } => {
+                Some(format!("{:?}", ir.intrinsic_site(*site).intrinsic))
             }
             _ => None,
         })

@@ -527,3 +527,757 @@ fn digitsRefused(digits: Int) -> String {
 fn digitsRule() -> String {
   "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17."
 }
+
+/// Appends the text of `value` to `buffer`: what `"{value}"` shows.
+///
+/// Not exported, and nothing a program can name: the lowering calls it for
+/// every `Float` piece of an interpolation and every `Float` part of a value it
+/// renders, as it calls `std.int.renderInto` for an `Int`. ADR 0068's Phase 4a
+/// moved it here from the `Float` arm of the Rust intrinsic `Value.renderInto`,
+/// whose bytes it writes — that arm is still what renders a `Float` held inside
+/// a box, until Phase 4b walks a box in Cove, and it is the oracle's
+/// `write_float` besides.
+///
+/// # The text of a `Float`
+///
+/// - **`NaN`**, whichever sign bit it has, and **`inf`** and **`-inf`**.
+/// - **A whole number shows its point.** Its exact decimal digits, never an
+///   exponent, and `.0`: `42.0`, `-0.0`, and `1e23` as
+///   `99999999999999991611392.0`, because that is the value `1e23` names. The
+///   language converts no number implicitly, so a `Float` is never written so
+///   that it reads as an `Int`. This is [`format`]`(x, 1)` exactly, and past
+///   `2^63`, where an `Int` stops holding the digits, it is that call.
+/// - **Any other value is the shortest decimal that reads back as it**, laid
+///   out positionally and never with an exponent: `0.1`, `1.5`,
+///   `0.30000000000000004`, and `5e-324` as `0.`, 323 zeros and a `5`. What
+///   reads back is what lies in the value's rounding interval — the reals
+///   that round to it, the bounds included when its significand is even — and
+///   among the shortest spellings in it the one nearest the exact value is
+///   written. **A tie between two goes up**: `2^50 + 0.25` is
+///   `1125899906842624.3`. That is Rust's `{}` for an `f64`, which is Grisu
+///   with a Dragon4 fallback, and it is *not* Ryu's rule, which breaks the tie
+///   to even and writes `.2` — the bytes were Rust's before they were this
+///   body's, and the bytes are the contract (`vm::differential` holds them to
+///   the formatter over 300,000 values).
+///
+/// # How
+///
+/// The signs, the three values with no digits and the whole numbers are
+/// decided here, a whole number below `2^63` written from the `Int` it is.
+/// What is left is below `2^52` and has a fraction, and it is taken apart as
+/// [`format`] takes a value apart — `significand * 2^exponent`, with `Float`
+/// arithmetic alone — and handed to [`near`], or to [`far`] when it is below
+/// about a thousandth or `near` declines it. Both are **Dragon4**, Steele and
+/// White's digit generation over exact integers, in the form Rust's
+/// `flt2dec::strategy::dragon::format_shortest` writes it: the value, its
+/// distance to either bound and the scale are integers, a digit is a
+/// quotient, and generation stops at the first digit where rounding down or
+/// rounding up lands inside the interval. [`near`] holds each of the four in
+/// one `Int` and allocates nothing; [`far`] holds them in limbs.
+///
+/// # Why this algorithm, measured
+///
+/// Three candidates, per render of the interpolation `"{x}"` on the VM:
+///
+/// | | `3.14159` | `0.30000000000000004` | `1.5`, ns | allocations |
+/// | --- | ---: | ---: | ---: | ---: |
+/// | Dragon4 in limbs for every value | 1,456 | 3,468 | 6,900 | 4 |
+/// | **Dragon4 in one `Int` apiece, limbs below a thousandth** | **345** | **734** | **1,180** | **0** |
+/// | the Rust arm this replaced | 8 | 8 | 316 | 0 |
+///
+/// The allocations are this body's own, over the interpolation's two, and
+/// the literal heap gains no word: `NaN` and `inf` are [`format`]'s already.
+/// **Ryu was not built.** Its 64-by-128-bit products would be limbs of thirty
+/// bits here, since an `Int` is signed and traps on overflow and there is no
+/// shift or unsigned multiply; its table of powers of five would be a string
+/// literal of several hundred words; and it answers a tie to even and treats
+/// the least normal value's interval as symmetric, where Rust does neither, so
+/// it would be Ryu adjusted to Rust's rules and held to the same corpus. The
+/// one `Int` apiece already covers every value from a thousandth to `2^52`
+/// without an allocation, which is where the values a program prints are.
+fn renderInto(value: Float, buffer: ByteBuffer) {
+  if value != value {
+    textInto("NaN", buffer)
+    return
+  }
+  // The sign bit, as [`format`] reads it: `1.0 / -0.0` is minus infinity.
+  var negative = value < 0.0
+  if value == 0.0 {
+    negative = 1.0 / value < 0.0
+  }
+  var scaled = value
+  if negative {
+    scaled = -value
+    let minus = '-'
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, minus)
+    core.bytesCommit(buffer, 1)
+  }
+  if scaled == 1.0 / 0.0 {
+    textInto("inf", buffer)
+    return
+  }
+  if scaled >= 9223372036854775808.0 {
+    textInto(format(scaled, 1), buffer)
+    return
+  }
+  // A whole number, asked with `round`, which is an instruction, so that a
+  // value with a fraction reaches only the one `toInt` below. Under `2^63`
+  // `toInt` cannot refuse.
+  if scaled.round() == scaled {
+    match scaled.toInt() {
+      Ok(whole) => wholeInto(whole, buffer)
+      Err(_) => { }
+    }
+    return
+  }
+  // `scaled` as `significand * 2^exponent` with the significand in `[2^52,
+  // 2^53)`: [`format`]'s ladder, and only its doubling half, because a value
+  // with a fraction is below `2^52` already. Written again rather than
+  // shared, because it answers two numbers and a Cove function answers one.
+  // A subnormal comes out with trailing zero bits and an exponent below
+  // `-1074`, which [`far`] takes back off.
+  var exponent = 0
+  while scaled < 2097152.0 {
+    scaled = scaled * 4294967296.0
+    exponent -= 32
+  }
+  if scaled < 137438953472.0 {
+    scaled = scaled * 65536.0
+    exponent -= 16
+  }
+  if scaled < 35184372088832.0 {
+    scaled = scaled * 256.0
+    exponent -= 8
+  }
+  if scaled < 562949953421312.0 {
+    scaled = scaled * 16.0
+    exponent -= 4
+  }
+  if scaled < 2251799813685248.0 {
+    scaled = scaled * 4.0
+    exponent -= 2
+  }
+  if scaled < 4503599627370496.0 {
+    scaled = scaled * 2.0
+    exponent -= 1
+  }
+  // Rust's first estimate of the decimal exponent: a `k` with `10^(k-1) <
+  // high <= 10^(k+1)` for the interval's upper bound `high`, which is
+  // `floor((exponent + 53) * log10(2))` with `log10(2)` taken as `1292913986 /
+  // 2^32`, low enough never to overestimate. The division rounds toward
+  // nought, so a negative product is floored by hand. [`near`] and [`far`]
+  // settle the exact exponent from it with one comparison, as Rust does.
+  let product = (exponent + 53) * 1292913986
+  var estimate = product / 4294967296
+  if product < 0 {
+    if estimate * 4294967296 != product {
+      estimate -= 1
+    }
+  }
+  match scaled.toInt() {
+    Ok(significand) => {
+      if estimate >= -3 {
+        if near(significand, exponent, estimate, buffer) {
+          return
+        }
+      }
+      far(significand, exponent, estimate, buffer)
+    }
+    Err(_) => { }
+  }
+}
+
+/// Appends `text` whole: `std.stringbuilder`'s `appendText`, written here
+/// because one standard-library module cannot name another's private
+/// function.
+fn textInto(text: String, buffer: ByteBuffer) {
+  let count = core.byteLength(text)
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, count)
+  core.bytesCopy(buffer, at, text, 0, count)
+  core.bytesCommit(buffer, count)
+}
+
+/// Appends `whole`, which is not negative, and then `.0`.
+///
+/// `std.int.renderInto`'s digit loop without the sign, written here for
+/// [`textInto`]'s reason; `power` grows only while `whole / 10` reaches it, so
+/// it never passes `whole`. Every byte is bound before its append window, as
+/// there, so that no constant is made between an ensure and its commit.
+fn wholeInto(whole: Int, buffer: ByteBuffer) {
+  var power = 1
+  while whole / 10 >= power {
+    power = power * 10
+  }
+  let zero = '0'
+  var rest = whole
+  while power > 0 {
+    let digit = rest / power
+    let byte = zero + digit
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, byte)
+    core.bytesCommit(buffer, 1)
+    rest = rest - digit * power
+    power = power / 10
+  }
+  let point = '.'
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, at, point)
+  core.bytesCommit(buffer, 1)
+  let end = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, end, zero)
+  core.bytesCommit(buffer, 1)
+}
+
+/// Appends the shortest digits of `significand * 2^exponent`, a normal value
+/// with a fraction whose decimal exponent is `estimate` or one more, and
+/// answers `true` — or appends nothing and answers `false` where they need
+/// more than an `Int` apiece, which is below about a thousandth.
+///
+/// # Dragon4, in the form Rust writes it
+///
+/// The value is `mant / scale` times a power of ten, and the interval around
+/// it reaches `minus / scale` below and `plus / scale` above. A digit is
+/// `mant / scale`; `mant` keeps the remainder; and the three are multiplied
+/// by ten for the next digit. Generation stops at the first digit where
+/// rounding **down** is inside the interval — the remainder is below `minus`
+/// — or rounding **up** is — `scale - mant` is below `plus` — each bound
+/// included when the significand is even. When only one holds it is taken;
+/// when both do, the nearer is, and a tie goes up (`2 * mant >= scale`). A
+/// round-up that carries through nines lengthens the digits and raises the
+/// point, as Rust's `round_up` does. The interval is half a unit in the last
+/// place each side, except at a power of two, where the next value down is
+/// half as far away and the interval below is a quarter — Rust's rule for
+/// every normal power of two, the least normal one included.
+///
+/// # Why one `Int` is enough from a thousandth up
+///
+/// In Rust's units `mant` is `2m` or `4m` for a significand `m` below `2^53`,
+/// and the bounds are `1` and `1` or `2`. Here `a` and `b` are `mant` and
+/// `scale` divided by that factor, `weight`, which cancels in every quotient,
+/// and `minus` and `plus` are compared against `weight` times them:
+///
+/// - **At ten and above** the scale is `2^-exponent * 10^(k-1)`, a power of
+///   ten the value is at least, so `b` is at most `a`, below `2^53`, and ten
+///   times it fits.
+/// - **Below ten** the scale is a power of two and the value is multiplied by
+///   `10^t` instead, `t` the number of places before the first digit; `a` is
+///   `m * 5^t` with the `2^t` taken out of the scale. Each further digit
+///   multiplies `a` by five and **halves** `b`, which is ten times the ratio
+///   with a quarter of the growth, so the largest product is `5 * m * 5^t`
+///   and `t` may reach 3: below `2^63` for every value from a thousandth up.
+/// - `minus` and `plus` start below `a` by the significand's `2^52` and grow
+///   by ten a digit, and generation stops before either passes `b`.
+///
+/// Which `t` is known only after one exact comparison — whether `high`
+/// reaches `10^estimate` — and it is made in the state for `estimate`'s `t`
+/// plus one, where every number is at most `5 * m * 5^t`, and turned into
+/// the state for `t` by a division by five if it does. The comparison is
+/// between an odd number and a power of two times four, so it is never a
+/// tie and the bounds' inclusion does not enter it.
+///
+/// A value this declines — `estimate` at `-3` and `t` at 4 — is [`far`]'s.
+/// Every one of these bounds was checked with overflow trapping, over thirty
+/// million values in a model and the 300,000 of `vm::differential`'s corpus.
+fn near(
+  significand: Int,
+  exponent: Int,
+  estimate: Int,
+  buffer: ByteBuffer,
+) -> Bool {
+  var weight = 2
+  var slope = 1
+  if significand == 4503599627370496 {
+    weight = 4
+    slope = 2
+  }
+  // `x < y + slack` is `x <= y` for an even significand, whose bounds are
+  // inside the interval, and `x < y` otherwise.
+  var slack = 0
+  if significand % 2 == 0 {
+    slack = 1
+  }
+  // `b` is a power of two, `2^shift`, built by halves: the scale for
+  // `estimate`, over `weight`, with the `2^t` of `10^t` taken out of it.
+  var shift = -exponent
+  if estimate <= 0 {
+    shift = estimate - exponent - 1
+  }
+  var b = 1
+  if shift >= 32 {
+    b = 4294967296
+    shift -= 32
+  }
+  if shift >= 16 {
+    b = b * 65536
+    shift -= 16
+  }
+  if shift >= 8 {
+    b = b * 256
+    shift -= 8
+  }
+  if shift >= 4 {
+    b = b * 16
+    shift -= 4
+  }
+  if shift >= 2 {
+    b = b * 4
+    shift -= 2
+  }
+  if shift >= 1 {
+    b = b * 2
+  }
+  // `bound * 2^(exponent - 1)` is `high`, whether the interval above is half
+  // a unit or, at a power of two, still half a unit.
+  let bound = significand * 2 + 1
+  var a = significand
+  var minus = 1
+  // Where the point goes: after the first `point` digits, or before
+  // `-point` zeros when it is nought or less.
+  var point = estimate
+  var step = 10
+  var halve = 1
+  if estimate <= 0 {
+    var five = 1
+    var left = -estimate
+    while left > 0 {
+      five = five * 5
+      left -= 1
+    }
+    // `high >= 10^estimate`: `bound * 5^u` against `4 * b`, asked as a
+    // quotient so that the product is not formed.
+    if bound * five / 4 >= b {
+      point = estimate + 1
+      a = significand * five
+      b = b * 2
+      minus = five
+    } else {
+      if estimate <= -3 {
+        return false
+      }
+      a = significand * five * 5
+      minus = five * 5
+    }
+    if point < 1 {
+      step = 5
+      halve = 2
+    }
+  } else {
+    var left = estimate - 1
+    while left > 0 {
+      b = b * 10
+      left -= 1
+    }
+    // `high >= 10^estimate`: `bound` against `20 * b`, the same way.
+    if bound / 20 >= b {
+      point = estimate + 1
+      b = b * 10
+    }
+  }
+  var plus = minus * slope
+  // The digits so far as one number, and the place of the first of them.
+  var digits = 0
+  var unit = 1
+  var down = false
+  var up = false
+  while true {
+    let digit = a / b
+    a = a % b
+    digits = digits * 10 + digit
+    let over = weight * (b - a) - plus
+    if weight * a - minus < slack {
+      down = true
+      up = over < slack
+      break
+    }
+    if over < slack {
+      up = true
+      break
+    }
+    a = a * step
+    minus = minus * step
+    plus = plus * step
+    b = b / halve
+    unit = unit * 10
+  }
+  if up {
+    if !down || a * 2 >= b {
+      digits += 1
+      if digits == unit * 10 {
+        unit = unit * 10
+        point += 1
+      }
+    }
+  }
+  placed(digits, unit, point, buffer)
+  return true
+}
+
+/// Appends `digits`, of which `unit` is the leading place, with the point
+/// after the first `point` of them — or, when `point` is nought or less, as
+/// `0.`, `-point` zeros and then the digits.
+///
+/// The point always falls inside the digits or before them, never after:
+/// every value [`near`] and [`far`] are given has a fraction, and no whole
+/// number is inside the interval of one below `2^52`, whose half unit is
+/// smaller than its distance to the nearest whole number.
+fn placed(digits: Int, unit: Int, point: Int, buffer: ByteBuffer) {
+  let zero = '0'
+  let dot = '.'
+  var rest = digits
+  var place = unit
+  var before = point
+  if point <= 0 {
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, zero)
+    core.bytesCommit(buffer, 1)
+    before = 0
+  }
+  while before > 0 {
+    let digit = rest / place
+    let byte = zero + digit
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, byte)
+    core.bytesCommit(buffer, 1)
+    rest = rest - digit * place
+    place = place / 10
+    before -= 1
+  }
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, at, dot)
+  core.bytesCommit(buffer, 1)
+  var zeros = 0
+  if point < 0 {
+    zeros = -point
+  }
+  while zeros > 0 {
+    let next = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, next, zero)
+    core.bytesCommit(buffer, 1)
+    zeros -= 1
+  }
+  while place > 0 {
+    let digit = rest / place
+    let byte = zero + digit
+    let next = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, next, byte)
+    core.bytesCommit(buffer, 1)
+    rest = rest - digit * place
+    place = place / 10
+  }
+  return
+}
+
+/// Appends the shortest digits of `significand * 2^exponent`, a value below
+/// about a thousandth: [`near`]'s Dragon4, over numbers held in limbs.
+///
+/// In Rust's own units this time: `mant` is `2m` or `4m` times `5^t`, `minus`
+/// is `5^t`, `plus` is `minus` or twice it, and the scale is `2^s`, so `mant /
+/// 2^s` is the value times `10^t`. The two numbers are `Vector<Int>`s of
+/// thirty-bit limbs, least significant first, sized once for the largest
+/// either reaches — `mant` stays below `10 * 2^s` — and the scale is never
+/// built at all. A power of two is a limb index and a bit, `place` and
+/// `power`: a digit is the bits of `mant` at and above `s`, read from two
+/// limbs, and the remainder is those bits cleared. The next digit multiplies
+/// `mant` and `minus` by five and moves `s` down one, [`near`]'s halving.
+///
+/// Two of Rust's decoding rules are kept as they are, because the bytes are
+/// what is kept: a subnormal's interval always includes its bounds — its
+/// significand is decoded doubled, so it is always even — and the least
+/// normal value's interval is the narrow one below, as every power of two's
+/// is, although the value below it is a subnormal the same distance away.
+///
+/// It allocates two vectors of at most 27 limbs, `5.0e-324`'s, and costs
+/// thousands of instructions where [`near`] costs hundreds: 16,834 for
+/// `1.2345678901234567e-200`, most of it multiplying seventeen-limb numbers
+/// by five once a digit.
+fn far(significand: Int, exponent: Int, estimate: Int, buffer: ByteBuffer) {
+  // A subnormal's significand without the zeros scaling put under it, and
+  // Rust's decoding of the value into `wide * 2^lowest` and the interval's
+  // two half-widths, `1` below and `slope` above.
+  var m = significand
+  var e = exponent
+  var inclusive = true
+  var wide = 0
+  var slope = 1
+  var lowest = 0
+  if e < -1074 {
+    while e < -1074 {
+      m = m / 2
+      e += 1
+    }
+    wide = m * 2
+    lowest = e - 1
+  } else {
+    if m % 2 == 1 {
+      inclusive = false
+    }
+    if m == 4503599627370496 {
+      wide = m * 4
+      slope = 2
+      lowest = e - 2
+    } else {
+      wide = m * 2
+      lowest = e - 1
+    }
+  }
+  // `minus` is `5^u` and `mant` is `wide` times it, the state before Rust's
+  // one comparison settles the exponent; `u` is at least 3 here.
+  let u = -estimate
+  let s = -lowest - u
+  let length = (s + 4) / 30 + 2
+  let minus: Vector<Int> = core.vectorWithCapacity(length)
+  let mant: Vector<Int> = core.vectorWithCapacity(length)
+  var at = 0
+  while at < length {
+    pushLimb(minus, 0)
+    pushLimb(mant, 0)
+    at += 1
+  }
+  core.vectorStore(minus, 0, 1)
+  // `5^13` a limb pass at a time, over only the limbs the number can have
+  // reached: each pass adds under 31 bits and two limbs.
+  var used = 1
+  var left = u
+  while left >= 13 {
+    used += 2
+    if used > length {
+      used = length
+    }
+    times(minus, 1220703125, used)
+    left -= 13
+  }
+  var factor = 1
+  while left > 0 {
+    factor = factor * 5
+    left -= 1
+  }
+  used += 2
+  if used > length {
+    used = length
+  }
+  times(minus, factor, used)
+  // `mant = minus * wide`, with `wide` below `2^56` split into two limbs.
+  let low = wide % 1073741824
+  let high = wide / 1073741824
+  var carry = 0
+  at = 0
+  var below = 0
+  while at < length {
+    let limb = core.vectorLoad(minus, at)
+    let product = limb * low + below * high + carry
+    core.vectorStore(mant, at, product % 1073741824)
+    carry = product / 1073741824
+    below = limb
+    at += 1
+  }
+  // The scale `2^s` as the limb it starts in and the bit within it.
+  var point = estimate
+  var place = s / 30
+  var power = 1
+  left = s % 30
+  while left > 0 {
+    power = power * 2
+    left -= 1
+  }
+  if above(mant, minus, slope, place, power, inclusive) {
+    point = estimate + 1
+  } else {
+    fives(mant, minus, place + 2)
+    if power == 1 {
+      place -= 1
+      power = 536870912
+    } else {
+      power = power / 2
+    }
+  }
+  var digits = 0
+  var unit = 1
+  var down = false
+  var up = false
+  while true {
+    let top = core.vectorLoad(mant, place + 1)
+    let bottom = core.vectorLoad(mant, place)
+    let digit = top * (1073741824 / power) + bottom / power
+    core.vectorStore(mant, place + 1, 0)
+    core.vectorStore(mant, place, bottom % power)
+    digits = digits * 10 + digit
+    let order = compare(mant, minus, place)
+    if order < 0 {
+      down = true
+    } else if order == 0 {
+      down = inclusive
+    }
+    up = above(mant, minus, slope, place, power, inclusive)
+    if down {
+      break
+    }
+    if up {
+      break
+    }
+    fives(mant, minus, place + 2)
+    if power == 1 {
+      place -= 1
+      power = 536870912
+    } else {
+      power = power / 2
+    }
+    unit = unit * 10
+  }
+  if up {
+    // `2 * mant >= 2^s` is the bit below the scale's.
+    var half = false
+    if power == 1 {
+      half = core.vectorLoad(mant, place - 1) >= 536870912
+    } else {
+      half = core.vectorLoad(mant, place) >= power / 2
+    }
+    if !down || half {
+      digits += 1
+      if digits == unit * 10 {
+        unit = unit * 10
+        point += 1
+      }
+    }
+  }
+  placed(digits, unit, point, buffer)
+  return
+}
+
+/// Multiplies the limbs of `limbs` below `end`, thirty bits each, by
+/// `factor` in place.
+///
+/// `factor` is at most `5^13`, below `2^31`, so a limb times it plus the carry
+/// is below `2^61`. The caller has made `end` high enough that nothing is
+/// carried out of it. [`far`]'s own limbs are thirty bits rather than
+/// [`format`]'s base `10^9` because its scale is a power of two, which a limb
+/// index and a bit can stand for.
+fn times(limbs: Vector<Int>, factor: Int, end: Int) {
+  var carry = 0
+  var at = 0
+  while at < end {
+    let product = core.vectorLoad(limbs, at) * factor + carry
+    core.vectorStore(limbs, at, product % 1073741824)
+    carry = product / 1073741824
+    at += 1
+  }
+  return
+}
+
+/// Multiplies the limbs of `mant` and of `minus` below `end` by five, in
+/// place: one loop for the two, because [`far`] always multiplies both.
+fn fives(mant: Vector<Int>, minus: Vector<Int>, end: Int) {
+  var carry = 0
+  var borne = 0
+  var at = 0
+  while at < end {
+    let product = core.vectorLoad(mant, at) * 5 + carry
+    core.vectorStore(mant, at, product % 1073741824)
+    carry = product / 1073741824
+    let other = core.vectorLoad(minus, at) * 5 + borne
+    core.vectorStore(minus, at, other % 1073741824)
+    borne = other / 1073741824
+    at += 1
+  }
+  return
+}
+
+/// Minus one, nought or one as `left` is below, equal to or above `right`,
+/// both of which are nought above limb `place + 1`.
+///
+/// Handed `place` rather than the top limb, and the counter made from it,
+/// because a counter copied from a parameter is a copy in every program that
+/// lowers this body (`crates/cove-cli/tests/copies.rs`).
+fn compare(left: Vector<Int>, right: Vector<Int>, place: Int) -> Int {
+  var at = place + 1
+  while at >= 0 {
+    let x = core.vectorLoad(left, at)
+    let y = core.vectorLoad(right, at)
+    if x < y {
+      return -1
+    }
+    if x > y {
+      return 1
+    }
+    at -= 1
+  }
+  return 0
+}
+
+/// Whether `mant + slope * minus` is above `power * 2^(30 * place)`, or
+/// reaches it when `inclusive`: [`far`]'s round-up test, the scale below the
+/// value and its upper bound.
+///
+/// Both numbers are nought above limb `place + 1`.
+fn above(
+  mant: Vector<Int>,
+  minus: Vector<Int>,
+  slope: Int,
+  place: Int,
+  power: Int,
+  inclusive: Bool,
+) -> Bool {
+  // The two limbs from `place` up hold everything at and above the power,
+  // and what the limbs below can carry into them is at most two: so the
+  // answer is decided by those two limbs alone unless the sum is within a
+  // carry of the power or of twice it.
+  let high = core.vectorLoad(mant, place + 1) * 1073741824 +
+    core.vectorLoad(mant, place)
+  let raised = high +
+    slope *
+      (core.vectorLoad(minus, place + 1) * 1073741824 +
+        core.vectorLoad(minus, place))
+  if (raised + 2) / power == 0 {
+    return false
+  }
+  if raised / power >= 2 {
+    return true
+  }
+  let length = place + 2
+  var carry = 0
+  var rest = false
+  var over = 0
+  var at = 0
+  while at < length {
+    let sum = core.vectorLoad(mant, at) + slope * core.vectorLoad(minus, at) +
+      carry
+    let limb = sum % 1073741824
+    carry = sum / 1073741824
+    if at < place {
+      if limb != 0 {
+        rest = true
+      }
+    } else if at == place {
+      if limb % power != 0 {
+        rest = true
+      }
+      over = limb / power
+    } else if limb != 0 {
+      over = 2
+    }
+    at += 1
+  }
+  if carry != 0 {
+    over = 2
+  }
+  if over >= 2 {
+    return true
+  }
+  if over == 1 {
+    if inclusive {
+      return true
+    }
+    return rest
+  }
+  return false
+}
