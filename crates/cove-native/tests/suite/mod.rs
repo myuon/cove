@@ -3552,29 +3552,15 @@ pub fn a_trap_names_its_sentences_by_address<A: Arm>() {
 pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
     let refused: Vec<(&str, Program)> = vec![
         (
-            "float negation, which `Num::Int` negation being lowered does not admit",
-            program(function(
-                vec![Repr::Float],
-                INT,
-                vec![
-                    Inst::Neg {
-                        num: Num::Float,
-                        dst: 0,
-                        a: 0,
-                    },
-                    Inst::Return { src: 0 },
-                ],
-            )),
-        ),
-        (
-            "float arithmetic",
+            "a float remainder, which is `fmod` and no machine instruction, \
+             though the other four float operations are lowered",
             program(function(
                 vec![Repr::Float, Repr::Float],
                 INT,
                 vec![
                     Inst::Arith {
                         num: Num::Float,
-                        op: ArithOp::Add,
+                        op: ArithOp::Rem,
                         dst: 1,
                         a: 0,
                         b: 0,
@@ -3584,14 +3570,14 @@ pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
             )),
         ),
         (
-            "a float comparison",
+            "a float's three-way order, which the VM refuses at run time",
             program(function(
-                vec![Repr::Float, Repr::Bool],
-                BOOL,
+                vec![Repr::Float, Repr::Int],
+                INT,
                 vec![
                     Inst::Cmp {
                         on: Compare::Float,
-                        op: CmpOp::Lt,
+                        op: CmpOp::Order,
                         dst: 1,
                         a: 0,
                         b: 0,
@@ -4094,26 +4080,371 @@ pub fn a_float_equality_is_ieee<A: Arm>() {
     }
 }
 
-/// `Float`'s equality is the only float comparison in the slice, which is what
-/// issue #494 asked for; the rest are issue #501's.
-pub fn only_a_floats_equality_is_in_the_slice<A: Arm>() {
+/// Every `Float` comparison is in the slice but its three-way order: `==`
+/// since issue #494, and the other five since issue #501, which is what
+/// `std.float.renderInto` asks. [`CmpOp::Order`] over `Float` is
+/// `encoded.rs`'s `not_ordered!()`, a refusal at run time, and stays out.
+pub fn only_a_floats_order_is_outside_the_slice<A: Arm>() {
     assert!(compiles::<A>(&equating(Compare::Float)));
-    for op in [CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
+    for op in FLOAT_COMPARISONS {
+        assert!(
+            compiles::<A>(&comparing_floats(op)),
+            "`Float` {op:?} is inside the slice"
+        );
+    }
+    let held = program(function(
+        vec![Repr::Float, Repr::Float, Repr::Int],
+        INT,
+        vec![
+            Inst::Cmp {
+                on: Compare::Float,
+                op: CmpOp::Order,
+                dst: 2,
+                a: 0,
+                b: 1,
+            },
+            Inst::Return { src: 2 },
+        ],
+    ));
+    assert!(
+        !compiles::<A>(&held),
+        "`Float`'s three-way order is outside the slice"
+    );
+}
+
+// --- float arithmetic, negation, constants and comparisons (issue #501) -------
+
+/// The six float comparisons the slice lowers, in `CmpOp`'s order.
+pub const FLOAT_COMPARISONS: [CmpOp; 6] = [
+    CmpOp::Eq,
+    CmpOp::Ne,
+    CmpOp::Lt,
+    CmpOp::Le,
+    CmpOp::Gt,
+    CmpOp::Ge,
+];
+
+/// The four float operations the slice lowers — every `ArithOp` but `Rem`.
+pub const FLOAT_OPERATIONS: [ArithOp; 4] = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
+
+/// The doubles every float instruction of issue #501 is held to, **in bits**:
+/// each pairs with each for the two-operand ones.
+///
+/// They are where an IEEE 754 operation has a case of its own, and where a
+/// lowering that was nearly right would answer differently: both zeros, which
+/// compare equal and divide into infinities of opposite signs; both
+/// infinities, whose sum and product with nought are `NaN`; the least and
+/// greatest subnormals, which a mode that flushed them would turn to nought;
+/// the least normal; the largest finite value, whose sum with itself
+/// overflows; values an ulp apart, which compare unequal; and `NaN`s — quiet
+/// and signalling, of both signs, with and without a payload — which no Cove
+/// program can build or read the bits of, and which are the rows that decide
+/// which operand an operation answers and whether it quiets it.
+pub const FLOAT_EDGES: &[(&str, u64)] = &[
+    ("+0.0", 0x0000_0000_0000_0000),
+    ("-0.0", 0x8000_0000_0000_0000),
+    ("+1.0", 0x3ff0_0000_0000_0000),
+    ("-1.0", 0xbff0_0000_0000_0000),
+    ("+1.0+ulp", 0x3ff0_0000_0000_0001),
+    ("+1.5", 0x3ff8_0000_0000_0000),
+    ("+2.0", 0x4000_0000_0000_0000),
+    ("+3.0", 0x4008_0000_0000_0000),
+    ("+0.1", 0x3fb9_9999_9999_999a),
+    ("-1/3", 0xbfd5_5555_5555_5555),
+    ("+2^53", 0x4340_0000_0000_0000),
+    ("+2^63", 0x43e0_0000_0000_0000),
+    ("+2^-1074", 0x0000_0000_0000_0001),
+    ("-2^-1074", 0x8000_0000_0000_0001),
+    ("+max subnorm", 0x000f_ffff_ffff_ffff),
+    ("+MIN_POS", 0x0010_0000_0000_0000),
+    ("-MIN_POS", 0x8010_0000_0000_0000),
+    ("+MAX", 0x7fef_ffff_ffff_ffff),
+    ("-MAX", 0xffef_ffff_ffff_ffff),
+    ("+inf", 0x7ff0_0000_0000_0000),
+    ("-inf", 0xfff0_0000_0000_0000),
+    ("+qNaN", 0x7ff8_0000_0000_0000),
+    ("-qNaN", 0xfff8_0000_0000_0000),
+    ("+qNaN payload", 0x7ff8_0000_dead_beef),
+    ("-qNaN payload", 0xfff8_0000_0bad_f00d),
+    ("+sNaN", 0x7ff0_0000_0000_0001),
+    ("-sNaN payload", 0xfff0_0000_dead_beef),
+];
+
+/// `count` pairs of doubles drawn from one seed, so that a failure names a
+/// pair that can be looked at again.
+///
+/// Half are **uniform bits**, which are mostly huge or tiny and so mostly
+/// exercise overflow, underflow and `NaN`s; the other half share an exponent
+/// window around one, where a sum and a product round in the last place and a
+/// comparison is decided by the low bits — the rows that tell a correctly
+/// rounded operation from one an ulp off.
+pub fn float_pairs(count: usize) -> Vec<(u64, u64)> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    (0..count)
+        .map(|at| {
+            if at % 2 == 0 {
+                (next(), next())
+            } else {
+                let near = |bits: u64| {
+                    let exponent = 0x3f0 + (bits >> 52) % 0x20;
+                    (bits & 0x800f_ffff_ffff_ffff) | (exponent << 52)
+                };
+                (near(next()), near(next()))
+            }
+        })
+        .collect()
+}
+
+/// Every operand pair the two-operand tests run: [`FLOAT_EDGES`] against
+/// itself, then [`float_pairs`], each with a label to fail by.
+pub fn float_operand_pairs() -> Vec<(String, u64, u64)> {
+    let mut pairs = Vec::new();
+    for (x, a) in FLOAT_EDGES {
+        for (y, b) in FLOAT_EDGES {
+            pairs.push((format!("{x} and {y}"), *a, *b));
+        }
+    }
+    for (a, b) in float_pairs(4096) {
+        pairs.push((format!("0x{a:016x} and 0x{b:016x}"), a, b));
+    }
+    pairs
+}
+
+/// `cove-runtime`'s `float_arith`, restated: `f64`'s operator over two
+/// operands the optimizer cannot see, which is the whole of that function.
+/// This crate cannot depend on the runtime, so the VM's own function is
+/// compared against the tier in `cove-runtime`'s `native_tier.rs` instead,
+/// and this is what the machine code is held to in bits.
+#[inline(never)]
+pub fn vm_float_arith(op: ArithOp, a: f64, b: f64) -> f64 {
+    let (a, b) = (std::hint::black_box(a), std::hint::black_box(b));
+    match op {
+        ArithOp::Add => a + b,
+        ArithOp::Sub => a - b,
+        ArithOp::Mul => a * b,
+        ArithOp::Div => a / b,
+        ArithOp::Rem => a % b,
+    }
+}
+
+/// `encoded.rs`'s six `cmp_float!` arms, restated for [`vm_float_arith`]'s
+/// reason.
+#[inline(never)]
+pub fn vm_float_compare(op: CmpOp, a: f64, b: f64) -> bool {
+    let (a, b) = (std::hint::black_box(a), std::hint::black_box(b));
+    match op {
+        CmpOp::Eq => a == b,
+        CmpOp::Ne => a != b,
+        CmpOp::Lt => a < b,
+        CmpOp::Le => a <= b,
+        CmpOp::Gt => a > b,
+        CmpOp::Ge => a >= b,
+        CmpOp::Order => unreachable!("the VM refuses a float's order"),
+    }
+}
+
+/// `s2 = s0 op s1`, and then `s1 = s0 op s1` — the destination the right
+/// operand — answering `s2`.
+pub fn arithmetic_on_floats(op: ArithOp) -> Program {
+    let arith = |dst| Inst::Arith {
+        num: Num::Float,
+        op,
+        dst,
+        a: 0,
+        b: 1,
+    };
+    program(function(
+        vec![Repr::Float, Repr::Float, Repr::Float],
+        FLOAT,
+        vec![arith(2), arith(1), Inst::Return { src: 2 }],
+    ))
+}
+
+/// `a op b` into `s2`, then the same question fused with its branch into
+/// `s3`, landing on a block writing `7` into `s4` when it is false and falling
+/// through to one writing `9` when it is true; answering `s2`. [`equating`]'s
+/// shape for any float comparison, with the operands in the same order both
+/// times, because only `==` and `!=` are symmetric.
+pub fn comparing_floats(op: CmpOp) -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Float, Repr::Bool, Repr::Bool, Repr::Int],
+        BOOL,
+        vec![
+            Inst::Cmp {
+                on: Compare::Float,
+                op,
+                dst: 2,
+                a: 0,
+                b: 1,
+            },
+            Inst::CmpBranch {
+                on: Compare::Float,
+                op,
+                dst: 3,
+                a: 0,
+                b: 1,
+                target: 4,
+            },
+            Inst::Int { dst: 4, value: 9 },
+            Inst::Return { src: 2 },
+            Inst::Int { dst: 4, value: 7 },
+            Inst::Return { src: 2 },
+        ],
+    ))
+}
+
+/// Compiles the one function of `program` once, for a case that enters it
+/// thousands of times.
+fn compiled_once<A: Arm>(program: &Program) -> (A, A::Handle) {
+    let mut jit = A::new(helpers());
+    let compiled = jit
+        .compile(program, FunctionId(0))
+        .expect("the function is inside the slice");
+    jit.finalize();
+    (jit, compiled)
+}
+
+/// **Float `+`, `-`, `*` and `/` answer `f64`'s bits** — every pair of
+/// [`FLOAT_EDGES`] and 4,096 drawn pairs, out of place and with the
+/// destination the right operand.
+///
+/// The bits and not the number, so that a `NaN` answer is held to *which*
+/// `NaN`: SSE answers the first operand's, quieted, when both are `NaN`s, and
+/// the one that is otherwise, and `f64`'s operator is the same instruction in
+/// the same order — a lowering that swapped the operands of a commutative
+/// operation would pass every row but the ones with two `NaN`s. The
+/// subnormal rows are what a flush-to-nought mode would fail, and the drawn
+/// pairs near one are what an operation an ulp off would.
+pub fn float_arithmetic_is_ieee<A: Arm>() {
+    let pairs = float_operand_pairs();
+    for op in FLOAT_OPERATIONS {
+        let (jit, compiled) = compiled_once::<A>(&arithmetic_on_floats(op));
+        for (what, a, b) in &pairs {
+            let want = vm_float_arith(op, f64::from_bits(*a), f64::from_bits(*b)).to_bits();
+            let mut words = vec![*a, *b, 0xdead];
+            let answer = enter(&jit, compiled, &mut words, 0);
+            assert_eq!(answer.outcome, Outcome::Returned, "{op:?} of {what}");
+            assert_eq!(
+                words[2], want,
+                "{op:?} of {what}: answered 0x{:016x}, want 0x{want:016x}",
+                words[2]
+            );
+            assert_eq!(
+                words[1], want,
+                "{op:?} of {what}, into the right operand: answered 0x{:016x}, want 0x{want:016x}",
+                words[1]
+            );
+            assert_eq!(
+                words[0], *a,
+                "{op:?} of {what}: the left operand is read only"
+            );
+            assert_eq!(answer.returned[0], want, "{op:?} of {what}: the return");
+        }
+    }
+}
+
+/// **A float negation flips the sign bit and touches no other**, which is
+/// `f64`'s `-x`: `-(+0.0)` is `-0.0`, and a `NaN` keeps its payload and its
+/// quiet bit — a signalling one included, which a subtraction from nought
+/// would have quieted. Out of place and in place.
+pub fn a_float_negation_flips_the_sign_bit<A: Arm>() {
+    let (jit, compiled) = compiled_once::<A>(&program(function(
+        vec![Repr::Float, Repr::Float],
+        FLOAT,
+        vec![
+            Inst::Neg {
+                num: Num::Float,
+                dst: 1,
+                a: 0,
+            },
+            Inst::Neg {
+                num: Num::Float,
+                dst: 0,
+                a: 0,
+            },
+            Inst::Return { src: 1 },
+        ],
+    )));
+    let operands = FLOAT_EDGES
+        .iter()
+        .map(|(what, bits)| (what.to_string(), *bits))
+        .chain(
+            float_pairs(512)
+                .into_iter()
+                .map(|(bits, _)| (format!("0x{bits:016x}"), bits)),
+        );
+    for (what, bits) in operands {
+        let want = (-std::hint::black_box(f64::from_bits(bits))).to_bits();
+        assert_eq!(want, bits ^ (1 << 63), "-({what}): the row is `f64`'s");
+        let mut words = vec![bits, 0xdead];
+        let answer = enter(&jit, compiled, &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "-({what})");
+        assert_eq!(words[1], want, "-({what})");
+        assert_eq!(words[0], want, "-({what}) in place");
+        assert_eq!(answer.returned[0], want, "-({what}): the return");
+    }
+}
+
+/// **A float constant is its bits**, stored whole: a `NaN`'s payload and a
+/// `-0.0`'s sign are words like any other to `encoded.rs`'s `CONST_FLOAT`,
+/// which shares `CONST_INT`'s arm.
+pub fn a_float_constant_is_its_bits<A: Arm>() {
+    for (what, bits) in FLOAT_EDGES {
         let held = program(function(
-            vec![Repr::Float, Repr::Float, Repr::Bool],
-            BOOL,
+            vec![Repr::Float],
+            FLOAT,
             vec![
-                Inst::Cmp {
-                    on: Compare::Float,
-                    op,
-                    dst: 2,
-                    a: 0,
-                    b: 1,
+                Inst::Float {
+                    dst: 0,
+                    bits: *bits,
                 },
-                Inst::Return { src: 2 },
+                Inst::Return { src: 0 },
             ],
         ));
-        assert!(!compiles::<A>(&held), "`Float` {op:?} is outside the slice");
+        let mut words = vec![0xdead];
+        let answer = run::<A>(&held, &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+        assert_eq!(words[0], *bits, "{what}");
+        assert_eq!(answer.returned[0], *bits, "{what}: the return");
+    }
+}
+
+/// **Every float comparison is IEEE 754's**, which is `f64`'s: an unordered
+/// pair — a `NaN` on either side — is unequal and neither less, nor greater,
+/// nor equal, so `!=` is the one operator true of it; `0.0` and `-0.0` are
+/// equal and neither is less.
+///
+/// Every pair of [`FLOAT_EDGES`] and 4,096 drawn pairs, each operator both
+/// unfused and fused with its branch, so that the `Bool` stored and the
+/// flags the branch reads are each held to the answer.
+pub fn a_float_comparison_is_ieee<A: Arm>() {
+    let pairs = float_operand_pairs();
+    for op in FLOAT_COMPARISONS {
+        let (jit, compiled) = compiled_once::<A>(&comparing_floats(op));
+        for (what, a, b) in &pairs {
+            let want = vm_float_compare(op, f64::from_bits(*a), f64::from_bits(*b));
+            let mut words = vec![*a, *b, 0xdead, 0xdead, 0xdead];
+            let answer = enter(&jit, compiled, &mut words, 0);
+            assert_eq!(answer.outcome, Outcome::Returned, "{op:?} of {what}");
+            assert_eq!(words[2], u64::from(want), "{op:?} of {what}");
+            assert_eq!(words[3], u64::from(want), "{op:?} of {what}, fused");
+            assert_eq!(
+                words[4],
+                if want { 9 } else { 7 },
+                "{op:?} of {what}: the branch"
+            );
+            assert_eq!(
+                (words[0], words[1]),
+                (*a, *b),
+                "{op:?} of {what}: the operands are read and not written"
+            );
+        }
     }
 }
 

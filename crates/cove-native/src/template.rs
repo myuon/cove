@@ -114,7 +114,8 @@ const HEAP_SPARE: u8 = R15;
 // integer scratch registers are: nothing lives in one between two
 // instructions, because every value of a frame lives in the frame. Only
 // `Inst::Convert(IntToFloat)`, `Inst::FloatMinMax`, `Inst::FloatRound`,
-// `Inst::FloatSqrt` and a float `==` touch them at all.
+// `Inst::FloatSqrt`, a float comparison and float arithmetic touch them at
+// all; a float constant and a float negation are words in integer registers.
 const XMM0: u8 = 0;
 const XMM2: u8 = 2;
 const XMM3: u8 = 3;
@@ -150,6 +151,8 @@ const CC_B: u8 = 0x2;
 const CC_AE: u8 = 0x3;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
+const CC_A: u8 = 0x7;
+const CC_P: u8 = 0xa;
 const CC_NP: u8 = 0xb;
 const CC_L: u8 = 0xc;
 const CC_GE: u8 = 0xd;
@@ -624,6 +627,14 @@ impl<'a> Emit<'a> {
                 self.mov_imm64(RAX, *value);
                 self.store_slot(*dst, RAX);
             }
+            // `encoded.rs`'s `CONST_FLOAT`, which shares `CONST_INT`'s arm: the
+            // double's bits are the word, and the same `mov r64, imm64` and
+            // store `Inst::Int` makes write them — this arm has no constant
+            // pool, and a double in an integer register is its bits.
+            Inst::Float { dst, bits } => {
+                self.mov_imm64(RAX, *bits as i64);
+                self.store_slot(*dst, RAX);
+            }
             // The same store `Inst::Int` makes, of a number the layout already
             // fixed: `encoded.rs` shares its `FUNC_REF | CONST_TAG` arm with
             // that one.
@@ -716,8 +727,8 @@ impl<'a> Emit<'a> {
                 self.load_slot(RAX, *a);
                 self.store_slot(*dst, RAX);
             }
-            // `encoded.rs`'s `FLOAT_ABS`, and the one float operation this arm
-            // lowers. The word never leaves the integer registers: `f64::abs`
+            // `encoded.rs`'s `FLOAT_ABS`, and the first float operation this
+            // arm lowered. The word never leaves the integer registers: `f64::abs`
             // clears the sign bit and bit 63 *is* the sign bit, so `btr` says
             // the whole operation in five bytes — where a round trip through
             // `xmm0` and an `andpd` against a constant in memory would need a
@@ -1079,6 +1090,23 @@ impl<'a> Emit<'a> {
                 self.raise_unless(CC_NO, Raise::NegOverflowed);
                 self.store_slot(*dst, RAX);
             }
+            // `encoded.rs`'s `NEG_FLOAT` arm, `-x`: the sign bit flipped and no
+            // other bit touched, which is what `f64`'s negation is — `rustc`
+            // emits an `xorpd` against the sign mask for it, and never a
+            // subtraction from nought, which answers `+0.0` where `-(0.0)` is
+            // `-0.0` and quiets a signalling `NaN`. The word never leaves the
+            // integer registers, `Inst::FloatAbs`'s arrangement with `btc` for
+            // its `btr`, and there is nothing to test: a negation of a double
+            // cannot fail.
+            Inst::Neg {
+                num: Num::Float,
+                dst,
+                a,
+            } => {
+                self.load_slot(RAX, *a);
+                self.btc_imm8(RAX, 63);
+                self.store_slot(*dst, RAX);
+            }
             Inst::Arith {
                 num: Num::Int,
                 op,
@@ -1090,6 +1118,15 @@ impl<'a> Emit<'a> {
                 self.load_slot(RCX, *b);
                 self.arith(*op, *dst);
             }
+            // `encoded.rs`'s four `float_op!` arms that `crate::subset`
+            // admits. See [`Emit::float_arith`].
+            Inst::Arith {
+                num: Num::Float,
+                op,
+                dst,
+                a,
+                b,
+            } => self.float_arith(*op, *dst, *a, *b),
             Inst::ArithImm { op, dst, a, value } => {
                 self.load_slot(RAX, *a);
                 self.mov_imm64(RCX, *value);
@@ -1104,9 +1141,10 @@ impl<'a> Emit<'a> {
                 a,
                 b,
             } => self.order_str(*dst, *a, *b),
-            // `encoded.rs`'s `EQ_STR` and `EQ_FLOAT`, the two equalities
-            // `crate::subset` admits over those two. See [`Emit::str_equal`]
-            // and [`Emit::float_equal`].
+            // `encoded.rs`'s `EQ_STR`, the one `String` comparison but its
+            // order that `crate::subset` admits, and its six `cmp_float!`
+            // arms, which it admits all of. See [`Emit::str_equal`] and
+            // [`Emit::float_compare`].
             Inst::Cmp {
                 on: Compare::Str,
                 op: CmpOp::Eq,
@@ -1116,11 +1154,11 @@ impl<'a> Emit<'a> {
             } => self.str_equal(*dst, *a, *b),
             Inst::Cmp {
                 on: Compare::Float,
-                op: CmpOp::Eq,
+                op,
                 dst,
                 a,
                 b,
-            } => self.float_equal(*dst, *a, *b),
+            } => self.float_compare(*op, *dst, *a, *b),
             // `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG`, which
             // `crate::subset` admits for those three and no other.
             Inst::Cmp {
@@ -1150,7 +1188,7 @@ impl<'a> Emit<'a> {
                 self.mov_imm64(RCX, *value);
                 self.compare(*op, *dst);
             }
-            // The same two equalities fused with their branch: each leaves the
+            // The same comparisons fused with their branch: each leaves the
             // flags `compare` leaves, the stored word tested against zero.
             Inst::CmpBranch {
                 on: Compare::Str,
@@ -1165,13 +1203,13 @@ impl<'a> Emit<'a> {
             }
             Inst::CmpBranch {
                 on: Compare::Float,
-                op: CmpOp::Eq,
+                op,
                 dst,
                 a,
                 b,
                 target,
             } => {
-                self.float_equal(*dst, *a, *b);
+                self.float_compare(*op, *dst, *a, *b);
                 self.branch_when_false(pc, *target);
             }
             Inst::CmpBranch {
@@ -2967,30 +3005,108 @@ impl<'a> Emit<'a> {
         self.test_rr(RAX, RAX);
     }
 
-    /// `encoded.rs`'s `EQ_FLOAT`: IEEE 754's `==`, which is `f64`'s.
+    /// `encoded.rs`'s six `cmp_float!` arms: IEEE 754's `==`, `!=`, `<`, `<=`,
+    /// `>` and `>=`, which are `f64`'s.
     ///
-    /// `ucomisd` sets `ZF` for equal *and* for unordered, and `PF` for
-    /// unordered alone, so equality is `ZF` and not `PF` — two `setcc`s and an
-    /// `and`. That is what makes a `NaN` equal to nothing, itself included, and
-    /// `0.0` equal to `-0.0`, which compare equal. `ucomisd` is the quiet
-    /// comparison: a signalling `NaN` sets `MXCSR`'s invalid flag, which is
-    /// masked and which Cove cannot observe, and touches no register but the
-    /// flags.
+    /// One `ucomisd`, which sets `ZF`, `PF` and `CF` all three for an
+    /// unordered pair — a `NaN` on either side — and otherwise `ZF` for equal
+    /// and `CF` for less. Each operator is read off those flags so that the
+    /// unordered pair answers what IEEE 754 says it answers, which is `true`
+    /// for `!=` and `false` for the other five:
+    ///
+    /// - **`==`** is `ZF` and not `PF` — two `setcc`s and an `and` — so a
+    ///   `NaN` is equal to nothing, itself included, and `0.0` to `-0.0`;
+    /// - **`!=`** is its complement, not `ZF` or `PF`, so a `NaN` is unequal
+    ///   to everything, itself included;
+    /// - **`>`** is "above", `CF` and `ZF` both clear, and **`>=`** is "above
+    ///   or equal", `CF` clear. The unordered pair sets `CF`, so both are
+    ///   false of it with no second flag to read;
+    /// - **`<`** and **`<=`** are `>` and `>=` with the operands the other way
+    ///   round, which is what `rustc` emits for them too: "below" would read
+    ///   the unordered `CF` as less, and answer `true` for `NaN < 1.0`.
+    ///
+    /// `ucomisd` is the quiet comparison: a signalling `NaN` sets `MXCSR`'s
+    /// invalid flag, which is masked and which Cove cannot observe, and touches
+    /// no register but the flags. `0.0` and `-0.0` compare equal, so neither
+    /// is less than the other.
     ///
     /// It leaves the flags [`Emit::compare`] leaves, for a fused branch.
-    fn float_equal(&mut self, dst: Slot, a: Slot, b: Slot) {
+    fn float_compare(&mut self, op: CmpOp, dst: Slot, a: Slot, b: Slot) {
         self.frame();
         let a_at = slot_offset(a).expect("`supported` bounded every slot");
         let b_at = slot_offset(b).expect("`supported` bounded every slot");
-        self.movsd_load(XMM0, FRAME, a_at);
-        self.ucomisd_load(XMM0, FRAME, b_at);
-        self.setcc(CC_E);
-        self.setcc_cl(CC_NP);
-        self.movzx_eax_al();
-        self.movzx_ecx_cl();
-        self.and_rr(RAX, RCX);
+        let (left, right) = match op {
+            CmpOp::Lt | CmpOp::Le => (b_at, a_at),
+            _ => (a_at, b_at),
+        };
+        self.movsd_load(XMM0, FRAME, left);
+        self.ucomisd_load(XMM0, FRAME, right);
+        match op {
+            CmpOp::Eq => {
+                self.setcc(CC_E);
+                self.setcc_cl(CC_NP);
+                self.movzx_eax_al();
+                self.movzx_ecx_cl();
+                self.and_rr(RAX, RCX);
+            }
+            CmpOp::Ne => {
+                self.setcc(CC_NE);
+                self.setcc_cl(CC_P);
+                self.movzx_eax_al();
+                self.movzx_ecx_cl();
+                self.or_rr(RAX, RCX);
+            }
+            CmpOp::Gt | CmpOp::Lt => {
+                self.setcc(CC_A);
+                self.movzx_eax_al();
+            }
+            CmpOp::Ge | CmpOp::Le => {
+                self.setcc(CC_AE);
+                self.movzx_eax_al();
+            }
+            CmpOp::Order => unreachable!("`crate::subset` refuses a float's order"),
+        }
         self.store_slot(dst, RAX);
         self.test_rr(RAX, RAX);
+    }
+
+    /// `encoded.rs`'s `ADD_FLOAT`, `SUB_FLOAT`, `MUL_FLOAT` and `DIV_FLOAT`:
+    /// `float_arith`, which is `f64`'s `+`, `-`, `*` and `/`.
+    ///
+    /// The left operand into `xmm0`, the operation against the right one where
+    /// it lies in the frame, and the answer stored — three instructions, and
+    /// `addsd`, `subsd`, `mulsd` and `divsd` are each bound by IEEE 754 to the
+    /// correctly rounded answer `f64`'s operator is bound to, under the
+    /// rounding `MXCSR` selects. That register is the thread's, and the
+    /// compiled code runs on the thread the encoded machine runs on, under the
+    /// default round-to-nearest-even with no flush of subnormals, which is the
+    /// only mode Rust code runs in — so there is no mode to set and none to
+    /// restore.
+    ///
+    /// The operand order is `f64`'s own: `a` is the destination operand and
+    /// `b` the source, which is the order `rustc` emits `a + b` in. The order
+    /// is invisible but for one case — two `NaN` operands, of which SSE
+    /// answers the first, quieted — and a Cove program cannot read a `NaN`'s
+    /// payload at all; `tests/suite`'s bit tables pin it anyway.
+    ///
+    /// Nothing can raise: a division by nought is an infinity, or a `NaN` for
+    /// `0.0 / 0.0`, on both tiers. `dst` may be `a` or `b`, because both are
+    /// read before it is written.
+    fn float_arith(&mut self, op: ArithOp, dst: Slot, a: Slot, b: Slot) {
+        let opcode = match op {
+            ArithOp::Add => 0x58,
+            ArithOp::Mul => 0x59,
+            ArithOp::Sub => 0x5c,
+            ArithOp::Div => 0x5e,
+            ArithOp::Rem => unreachable!("`crate::subset` refuses a float's remainder"),
+        };
+        self.frame();
+        let a_at = slot_offset(a).expect("`supported` bounded every slot");
+        let b_at = slot_offset(b).expect("`supported` bounded every slot");
+        let dst_at = slot_offset(dst).expect("`supported` bounded every slot");
+        self.movsd_load(XMM0, FRAME, a_at);
+        self.scalar_double_load(opcode, XMM0, FRAME, b_at);
+        self.movsd_store(FRAME, dst_at, XMM0);
     }
 
     fn order(&mut self, dst: Slot) {
@@ -3638,6 +3754,34 @@ impl<'a> Emit<'a> {
         self.byte(bit);
     }
 
+    /// `btc r64, imm8`: the bit at `bit` flipped, and the rest left alone.
+    ///
+    /// The one caller is a float [`Inst::Neg`](cove_ir::Inst::Neg) at bit 63,
+    /// which is [`Emit::btr_imm8`]'s arrangement for `f64::abs` with the bit
+    /// flipped rather than cleared: `f64`'s negation, in five bytes.
+    fn btc_imm8(&mut self, dst: u8, bit: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0x0f);
+        self.byte(0xba);
+        self.modrm_reg(7, dst);
+        self.byte(bit);
+    }
+
+    /// `addsd`, `mulsd`, `subsd` or `divsd xmm, [base + disp]` — the four SSE2
+    /// scalar double operations, which differ in one opcode byte: `0x58`,
+    /// `0x59`, `0x5c` and `0x5e`.
+    ///
+    /// `dst` is the left operand and the answer, and the double at the
+    /// address the right one. [`Emit::float_arith`] is the one caller.
+    fn scalar_double_load(&mut self, opcode: u8, dst: u8, base: u8, disp: i32) {
+        debug_assert!(matches!(opcode, 0x58 | 0x59 | 0x5c | 0x5e));
+        self.byte(0xf2);
+        self.rex(false, dst, base);
+        self.byte(0x0f);
+        self.byte(opcode);
+        self.modrm_mem(dst, base, disp);
+    }
+
     /// `movsd xmm, [base + disp]`: one double loaded, the upper half of the
     /// register zeroed.
     fn movsd_load(&mut self, dst: u8, base: u8, disp: i32) {
@@ -3768,10 +3912,10 @@ impl<'a> Emit<'a> {
 
     /// `addsd xmm, xmm`.
     ///
-    /// The **one** float arithmetic instruction this file emits, and it is
-    /// emitted against a constant the same template just wrote rather than
-    /// against a value the program named: `crate::subset`'s `supported`
-    /// admits no `Inst::Arith` over `Num::Float`.
+    /// Register to register, and emitted against a constant the same template
+    /// just wrote rather than against a value the program named: the one
+    /// caller is [`Inst::FloatRound`](cove_ir::Inst::FloatRound). The
+    /// program's own float arithmetic is [`Emit::scalar_double_load`]'s.
     fn addsd_rr(&mut self, dst: u8, src: u8) {
         self.byte(0xf2);
         self.rex(false, dst, src);

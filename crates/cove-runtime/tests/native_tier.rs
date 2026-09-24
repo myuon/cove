@@ -1434,9 +1434,14 @@ export fn appendByteBelow(var out: StringBuilder, value: Int, depth: Int) {
 ";
 
 fn checked() -> (Arc<SourceMap>, Arc<cove_sema::resolve::Program>) {
+    checked_source(SOURCE)
+}
+
+/// [`checked`], over a module `m` of `source` rather than of [`SOURCE`].
+fn checked_source(source: &str) -> (Arc<SourceMap>, Arc<cove_sema::resolve::Program>) {
     let mut sources = SourceMap::new();
     let path = PathBuf::from("m/main.cove");
-    let file = sources.add(path.clone(), SOURCE);
+    let file = sources.add(path.clone(), source);
     let ast = cove_syntax::parse_file(&sources, file).expect("the fixture parses");
     let mut modules = BTreeMap::from([(
         MODULE.to_string(),
@@ -1949,11 +1954,12 @@ fn a_float_square_root_runs_as_machine_code() {
 ///
 /// The trailing `.max(floor)` is what makes the answer carry the `min`
 /// through a second instruction rather than out of the frame, and `floor` is a
-/// **parameter** rather than a `-1.0` because `subset.rs` admits no
-/// `ConstFloat` and no float arithmetic: either a literal or a `0.0 - 1.0`
-/// below `main` refuses the function and turns this into a second VM column.
-/// Which is not a guess — it was written the second way first and the tier
-/// refused it.
+/// **parameter** rather than a `-1.0` because `subset.rs` admitted no
+/// `ConstFloat` and no float arithmetic when this was written: either a
+/// literal or a `0.0 - 1.0` below `main` refused the function and turned this
+/// into a second VM column. Which was not a guess — it was written the second
+/// way first and the tier refused it. Issue #501 admitted both, and the
+/// parameter stays because it costs nothing.
 #[test]
 fn a_float_extremum_runs_as_machine_code() {
     on_each_tier(&["extremes"], &["callsExtremes"]);
@@ -4251,4 +4257,492 @@ fn on_path_follows_a_path_through_compiled_frames() {
         );
         assert_eq!(both.native, both.vm, "{segment:?}: the tiers agree");
     }
+}
+
+/// Issue #501's fixture: the float instructions `std.float` is written in,
+/// each behind a refused caller, and a rendering loop behind one too.
+///
+/// A module of its own rather than more of [`SOURCE`], so that the cases over
+/// it can compile it once and invoke it thousands of times.
+const FLOATS: &str = "\
+/// Recursive, so no caller of this can be inlined away. `counts(0)` is zero.
+fn counts(n: Int) -> Int {
+  if n <= 0 {
+    0
+  } else {
+    counts(n - 1) + 1
+  }
+}
+
+/// One float instruction per `which`: the four operations, a negation, and
+/// two constants. `counts(n)` is `native_tier.rs`'s guard against the inliner.
+export fn floats(x: Float, y: Float, which: Int, n: Int) -> Float {
+  let guard = counts(n)
+  if which == 0 {
+    x + y
+  } else if which == 1 {
+    x - y
+  } else if which == 2 {
+    x * y
+  } else if which == 3 {
+    x / y
+  } else if which == 4 {
+    -x
+  } else if which == 5 {
+    0.1
+  } else {
+    -0.0
+  }
+}
+
+/// A refused caller, so the float instruction is reached across the boundary.
+export fn callsFloats(x: Float, y: Float, which: Int, n: Int) -> Float {
+  let nothing = Shared(0).lock(fn(v) { v })
+  floats(x, y, which, n)
+}
+
+/// All six comparisons, each branched on, as one bit each; and the six again
+/// as values, in the next six bits.
+export fn compares(x: Float, y: Float, n: Int) -> Int {
+  let guard = counts(n)
+  var bits = 0
+  if x == y {
+    bits = bits + 1
+  }
+  if x != y {
+    bits = bits + 2
+  }
+  if x < y {
+    bits = bits + 4
+  }
+  if x <= y {
+    bits = bits + 8
+  }
+  if x > y {
+    bits = bits + 16
+  }
+  if x >= y {
+    bits = bits + 32
+  }
+  let answers = [x == y, x != y, x < y, x <= y, x > y, x >= y]
+  var weight = 64
+  for answer in answers {
+    if answer {
+      bits = bits + weight
+    }
+    weight = weight * 2
+  }
+  bits
+}
+
+/// A refused caller, so the comparisons are reached across the boundary.
+export fn callsCompares(x: Float, y: Float, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  compares(x, y, n)
+}
+
+/// Every value's `\"{x}\"`, one to a line.
+export fn renders(xs: Array<Float>, n: Int) -> String {
+  let guard = counts(n)
+  var out: Vector<String> = Vector.of()
+  for x in xs {
+    out.push(\"{x}\")
+  }
+  \"\\n\".join(out.freeze())
+}
+
+/// A refused caller, so the rendering is reached across the boundary.
+export fn callsRenders(xs: Array<Float>, n: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  renders(xs, n)
+}
+";
+
+/// [`FLOATS`], lowered and compiled once, with the functions the tier refused.
+struct Floats {
+    sources: Arc<SourceMap>,
+    program: Arc<cove_sema::resolve::Program>,
+    lowered: Arc<cove_ir::Program>,
+    native: cove_runtime::NativeProgram,
+    refused: Vec<String>,
+}
+
+impl Floats {
+    fn new() -> Floats {
+        let (sources, program) = checked_source(FLOATS);
+        let lowered = Arc::new(
+            cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+                .expect("the fixture lowers"),
+        );
+        let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+        let refused = native
+            .refusals()
+            .iter()
+            .map(|row| row.name.clone())
+            .collect();
+        Floats {
+            sources,
+            program,
+            lowered,
+            native,
+            refused,
+        }
+    }
+
+    /// Asserts that `compiled` were compiled and `refused` were not, by
+    /// qualified name.
+    fn on_each_tier(&self, compiled: &[&str], refused: &[&str]) {
+        for name in compiled {
+            assert!(
+                !self.refused.iter().any(|row| row == name),
+                "`{name}` is meant to be compiled, and the tier refused {:?}",
+                self.refused
+            );
+        }
+        for name in refused {
+            assert!(
+                self.refused.iter().any(|row| row == name),
+                "`{name}` is meant to be refused, and the tier took it"
+            );
+        }
+    }
+
+    /// Runs `f` with one encoded `Vm` and one native one over the fixture,
+    /// each invoked as many times as `f` likes, and answers the native run's
+    /// tiers.
+    fn each_tier(&self, f: impl FnOnce(&mut Vm<'_>, &mut Vm<'_>)) -> cove_runtime::Tiers {
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let runtime = Runtime::new(
+            Arc::clone(&self.program),
+            Arc::clone(&self.sources),
+            Arc::clone(&hosts),
+        );
+        let mut vm = Vm::new(&runtime, &hosts, &self.lowered);
+        let mut native = Vm::with_native(&runtime, &hosts, &self.lowered, &self.native);
+        f(&mut vm, &mut native);
+        native.tiers()
+    }
+}
+
+/// The doubles issue #501's instructions are driven with through the VM and
+/// the tier, **in bits** — `cove-native`'s `FLOAT_EDGES`, restated because a
+/// test crate cannot reach another's suite — and then drawn pairs.
+fn float_operands() -> Vec<(u64, u64)> {
+    const EDGES: [u64; 27] = [
+        0x0000_0000_0000_0000,
+        0x8000_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        0xbff0_0000_0000_0000,
+        0x3ff0_0000_0000_0001,
+        0x3ff8_0000_0000_0000,
+        0x4000_0000_0000_0000,
+        0x4008_0000_0000_0000,
+        0x3fb9_9999_9999_999a,
+        0xbfd5_5555_5555_5555,
+        0x4340_0000_0000_0000,
+        0x43e0_0000_0000_0000,
+        0x0000_0000_0000_0001,
+        0x8000_0000_0000_0001,
+        0x000f_ffff_ffff_ffff,
+        0x0010_0000_0000_0000,
+        0x8010_0000_0000_0000,
+        0x7fef_ffff_ffff_ffff,
+        0xffef_ffff_ffff_ffff,
+        0x7ff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+        0x7ff8_0000_0000_0000,
+        0xfff8_0000_0000_0000,
+        0x7ff8_0000_dead_beef,
+        0xfff8_0000_0bad_f00d,
+        0x7ff0_0000_0000_0001,
+        0xfff0_0000_dead_beef,
+    ];
+    let mut pairs = Vec::new();
+    for a in EDGES {
+        for b in EDGES {
+            pairs.push((a, b));
+        }
+    }
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    // Half uniform bits, and half in an exponent window around one, where
+    // the low bits decide a rounding and a comparison.
+    let near = |bits: u64| (bits & 0x800f_ffff_ffff_ffff) | ((0x3f0 + (bits >> 52) % 0x20) << 52);
+    for at in 0..512 {
+        let (a, b) = (next(), next());
+        if at % 2 == 0 {
+            pairs.push((a, b));
+        } else {
+            pairs.push((near(a), near(b)));
+        }
+    }
+    pairs
+}
+
+/// **Issue #501's float arithmetic, negation and constants answer the VM's
+/// bits in compiled code.**
+///
+/// `floats` is compiled and every one of its instructions runs as machine
+/// code entered from the VM, against the encoded machine's own
+/// `float_arith` and `NEG_FLOAT` over the same operands — compared as the
+/// bits `Value::as_float` hands back rather than as rendered text, so that a
+/// `NaN`'s payload, which no Cove program can read, is held too. That is the
+/// one place the operand order of a commutative operation is visible, and
+/// the one place the VM's own compiled `a + b` is the oracle rather than a
+/// restatement of it.
+#[test]
+fn float_arithmetic_runs_as_machine_code_and_answers_the_vm_s_bits() {
+    let fixture = Floats::new();
+    fixture.on_each_tier(&["m.floats"], &["m.callsFloats"]);
+    let pairs = float_operands();
+    let bits = |answer: Result<Value, cove_runtime::RuntimeError>| {
+        answer
+            .map(|value| value.as_float().expect("a Float").to_bits())
+            .map_err(|error| error.message)
+    };
+    let tiers = fixture.each_tier(|vm, native| {
+        for which in 0..7 {
+            for (a, b) in &pairs {
+                let args = vec![
+                    Value::float(f64::from_bits(*a)),
+                    Value::float(f64::from_bits(*b)),
+                    Value::int(which),
+                    Value::int(0),
+                ];
+                let on_vm = bits(vm.invoke(MODULE, "callsFloats", args.clone()));
+                let compiled = bits(native.invoke(MODULE, "callsFloats", args));
+                assert!(on_vm.is_ok(), "{which} of 0x{a:016x} and 0x{b:016x}");
+                assert_eq!(
+                    compiled, on_vm,
+                    "{which} of 0x{a:016x} and 0x{b:016x}: the tier against the VM, in bits"
+                );
+            }
+        }
+    });
+    assert!(
+        tiers.vm_to_native >= 7 * pairs.len() as u64,
+        "every row crossed into compiled code: {tiers:?}"
+    );
+    assert_eq!(tiers.native_to_vm, 0, "and none came back: {tiers:?}");
+}
+
+/// **Every float comparison answers the VM's `Bool` in compiled code**, fused
+/// with its branch and as a value, over the same operands — a `NaN` on either
+/// side among them, which is unordered and makes `!=` the one operator true.
+#[test]
+fn a_float_comparison_runs_as_machine_code_and_answers_the_vm() {
+    let fixture = Floats::new();
+    fixture.on_each_tier(&["m.compares"], &["m.callsCompares"]);
+    let pairs = float_operands();
+    let said = |answer: Result<Value, cove_runtime::RuntimeError>| {
+        answer
+            .map(|value| value.to_string())
+            .map_err(|error| error.message)
+    };
+    let tiers = fixture.each_tier(|vm, native| {
+        for (a, b) in &pairs {
+            let args = vec![
+                Value::float(f64::from_bits(*a)),
+                Value::float(f64::from_bits(*b)),
+                Value::int(0),
+            ];
+            let on_vm = said(vm.invoke(MODULE, "callsCompares", args.clone()));
+            let (x, y) = (f64::from_bits(*a), f64::from_bits(*b));
+            let answers = [x == y, x != y, x < y, x <= y, x > y, x >= y];
+            let want = answers
+                .iter()
+                .enumerate()
+                .filter(|(_, answer)| **answer)
+                .map(|(at, _)| (1i64 << at) | (64 << at))
+                .sum::<i64>();
+            assert_eq!(on_vm, Ok(want.to_string()), "0x{a:016x} against 0x{b:016x}");
+            let compiled = said(native.invoke(MODULE, "callsCompares", args));
+            assert_eq!(compiled, on_vm, "0x{a:016x} against 0x{b:016x}: the tier");
+        }
+    });
+    assert!(tiers.vm_to_native >= pairs.len() as u64, "{tiers:?}");
+    assert_eq!(tiers.native_to_vm, 0, "{tiers:?}");
+}
+
+/// What Rust's formatter writes for a `Float`, which is the text `"{x}"` is
+/// held to: `NaN`, `inf` and `-inf`, an integral value with `.0`, and anything
+/// else with `{}`. `cove-runtime`'s `vm/differential.rs` states it for the
+/// VM's corpus, and this is the same statement for the tier's.
+fn float_text(x: f64) -> String {
+    if x.is_nan() {
+        "NaN".to_string()
+    } else if x.is_infinite() {
+        if x < 0.0 { "-inf" } else { "inf" }.to_string()
+    } else if x.fract() == 0.0 {
+        format!("{x:.1}")
+    } else {
+        format!("{x}")
+    }
+}
+
+/// The values [`a_float_renders_in_compiled_code_as_the_vm_and_rust_do`]
+/// renders: the edges of issue #500's corpus, then drawn values.
+///
+/// The edges are the ones each path of `std.float.renderInto` turns on — both
+/// zeros, `NaN` of both signs, both infinities, the halves either side of
+/// `2^52`, `2^53`, `±2^63` and `1.5·2^63` where the whole-number path stops
+/// fitting an `Int` and `std.float.format` writes it, `1e23`, `1e300`, the
+/// largest value, the least normal, subnormals down to `5e-324`, the shapes
+/// issue #500 costed, Rust's round-up tie at `2^50 + 0.25`, every power of two
+/// and two ulps either side of every power of ten a double reaches. The drawn
+/// ones are 2,000 uniform bit patterns and 1,000 decimals a person would type,
+/// which is a sample of the 300,000 `vm/differential.rs` runs on both tiers —
+/// sized so this case takes about a second.
+fn rendered_floats() -> Vec<f64> {
+    let mut cases: Vec<f64> = vec![
+        0.0,
+        -0.0,
+        f64::NAN,
+        -f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        4_503_599_627_370_495.5,
+        4_503_599_627_370_496.5,
+        9_007_199_254_740_992.0,
+        9_223_372_036_854_775_808.0,
+        -9_223_372_036_854_775_808.0,
+        13_835_058_055_282_163_712.0,
+        1e23,
+        1e300,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::from_bits(0x000f_ffff_ffff_ffff),
+        f64::from_bits(1),
+        f64::from_bits(2),
+        42.0,
+        1.5,
+        314_159.0 / 100_000.0,
+        0.1 + 0.2,
+        1.0 / 3.0,
+        2f64.powi(50) + 0.25,
+        2f64.powi(50) + 0.75,
+    ];
+    for exponent in -1074..=64 {
+        cases.push(2f64.powi(exponent));
+        cases.push(-2f64.powi(exponent));
+    }
+    for exponent in -324..=24 {
+        let power: f64 = format!("1e{exponent}").parse().expect("a power of ten");
+        for step in [-2i64, -1, 0, 1, 2] {
+            cases.push(f64::from_bits(power.to_bits().wrapping_add_signed(step)));
+        }
+    }
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..2_000 {
+        cases.push(f64::from_bits(next()));
+    }
+    for _ in 0..1_000 {
+        cases.push((next() % 100_000_000) as f64 / 10f64.powi((next() % 12) as i32));
+    }
+    cases
+}
+
+/// **A `Float` renders in compiled code as the VM and Rust's formatter render
+/// it, and reads back as itself** (issue #501).
+///
+/// `std.float.renderInto` and every body it reaches compile since issue #501
+/// admitted float constants, arithmetic, negation and comparisons, so an
+/// interpolated `Float` no longer crosses into the VM and back. Each value of
+/// [`rendered_floats`] is rendered on both tiers, and the texts are held to
+/// each other and to [`float_text`]; then, for every finite value, the text
+/// is parsed by Rust's parser and held to the value **bitwise** — `-0.0`
+/// included — which is what "the shortest decimal that reads back as the
+/// value" promises, checked by an oracle that is not the formatter.
+#[test]
+fn a_float_renders_in_compiled_code_as_the_vm_and_rust_do() {
+    let fixture = Floats::new();
+    let compiled = compiled_float_names(&fixture);
+    for body in [
+        "std.float.renderInto",
+        "std.float.format",
+        "std.float.near",
+        "std.float.placed",
+        "std.float.far",
+    ] {
+        assert!(
+            compiled.iter().any(|name| name == body),
+            "`{body}` is meant to be compiled: {compiled:?}"
+        );
+    }
+    fixture.on_each_tier(&["m.renders"], &["m.callsRenders"]);
+
+    let cases = rendered_floats();
+    let args = vec![
+        Value::array(cases.iter().copied().map(Value::float)),
+        Value::int(0),
+    ];
+    let mut texts = (String::new(), String::new());
+    let tiers = fixture.each_tier(|vm, native| {
+        texts.0 = vm
+            .invoke(MODULE, "callsRenders", args.clone())
+            .expect("the VM renders")
+            .to_string();
+        texts.1 = native
+            .invoke(MODULE, "callsRenders", args)
+            .expect("the tier renders")
+            .to_string();
+    });
+    assert!(
+        tiers.native() >= cases.len() as u64,
+        "every value was rendered by a compiled entry: {tiers:?}"
+    );
+    assert_eq!(tiers.native_to_vm, 0, "and none crossed back: {tiers:?}");
+
+    let on_vm: Vec<&str> = texts.0.lines().collect();
+    let natively: Vec<&str> = texts.1.lines().collect();
+    assert_eq!(on_vm.len(), cases.len());
+    assert_eq!(natively.len(), cases.len());
+    let mut finite = 0;
+    for ((x, vm), native) in cases.iter().zip(on_vm).zip(natively) {
+        let bits = x.to_bits();
+        assert_eq!(native, vm, "0x{bits:016x}: the tier against the VM");
+        assert_eq!(
+            native,
+            float_text(*x),
+            "0x{bits:016x}: against Rust's formatter"
+        );
+        if x.is_finite() {
+            let back: f64 = native.parse().expect("the text is a decimal Rust reads");
+            assert_eq!(
+                back.to_bits(),
+                bits,
+                "0x{bits:016x}: `{native}` reads back as 0x{:016x}",
+                back.to_bits()
+            );
+            finite += 1;
+        }
+    }
+    assert!(
+        finite > 6_000,
+        "the round trip was asked of {finite} values"
+    );
+}
+
+/// Every `std.float` function the tier compiled out of [`FLOATS`].
+fn compiled_float_names(fixture: &Floats) -> Vec<String> {
+    fixture
+        .lowered
+        .functions
+        .iter()
+        .filter(|f| !f.stub)
+        .map(|f| format!("{}.{}", f.module, f.name))
+        .filter(|name| name.starts_with("std.float."))
+        .filter(|name| !fixture.refused.contains(name))
+        .collect()
 }

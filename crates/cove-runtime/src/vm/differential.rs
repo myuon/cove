@@ -3087,6 +3087,46 @@ fn rendered_lines(source: &'static str, args: Vec<Value>, on_machine: bool) -> S
     }
 }
 
+/// What [`rendered_natively`] answers: the `String`, how the run's calls
+/// divided between the tiers, and every function the tier refused.
+#[cfg(feature = "template")]
+struct Natively {
+    text: String,
+    tiers: crate::Tiers,
+    refused: Vec<String>,
+}
+
+/// [`rendered_lines`] on the native tier: the same program compiled by the
+/// template arm and entered through [`Vm::with_native`], so that every
+/// function the tier takes runs as machine code.
+///
+/// Behind the code generator's feature, as `tests/native_tier.rs` is, so it
+/// runs in CI's second native step and in no default build.
+#[cfg(feature = "template")]
+fn rendered_natively(source: &'static str, args: Vec<Value>) -> Natively {
+    let (sources, checked) = checked(source);
+    let program = lowered(&sources, &checked);
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let native = crate::compile_native(&program).expect("this host compiles");
+    let refused = native
+        .refusals()
+        .iter()
+        .map(|row| row.name.clone())
+        .collect();
+    let runtime = Runtime::new(checked, sources, hosts.clone());
+    let mut vm = Vm::with_native(&runtime, &hosts, &program, &native);
+    let answer = vm.invoke("m", "rendered", args);
+    let tiers = vm.tiers();
+    match answer {
+        Ok(value) => Natively {
+            text: value.to_string(),
+            tiers,
+            refused,
+        },
+        Err(error) => panic!("the body answers natively: {}", error.message),
+    }
+}
+
 /// `"{x}"` of a `Float` is `std.float.renderInto` since ADR 0068's Phase 4a,
 /// and it writes what the Rust arm wrote, byte for byte, across the edges and
 /// 200,000 random bit patterns — and 100,000 more drawn where the fast path
@@ -3223,7 +3263,9 @@ fn float_render_corpus() -> (Vec<f64>, usize) {
 
 /// Every batch of [`float_render_corpus`] whose index is `part` modulo four,
 /// on the machine against the formatter — and for the first quarter, the
-/// edges and the first 400 random rows on the oracle as well.
+/// edges and the first 400 random rows on the oracle as well. Built with the
+/// code generator, every batch runs on the native tier too, against the same
+/// formatter (issue #501).
 ///
 /// Four tests over one corpus rather than one, so that the harness runs them
 /// on four threads: the machine takes about twenty seconds over all of it,
@@ -3253,6 +3295,8 @@ export fn rendered(xs: Array<Float>) -> String {
         }
         let chunk = chunk.to_vec();
         let count = chunk.len();
+        #[cfg(feature = "template")]
+        let natively = chunk.clone();
         let answer = on_a_deep_stack(move || {
             rendered_lines(
                 source,
@@ -3270,6 +3314,42 @@ export fn rendered(xs: Array<Float>) -> String {
                     cases[index].to_bits(),
                     expected[index]
                 ));
+            }
+        }
+        // The same batch on the native tier, since issue #501 admitted the
+        // float instructions `std.float` is written in: every value rendered
+        // by machine code, held to the formatter and so to the VM above. What
+        // is asserted about the tier is that it was used — no `std.float`
+        // function refused, no call handed back to the VM, and a compiled
+        // entry for every value — because a run that fell back would compare
+        // the VM with itself and pass.
+        #[cfg(feature = "template")]
+        {
+            let run = on_a_deep_stack(move || {
+                rendered_natively(
+                    source,
+                    vec![Value::array(natively.into_iter().map(Value::float))],
+                )
+            });
+            let floats: Vec<&String> = run
+                .refused
+                .iter()
+                .filter(|name| name.starts_with("std.float.") || name.starts_with("std.int."))
+                .collect();
+            assert!(floats.is_empty(), "the tier refused {floats:?}");
+            assert_eq!(run.tiers.native_to_vm, 0, "{:?}", run.tiers);
+            assert!(run.tiers.native() >= count as u64, "{:?}", run.tiers);
+            let lines = run.text.lines().collect::<Vec<_>>();
+            assert_eq!(lines.len(), count);
+            for (offset, line) in lines.into_iter().enumerate() {
+                let index = at * batch + offset;
+                if line != expected[index] {
+                    wrong.push(format!(
+                        "natively {:#018x}: {line} against {}",
+                        cases[index].to_bits(),
+                        expected[index]
+                    ));
+                }
             }
         }
         rendered += count;

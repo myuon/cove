@@ -214,8 +214,28 @@ fn a_float_equality_is_ieee() {
 }
 
 #[test]
-fn only_a_floats_equality_is_in_the_slice() {
-    suite::only_a_floats_equality_is_in_the_slice::<Template>();
+fn only_a_floats_order_is_outside_the_slice() {
+    suite::only_a_floats_order_is_outside_the_slice::<Template>();
+}
+
+#[test]
+fn float_arithmetic_is_ieee() {
+    suite::float_arithmetic_is_ieee::<Template>();
+}
+
+#[test]
+fn a_float_negation_flips_the_sign_bit() {
+    suite::a_float_negation_flips_the_sign_bit::<Template>();
+}
+
+#[test]
+fn a_float_constant_is_its_bits() {
+    suite::a_float_constant_is_its_bits::<Template>();
+}
+
+#[test]
+fn a_float_comparison_is_ieee() {
+    suite::a_float_comparison_is_ieee::<Template>();
 }
 
 #[test]
