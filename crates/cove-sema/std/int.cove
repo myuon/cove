@@ -352,17 +352,27 @@ fn radixHelp() -> String {
 /// - no divisor is zero, and `power` is `-1` only for the last digit, when
 ///   `rest` is above `-10`, so no quotient overflows.
 ///
+/// # `rest` is chosen, not copied and then corrected
+///
+/// `rest` is bound to the answer of the sign test, so each arm writes it once:
+/// the negative arm copies `value` in after its minus sign, and the other
+/// negates straight into it. Bound to `value` first and negated afterwards, it
+/// was a copy on every path, and wherever this leaf is expanded straight after
+/// the instruction that made its argument — `std.dynamic`'s `written`, a
+/// synthesized walk that has just loaded the number — that copy is one
+/// `copies.rs` counts as forwardable, in every program (#505).
+///
 /// It must never interpolate an `Int` itself, which would call itself.
 fn renderInto(value: Int, buffer: ByteBuffer) {
-  var rest = value
-  if value < 0 {
+  var rest = if value < 0 {
     let minus = '-'
     let at = core.bytesLength(buffer)
     core.bytesEnsure(buffer, 1)
     core.bytesStore(buffer, at, minus)
     core.bytesCommit(buffer, 1)
+    value
   } else {
-    rest = -value
+    -value
   }
   let tenth = rest / 10
   var power = -1

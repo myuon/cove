@@ -1636,7 +1636,31 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `fail_key_known_struct_path` 36, `fail_key_known_enum_root` 36,
 /// `fail_key_known_map_key` 37, `fail_key_known_shared` 40 and
 /// `fail_key_known_deep` 37.
-const FORWARDABLE_COPIES: usize = 11146;
+///
+/// **10,834 since issue #505 took the copy the Phase 4b-ii paragraph names out
+/// of `std.int.renderInto`**, and the fall of 312 is all lowering: the corpus
+/// is the same 239 programs, and neither #494's nor #501's native work had
+/// moved the number from 11,146. `var rest = value` corrected afterwards by
+/// `rest = -value` is now `var rest = if value < 0 { …; value } else { -value }`,
+/// so each arm writes `rest` once — a `copy` behind the minus sign's commit,
+/// which is not a producer of `value`, or a `neg` straight into it — and a
+/// non-negative `Int` runs one instruction fewer. What fell is that one
+/// instruction wherever the leaf is expanded straight after whatever made its
+/// argument:
+///
+/// | | forwardable |
+/// | --- | ---: |
+/// | `std.dynamic.written`, after the `dyn.read` of the `Int` — one in every program | −239 |
+/// | `<synth>.renders<…>`, after the `load-elem` or `load-field` — the 35 of #477's walk, grown with the corpus | −38 |
+/// | a program's own interpolation of an `Int` it had just computed — `cq.json.parseValue`, the `values_string_*` fixtures' `show` | −35 |
+///
+/// So #504's lowering share is gone, and 73 more that had been in the survey
+/// since the walks first expanded this leaf. No other function's count moved
+/// in either direction, which a per-function listing of the counted copies
+/// before and after showed rather than the total. ADR 0068's other phases
+/// were already at a lowering share of 0, or below it: Phase 3's −19 is the
+/// only other movement, and every other paragraph above says 0.
+const FORWARDABLE_COPIES: usize = 10834;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
