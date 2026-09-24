@@ -99,9 +99,20 @@ pub(super) const DYNAMIC_ORDER: (&str, &str) = ("std.dynamic", "order");
 
 /// The Cove function `core.admitKey` decides an erased key with: ADR 0068's
 /// `std.dynamic.refusesKey`, which no program can name either. It decides and
-/// does not word — the sentence stays `Value.admitKey`'s, under a branch on
-/// what this answers.
+/// does not word — the sentence is [`DYNAMIC_REFUSE_KEY`]'s, under a branch
+/// on what this answers.
 pub(super) const DYNAMIC_REFUSES_KEY: (&str, &str) = ("std.dynamic", "refusesKey");
+
+/// The Cove function the refusal of an erased key is worded by: ADR 0068's
+/// Phase 4c `std.dynamic.refuseKey`, which no program can name either. It
+/// takes the box, `core.admitKey`'s method and role, the path to the box — an
+/// empty one where the box is the key — and the path of vectors a map key it
+/// quotes renders under, and never answers.
+pub(super) const DYNAMIC_REFUSE_KEY: (&str, &str) = ("std.dynamic", "refuseKey");
+
+/// The module a wording walk's [`synth::Trail`] functions are in, beside
+/// [`DYNAMIC_REFUSE_KEY`].
+const DYNAMIC_MODULE: &str = "std.dynamic";
 
 /// The Cove function an erased value's text is appended by: ADR 0068's
 /// Phase 4b-ii `std.dynamic.renderInto`, which no program can name either. It
@@ -492,6 +503,99 @@ impl Body<'_> {
             span,
         )?;
         self.pool.dynamic_refuses_key = Some(id);
+        Some(id)
+    }
+
+    /// The [`synth::Trail`] a wording walk hands the wording walks it calls:
+    /// the layout of a `Vector<String>` and `std.dynamic`'s five functions over
+    /// one, resolved once per lowering and recorded on the
+    /// [`Pool`](super::Pool).
+    ///
+    /// [`Body::render_leaves`]' arrangement for ADR 0068's Phase 4c: a walk
+    /// cannot resolve a name, so the call site whose wording walk can call
+    /// another — [`synth::needs_trail`] — resolves these first. All five are
+    /// asked about before any answer is read, so that a package whose slice
+    /// has none of them converges in one more round. `None` is
+    /// [`Body::dynamic_equals`]' `None`.
+    pub(super) fn wording_trail(&mut self, span: Span) -> Option<synth::Trail> {
+        if let Some(trail) = self.pool.trail {
+            return Some(trail);
+        }
+        let layout = self.layout(&Ty::Vector(Box::new(Ty::Str)), span)?;
+        let what = "the trail of a key's refusal";
+        let new = self.library_leaf(DYNAMIC_MODULE, "newTrail", (&[], layout), what, span);
+        let push = self.library_leaf(
+            DYNAMIC_MODULE,
+            "trailPush",
+            (&[layout, shapes::STR], shapes::UNIT),
+            what,
+            span,
+        );
+        let length = self.library_leaf(
+            DYNAMIC_MODULE,
+            "trailLength",
+            (&[layout], shapes::INT),
+            what,
+            span,
+        );
+        let cut = self.library_leaf(
+            DYNAMIC_MODULE,
+            "trailCut",
+            (&[layout, shapes::INT], shapes::UNIT),
+            what,
+            span,
+        );
+        let text = self.library_leaf(
+            DYNAMIC_MODULE,
+            "trailText",
+            (&[layout], shapes::STR),
+            what,
+            span,
+        );
+        let trail = synth::Trail {
+            layout,
+            new: new?,
+            push: push?,
+            length: length?,
+            cut: cut?,
+            text: text?,
+        };
+        self.pool.trail = Some(trail);
+        Some(trail)
+    }
+
+    /// `std.dynamic.refuseKey`, the Cove walk the refusal of an erased key is
+    /// worded by, resolved once per lowering and recorded on the
+    /// [`Pool`](super::Pool).
+    ///
+    /// [`Body::dynamic_equals`]' arrangement for ADR 0068's Phase 4c, and for
+    /// its reason: a wording walk composed for a known key layout whose refused
+    /// part is a box calls this from a [`synth`] walk that cannot resolve a
+    /// name, so the call site that asks for the walk resolves it first, and
+    /// `Body::core_admit_key` resolves it for the boxed key it calls it over
+    /// directly. `None` is [`Body::dynamic_equals`]' `None`.
+    pub(super) fn dynamic_refuse_key(&mut self, span: Span) -> Option<FunctionId> {
+        if let Some(id) = self.pool.dynamic_refuse_key {
+            return Some(id);
+        }
+        let (module, function) = DYNAMIC_REFUSE_KEY;
+        let id = self.library_leaf(
+            module,
+            function,
+            (
+                &[
+                    shapes::BOXED,
+                    shapes::STR,
+                    shapes::STR,
+                    shapes::STR,
+                    shapes::RENDER_PATH,
+                ],
+                shapes::UNIT,
+            ),
+            "the refusal of an erased key",
+            span,
+        )?;
+        self.pool.dynamic_refuse_key = Some(id);
         Some(id)
     }
 

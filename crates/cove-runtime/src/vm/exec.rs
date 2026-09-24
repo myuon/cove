@@ -522,12 +522,14 @@ pub(crate) struct Machine<'a> {
     /// it once, for every arm, in one place.
     ///
     /// **A [`Cell`] rather than a plain `u64`, because the walkers hold the
-    /// machine by shared reference and must.** `key::admit_key` and
-    /// `intrinsics::render_into` — and `equal::equals` and `key::value_order`
-    /// until ADR 0068 moved them into `std.dynamic` —
-    /// each narrow their `&mut Machine` to a `&Machine` before they start,
-    /// because the value they are walking is borrowed *out of the caller's
-    /// frame* — see [`Operands`] — and that borrow lives for the whole walk.
+    /// machine by shared reference and must.** `key::admit_key`,
+    /// `intrinsics::render_into`, `equal::equals` and `key::value_order` —
+    /// until ADR 0068 moved every one of them into `std.dynamic`, the last in
+    /// its Phase 4c — each narrowed its `&mut Machine` to a `&Machine` before
+    /// it started, because the value it walked was borrowed *out of the
+    /// caller's frame* — see [`Operands`] — and that borrow lived for the whole
+    /// walk. What is left under a shared borrow is the tests' order walk
+    /// (`key::order`), and a text intrinsic's reading of its receiver.
     /// A counter those walks could add to therefore has to be writable
     /// through a shared borrow, and threading a `&mut u64` through thirteen
     /// recursive functions in three modules would be the same counter with
@@ -2410,14 +2412,6 @@ impl<'a> Machine<'a> {
         self.mem.slot(base, slot)
     }
 
-    /// The value location of `layout` at `slot` of the frame based at `base`,
-    /// borrowed as an intrinsic's operand. See [`Machine::operand_word`].
-    #[inline(always)]
-    pub(crate) fn operand_words(&self, base: u64, slot: u32, layout: LayoutId) -> &[u64] {
-        self.unanswered();
-        self.mem.slots(base, slot, self.width(layout))
-    }
-
     /// The `width` words of an intrinsic's destination at `slot` of the frame
     /// based at `base`, to be written.
     #[inline(always)]
@@ -2430,7 +2424,8 @@ impl<'a> Machine<'a> {
     }
 
     /// Writes one word of an intrinsic's answer. See
-    /// [`Machine::answer_words`].
+    /// [`Machine::answer_words`]. Only this crate's tests write one now.
+    #[cfg(test)]
     #[inline(always)]
     pub(crate) fn answer_word(&mut self, base: u64, slot: u32, word: u64) {
         #[cfg(debug_assertions)]

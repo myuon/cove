@@ -1,0 +1,41 @@
+use clock.timeout
+use console.println
+
+/// A key that renders as more than a number: two `Duration`s, whose text is
+/// `std.duration`'s.
+struct Span {
+  from: Duration
+  to: Duration
+}
+
+/// A boxed `Map<Span, Float>` used as a set element: the admission refuses
+/// the value of the entry keyed `Span(from: 90s, to: 2m)`, and names it by
+/// that key as it renders, `[Span(from: 90s, to: 2m)]`.
+///
+/// `fail_key_boxed_map_value`'s row for a key that is not an `Int`. Since ADR
+/// 0068's Phase 4c the refusal of a boxed key is `std.dynamic.refuseKey`'s,
+/// Cove over a view of the box, and a key it quotes is rendered by the same
+/// Cove that renders an interpolation of a box — a struct's name and fields,
+/// and each `Duration` through `std.duration.renderInto`, in the largest unit
+/// that divides it. A key cannot hold a `Float`: `Map.of` refuses one before
+/// the map exists.
+///
+/// The map is boxed through `clock.timeout`, which answers `Result<Any,
+/// Error>`, so that no `impl` has to be written for a `Map`.
+fn admitMap() -> Result<Unit, Error> {
+  let held = timeout(1s) {
+    Map.of(MapEntry(key: Span(from: 90s, to: 2m), value: 1.5))
+  }?
+  let other = timeout(1s) {
+    Map.of(MapEntry(key: Span(from: 1s, to: 2s), value: 3.0))
+  }?
+  let keyed = Set.of(held).inserted(other)
+  println("never printed {keyed}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed map keyed by spans as a set element")?
+  admitMap()?
+  Ok(())
+}

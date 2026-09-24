@@ -287,12 +287,28 @@ fn the_run_writes_the_recording_a_run_writes() {
     // builtin `Error` is told apart by. A one-byte bracket is pushed as its
     // byte and places nothing. The names a rendering reads are not here:
     // this fixture boxes nothing, so `lower::names` places none.
+    //
+    // It is 1,757 since ADR 0068's Phase 4c worded the refusal of a boxed key
+    // in `std.dynamic.refuseKey`, and the 98 words are seventeen literals it
+    // and the functions it calls write, found by listing `Program::strings`:
+    // the two rules and the two helps, `Value.admitKey`'s in Rust until then —
+    // a `Float`'s rule, 121 bytes and seventeen words, and its help, 93 and
+    // thirteen; everything else's rule, 129 and eighteen, and its help, 155
+    // and twenty-one; the three pieces of the sentence around the method, the
+    // type, the path and the role, `` ` cannot use a ` `` three words, `` ` as
+    // a `` two and `` ` inside ` `` three, whose opening backticks are pushed
+    // as bytes; and the nine words a refused part is called by and read with,
+    // `Float`, `Vector`, `fn`, `Shared`, `<task>` and `a task`, two words
+    // each, and `<task scope `, `a task scope` and `a host resource`, three.
+    // A known layout's wording walk writes the same rules and helps, and
+    // `Pool::string` places a text once, so a program with one adds only its
+    // own leads; this fixture has none.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1659), capacity_words: Some(1659) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1757), capacity_words: Some(1757) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

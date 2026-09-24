@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.contains` cannot use a `Float` inside `Mark.Weight(0)` as a set element
+  --> <e2e>/fail_key_known_enum_root/main.cove:22:15
+   |
+22 |   let found = marks.contains(Mark.Weight(1.5))
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/set.cove:19:3
+   |
+19 |   core.admitKey(element, "Set.contains", "set element")
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_known_enum_root/main.cove:29:3
+   |
+29 |   search()?
+   |   ^^^^^^^^ called from here
+  rule: A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.
+  help: convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`
+1 error(s)

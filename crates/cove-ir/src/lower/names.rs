@@ -45,7 +45,14 @@
 //!
 //! [`LayoutNames`] says. A struct that is not the program's `Range` gets its
 //! shown name, and, unless it is `opaque`, its fields' names; an enum gets its
-//! cases' names. A range renders as its bounds and gets nothing. Every string
+//! shown name and its cases' names. A range renders as its bounds and gets
+//! nothing.
+//!
+//! An enum's own name is not rendered — a value of one renders as its case —
+//! and it is placed for the refusal of a boxed key: `std.dynamic.refuseKey`
+//! begins the path to the refused part of an enum at the root of a key with the
+//! enum's name and its case, `Mark.Weight(0)`, as the oracle's
+//! `MapKey::convert` does (ADR 0068's Phase 4c). Every string
 //! is interned into [`Program::strings`] as the lowering's own pool interns —
 //! one entry per distinct text — so a field named `name` in two structs, or a
 //! name the standard library's rendering already writes as a literal, is one
@@ -123,7 +130,7 @@ pub(super) fn place(program: &mut Program) {
                 LayoutNames { name, parts }
             }
             Shape::Enum { cases, .. } => LayoutNames {
-                name: None,
+                name: Some(intern(crate::dynamic::shown_name(&described.name))),
                 parts: cases.iter().map(|case| intern(&case.name)).collect(),
             },
             _ => continue,

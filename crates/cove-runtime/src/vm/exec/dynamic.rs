@@ -411,10 +411,14 @@ fn literal(machine: &Machine, text: StrId) -> u64 {
 }
 
 /// `dyn.type-name`: the name a rendering shows for the struct a view names,
-/// as the address of the literal `lower::names` placed for it.
+/// or the name a refused key's path begins with for the enum it names, as the
+/// address of the literal `lower::names` placed for it.
 pub(crate) fn type_name(machine: &Machine, view: View) -> Result<u64, RuntimeError> {
     let described = layout(machine, view.layout)?;
-    if !matches!(kind_of(machine, described), DynamicKind::Struct) {
+    if !matches!(
+        kind_of(machine, described),
+        DynamicKind::Struct | DynamicKind::Enum
+    ) {
         return Err(internal(format!(
             "the name of a dynamic view of a {} was asked",
             kind_of(machine, described).name()
@@ -779,7 +783,7 @@ pub(crate) fn unplaced_in(machine: &Machine, boxed: u64) -> Vec<String> {
                 names.name.is_some() && (*opaque || names.parts.len() == fields.len())
             }),
             Shape::Enum { cases, .. } => {
-                names.is_some_and(|names| names.parts.len() == cases.len())
+                names.is_some_and(|names| names.name.is_some() && names.parts.len() == cases.len())
             }
             _ => true,
         };

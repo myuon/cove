@@ -266,9 +266,10 @@ fn an_erased_value_reaches_the_one_dynamic_fallback() {
 /// lengths are compared after its elements, a `Float` field that has to raise
 /// — could have been made to work by handing the layout to the intrinsic, and
 /// everything would have passed, because the answers would still have been
-/// right. `Value.admitKey` is the one left, and the same is true of it;
-/// `Value.renderInto` stood beside it until ADR 0068's Phase 4b-ii, and the
-/// rendering's own case below holds its successor to a box.
+/// right. `Value.admitKey` was the last, and the same was true of it until
+/// ADR 0068's Phase 4c; `Value.renderInto` stood beside it until the ADR's
+/// Phase 4b-ii, and the rendering's own case below holds its successor to a
+/// box.
 #[test]
 fn no_statically_known_layout_reaches_the_fallback() {
     let known: &[&str] = &[
@@ -596,9 +597,9 @@ fn orders_of(program: &Program) -> Vec<String> {
 ///
 /// [`super::super::synth::admission`] answers [`synth::Admission::Always`] for
 /// every layout no value of which is ever refused, and `core.admitKey` emits
-/// **nothing at all** there — no walk, no call, no intrinsic. That is why
-/// `covefmt` and `cq` reach `Value.admitKey` at no site and on no turn: every
-/// key either program uses is a `String` or an `Int`. It is also the property
+/// **nothing at all** there — no walk, no call, no refusal. That is why
+/// `covefmt` and `cq` ask an admission nothing at any site and on any turn:
+/// every key either program uses is a `String` or an `Int`. It is also the property
 /// a synthesis is in a position to destroy by making a function for every key
 /// and letting the inliner sort it out.
 ///
@@ -620,6 +621,10 @@ fn a_key_no_value_of_which_is_refused_is_not_asked_about() {
         ("", "Option<Int>"),
         ("", "Result<Int, String>"),
         ("struct Row { n: Int, name: String, flag: Bool }", "Row"),
+        // A layout that holds itself, whose every part is a key: however deep
+        // a `Node` nests, nothing in it is refused, so it is asked nothing —
+        // where until ADR 0068's Phase 4c it was handed whole to the runtime.
+        ("struct Node { tag: Int, kids: Array<Node> }", "Node"),
         ("enum Flag { On\n  Off }", "Flag"),
         (
             "struct Row { n: Int, name: String, flag: Bool }",
@@ -632,11 +637,16 @@ fn a_key_no_value_of_which_is_refused_is_not_asked_about() {
     ];
     for (declarations, key) in keys {
         let program = keyed(declarations, key);
-        assert_eq!(admissions(&program), 0, "a `Value.admitKey` site for {key}");
+        assert_eq!(refusals(&program), 0, "a refusal worded for {key}");
         assert_eq!(
             walks_named(&program, "refuses<"),
             Vec::<String>::new(),
             "a walk for {key}"
+        );
+        assert_eq!(
+            walks_named(&program, "describes"),
+            Vec::<String>::new(),
+            "a wording walk for {key}"
         );
     }
 }
@@ -648,11 +658,10 @@ fn a_key_no_value_of_which_is_refused_is_not_asked_about() {
 /// walk is one `switch`, two arms that do nothing at all, and one that
 /// answers `true`.
 ///
-/// It answers a `Bool` and never raises: the sentence a refusal carries has a
-/// `rule:` and a `help:` beside it, and `Operation::Admission` always decides
-/// rather than composes it — see `lower::synth`'s header — so what the walk
-/// hands back is the bit and `core.admitKey` runs the intrinsic under a
-/// `branch-false`.
+/// It answers a `Bool` and never raises: the sentence a refusal carries is
+/// text, which the path that admits never builds, so what the walk hands back
+/// is the bit and `core.admitKey` runs `describes<Mark>` under a
+/// `branch-false` on it.
 #[test]
 fn an_enum_is_read_at_its_discriminant_and_answers_a_bool() {
     let program = keyed("enum Mark { Plain\n  Count(Int)\n  Weight(Float) }", "Mark");
@@ -713,35 +722,69 @@ fn a_map_is_asked_about_its_values_and_not_its_keys() {
     assert_eq!(listed.matches("load-elem").count(), 1, "{listed}");
 }
 
-/// The two things no walk can be composed for, and what each reaches.
+/// A box is decided and worded in Cove, and a layout that holds itself is a
+/// walk of calls.
 ///
-/// A box's family is a word in its own header, so no walk is composed for it
-/// — and since ADR 0068's Phase 3 it is decided anyway, by
-/// `std.dynamic.refusesKey` over a view of the box, with the intrinsic under
-/// the branch on that answer as it is under a walk's. A layout that holds
-/// itself has values that nest as deep as they like, where a walk expanded in
-/// place is finite, so it still hands the whole key to the runtime.
+/// A box's family is a word in its own header, so no walk is composed for it:
+/// since ADR 0068's Phase 3 it is decided by `std.dynamic.refusesKey` over a
+/// view of the box, and since its Phase 4c the refusal under the branch on
+/// that answer is `std.dynamic.refuseKey`'s, over the same view.
+///
+/// A layout that holds itself has values that nest as deep as they like, and a
+/// walk expanded in place is finite — so the walk *calls* itself where the
+/// layout comes round again, `refuses<Tree>` calling `refuses<Tree>` for each
+/// `Tree` a `Tree` holds, and the wording is `describesAt<Tree>` calling
+/// itself the same way. Until Phase 4c such a layout handed the whole key to
+/// the runtime.
 #[test]
-fn a_box_and_a_layout_that_holds_itself_reach_the_fallback() {
+fn a_box_is_worded_in_cove_and_a_layout_that_holds_itself_is_a_walk_of_calls() {
     let boxed = keyed(
         "trait Summary { fn summarize(self) -> String }\n\
          struct Booking { id: Int }\n\
          impl Summary for Booking { fn summarize(self) -> String { \"{self.id}\" } }",
         "dyn Summary",
     );
-    assert!(admissions(&boxed) > 0, "no `Value.admitKey` for a box");
+    assert!(refusals(&boxed) > 0, "no refusal worded for a box");
     assert!(
         reflected(&boxed, "refusesKey") > 0,
         "no `std.dynamic.refusesKey` for a box"
     );
-    assert_eq!(walks_named(&boxed, "refuses<"), Vec::<String>::new());
-
-    let deep = keyed("struct Node { tag: Int, kids: Array<Node> }", "Node");
     assert!(
-        admissions(&deep) > 0,
-        "no `Value.admitKey` for a layout that holds itself"
+        reflected(&boxed, "refuseKey") > 0,
+        "no `std.dynamic.refuseKey` for a box"
     );
-    assert_eq!(walks_named(&deep, "refuses<"), Vec::<String>::new());
+    assert_eq!(walks_named(&boxed, "refuses<"), Vec::<String>::new());
+    assert_eq!(walks_named(&boxed, "describes"), Vec::<String>::new());
+
+    let deep = keyed(
+        "enum Mark { Plain\n  Count(Int)\n  Weight(Float) }\n\
+         struct Tree { mark: Mark, kids: Array<Tree> }",
+        "Tree",
+    );
+    assert!(
+        refusals(&deep) > 0,
+        "no refusal worded for a layout that holds itself"
+    );
+    let decides = synthesized(&deep, "refuses<m.Tree");
+    assert!(
+        decides.contains("refuses<m.Tree"),
+        "the walk calls itself: {decides}"
+    );
+    let words = synthesized(&deep, "describesAt<m.Tree");
+    assert!(
+        words.matches("describesAt<m.Tree").count() >= 2,
+        "the wording walk calls itself: {words}"
+    );
+    assert!(words.contains("trap"), "{words}");
+    // And it does not ask `refuses<Tree>` of a tree before calling itself on
+    // it: the call is the decision, so a key refused `n` trees down is walked
+    // once, where deciding each tree on the way down would walk what is below
+    // it again at every level.
+    assert!(!words.contains("refuses<m.Tree"), "{words}");
+    // What it does instead is lengthen the trail before the call and cut it
+    // back after — `std.dynamic.trailCut`, a leaf the inliner expands into
+    // its truncate.
+    assert!(words.contains("growable-truncate"), "{words}");
 }
 
 /// A known key layout with a box inside it is a walk, and the walk calls
@@ -777,10 +820,47 @@ fn a_box_inside_a_known_layout_is_one_call_in_its_walk() {
     let listed = synthesized(&program, "refuses<m.Holder");
     assert!(listed.contains("-> Bool"), "{listed}");
     assert!(listed.contains("std.dynamic.refusesKey"), "{listed}");
-    assert!(!listed.contains("Value.admitKey"), "{listed}");
     assert!(!listed.contains("trap"), "{listed}");
     assert!(reflected(&program, "refusesKey") > 0);
-    assert!(admissions(&program) > 0);
+    assert!(refusals(&program) > 0);
+    // And the wording walk hands the box, and the path down to it, to
+    // `std.dynamic.refuseKey` — `Holder.item` and whatever the box holds.
+    let words = synthesized(&program, "describes<m.Holder");
+    assert!(words.contains("std.dynamic.refuseKey"), "{words}");
+}
+
+/// A key every value of whose layout is refused is refused at the site, in a
+/// literal sentence and one trap: there is no walk to decide and none to word.
+#[test]
+fn a_key_refused_whole_is_a_literal_sentence_at_the_site() {
+    let program = keyed("", "Float");
+    assert_eq!(walks_named(&program, "refuses<"), Vec::<String>::new());
+    assert_eq!(walks_named(&program, "describes"), Vec::<String>::new());
+    assert_eq!(refusals(&program), 0);
+    let placed = |text: &str| program.strings.iter().any(|held| &**held == text);
+    assert!(placed("`Map.contains` cannot use a `Float` as a map key"));
+    assert!(placed(crate::dynamic::FLOAT_KEY_RULE));
+    assert!(placed(crate::dynamic::FLOAT_KEY_HELP));
+}
+
+/// The wording walk of a map quotes the entry's key as it renders, through
+/// the rendering walk of the key's layout, and names an array's element by
+/// its index, through `std.int.renderInto` — a leaf the inliner expands, so
+/// what is left of it is its digit loop.
+///
+/// Between the two is one literal, `][`: the path's static text is written a
+/// run at a time between the parts read at run time, `[0][Point(x: 1, y: 2)]`.
+#[test]
+fn a_wording_walk_quotes_a_key_and_an_index_as_they_render() {
+    let program = keyed(
+        "struct Point { x: Int, y: Int }",
+        "Array<Map<Point, Float>>",
+    );
+    let words = synthesized(&program, "describes<Array");
+    assert!(words.contains("renders<m.Point"), "{words}");
+    assert!(words.contains("\"][\""), "{words}");
+    assert!(words.contains("div.int"), "{words}");
+    assert!(words.contains("trap"), "{words}");
 }
 
 /// **ADR 0064's Decision 4 for the admission, as a fact about every program
@@ -790,14 +870,13 @@ fn a_box_inside_a_known_layout_is_one_call_in_its_walk() {
 /// pass of its own rather than a line in the verifier because what it checks
 /// is what the *lowering* chose and `lower::finish` expands a small leaf
 /// before it verifies. What is left for a test is the half a rule cannot
-/// state: that the rule bites, and that a program of many key families
-/// reaches the intrinsic exactly as often as it holds a key no layout can
-/// answer for.
+/// state: that the rule bites, and that a program of many key families words
+/// a refusal only where one can happen.
 ///
 /// The programs below hold every composite family whose admission a walk
-/// decides — a struct, an enum, an array, a map, an `Option` — and reach
-/// `Value.admitKey` **under a branch and never unguarded**, which
-/// [`admissions`] checks as it counts.
+/// decides — a struct, an enum, an array, a map, an `Option` — and word the
+/// refusal of each **under a branch and never unguarded**, which [`refusals`]
+/// checks as it counts.
 #[test]
 fn no_layout_the_walk_decides_is_asked_about_unguarded() {
     let program = lowered(
@@ -815,29 +894,37 @@ fn no_layout_the_walk_decides_is_asked_about_unguarded() {
         names.len() >= 5,
         "one walk per composite family, and these are what there are: {names:?}"
     );
-    // Every `Value.admitKey` the program holds is one of those five under its
-    // branch; `Int` reaches none at all.
-    assert!(admissions(&program) > 0);
+    // Every refusal the program words is one of those five under its branch;
+    // `Int` reaches none at all.
+    assert!(refusals(&program) > 0);
 }
 
-/// How many `Value.admitKey` sites the program holds, checking as it counts
-/// that each is either a layout no walk can be composed for or one under the
-/// branch on what a walk answered.
+/// How many refusals of a key the program words outside support code — calls
+/// of a `describes<L>` walk or of `std.dynamic.refuseKey` — checking as it
+/// counts that none is about a layout every value of which is a key.
 ///
-/// The second half duplicates [`crate::verify::one_admission_boundary`] on
+/// It duplicates half of [`crate::verify::one_admission_boundary`] on
 /// purpose, for [`reached`]'s reason: the pass panics through
 /// `lower::finish`, and a panic is a worse thing for a test to read than an
 /// assertion is. It is asked of the *finished* program, where the pass is
-/// asked of the one the lowering emitted, so what it can still say is that no
-/// site is about a layout the admission already answered.
-fn admissions(program: &Program) -> usize {
+/// asked of the one the lowering emitted, so the guard beside each call may
+/// have been moved by the expansion of a small walk; what it can still say is
+/// that no refusal is about a layout the admission already answered.
+fn refusals(program: &Program) -> usize {
     let mut found = 0;
     for function in &program.functions {
+        if function.is_support() {
+            continue;
+        }
         for inst in &function.code {
-            let Inst::IntrinsicCall { site, args, .. } = inst else {
+            let Inst::Call { callee, args, .. } = inst else {
                 continue;
             };
-            if program.intrinsic_site(*site).intrinsic != crate::Intrinsic::ValueAdmitKey {
+            let called = &program.functions[callee.index()];
+            let words = called.is_support()
+                && (called.name.starts_with("describes<")
+                    || (&*called.module, &*called.name) == ("std.dynamic", "refuseKey"));
+            if !words {
                 continue;
             }
             found += 1;
@@ -847,7 +934,7 @@ fn admissions(program: &Program) -> usize {
             assert_ne!(
                 synth::admission(&program.layouts, arg.layout),
                 synth::Admission::Always,
-                "`Value.admitKey` was asked about a `{}`, every value of which is a key",
+                "a refusal was worded for a `{}`, every value of which is a key",
                 program.layout(arg.layout).name
             );
         }
@@ -886,13 +973,21 @@ fn orderings(program: &Program) -> usize {
 }
 
 /// How many calls of `std.dynamic.<function>` the program holds, checking as it
-/// counts that every operand of every one of them is erased.
+/// counts that every value operand of every one of them is erased: both of
+/// `equals` and `order`, and the first of every other — the key of
+/// `refusesKey` and `refuseKey`, whose other operands are the names, the path
+/// and the render path a refusal is worded with.
 ///
 /// The check duplicates `cove-cli`'s `tests/boxed.rs` on purpose, over the
 /// programs this file lowers rather than the repository's: a call handed a
 /// layout the lowering knows is a static layout routed through reflection,
 /// which ADR 0068's Decision 5 calls a failure.
 fn reflected(program: &Program, function: &str) -> usize {
+    let values = if matches!(function, "equals" | "order") {
+        2
+    } else {
+        1
+    };
     let mut found = 0;
     for caller in &program.functions {
         for inst in &caller.code {
@@ -904,7 +999,7 @@ fn reflected(program: &Program, function: &str) -> usize {
                 continue;
             }
             found += 1;
-            for arg in program.arg_list(*args) {
+            for arg in program.arg_list(*args).iter().take(values) {
                 assert!(
                     matches!(program.layout(arg.layout).shape, Shape::Boxed),
                     "`std.dynamic.{function}` was handed a `{}`, whose layout is known",

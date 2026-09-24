@@ -5032,18 +5032,22 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 }
 
 /// One intrinsic of each effect class that still has a member, as the pair of
-/// names that resolves to it: a raise (`Value.admitKey`: a key too deep to
-/// walk, or one the language refuses) and a safepoint (`Float.parse`: allocates
-/// the message of the `Err` it answers).
+/// names that resolves to it: a raise (`String.refuseByteRange`: a byte range
+/// `std.stringbuilder`'s `appendRange` has already found wrong) and a
+/// safepoint (`Float.parse`: allocates the message of the `Err` it answers).
 ///
 /// **The raise member was `Any.equals`** until ADR 0068's Phase 2 made `==` on
-/// two erased values `std.dynamic.equals` and deleted the variant, and then
+/// two erased values `std.dynamic.equals` and deleted the variant, then
 /// `Value.order` until its Phase 3 made the order of two erased keys
-/// `std.dynamic.order` and deleted that one. `Value.admitKey` declares exactly
-/// what both did — `MAY_RAISE | READS_MEMORY | BULK_WORK`, no allocation — so
-/// it is the same class, and the cases below check the same protocol over it.
-/// It takes three operands where they took two, and that changes nothing here,
-/// for the reason the paragraph on the safepoint member gives.
+/// `std.dynamic.order` and deleted that one, and then `Value.admitKey` until
+/// its Phase 4c worded the refusal of a key in Cove and deleted the last. Each
+/// declared `MAY_RAISE | READS_MEMORY | BULK_WORK` and no allocation.
+/// `String.refuseByteRange` declares `MAY_RAISE | READS_MEMORY` and no
+/// allocation, which is the same class — [`IntrinsicProtocol`] reads only
+/// whether a call is a safepoint and whether it raises, and `BULK_WORK` decides
+/// neither — so the cases below check the same protocol over it. It takes three
+/// operands, as `Value.admitKey` did, and that changes nothing here, for the
+/// reason the paragraph on the safepoint member gives.
 ///
 /// **There were three, and the third has no member left.** A *plain call* —
 /// neither a safepoint nor a raise, so no publish, no program counter, no
@@ -5071,7 +5075,8 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 /// makes the swap free. So what the case below checks is unchanged: it is a
 /// call whose protocol publishes the unpaid work before the hand-over and tests
 /// the outcome after it.
-pub const INTRINSIC_CLASSES: [(&str, &str); 2] = [("Value", "admitKey"), ("Float", "parse")];
+pub const INTRINSIC_CLASSES: [(&str, &str); 2] =
+    [("String", "refuseByteRange"), ("Float", "parse")];
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///

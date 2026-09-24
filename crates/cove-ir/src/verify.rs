@@ -101,23 +101,24 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
     }
 }
 
-/// ADR 0064's Decision 4 for `Value.admitKey`, which is the one of the three
-/// whose fallback is reached from more than a box — and the one whose rule
-/// therefore has to be asked before the optimizer runs.
+/// ADR 0064's Decision 4 for `core.admitKey`, which is the one of the
+/// layout-directed operations whose call site is two walks and not one — and
+/// whose rule therefore has to be asked before the optimizer runs.
 ///
-/// # Why the fallback is reached from more than a box
+/// # Why the call site is two walks
 ///
-/// The other two layout-directed walks answer a value. This one answers `()`
-/// or raises, and its refusal is
-/// `` `{method}` cannot use a `{type}` inside `{path}` as a {role} `` **with
-/// a `rule:` and a `help:` beside it** — three sentences, and
-/// [`crate::Inst::Trap`] takes a slot for each. Every hole in that sentence
-/// is something the lowering knows, except where `path` reaches through a
-/// run or a map: there it quotes an index or a rendered key computed at run
-/// time, which is issue #461's kind and not something `lower::synth`'s walks
-/// build. So `lower::synth`'s admission walk proves what it can and hands
-/// the runtime the whole key wherever it cannot, and the sentence stays the
-/// runtime's, unchanged to the byte. See `lower::synth::Synth::ask`.
+/// The other walks answer a value. An admission answers `()` or raises, and
+/// its refusal is `` `{method}` cannot use a `{type}` inside `{path}` as a
+/// {role} `` with a `rule:` and a `help:` beside it, where the path quotes an
+/// index or a map's key as it renders. Text is work the path that admits
+/// never does, so `lower::core` emits the walk that decides — `refuses<L>`, or
+/// `std.dynamic.refusesKey` for a box — and, under a `branch-false` on what it
+/// answered, the walk that words the refusal: `describes<L>`, or
+/// `std.dynamic.refuseKey` for a box ([ADR
+/// 0068](../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+/// Phase 4c, which deleted the `Value.admitKey` intrinsic that stood under the
+/// branch until then). A key every value of whose layout is refused is a
+/// literal sentence and a trap, and has neither.
 ///
 /// # Why it is a pass of its own, and why it runs first
 ///
@@ -129,51 +130,42 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
 /// expansion record names. Asked there, the rule could only be satisfied by
 /// recognising the walk by its *name*, which is the one thing ADR 0064 says
 /// nothing may do. Asked here — over the program as the lowering emitted it —
-/// it is a fact about three adjacent instructions.
+/// it is a fact about a few adjacent instructions.
+///
+/// # What a wording call is, recognised by shape
+///
+/// A call, outside support code, of support code ([`Function::is_support`]:
+/// a walk `lower::synth` composed, or `std.dynamic`) that answers `()` and
+/// takes a key and `core.admitKey`'s two names — `(L, String, String)`, which
+/// is `describes<L>` and no other support function — or a box, the two names,
+/// the path to the box and a render path, which is `std.dynamic.refuseKey`
+/// and no other. A wording walk's own calls are support code calling support
+/// code, and are the walk's business.
 ///
 /// # What it refuses
 ///
-/// A layout every value of which is a key: there is nothing to ask, and a
-/// site that asked anyway would be paying for an answer the layout already
-/// gave. This is the clause that keeps `always_admitted`'s short circuit
-/// honest — it is why `covefmt` and `cq` reach the operation at no site, and
-/// a lowering that stopped asking it would be caught here rather than in a
-/// benchmark.
+/// A layout every value of which is a key: there is nothing to word, and a
+/// site that worded anyway would be a refusal the layout already rules out.
+/// This is the clause that keeps `always_admitted`'s short circuit honest — it
+/// is why `covefmt` and `cq` reach the operation at no site, and a lowering
+/// that stopped asking it would be caught here rather than in a benchmark.
 ///
-/// And a layout the walk decides, asked about *unguarded*. The lowering emits
-/// the walk, a `branch-false` on what it answered, and the intrinsic under
-/// it; this is those three instructions read back, so a site that skipped the
-/// first two is a site that asked the runtime a question the layout had
-/// already narrowed.
-///
-/// **That is the cheap way out of the migration that added it.** An enum
-/// needs a `switch`, an array needs a loop, a map needs a loop at the entry's
-/// width — and every one of those could have been made to work by handing the
-/// layout to the intrinsic instead. Nothing else in this repository would
-/// have noticed: the answers would still be right, the corpus green, the
-/// architecture exactly where it was.
-///
-/// A box is held to the same rule since [ADR
-/// 0068](../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-/// Phase 3. Its layout names no walk, but `std.dynamic.refusesKey` decides it
-/// in Cove over a view, so a boxed key is `lower::synth::Admission::Decided`
-/// and its intrinsic is guarded by a call of that function exactly as a known
-/// layout's is guarded by its walk — and a boxed site asked about unguarded is
-/// the same cheap way out, taken for the one layout the migration was about.
+/// And a wording call *unguarded*: not under the branch on what a walk of the
+/// same key's layout decided. That is the cheap way out — the whole key handed
+/// to the wording on every call, which would answer the same and put text on
+/// the path that admits — and nothing else in this repository would notice:
+/// the answers would still be right and the corpus green.
 pub fn one_admission_boundary(program: &Program) -> Result<(), Vec<Invalid>> {
     let mut faults = Vec::new();
     for function in &program.functions {
+        if function.is_support() {
+            continue;
+        }
         for (pc, inst) in function.code.iter().enumerate() {
-            let Inst::IntrinsicCall { site, args, .. } = inst else {
+            let Inst::Call { callee, args, .. } = inst else {
                 continue;
             };
-            let Some(called) = program.intrinsic_sites.get(site.index()) else {
-                continue;
-            };
-            if called.intrinsic != crate::Intrinsic::ValueAdmitKey {
-                continue;
-            }
-            if args.index() >= program.args.len() {
+            if !words_a_refusal(program, *callee) || args.index() >= program.args.len() {
                 continue;
             }
             let Some(arg) = program.arg_list(*args).first().copied() else {
@@ -182,36 +174,19 @@ pub fn one_admission_boundary(program: &Program) -> Result<(), Vec<Invalid>> {
             if arg.layout.index() >= program.layouts.len() {
                 continue;
             }
-            let described = program.layout(arg.layout);
-            let name = described.name.clone();
+            let name = program.layout(arg.layout).name.clone();
             let admission = crate::lower::synth::admission(&program.layouts, arg.layout);
             let what = if admission == crate::lower::synth::Admission::Always {
                 format!(
-                    "asks `Value.admitKey` about a `{name}`, every value of which is a key; \
-                     ADR 0064's Decision 4 admits this fallback where the layout does not \
-                     answer, and this one answers"
+                    "words the refusal of a `{name}` as a key, every value of which is a key; \
+                     ADR 0064's Decision 4 has `core.admitKey` ask nothing where the layout \
+                     answers, and this one answers"
                 )
-            } else if admission == crate::lower::synth::Admission::Decided
-                && matches!(described.shape, Shape::Boxed)
-                && !guarded_by_a_walk(program, function, pc, arg)
-            {
+            } else if !guarded_by_a_walk(program, function, pc, arg) {
                 format!(
-                    "passes operand 0 of `Value.admitKey` a `{name}` unguarded; ADR 0068's Phase \
-                     3 decides an erased key in `std.dynamic.refusesKey`, and this fallback words \
-                     the refusal that call found, under the branch on what it answered"
-                )
-            } else if admission == crate::lower::synth::Admission::Decided
-                && crate::lower::synth::walks(
-                    crate::lower::synth::Operation::Admission,
-                    &described.shape,
-                )
-                && !guarded_by_a_walk(program, function, pc, arg)
-            {
-                format!(
-                    "passes operand 0 of `Value.admitKey` a `{name}`, whose layout says which \
-                     of its values are keys; ADR 0064's Decision 4 admits this fallback from a \
-                     value the layout does not answer for, and a layout that answers is a walk \
-                     `lower::synth` writes"
+                    "words the refusal of a `{name}` as a key unguarded; ADR 0068's Phase 4c \
+                     words a refusal only under the branch on what the walk that decides it — \
+                     `refuses<L>`, or `std.dynamic.refusesKey` for a box — answered"
                 )
             } else {
                 continue;
@@ -230,13 +205,50 @@ pub fn one_admission_boundary(program: &Program) -> Result<(), Vec<Invalid>> {
     }
 }
 
-/// Whether the `Value.admitKey` at `pc` is the one under the branch on what a
-/// walk of `arg`'s layout answered.
+/// Whether `callee` is a wording walk, by its shape: see
+/// [`one_admission_boundary`].
+fn words_a_refusal(program: &Program, callee: FunctionId) -> bool {
+    let Some(called) = program.functions.get(callee.index()) else {
+        return false;
+    };
+    let unit = program
+        .layouts
+        .get(called.returns.index())
+        .is_some_and(|layout| layout.shape == Shape::Word(Repr::Unit));
+    if !called.is_support() || !unit {
+        return false;
+    }
+    let text = program.str_layout;
+    let boxed = |layout: &LayoutId| {
+        program
+            .layouts
+            .get(layout.index())
+            .is_some_and(|layout| layout.shape == Shape::Boxed)
+    };
+    match called.params.as_slice() {
+        [_, method, role] => *method == text && *role == text,
+        [key, method, role, path, quoted] => {
+            boxed(key)
+                && *method == text
+                && *role == text
+                && *path == text
+                && *quoted == program.render_path_layout
+        }
+        _ => false,
+    }
+}
+
+/// Whether the wording call at `pc` is the one under the branch on what a walk
+/// of `arg`'s layout decided.
 ///
-/// The three instructions `lower::core::Body::admit_by_walk` emits, read
-/// back: a call to a body that takes one value of the layout and answers a
-/// `Bool`, a `branch-false` on what it answered that lands past this
-/// instruction, and this instruction. Recognised by shape and never by name.
+/// The instructions `lower::core::Body::admit_by_walk` emits, read back: a
+/// call to a body that takes one value of the layout and answers a `Bool`, a
+/// `branch-false` on what it answered that lands past this instruction, and
+/// this instruction — with, between the branch and it, nothing but the
+/// constants a wording call of a box is handed, the empty path to the box and
+/// an empty render path; and between it and the landing nothing but the
+/// clears of those, which are under the branch so that the path that admits
+/// does not clear what it never made. Recognised by shape and never by name.
 ///
 /// So a boxed key's guard is accepted by the same test: the body it calls is
 /// `std.dynamic.refusesKey`, which takes one erased value and answers a `Bool`
@@ -248,16 +260,33 @@ fn guarded_by_a_walk(
     pc: usize,
     arg: crate::program::Arg,
 ) -> bool {
-    let Some(call) = pc.checked_sub(2) else {
+    let mut at = pc;
+    while let Some(before) = at.checked_sub(1) {
+        match function.code.get(before) {
+            Some(Inst::Str { .. } | Inst::AddrOfSlot { .. } | Inst::Int { .. }) => at = before,
+            _ => break,
+        }
+    }
+    let Some(branch) = at.checked_sub(1) else {
+        return false;
+    };
+    let Some(call) = branch.checked_sub(1) else {
         return false;
     };
     let Some(Inst::Call { dst, callee, args }) = function.code.get(call) else {
         return false;
     };
-    let Some(Inst::BranchFalse { cond, to }) = function.code.get(pc - 1) else {
+    let Some(Inst::BranchFalse { cond, to }) = function.code.get(branch) else {
         return false;
     };
-    if cond != dst || *to as usize != pc + 1 {
+    let landing = *to as usize;
+    let cleared = landing > pc
+        && function.code.get(pc + 1..landing).is_some_and(|between| {
+            between
+                .iter()
+                .all(|inst| matches!(inst, Inst::Clear { .. }))
+        });
+    if cond != dst || !cleared {
         return false;
     }
     let Some(walk) = program.functions.get(callee.index()) else {
@@ -3648,43 +3677,34 @@ mod tests {
             vec![Repr::Unit, Repr::Ref, Repr::Bool],
             UNIT,
             vec![
-                Inst::IntrinsicCall {
+                Inst::Call {
                     dst: 0,
-                    site: crate::SiteId(0),
+                    callee: FunctionId(1),
                     args: crate::ArgsId(0),
                 },
                 Inst::Return { src: 0 },
             ],
         );
-        let mut held = program(vec![f]);
-        held.intrinsic_sites = vec![crate::IntrinsicSite {
-            intrinsic: crate::Intrinsic::ValueAdmitKey,
-            result: UNIT,
-        }];
-        held.args = vec![vec![
-            Arg {
-                slot: 2,
-                layout: POINT,
-            },
-            Arg {
-                slot: 1,
-                layout: STR,
-            },
-            Arg {
-                slot: 1,
-                layout: STR,
-            },
-        ]];
+        let mut takes = function(
+            vec![Repr::Int, Repr::Int, Repr::Unit],
+            UNIT,
+            vec![Inst::Unit { dst: 2 }, Inst::Return { src: 2 }],
+        );
+        takes.params = vec![POINT];
+        let mut held = program(vec![f, takes]);
+        held.args = vec![vec![Arg {
+            slot: 2,
+            layout: POINT,
+        }]];
         // The call was `Value.order` over a `Point` and an `Int` until ADR
         // 0068's Phase 3 made the order `std.dynamic.order` and deleted the
-        // variant, and ADR 0064's Decision 4 spoke beside this sentence then.
-        // `Value.admitKey` takes a value of any layout first and its two
-        // names after it, and its own boundary is
-        // [`one_admission_boundary`]'s pass rather than this one's, so what is
-        // left is the sentence the case is about.
+        // variant, and then `Value.admitKey` over a `Point` and its two names
+        // until the ADR's Phase 4c deleted that one. No intrinsic left takes a
+        // value two words wide, so the call is an ordinary one to a function
+        // that takes a `Point`, and its argument is checked the same way.
         assert_eq!(
             faults(&held),
-            vec!["argument 0 is `Point`, 2 words at slot 2, and the frame has 3"]
+            vec!["argument 0 of `m.f` is `Point`, 2 words at slot 2, and the frame has 3"]
         );
     }
 
@@ -3849,88 +3869,108 @@ mod tests {
         // `no_intrinsic_is_a_collection_operation` now asserts unconditionally
         // that no operand is one.
 
-        // `Value.admitKey` is a value intrinsic, so the *category* refusal
-        // above is silent for it — an `Array<Int>` operand is not "a
-        // collection a Text intrinsic takes none of". This half stood on
-        // `Value.order` until ADR 0068's Phase 3 deleted that variant, and ADR
-        // 0064's Decision 4 spoke instead of the category then, one sentence
-        // per operand; the admission's Decision 4 is
-        // [`one_admission_boundary`]'s, a pass of its own, so here nothing
-        // speaks at all, which is the half this is about.
-        let string = |slot| Arg { slot, layout: STR };
-        let held = calling(
-            crate::Intrinsic::ValueAdmitKey,
-            UNIT,
-            vec![Repr::Unit, Repr::Ref, Repr::Ref],
-            vec![array(1), string(2), string(2)],
-        );
-        assert_eq!(faults(&held), Vec::<String>::new());
+        // A second half stood here, holding a *value* intrinsic silent over
+        // the same `Array<Int>`: `Value.order` until ADR 0068's Phase 3, and
+        // then `Value.admitKey` until its Phase 4c deleted the last variant of
+        // `Category::Value`. No intrinsic left takes a value of any layout, so
+        // there is nothing to build the silent half out of.
     }
 
-    /// ADR 0068's Phase 3 for [`one_admission_boundary`]: a boxed key is
-    /// asked about only under the branch on a decision.
+    /// ADR 0068's Phase 4c for [`one_admission_boundary`]: a refusal is
+    /// worded only under the branch on a decision.
     ///
-    /// Unguarded, it is the cheap way out of the migration — the whole key
-    /// handed to the runtime to decide, where `std.dynamic.refusesKey` decides
-    /// it in Cove. Under a `branch-false` on a call that takes one erased value
-    /// and answers a `Bool` it is the shape `lower::core` emits, recognised by
-    /// shape and not by the callee's name.
+    /// Unguarded, it is the cheap way out — the whole key handed to the
+    /// wording on every call, which answers the same and puts text on the
+    /// path that admits. Under a `branch-false` on a call that takes one value
+    /// of the key's layout and answers a `Bool` it is the shape `lower::core`
+    /// emits, recognised by shape and not by either callee's name: here the
+    /// box's, `std.dynamic.refuseKey` over the box, the two names, the empty
+    /// path to it and an empty render path, which the site makes between the
+    /// branch and the call.
     #[test]
-    fn a_boxed_admission_is_asked_about_only_under_a_decision() {
+    fn a_refusal_is_worded_only_under_a_decision() {
         let string = |slot| Arg { slot, layout: STR };
         let key = Arg {
             slot: 1,
             layout: BOXED,
         };
-        let unguarded = calling(
-            crate::Intrinsic::ValueAdmitKey,
-            UNIT,
-            vec![Repr::Unit, Repr::Ref, Repr::Ref],
-            vec![key, string(2), string(2)],
-        );
+        let path = Arg {
+            slot: 4,
+            layout: PATH,
+        };
+        let reprs = || {
+            vec![
+                Repr::Unit,
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Bool,
+                Repr::Addr,
+                Repr::Int,
+            ]
+        };
         let faults = |program: &Program| match one_admission_boundary(program) {
             Ok(()) => Vec::new(),
             Err(items) => items.into_iter().map(|item| item.what).collect(),
         };
-        assert_eq!(
-            faults(&unguarded),
+        let mut words = function(
             vec![
-                "passes operand 0 of `Value.admitKey` a `Any` unguarded; ADR 0068's Phase 3 \
-                 decides an erased key in `std.dynamic.refusesKey`, and this fallback words the \
-                 refusal that call found, under the branch on what it answered"
-            ]
-        );
-
-        let site = function(
-            vec![Repr::Unit, Repr::Ref, Repr::Ref, Repr::Bool],
-            UNIT,
-            vec![
-                Inst::Call {
-                    dst: 3,
-                    callee: FunctionId(1),
-                    args: crate::ArgsId(1),
-                },
-                Inst::BranchFalse { cond: 3, to: 3 },
-                Inst::IntrinsicCall {
-                    dst: 0,
-                    site: crate::SiteId(0),
-                    args: crate::ArgsId(0),
-                },
-                Inst::Return { src: 0 },
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Addr,
+                Repr::Int,
             ],
+            UNIT,
+            Vec::new(),
         );
+        words.module = std::sync::Arc::from("std.dynamic");
+        words.params = vec![BOXED, STR, STR, STR, PATH];
         let mut decides = function(
             vec![Repr::Ref, Repr::Bool],
             crate::lower::shapes_bool(),
             Vec::new(),
         );
         decides.params = vec![BOXED];
-        let mut guarded = program(vec![site, decides]);
-        guarded.intrinsic_sites = vec![crate::IntrinsicSite {
-            intrinsic: crate::Intrinsic::ValueAdmitKey,
-            result: UNIT,
-        }];
-        guarded.args = vec![vec![key, string(2), string(2)], vec![key]];
+        let words_call = Inst::Call {
+            dst: 0,
+            callee: FunctionId(1),
+            args: crate::ArgsId(0),
+        };
+        let constants = [
+            Inst::Str {
+                dst: 2,
+                text: crate::StrId(0),
+            },
+            Inst::AddrOfSlot { dst: 4, slot: 4 },
+            Inst::Int { dst: 5, value: 0 },
+        ];
+
+        let mut code = constants.to_vec();
+        code.extend([words_call.clone(), Inst::Return { src: 0 }]);
+        let mut unguarded = program(vec![function(reprs(), UNIT, code), words.clone()]);
+        unguarded.args = vec![vec![key, string(2), string(2), string(2), path]];
+        assert_eq!(
+            faults(&unguarded),
+            vec![
+                "words the refusal of a `Any` as a key unguarded; ADR 0068's Phase 4c words a \
+                 refusal only under the branch on what the walk that decides it — \
+                 `refuses<L>`, or `std.dynamic.refusesKey` for a box — answered"
+            ]
+        );
+
+        let mut code = vec![
+            Inst::Call {
+                dst: 3,
+                callee: FunctionId(2),
+                args: crate::ArgsId(1),
+            },
+            Inst::BranchFalse { cond: 3, to: 6 },
+        ];
+        code.extend(constants);
+        code.extend([words_call, Inst::Return { src: 0 }]);
+        let mut guarded = program(vec![function(reprs(), UNIT, code), words, decides]);
+        guarded.args = vec![vec![key, string(2), string(2), string(2), path], vec![key]];
         assert_eq!(faults(&guarded), Vec::<String>::new());
     }
 

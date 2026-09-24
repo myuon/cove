@@ -1,0 +1,2 @@
+about to use a node holding a shared cell as a set element
+Node(next: Some(<shared>), label: outer)

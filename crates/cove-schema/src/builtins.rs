@@ -3135,12 +3135,14 @@ pub const CORE_RENDER_PATH_TYPE: &str = "RenderPath";
 
 /// `core.dynamicTypeName(view: DynamicView) -> String`: the name a rendering
 /// shows for the struct a view names — its declared name without type
-/// arguments or module, so `m.Cell<Int>` is `Cell`.
+/// arguments or module, so `m.Cell<Int>` is `Cell` — and the same name of the
+/// enum a view names, which the refusal of a boxed key begins its path with
+/// (ADR 0068's Phase 4c).
 ///
 /// One `Inst::DynTypeName`, which loads a `String` the machine placed before
 /// the run, so it allocates nothing (issue #499's decision 4, option N1). A
-/// view of anything but a struct is an internal runtime error, held to
-/// [`CORE_DYNAMIC_BOOL`]'s rule.
+/// view of anything but a struct or an enum is an internal runtime error, held
+/// to [`CORE_DYNAMIC_BOOL`]'s rule.
 pub const CORE_DYNAMIC_TYPE_NAME: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "dynamicTypeName",
     generics: &[],

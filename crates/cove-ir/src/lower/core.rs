@@ -8,7 +8,7 @@
 //! table. The checker admits such a call only inside a standard-library module,
 //! and this is the lowering's half: each entry becomes run instructions in the
 //! frame the call is written in, and never an [`Inst::IntrinsicCall`] that names
-//! a method — the keyed walks below are the one exception, and they name a
+//! a method — `core.refuseByteRange` below is the one exception, and it names a
 //! static intrinsic identity. A core intrinsic is not a name for the machine to
 //! dispatch on; it is the operation the name stands for.
 //!
@@ -36,19 +36,21 @@
 //! since ADR 0068's Phase 3 — only where the key is erased (ADR 0064,
 //! Decisions 3 and 4);
 //! `core.admitKey` is nothing at all where the key's layout cannot hold a
-//! refused part, a call into the walk `super::synth` composes out of it where
-//! it can and the layout says which values, and an
-//! `Intrinsic::ValueAdmitKey` where the key is erased or holds itself.
+//! refused part, a literal refusal where every value of it is refused, and
+//! otherwise a call into the walk `super::synth` composes out of the layout —
+//! `std.dynamic.refusesKey` for a box — with the walk that words the refusal
+//! under the branch on its answer. It was an `Intrinsic::ValueAdmitKey` where
+//! the key was erased or held itself, and under every such branch, until ADR
+//! 0068's Phase 4c wrote the refusal in Cove and in synthesized IR.
 //! `core.refuseDuplicate` stood beside them until ADR 0067 gave the standard
 //! library [`Inst::Trap`]'s three slots: a duplicate in `Set.of` or `Map.of` is
 //! refused by `std.set` and `std.map` themselves, through `core.refuse`.
 //!
-//! `core.refuseByteRange` is a fourth of the same kind, and for the same
-//! reason: `std.stringbuilder`'s `appendRange` decides a byte range in Cove and
-//! has nothing to raise with, so ADR 0062 gives it
-//! `Intrinsic::StringRefuseByteRange`, which never answers. Those four are the
-//! only calls this file emits, and each is a static identity rather than a
-//! name.
+//! `core.refuseByteRange` is of the same kind, and for the same reason:
+//! `std.stringbuilder`'s `appendRange` decides a byte range in Cove and has
+//! nothing to raise with, so ADR 0062 gives it
+//! `Intrinsic::StringRefuseByteRange`, which never answers. It is the only
+//! intrinsic this file emits, and it is a static identity rather than a name.
 //!
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
@@ -62,7 +64,7 @@
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
-use cove_syntax::ast::{Arg, Expr, ExprKind};
+use cove_syntax::ast::{Arg, Expr, ExprKind, StrPart};
 
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, BUFFER_STORE, VECTOR_LEN, VECTOR_STORE};
@@ -71,6 +73,22 @@ use crate::inst::{CmpOp, Inst, Len, Slot, Storage, Validation};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::{Arg as Operand, IntrinsicSite};
+
+/// The text of a string literal with nothing interpolated into it, or `None`
+/// for any other expression.
+fn literal_text(expr: &Expr) -> Option<String> {
+    let ExprKind::Str(parts) = &expr.kind else {
+        return None;
+    };
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            StrPart::Text(more) => text.push_str(more),
+            StrPart::Interpolation(_) => return None,
+        }
+    }
+    Some(text)
+}
 
 /// Which half of ADR 0062's reservation [`Body::core_vector_reserve`] emits.
 #[derive(Clone, Copy)]
@@ -1383,20 +1401,19 @@ impl Body<'_> {
     ///   layout is ever refused, so there is nothing to ask, and the call
     ///   answers a `()` only if something reads one. Every key `covefmt` and
     ///   `cq` use is a `String` or an `Int`, so this arm is why neither
-    ///   program reaches `Value.admitKey` at a single site.
-    /// - [`synth::Admission::Decided`] of a composite: one [`Inst::Call`] of
-    ///   the walk `super::synth` composes out of the layout (ADR 0064,
-    ///   Decision 3), which reads whatever decides and hands the key on only
-    ///   where the answer is that it is refused.
-    /// - [`synth::Admission::Decided`] of a box: the same shape, with one
-    ///   [`Inst::Call`] of `std.dynamic.refusesKey` in the walk's place — Cove
-    ///   over a view of the box, since [ADR
-    ///   0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    ///   Phase 3 — because no layout says what the box holds.
-    /// - otherwise one [`Inst::IntrinsicCall`] of
-    ///   [`Intrinsic::ValueAdmitKey`] over the key and the two names: a layout
-    ///   that holds itself, and the scalars and handles the language refuses
-    ///   outright, which are one value and not a walk.
+    ///   program asks an admission anything at a single site.
+    /// - A layout every value of which is refused — a `Float`, a `Vector`, a
+    ///   function, a handle ([`synth::refused_whole`]): **the refusal itself**,
+    ///   a sentence of literals and one [`Inst::Trap`]. See
+    ///   [`Body::refuse_whole`].
+    /// - [`synth::Admission::Decided`] of any other layout: the walk that
+    ///   decides, and under the one branch its answer decides, the walk that
+    ///   words the refusal. See [`Body::admit_by_walk`].
+    ///
+    /// Nothing here is an [`Inst::IntrinsicCall`] any more. `Value.admitKey`
+    /// worded every refusal in Rust until [ADR
+    /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+    /// Phase 4c, and its variant is deleted.
     fn core_admit_key(
         &mut self,
         expr: &Expr,
@@ -1420,48 +1437,123 @@ impl Body<'_> {
             };
         }
         let shape = self.pool.shapes.layout(layout).shape.clone();
-        if admission == synth::Admission::Decided
-            && (synth::walks(synth::Operation::Admission, &shape) || self.is_boxed(layout))
-        {
-            return self.admit_by_walk(expr, key, [method, role], layout, want);
+        if synth::refused_whole(&shape) {
+            return self.refuse_whole(expr, key, [method, role], &shape, want);
         }
-        self.keyed_refusal(Intrinsic::ValueAdmitKey, expr, key, [method, role], want)
+        self.admit_by_walk(expr, key, [method, role], layout, want)
     }
 
-    /// The walk `super::synth` composes out of `layout`, and the intrinsic
-    /// under the one branch its answer decides.
+    /// The refusal of a key every value of whose layout is refused — a
+    /// `Float`, a `Vector`, a function, a handle: `` `{method}` cannot use a
+    /// `{type}` as a {role} ``, its rule and its help, each a literal, and one
+    /// [`Inst::Trap`].
+    ///
+    /// There is no walk and nothing to decide: the key is the part that is
+    /// refused, so the path is empty, and the type is the layout's
+    /// ([`synth::refused_word`]). The method and the role are the two literal
+    /// arguments every one of `std.set`'s and `std.map`'s nine `core.admitKey`
+    /// calls passes, so the whole sentence is known here and costs no string
+    /// at run time — three [`Inst::Str`]s of placed literals (ADR 0045), which
+    /// is what ADR 0067 says a constant refusal costs.
+    ///
+    /// The trap is at the site, in the caller's frame, which is where the
+    /// runtime's `Value.admitKey` raised it: the diagnostic is blamed where it
+    /// was, `in the standard library` block and all.
+    fn refuse_whole(
+        &mut self,
+        expr: &Expr,
+        key: &Expr,
+        [method, role]: [&Expr; 2],
+        shape: &crate::layout::Shape,
+        want: Option<Dest>,
+    ) -> Val {
+        let (Some(method), Some(role)) = (literal_text(method), literal_text(role)) else {
+            self.errors.push(super::gap::gap(
+                "`core.admitKey` whose method and role are not literals: the standard library \
+                 names both with literals at every site, and the refusal of a key refused whole \
+                 is written out of them",
+                expr.span,
+            ));
+            return self.dead(expr);
+        };
+        let held = self.expr(key);
+        self.release(held, expr.span);
+        let word = synth::refused_word(shape);
+        let (rule, help) = crate::dynamic::refused_key(word);
+        let dst = self.answer_at(want, shapes::UNIT);
+        let message = self.literal_text_at(
+            &format!("`{method}` cannot use a `{word}` as a {role}"),
+            expr.span,
+        );
+        let rule = self.literal_text_at(rule, expr.span);
+        let help = self.literal_text_at(help, expr.span);
+        self.emit(
+            Inst::Trap {
+                message: message.slot,
+                rule: rule.slot,
+                help: help.slot,
+            },
+            expr.span,
+        );
+        self.release(help, expr.span);
+        self.release(rule, expr.span);
+        self.release(message, expr.span);
+        dst
+    }
+
+    /// A location holding the literal `text`, placed before the run.
+    fn literal_text_at(&mut self, text: &str, span: Span) -> Val {
+        let id = self.string(text);
+        let dst = self.temp(shapes::STR);
+        self.emit(
+            Inst::Str {
+                dst: dst.slot,
+                text: id,
+            },
+            span,
+        );
+        dst
+    }
+
+    /// The walk that decides whether the key is refused, and under the one
+    /// branch its answer decides, the walk that words the refusal.
     ///
     /// ```text
     ///   call     refused, refuses<Mark#16>(key)
     ///   branch-false refused -> past
-    ///   intrinsic-call Value.admitKey(key, method, role)
+    ///   call     (), describes<Mark#16>(key, method, role)
     /// past:
     /// ```
     ///
-    /// A key that is a box has no layout to compose a walk out of, and the
-    /// call is of `std.dynamic.refusesKey` instead — the same three
-    /// instructions, and the same answer, decided in Cove over a view of the
-    /// box ([ADR
+    /// Both walks are composed out of `layout` by `super::synth` (ADR 0064's
+    /// Decision 3): `refuses<L>` answers one `Bool` and allocates nothing,
+    /// which is all the path that admits — every path a program that works
+    /// takes — ever runs; and `describes<L>` walks the same parts again, on the
+    /// path that ends the run, and raises the sentence the runtime's
+    /// `Value.admitKey` raised until [ADR
     /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-    /// Phase 3). A walk composed for a known layout that reaches a boxed part
-    /// calls it too, from a function that cannot resolve a name, so it is
-    /// resolved here first — [`synth::reaches_a_box`]'s arrangement for the
-    /// other two operations. `None` is a round that has to lower the package
-    /// again with it in the slice, and nothing this round emits is verified,
-    /// so the stand-in is the unguarded intrinsic, which is always correct.
+    /// Phase 4c: the path from the key to the part that is refused, which
+    /// quotes an index or a map's key as it renders.
     ///
-    /// The intrinsic stays **here**, at the site, in this frame, over this
-    /// key — which is where it was before this migration and is the whole of
-    /// why the diagnostic does not move. A refusal names the path from the
-    /// key to the part that is wrong and is blamed on the caller by reading
-    /// the live frames (ADR 0058); a fallback raised from inside the walk
-    /// would have added a frame and a second `in the standard library` label
-    /// pointing at the line the first already pointed at. So the walk answers
-    /// a bit and this decides what to do with it.
+    /// A key that is a box has no layout to compose either walk out of, and the
+    /// two calls are of Cove instead: `std.dynamic.refusesKey`, which decides
+    /// over a view of the box (the ADR's Phase 3), and `std.dynamic.refuseKey`,
+    /// which words over one, handed an empty path — the box is the key — and
+    /// the empty path of vectors a map key it quotes renders under.
     ///
-    /// The answer's sense is `true` for "ask the runtime", because the
-    /// instruction set has a `branch-false` and no `branch-true`, and the
-    /// `()` is written before the branch so that both paths leave it written.
+    /// Whatever either wording walk calls is resolved here first, because a
+    /// walk cannot resolve a name: the appends and `std.int.renderInto` its
+    /// path is written with, the rendering of every map key it can quote
+    /// ([`synth::quoted_keys`]), the two `std.dynamic` functions where it
+    /// reaches a box, and the trail it hands a wording walk it calls where the
+    /// layout holds itself ([`synth::needs_trail`]). `None` from any of them is
+    /// a round that has to lower the package again with it in the slice, and
+    /// nothing this round emits is verified, so the stand-in asks nothing.
+    ///
+    /// **The refusal is blamed on this line.** Both wording walks are support
+    /// code ([`crate::Function::is_support`]), so the trap they end in is
+    /// blamed on the call here, with this line's `in the standard library`
+    /// block — where the intrinsic that stood under the branch was blamed.
     fn admit_by_walk(
         &mut self,
         expr: &Expr,
@@ -1473,38 +1565,47 @@ impl Body<'_> {
         let boxed = self.is_boxed(layout);
         let reflected =
             boxed || synth::reaches_a_box(&self.pool.shapes, synth::Operation::Admission, layout);
-        let refuses_key = if reflected {
-            match self.dynamic_refuses_key(expr.span) {
-                Some(id) => Some(id),
-                None => {
-                    return self.keyed_refusal(
-                        Intrinsic::ValueAdmitKey,
-                        expr,
-                        key,
-                        [method, role],
-                        want,
-                    )
-                }
+        let mut resolved = true;
+        let (mut decide, mut word) = (None, None);
+        if reflected {
+            decide = self.dynamic_refuses_key(expr.span);
+            word = self.dynamic_refuse_key(expr.span);
+            resolved &= decide.is_some() && word.is_some();
+        }
+        if !boxed {
+            resolved &= self.render_leaves(expr.span).is_some();
+            for quoted in synth::quoted_keys(&self.pool.shapes, layout) {
+                resolved &= self.render_leaves_for(quoted, expr.span).is_some();
             }
-        } else {
-            None
-        };
+            if synth::needs_trail(&self.pool.shapes, layout) {
+                resolved &= self.wording_trail(expr.span).is_some();
+            }
+        }
+        if !resolved {
+            let held = self.expr(key);
+            self.release(held, expr.span);
+            return match want {
+                Some(_) => self.unit_answer(expr, want),
+                None => self.temp(shapes::UNIT),
+            };
+        }
         let held = self.expr(key);
         let method = self.expr(method);
         let role = self.expr(role);
         let dst = self.answer_at(want, shapes::UNIT);
         self.emit(Inst::Unit { dst: dst.slot }, expr.span);
-        let callee = match refuses_key {
-            Some(callee) if boxed => callee,
+        let (decide, word) = match (decide, word) {
+            (Some(decide), Some(word)) if boxed => (decide, Some(word)),
             _ => {
                 let decls = self.plan.decls.len();
-                synth::function_for(
+                let decide = synth::function_for(
                     synth::Operation::Admission,
                     layout,
                     self.pool,
                     decls,
                     expr.span,
-                )
+                );
+                (decide, None)
             }
         };
         let refused = self.temp(shapes::BOOL);
@@ -1512,7 +1613,7 @@ impl Body<'_> {
         self.emit(
             Inst::Call {
                 dst: refused.slot,
-                callee,
+                callee: decide,
                 args,
             },
             expr.span,
@@ -1524,45 +1625,70 @@ impl Body<'_> {
             },
             expr.span,
         );
-        self.intrinsic_call(
-            Intrinsic::ValueAdmitKey,
-            shapes::UNIT,
-            dst.slot,
-            &[&held, &method, &role],
-            expr.span,
-        );
+        match word {
+            Some(callee) => {
+                let anchor = self.literal_text_at("", expr.span);
+                let quoted = self.temp(shapes::RENDER_PATH);
+                self.emit(
+                    Inst::AddrOfSlot {
+                        dst: quoted.slot,
+                        slot: quoted.slot,
+                    },
+                    expr.span,
+                );
+                self.emit(
+                    Inst::Int {
+                        dst: quoted.slot + crate::dynamic::PATH_DEPTH as Slot,
+                        value: 0,
+                    },
+                    expr.span,
+                );
+                let args = self.pool.args.intern(vec![
+                    held.arg(),
+                    method.arg(),
+                    role.arg(),
+                    anchor.arg(),
+                    quoted.arg(),
+                ]);
+                self.emit(
+                    Inst::Call {
+                        dst: dst.slot,
+                        callee,
+                        args,
+                    },
+                    expr.span,
+                );
+                // Freed under the branch, so that the path that admits does
+                // not clear what it never made.
+                self.release(quoted, expr.span);
+                self.release(anchor, expr.span);
+            }
+            None => {
+                let decls = self.plan.decls.len();
+                let callee = synth::function_for(
+                    synth::Operation::Description,
+                    layout,
+                    self.pool,
+                    decls,
+                    expr.span,
+                );
+                let args = self
+                    .pool
+                    .args
+                    .intern(vec![held.arg(), method.arg(), role.arg()]);
+                self.emit(
+                    Inst::Call {
+                        dst: dst.slot,
+                        callee,
+                        args,
+                    },
+                    expr.span,
+                );
+            }
+        }
         let past = self.here();
         self.patch(branch, past);
         self.release(refused, expr.span);
-        self.release(role, expr.span);
-        self.release(method, expr.span);
-        self.release(held, expr.span);
-        dst
-    }
-
-    /// One [`Inst::IntrinsicCall`] of a keyed refusal over a key and the two
-    /// names its message is written with, answering `()`.
-    ///
-    /// `Value.admitKey`'s, and once `Value.refuseDuplicate`'s too.
-    fn keyed_refusal(
-        &mut self,
-        intrinsic: Intrinsic,
-        expr: &Expr,
-        key: &Expr,
-        [method, role]: [&Expr; 2],
-        want: Option<Dest>,
-    ) -> Val {
-        let held = self.expr(key);
-        let method = self.expr(method);
-        let role = self.expr(role);
-        let dst = self.answer_at(want, shapes::UNIT);
-        self.intrinsic_call(
-            intrinsic,
-            shapes::UNIT,
-            dst.slot,
-            &[&held, &method, &role],
-            expr.span,
-        );
         self.release(role, expr.span);
         self.release(method, expr.span);
         self.release(held, expr.span);

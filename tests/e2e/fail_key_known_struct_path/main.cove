@@ -1,0 +1,40 @@
+use console.println
+
+/// One reading, whose weight is a `Float` and so not a key.
+struct Reading {
+  at: Int
+  weight: Float
+}
+
+/// A struct at the root of a key, holding an array of structs.
+struct Track {
+  name: String
+  points: Array<Reading>
+}
+
+/// Asks an empty `Set<Track>` whether it holds a track: the admission refuses
+/// the key and names the part, `Track.points[0].weight`.
+///
+/// Every step of the path is one a known layout writes: the struct at the
+/// root names itself by the name its declaration wrote, a field is `.name`, and
+/// an element is its index. The refused part is the first in the order the
+/// oracle's `MapKey::convert` visits — the first reading's weight, although
+/// every reading holds one. Since ADR 0068's Phase 4c the sentence is the
+/// synthesized wording walk's, `describes<Track>`, where it was the runtime's
+/// `Value.admitKey`.
+fn search() -> Result<Unit, Error> {
+  let seen: Set<Track> = Set.of()
+  let wanted = Track(
+    name: "morning",
+    points: [Reading(at: 1, weight: 1.5), Reading(at: 2, weight: 2.5)],
+  )
+  let found = seen.contains(wanted)
+  println("never printed {found}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to search an empty set for a track of readings")?
+  search()?
+  Ok(())
+}

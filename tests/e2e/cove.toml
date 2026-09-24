@@ -464,6 +464,30 @@ allow = ["console"]
 entry = "fail_key_boxed_deep_1000.main"
 allow = ["console"]
 
+[run.fail_key_boxed_map_key]
+entry = "fail_key_boxed_map_key.main"
+allow = ["console", "clock"]
+
+[run.fail_key_known_struct_path]
+entry = "fail_key_known_struct_path.main"
+allow = ["console"]
+
+[run.fail_key_known_enum_root]
+entry = "fail_key_known_enum_root.main"
+allow = ["console"]
+
+[run.fail_key_known_map_key]
+entry = "fail_key_known_map_key.main"
+allow = ["console"]
+
+[run.fail_key_known_shared]
+entry = "fail_key_known_shared.main"
+allow = ["console"]
+
+[run.fail_key_known_deep]
+entry = "fail_key_known_deep.main"
+allow = ["console"]
+
 [run.values_interpolation_order]
 entry = "values_interpolation_order.main"
 allow = ["console"]

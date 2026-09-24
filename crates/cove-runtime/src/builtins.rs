@@ -1128,6 +1128,7 @@ pub fn call_core(
         // before the run; here they are the value's own.
         "dynamicTypeName" => match args[0].erased() {
             Value(Repr::Struct(s)) => Ok(Value::string(cove_ir::dynamic::shown_name(&s.type_name))),
+            Value(Repr::Enum(e)) => Ok(Value::string(cove_ir::dynamic::shown_name(&e.type_name))),
             other => Err(dynamic_internal(format!(
                 "the name of a dynamic view of a {} was asked",
                 dynamic_kind(other).name()

@@ -1,0 +1,44 @@
+use console.println
+
+/// A two-word key, which a path through a map quotes as it renders.
+struct Point {
+  x: Int
+  y: Int
+}
+
+/// `fail_key_enum_case`'s enum, whose `Weight` case is refused.
+enum Mark {
+  Plain
+  Count(Int)
+  Weight(Float)
+}
+
+/// Asks an empty `Set<Array<Map<Point, Mark>>>` whether it holds an array of
+/// two maps, of which the second has a value in the refused case: the
+/// admission names it `[1][Point(x: 1, y: 2)](0)`.
+///
+/// A map is asked about its values and never its keys, which are keys by
+/// construction; and the value is named by its entry's key *as the key
+/// renders*, which is text a known layout's walk writes at run time — the
+/// rendering walk the lowering composes for `Point`, called from the wording
+/// walk it composes for the key since ADR 0068's Phase 4c. The first map's
+/// entries are admitted, so nothing of them is in the path.
+fn search() -> Result<Unit, Error> {
+  let seen: Set<Array<Map<Point, Mark>>> = Set.of()
+  let wanted = [
+    Map.of(MapEntry(key: Point(x: 5, y: 6), value: Mark.Count(1))),
+    Map.of(
+      MapEntry(key: Point(x: 0, y: 9), value: Mark.Plain),
+      MapEntry(key: Point(x: 1, y: 2), value: Mark.Weight(1.5)),
+    ),
+  ]
+  let found = seen.contains(wanted)
+  println("never printed {found}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to search an empty set for maps keyed by points")?
+  search()?
+  Ok(())
+}

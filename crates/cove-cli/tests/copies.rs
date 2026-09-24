@@ -1623,7 +1623,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// **65** is `values_boxed_render` existing, and **2** the `box.*` rows
 /// `values_render_cycle` gained; the rows `values_render_opaque` gained hold
 /// none.
-const FORWARDABLE_COPIES: usize = 10921;
+///
+/// **11,146 since ADR 0068's Phase 4c worded the refusal of a key in Cove and
+/// in synthesized walks.** The lowering moved it by **0**: with the six
+/// programs it added held out it is 10,921 over the same 233 programs, the
+/// figure above to the copy, although every whole-package lowering now holds
+/// `std.dynamic.refuseKey` and the thirteen functions written beside it, and
+/// every program with a key that can be refused its wording walks: the path
+/// they write goes into a buffer and the sentence into another, and neither is
+/// a value being moved. **225** is the six programs existing, each about
+/// what any small program holds: `fail_key_boxed_map_key` 39,
+/// `fail_key_known_struct_path` 36, `fail_key_known_enum_root` 36,
+/// `fail_key_known_map_key` 37, `fail_key_known_shared` 40 and
+/// `fail_key_known_deep` 37.
+const FORWARDABLE_COPIES: usize = 11146;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
