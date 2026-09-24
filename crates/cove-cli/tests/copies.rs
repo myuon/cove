@@ -1604,7 +1604,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `values_render_cycle` 43, `values_render_deep` 39 and
 /// `values_render_opaque` 36 — and **4** is the `tree` row `benches/rendering`
 /// gained, `countTree` and `treeRow`.
-const FORWARDABLE_COPIES: usize = 10622;
+///
+/// **10,921 since ADR 0068's Phase 4b-ii rendered an erased value in Cove.**
+/// The lowering moved it by **232**, and it is one copy in every program:
+/// with the new program and the new rows held out it is 10,854 over the same
+/// 232 programs, one more than 10,622 in each. `std.dynamic.renderInto` is
+/// not generic, so its walk is lowered into every package, and its `written`
+/// writes an `Int` through `std.int.renderInto` as an interpolation does —
+/// the call ADR 0068's Phase 4b-ii asks for, so that there is one text of an
+/// `Int`. That body is a leaf `lower::inline` expands, and its first
+/// statement, `var rest = value`, is the copy this file already names above:
+/// here it lands straight after the `dyn.read` that produced the argument,
+/// which is what this survey counts. It is a real forwarding candidate — the
+/// read could have written `rest` — and it cannot be taken out of `std.int`
+/// without moving every `Int` interpolation in `covefmt` and `cq`. A second,
+/// the loop's `()` copied into the answer of `renderBelow`, is not here: the
+/// function ends in `()`, as `std.int.renderInto` does for the same reason.
+/// **65** is `values_boxed_render` existing, and **2** the `box.*` rows
+/// `values_render_cycle` gained; the rows `values_render_opaque` gained hold
+/// none.
+const FORWARDABLE_COPIES: usize = 10921;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

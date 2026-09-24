@@ -56,7 +56,13 @@
     {"name": "dynamicChildCount", "signature": "core.dynamicChildCount(view: DynamicView) -> Int", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
     {"name": "dynamicChild", "signature": "core.dynamicChild(view: DynamicView, index: Int) -> DynamicView", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "index", "type": "Int"}], "result": "DynamicView", "libraryOnly": true},
     {"name": "dynamicSameObject", "signature": "core.dynamicSameObject(a: DynamicView, b: DynamicView) -> Bool", "generics": [], "params": [{"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true},
-    {"name": "dynamicNameOrder", "signature": "core.dynamicNameOrder(a: DynamicView, b: DynamicView) -> Int", "generics": [], "params": [{"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Int", "libraryOnly": true}
+    {"name": "dynamicNameOrder", "signature": "core.dynamicNameOrder(a: DynamicView, b: DynamicView) -> Int", "generics": [], "params": [{"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Int", "libraryOnly": true},
+    {"name": "dynamicTypeName", "signature": "core.dynamicTypeName(view: DynamicView) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "String", "libraryOnly": true},
+    {"name": "dynamicFieldName", "signature": "core.dynamicFieldName(view: DynamicView, index: Int) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "index", "type": "Int"}], "result": "String", "libraryOnly": true},
+    {"name": "dynamicCaseName", "signature": "core.dynamicCaseName(view: DynamicView) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "String", "libraryOnly": true},
+    {"name": "dynamicOpaque", "signature": "core.dynamicOpaque(view: DynamicView) -> Bool", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true},
+    {"name": "dynamicHandleText", "signature": "core.dynamicHandleText(view: DynamicView) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "String", "libraryOnly": true},
+    {"name": "dynamicOnPath", "signature": "core.dynamicOnPath(view: DynamicView, path: RenderPath) -> Bool", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "path", "type": "RenderPath"}], "result": "Bool", "libraryOnly": true}
   ],
   "types": [
     {

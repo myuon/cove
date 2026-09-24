@@ -4247,7 +4247,9 @@ export fn main() -> Int {
 /// describes every observation, where `std.dynamic.equals` only compares: it
 /// describes every node it reaches: its kind code,
 /// an enum's case, how many children, a scalar's value, and whether its first
-/// two children have one type. The values reach every kind a `dyn` erasure can
+/// two children have one type — and, since ADR 0068's Phase 4b-ii, a struct's
+/// name, whether it is opaque and its fields' names, and an enum's case name,
+/// which the machine reads as literals it placed before the run. The values reach every kind a `dyn` erasure can
 /// carry: a struct holding a nested struct, a `String`, an `Array`, a
 /// `Vector`, a `Set`, a `Map`, a `Range`, a `Float`, a `Duration`, a `Bool`,
 /// an `Option`, a `Result` and another erased value; an enum in each of its
@@ -4340,7 +4342,17 @@ fn probeDescribe(root: DynamicView) -> String {
     } else if kind == 5 {
       out = \"{out} '{core.dynamicString(view)}'\"
     } else if kind == 7 {
-      out = \"{out} k7#{core.dynamicCase(view)}/{count}\"
+      out = \"{out} k7#{core.dynamicCase(view)}/{count}:{core.dynamicCaseName(view)}\"
+    } else if kind == 6 {
+      out = \"{out} k6/{count}:{core.dynamicTypeName(view)}\"
+      if core.dynamicOpaque(view) {
+        out = \"{out}!\"
+      }
+      var field = 0
+      while field < count {
+        out = \"{out},{core.dynamicFieldName(view, field)}\"
+        field = field + 1
+      }
     } else {
       out = \"{out} k{kind}/{count}\"
     }
@@ -4440,6 +4452,10 @@ export fn main() -> String {
         "DynSameType",
         "DynSameObject",
         "DynNameOrder",
+        "DynTypeName",
+        "DynFieldName",
+        "DynCaseName",
+        "DynOpaque",
     ] {
         assert!(
             walk.code
@@ -4487,9 +4503,10 @@ export fn main() -> String {
     assert_eq!(
         oracle,
         Answer::Value(
-            " k6/13^-1 'bag' k6/2= 1 2 k8/2= 'a' 'b' k9/2=! 3 4 k10/2= 5 6 k11/2 'k' 7 k12/3= 1 4 \
-             false 1.5 2ms true k7#1/1 8 k7#1/1 'bad' k6/2= 9 10 | k7#0/0 | k7#1/1 3 | k7#2/1 \
-             'n' | k6/1 k13/0"
+            " k6/13:ProbeBag,name,at,tags,counts,seen,index,span,ratio,wait,on,maybe,outcome,\
+             inner^-1 'bag' k6/2:ProbeAt,x,y= 1 2 k8/2= 'a' 'b' k9/2=! 3 4 k10/2= 5 6 k11/2 'k' \
+             7 k12/3= 1 4 false 1.5 2ms true k7#1/1:Some 8 k7#1/1:Err 'bad' k6/2:ProbeAt,x,y= 9 \
+             10 | k7#0/0:Plain | k7#1/1:Count 3 | k7#2/1:Named 'n' | k6/1:ProbeHolds,step k13/0"
                 .to_string()
         )
     );
@@ -5827,9 +5844,11 @@ export fn deep() -> String { \"{chain(10000)}\" }
 /// boxed renderer exactly where the oracle does, because the whole of the
 /// path is the box's (issue #499's decision 2).
 ///
-/// A cycle that passes *through* a box is not here: until ADR 0068's Phase
-/// 4b-ii the static walk's path stops at the box and the boxed renderer starts
-/// its own, so the machine renders that repeat one vector later.
+/// A cycle that passes *through* a box is `tests/e2e/values_render_cycle`'s
+/// `box.*` rows, on all three evaluators: since ADR 0068's Phase 4b-ii the
+/// static walk hands its path to `std.dynamic.renderInto` at the box, where
+/// until then the boxed renderer started its own and rendered that repeat one
+/// vector later.
 #[test]
 fn a_cycle_wholly_inside_a_box_renders_its_repeat_on_both() {
     const SOURCE: &str = "trait Summary { fn summarize(self) -> String }

@@ -266,8 +266,9 @@ fn an_erased_value_reaches_the_one_dynamic_fallback() {
 /// lengths are compared after its elements, a `Float` field that has to raise
 /// — could have been made to work by handing the layout to the intrinsic, and
 /// everything would have passed, because the answers would still have been
-/// right. `Value.admitKey` and `Value.renderInto` are the two left, and the
-/// same is true of each.
+/// right. `Value.admitKey` is the one left, and the same is true of it;
+/// `Value.renderInto` stood beside it until ADR 0068's Phase 4b-ii, and the
+/// rendering's own case below holds its successor to a box.
 #[test]
 fn no_statically_known_layout_reaches_the_fallback() {
     let known: &[&str] = &[
@@ -414,7 +415,7 @@ fn an_enum_orders_by_case_name_and_not_by_case_index() {
             "order<"
         ),
         "\
-fn @<synth>.order<m.Mark#17>(m.Mark m.Mark) -> Int
+fn @<synth>.order<m.Mark#18>(m.Mark m.Mark) -> Int
   frame 16: s0!:tag s1!:int s2!:ref s3!:tag s4!:int s5!:ref s6:int s7:int s8:ref s9:ref \
 s10:int s11:ref s12:ref s13:bool s14:ref s15:ref
      0  switch s0:tag [1 3 5] else 7
@@ -1063,7 +1064,11 @@ fn no_statically_known_layout_reaches_the_rendering_fallback() {
          fn i(x: Range) -> String { \"{x}\" }\n\
          fn j(x: Token) -> String { \"{x}\" }\n\
          fn k(x: Unit) -> String { \"{x}\" }\n\
-         fn l(x: Error) -> String { \"{x}\" }",
+         fn l(x: Error) -> String { \"{x}\" }\n\
+         fn m(x: fn(Int) -> Int) -> String { \"{x}\" }",
+        // A function value's location is one bare reference word, and it went
+        // below until ADR 0068's Phase 4b-ii: it is `<fn>` whichever function
+        // it names, which the location's layout says.
         // The two scalars that went below until ADR 0068's Phase 4a, alone
         // and as parts of a walk.
         "struct Sample { at: Float, wait: Duration }\n\
@@ -1082,7 +1087,7 @@ fn no_statically_known_layout_reaches_the_rendering_fallback() {
         assert_eq!(
             renderings(&program),
             0,
-            "`Value.renderInto` sites in:\n{source}"
+            "`std.dynamic.renderInto` calls in:\n{source}"
         );
     }
 
@@ -1117,10 +1122,10 @@ fn a_layout_that_reaches_itself_renders_by_calling_itself() {
     );
     assert_eq!(
         walks_named(&program, "renders<"),
-        ["renders<m.Node#17>", "renders<Array#18>"]
+        ["renders<m.Node#18>", "renders<Array#19>"]
     );
     let walk = synthesized(&program, "renders<Array");
-    assert!(walk.contains("<synth>.renders<m.Node#17>"), "{walk}");
+    assert!(walk.contains("<synth>.renders<m.Node#18>"), "{walk}");
 }
 
 /// Only a rendering that can meet a vector again carries the path of vectors
@@ -1256,27 +1261,27 @@ fn literals(program: &Program, what: &str) -> Vec<String> {
         .collect()
 }
 
-/// How many `Value.renderInto` sites the program holds, checking as it counts
-/// that every one of them is a layout ADR 0064's Decision 4 admits for this
-/// operation.
-///
-/// `reached`'s second half, written apart because this operation's admitted
-/// list is three shapes and not one: see `synth::Rendered::Dynamic`.
+/// How many calls of `std.dynamic.renderInto` the program holds, checking as
+/// it counts that every one of them is handed a box — the one layout ADR
+/// 0064's Decision 4 admits for this operation since ADR 0068's Phase 4b-ii
+/// took `Value.renderInto` out of the runtime, and see
+/// `synth::Rendered::Dynamic`.
 fn renderings(program: &Program) -> usize {
     let mut found = 0;
     for function in &program.functions {
         for inst in &function.code {
-            let Inst::IntrinsicCall { site, args, .. } = inst else {
+            let Inst::Call { callee, args, .. } = inst else {
                 continue;
             };
-            if program.intrinsic_site(*site).intrinsic != crate::Intrinsic::ValueRenderInto {
+            let called = program.function(*callee);
+            if (&*called.module, &*called.name) != ("std.dynamic", "renderInto") {
                 continue;
             }
             found += 1;
             let piece = program.arg_list(*args)[0];
             assert!(
                 synth::rendered(&program.layout(piece.layout).shape) == synth::Rendered::Dynamic,
-                "`Value.renderInto` was handed a `{}`, whose layout says what it is",
+                "`std.dynamic.renderInto` was handed a `{}`, whose layout says what it is",
                 program.layout(piece.layout).name
             );
         }

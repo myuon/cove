@@ -758,6 +758,7 @@ fn boxed(
     machine.push_temp(addr);
     machine.set_payload(addr, 0, held.0 as u64);
     machine.set_payload_run(addr, 1, words);
+    crate::vm::exec::dynamic::audit_box(machine, addr);
     Ok(addr)
 }
 

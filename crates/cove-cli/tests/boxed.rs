@@ -62,9 +62,10 @@ fn discover() -> Vec<Case> {
 
 /// The operations ADR 0068 moves that are still intrinsics, in its order.
 ///
-/// It was four. `Any.equals` left in Phase 2 and `Value.order` in Phase 3, and
-/// each is counted as a reflected call in [`Counts::reflected`] instead.
-const BOXED: [Intrinsic; 2] = [Intrinsic::ValueAdmitKey, Intrinsic::ValueRenderInto];
+/// It was four. `Any.equals` left in Phase 2, `Value.order` in Phase 3 and
+/// `Value.renderInto` in Phase 4b-ii, and each is counted as a reflected call
+/// in [`Counts::reflected`] instead.
+const BOXED: [Intrinsic; 1] = [Intrinsic::ValueAdmitKey];
 
 /// The Cove functions the moved operations became, in [`Counts::reflected`]'s
 /// order: what `==` answers two erased values with since ADR 0068's Phase 2,
@@ -78,10 +79,21 @@ const BOXED: [Intrinsic; 2] = [Intrinsic::ValueAdmitKey, Intrinsic::ValueRenderI
 /// fall with this, and what falls is the **executed** count: a run whose keys
 /// are all admitted reaches `Value.admitKey` on no turn, which is what a
 /// `--boundary` report of `benches/admission` says.
-const REFLECTED_FUNCTIONS: [(&str, &str); 3] = [
-    ("std.dynamic", "equals"),
-    ("std.dynamic", "order"),
-    ("std.dynamic", "refusesKey"),
+///
+/// The fourth is what `Value.renderInto` became in Phase 4b-ii: the text of an
+/// erased value, appended to a buffer, with the path of vectors the rendering
+/// that reached the box is inside.
+///
+/// The third field is how many of the leading operands are the *values* the
+/// call is about, which Decision 5 holds to a box: every operand of the first
+/// three, and the first of `renderInto`, whose other two are the buffer it
+/// appends to and the path it is handed — a handle and a capability, not
+/// values of anything.
+const REFLECTED_FUNCTIONS: [(&str, &str, usize); 4] = [
+    ("std.dynamic", "equals", 2),
+    ("std.dynamic", "order", 2),
+    ("std.dynamic", "refusesKey", 1),
+    ("std.dynamic", "renderInto", 1),
 ];
 
 /// Why a site calls one of [`BOXED`], read off its first operand's layout.
@@ -112,12 +124,12 @@ enum Why {
 #[derive(Clone, Copy, Default)]
 struct Counts {
     /// `IntrinsicCall` sites per entry of [`BOXED`], per [`Why`] in its order.
-    sites: [[usize; 3]; 2],
+    sites: [[usize; 3]; 1],
     /// Calls per entry of [`REFLECTED_FUNCTIONS`]: `==` on two erased values,
-    /// `core.order` over two erased keys and `core.admitKey`'s decision over an
-    /// erased key, each from the operation itself or from inside a synthesized
-    /// walk that reached a boxed part.
-    reflected: [usize; 3],
+    /// `core.order` over two erased keys, `core.admitKey`'s decision over an
+    /// erased key and the text of an erased value, each from the operation
+    /// itself or from inside a synthesized walk that reached a boxed part.
+    reflected: [usize; 4],
     /// Functions the lowering synthesized.
     synthesized: usize,
 }
@@ -137,9 +149,11 @@ fn why(program: &Program, args: cove_ir::ArgsId) -> Why {
 /// [`REFLECTED_FUNCTIONS`] whose operand has a layout the lowering knows would be
 /// a static layout routed through reflection, which the gate calls a failure —
 /// the walk the lowering writes for that layout is the fast path, and this is
-/// the fallback. Every operand is asked, so it is the first operand of
-/// `std.dynamic.refusesKey`, which has only the one, and both of the other two.
-/// Which of them the call is, or `None` for any other call.
+/// the fallback. Every value operand is asked — the third field of
+/// [`REFLECTED_FUNCTIONS`] says how many that is — so it is the first operand
+/// of `std.dynamic.refusesKey`, which has only the one, both of `equals` and
+/// `order`, and the value `std.dynamic.renderInto` renders. Which of them the
+/// call is, or `None` for any other call.
 fn reflected(
     program: &Program,
     function: &str,
@@ -149,8 +163,9 @@ fn reflected(
     let called = &program.functions[callee.index()];
     let which = REFLECTED_FUNCTIONS
         .iter()
-        .position(|named| (&*called.module, &*called.name) == *named)?;
-    for arg in program.arg_list(args) {
+        .position(|(module, name, _)| (&*called.module, &*called.name) == (*module, *name))?;
+    let values = REFLECTED_FUNCTIONS[which].2;
+    for arg in program.arg_list(args).iter().take(values) {
         let described = program.layout(arg.layout);
         assert!(
             matches!(described.shape, Shape::Boxed),
@@ -281,7 +296,13 @@ fn count(program: &Program) -> Counts {
 /// not move: a host resource and a task scope still refuse on a static walk,
 /// because their text is in the run's tables and handing their layouts to the
 /// intrinsic would raise it (issue #499).
-const FALLBACK_SITES: [[usize; 3]; 2] = [[43, 1, 115], [70, 0, 4]];
+///
+/// **ADR 0068's Phase 4b-ii took the `Value.renderInto` row out**, the third
+/// to leave, and it is the fourth entry of [`REFLECTED`] now. Its four known
+/// sites were a function value, whose location is one bare reference word:
+/// `<fn>` whichever function it names, which a walk writes from that layout
+/// alone, so none of them reaches reflection.
+const FALLBACK_SITES: [[usize; 3]; 1] = [[43, 1, 115]];
 
 /// The whole-corpus calls of `std.dynamic.equals`, of `std.dynamic.order` and of
 /// `std.dynamic.refusesKey`, which may fall and may never rise: the reflected
@@ -337,7 +358,24 @@ const FALLBACK_SITES: [[usize; 3]; 2] = [[43, 1, 115], [70, 0, 4]];
 /// - **6** more from the four programs Phase 3b added, one under each of their
 ///   boxed admission sites. The `chain` rows it added to `values_boxed_order`
 ///   reach the calls that program already held.
-const REFLECTED: [usize; 3] = [136, 38, 48];
+///
+/// `std.dynamic.renderInto`, measured when Phase 4b-ii landed, over 233
+/// programs:
+///
+/// - **53** in the 232 programs that were here before it, with
+///   `values_render_cycle` and `values_render_opaque` as they were, against
+///   the 70 boxed `Value.renderInto` sites they held. Phase 2's finding once
+///   more: a site in a small body `lower::inline` expanded into each caller was
+///   counted once per expansion and once in the body, and a call of a walk as
+///   large as this one is not expanded, so it is counted once. Fourteen
+///   programs hold one or two fewer — `values_boxed` 14 to 12, every
+///   `fail_key_boxed_*` 3 to 2 or 2 to 1 — and none holds more;
+/// - **28** more from what Phase 4b-ii added to pin it: `values_boxed_render`,
+///   every kind a box can hold, and the `box.*` rows of `values_render_cycle`
+///   and the boxed rows of `values_render_opaque`. The synthesized count went
+///   646 to 648 with those held out — the two walks of a function value's
+///   location, which were intrinsic sites — and to 654 with them.
+const REFLECTED: [usize; 4] = [136, 38, 48, 81];
 
 #[test]
 fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
@@ -371,13 +409,15 @@ fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
     }
     println!(
         "{} program(s), {} synthesized function(s), {} reflected call(s) of \
-         `std.dynamic.equals`, {} of `std.dynamic.order` and {} of \
-         `std.dynamic.refusesKey`; sites as boxed / scalar / known:",
+         `std.dynamic.equals`, {} of `std.dynamic.order`, {} of \
+         `std.dynamic.refusesKey` and {} of `std.dynamic.renderInto`; sites as boxed / \
+         scalar / known:",
         rows.len(),
         total.synthesized,
         total.reflected[0],
         total.reflected[1],
-        total.reflected[2]
+        total.reflected[2],
+        total.reflected[3]
     );
     for (intrinsic, sites) in BOXED.iter().zip(&total.sites) {
         println!(
@@ -389,7 +429,7 @@ fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
         );
     }
     println!(
-        "\n  reflected equals, order and refusesKey, boxed per operation (admit render), then \
+        "\n  reflected equals, order, refusesKey and renderInto, boxed admission sites, then \
          synth, program"
     );
     for (name, found) in &rows {
@@ -397,8 +437,8 @@ fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
             found.reflected[0],
             found.reflected[1],
             found.reflected[2],
+            found.reflected[3],
             found.sites[0][0],
-            found.sites[1][0],
         ];
         if boxed.iter().any(|n| *n > 0) {
             println!(
@@ -407,7 +447,7 @@ fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {
             );
         }
     }
-    for (at, (module, function)) in REFLECTED_FUNCTIONS.iter().enumerate() {
+    for (at, (module, function, _)) in REFLECTED_FUNCTIONS.iter().enumerate() {
         assert!(
             total.reflected[at] <= REFLECTED[at],
             "the corpus has {} call(s) of `{module}.{function}`, and the ratchet is {}. It may \

@@ -1398,7 +1398,13 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         | Inst::DynCount { .. }
         | Inst::DynChild { .. }
         | Inst::DynSameObject { .. }
-        | Inst::DynNameOrder { .. } => return Some(Reason::Reflection),
+        | Inst::DynNameOrder { .. }
+        | Inst::DynTypeName { .. }
+        | Inst::DynFieldName { .. }
+        | Inst::DynCaseName { .. }
+        | Inst::DynOpaque { .. }
+        | Inst::DynHandleText { .. }
+        | Inst::DynOnPath { .. } => return Some(Reason::Reflection),
         // ADR 0068's Phase 4b's text of a resource, a scope or a task, refused
         // by name. Its source is a `Host`, `Scope` or `Task` word, which this
         // tier keeps in no slot, so a function holding one is refused whole as
@@ -1657,13 +1663,15 @@ mod tests {
         }
     }
 
-    /// ADR 0068's seven observations, the identity question and the name order
-    /// are refused as one family, each by name.
+    /// ADR 0068's seven observations, the identity question, the name order
+    /// and Phase 4b-ii's six for the rendering are refused as one family, each
+    /// by name.
     #[test]
     fn every_reflection_observation_is_refused_as_reflection() {
-        // A box at 0 and two views at 1..=3 and 4..=6, then an `Int`: every
-        // operand is a slot the frame has, so nothing here is a bound, and
-        // each refusal is the family's.
+        // A box at 0 and two views at 1..=3 and 4..=6, then an `Int`, a
+        // reference, a `Bool` and a render path at 10..=11: every operand is a
+        // slot the frame has, so nothing here is a bound, and each refusal is
+        // the family's.
         let reprs = vec![
             Repr::Ref,
             Repr::Int,
@@ -1672,6 +1680,10 @@ mod tests {
             Repr::Int,
             Repr::Ref,
             Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Bool,
+            Repr::Addr,
             Repr::Int,
         ];
         let code = vec![
@@ -1688,6 +1700,20 @@ mod tests {
             },
             Inst::DynSameObject { dst: 7, a: 1, b: 4 },
             Inst::DynNameOrder { dst: 7, a: 1, b: 4 },
+            Inst::DynTypeName { dst: 8, view: 1 },
+            Inst::DynFieldName {
+                dst: 8,
+                view: 1,
+                index: 7,
+            },
+            Inst::DynCaseName { dst: 8, view: 1 },
+            Inst::DynOpaque { dst: 9, view: 1 },
+            Inst::DynHandleText { dst: 8, view: 1 },
+            Inst::DynOnPath {
+                dst: 9,
+                view: 1,
+                path: 10,
+            },
             Inst::Return { src: 0 },
         ];
         let function = function(reprs, LayoutId(2), code);
@@ -1707,7 +1733,7 @@ mod tests {
             .collect();
         assert_eq!(
             reasons,
-            (0..9)
+            (0..15)
                 .map(|pc| (Reason::Reflection, Some(pc)))
                 .collect::<Vec<_>>()
         );

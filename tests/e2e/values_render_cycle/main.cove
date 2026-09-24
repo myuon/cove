@@ -11,10 +11,14 @@ use console.println
 /// one of them is being rendered, so it renders in full at each occurrence. An
 /// empty vector renders `[]` and is never looked for.
 ///
-/// Every value here is rendered through a layout the lowering knows, so every
-/// row is a static walk on the linear-memory backend. A cycle through a box
-/// is not here: until ADR 0068's Phase 4b-ii the box's renderer starts a path
-/// of its own.
+/// The first seven values are rendered through a layout the lowering knows,
+/// so each is a static walk on the linear-memory backend. The `box.*` rows are
+/// cycles that close **through a box**: a `Vector<dyn Summary>` that holds
+/// the value it is inside. The path is not restarted at the box (issue #499's
+/// decision 3) — the walk that reaches it hands `std.dynamic.renderInto` the
+/// vectors it is inside — so the repeat is marked where the interpreter marks
+/// it, one vector in, on every evaluator. Until ADR 0068's Phase 4b-ii the
+/// box's renderer started a path of its own and rendered one vector deeper.
 struct S {
   v: Vector<S>
 }
@@ -43,6 +47,43 @@ struct M {
 struct Twin {
   left: Vector<S>
   right: Vector<S>
+}
+
+/// What the `box.*` rows erase their values to.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// A value whose vector holds erased values, itself among them.
+struct T {
+  v: Vector<dyn Summary>
+}
+
+impl Summary for T {
+  fn summarize(self) -> String {
+    "t"
+  }
+}
+
+/// Two types whose erased vectors each hold the other.
+struct P {
+  v: Vector<dyn Summary>
+}
+
+impl Summary for P {
+  fn summarize(self) -> String {
+    "p"
+  }
+}
+
+struct Q {
+  v: Vector<dyn Summary>
+}
+
+impl Summary for Q {
+  fn summarize(self) -> String {
+    "q"
+  }
 }
 
 /// `s` pushed into its own `v`.
@@ -81,6 +122,25 @@ fn cyclicMap() -> M {
   m
 }
 
+/// `t` pushed, erased, into its own `v`.
+fn boxedItself() -> T {
+  var held: Vector<dyn Summary> = Vector.of()
+  let t = T(v: held)
+  held.push(t)
+  t
+}
+
+/// `p.v` holds `q`, and `q.v` holds `p`, both erased.
+fn boxedMutual() -> P {
+  var first: Vector<dyn Summary> = Vector.of()
+  var second: Vector<dyn Summary> = Vector.of()
+  let p = P(v: first)
+  let q = Q(v: second)
+  first.push(q)
+  second.push(p)
+  p
+}
+
 /// A vector of one leaf, to be reached twice.
 fn shared() -> Vector<S> {
   var held: Vector<S> = Vector.of()
@@ -109,6 +169,11 @@ export fn main() -> Result<Unit, Error> {
   println("twin {Twin(left: one, right: one)}")?
   println("array {[one, one]}")?
   println("diamond {diamond()}")?
+
+  println("box.self {boxedItself()}")?
+  println("box.mutual {boxedMutual()}")?
+  let erased: dyn Summary = boxedItself()
+  println("box.root {erased}")?
 
   println("empty {S(v: Vector.of())}")?
   let none: Vector<S> = Vector.of()

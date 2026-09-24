@@ -94,6 +94,12 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `dynamicChild` | `core.dynamicChild(view: DynamicView, index: Int) -> DynamicView` |
 | `dynamicSameObject` | `core.dynamicSameObject(a: DynamicView, b: DynamicView) -> Bool` |
 | `dynamicNameOrder` | `core.dynamicNameOrder(a: DynamicView, b: DynamicView) -> Int` |
+| `dynamicTypeName` | `core.dynamicTypeName(view: DynamicView) -> String` |
+| `dynamicFieldName` | `core.dynamicFieldName(view: DynamicView, index: Int) -> String` |
+| `dynamicCaseName` | `core.dynamicCaseName(view: DynamicView) -> String` |
+| `dynamicOpaque` | `core.dynamicOpaque(view: DynamicView) -> Bool` |
+| `dynamicHandleText` | `core.dynamicHandleText(view: DynamicView) -> String` |
+| `dynamicOnPath` | `core.dynamicOnPath(view: DynamicView, path: RenderPath) -> Bool` |
 
 ## Builtin types
 

@@ -249,6 +249,16 @@ impl Check<'_> {
                         self.outside(at, name, slot);
                     }
                 }
+                // A render path's width is the program's path layout's, on the
+                // view's terms.
+                Operand::Path => {
+                    let layout = self.program.render_path_layout;
+                    if layout.index() < self.program.layouts.len() {
+                        self.fits(at, slot, layout, &format!("the path at {name}"));
+                    } else if self.function.repr(slot).is_none() {
+                        self.outside(at, name, slot);
+                    }
+                }
                 Operand::Value => match self.named_layout(op, bytes) {
                     Some(layout) => {
                         self.fits(at, slot, layout, &format!("the value at {name}"));

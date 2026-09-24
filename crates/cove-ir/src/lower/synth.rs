@@ -74,7 +74,7 @@
 //!
 //! So [`Operation::Admission`] does not refuse. It **decides**: a `Bool`,
 //! `true` where the runtime is to be asked, and `super::core` runs the
-//! [`Intrinsic::ValueAdmitKey`] it would have run anyway, at the site it
+//! [`Intrinsic::ValueAdmitKey`](crate::Intrinsic::ValueAdmitKey) it would have run anyway, at the site it
 //! would have run it at, over the key it would have run it over. That keeps
 //! the diagnostic byte for byte — including the frame it is blamed on, which
 //! a fallback raised from inside a walk would have added one to (ADR 0058
@@ -223,9 +223,8 @@ use cove_diag::Span;
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD, RANGE};
 
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Pc, Slot};
-use crate::intrinsic::Intrinsic;
 use crate::layout::{Case, Field, Layout, LayoutId, Shape};
-use crate::program::{Arg, Function, FunctionId, IntrinsicSite, Table, TableId};
+use crate::program::{Arg, Function, FunctionId, Table, TableId};
 use crate::repr::{RefMap, Repr};
 
 use super::shapes;
@@ -281,7 +280,7 @@ pub(crate) enum Operation {
     /// ask — the call site asked for a *refusal*, which is a sentence, and
     /// the walk hands back the one bit that says whether there is one to
     /// write. Where the bit is set, `super::core` runs the
-    /// [`Intrinsic::ValueAdmitKey`] it would have run anyway, at the site it
+    /// [`Intrinsic::ValueAdmitKey`](crate::Intrinsic::ValueAdmitKey) it would have run anyway, at the site it
     /// would have run it at, and the runtime writes the sentence.
     ///
     /// It has to be that way round, and the reason is in the sentence rather
@@ -387,7 +386,7 @@ impl Operation {
     /// which needs neither of `core.admitKey`'s two names — they word a
     /// refusal, and this walk does not word one — and for the rendering the
     /// value and the buffer its text is appended to, in that order, which is
-    /// `Value.renderInto`'s own.
+    /// `std.dynamic.renderInto`'s own, and was `Value.renderInto`'s.
     fn params(self, layout: LayoutId) -> Vec<LayoutId> {
         match self {
             Operation::Equality | Operation::Order => vec![layout, layout],
@@ -603,22 +602,19 @@ pub(crate) enum Rendered {
     Duration,
     /// A walk [`Synth::rendering`] writes.
     Walk,
-    /// The runtime's own rendering walk.
+    /// `std.dynamic.renderInto`, the Cove walk over a view of a box.
     ///
-    /// ADR 0064's Decision 4, and only that since ADR 0068's Phase 4a: a
-    /// **layout that does not say what the value is**. A [`Shape::Boxed`]
-    /// keeps its [`LayoutId`] in payload word 0, and a bare `Repr::Ref` word
-    /// is an address whose object's family is read off the object. There is
-    /// nothing here for a walk to be directed by. [`crate::verify`] checks
-    /// exactly this list.
-    ///
-    /// It was widened by two scalars until Phase 4a, a `Float` and a
-    /// `Duration`, whose text no Cove body wrote then; they are
-    /// [`Rendered::Float`] and [`Rendered::Duration`] now, and a `Float`
-    /// field of a struct is a call from the struct's walk rather than the
-    /// intrinsic at that field. What stays below is what is inside a box —
-    /// a `Float` there is still the Rust arm until Phase 4b walks a box in
-    /// Cove.
+    /// ADR 0064's Decision 4: a **layout that does not say what the value
+    /// is**. A [`Shape::Boxed`] keeps its [`LayoutId`] in payload word 0, and
+    /// there is nothing here for a walk to be directed by — so ADR 0068's
+    /// Phase 4b-ii opens it and walks the view, in Cove, handing over the
+    /// path of vectors the rendering that reached it is inside. It was the
+    /// runtime's `Value.renderInto` until then, and before Phase 4a it was
+    /// reached from a `Float` and a `Duration` too; a bare `Repr::Ref` word
+    /// and a reclaimed run were on this list beside the box, and are walks
+    /// now, since the one bare reference a value's layout can be is a
+    /// function value's. `cove-cli`'s `tests/boxed.rs` holds every call of
+    /// the function to an erased operand.
     Dynamic,
 }
 
@@ -634,10 +630,12 @@ pub(crate) fn rendered(shape: &Shape) -> Rendered {
         Shape::Word(Repr::Int) => Rendered::Digits,
         Shape::Word(Repr::Float) => Rendered::Float,
         Shape::Word(Repr::Duration) => Rendered::Duration,
-        // See [`Rendered::Dynamic`]. `Shape::Free` is here for the reason a
-        // reclaimed run is not a value: there is nothing to walk, and the
-        // runtime's own arm is the one that says so.
-        Shape::Boxed | Shape::Free | Shape::Word(Repr::Ref) => Rendered::Dynamic,
+        // See [`Rendered::Dynamic`].
+        Shape::Boxed => Rendered::Dynamic,
+        // Everything else is a walk, a bare reference word included: the
+        // one a value's layout is is a function value's, whose text is
+        // `<fn>` whichever function it names — see [`Synth::rendering`] — and
+        // a reclaimed run is a walk that refuses.
         _ => Rendered::Walk,
     }
 }
@@ -1032,12 +1030,13 @@ fn reached_by(
 /// may not have been interned yet, and the answer here, like [`tracked`]'s, is
 /// a fact about the layout and its parts alone, so it never changes.
 ///
-/// **In ADR 0068's Phase 4b-i the box does not read the path yet.** A box is
-/// still rendered by the runtime's `Value.renderInto`, whose walk starts a
-/// path of its own at the box; the static walks carry theirs as far as the
-/// box and no further. So a cycle that closes through a box renders its
-/// `[…]` one vector later than the oracle's, which walks the whole value as
-/// one path. Phase 4b-ii's Cove renderer is what reads the path at the box.
+/// **Since ADR 0068's Phase 4b-ii the box reads the path.** A box is
+/// rendered by `std.dynamic.renderInto`, which is handed the path the static
+/// walk is carrying — see [`Synth::below`] — and looks a vector up on it as
+/// well as on its own. So a cycle that closes through a box renders its `[…]`
+/// where the oracle's does, which walks the whole value as one path. In Phase
+/// 4b-i the box started a path of its own and rendered the repeat one vector
+/// later.
 ///
 /// Every other layout — one on no cycle through a vector and reaching no box —
 /// answers `false`, and its walk is emitted exactly as it was before issue
@@ -2846,7 +2845,18 @@ impl Synth<'_> {
             // its contents are reachable only under a `lock`, and rendering
             // one would be reading it without taking it.
             Shape::Shared { .. } => self.literal(buffer, "<shared>"),
-            Shape::Closure { .. } => self.literal(buffer, "<fn>"),
+            // A function value is one reference word to its environment,
+            // whose own `Shape::Closure` header says which function it is —
+            // and a rendering says `<fn>` whichever it is. So the layout of
+            // the *location*, a bare `Repr::Ref` word, is the whole of what
+            // the text needs: the one such layout a value can have is
+            // `Shapes::function_value`'s. It reached the runtime's
+            // `Value.renderInto` until ADR 0068's Phase 4b-ii, the four
+            // `known` sites `tests/boxed.rs` counted.
+            Shape::Closure { .. } | Shape::Word(Repr::Ref) => self.literal(buffer, "<fn>"),
+            // A reclaimed run is not a value, and the runtime's rendering
+            // refused one in these words.
+            Shape::Free => self.trap("this value was read after it was reclaimed"),
             // A task shows as the handle it is and never as the value it
             // will produce, which is observable only through `await` or the
             // scope settling it — `Display for Value`'s `<task>`, and all of
@@ -3358,31 +3368,61 @@ impl Synth<'_> {
         self.trap("this value has no text of its own");
     }
 
-    /// ADR 0064's Decision 4 for the rendering: a layout that does not say
-    /// what the value is.
+    /// ADR 0064's Decision 4 for the rendering: a box, whose layout does not
+    /// say what the value is, rendered by `std.dynamic.renderInto`.
     ///
-    /// See [`Rendered::Dynamic`], which is the list, and `crate::verify`,
-    /// which is where the list is enforced rather than promised.
+    /// See [`Rendered::Dynamic`]. **The path is handed on** (issue #499's
+    /// decision 3): a tracked walk passes the two words it is carrying as one
+    /// [`shapes::RENDER_PATH`] argument, and the dynamic renderer looks a
+    /// vector up on it with `core.dynamicOnPath` before its own path — so a
+    /// cycle that closes through a box renders `[…]` exactly where the
+    /// oracle's does. Every walk that reaches a box is tracked
+    /// ([`render_tracked`]), so there is always a path here; the two words
+    /// are adjacent, because every place a path is made allocates its address
+    /// and then its depth, and the parameters of a tracked walk are laid out
+    /// the same way.
     ///
-    /// A tracked walk reaches here with a path, and in Phase 4b-i it does not
-    /// hand the path on: the intrinsic takes a value and a buffer and starts a
-    /// path of its own. See [`render_tracked`] for what that leaves inexact
-    /// until Phase 4b-ii.
+    /// The other direction needs nothing: the dynamic renderer walks
+    /// everything below the box through views and never calls a walk
+    /// composed here, so no path has to come back out of it.
     fn below(&mut self, layout: LayoutId, at: Slot, buffer: Slot) {
-        let site = self.pool.intrinsic_site(IntrinsicSite {
-            intrinsic: Intrinsic::ValueRenderInto,
-            result: shapes::UNIT,
-        });
+        let callee = self.pool.dynamic_render.expect(
+            "a walk that reaches a box is asked for only after its call site resolved \
+             `std.dynamic.renderInto`",
+        );
+        let path = match self.path {
+            Some(path) => path,
+            None => {
+                // No walk reaches here without one; an empty path, as an
+                // interpolation of a box hands over, is the answer if one did.
+                let at = self.alloc(shapes::RENDER_PATH);
+                self.emit(Inst::AddrOfSlot { dst: at, slot: at });
+                self.emit(Inst::Int {
+                    dst: at + 1,
+                    value: 0,
+                });
+                Path { at, depth: at + 1 }
+            }
+        };
+        assert_eq!(
+            path.depth,
+            path.at + 1,
+            "a path's depth is the word after its address"
+        );
         let args = self.pool.args.intern(vec![
             Arg { slot: at, layout },
             Arg {
                 slot: buffer,
                 layout: shapes::BYTE_BUFFER,
             },
+            Arg {
+                slot: path.at,
+                layout: shapes::RENDER_PATH,
+            },
         ]);
-        self.emit(Inst::IntrinsicCall {
+        self.emit(Inst::Call {
             dst: self.answer,
-            site,
+            callee,
             args,
         });
     }

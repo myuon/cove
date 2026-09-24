@@ -79,6 +79,7 @@ mod inline;
 mod interpolate;
 mod limits;
 mod methods;
+pub(crate) mod names;
 mod pattern;
 mod shapes;
 mod stmt;
@@ -362,6 +363,8 @@ fn emit<'a>(
         buffer_layout: shapes::BYTE_BUFFER,
         boxed_layout: shapes::BOXED,
         view_layout: shapes::DYNAMIC_VIEW,
+        render_path_layout: shapes::RENDER_PATH,
+        names: Vec::new(),
         strings: pool.strings,
         args: pool.args.lists,
         tables: pool.tables,
@@ -435,6 +438,12 @@ fn finish(
             .collect();
         sweep::stand_down_unreferenced(&mut program, &kept);
     }
+
+    // The names a rendering of an erased value shows, placed as literals for
+    // exactly the layouts a box can hold — asked of the finished program,
+    // after the sweep, so that a box in a body nothing calls any more places
+    // nothing. See `names`.
+    names::place(&mut program);
 
     // A clear the `return` after it was going to make pointless is dropped
     // here rather than never emitted, because the emission sites are many and
@@ -1249,6 +1258,11 @@ struct Pool {
     /// [`Pool::dynamic_equals`]' arrangement, filled in by
     /// `Body::dynamic_refuses_key`.
     dynamic_refuses_key: Option<FunctionId>,
+    /// `std.dynamic.renderInto`, once a call site has resolved it: what an
+    /// interpolation of an erased value calls, and what a rendering walk
+    /// calls where it reaches a boxed part — [`Pool::dynamic_equals`]'
+    /// arrangement, filled in by `Body::dynamic_render`.
+    dynamic_render: Option<FunctionId>,
     /// The instantiations being lowered right now, outermost first.
     ///
     /// A chain rather than a count, because what a program that exceeds the
@@ -1294,6 +1308,7 @@ impl Pool {
             dynamic_equals: None,
             dynamic_order: None,
             dynamic_refuses_key: None,
+            dynamic_render: None,
             open: Vec::new(),
         }
     }

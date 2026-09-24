@@ -1880,6 +1880,59 @@ pub enum Inst {
     /// a known layout off reflection, and this is one narrow question about
     /// one word, not a rendering.
     HandleText { dst: Slot, src: Slot },
+    /// `dst = <the name a rendering shows for the struct view names>`, a
+    /// `String` placed before the run.
+    ///
+    /// The declared name without its type arguments or its module —
+    /// [`crate::dynamic::shown_name`] — which is what `m.Cell<Int>` renders as
+    /// (`Cell`). **It allocates nothing**: the name is one of
+    /// [`crate::Program::names`], a literal the machine placed before the
+    /// first instruction as it places every [`Inst::Str`]'s, and this is one
+    /// load of its address (issue #499's decision 4, option N1). A view of
+    /// anything but a struct, or of a struct whose names were never placed, is
+    /// an internal runtime error; `lower::names` is what makes the second
+    /// impossible.
+    DynTypeName { dst: Slot, view: Slot },
+    /// `dst = <the name of field index of the struct view names>`, a `String`
+    /// placed before the run: [`Inst::DynTypeName`]'s arrangement, for the
+    /// field in [`Inst::DynChild`]'s position `index`.
+    DynFieldName { dst: Slot, view: Slot, index: Slot },
+    /// `dst = <the name of the case the enum view names is in>`, a `String`
+    /// placed before the run: [`Inst::DynTypeName`]'s arrangement, for the case
+    /// [`Inst::DynCase`] numbers.
+    DynCaseName { dst: Slot, view: Slot },
+    /// `dst = <whether the struct view names was declared opaque>`, a `Bool`.
+    ///
+    /// An `export opaque struct` renders as its name alone (ADR 0014), and
+    /// that is a fact about the declaration the layout carries as a flag and
+    /// not a name — so it is asked as the flag it is. `false` for every view
+    /// that is not a struct.
+    DynOpaque { dst: Slot, view: Slot },
+    /// `dst = <the text a rendering shows for the opaque value view names>`,
+    /// a new `String`.
+    ///
+    /// [`Inst::HandleText`] for a view: a Host resource, a task scope and a
+    /// task inside a box are `<{module}.{Type}#{n}>`, `<task scope {name}>` and
+    /// `<task>`, from the same `intrinsics::handle_text` the other writes with,
+    /// so the two cannot come to say different things of one handle. A byte
+    /// run and a byte buffer, the other opaque values, keep the text they
+    /// always had. **It allocates**, for [`Inst::HandleText`]'s reason: which
+    /// handle it is lives in a table of the run's and in no layout, and
+    /// nothing renders a handle in a loop.
+    DynHandleText { dst: Slot, view: Slot },
+    /// `dst = <whether the vector view names is on the render path path>`, a
+    /// `Bool`.
+    ///
+    /// `path` is a run of [`crate::Program::render_path_layout`]'s two words:
+    /// the address of the innermost entry of a path a walk composed for a
+    /// known layout is carrying, and how many entries it has. The machine
+    /// follows the entries' links below the boundary and compares each one's
+    /// vector with the view as [`Inst::DynSameObject`] would — so a vector is
+    /// on the path exactly when a rendering further up is still inside it
+    /// (issue #499's decision 3). A path of depth nought is empty, and a view
+    /// of anything but a vector is on no path. No address, depth or identity
+    /// reaches Cove: the answer is a `Bool`.
+    DynOnPath { dst: Slot, view: Slot, path: Slot },
 
     // ---- tasks -------------------------------------------------------------
     /// `dst = <a new task scope, open>`

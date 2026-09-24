@@ -77,7 +77,13 @@ impl Inst {
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
             | Inst::DynCount { dst, .. }
-            | Inst::HandleText { dst, .. } => f(dst, 1),
+            | Inst::HandleText { dst, .. }
+            | Inst::DynTypeName { dst, .. }
+            | Inst::DynFieldName { dst, .. }
+            | Inst::DynCaseName { dst, .. }
+            | Inst::DynOpaque { dst, .. }
+            | Inst::DynHandleText { dst, .. }
+            | Inst::DynOnPath { dst, .. } => f(dst, 1),
             // A view is `Program::view_layout`'s words wherever it is written.
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 f(dst, width(program.view_layout))
@@ -253,7 +259,13 @@ impl Inst {
             | Inst::DynCase { .. }
             | Inst::DynCount { .. }
             | Inst::DynChild { .. }
-            | Inst::HandleText { .. } => None,
+            | Inst::HandleText { .. }
+            | Inst::DynTypeName { .. }
+            | Inst::DynFieldName { .. }
+            | Inst::DynCaseName { .. }
+            | Inst::DynOpaque { .. }
+            | Inst::DynHandleText { .. }
+            | Inst::DynOnPath { .. } => None,
         }
     }
 

@@ -383,7 +383,13 @@ impl<'p> Flow<'p> {
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
             | Inst::DynCount { dst, .. }
-            | Inst::HandleText { dst, .. } => f(dst, 1),
+            | Inst::HandleText { dst, .. }
+            | Inst::DynTypeName { dst, .. }
+            | Inst::DynFieldName { dst, .. }
+            | Inst::DynCaseName { dst, .. }
+            | Inst::DynOpaque { dst, .. }
+            | Inst::DynHandleText { dst, .. }
+            | Inst::DynOnPath { dst, .. } => f(dst, 1),
             // ADR 0068's view, the program's view layout's words.
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 f(dst, width(self.program.view_layout))
@@ -637,6 +643,18 @@ impl<'p> Flow<'p> {
                 f(index, 1);
             }
             Inst::HandleText { src, .. } => f(src, 1),
+            Inst::DynTypeName { view, .. }
+            | Inst::DynCaseName { view, .. }
+            | Inst::DynOpaque { view, .. }
+            | Inst::DynHandleText { view, .. } => f(view, width(self.program.view_layout)),
+            Inst::DynFieldName { view, index, .. } => {
+                f(view, width(self.program.view_layout));
+                f(index, 1);
+            }
+            Inst::DynOnPath { view, path, .. } => {
+                f(view, width(self.program.view_layout));
+                f(path, width(self.program.render_path_layout));
+            }
         }
     }
 

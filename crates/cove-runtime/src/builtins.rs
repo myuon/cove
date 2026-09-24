@@ -1121,6 +1121,61 @@ pub fn call_core(
                 .at(span)),
             }
         }
+        // ADR 0068's Phase 4b-ii, for the rendering of an erased value. A
+        // name is the one the value carries, shown as `Display for Value`
+        // shows it: the declared name without its module; a field's and a
+        // case's name as the value holds them. The machine places these
+        // before the run; here they are the value's own.
+        "dynamicTypeName" => match args[0].erased() {
+            Value(Repr::Struct(s)) => Ok(Value::string(cove_ir::dynamic::shown_name(&s.type_name))),
+            other => Err(dynamic_internal(format!(
+                "the name of a dynamic view of a {} was asked",
+                dynamic_kind(other).name()
+            ))
+            .at(span)),
+        },
+        "dynamicFieldName" => {
+            let Value(Repr::Int(index)) = &args[1] else {
+                return Err(type_error(&shown, "index", "Int", &args[1], span));
+            };
+            match args[0].erased() {
+                Value(Repr::Struct(s)) => {
+                    match usize::try_from(*index).ok().and_then(|at| s.fields.get(at)) {
+                        Some((name, _)) => Ok(Value::string(name.clone())),
+                        None => Err(dynamic_internal(format!(
+                            "the name of field {index} of a dynamic view with {} fields was asked",
+                            s.fields.len()
+                        ))
+                        .at(span)),
+                    }
+                }
+                other => Err(dynamic_internal(format!(
+                    "a field name of a dynamic view of a {} was asked",
+                    dynamic_kind(other).name()
+                ))
+                .at(span)),
+            }
+        }
+        "dynamicCaseName" => match args[0].erased() {
+            Value(Repr::Enum(e)) => Ok(Value::string(e.case.clone())),
+            other => Err(dynamic_internal(format!(
+                "the case name of a dynamic view of a {} was asked",
+                dynamic_kind(other).name()
+            ))
+            .at(span)),
+        },
+        "dynamicOpaque" => Ok(Value(Repr::Bool(matches!(
+            args[0].erased(),
+            Value(Repr::Struct(s)) if s.opaque
+        )))),
+        // An opaque value's text is `Display for Value`'s, which is the text
+        // the machine's `intrinsics::handle_text` writes for a handle.
+        "dynamicHandleText" => Ok(Value::string(args[0].erased().to_string())),
+        // No render path is ever made on this evaluator: its rendering is
+        // `Display for Value`, one walk over the whole value, and a path is
+        // what a walk the lowering composed hands over at a box. Whatever
+        // stands for one here is empty.
+        "dynamicOnPath" => Ok(Value(Repr::Bool(false))),
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each

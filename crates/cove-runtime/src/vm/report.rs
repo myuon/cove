@@ -1537,119 +1537,17 @@ export fn main() -> Int {
         );
     }
 
-    /// Ten renderings of an erased struct holding a `String` of `characters`
-    /// ASCII characters, so that two runs of it differ in exactly the one thing
-    /// the charge is supposed to be proportional to.
-    ///
-    /// **The operation has moved seven times, and the seventh left no intrinsic
-    /// that orders two values at all.** It was `String.length` until ADR 0064
-    /// moved the count out of the intrinsics, `String.contains` until ADR 0065
-    /// gave that a run search, `String.indexOf` until the migration that wrote
-    /// that over the same search, `String.toUpper` until issue #454's Step 5,
-    /// `String.replace` until the end of Step 3, `Any.equals` over two erased
-    /// strings until ADR 0068's Phase 2 made that `std.dynamic.equals`, and
-    /// `Value.order` over two until its Phase 3 made that `std.dynamic.order`.
-    /// What is left that charges by the byte is `Value.renderInto` over an
-    /// erased value, which charges the bytes it appended on top of one unit per
-    /// value its walk reaches. The value is held as `dyn Tagged` because a
-    /// rendering whose layout is known is a walk the lowering writes and never
-    /// reaches an intrinsic.
-    ///
-    /// The text is an interpolation of a literal rather than the literal, so
-    /// the two runs build it the same way; an interpolation of a `String` is a
-    /// byte copy and calls no intrinsic, so the two runs still differ in
-    /// nothing but `characters`.
-    fn renders_over(characters: usize) -> String {
-        let text = "a".repeat(characters);
-        format!(
-            "
-trait Tagged {{
-  fn tag(self) -> Int
-}}
-
-struct Named {{
-  name: String
-}}
-
-impl Tagged for Named {{
-  fn tag(self) -> Int {{ 0 }}
-}}
-
-export fn main() -> Int {{
-  let text = \"{text}\"
-  let shown: dyn Tagged = Named(name: \"{{text}}b\")
-  var total = 0
-  var i = 0
-  while i < 10 {{
-    let rendered = \"{{shown}}\"
-    total = total + rendered.length()
-    i = i + 1
-  }}
-  total
-}}
-"
-        )
-    }
-
-    /// **The charge is proportional to what the call examined.**
-    ///
-    /// This is the property the whole of [ADR 0064]'s Decision 7 exists for,
-    /// and the one a regression would silently undo: before it, an
-    /// `IntrinsicCall` was charged one unit of work whatever it walked, so
-    /// 10,000 `String.length` calls over ten characters and over 100,000
-    /// characters spent `fuel_spent` 160,027 against 160,026 — the same fuel
-    /// for 383 times the wall clock. That measurement was taken while
-    /// `String.length` was still an intrinsic; ADR 0064 moved it into
-    /// `std.string` and this case became `String.contains`, and ADR 0065 has
-    /// since moved that one too, `String.indexOf` after it, `String.toUpper`
-    /// after that, `String.replace`, `Any.equals` and then `Value.order` last.
-    /// The case below is `Value.renderInto` over an erased struct holding a
-    /// string, charged the same way — a walk whose charge is the bytes it
-    /// appended — plus one unit a value, which is why what is asserted is the
-    /// *difference* between the two runs.
-    ///
-    /// Two runs of the same shape over receivers a hundred times apart,
-    /// making the same number of calls, from the real machinery. The call
-    /// counts are asserted equal first: a work column that rose because the
-    /// program made more calls would say nothing about proportionality, and
-    /// the equality is what rules that out.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    #[test]
-    fn the_work_a_variant_is_charged_scales_with_what_it_examined() {
-        use crate::vm::debug::tests::World;
-
-        let row = |source: &str| {
-            let world = World::new(source);
-            let mut vm = world.plain();
-            vm.count_boundary();
-            vm.run_entry("m", "main", Vec::new()).expect("it answers");
-            vm.boundary()
-                .expect("count_boundary was called")
-                .intrinsic(Intrinsic::ValueRenderInto)
-                .expect("the program renders an erased value")
-        };
-
-        let short = row(&renders_over(10));
-        let long = row(&renders_over(1_000));
-
-        assert_eq!(
-            short.calls(),
-            long.calls(),
-            "the two runs make the same calls: {short:?} against {long:?}"
-        );
-        assert!(short.calls() >= 10, "{short:?}");
-        // What the two runs differ by is the bytes, exactly: 990 more a call,
-        // because the text is ASCII and the unit is bytes — which is the
-        // other half of what this pins: a charge in *characters* would be the
-        // same number here, and one in words an eighth of it. The one unit a
-        // value the walk also charges is the same in both runs and cancels.
-        assert_eq!(
-            long.work - short.work,
-            short.calls() * 990,
-            "{short:?} against {long:?}"
-        );
-    }
+    // `the_work_a_variant_is_charged_scales_with_what_it_examined` stood here,
+    // over `renders_over`: ten renderings of an erased struct holding a string
+    // ten and then a thousand characters long, asserting that the two runs'
+    // work differed by exactly the bytes appended — ADR 0064's Decision 7, that
+    // an intrinsic is charged what it examined rather than one unit a call.
+    // The operation had moved seven times already, from `String.length` to
+    // `Value.order`, and ADR 0068's Phase 4b-ii moved the eighth: the rendering
+    // of an erased value is `std.dynamic.renderInto`, a Cove loop charged an
+    // instruction at a time, so no intrinsic that charges by the byte is left
+    // to hold the property over. `Value.admitKey`, the one that walks, is held
+    // to its per-value charge by the case above.
 
     // `an_early_exit_is_charged_less_than_a_whole_walk` stood here: ten orders
     // of two erased four-field structs that differed in the first field or in

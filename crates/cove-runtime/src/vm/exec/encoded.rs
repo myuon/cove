@@ -341,6 +341,12 @@ const DYN_CHILD: u8 = Op::DynChild.number();
 const DYN_SAME_OBJECT: u8 = Op::DynSameObject.number();
 const DYN_NAME_ORDER: u8 = Op::DynNameOrder.number();
 const HANDLE_TEXT: u8 = Op::HandleText.number();
+const DYN_TYPE_NAME: u8 = Op::DynTypeName.number();
+const DYN_FIELD_NAME: u8 = Op::DynFieldName.number();
+const DYN_CASE_NAME: u8 = Op::DynCaseName.number();
+const DYN_OPAQUE: u8 = Op::DynOpaque.number();
+const DYN_HANDLE_TEXT: u8 = Op::DynHandleText.number();
+const DYN_ON_PATH: u8 = Op::DynOnPath.number();
 
 /// Whether [`dispatch`] implements this opcode.
 ///
@@ -439,7 +445,13 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::DynChild
         | Op::DynSameObject
         | Op::DynNameOrder
-        | Op::HandleText => true,
+        | Op::HandleText
+        | Op::DynTypeName
+        | Op::DynFieldName
+        | Op::DynCaseName
+        | Op::DynOpaque
+        | Op::DynHandleText
+        | Op::DynOnPath => true,
     }
 }
 
@@ -3735,6 +3747,7 @@ pub(super) fn dispatch<'s, 'a>(
                     width,
                 );
                 machine.mem.set_word_at(base_at + (a!()) as usize, boxed);
+                dynamic::audit_box(machine, boxed);
             }
             UNBOX => {
                 let layout = LayoutId(held.lo());
@@ -3767,8 +3780,14 @@ pub(super) fn dispatch<'s, 'a>(
             // chain of tier crossings has entered, and the seven arms inlined
             // grew it enough that `native_tier`'s three-hundred-crossing chain
             // overflowed a test thread's stack.
+            //
+            // Phase 4b-ii's five that do not allocate are here too: a placed
+            // name is a load of an address the run placed, whether a struct is
+            // opaque is a flag, and whether a vector is on a path is a walk of
+            // frames already there.
             DYN_OPEN | DYN_KIND | DYN_SAME_TYPE | DYN_READ | DYN_CASE | DYN_COUNT | DYN_CHILD
-            | DYN_SAME_OBJECT | DYN_NAME_ORDER => {
+            | DYN_SAME_OBJECT | DYN_NAME_ORDER | DYN_TYPE_NAME | DYN_FIELD_NAME | DYN_CASE_NAME
+            | DYN_OPAQUE | DYN_ON_PATH => {
                 if let Err(error) =
                     dynamic::execute(machine, held.opcode(), base_at, a!(), b!(), c!(), id)
                 {
@@ -3783,6 +3802,14 @@ pub(super) fn dispatch<'s, 'a>(
             HANDLE_TEXT => {
                 machine.sync(pc - 1);
                 if let Err(error) = handle_text(machine, base_at, a!(), b!(), id) {
+                    fail!(error)
+                }
+            }
+            // The same text for an opaque value inside a box, read through a
+            // view: `HANDLE_TEXT`'s arrangement, for its reasons.
+            DYN_HANDLE_TEXT => {
+                machine.sync(pc - 1);
+                if let Err(error) = dynamic::handle_text(machine, base_at, a!(), b!()) {
                     fail!(error)
                 }
             }
