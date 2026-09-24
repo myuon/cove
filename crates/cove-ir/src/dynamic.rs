@@ -117,15 +117,24 @@ pub fn view_layout(int: LayoutId, reference: LayoutId) -> Layout {
 /// | 11 | [`Map`](DynamicKind::Map) | `Entries` | `Map` |
 /// | 12 | [`Range`](DynamicKind::Range) | the program's `Range` struct | `Range` |
 /// | 13 | [`Function`](DynamicKind::Function) | `Closure` | `Closure`, and a host operation used as a value |
-/// | 14 | [`Opaque`](DynamicKind::Opaque) | every other shape: a `Host`, `Task`, `Scope`, `Addr` or `Tag` word, `Shared`, `Bytes`, `ByteBuffer` | every other value |
+/// | 14 | [`Opaque`](DynamicKind::Opaque) | every other shape: a `Host`, `Task`, `Scope`, `Addr` or `Tag` word, `Bytes`, `ByteBuffer` | every other value |
+/// | 15 | [`Shared`](DynamicKind::Shared) | `Shared` | `Shared` |
 ///
 /// The order is the table's and not a ranking: nothing may compare two codes
 /// as numbers, and the ordering between kinds a `Map` key needs is
 /// `MapKey`'s and is the standard library's to reproduce.
 ///
-/// Decision 7 is the last row. A function, a Host handle, a task, a scope and
-/// a synchronized cell do not become readable by being boxed, so they have no
-/// children here and no scalar to read.
+/// Decision 7 is the last three rows. A function, a Host handle, a task, a
+/// scope and a synchronized cell do not become readable by being boxed, so
+/// they have no children here and no scalar to read.
+///
+/// **A `Shared` cell is row 15 and not row 14**, which it was until ADR 0068's
+/// Phase 4b-ii (issue #499's decision 5). It is no more readable than a
+/// handle, and every walk treats it as one — equal to nothing, refused as a
+/// key — but a rendering shows it as `<shared>`, which is in no layout of a
+/// handle, so a walk has to be able to tell it apart. It was appended rather
+/// than put beside the other opaque kinds so that no code already in the
+/// table moved.
 ///
 /// **An `opaque` struct is row 6 and not row 14.** It was row 14 until ADR
 /// 0068's Phase 2, on the reading that its fields belong to the module that
@@ -151,11 +160,12 @@ pub enum DynamicKind {
     Range,
     Function,
     Opaque,
+    Shared,
 }
 
 impl DynamicKind {
     /// Every kind, in code order.
-    pub const ALL: [DynamicKind; 15] = [
+    pub const ALL: [DynamicKind; 16] = [
         DynamicKind::Unit,
         DynamicKind::Bool,
         DynamicKind::Int,
@@ -171,6 +181,7 @@ impl DynamicKind {
         DynamicKind::Range,
         DynamicKind::Function,
         DynamicKind::Opaque,
+        DynamicKind::Shared,
     ];
 
     /// The `Int` [`Inst::DynKind`](crate::Inst::DynKind) answers.
@@ -228,6 +239,7 @@ impl DynamicKind {
             DynamicKind::Range => "Range",
             DynamicKind::Function => "function",
             DynamicKind::Opaque => "opaque value",
+            DynamicKind::Shared => "Shared",
         }
     }
 }
@@ -299,12 +311,13 @@ mod tests {
                 (12, "Range"),
                 (13, "function"),
                 (14, "opaque value"),
+                (15, "Shared"),
             ]
         );
         for kind in DynamicKind::ALL {
             assert_eq!(DynamicKind::from_code(kind.code()), Some(kind));
         }
-        assert_eq!(DynamicKind::from_code(15), None);
+        assert_eq!(DynamicKind::from_code(16), None);
         assert_eq!(DynamicKind::from_code(-1), None);
     }
 

@@ -390,6 +390,11 @@ impl Check<'_> {
                     identify(&mut objects, dst, self.program.boxed_layout);
                     poison(&mut funcs, dst, 1);
                 }
+                // A new string, as `Inst::Str`'s is one placed before the run.
+                Inst::HandleText { dst, .. } => {
+                    identify(&mut objects, dst, self.program.str_layout);
+                    poison(&mut funcs, dst, 1);
+                }
                 // The one instruction that identifies a callee rather than a
                 // layout. It is not an allocation, so it poisons the first
                 // answer exactly as `Inst::Int` does.
@@ -1367,6 +1372,13 @@ impl Check<'_> {
             Inst::DynCase { dst, view } => {
                 self.expect(at, dst, &[Repr::Int]);
                 self.view(at, view, "what a case is asked of");
+            }
+            // The source's `Repr` is the whole of which text is written, so it
+            // is held to the three handles whose text is in a table of the
+            // run's; the answer is a new `String`.
+            Inst::HandleText { dst, src } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.expect(at, src, &[Repr::Host, Repr::Scope, Repr::Task]);
             }
             Inst::DynCount { dst, view } => {
                 self.expect(at, dst, &[Repr::Int]);
@@ -3078,6 +3090,35 @@ mod tests {
                 "{shown}"
             );
         }
+    }
+
+    /// A handle's text is read out of each of the three handles and written
+    /// into a reference, and nothing else: the source is held to the three
+    /// words whose text is in a table of the run's, and the answer to a
+    /// `String`'s word.
+    #[test]
+    fn a_handle_s_text_is_read_from_a_handle_into_a_reference() {
+        let handles = |code: Vec<Inst>| {
+            program(vec![function(
+                vec![Repr::Ref, Repr::Host, Repr::Scope, Repr::Task, Repr::Int],
+                INT,
+                code.into_iter().chain([Inst::Return { src: 4 }]).collect(),
+            )])
+        };
+        let held = handles(vec![
+            Inst::HandleText { dst: 0, src: 1 },
+            Inst::HandleText { dst: 0, src: 2 },
+            Inst::HandleText { dst: 0, src: 3 },
+        ]);
+        assert_eq!(faults(&held), Vec::<String>::new());
+        assert_eq!(
+            faults(&handles(vec![Inst::HandleText { dst: 0, src: 4 }])),
+            vec!["slot 4 holds int, but this wants host or scope or task".to_string()]
+        );
+        assert_eq!(
+            faults(&handles(vec![Inst::HandleText { dst: 4, src: 1 }])),
+            vec!["slot 4 holds int, but this wants ref".to_string()]
+        );
     }
 
     /// A view cannot run off the top of the frame: its three words are checked

@@ -163,6 +163,25 @@ pub fn is_library_module(module: &str) -> bool {
     module_names().contains(&module)
 }
 
+/// Whether module `from` may name `owner`'s declarations that are not
+/// exported: only when both are the standard library's.
+///
+/// The standard library is one body of trusted code written as several
+/// modules, and a module-private function in one of them is private to the
+/// library rather than to its file: `std.dynamic`'s rendering of an erased
+/// value writes an `Int`, a `Float` and a `Duration` through `std.int`'s,
+/// `std.float`'s and `std.duration`'s own `renderInto`, which the lowering
+/// already calls by name and which no program may call at all (issue #499's
+/// decision 6). So this is a privilege on the footing of `core.*`, decided by
+/// [`is_library_module`] and by nothing in the source, and it is asked
+/// wherever an `export` is: a `use` of one declaration, a qualified name
+/// through a module imported whole, and the call graph's edge for either. A
+/// program's module is refused a library module's private declaration as it
+/// always was, and a library module is refused a program's.
+pub fn reaches_private(from: &str, owner: &str) -> bool {
+    is_library_module(from) && is_library_module(owner)
+}
+
 /// Adds the standard library's sources to `sources` and answers the modules
 /// to put in a package.
 ///

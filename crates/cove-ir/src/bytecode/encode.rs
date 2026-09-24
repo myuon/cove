@@ -557,6 +557,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::DynRead { dst, view } => build(Op::DynRead, slot(dst)?, slot(view)?, 0, 0),
         Inst::DynCase { dst, view } => build(Op::DynCase, slot(dst)?, slot(view)?, 0, 0),
         Inst::DynCount { dst, view } => build(Op::DynCount, slot(dst)?, slot(view)?, 0, 0),
+        // No payload, for `DynRead`'s reason turned round: which handle's text
+        // is written is its source's `Repr`.
+        Inst::HandleText { dst, src } => build(Op::HandleText, slot(dst)?, slot(src)?, 0, 0),
         Inst::DynChild { dst, view, index } => {
             build(Op::DynChild, slot(dst)?, slot(view)?, slot(index)?, 0)
         }
@@ -1258,6 +1261,7 @@ mod tests {
             (0, Inst::DynRead { dst: 1, view: 2 }),
             (0, Inst::DynCase { dst: 1, view: 2 }),
             (0, Inst::DynCount { dst: 1, view: 2 }),
+            (0, Inst::HandleText { dst: 1, src: 2 }),
             (
                 0,
                 Inst::DynChild {

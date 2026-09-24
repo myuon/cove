@@ -2852,22 +2852,22 @@ impl Synth<'_> {
             // scope settling it — `Display for Value`'s `<task>`, and all of
             // it is in the layout.
             Shape::Word(Repr::Task) => self.literal(buffer, "<task>"),
+            // A host resource and a task scope show *which* one they are —
+            // `<{module}.{Type}#{n}>`, `<task scope {name}>` — and that is in
+            // the run's resource table and the scheduler's scope table rather
+            // than in the layout: every resource is the one `<host>` layout and
+            // every scope the one `TaskScope`. So neither can be placed as a
+            // literal, and until ADR 0068's Phase 4b-ii both refused here (issue
+            // #499). [`Inst::HandleText`] is the one question that answers it,
+            // asked of the word and of nothing else; ADR 0068's Decision 5 keeps
+            // this known layout off reflection, which a rendering of an erased
+            // value would have been.
+            Shape::Word(Repr::Host | Repr::Scope) => self.handle(at, buffer),
             // An address is a place and not a value; interpolating one would
             // be putting this run's bookkeeping into a string a program
             // prints. A tag is not a value either, for a reason of its own: it
             // is word 0 of an enum, and an enum renders whole through its
             // layout.
-            //
-            // A host resource and a task scope are here too, and unlike those
-            // two a program can interpolate either (issue #499). Their text —
-            // `<{module}.{Type}#{n}>`, `<task scope {name}>` — names *which*
-            // one, and that is in the run's resource table and the scheduler's
-            // scope table rather than in the layout: every resource is the one
-            // `<host>` layout and every scope the one `TaskScope`. A walk has
-            // nothing to write it from, and ADR 0068's gate forbids handing a
-            // known layout to `Value.renderInto` instead. So these two still
-            // refuse on a static walk; a box renders them, because the
-            // runtime's renderer reads both tables.
             //
             // Everything else — a `String`, an `Int`, a `Float`, a
             // `Duration`, a box — is not a walk at all, so [`walks`] made no
@@ -3295,6 +3295,21 @@ impl Synth<'_> {
         }
     }
 
+    /// The text of the resource or scope in `at`, appended to `buffer`: one
+    /// [`Inst::HandleText`] into a `String` of the walk's own, and the append
+    /// of it.
+    ///
+    /// The one arm of a rendering walk that allocates a string itself. It owes
+    /// no [`Inst::Clear`], for the module's reason: the string is retained for
+    /// one append, until this function's frame is popped a few instructions
+    /// later.
+    fn handle(&mut self, at: Slot, buffer: Slot) {
+        let text = self.alloc(shapes::STR);
+        self.emit(Inst::HandleText { dst: text, src: at });
+        let callee = self.leaves().text;
+        self.append(callee, buffer, text, shapes::STR);
+    }
+
     /// One call of an append: the buffer first, then what is appended.
     ///
     /// Its answer is written into [`Synth::answer`], which already holds the
@@ -3335,10 +3350,10 @@ impl Synth<'_> {
     ///
     /// The lowering's own sentence again, [`Synth::not_a_key`]'s argument
     /// repeated. The families it answers for are word 0 of an enum and an
-    /// address, which no checked program can interpolate, and a host handle
-    /// and a task scope, which issue #499 found a program can: see
-    /// [`Synth::rendering`]'s last arm for why a walk cannot write their text.
-    /// A task was here too, and renders as `<task>` now.
+    /// address, which no checked program can interpolate. A task was here
+    /// too, and renders as `<task>` now; and a host handle and a task scope,
+    /// which issue #499 found a program can interpolate, render through
+    /// [`Synth::handle`] since ADR 0068's Phase 4b-ii.
     fn no_text(&mut self) {
         self.trap("this value has no text of its own");
     }

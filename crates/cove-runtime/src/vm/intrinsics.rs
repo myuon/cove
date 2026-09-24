@@ -323,12 +323,41 @@ fn render(
         Repr::Float => float(out, f64::from_bits(word)),
         Repr::Duration => duration(out, word as i64),
         Repr::Ref => return render_object(machine, word, walk, out),
+        Repr::Host | Repr::Scope | Repr::Task => handle_text(machine, repr, word, out)?,
+        // An address is a place and not a value; interpolating one would be
+        // putting this run's bookkeeping into a string a program prints.
+        //
+        // A tag is not a value either, for a reason of its own: it is word 0
+        // of an enum and an enum renders whole, through its layout, as the
+        // case it holds. A tag reaching here alone is a lowering bug.
+        Repr::Addr | Repr::Tag => {
+            return Err(RuntimeError::new("this value has no text of its own"))
+        }
+    }
+    Ok(())
+}
+
+/// The text of the handle `word`, read as `repr`, appended to `out` — what
+/// `Inst::HandleText` answers as a new `String`, and what this rendering
+/// writes for a handle inside a box.
+///
+/// Written once for the two, so that a walk the lowering composed for a known
+/// layout and this rendering of an erased one cannot come to say different
+/// things of one handle.
+pub(crate) fn handle_text(
+    machine: &Machine,
+    repr: Repr,
+    word: u64,
+    out: &mut String,
+) -> Result<(), RuntimeError> {
+    match repr {
         // A handle shows as what it names, identity included — `Display for
         // Value`'s `<{handle}>`, which is `<{module}.{Type}#{n}>`: two
         // connections are told apart by the number the host issued and by
         // nothing else. The module, the type and the number are the run's
         // resource table's, which is why a walk the lowering composed cannot
-        // write this and hands the word here (issue #499).
+        // place this as a literal and asks `Inst::HandleText` for it (issue
+        // #499).
         Repr::Host => {
             let handle = machine
                 .resource(word)
@@ -343,17 +372,14 @@ fn render(
         }
         // A task shows as the handle it is, never as the value it will
         // produce: that value is observable only through `await` or the scope
-        // settling it. A walk writes this one itself; it is here for a task
-        // inside a box.
+        // settling it. A walk writes this one itself, as a literal; it is here
+        // for a task inside a box.
         Repr::Task => out.push_str("<task>"),
-        // An address is a place and not a value; interpolating one would be
-        // putting this run's bookkeeping into a string a program prints.
-        //
-        // A tag is not a value either, for a reason of its own: it is word 0
-        // of an enum and an enum renders whole, through its layout, as the
-        // case it holds. A tag reaching here alone is a lowering bug.
-        Repr::Addr | Repr::Tag => {
-            return Err(RuntimeError::new("this value has no text of its own"))
+        other => {
+            return Err(RuntimeError::new(format!(
+                "internal error: a `{}` word is not a handle with a text",
+                other.name()
+            )))
         }
     }
     Ok(())

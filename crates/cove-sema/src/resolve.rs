@@ -1225,7 +1225,10 @@ fn resolve_uses(
                         continue;
                     }
                     match surface.declarations.get(*last) {
-                        Some(declared) if declared.exported => {
+                        Some(declared)
+                            if declared.exported
+                                || crate::stdlib::reaches_private(name, &owner) =>
+                        {
                             bind(
                                 &mut bound,
                                 name,
@@ -3559,11 +3562,9 @@ fn resolve_calls(
                     .and_then(|head| resolved.module_imports.get(head))
                 {
                     if let Some(owner) = program.modules.get(target) {
-                        if owner
-                            .functions
-                            .get(method)
-                            .is_some_and(|entry| entry.exported)
-                        {
+                        if owner.functions.get(method).is_some_and(|entry| {
+                            entry.exported || crate::stdlib::reaches_private(module, target)
+                        }) {
                             exact(&mut targets, (target.clone(), FnKey::Fn(method.clone())));
                             continue;
                         }
@@ -4463,6 +4464,29 @@ impl Show for B {
         // The declaration itself is labelled, and `export` is the fix.
         assert_eq!(diagnostic.labels.len(), 1);
         assert!(diagnostic.help.as_deref().unwrap().contains("export"));
+    }
+
+    /// A standard-library module may `use` another's private declaration,
+    /// which is issue #499's decision 6 — and a program's module still may not,
+    /// nor a library module a program's.
+    #[test]
+    fn only_a_library_module_uses_another_library_module_s_private_declaration() {
+        const INT: &str = "fn hidden(value: Int) -> Int {\n  value\n}\n";
+        let program = resolve_modules(&[("std.int", INT), ("std.dynamic", "use std.int.hidden\n")])
+            .unwrap_or_else(|errors| panic!("{errors:?}"));
+        assert_eq!(
+            program.modules["std.dynamic"].imports.get("hidden"),
+            Some(&"std.int".to_string())
+        );
+        let diagnostic = resolve_err(
+            &[("std.int", INT), ("app", "use std.int.hidden\n")],
+            "cove::resolve::private_declaration",
+        );
+        assert!(diagnostic.message.contains("not exported"));
+        resolve_err(
+            &[("greet", INT), ("std.dynamic", "use greet.hidden\n")],
+            "cove::resolve::private_declaration",
+        );
     }
 
     #[test]

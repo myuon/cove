@@ -2412,7 +2412,7 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-        if !exported {
+        if !exported && !crate::stdlib::reaches_private(&self.module.name, owner_name) {
             self.diagnostics.push(
                 Diagnostic::error(
                     UNKNOWN_MEMBER,
@@ -15836,6 +15836,69 @@ fn secret() -> Int {
         assert!(error
             .message
             .contains("`core` has no intrinsic `byteLengthOf`"));
+    }
+
+    /// One standard-library module names another's declaration that is not
+    /// exported, through a module imported whole and through a `use` of the
+    /// one declaration, and it checks as the declaration says (issue #499's
+    /// decision 6) — while a program's module is refused the same name, and a
+    /// library module is refused a program's.
+    #[test]
+    fn library_modules_reach_one_another_s_private_declarations() {
+        const INT: &str = "fn hidden(value: Int) -> Int {\n  value + 1\n}\n\n/// Shown.\nexport fn shown() -> Int {\n  hidden(1)\n}\n";
+        accepts_modules(&[
+            ("std.int", INT),
+            (
+                "std.dynamic",
+                "use std.int\n\n/// Probe.\nexport fn probe() -> Int {\n  int.hidden(2)\n}\n",
+            ),
+        ]);
+        accepts_modules(&[
+            ("std.int", INT),
+            (
+                "std.dynamic",
+                "use std.int.hidden\n\n/// Probe.\nexport fn probe() -> Int {\n  hidden(2)\n}\n",
+            ),
+        ]);
+        // What it names is the declaration it is: a wrong argument is a
+        // mismatch, not a question of who may call it.
+        let error = rejects_modules(&[
+            ("std.int", INT),
+            (
+                "std.dynamic",
+                "use std.int\n\n/// Probe.\nexport fn probe() -> Int {\n  int.hidden(\"2\")\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH, "{}", error.message);
+        // A program's module is refused it, qualified and imported alike.
+        let error = rejects_modules(&[
+            ("std.int", INT),
+            (
+                "app",
+                "use std.int\n\n/// Entry point.\nexport fn main() -> Int {\n  int.hidden(2)\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_MEMBER, "{}", error.message);
+        assert_eq!(
+            error.message,
+            "`hidden` is declared by module `std.int`, but is not exported"
+        );
+        // A `use` of the one declaration is refused before checking starts:
+        // see `resolve`'s `a_use_of_a_private_declaration_is_rejected`.
+        //
+        // And the privilege is the library's alone: a library module reaches
+        // no program's private declaration.
+        let error = rejects_modules(&[
+            (
+                "levels",
+                "fn secret() -> Int {\n  1\n}\n\n/// Shown.\nexport fn shown() -> Int {\n  secret()\n}\n",
+            ),
+            (
+                "std.dynamic",
+                "use levels\n\n/// Probe.\nexport fn probe() -> Int {\n  levels.secret()\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_MEMBER, "{}", error.message);
     }
 
     /// In a program's own module `core` is an ordinary name, and a call

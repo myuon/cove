@@ -433,6 +433,7 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
         Op::DynSameType => Inst::DynSameType { dst: a, a: b, b: c },
         Op::DynSameObject => Inst::DynSameObject { dst: a, a: b, b: c },
         Op::DynNameOrder => Inst::DynNameOrder { dst: a, a: b, b: c },
+        Op::HandleText => Inst::HandleText { dst: a, src: b },
         Op::DynRead => Inst::DynRead { dst: a, view: b },
         Op::DynCase => Inst::DynCase { dst: a, view: b },
         Op::DynCount => Inst::DynCount { dst: a, view: b },

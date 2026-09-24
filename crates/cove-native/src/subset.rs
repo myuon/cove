@@ -1399,6 +1399,14 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         | Inst::DynChild { .. }
         | Inst::DynSameObject { .. }
         | Inst::DynNameOrder { .. } => return Some(Reason::Reflection),
+        // ADR 0068's Phase 4b's text of a resource, a scope or a task, refused
+        // by name. Its source is a `Host`, `Scope` or `Task` word, which this
+        // tier keeps in no slot, so a function holding one is refused whole as
+        // `Reason::SlotRepr` before its instructions are looked at and this arm
+        // is where a reader finds why it would be refused if that changed: the
+        // text is in the run's resource and scope tables, and a narrow helper
+        // over them is work for the day this tier keeps a handle in a slot.
+        Inst::HandleText { .. } => return Some(Reason::Instruction),
         // [ADR 0065]'s run search, the same helper with [`RunOp::FindBytes`].
         // Bounded as the slice is — four one-word operands the frame has —
         // and over packed bytes alone, which `cove_ir::verify` is what holds:

@@ -214,7 +214,8 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
         | Inst::DynNameOrder { dst, .. }
         | Inst::DynRead { dst, .. }
         | Inst::DynCase { dst, .. }
-        | Inst::DynCount { dst, .. } => one(dst),
+        | Inst::DynCount { dst, .. }
+        | Inst::HandleText { dst, .. } => one(dst),
         // ADR 0068's view, the program's view layout wide.
         Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
             Some((dst, width(program.view_layout)))

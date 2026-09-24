@@ -54,6 +54,7 @@ struct Layouts {
     range: LayoutId,
     closure: LayoutId,
     secret: LayoutId,
+    shared: LayoutId,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +153,7 @@ fn fixture() -> Fixture {
             captures: Vec::new(),
         },
     );
+    let shared = build.layout("Shared", Shape::Shared { value: int });
     build.program.layouts.push(Layout::inline(
         "m.Secret",
         Shape::Struct {
@@ -286,6 +288,7 @@ fn fixture() -> Fixture {
             range,
             closure,
             secret,
+            shared,
         },
         functions: Functions {
             open,
@@ -664,7 +667,7 @@ fn describe(machine: &mut Machine, fixture: &Fixture, view: &[u64]) -> String {
                 String::from_utf8(machine.string_bytes(text)).unwrap()
             )
         }
-        DynamicKind::Function | DynamicKind::Opaque => {
+        DynamicKind::Function | DynamicKind::Opaque | DynamicKind::Shared => {
             assert_eq!(one(machine, functions.count), 0, "{}", kind.name());
             kind.name().to_string()
         }
@@ -710,6 +713,7 @@ fn every_kind_is_described_through_the_instructions() {
     let set = object(machine, layouts.set_int, 2, &[1, 5]);
     let map = object(machine, layouts.map, 2, &[a, 1, b, 2]);
     let closure = object(machine, layouts.closure, 0, &[0]);
+    let cell = object(machine, layouts.shared, 2, &[0, 3]);
     let point = boxed(machine, layouts.point, &[1, 2]);
     let name = string(machine, "n");
     let held = boxed(machine, layouts.inner, &[name, 5, 6]);
@@ -754,6 +758,8 @@ fn every_kind_is_described_through_the_instructions() {
             boxed(machine, layouts.range, &[1, 4, 0]),
         ),
         ("function", boxed(machine, layouts.closure, &[closure])),
+        // A cell is a kind of its own, and as unreadable as a handle.
+        ("Shared", boxed(machine, layouts.shared, &[cell])),
         // A box inside a box is opened through, to the value.
         ("struct[1, 2]", boxed(machine, layouts.boxed, &[point])),
         // And so is a box in a field: the child is the value it holds.
