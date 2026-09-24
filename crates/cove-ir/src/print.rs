@@ -525,6 +525,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::DynRead { dst, view } => {
             format!("dyn.read {} {}", s(*dst), v(*view, program.view_layout))
         }
+        Inst::HandleText { dst, src } => format!("handle.text {} {}", s(*dst), s(*src)),
         Inst::DynCase { dst, view } => {
             format!("dyn.case {} {}", s(*dst), v(*view, program.view_layout))
         }

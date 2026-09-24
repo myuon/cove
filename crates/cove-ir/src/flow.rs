@@ -76,7 +76,8 @@ impl Inst {
             | Inst::DynNameOrder { dst, .. }
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
-            | Inst::DynCount { dst, .. } => f(dst, 1),
+            | Inst::DynCount { dst, .. }
+            | Inst::HandleText { dst, .. } => f(dst, 1),
             // A view is `Program::view_layout`'s words wherever it is written.
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 f(dst, width(program.view_layout))
@@ -251,7 +252,8 @@ impl Inst {
             | Inst::DynRead { .. }
             | Inst::DynCase { .. }
             | Inst::DynCount { .. }
-            | Inst::DynChild { .. } => None,
+            | Inst::DynChild { .. }
+            | Inst::HandleText { .. } => None,
         }
     }
 

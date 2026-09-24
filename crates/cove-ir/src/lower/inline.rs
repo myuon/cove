@@ -839,7 +839,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::DynNameOrder { dst, .. }
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
-            | Inst::DynCount { dst, .. } => mark(dst, 1),
+            | Inst::DynCount { dst, .. }
+            | Inst::HandleText { dst, .. } => mark(dst, 1),
             // A view is the program's view layout's words wherever it lands.
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 mark(dst, width(program.view_layout))
@@ -1517,6 +1518,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         | Inst::DynSameObject { dst, a, b }
         | Inst::DynNameOrder { dst, a, b } => vec![dst, a, b],
         Inst::DynChild { dst, view, index } => vec![dst, view, index],
+        Inst::HandleText { dst, src } => vec![dst, src],
         Inst::IntrinsicCall { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
         Inst::Trap {

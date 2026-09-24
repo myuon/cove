@@ -1138,8 +1138,9 @@ pub fn call_core(
 /// and whether or not it is `opaque`: its fields are the declaring module's,
 /// and the only reader of a view is the standard library's own walks, which
 /// compare them as `eq_value` does. A host operation used as a value is a
-/// function, as the closure the machine builds for one is; and every handle,
-/// module, type and cell is opaque (ADR 0068, Decision 7).
+/// function, as the closure the machine builds for one is; a `Shared` cell is
+/// a kind of its own, so that a rendering can show it as `<shared>`; and every
+/// handle, module and type is opaque (ADR 0068, Decision 7).
 pub(crate) fn dynamic_kind(value: &Value) -> DynamicKind {
     match value.erased() {
         Value(Repr::Unit) => DynamicKind::Unit,
@@ -1156,6 +1157,7 @@ pub(crate) fn dynamic_kind(value: &Value) -> DynamicKind {
         Value(Repr::Map(_)) => DynamicKind::Map,
         Value(Repr::Range { .. }) => DynamicKind::Range,
         Value(Repr::Closure(_) | Repr::HostFn(_)) => DynamicKind::Function,
+        Value(Repr::Shared(_)) => DynamicKind::Shared,
         Value(
             Repr::ByteBuffer(_)
             | Repr::Dyn(_)
@@ -1163,8 +1165,7 @@ pub(crate) fn dynamic_kind(value: &Value) -> DynamicKind {
             | Repr::Resource(_)
             | Repr::Type(_)
             | Repr::TaskScope(_)
-            | Repr::Task(_)
-            | Repr::Shared(_),
+            | Repr::Task(_),
         ) => DynamicKind::Opaque,
     }
 }
@@ -2295,7 +2296,7 @@ mod dynamic_tests {
     use cove_diag::{FileId, Span};
     use cove_ir::DynamicKind;
 
-    use super::{call_core, Callable};
+    use super::{call_core, Callable, SharedCell};
     use crate::error::RuntimeError;
     use crate::value::{DynValue, MapKey, Repr, StructValue, Value, VectorStorage};
 
@@ -2379,7 +2380,7 @@ mod dynamic_tests {
                 "{:?}",
                 ask("dynamicString", vec![view.clone()]).as_str().unwrap()
             ),
-            DynamicKind::Function | DynamicKind::Opaque => {
+            DynamicKind::Function | DynamicKind::Opaque | DynamicKind::Shared => {
                 assert_eq!(int(&ask("dynamicChildCount", vec![view.clone()])), 0);
                 kind.name().to_string()
             }
@@ -2473,6 +2474,12 @@ mod dynamic_tests {
             ),
             ("Range[1, 4, false]", Value::range_of(1, 4, false)),
             ("function", Value::host_fn("console", "println")),
+            (
+                "Shared",
+                Value(Repr::Shared(
+                    SharedCell::wrap(&Value::int(3), span()).expect("an `Int` is task-safe"),
+                )),
+            ),
             ("struct[1, 2]", erased(point(1, 2))),
             (
                 "struct[struct[\"n\", struct[5, 6]]]",

@@ -2,26 +2,36 @@ use console.println
 use http
 use clock.timeout
 
-/// A task and a host resource render as the interpreter's opaque text on
-/// every evaluator (issue #499's decision 7).
+/// A task, a task scope, a host resource, a `Shared` cell and a function
+/// render as the interpreter's opaque text on every evaluator (issue #499's
+/// decision 7).
 ///
-/// Each is a handle to something that is not a Cove value — a thread, a thing
-/// the host owns — so each renders as what it names and never as what it
-/// holds:
+/// Each is a handle to something that is not a Cove value — a thread, a scope
+/// of work, a thing the host owns, a cell behind a lock, code — so each renders
+/// as what it names and never as what it holds:
 ///
 /// - a `Task` as `<task>`, unboxed, as a field, and as a field of a value
 ///   erased to `dyn`;
-/// - an `http.Server` as `<http.Server#{n}>`, the number the host issued, as a
-///   field of a value erased to `dyn`, and erased to `Any` through
-///   `clock.timeout`'s answer.
+/// - a task scope as `<task scope {name}>`, unboxed, which is the only way a
+///   program can reach one;
+/// - an `http.Server` as `<http.Server#{n}>`, the number the host issued,
+///   unboxed, as a field, as a field of a value erased to `dyn`, and erased to
+///   `Any` through `clock.timeout`'s answer;
+/// - a `Shared` cell as `<shared>`, unboxed.
 ///
-/// Until ADR 0068's Phase 4b-i the linear-memory backend refused every row
-/// with "this value has no text of its own".
+/// Until ADR 0068's Phase 4b-i the linear-memory backend refused every task
+/// and resource row with "this value has no text of its own", and until its
+/// Phase 4b-ii it still refused a resource and a scope rendered through a
+/// layout the lowering knows: their text is in the run's resource and scope
+/// tables and not in the layout, and `Inst::HandleText` is how a walk the
+/// lowering composed reaches it.
 ///
-/// A resource rendered through a layout the lowering knows — unboxed, or as a
-/// field — and a task scope, which is only ever unboxed, are not here: their
-/// text is in the run's resource and scope tables and not in the layout, and
-/// how a static walk reaches it is open (issue #499).
+/// A `Shared` cell erased to `dyn`, and a function whether erased or not, are
+/// not here yet: each is rendered by the runtime's `Value.renderInto` until ADR
+/// 0068's Phase 4b-ii renders an erased value in Cove — a function's static
+/// layout is one reference word that says nothing of what it holds — and a
+/// row of any would be one more site of a fallback `tests/boxed.rs` holds from
+/// rising.
 trait Summary {
   fn summarize(self) -> String
 }
@@ -53,14 +63,20 @@ export fn main() -> Result<Unit, Error> {
     println("task.field {Holder(t: t)}")?
     let held: dyn Summary = Holder(t: t)
     println("task.dyn {held}")?
+    println("scope {work}")?
     await t
   }
 
   let server = http.listen(0)?
+  println("server {server}")?
+  println("server.field {Listening(server: server)}")?
   let listening: dyn Summary = Listening(server: server)
   println("server.dyn {listening}")?
   let erased = timeout(10s) { server }?
   println("server.any {erased}")?
   server.close()?
+
+  let cell = Shared(1)
+  println("shared {cell}")?
   Ok(())
 }

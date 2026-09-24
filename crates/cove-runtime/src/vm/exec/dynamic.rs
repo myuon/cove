@@ -259,15 +259,15 @@ fn kind_of(machine: &Machine, described: &Layout) -> DynamicKind {
         Shape::Members { .. } => DynamicKind::Set,
         Shape::Entries { .. } => DynamicKind::Map,
         Shape::Closure { .. } => DynamicKind::Function,
+        // A synchronized cell is Decision 7's too, with a kind of its own so
+        // that a rendering can show it as `<shared>` (issue #499's decision 5).
+        Shape::Shared { .. } => DynamicKind::Shared,
         // ADR 0068's Decision 7: a Host handle, a task, a scope, an address,
-        // a case tag, a synchronized cell and a byte run are capabilities or
-        // machinery, and boxing one does not make it readable.
-        Shape::Word(_)
-        | Shape::Shared { .. }
-        | Shape::Bytes
-        | Shape::ByteBuffer
-        | Shape::Boxed
-        | Shape::Free => DynamicKind::Opaque,
+        // a case tag and a byte run are capabilities or machinery, and boxing
+        // one does not make it readable.
+        Shape::Word(_) | Shape::Bytes | Shape::ByteBuffer | Shape::Boxed | Shape::Free => {
+            DynamicKind::Opaque
+        }
     }
 }
 

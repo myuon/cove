@@ -1353,18 +1353,25 @@ impl<'a> Interpreter<'a> {
         select(resolved)
     }
 
-    /// The exported function of `owner` named `name`.
-    fn exported_function(&self, owner: &str, name: &str) -> Option<Arc<FnDecl>> {
-        self.find_exported(owner, name, |resolved| {
-            Some(resolved.functions.get(name)?.decl.clone())
-        })
+    /// The function of `owner` named `name` that module `from` may call
+    /// qualified: an exported one, or — where both modules are the standard
+    /// library's — any one, which is the checker's
+    /// `cove_sema::stdlib::reaches_private` asked again here.
+    fn exported_function(&self, from: &str, owner: &str, name: &str) -> Option<Arc<FnDecl>> {
+        let select =
+            |resolved: &'a ResolvedModule| Some(resolved.functions.get(name)?.decl.clone());
+        if cove_sema::stdlib::reaches_private(from, owner) {
+            return select(self.resolved(owner)?);
+        }
+        self.find_exported(owner, name, select)
     }
 
-    /// `owner.name` as a value: an exported function is an ordinary handle,
-    /// and an exported struct or enum is the type used as a value, exactly
-    /// as a bare name for either would be.
-    fn module_member(&self, owner: &str, name: &str, span: Span) -> Eval {
-        if let Some(decl) = self.exported_function(owner, name) {
+    /// `owner.name` as a value in module `from`: an exported function — or a
+    /// private one [`Interpreter::exported_function`] lets `from` reach — is an
+    /// ordinary handle, and an exported struct or enum is the type used as a
+    /// value, exactly as a bare name for either would be.
+    fn module_member(&self, from: &str, owner: &str, name: &str, span: Span) -> Eval {
+        if let Some(decl) = self.exported_function(from, owner, name) {
             return Ok(declared_as_value(owner.into(), decl));
         }
         if self
@@ -2625,7 +2632,7 @@ impl<'a> Interpreter<'a> {
                 // `booking.create` and `booking.Status`: a module imported
                 // whole answers with the exported declaration it names.
                 if let Some(owner) = self.imported_module(&module, head) {
-                    return self.module_member(&owner, name, span);
+                    return self.module_member(&module, &owner, name, span);
                 }
             }
         }
@@ -2854,7 +2861,8 @@ impl<'a> Interpreter<'a> {
                         // `booking.create(...)`: a module imported whole is
                         // called through the declaration it exports.
                         if let Some(owner) = self.imported_module(&module, head) {
-                            if let Some(decl) = self.exported_function(&owner, &name.node) {
+                            if let Some(decl) = self.exported_function(&module, &owner, &name.node)
+                            {
                                 let args = self.eval_args(env, args, trailing)?;
                                 return Ok(self.call_target(
                                     &Target {

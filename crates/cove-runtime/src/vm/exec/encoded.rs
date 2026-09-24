@@ -340,6 +340,7 @@ const DYN_COUNT: u8 = Op::DynCount.number();
 const DYN_CHILD: u8 = Op::DynChild.number();
 const DYN_SAME_OBJECT: u8 = Op::DynSameObject.number();
 const DYN_NAME_ORDER: u8 = Op::DynNameOrder.number();
+const HANDLE_TEXT: u8 = Op::HandleText.number();
 
 /// Whether [`dispatch`] implements this opcode.
 ///
@@ -437,7 +438,8 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::DynCount
         | Op::DynChild
         | Op::DynSameObject
-        | Op::DynNameOrder => true,
+        | Op::DynNameOrder
+        | Op::HandleText => true,
     }
 }
 
@@ -3773,6 +3775,17 @@ pub(super) fn dispatch<'s, 'a>(
                     fail!(error)
                 }
             }
+            // ADR 0068's Phase 4b: the text of a resource, a scope or a task,
+            // which is in the run's tables and in no layout. It allocates the
+            // string, so the frame is published first, as an allocation's is;
+            // and it is one call out of line, for the reflection arm's reason
+            // above and because nothing renders a handle in a loop.
+            HANDLE_TEXT => {
+                machine.sync(pc - 1);
+                if let Err(error) = handle_text(machine, base_at, a!(), b!(), id) {
+                    fail!(error)
+                }
+            }
 
             // ---- tasks -----------------------------------------------
             SCOPE_ENTER => {
@@ -3948,6 +3961,29 @@ pub(super) fn dispatch<'s, 'a>(
             }
         }
     }
+}
+
+/// `handle.text`: the text of the handle in slot `src` of the frame at
+/// `frame` — which handle is the slot's `Repr` in function `id` — written as a
+/// new `String` into slot `dst`.
+///
+/// The text is `super::super::intrinsics::handle_text`'s, which the rendering
+/// of an erased value writes for the same handle, so the two cannot differ.
+#[inline(never)]
+fn handle_text(
+    machine: &mut Machine,
+    frame: usize,
+    dst: Slot,
+    src: Slot,
+    id: FunctionId,
+) -> Result<(), RuntimeError> {
+    let repr = machine.program.function(id).repr(src).unwrap_or(Repr::Unit);
+    let word = machine.mem.word_at(frame + src as usize);
+    let mut text = String::new();
+    crate::vm::intrinsics::handle_text(machine, repr, word, &mut text)?;
+    let string = machine.new_string(&text)?;
+    machine.mem.set_word_at(frame + dst as usize, string);
+    Ok(())
 }
 
 #[cfg(test)]

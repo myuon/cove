@@ -1,5 +1,9 @@
 task <task>
 task.field Holder(t: <task>)
 task.dyn Holder(t: <task>)
+scope <task scope work>
+server <http.Server#1>
+server.field Listening(server: <http.Server#1>)
 server.dyn Listening(server: <http.Server#1>)
 server.any <http.Server#1>
+shared <shared>

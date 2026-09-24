@@ -2901,7 +2901,8 @@ pub const CORE_DYNAMIC_OPEN: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// defines.
 ///
 /// One `Inst::DynKind`. From nought: unit, bool, int, float, duration,
-/// string, struct, enum, array, vector, set, map, range, function and opaque.
+/// string, struct, enum, array, vector, set, map, range, function, opaque and
+/// shared.
 pub const CORE_DYNAMIC_KIND: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "dynamicKind",
     generics: &[],

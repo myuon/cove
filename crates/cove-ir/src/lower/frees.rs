@@ -382,7 +382,8 @@ impl<'p> Flow<'p> {
             | Inst::DynNameOrder { dst, .. }
             | Inst::DynRead { dst, .. }
             | Inst::DynCase { dst, .. }
-            | Inst::DynCount { dst, .. } => f(dst, 1),
+            | Inst::DynCount { dst, .. }
+            | Inst::HandleText { dst, .. } => f(dst, 1),
             // ADR 0068's view, the program's view layout's words.
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 f(dst, width(self.program.view_layout))
@@ -635,6 +636,7 @@ impl<'p> Flow<'p> {
                 f(view, width(self.program.view_layout));
                 f(index, 1);
             }
+            Inst::HandleText { src, .. } => f(src, 1),
         }
     }
 

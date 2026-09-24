@@ -1856,6 +1856,30 @@ pub enum Inst {
     /// them is a view of three words, which is ADR 0068's "no child allocation
     /// required merely to traverse a value".
     DynChild { dst: Slot, view: Slot, index: Slot },
+    /// `dst = <the text a rendering shows for the handle in src>`, a new
+    /// `String`.
+    ///
+    /// Which handle is the source slot's [`Repr`](crate::Repr), as which
+    /// scalar is [`Inst::DynRead`]'s destination's: a
+    /// [`Repr::Host`](crate::Repr::Host) resource is `<{module}.{Type}#{n}>`,
+    /// a [`Repr::Scope`](crate::Repr::Scope) is `<task scope {name}>`, and a
+    /// [`Repr::Task`](crate::Repr::Task) is `<task>` — the oracle's
+    /// `Display for Value`, word for word (issue #499's decision 7).
+    ///
+    /// **It allocates the string.** The first two name *which* handle, and
+    /// that is in the run's resource table and the scheduler's scope table
+    /// rather than in any layout: every resource is the one `<host>` layout
+    /// and every scope the one `TaskScope`, so no text can be placed before the
+    /// run as a literal is, and a rendering that meets one has nothing else to
+    /// write it from. The values are rare — nothing renders a connection in a
+    /// loop — so the allocation is the price of the text and not of a walk.
+    ///
+    /// A rendering walk the lowering composes for a known layout emits this
+    /// where it meets a resource or a scope, rather than handing the value to
+    /// the runtime's rendering of an erased value: ADR 0068's Decision 5 keeps
+    /// a known layout off reflection, and this is one narrow question about
+    /// one word, not a rendering.
+    HandleText { dst: Slot, src: Slot },
 
     // ---- tasks -------------------------------------------------------------
     /// `dst = <a new task scope, open>`

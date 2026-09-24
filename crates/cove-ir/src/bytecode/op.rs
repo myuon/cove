@@ -260,8 +260,13 @@ mod base {
     /// 0068's Phase 3 brought for `std.dynamic.order`. Last, for
     /// `CMP_ORDER`'s reason: adding it renumbered nothing already there.
     pub const DYN_NAME_ORDER: u8 = DYN_SAME_OBJECT + 1;
+    /// [`crate::Inst::HandleText`], the text of a handle the run's tables
+    /// hold, which ADR 0068's Phase 4b brought for the rendering (issue
+    /// #499). Last, for `CMP_ORDER`'s reason: adding it renumbered nothing
+    /// already there.
+    pub const HANDLE_TEXT: u8 = DYN_NAME_ORDER + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = DYN_NAME_ORDER + 1;
+    pub const END: u8 = HANDLE_TEXT + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -416,6 +421,9 @@ pub enum Op {
     DynSameObject,
     /// [`crate::Inst::DynNameOrder`].
     DynNameOrder,
+    /// [`crate::Inst::HandleText`]: one opcode for the three handles, because
+    /// the source's `Repr` is which one, and the frame already records it.
+    HandleText,
 }
 
 /// Which of `a`, `b` and `c` an opcode uses, and for what.
@@ -490,6 +498,9 @@ const READ: &[Repr] = &[
     Repr::Duration,
     Repr::Ref,
 ];
+/// What [`crate::Inst::HandleText`] may read: the three handles whose text is
+/// in a table of the run's rather than in any layout.
+const HANDLE: &[Repr] = &[Repr::Host, Repr::Scope, Repr::Task];
 
 /// What the payload's eight bytes are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -732,6 +743,7 @@ impl Op {
             Op::DynSameObject,
             Op::DynNameOrder,
         ]);
+        all.push(Op::HandleText);
         all
     }
 
@@ -844,6 +856,7 @@ impl Op {
             Op::DynChild => base::DYN_CHILD,
             Op::DynSameObject => base::DYN_SAME_OBJECT,
             Op::DynNameOrder => base::DYN_NAME_ORDER,
+            Op::HandleText => base::HANDLE_TEXT,
         }
     }
 
@@ -1300,6 +1313,12 @@ impl Op {
                 Operand::View,
                 Payload::Empty,
             ),
+            Op::HandleText => fields(
+                Operand::Word(REF),
+                Operand::Word(HANDLE),
+                NONE,
+                Payload::Empty,
+            ),
         }
     }
 }
@@ -1387,7 +1406,9 @@ mod tests {
     /// and a hundred and ninety once issue #493's cycle rule brought the one
     /// identity question reflection answers, `DynSameObject`, and a hundred and
     /// ninety-one once ADR 0068's Phase 3 brought `DynNameOrder` for
-    /// `std.dynamic.order`.
+    /// `std.dynamic.order`, and a hundred and ninety-two once its Phase 4b
+    /// brought `HandleText` for the text of a resource, a scope or a task —
+    /// one and not three, for `DynRead`'s reason.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1407,9 +1428,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_ninety_one_opcodes() {
-        assert_eq!(Op::all().len(), 191);
-        assert_eq!(OPCODES, 191);
+    fn there_are_a_hundred_and_ninety_two_opcodes() {
+        assert_eq!(Op::all().len(), 192);
+        assert_eq!(OPCODES, 192);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

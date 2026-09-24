@@ -353,9 +353,10 @@ fn containsItselfHelp() -> String {
 ///
 /// The kind codes are `cove_ir::DynamicKind`'s one table: 0 unit, 1 bool, 2
 /// int, 3 float, 4 duration, 5 string, 6 struct, 7 enum, 8 array, 9 vector,
-/// 10 set, 11 map, 12 range, 13 function and 14 opaque. The same type is the
-/// same kind, so one kind is asked for. A scalar has no children, and neither
-/// has a function or an opaque value, which is equal to nothing.
+/// 10 set, 11 map, 12 range, 13 function, 14 opaque and 15 shared. The same
+/// type is the same kind, so one kind is asked for. A scalar has no children,
+/// and neither has a function, an opaque value or a `Shared` cell, each of
+/// which is equal to nothing.
 ///
 /// The counts are compared even where the type settles them — two structs of
 /// one declaration have one field count, two cases of one enum one payload —
@@ -735,10 +736,10 @@ fn sorts(x: DynamicView, y: DynamicView) -> Int {
 }
 
 /// Nothing, where `kind` is a kind a key can be, and the refusal of a value
-/// that is not a key where it is not: a float, 3, a vector, 9, and a function
-/// or an opaque value, 13 and up. [`sorts`] asks it of each of two kinds that
-/// are apart, because which of two such kinds sorts first is a question only
-/// keys have an answer to.
+/// that is not a key where it is not: a float, 3, a vector, 9, and a function,
+/// an opaque value or a `Shared` cell, 13 and up. [`sorts`] asks it of each of
+/// two kinds that are apart, because which of two such kinds sorts first is a
+/// question only keys have an answer to.
 fn admitted(kind: Int) {
   if kind < 13 {
     if kind != 3 {
