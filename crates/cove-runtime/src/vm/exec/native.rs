@@ -1672,6 +1672,7 @@ unsafe fn enter<const MASK: u64>(
         .over_literals(machine.literals_ptr())
         .over_payload_words(machine.fixed_payload_words_ptr())
         .over_dyn_layouts(machine.dyn_layouts_ptr())
+        .over_dyn_children(machine.dyn_children_ptr())
         // What is left of the stride, not a fresh one: this call is entered
         // with whatever the encoded tier has run and not yet charged, and
         // compiled code's poll has to land where the dispatch loop's own would
@@ -2903,7 +2904,8 @@ unsafe fn again_ctx(
     .over_heap((*host).table())
     .over_literals(machine.literals_ptr())
     .over_payload_words(machine.fixed_payload_words_ptr())
-    .over_dyn_layouts(machine.dyn_layouts_ptr());
+    .over_dyn_layouts(machine.dyn_layouts_ptr())
+    .over_dyn_children(machine.dyn_children_ptr());
     std::hint::black_box(&ctx);
     std::hint::black_box(machine.mem.stack_index(base) as u64);
     std::hint::black_box(machine.mem.stack_index(into.base) as u64);
@@ -3033,7 +3035,8 @@ unsafe fn mediation_again(
         .over_heap((*host).table())
         .over_literals(machine.literals_ptr())
         .over_payload_words(machine.fixed_payload_words_ptr())
-        .over_dyn_layouts(machine.dyn_layouts_ptr());
+        .over_dyn_layouts(machine.dyn_layouts_ptr())
+        .over_dyn_children(machine.dyn_children_ptr());
         std::hint::black_box(&held);
         std::hint::black_box(machine.mem.stack_index(callee_base) as u64);
         std::hint::black_box(machine.mem.stack_index(caller_base) as u64);

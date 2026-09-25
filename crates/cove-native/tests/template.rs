@@ -259,6 +259,11 @@ fn an_observation_the_table_cannot_settle_is_the_helpers() {
 }
 
 #[test]
+fn a_child_is_answered_inline_from_the_child_table() {
+    suite::a_child_is_answered_inline_from_the_child_table::<Template>();
+}
+
+#[test]
 fn a_copy_moves_every_word_and_does_not_smear() {
     suite::a_copy_moves_every_word_and_does_not_smear::<Template>();
 }

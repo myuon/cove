@@ -1267,6 +1267,19 @@ pub const DYN_TYPE_MASK: u64 = 0xffff_ffff;
 /// layout rather than about the value.
 pub const DYN_COUNT_SHIFT: u32 = 32;
 
+/// Where a [`NativeCtx::dyn_children`] child entry's word offset — or, for a
+/// collection's element, its stride — begins: 31 bits, below [`DYN_SETTLE`].
+/// Bits 0–31 are the child's `LayoutId`.
+pub const DYN_OFFSET_SHIFT: u32 = 32;
+
+/// The bit of a [`NativeCtx::dyn_children`] child entry that says the child is
+/// **not** inline: its layout is one address — a `String`, a collection, a
+/// box, a bare reference — or is reclaimed, or its offset does not fit the
+/// entry's 31 bits. Such a child needs the runtime's normalisation, which
+/// follows references and opens boxes, so emitted code hands the observation
+/// to [`DynamicFn`]. It is the sign bit, so one `test` finds it.
+pub const DYN_SETTLE: u64 = 1 << 63;
+
 /// Which run instruction a [`RunCopyFn`] was handed.
 ///
 /// `#[repr(u32)]` with the values written out, for [`GrowableOp`]'s reason. The
@@ -1469,6 +1482,39 @@ pub struct NativeCtx {
     ///
     /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
     pub dyn_layouts: *const u64,
+    /// Where every layout's children are, placed before the run: the table an
+    /// emitted `dyn.child` reads to answer an **inline** child — a field of a
+    /// struct, a part of an enum's current case, an element of a run — without
+    /// the reflection helper.
+    ///
+    /// Words `0..layouts` are one per layout, in `LayoutId` order: the word
+    /// index in this same table at which that layout's block begins, or nought
+    /// for a layout with no block, whose every child is [`DynamicFn`]'s. A
+    /// block is:
+    ///
+    /// | the parent is | its block |
+    /// |---|---|
+    /// | a struct or a range | one child entry a field, offset `field.at` |
+    /// | an enum | the case count, then one word a case: the index its case block begins at; a case block is the part count and one child entry a part, offset `1 + part.at` |
+    /// | an array, a set or a vector | one child entry, the element's, whose offset is the stride |
+    /// | a map | the entry stride, then the key's child entry, offset nought, then the value's, offset the key's width |
+    ///
+    /// A **child entry** is a `LayoutId` in bits 0–31, a word offset from
+    /// [`DYN_OFFSET_SHIFT`], and [`DYN_SETTLE`] when the child is not inline.
+    /// An inline child's view is the parent's owner, the entry's layout, and
+    /// the parent's word plus the offset — for a run's element, the index
+    /// times the stride, in the run — which is exactly what the runtime's
+    /// normalisation answers of a layout that is not one address, so what
+    /// emitted code writes is what the reflection arm writes. Every bound —
+    /// the index against the count, an enum's case against its case count, a
+    /// consumed vector — is checked first, and a failed one is the helper's,
+    /// so a refusal is the runtime's sentence.
+    ///
+    /// Published **once**, [`NativeCtx::dyn_layouts`]' rule and for its reason,
+    /// and null for a caller whose compiled code observes nothing. Emitted
+    /// code reads it only after the descriptor says the parent is a kind with
+    /// children, so a table of `DYN_ASK` descriptors never reaches it.
+    pub dyn_children: *const u64,
     /// The linear address of word zero of the task's stack segment.
     ///
     /// What [`NativeCtx::words`] points *at*, as a number in the one address
@@ -1604,6 +1650,7 @@ impl NativeCtx {
             literals: std::ptr::null(),
             fixed_payload_words: std::ptr::null(),
             dyn_layouts: std::ptr::null(),
+            dyn_children: std::ptr::null(),
             stack_origin,
             pending_work: 0,
             // "Poll at every backedge", which is what compiled code did before
@@ -1656,6 +1703,15 @@ impl NativeCtx {
     /// why it is a builder.
     pub fn over_dyn_layouts(mut self, dyn_layouts: *const u64) -> Self {
         self.dyn_layouts = dyn_layouts;
+        self
+    }
+
+    /// The same context, over the child table `dyn_children` begins.
+    ///
+    /// See [`NativeCtx::dyn_children`], and [`NativeCtx::over_payload_words`]
+    /// for why it is a builder.
+    pub fn over_dyn_children(mut self, dyn_children: *const u64) -> Self {
+        self.dyn_children = dyn_children;
         self
     }
 
@@ -1774,6 +1830,7 @@ mod tests {
         assert!(ctx.literals.is_null());
         assert!(ctx.fixed_payload_words.is_null());
         assert!(ctx.dyn_layouts.is_null());
+        assert!(ctx.dyn_children.is_null());
 
         let addrs = [7u64, 9];
         let ctx = ctx.over_literals(addrs.as_ptr());

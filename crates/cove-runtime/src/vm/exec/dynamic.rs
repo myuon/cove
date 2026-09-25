@@ -144,7 +144,11 @@ pub(crate) fn execute(
         CHILD => {
             let view = View::read(machine, at(b));
             let index = machine.mem.word_at(at(c)) as i64;
-            child(machine, view, index)?.write(machine, at(a));
+            let answer = match inline_child(machine, view, index) {
+                Some(answer) => answer,
+                None => child(machine, view, index)?,
+            };
+            answer.write(machine, at(a));
             return Ok(());
         }
         KIND => kind(machine, View::read(machine, at(b)))?.code() as u64,
@@ -372,6 +376,89 @@ pub(crate) fn descriptors(program: &Program) -> std::sync::Arc<[u64]> {
             kind.code() as u64 | name << DYN_NAME_SHIFT | fields << DYN_COUNT_SHIFT
         })
         .collect()
+}
+
+/// The two tables compiled code reads its observations out of, built once
+/// before a run and shared by every task of it: [`descriptors`] and
+/// [`children`].
+pub(crate) struct Tables {
+    /// `cove_native::NativeCtx::dyn_layouts`: see [`descriptors`].
+    pub(crate) descriptors: std::sync::Arc<[u64]>,
+    /// `cove_native::NativeCtx::dyn_children`: see [`children`].
+    pub(crate) children: Box<[u64]>,
+}
+
+/// Both of a program's tables. See [`Tables`].
+pub(crate) fn tables(program: &Program) -> std::sync::Arc<Tables> {
+    std::sync::Arc::new(Tables {
+        descriptors: descriptors(program),
+        children: children(program),
+    })
+}
+
+/// Where every layout's children are: the table
+/// `cove_native::NativeCtx::dyn_children` publishes to compiled code, whose
+/// documentation is the format.
+///
+/// Words `0..layouts` are each layout's block, as the word index it begins at,
+/// or nought where there is none; the blocks follow. Every entry is made from
+/// the layout table [`child`] reads — a field's `at`, a part's `1 + at`, an
+/// element's width — and an entry's child is marked
+/// [`DYN_SETTLE`](cove_native::DYN_SETTLE) exactly when [`settle`] would have
+/// something to do with it: its layout is one address, or is reclaimed, which
+/// [`layout`] refuses. So a child compiled code writes unmarked is the child
+/// [`child`] answers — `(its layout, the parent's owner, where it begins)`,
+/// which [`settle`] returns unchanged for a layout that is not one address.
+///
+/// Built once before the run, and allocating nothing afterwards.
+pub(crate) fn children(program: &Program) -> Box<[u64]> {
+    use cove_native::{DYN_OFFSET_SHIFT, DYN_SETTLE};
+    let layouts = &program.layouts;
+    // A child entry: its layout, its offset, and whether it is inline.
+    let entry = |layout: LayoutId, offset: u32| -> u64 {
+        let inline = layouts.get(layout.index()).is_some_and(|described| {
+            !matches!(described.shape, Shape::Free) && !described.is_one_address()
+        });
+        match (inline, offset < 1 << 31) {
+            (true, true) => u64::from(layout.0) | u64::from(offset) << DYN_OFFSET_SHIFT,
+            _ => u64::from(layout.0) | DYN_SETTLE,
+        }
+    };
+    let width = |id: LayoutId| layouts.get(id.index()).map_or(0, Layout::width);
+    let mut table = vec![0u64; layouts.len()];
+    for (at, described) in layouts.iter().enumerate() {
+        let start = table.len() as u64;
+        match &described.shape {
+            Shape::Struct { fields, .. } if !fields.is_empty() => {
+                table.extend(fields.iter().map(|field| entry(field.layout, field.at)));
+            }
+            Shape::Enum { cases, .. } if !cases.is_empty() => {
+                table.push(cases.len() as u64);
+                let starts = table.len();
+                table.extend(std::iter::repeat_n(0, cases.len()));
+                for (nth, case) in cases.iter().enumerate() {
+                    table[starts + nth] = table.len() as u64;
+                    table.push(case.parts.len() as u64);
+                    table.extend(
+                        case.parts
+                            .iter()
+                            .map(|part| entry(part.layout, 1 + part.at)),
+                    );
+                }
+            }
+            Shape::Elements { elem, .. } | Shape::Members { elem } | Shape::Vector { elem } => {
+                table.push(entry(*elem, width(*elem)));
+            }
+            Shape::Entries { key, value } => {
+                table.push(u64::from(width(*key) + width(*value)));
+                table.push(entry(*key, 0));
+                table.push(entry(*value, width(*key)));
+            }
+            _ => continue,
+        }
+        table[at] = start;
+    }
+    table.into_boxed_slice()
 }
 
 /// `dyn.same-type`: whether the two viewed values have one semantic type.
@@ -754,29 +841,39 @@ fn enum_case<'l>(
 /// is entry `i`'s key and `2i + 1` its value; and a vector's elements in its
 /// store, the count taken from its own length word. Every other kind has no
 /// children.
+///
+/// The index is bounded by the count [`count`] answers, read from the one fact
+/// of the parent's shape it needs — the field count, the current case's parts,
+/// the header length, the length word — rather than by asking [`count`], which
+/// classifies the layout, and then looking the layout up again. The refusals
+/// and their order are [`count`]'s and then the bound's, as they were.
 pub(crate) fn child(machine: &Machine, view: View, index: i64) -> Result<View, RuntimeError> {
-    let count = count(machine, view)?;
-    if index < 0 || index >= count {
-        return Err(internal(format!(
-            "child {index} of a dynamic view with {count} children was asked"
-        )));
-    }
-    let at = index as u32;
     let described = layout(machine, view.layout)?;
     let width = |id: LayoutId| machine.program.layout(id).width();
+    let within = |count: i64| -> Result<u32, RuntimeError> {
+        if index < 0 || index >= count {
+            return Err(internal(format!(
+                "child {index} of a dynamic view with {count} children was asked"
+            )));
+        }
+        Ok(index as u32)
+    };
     match &described.shape {
         Shape::Struct { fields, .. } => {
-            let field = &fields[at as usize];
+            let field = &fields[within(fields.len() as i64)? as usize];
             settle(machine, field.layout, view.owner, view.at + field.at)
         }
         Shape::Enum { .. } => {
-            let part = &enum_case(machine, view, described)?.parts[at as usize];
+            let parts = &enum_case(machine, view, described)?.parts;
+            let part = &parts[within(parts.len() as i64)? as usize];
             settle(machine, part.layout, view.owner, view.at + 1 + part.at)
         }
         Shape::Elements { elem, .. } | Shape::Members { elem } => {
+            let at = within(i64::from(machine.mem.object_len(view.owner)))?;
             settle(machine, *elem, view.owner, at * width(*elem))
         }
         Shape::Entries { key, value } => {
+            let at = within(2 * i64::from(machine.mem.object_len(view.owner)))?;
             let entry = (at / 2) * (width(*key) + width(*value));
             if at.is_multiple_of(2) {
                 settle(machine, *key, view.owner, entry)
@@ -785,14 +882,102 @@ pub(crate) fn child(machine: &Machine, view: View, index: i64) -> Result<View, R
             }
         }
         Shape::Vector { elem } => {
+            let at = within(machine.mem.payload(view.owner, VECTOR_LEN) as i64)?;
             let store = machine.mem.payload(view.owner, VECTOR_STORE);
             if store == 0 {
                 return Err(super::consumed_vector());
             }
             settle(machine, *elem, store, at * width(*elem))
         }
-        _ => unreachable!("a kind with no children counted {count}"),
+        // Every other kind counts nought, so every index is past it.
+        _ => Err(within(0).expect_err("no index is below nought")),
     }
+}
+
+/// `dyn.child` of an **inline** child, read out of [`children`] exactly as
+/// compiled code reads `cove_native::NativeCtx::dyn_children`: the parent's
+/// kind from [`descriptors`], its block, the index bounded by the count, and
+/// the child's entry — or `None`, for everything [`child`] has to answer
+/// itself: a parent with no children or no block, an index past the count, a
+/// case the enum does not have, a consumed vector, and a child marked
+/// [`DYN_SETTLE`](cove_native::DYN_SETTLE).
+///
+/// It is the encoded machine's fast path and the written-down meaning of the
+/// native one, and `tests` holds it to [`child`] for every child of every
+/// fixture value: an inline child is `(its layout, the parent's owner, where it
+/// begins)`, which is what [`settle`] answers of a layout that is not one
+/// address once the parent's own words were checked.
+pub(crate) fn inline_child(machine: &Machine, view: View, index: i64) -> Option<View> {
+    use cove_native::{DYN_OFFSET_SHIFT, DYN_SETTLE};
+    let tables = &*machine.reflection;
+    let descriptor = *tables.descriptors.get(view.layout.index())?;
+    let kind = DynamicKind::from_code((descriptor & cove_native::DYN_KIND_MASK) as i64)?;
+    let children = &tables.children;
+    let block = *children.get(view.layout.index())? as usize;
+    if block == 0 || view.owner == 0 {
+        return None;
+    }
+    let index = u64::try_from(index).ok()?;
+    let below = |at: u64, count: u64| (at < count).then_some(());
+    // The entry, the word its offset is added to, and the owner.
+    let (entry, from, owner) = match kind {
+        DynamicKind::Struct | DynamicKind::Range => {
+            below(index, descriptor >> DYN_COUNT_SHIFT)?;
+            (
+                children[block + index as usize],
+                u64::from(view.at),
+                view.owner,
+            )
+        }
+        DynamicKind::Enum => {
+            let case = machine.mem.payload(view.owner, view.at);
+            below(case, children[block])?;
+            let parts = children[block + 1 + case as usize] as usize;
+            below(index, children[parts])?;
+            (
+                children[parts + 1 + index as usize],
+                u64::from(view.at),
+                view.owner,
+            )
+        }
+        // A run's element: the entry's offset is the stride.
+        DynamicKind::Array | DynamicKind::Set | DynamicKind::Vector => {
+            let owner = if kind == DynamicKind::Vector {
+                below(index, machine.mem.payload(view.owner, VECTOR_LEN))?;
+                machine.mem.payload(view.owner, VECTOR_STORE)
+            } else {
+                below(index, u64::from(machine.mem.object_len(view.owner)))?;
+                view.owner
+            };
+            let entry = children[block];
+            if owner == 0 || entry & DYN_SETTLE != 0 {
+                return None;
+            }
+            return Some(View {
+                layout: LayoutId(entry as u32),
+                owner,
+                at: u32::try_from(index * (entry >> DYN_OFFSET_SHIFT)).ok()?,
+            });
+        }
+        DynamicKind::Map => {
+            below(index, 2 * u64::from(machine.mem.object_len(view.owner)))?;
+            let stride = children[block];
+            (
+                children[block + 1 + (index & 1) as usize],
+                (index / 2) * stride,
+                view.owner,
+            )
+        }
+        _ => return None,
+    };
+    if entry & DYN_SETTLE != 0 {
+        return None;
+    }
+    Some(View {
+        layout: LayoutId(entry as u32),
+        owner,
+        at: u32::try_from(from + (entry >> DYN_OFFSET_SHIFT)).ok()?,
+    })
 }
 
 /// An internal runtime error: a view asked a question its kind has no answer

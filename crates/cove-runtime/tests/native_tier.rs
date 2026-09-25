@@ -1190,6 +1190,20 @@ export fn observesEverything(n: Int) -> String {
   stringbuilder.observesEverythingOf(n)
 }
 
+/// How many children the view at `path` of a boxed `stringbuilder.Walked`
+/// has. See `stringbuilder.viewAt`, which the tier compiles.
+export fn countsAt(n: Int, path: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  stringbuilder.countAt(n, path)
+}
+
+/// Every child of a boxed `stringbuilder.Walked`, taken. See
+/// `stringbuilder.walksAll`.
+export fn walksAll(n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  stringbuilder.walksAllOf(n)
+}
+
 /// A view held across a collection. See `stringbuilder.holdsAView`.
 export fn holdsAView(name: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
@@ -1421,6 +1435,108 @@ fn holdsAView(value: dyn Reflected, n: Int) -> Int {
 /// [`holdsAView`] of a fresh boxed [`HeldAt`]; refused for its box.
 export fn holdsAViewOf(name: String, n: Int) -> Int {
   holdsAView(HeldAt(name: \"{name}{n}\", y: 7), n)
+}
+
+/// Two structs and an enum of one, for [`Walked`]: a struct inside a struct,
+/// and a struct as an enum's payload.
+struct WalkedPair {
+  left: ReflectedAt,
+  right: Option<ReflectedAt>
+}
+
+/// A child of every shape `dyn.child` projects (#514 F2): inline ones — a
+/// scalar field, a struct field, a struct inside that, an enum's payload that
+/// is a struct or a scalar, a range's fields, the elements of an array and a
+/// vector of structs, a set's elements, a map's values — and ones that are
+/// followed: a string, a collection, a vector of strings, a map's keys, and a
+/// box in a field.
+struct Walked {
+  i: Int,
+  at: ReflectedAt,
+  pair: WalkedPair,
+  s: String,
+  o: Option<Int>,
+  r: Result<ReflectedAt, String>,
+  a: Array<ReflectedAt>,
+  v: Vector<ReflectedAt>,
+  names: Vector<String>,
+  set: Set<Int>,
+  m: Map<String, ReflectedAt>,
+  range: Range,
+  inner: dyn Reflected
+}
+
+impl Reflected for Walked {
+  fn reflected(self) -> Int {
+    self.i
+  }
+}
+
+fn walked(n: Int) -> Walked {
+  Walked(
+    i: n,
+    at: ReflectedAt(x: n, y: 2),
+    pair: WalkedPair(left: ReflectedAt(x: 3, y: n), right: Some(ReflectedAt(x: 5, y: 6))),
+    s: \"text\",
+    o: Some(n),
+    r: Ok(ReflectedAt(x: 7, y: 8)),
+    a: [ReflectedAt(x: 1, y: 2), ReflectedAt(x: 3, y: 4)],
+    v: Vector.of(ReflectedAt(x: 9, y: 10), ReflectedAt(x: 11, y: n), ReflectedAt(x: 13, y: 14)),
+    names: Vector.of(\"a\", \"b\"),
+    set: Set.of(3, 1),
+    m: Map.of(MapEntry(key: \"k\", value: ReflectedAt(x: 15, y: 16))),
+    range: 0..n,
+    inner: ReflectedAt(x: 17, y: n),
+  )
+}
+
+/// The view `path` names below `view`: its base-16 digits, lowest first, are
+/// each a child's index plus one, and the first zero digit ends it.
+fn descend(view: DynamicView, path: Int) -> DynamicView {
+  var at = view
+  var rest = path
+  while rest > 0 {
+    at = core.dynamicChild(at, rest % 16 - 1)
+    rest = rest / 16
+  }
+  at
+}
+
+fn viewIn(value: dyn Reflected, path: Int) -> DynamicView {
+  descend(core.dynamicOpen(value), path)
+}
+
+/// The view at `path` of a fresh boxed [`walked`]. The box is an
+/// `Inst::Box`, which the tier refuses, so this body is encoded and the
+/// children are taken in the compiled [`descend`].
+fn viewAt(n: Int, path: Int) -> DynamicView {
+  viewIn(walked(n), path)
+}
+
+/// [`viewAt`]'s child count.
+export fn countAt(n: Int, path: Int) -> Int {
+  core.dynamicChildCount(viewAt(n, path))
+}
+
+/// Takes every child below `view`, and answers how many it took.
+fn walksBelow(view: DynamicView) -> Int {
+  let count = core.dynamicChildCount(view)
+  var taken = 0
+  var at = 0
+  while at < count {
+    taken = taken + 1 + walksBelow(core.dynamicChild(view, at))
+    at = at + 1
+  }
+  taken
+}
+
+fn walksAllIn(value: dyn Reflected) -> Int {
+  walksBelow(core.dynamicOpen(value))
+}
+
+/// [`walksBelow`] of a fresh boxed [`walked`]; refused for its box.
+export fn walksAllOf(n: Int) -> Int {
+  walksAllIn(walked(n))
 }
 
 /// `appendByte`, `depth` frames down a recursion no expansion can reach.
@@ -4225,6 +4341,130 @@ fn a_view_held_across_a_collection_keeps_its_owner() {
     assert!(
         session.collections() > before,
         "no collection ran in {calls} call(s), so this case proved nothing"
+    );
+}
+
+/// **Every child view compiled code takes is the encoded machine's, word for
+/// word** (#514 F2).
+///
+/// `stringbuilder.viewAt` answers the view at a path below a boxed `Walked`,
+/// whose fields are a child of every shape `dyn.child` projects — inline ones
+/// that compiled code answers out of `NativeCtx::dyn_children` and ones it
+/// hands to the reflection helper — and whose children are taken in the
+/// compiled `descend`. Every path three children deep is asked twice, on two
+/// fresh machines over one program, once encoded and once with the tier, and
+/// the three words each answers are compared: the layout, the owner and the
+/// word. The two machines allocate the same objects in the same order, so an
+/// owner is one address on both, and a word that differs is a wrong view.
+///
+/// Then a whole walk of the same value, counted: every child taken, and the
+/// `DynChild`s that reached the helper, which has to be fewer — so the fast
+/// path answered — and not none, so the helper still answers what it must.
+#[test]
+fn every_child_view_is_the_encoded_machine_s_word_for_word() {
+    use cove_ir::bytecode::Op;
+    const N: i64 = 5;
+    const HEAP_WORDS: usize = 1 << 16;
+    let names = compiled_names();
+    for body in ["std.stringbuilder.descend", "std.stringbuilder.walksBelow"] {
+        assert!(
+            names.contains(&body.to_string()),
+            "`{body}` is meant to be compiled"
+        );
+    }
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let view = |path: i64, tier: &dyn cove_runtime::Tiered| {
+        let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, HEAP_WORDS);
+        let mut session = vm
+            .native_session(
+                "std.stringbuilder",
+                "viewAt",
+                vec![Value::int(N), Value::int(path)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        session.call(tier, &words).expect("the view is answered")
+    };
+    let (mut views, mut inline) = (0, 0);
+    let mut pending = vec![(0i64, 0u32)];
+    while let Some((path, depth)) = pending.pop() {
+        let encoded = view(path, &cove_runtime::NothingCompiled);
+        let compiled = view(path, &native);
+        assert_eq!(encoded.len(), 3, "a view is three words");
+        assert_ne!(encoded[1], 0, "path {path:#x}: a view has an owner");
+        assert_eq!(compiled, encoded, "path {path:#x}: layout, owner, word");
+        views += 1;
+        let counted = |mut vm: Vm<'_>| {
+            vm.invoke(MODULE, "countsAt", vec![Value::int(N), Value::int(path)])
+                .map(|value| value.to_string())
+                .map_err(|error| error.message)
+        };
+        let on_vm = counted(Vm::new(&runtime, &hosts, &lowered));
+        let on_native = counted(Vm::with_native(&runtime, &hosts, &lowered, &native));
+        assert_eq!(on_native, on_vm, "path {path:#x}: the count");
+        let count: i64 = on_vm.expect("counted").parse().expect("an Int");
+        if depth == 3 {
+            continue;
+        }
+        for at in 0..count {
+            let below = path + ((at + 1) << (4 * depth));
+            // An inline child keeps its parent's owner (or is in a vector's store,
+            // which this does not count).
+            let child = view(below, &cove_runtime::NothingCompiled);
+            if child[1] == encoded[1] {
+                inline += 1;
+            }
+            pending.push((below, depth + 1));
+        }
+    }
+    assert!(views >= 50, "{views} views compared");
+    assert!(inline >= 30, "{inline} of them inline");
+
+    let counting = cove_runtime::compile_native_counting(&lowered).expect("this host compiles");
+    let walk = |native: Option<&cove_runtime::NativeProgram>| {
+        let mut vm = match native {
+            Some(native) => Vm::with_native(&runtime, &hosts, &lowered, native),
+            None => Vm::new(&runtime, &hosts, &lowered),
+        };
+        vm.count_boundary();
+        let answered = vm
+            .invoke(MODULE, "walksAll", vec![Value::int(N)])
+            .map(|value| value.to_string())
+            .map_err(|error| error.message);
+        (answered, vm.boundary().expect("asked for"))
+    };
+    let (on_vm, _) = walk(None);
+    let (on_native, report) = walk(Some(&counting));
+    assert_eq!(on_native, on_vm, "the walk agrees");
+    let taken: u64 = on_vm.expect("walked").parse().expect("an Int");
+    // The report's own row, as `--boundary` prints it: the observation is
+    // named by its opcode's name, which the public surface does not carry.
+    assert!(report.helpers.is_some(), "the counting helpers were bound");
+    let printed = report.to_string();
+    let helped: u64 = printed
+        .lines()
+        .find_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some(&format!("{:?}", Op::DynChild)[..]))
+                .then(|| words.next().expect("a count").replace(',', ""))
+        })
+        .unwrap_or_else(|| panic!("a `DynChild` row in {printed}"))
+        .parse()
+        .expect("a count");
+    assert!(
+        helped > 0 && helped < taken,
+        "{helped} of {taken} children reached the helper"
     );
 }
 
