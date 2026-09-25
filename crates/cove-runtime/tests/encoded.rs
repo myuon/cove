@@ -477,6 +477,132 @@ export fn main() -> Result<Unit, Error> {
     assert_eq!(described(&ran.answer), "Ok(Ok(()))");
 }
 
+// ------------------------------------------------------ what a walk leaves behind
+
+/// Two boxed trees compared with `==` and rendered with `"{..}"` — the
+/// `std.dynamic` walks `equals` and `renderInto`, each over work stacks of
+/// views — and then enough allocation to collect several times over.
+///
+/// `dropped` holds nothing of the trees once `walked` returns; `kept` holds one
+/// of them through the same churn and is the control.
+const WALKED: &str = "\
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+struct Tree {
+  tag: Int
+  kids: Vector<Tree>
+}
+
+impl Tagged for Tree {
+  fn tag(self) -> Int {
+    self.tag
+  }
+}
+
+fn grow(levels: Int) -> Tree {
+  var kids: Vector<Tree> = Vector.of()
+  if levels > 1 {
+    var at = 0
+    while at < 3 {
+      kids.push(grow(levels - 1))
+      at = at + 1
+    }
+  }
+  Tree(tag: levels, kids: kids)
+}
+
+fn churn(rounds: Int) -> Int {
+  var total = 0
+  var at = 0
+  while at < rounds {
+    var items: Vector<Int> = Vector.of()
+    items.push(at)
+    total = total + items.length()
+    at = at + 1
+  }
+  total
+}
+
+fn compared(a: dyn Tagged, b: dyn Tagged) -> Int {
+  var seen = 0
+  if a == b {
+    seen = seen + 1
+  }
+  let text = \"{a}\"
+  if text != \"\" {
+    seen = seen + 1
+  }
+  seen
+}
+
+fn walked() -> Int {
+  compared(grow(6), grow(6))
+}
+
+export fn dropped() -> Result<Unit, Error> {
+  assertEqual(walked(), 2)?
+  assertEqual(churn(20000), 20000)?
+  Ok(())
+}
+
+export fn kept() -> Result<Unit, Error> {
+  let a: dyn Tagged = grow(6)
+  assertEqual(compared(a, grow(6)), 2)?
+  assertEqual(churn(20000), 20000)?
+  assertEqual(a.tag(), 6)
+}
+";
+
+/// A `std.dynamic` walk leaves nothing reachable once it returns (issue #514's
+/// F1).
+///
+/// The walks keep their work stacks' height in a local and never truncate, so
+/// every slot above the height still holds a view, and the collector traces a
+/// store's whole capacity: a stale slot is a root for its view's owner **for as
+/// long as the stack is reachable**. What bounds that to the walk is that a
+/// stack is a local the walk never returns, stores or captures — and this is
+/// that bound observed. When the walk is over every slot is stale and every
+/// one names part of a tree, so a stack that outlived it would keep the trees
+/// live through the churn after it.
+///
+/// The control runs the same walks with one tree held by the entry's frame, and
+/// is what shows the collections were counted after the walks and that a tree
+/// that is still reachable is seen in `live_words`: the test is the difference
+/// between the two, not a small number on its own.
+#[test]
+fn a_walk_leaves_nothing_reachable_once_it_returns() {
+    const HEAP_WORDS: usize = 1 << 15;
+    // 364 trees in a boxed `grow(6)`, each at least a header and two fields.
+    const TREE_FLOOR: u64 = 364 * 3;
+    let live = |entry: &str| {
+        let (sources, checked) = check(WALKED);
+        let lowered = Arc::new(
+            cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+                .expect("the fixture lowers"),
+        );
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let runtime = Runtime::new(
+            Arc::clone(&checked),
+            Arc::clone(&sources),
+            Arc::clone(&hosts),
+        );
+        let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, HEAP_WORDS);
+        let answer = vm.run_entry("m", entry, Vec::new());
+        assert_eq!(described(&answer), "Ok(Ok(()))", "{entry}");
+        assert!(vm.collections() > 1, "{entry}: the churn collected");
+        vm.live_words()
+            .expect("a heap that collected measured what is live")
+    };
+    let (dropped, kept) = (live("dropped"), live("kept"));
+    assert!(
+        dropped + TREE_FLOOR <= kept,
+        "a tree the walk dropped was still live after it: {dropped} word(s) live without \
+         the trees, {kept} with one"
+    );
+}
+
 // ------------------------------------------------------------------ the harness
 
 struct Ran {
