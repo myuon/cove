@@ -370,7 +370,21 @@ fn count(program: &Program) -> Counts {
 ///   they hold: `fail_key_boxed_map_key` 2 in each of the order, the decision,
 ///   the rendering and the wording, and the five `fail_key_known_*` programs
 ///   none, because their keys are known layouts.
-const REFLECTED: [usize; 5] = [136, 40, 55, 83, 50];
+///
+/// Issue #506, measured when it landed, over 248 programs:
+///
+/// - the lowering moved nothing: with the ten programs it added held out, the
+///   239 before it answer 136, 40, 55, 83 and 50, the row above. A boxed
+///   task, scope or resource is named by `std.dynamic.keyWord` through
+///   `core.dynamicTypeName` now, where it was named through
+///   `core.dynamicHandleText`, and neither is a call this survey counts;
+/// - then the programs it added raised the order, the decision, the rendering
+///   and the wording by **4** each: `fail_key_boxed_resource_any` 2, and
+///   `fail_key_boxed_task` and `fail_key_boxed_resource` 1 each. Its seven
+///   `fail_key_known_*` programs hold none, because their keys are known
+///   layouts, and `fail_key_boxed_scope` is not counted: a lowering of its
+///   whole package stops at a method of a generic type.
+const REFLECTED: [usize; 5] = [136, 44, 59, 87, 54];
 
 /// The wording walks the whole corpus carries, `describes<L>` and
 /// `describesAt<L>`, which may fall and may never rise: ADR 0068's Phase 4c.
@@ -391,7 +405,20 @@ const REFLECTED: [usize; 5] = [136, 40, 55, 83, 50];
 ///   `describes<L>` each and a `describesAt<Tree>` for the one whose key holds
 ///   itself, `fail_key_known_deep`. The synthesized count went 673 to 712
 ///   with the six programs, and those six are of the 39.
-const WORDING_WALKS: usize = 25;
+///
+/// Issue #506, over 248 programs:
+///
+/// - the lowering moved nothing: with the ten programs it added held out, the
+///   239 before it hold 25 wording walks and 712 synthesized functions, the
+///   figures above. A walk is keyed by the Host resources in its key's type
+///   too, now, but no program before it refused a key holding one;
+/// - **4** more from the programs it added: `fail_key_known_task_part` and
+///   `fail_key_known_scope_part` one `describes<L>` each, and
+///   `fail_key_known_resource_deep` a `describes<Node>` and a
+///   `describesAt<Node>`, both carrying the node that names the server. The
+///   keys refused whole are sentences at the site and have none. The
+///   synthesized count went 712 to 740 with the programs.
+const WORDING_WALKS: usize = 29;
 
 #[test]
 fn the_corpus_says_how_much_of_it_still_reaches_a_boxed_fallback() {

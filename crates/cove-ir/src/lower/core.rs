@@ -1437,10 +1437,27 @@ impl Body<'_> {
             };
         }
         let shape = self.pool.shapes.layout(layout).shape.clone();
-        if synth::refused_whole(&shape) {
-            return self.refuse_whole(expr, key, [method, role], &shape, want);
+        // The Host resources in the key are named by its type, which is here
+        // and not in the layout: see `named`.
+        let named = self
+            .pool
+            .naming
+            .of(self.checked, &self.pool.shapes, self.module, &ty);
+        if named.is_none() && synth::reaches_a_resource(&self.pool.shapes, layout) {
+            self.errors.push(super::gap::gap(
+                "a key holding a Host resource whose type could not be followed to it: the \
+                 refusal names a resource by its type, which the key's type says and its \
+                 layout does not",
+                expr.span,
+            ));
+            return self.dead(expr);
         }
-        self.admit_by_walk(expr, key, [method, role], layout, want)
+        if synth::refused_whole(&shape) {
+            let resource = self.pool.naming.resource(named).map(str::to_string);
+            let word = synth::refused_word(&shape, resource.as_deref()).to_string();
+            return self.refuse_whole(expr, key, [method, role], &word, want);
+        }
+        self.admit_by_walk(expr, key, [method, role], layout, named, want)
     }
 
     /// The refusal of a key every value of whose layout is refused — a
@@ -1449,10 +1466,11 @@ impl Body<'_> {
     /// [`Inst::Trap`].
     ///
     /// There is no walk and nothing to decide: the key is the part that is
-    /// refused, so the path is empty, and the type is the layout's
-    /// ([`synth::refused_word`]). The method and the role are the two literal
-    /// arguments every one of `std.set`'s and `std.map`'s nine `core.admitKey`
-    /// calls passes, so the whole sentence is known here and costs no string
+    /// refused, so the path is empty, and the type, `word`, is the layout's
+    /// ([`synth::refused_word`]) — or, for a Host resource, which shares its
+    /// layout with every other, the key's type's, `http.Server`. The method
+    /// and the role are the two literal arguments every one of `std.set`'s
+    /// and `std.map`'s nine `core.admitKey` calls passes, so the whole sentence is known here and costs no string
     /// at run time — three [`Inst::Str`]s of placed literals (ADR 0045), which
     /// is what ADR 0067 says a constant refusal costs.
     ///
@@ -1464,7 +1482,7 @@ impl Body<'_> {
         expr: &Expr,
         key: &Expr,
         [method, role]: [&Expr; 2],
-        shape: &crate::layout::Shape,
+        word: &str,
         want: Option<Dest>,
     ) -> Val {
         let (Some(method), Some(role)) = (literal_text(method), literal_text(role)) else {
@@ -1478,7 +1496,6 @@ impl Body<'_> {
         };
         let held = self.expr(key);
         self.release(held, expr.span);
-        let word = synth::refused_word(shape);
         let (rule, help) = crate::dynamic::refused_key(word);
         let dst = self.answer_at(want, shapes::UNIT);
         let message = self.literal_text_at(
@@ -1560,6 +1577,7 @@ impl Body<'_> {
         key: &Expr,
         [method, role]: [&Expr; 2],
         layout: LayoutId,
+        named: Option<super::named::NamedId>,
         want: Option<Dest>,
     ) -> Val {
         let boxed = self.is_boxed(layout);
@@ -1665,9 +1683,10 @@ impl Body<'_> {
             }
             None => {
                 let decls = self.plan.decls.len();
-                let callee = synth::function_for(
+                let callee = synth::function_named_for(
                     synth::Operation::Description,
                     layout,
+                    named,
                     self.pool,
                     decls,
                     expr.span,

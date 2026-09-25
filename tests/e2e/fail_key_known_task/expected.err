@@ -1,0 +1,16 @@
+error[cove::runtime]: `Map.of` cannot use a `Task` as a map key
+  --> <e2e>/fail_key_known_task/main.cove:14:17
+   |
+14 |     let keyed = Map.of(MapEntry(key: task, value: "one"))
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/map.cove:46:5
+   |
+46 |     core.admitKey(entry.key, "Map.of", "map key")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_known_task/main.cove:23:3
+   |
+23 |   keyByTask()?
+   |   ^^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

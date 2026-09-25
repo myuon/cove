@@ -1,0 +1,33 @@
+use console.println
+use http
+
+/// A node of a tree, which may hold a server.
+struct Node {
+  server: Option<http.Server>
+  kids: Array<Node>
+}
+
+/// A tree holding a server two levels down, used as a set element: the
+/// admission refuses the server and names it `http.Server` inside
+/// `Node.kids[1].kids[0].server(0)`.
+///
+/// `fail_key_known_resource`'s row for a part of a layout that holds itself,
+/// whose wording walk calls itself for each node it goes into: the resource's
+/// type is carried into the walk it calls, from the key's type, so a node
+/// three calls down names it as the key's own site would (issue #506).
+fn admitTree() -> Result<Unit, Error> {
+  let server = http.listen(0)?
+  let leaf = Node(server: Some(server), kids: [])
+  let branch = Node(server: None, kids: [leaf])
+  let tree = Node(server: None, kids: [Node(server: None, kids: []), branch])
+  let trees = Set.of(tree)
+  println("never printed {trees.length()}")?
+  server.close()?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a tree holding a server as a set element")?
+  admitTree()?
+  Ok(())
+}

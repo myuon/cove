@@ -52,7 +52,16 @@
 //! and it is placed for the refusal of a boxed key: `std.dynamic.refuseKey`
 //! begins the path to the refused part of an enum at the root of a key with the
 //! enum's name and its case, `Mark.Weight(0)`, as the oracle's
-//! `MapKey::convert` does (ADR 0068's Phase 4c). Every string
+//! `MapKey::convert` does (ADR 0068's Phase 4c).
+//!
+//! An opaque value a box can hold gets the name of its type, which is what a
+//! refused key is called by (issue #506): a task, a task scope, a byte run and
+//! a byte buffer their layout's, `Task`, `TaskScope`, `Bytes`, `ByteBuffer`.
+//! A Host resource cannot, because every resource shares one layout; where a
+//! box can hold that layout, the qualified type of every kind of resource the
+//! run can hold is placed instead — `http.Server` — in
+//! [`Program::resource_names`], and the machine finds the one a handle needs
+//! by the kind its resource table records. Every string
 //! is interned into [`Program::strings`] as the lowering's own pool interns —
 //! one entry per distinct text — so a field named `name` in two structs, or a
 //! name the standard library's rendering already writes as a literal, is one
@@ -62,15 +71,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use cove_schema::builtins::RANGE;
+use cove_schema::HostSchemas;
 
 use crate::inst::Inst;
 use crate::layout::{LayoutId, Shape};
-use crate::program::{LayoutNames, Program, StrId};
+use crate::program::{LayoutNames, Program, ResourceName, StrId};
 use crate::repr::Repr;
 
 /// Places the names every layout a box can hold needs, and records them in
 /// [`Program::names`]. See the module's documentation for which those are.
-pub(super) fn place(program: &mut Program) {
+pub(super) fn place(program: &mut Program, schemas: &HostSchemas) {
     let every = program
         .host_ops
         .iter()
@@ -102,6 +112,8 @@ pub(super) fn place(program: &mut Program) {
         .rev()
         .collect();
     let mut names = vec![LayoutNames::default(); program.layouts.len()];
+    let mut resources = Vec::new();
+    let issued = kinds(program, schemas);
     let mut ordered: Vec<LayoutId> = held.into_iter().collect();
     ordered.sort();
     for layout in ordered {
@@ -133,11 +145,62 @@ pub(super) fn place(program: &mut Program) {
                 name: Some(intern(crate::dynamic::shown_name(&described.name))),
                 parts: cases.iter().map(|case| intern(&case.name)).collect(),
             },
+            // A task, a task scope, a byte run and a byte buffer are each one
+            // layout of their own, and that layout's name is the type's:
+            // `Task`, `TaskScope`, `Bytes`, `ByteBuffer`.
+            Shape::Word(Repr::Task | Repr::Scope) | Shape::Bytes | Shape::ByteBuffer => {
+                LayoutNames {
+                    name: Some(intern(&described.name)),
+                    parts: Vec::new(),
+                }
+            }
+            // Every resource shares this one layout, so its names are not the
+            // layout's: they are the kinds of resource the run can hold.
+            Shape::Word(Repr::Host) => {
+                resources = issued
+                    .iter()
+                    .cloned()
+                    .map(|(module, resource)| {
+                        let text = intern(&format!("{module}.{resource}"));
+                        ResourceName {
+                            module,
+                            resource,
+                            text,
+                        }
+                    })
+                    .collect();
+                continue;
+            }
             _ => continue,
         };
         names[layout.index()] = placed;
     }
     program.names = names;
+    program.resource_names = resources;
+}
+
+/// Every kind of resource a run of `program` can hold, as the module that
+/// issues it and the kind's name, in the order the schemas declare them.
+///
+/// A handle is issued by an operation of the module that declares its kind —
+/// `http.listen` answers an `http.Server` — so a run holds only kinds of the
+/// modules its Host operations name. That is exact enough: a program that
+/// calls one operation of a module places the names of every kind the module
+/// declares, which is a few words, and only once a box can hold a resource.
+fn kinds(program: &Program, schemas: &HostSchemas) -> Vec<(Arc<str>, Arc<str>)> {
+    let mut modules: Vec<&str> = program.host_ops.iter().map(|op| &*op.module).collect();
+    modules.sort_unstable();
+    modules.dedup();
+    let mut kinds = Vec::new();
+    for module in modules {
+        let Some(schema) = schemas.module(module) else {
+            continue;
+        };
+        for resource in schema.resources {
+            kinds.push((Arc::from(module), Arc::from(resource.name)));
+        }
+    }
+    kinds
 }
 
 /// Every layout a value of one of `roots` can hold a part of, `roots`

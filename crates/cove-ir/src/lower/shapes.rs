@@ -1152,7 +1152,7 @@ pub(super) fn qualified(checked: &Checked, module: &str, ty: &Ty) -> Ty {
 }
 
 /// [`qualified`] over a list.
-fn qualify_all(checked: &Checked, module: &str, args: &[Ty]) -> Vec<Ty> {
+pub(super) fn qualify_all(checked: &Checked, module: &str, args: &[Ty]) -> Vec<Ty> {
     args.iter()
         .map(|arg| qualified(checked, module, arg))
         .collect()

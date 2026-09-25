@@ -843,6 +843,100 @@ fn a_key_refused_whole_is_a_literal_sentence_at_the_site() {
     assert!(placed(crate::dynamic::FLOAT_KEY_HELP));
 }
 
+/// A task, a task scope's and a Host resource's refusals name the type as
+/// the oracle does — `Task`, a resource's qualified type — in the literal
+/// sentence at the site (issue #506). A resource shares its layout with every
+/// other kind, so its name is the key's type's, read off where the key is
+/// admitted.
+#[test]
+fn a_handle_refused_whole_is_named_by_its_type() {
+    let placed = |program: &Program, text: &str| program.strings.iter().any(|held| &**held == text);
+    let task = keyed("", "Task<Int>");
+    assert!(placed(
+        &task,
+        "`Map.contains` cannot use a `Task` as a map key"
+    ));
+    let server = keyed("use http", "http.Server");
+    assert!(placed(
+        &server,
+        "`Map.contains` cannot use a `http.Server` as a map key"
+    ));
+    for program in [&task, &server] {
+        assert!(
+            !program
+                .strings
+                .iter()
+                .any(|held| held.contains("a task") || held.contains("a host resource")),
+            "the machine's old words are gone"
+        );
+    }
+}
+
+/// **Two kinds of resource in parts of one layout are named apart**, and
+/// without asking the run (issue #506).
+///
+/// `Array<http.Server>` and `Array<files.Reader>` are one `Array` layout, so
+/// a wording walk keyed by its layout alone could name only one of them. The
+/// walk is keyed by the part of the key's type that says which resource is
+/// where too, and each kind is a literal of its own: the refusal names the
+/// part it meets by the type the declaration gave it. Nothing in a wording
+/// walk composed for a known layout asks the run's resource table — no
+/// `HandleText`, no `DynTypeName` — because the type is known before the run.
+#[test]
+fn two_kinds_of_resource_in_one_layout_are_named_apart() {
+    let program = keyed(
+        "use files\nuse http\n\
+         struct Pair { servers: Array<http.Server>, readers: Array<files.Reader> }",
+        "Pair",
+    );
+    let placed = |text: &str| program.strings.iter().any(|held| &**held == text);
+    assert!(placed("` cannot use a `http.Server` inside `"));
+    assert!(placed("` cannot use a `files.Reader` inside `"));
+    let asks_the_run = program
+        .functions
+        .iter()
+        .filter(|function| &*function.module == synth::MODULE)
+        .flat_map(|function| &function.code)
+        .filter(|inst| matches!(inst, Inst::HandleText { .. } | Inst::DynTypeName { .. }))
+        .count();
+    assert_eq!(
+        asks_the_run, 0,
+        "a known layout's refusal asks the run nothing"
+    );
+    // A walk that names resources carries its node in its name, and one of a
+    // key that holds none is the walk it always was.
+    assert!(walks_named(&program, "describes<")
+        .iter()
+        .all(|name| name.contains('@')));
+    let plain = keyed("struct Reading { at: Int, weight: Float }", "Reading");
+    assert!(walks_named(&plain, "describes<")
+        .iter()
+        .all(|name| !name.contains('@')));
+}
+
+/// A box that can hold a Host resource places the names of the resources the
+/// run can hold, for `core.dynamicTypeName` to answer with one load: the
+/// qualified type, and never a handle's number (issue #506).
+#[test]
+fn a_box_that_can_hold_a_resource_places_its_type_names() {
+    let program = lowered(
+        "use http\n\
+         trait Summary { fn summarize(self) -> String }\n\
+         struct Service { server: http.Server }\n\
+         impl Summary for Service { fn summarize(self) -> String { \"api\" } }\n\
+         fn f() -> Result<Int, Error> {\n  \
+           let server = http.listen(0)?\n  \
+           let boxed: dyn Summary = Service(server: server)\n  \
+           Ok(Set.of(boxed).length())\n}",
+    );
+    let named: Vec<String> = program
+        .resource_names
+        .iter()
+        .map(|named| program.string(named.text).to_string())
+        .collect();
+    assert_eq!(named, ["http.Server"]);
+}
+
 /// The wording walk of a map quotes the entry's key as it renders, through
 /// the rendering walk of the key's layout, and names an array's element by
 /// its index, through `std.int.renderInto` — a leaf the inliner expands, so

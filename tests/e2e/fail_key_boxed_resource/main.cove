@@ -1,0 +1,43 @@
+use console.println
+use http
+
+/// Something that can say what it is.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// A service, and the server it listens with.
+struct Service {
+  name: String
+  server: http.Server
+}
+
+impl Summary for Service {
+  fn summarize(self) -> String {
+    self.name
+  }
+}
+
+/// A service boxed as a `dyn Summary`, used as a set element: the admission
+/// of the box refuses the server inside it and names it `http.Server` inside
+/// `Service.server`.
+///
+/// `fail_key_known_resource`'s row for a box. The layout of the box's value
+/// says only that the field is a resource; which kind is in the run's
+/// resource table, and `core.dynamicTypeName` answers it from there with a
+/// name placed before the run — the type, never the handle's number (issue
+/// #506).
+fn admitService() -> Result<Unit, Error> {
+  let server = http.listen(0)?
+  let service: dyn Summary = Service(name: "api", server: server)
+  let services = Set.of(service)
+  println("never printed {services.length()}")?
+  server.close()?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed service holding a server as a set element")?
+  admitService()?
+  Ok(())
+}

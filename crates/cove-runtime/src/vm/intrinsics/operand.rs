@@ -222,7 +222,8 @@ pub(super) fn text(machine: &Machine, frame: Frame<'_>, at: usize) -> Result<Str
 // `a task` — read off a word and a layout. Their one caller was
 // `key::admit_key`'s wording, and ADR 0068's Phase 4c moved it into
 // `std.dynamic.keyWord` for a box and `cove_ir::lower::synth::refused_word`
-// for a known layout, which say those words exactly.
+// for a known layout, which said those words exactly until issue #506 gave
+// every evaluator the oracle's: `Task`, `TaskScope`, `http.Server`.
 
 /// A reference slot that was read before anything was written to it.
 ///

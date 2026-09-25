@@ -1,0 +1,24 @@
+use console.println
+
+/// A task scope used as a set element: the admission refuses the key itself,
+/// and names it by its type, `TaskScope`.
+///
+/// `fail_key_known_task`'s row for a scope. The type has no name a program can
+/// write — a scope is bound by `scope` and never declared — but it is the
+/// oracle's word for one, and every evaluator's since issue #506, where the
+/// machine said `a task scope`.
+fn keyByScope() -> Result<Unit, Error> {
+  scope work {
+    let scopes = Set.of(work)
+    println("never printed {scopes.length()}")?
+    let task = work.spawn { 1 }
+    await task
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a task scope as a set element")?
+  keyByScope()?
+  Ok(())
+}

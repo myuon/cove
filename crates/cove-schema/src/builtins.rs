@@ -3137,12 +3137,15 @@ pub const CORE_RENDER_PATH_TYPE: &str = "RenderPath";
 /// shows for the struct a view names — its declared name without type
 /// arguments or module, so `m.Cell<Int>` is `Cell` — and the same name of the
 /// enum a view names, which the refusal of a boxed key begins its path with
-/// (ADR 0068's Phase 4c).
+/// (ADR 0068's Phase 4c) — and the type an opaque value is refused as a key
+/// by: `Task`, `TaskScope`, a Host resource's qualified type, `http.Server`
+/// (issue #506). The type's name, never the handle's number: the text a
+/// rendering shows for a handle is [`CORE_DYNAMIC_HANDLE_TEXT`]'s.
 ///
 /// One `Inst::DynTypeName`, which loads a `String` the machine placed before
 /// the run, so it allocates nothing (issue #499's decision 4, option N1). A
-/// view of anything but a struct or an enum is an internal runtime error, held
-/// to [`CORE_DYNAMIC_BOOL`]'s rule.
+/// view of anything else is an internal runtime error, held to
+/// [`CORE_DYNAMIC_BOOL`]'s rule.
 pub const CORE_DYNAMIC_TYPE_NAME: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "dynamicTypeName",
     generics: &[],

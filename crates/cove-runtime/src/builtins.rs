@@ -1126,9 +1126,16 @@ pub fn call_core(
         // shows it: the declared name without its module; a field's and a
         // case's name as the value holds them. The machine places these
         // before the run; here they are the value's own.
+        //
+        // An opaque value's name is its type's, the one `MapKey::convert`
+        // refuses it by: `Task`, `TaskScope`, a resource's `http.Server` —
+        // never the handle's number (issue #506).
         "dynamicTypeName" => match args[0].erased() {
             Value(Repr::Struct(s)) => Ok(Value::string(cove_ir::dynamic::shown_name(&s.type_name))),
             Value(Repr::Enum(e)) => Ok(Value::string(cove_ir::dynamic::shown_name(&e.type_name))),
+            other @ Value(
+                Repr::Task(_) | Repr::TaskScope(_) | Repr::Resource(_) | Repr::ByteBuffer(_),
+            ) => Ok(Value::string(other.type_name())),
             other => Err(dynamic_internal(format!(
                 "the name of a dynamic view of a {} was asked",
                 dynamic_kind(other).name()

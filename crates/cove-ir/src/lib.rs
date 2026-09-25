@@ -67,7 +67,7 @@ pub use layout::{
 pub use lower::{lower, lower_entry, lower_roots};
 pub use program::{
     Arg, ArgsId, Capture, CaseId, Function, FunctionId, HostOp, HostOpId, IntrinsicSite,
-    LayoutNames, Local, Program, SiteId, StrId, Table, TableId,
+    LayoutNames, Local, Program, ResourceName, SiteId, StrId, Table, TableId,
 };
 pub use repr::{RefMap, Repr};
 pub use verify::{verify, Invalid};

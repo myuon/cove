@@ -457,6 +457,9 @@ pub(crate) fn same_object(machine: &Machine, a: View, b: View) -> bool {
 /// The names placed for the layout a view names, or the internal error a
 /// read of a name `lower::names` never placed is.
 ///
+/// A resource's are not here but in
+/// [`cove_ir::Program::resource_names`]: see [`type_name`].
+///
 /// The pass places exactly the names a box can need, so a view of a struct or
 /// an enum always finds its own here; a miss is a lowering bug, and it is
 /// refused rather than answered because the alternative is a name made up at
@@ -487,13 +490,38 @@ fn literal(machine: &Machine, text: StrId) -> u64 {
 }
 
 /// `dyn.type-name`: the name a rendering shows for the struct a view names,
-/// or the name a refused key's path begins with for the enum it names, as the
-/// address of the literal `lower::names` placed for it.
+/// or the name a refused key's path begins with for the enum it names, or the
+/// type a refused key is called by for the opaque value it names — `Task`,
+/// `TaskScope`, a Host resource's `http.Server` — as the address of the
+/// literal `lower::names` placed for it.
+///
+/// A resource's name is found by the module and the kind the run's resource
+/// table records for the handle, among [`cove_ir::Program::resource_names`]:
+/// every resource shares one layout, so the layout cannot say which. The
+/// handle's number is never read, and nothing is allocated (issue #506).
 pub(crate) fn type_name(machine: &Machine, view: View) -> Result<u64, RuntimeError> {
     let described = layout(machine, view.layout)?;
+    if matches!(described.shape, Shape::Word(Repr::Host)) {
+        let word = machine.mem.payload(view.owner, view.at);
+        let handle = machine
+            .resource(word)
+            .ok_or_else(crate::vm::boundary::no_such_resource)?;
+        let placed = machine
+            .program
+            .resource_names
+            .iter()
+            .find(|named| *named.module == handle.module && *named.resource == handle.type_name)
+            .ok_or_else(|| {
+                internal(format!(
+                    "a refusal asked for the name of a `{}`, and none was placed for it",
+                    handle.qualified_type()
+                ))
+            })?;
+        return Ok(literal(machine, placed.text));
+    }
     if !matches!(
         kind_of(machine, described),
-        DynamicKind::Struct | DynamicKind::Enum
+        DynamicKind::Struct | DynamicKind::Enum | DynamicKind::Opaque
     ) {
         return Err(internal(format!(
             "the name of a dynamic view of a {} was asked",
@@ -861,6 +889,10 @@ pub(crate) fn unplaced_in(machine: &Machine, boxed: u64) -> Vec<String> {
             Shape::Enum { cases, .. } => {
                 names.is_some_and(|names| names.name.is_some() && names.parts.len() == cases.len())
             }
+            // The type a refused key is called by (issue #506).
+            Shape::Word(Repr::Task | Repr::Scope) => {
+                names.is_some_and(|names| names.name.is_some())
+            }
             _ => true,
         };
         if !whole {
@@ -888,6 +920,19 @@ pub(crate) fn unplaced_in(machine: &Machine, boxed: u64) -> Vec<String> {
                             .iter()
                             .map(|part| (part.layout, owner, at + 1 + part.at)),
                     );
+                }
+            }
+            // A resource's name is found by its kind, which is the handle's
+            // and not the layout's: see [`type_name`].
+            Shape::Word(Repr::Host) => {
+                let word = machine.mem.payload(owner, at);
+                if let Some(handle) = machine.resource(word) {
+                    let placed = program.resource_names.iter().any(|named| {
+                        *named.module == handle.module && *named.resource == handle.type_name
+                    });
+                    if !placed {
+                        found.push(handle.qualified_type());
+                    }
                 }
             }
             _ if described.is_one_address() => {

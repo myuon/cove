@@ -488,6 +488,46 @@ allow = ["console"]
 entry = "fail_key_known_deep.main"
 allow = ["console"]
 
+[run.fail_key_known_task]
+entry = "fail_key_known_task.main"
+allow = ["console"]
+
+[run.fail_key_known_task_part]
+entry = "fail_key_known_task_part.main"
+allow = ["console"]
+
+[run.fail_key_boxed_task]
+entry = "fail_key_boxed_task.main"
+allow = ["console"]
+
+[run.fail_key_known_scope]
+entry = "fail_key_known_scope.main"
+allow = ["console"]
+
+[run.fail_key_known_scope_part]
+entry = "fail_key_known_scope_part.main"
+allow = ["console"]
+
+[run.fail_key_boxed_scope]
+entry = "fail_key_boxed_scope.main"
+allow = ["console"]
+
+[run.fail_key_known_resource]
+entry = "fail_key_known_resource.main"
+allow = ["http", "console"]
+
+[run.fail_key_known_resource_deep]
+entry = "fail_key_known_resource_deep.main"
+allow = ["http", "console"]
+
+[run.fail_key_boxed_resource]
+entry = "fail_key_boxed_resource.main"
+allow = ["http", "console"]
+
+[run.fail_key_boxed_resource_any]
+entry = "fail_key_boxed_resource_any.main"
+allow = ["http", "clock", "console"]
+
 [run.values_interpolation_order]
 entry = "values_interpolation_order.main"
 allow = ["console"]

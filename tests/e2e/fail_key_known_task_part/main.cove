@@ -1,0 +1,23 @@
+use console.println
+
+/// A task handle inside the payload of a `Some`, used as a set element: the
+/// admission refuses the handle and names it `Task` inside `Option.Some(0)`.
+///
+/// `fail_key_known_task`'s row for a part rather than a whole key: the
+/// sentence is the synthesized wording walk's, `describes<Option>`, which
+/// names a task by its layout (issue #506).
+fn admitPending() -> Result<Unit, Error> {
+  scope work {
+    let task = work.spawn { 2 }
+    let pending = Set.of(Some(task))
+    println("never printed {pending.length()}")?
+    await task
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use an optional task as a set element")?
+  admitPending()?
+  Ok(())
+}

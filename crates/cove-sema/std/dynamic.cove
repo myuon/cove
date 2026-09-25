@@ -1126,17 +1126,16 @@ fn refuseAt(
   }
 }
 
-/// What a refusal calls a value of kind `kind` that is not a key: the words
-/// the machine's Rust walk called it by, which a walk composed for a known
-/// layout calls it by too — `Float`, `Vector`, `fn`, `Shared`, and for the
-/// three handles a box can hold, `a task`, `a task scope` and `a host
-/// resource`.
+/// What a refusal calls a value of kind `kind` that is not a key: its type,
+/// in the words the oracle's `MapKey::convert` and a walk composed for a known
+/// layout call it by too — `Float`, `Vector`, `fn`, `Shared`, and for every
+/// other opaque value the name `core.dynamicTypeName` answers, `Task`,
+/// `TaskScope` or a Host resource's qualified type such as `http.Server`
+/// (issue #506).
 ///
-/// Which handle an opaque value is lives in the run's tables and no layout, so
-/// it is told by the text a rendering shows for it, `core.dynamicHandleText`'s:
-/// `<task>`, `<task scope {name}>`, and a Host resource's `<{module}.{Type}#{n}>`,
-/// which is neither. It is the one observation here that allocates, and it is
-/// made once, on the path that ends the run.
+/// The name is a literal the machine placed before the run, so this allocates
+/// nothing, and it is the type's and never the handle's: which one of its kind
+/// a handle is, the number a rendering shows, is not part of a refusal.
 fn keyWord(view: DynamicView, kind: Int) -> String {
   if kind == 3 {
     return "Float"
@@ -1150,14 +1149,7 @@ fn keyWord(view: DynamicView, kind: Int) -> String {
   if kind == 15 {
     return "Shared"
   }
-  let text = core.dynamicHandleText(view)
-  if text == "<task>" {
-    return "a task"
-  }
-  if text.startsWith("<task scope ") {
-    return "a task scope"
-  }
-  "a host resource"
+  core.dynamicTypeName(view)
 }
 
 /// A new trail: the path a wording walk composed for a known key layout has
