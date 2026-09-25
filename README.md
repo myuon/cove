@@ -651,6 +651,31 @@ measured when it lands, and ADR 0062's reason for `appendRange`'s refusal being
 an intrinsic — that the body stays a leaf the lowering expands — stands until
 one of them measures its replacement.
 
+[ADR 0068](docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)
+(proposed) takes the last four of ADR 0064's layout-directed operations out
+of Rust. `==`, key order, key admission and rendering over a value whose type
+was erased (`dyn Trait`, or a Host `Any`) used to reach a Rust walk through
+`Inst::IntrinsicCall`. They are now ordinary standard-library Cove,
+`std.dynamic`, written over a private read-only view of the box.
+- The view answers structural questions: what kind the value is, which case
+  it holds, how many children it has, and each child.
+- It never answers with an address or an offset.
+- It allocates nothing per child.
+- A statically known layout still takes the synthesized walk and never the
+  view.
+
+All four `Intrinsic` variants are deleted, leaving three that belong to other
+work. The native tier lowers the observations directly or through one narrow
+helper, so an erased operation no longer crosses back to the VM. `Float` and
+`Duration` text are written in Cove as well.
+
+The series was measured whole in
+[docs/measurements/adr-0068.md](docs/measurements/adr-0068.md):
+- covefmt did not get slower on either tier;
+- cq pays the accepted Float rendering cost on the VM and is faster on
+  native;
+- the costs that remain are four decisions and one deletion, listed there.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
