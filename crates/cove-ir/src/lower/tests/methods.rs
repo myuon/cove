@@ -643,32 +643,31 @@ fn @std.vector.pop<Int>(Vector) -> Option
         "\
 fn @std.vector.remove<Int>(Vector Int) -> Option
   frame 14: s0!:ref s1!:int s2:tag s3:int s4:int s5:bool s6:ref s7:int s8:int s9:int s10:int s11:unit s12:tag s13:int
-  local items -> s0:Vector [0, 22)
-  local index -> s1:Int [0, 22)
-  local length -> s4:Int [1, 21)
-  local was -> s7:Int [7, 18)
+  local items -> s0:Vector [0, 21)
+  local index -> s1:Int [0, 21)
+  local length -> s4:Int [1, 20)
+  local was -> s7:Int [6, 17)
      0  load-field s4:Int s0:ref +0
      1  ge.int.imm.branch s5:bool s1:int 0 3
      2  lt.int s5:bool s1:int s4:int
-     3  branch-false s5:bool 19
+     3  branch-false s5:bool 18
      4  load-field s6:<ref> s0:ref +1
      5  load-elem s7:Int s6:ref s1:int
-     6  clear s6:<ref>
-     7  add.int.imm s8:int s1:int 1
-     8  sub.int s9:int s4:int s1:int
-     9  sub.int.imm s10:int s9:int 1
-    10  load-field s6:<ref> s0:ref +1
-    11  run-copy.words Int (s6:<ref> s1:Int s6:<ref> s8:Int s10:Int)
-    12  clear s6:<ref>
-    13  sub.int.imm s8:int s4:int 1
-    14  growable-truncate.words Int s0:ref s8:int
-    15  tag s12:tag Option.Some
-    16  copy s13:Int s7:Int
-    17  copy s2..s3:Option s12..s13:Option
-    18  jump 21
-    19  tag s12:tag Option.None
-    20  copy s2..s3:Option s12..s13:Option
-    21  return s2..s3:Option
+     6  add.int.imm s8:int s1:int 1
+     7  sub.int s9:int s4:int s1:int
+     8  sub.int.imm s10:int s9:int 1
+     9  load-field s6:<ref> s0:ref +1
+    10  run-copy.words Int (s6:<ref> s1:Int s6:<ref> s8:Int s10:Int)
+    11  clear s6:<ref>
+    12  sub.int.imm s8:int s4:int 1
+    13  growable-truncate.words Int s0:ref s8:int
+    14  tag s12:tag Option.Some
+    15  copy s13:Int s7:Int
+    16  copy s2..s3:Option s12..s13:Option
+    17  jump 20
+    18  tag s12:tag Option.None
+    19  copy s2..s3:Option s12..s13:Option
+    20  return s2..s3:Option
 "
     );
 }

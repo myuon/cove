@@ -1,11 +1,12 @@
 //! Removing instructions from a finished function, and renumbering what
 //! named them.
 //!
-//! Two passes over emitted code drop [`Inst::Clear`]s — `tails`, which drops
-//! the ones a `return` was about to make pointless, and `frees`, which drops
-//! the ones that provably release nothing — and what they share is not the
-//! condition but the *edit*. Deciding which instructions go is the whole of
-//! what makes those two different passes; taking them out and making every
+//! Three passes over emitted code drop [`Inst::Clear`]s — `tails`, which
+//! drops the ones a `return` was about to make pointless, `frees`, which drops
+//! the ones that provably release nothing, and `redefined`, which drops the
+//! ones a write of the same words makes unobservable — and what they share is
+//! not the condition but the *edit*. Deciding which instructions go is the
+//! whole of what makes those different passes; taking them out and making every
 //! program counter still mean what it meant is one operation, and it is here
 //! so that there is one of it to get right.
 //!
@@ -19,7 +20,7 @@
 //! [`Inlined`](crate::program::Inlined) body.
 //!
 //! The fused pair is here even though the pass that *makes* one runs after
-//! the two that drop clears, so nothing in the current sequence hands this a
+//! the three that drop clears, so nothing in the current sequence hands this a
 //! `CmpBranch`. It is a target and this is the function that moves targets;
 //! leaving it out would make the omission a fact about an ordering rather
 //! than about the edit.
