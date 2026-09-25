@@ -179,13 +179,16 @@ fn deeper(
     stack(rights, core.dynamicChild(y, next))
     next = next - 1
   }
+  // `depth` is both stacks' logical top, [`place`]'s: a pop lowers it and
+  // leaves the slot, and the next push overwrites it. `high` is their length,
+  // which nothing has lowered yet — computed rather than copied from `depth`,
+  // which would be one more copy in every program that lowers this.
+  var high = depth + under
   depth = depth + under
   while depth > 0 {
     depth = depth - 1
     let x = core.vectorLoad(lefts, depth)
     let y = core.vectorLoad(rights, depth)
-    core.vectorTruncate(lefts, depth)
-    core.vectorTruncate(rights, depth)
     var next = children(x, y) - 1
     if next < -1 {
       return false
@@ -197,8 +200,16 @@ fn deeper(
         return tracked(lefts, rights, way, ends, depth, x, y, next + 1)
       }
       while next >= 0 {
-        stack(lefts, core.dynamicChild(x, next))
-        stack(rights, core.dynamicChild(y, next))
+        let leftChild = core.dynamicChild(x, next)
+        let rightChild = core.dynamicChild(y, next)
+        if depth >= high {
+          stack(lefts, leftChild)
+          stack(rights, rightChild)
+          high = high + 1
+        } else {
+          core.vectorStore(lefts, depth, leftChild)
+          core.vectorStore(rights, depth, rightChild)
+        }
         depth = depth + 1
         next = next - 1
       }
@@ -217,7 +228,7 @@ fn deeper(
 /// were when its children went on — so its children are the pairs at and above
 /// that height, and it is finished once the walk pops a pair below it. The
 /// visit is depth first, so the pairs that are finished are always the
-/// innermost, and leaving them is truncating both.
+/// innermost, and leaving them is lowering the two stacks' logical top.
 ///
 /// A vector pair with children is looked for on the path before it is added
 /// to it, and finding it is the refusal. A vector pair without children is
@@ -234,28 +245,53 @@ fn tracked(
   under: Int,
 ) -> Bool {
   var depth = depth
+  // How many pairs `ends` holds, and so `way`'s pairs too: the two path stacks'
+  // logical top, kept here for [`place`]'s reason. Both are as long as that on
+  // the way in, whichever caller made them.
+  var held = core.vectorLength(ends)
+  // And their length, in pairs, for `high`'s reason below: read rather than
+  // copied from `held`, which would be one more copy in every program.
+  var paths = core.vectorLength(ends)
   // The innermost pair's end, kept beside `ends` so that the question every
   // pair popped asks — is the innermost pair finished — is one comparison. A
   // path that holds only the root, or nothing, never finishes: `-1`, or the
   // root's `0`, is never above a height.
   var edge = -1
-  let held = core.vectorLength(ends)
   if held > 0 {
     edge = core.vectorLoad(ends, held - 1)
   }
   if core.dynamicKind(x) == 9 {
-    if onPath(way, x, y) {
+    if onPath(way, held, x, y) {
       core.refuse(containsItself(), containsItselfRule(), containsItselfHelp())
     }
-    stack(way, x)
-    stack(way, y)
-    mark(ends, depth)
+    if held >= paths {
+      stack(way, x)
+      stack(way, y)
+      mark(ends, depth)
+      paths = paths + 1
+    } else {
+      core.vectorStore(way, 2 * held, x)
+      core.vectorStore(way, 2 * held + 1, y)
+      core.vectorStore(ends, held, depth)
+    }
+    held = held + 1
     edge = depth
   }
+  // `depth` is `lefts`' and `rights`' logical top, which [`deeper`] may have
+  // left below their length, `high`.
+  var high = core.vectorLength(lefts)
   var next = under - 1
   while next >= 0 {
-    stack(lefts, core.dynamicChild(x, next))
-    stack(rights, core.dynamicChild(y, next))
+    let leftChild = core.dynamicChild(x, next)
+    let rightChild = core.dynamicChild(y, next)
+    if depth >= high {
+      stack(lefts, leftChild)
+      stack(rights, rightChild)
+      high = high + 1
+    } else {
+      core.vectorStore(lefts, depth, leftChild)
+      core.vectorStore(rights, depth, rightChild)
+    }
     depth = depth + 1
     next = next - 1
   }
@@ -263,13 +299,11 @@ fn tracked(
     depth = depth - 1
     let x = core.vectorLoad(lefts, depth)
     let y = core.vectorLoad(rights, depth)
-    core.vectorTruncate(lefts, depth)
-    core.vectorTruncate(rights, depth)
     // Every pair whose children all sat above this one is finished: the
     // innermost first, and then as many outward as ended above it too. A pair
     // is left once, so the loop turns once a pair over the whole walk.
     if edge > depth {
-      var inside = core.vectorLength(ends) - 1
+      var inside = held - 1
       edge = -1
       while inside > 0 {
         let end = core.vectorLoad(ends, inside - 1)
@@ -279,8 +313,7 @@ fn tracked(
         }
         inside = inside - 1
       }
-      core.vectorTruncate(ends, inside)
-      core.vectorTruncate(way, 2 * inside)
+      held = inside
     }
     var next = children(x, y) - 1
     if next < -1 {
@@ -288,21 +321,37 @@ fn tracked(
     }
     if next >= 0 {
       if core.dynamicKind(x) == 9 {
-        if onPath(way, x, y) {
+        if onPath(way, held, x, y) {
           core.refuse(
             containsItself(),
             containsItselfRule(),
             containsItselfHelp(),
           )
         }
-        stack(way, x)
-        stack(way, y)
-        mark(ends, depth)
+        if held >= paths {
+          stack(way, x)
+          stack(way, y)
+          mark(ends, depth)
+          paths = paths + 1
+        } else {
+          core.vectorStore(way, 2 * held, x)
+          core.vectorStore(way, 2 * held + 1, y)
+          core.vectorStore(ends, held, depth)
+        }
+        held = held + 1
         edge = depth
       }
       while next >= 0 {
-        stack(lefts, core.dynamicChild(x, next))
-        stack(rights, core.dynamicChild(y, next))
+        let leftChild = core.dynamicChild(x, next)
+        let rightChild = core.dynamicChild(y, next)
+        if depth >= high {
+          stack(lefts, leftChild)
+          stack(rights, rightChild)
+          high = high + 1
+        } else {
+          core.vectorStore(lefts, depth, leftChild)
+          core.vectorStore(rights, depth, rightChild)
+        }
         depth = depth + 1
         next = next - 1
       }
@@ -311,16 +360,22 @@ fn tracked(
   true
 }
 
-/// Whether the pair of vectors `x` and `y` is on the path `way`: one entry at
-/// which the left is `x` and the right is `y`.
+/// Whether the pair of vectors `x` and `y` is on the path `way`, which holds
+/// `held` pairs below its logical top: one entry at which the left is `x` and
+/// the right is `y`.
 ///
 /// The pair and not either side alone. `a == a` compares a value with itself
 /// all the way down, so every left is its right, and it is only a cycle when
 /// the *same* two are met again; and two distinct values that each contain
 /// themselves are a cycle as soon as their two vectors come round together,
 /// whatever else either side holds.
-fn onPath(way: Vector<DynamicView>, x: DynamicView, y: DynamicView) -> Bool {
-  var at = core.vectorLength(way)
+fn onPath(
+  way: Vector<DynamicView>,
+  held: Int,
+  x: DynamicView,
+  y: DynamicView,
+) -> Bool {
+  var at = 2 * held
   while at > 0 {
     at = at - 2
     if core.dynamicSameObject(core.vectorLoad(way, at), x) {
@@ -433,6 +488,52 @@ fn mark(ends: Vector<Int>, end: Int) {
   core.vectorEnsure(ends, 1)
   core.vectorStore(ends, at, end)
   core.vectorCommit(ends, 1)
+}
+
+/// Pushes `view` onto `views` at `at`, the stack's **logical top**: over the
+/// slot a pop left there if there is one, and otherwise onto the end, by
+/// [`stack`].
+///
+/// # A work stack keeps its own top
+///
+/// Every walk here keeps the height of its work stacks in an `Int` of its own
+/// rather than in the vector's length (issue #514's F1). A pop reads the slot
+/// below the top and lowers the `Int`; it truncates nothing and clears nothing,
+/// so the vector's length is the walk's high-water mark and `at` is never above
+/// it. A truncate is a safepoint helper on the native tier, and it was one on
+/// every pop.
+///
+/// Where stacks are kept together — `lefts` and `rights`, a stack of open
+/// containers and the `Int` beside each, or [`tracked`]'s `way` and `ends` —
+/// the walk keeps their length in a local as well and writes this out in
+/// place: the pushes then ask one comparison between them and read no length,
+/// and no answer is copied back out of a call. Only an append changes that
+/// length, and it appends to all of them at once.
+///
+/// What that costs is that a slot above the top still holds the view it held,
+/// and the collector traces a store's whole capacity, so the view's owner stays
+/// a root until a push overwrites the slot or the walk returns. That owner was
+/// reached from the value being walked, which the walk's own frame holds for as
+/// long as it runs, so it is normally alive regardless. Where a `Shared` cell or
+/// another task's change detaches it from that value mid-walk, the only effect
+/// is that it is kept **until the walk ends**: no answer, no refusal and no
+/// order changes, because nothing reads a slot above the top.
+///
+/// That is bounded only because the stacks never escape. Each is a local of the
+/// walk that made it, passed down to the functions here and never returned,
+/// stored or captured, so it is garbage the moment the walk returns — which
+/// `crates/cove-runtime/tests/encoded.rs` holds by collecting after a walk.
+/// `std.dynamic.trailCut`'s `Vector<String>` is not one of these: its pieces
+/// are strings nothing else holds, and it keeps its truncate.
+fn place(views: Vector<DynamicView>, at: Int, view: DynamicView) {
+  // The append first, so that the overwrite, which is every push but the
+  // high-water mark's, is the arm the branch falls through to.
+  if at >= core.vectorLength(views) {
+    // `at` is the length here, and a window's store is at the length it reads.
+    stack(views, view)
+  } else {
+    core.vectorStore(views, at, view)
+  }
 }
 
 /// Where the erased value `a` sorts against `b` in the one order a key is kept
@@ -617,15 +718,16 @@ fn orderBelow(
     depth = depth + 1
     next = next - 1
   }
+  // `high` is both stacks' length, which nothing has lowered yet.
+  var high = depth
   while depth > 0 {
     if depth == edge {
       return verdict
     }
+    // `depth` is both stacks' logical top, [`place`]'s.
     depth = depth - 1
     let x = core.vectorLoad(lefts, depth)
     let y = core.vectorLoad(rights, depth)
-    core.vectorTruncate(lefts, depth)
-    core.vectorTruncate(rights, depth)
     let here = sorts(x, y)
     if here != 2 {
       if here != 0 {
@@ -649,8 +751,16 @@ fn orderBelow(
         verdict = tie
       }
       while next >= 0 {
-        stack(lefts, core.dynamicChild(x, next))
-        stack(rights, core.dynamicChild(y, next))
+        let leftChild = core.dynamicChild(x, next)
+        let rightChild = core.dynamicChild(y, next)
+        if depth >= high {
+          stack(lefts, leftChild)
+          stack(rights, rightChild)
+          high = high + 1
+        } else {
+          core.vectorStore(lefts, depth, leftChild)
+          core.vectorStore(rights, depth, rightChild)
+        }
         depth = depth + 1
         next = next - 1
       }
@@ -853,28 +963,32 @@ fn refusesKey(key: Any) -> Bool {
       return true
     }
     if under > 0 {
-      return refusesBelow(root, count, at + step, step, part, inner, under)
+      return refusesBelow(root, count, at + step, step, part, under)
     }
     at = at + step
   }
   false
 }
 
-/// The rest of [`refusesKey`] over one stack of views: `part`, of kind
-/// `inner`, is a part of `root` that is not refused and has `under` children
-/// of its own, and `root`'s parts from child `from` on, every `step`th of its
-/// `count` children, are still to be decided.
+/// The rest of [`refusesKey`] over one stack of views: `part` is a part of
+/// `root` that is not refused and has `under` children of its own, and
+/// `root`'s parts from child `from` on, every `step`th of its `count` children,
+/// are still to be decided.
 ///
 /// They all go on the stack before anything is popped — `root`'s remaining
-/// parts, then `part`'s — and each value popped pushes its own parts in turn.
+/// parts, then `part` — and each value popped pushes its own parts in turn.
 /// Which is visited first cannot change the answer, so nothing is ordered.
+///
+/// `part` goes on whole and is asked about again when it is popped, rather
+/// than having its parts pushed here: that is one more question of one value a
+/// walk, and it keeps every push in the one loop, where the stack's logical
+/// top is a local rather than an answer a helper hands back.
 fn refusesBelow(
   root: DynamicView,
   count: Int,
   from: Int,
   step: Int,
   part: DynamicView,
-  inner: Int,
   under: Int,
 ) -> Bool {
   let parts: Vector<DynamicView> = core.vectorWithCapacity(count + under)
@@ -883,43 +997,31 @@ fn refusesBelow(
     stack(parts, core.dynamicChild(root, at))
     at = at + step
   }
-  var depth = stackParts(parts, part, inner, under)
+  stack(parts, part)
+  // `depth` is the stack's logical top, [`place`]'s.
+  var depth = core.vectorLength(parts)
   while depth > 0 {
     depth = depth - 1
     let x = core.vectorLoad(parts, depth)
-    core.vectorTruncate(parts, depth)
     let held = core.dynamicKind(x)
     let more = keyParts(x, held)
     if more < 0 {
       return true
     }
-    if more > 0 {
-      depth = stackParts(parts, x, held, more)
+    // The parts admission asks about: every child, but for a `Map`, whose
+    // keys are keys by construction and whose values are its odd children.
+    var child = 0
+    if held == 11 {
+      child = 1
+    }
+    let stride = child + 1
+    while child < more {
+      place(parts, depth, core.dynamicChild(x, child))
+      depth = depth + 1
+      child = child + stride
     }
   }
   false
-}
-
-/// Pushes the parts admission asks about of `view`, of kind `kind`, which has
-/// `count` children — every child, but for a `Map`, whose keys are keys by
-/// construction and whose values are its odd children — and answers how many
-/// views `parts` holds now.
-fn stackParts(
-  parts: Vector<DynamicView>,
-  view: DynamicView,
-  kind: Int,
-  count: Int,
-) -> Int {
-  var at = 0
-  if kind == 11 {
-    at = 1
-  }
-  let step = at + 1
-  while at < count {
-    stack(parts, core.dynamicChild(view, at))
-    at = at + step
-  }
-  core.vectorLength(parts)
 }
 
 /// Whether admission looks inside `view`, of kind `kind`: `-1` where the value
@@ -1015,6 +1117,9 @@ fn refuseKey(
   stack(views, root)
   mark(ats, -1)
   var depth = 1
+  // The two stacks' length: they are always as long as each other, and only
+  // an append changes it.
+  var high = 1
   while depth > 0 {
     let top = depth - 1
     let parent = core.vectorLoad(views, top)
@@ -1030,17 +1135,28 @@ fn refuseKey(
       let inner = core.dynamicKind(part)
       let under = keyParts(part, inner)
       if under < 0 {
-        refuseAt(method, role, part, inner, trail(views, ats, anchor, quoted))
+        refuseAt(
+          method,
+          role,
+          part,
+          inner,
+          trail(views, ats, depth, anchor, quoted),
+        )
         return
       }
       if under > 0 {
-        stack(views, part)
-        mark(ats, -1)
+        if depth >= high {
+          stack(views, part)
+          mark(ats, -1)
+          high = high + 1
+        } else {
+          core.vectorStore(views, depth, part)
+          core.vectorStore(ats, depth, -1)
+        }
         depth = depth + 1
       }
     } else {
-      core.vectorTruncate(views, top)
-      core.vectorTruncate(ats, top)
+      // `depth` is the two stacks' logical top, [`place`]'s.
       depth = top
     }
   }
@@ -1050,11 +1166,12 @@ fn refuseKey(
 }
 
 /// The path [`refuseKey`] names its part by: `anchor`, and then, for each
-/// container on `views` outermost first, the step to the child `ats` says the
-/// walk is in.
+/// container on `views` below its logical top `depth`, outermost first, the
+/// step to the child `ats` says the walk is in.
 fn trail(
   views: Vector<DynamicView>,
   ats: Vector<Int>,
+  depth: Int,
   anchor: String,
   quoted: RenderPath,
 ) -> String {
@@ -1063,7 +1180,6 @@ fn trail(
   // Only a key that is the root names itself: a part further in is named by
   // the path that reached it.
   var root = core.byteLength(anchor) == 0
-  let depth = core.vectorLength(views)
   var at = 0
   while at < depth {
     let view = core.vectorLoad(views, at)
@@ -1374,22 +1490,32 @@ fn renderBelow(
   let nexts: Vector<Int> = core.vectorWithCapacity(8)
   stack(views, root)
   mark(nexts, from + 1)
+  // The two stacks' logical top, [`place`]'s, and their length: they are
+  // always as long as each other, and only an append changes it.
+  var depth = 1
+  var high = 1
   var view = child
   var shape = kind
   var going = true
   while going {
     // `view` has children and is not written yet: the repeat, or open it.
-    if repeats(views, view, shape) {
+    if repeats(views, depth, view, shape) {
       stringbuilder.appendText(buffer, "[…]")
     } else {
       opening(view, shape, buffer)
-      stack(views, view)
-      mark(nexts, 0)
+      if depth >= high {
+        stack(views, view)
+        mark(nexts, 0)
+        high = high + 1
+      } else {
+        core.vectorStore(views, depth, view)
+        core.vectorStore(nexts, depth, 0)
+      }
+      depth = depth + 1
     }
     // Then the next child that has children of its own, writing every leaf
     // and closing every finished container on the way to it.
     going = false
-    var depth = core.vectorLength(views)
     while depth > 0 {
       let top = depth - 1
       let parent = core.vectorLoad(views, top)
@@ -1397,8 +1523,6 @@ fn renderBelow(
       let above = core.dynamicKind(parent)
       if next == core.dynamicChildCount(parent) {
         closing(above, buffer)
-        core.vectorTruncate(views, top)
-        core.vectorTruncate(nexts, top)
         depth = top
       } else {
         between(parent, above, next, buffer)
@@ -1420,13 +1544,19 @@ fn renderBelow(
 }
 
 /// Whether `view`, of kind `kind` and with children, is a vector this walk is
-/// already inside: one of the open containers on `views`. Only a vector is
-/// ever one object with anything, so the others are never it.
-fn repeats(views: Vector<DynamicView>, view: DynamicView, kind: Int) -> Bool {
+/// already inside: one of the open containers on `views`, below its logical top
+/// `top`. Only a vector is ever one object with anything, so the others are
+/// never it.
+fn repeats(
+  views: Vector<DynamicView>,
+  top: Int,
+  view: DynamicView,
+  kind: Int,
+) -> Bool {
   if kind != 9 {
     return false
   }
-  var at = core.vectorLength(views)
+  var at = top
   while at > 0 {
     at = at - 1
     if core.dynamicSameObject(core.vectorLoad(views, at), view) {
