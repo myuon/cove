@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `http.Server` inside `Option.Some(0)` as a set element
+  --> <e2e>/fail_key_boxed_resource_any/main.cove:16:17
+   |
+16 |   let answers = Set.of(answer).inserted(answer)
+   |                 ^^^^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_boxed_resource_any/main.cove:24:3
+   |
+24 |   admitAnswer()?
+   |   ^^^^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

@@ -235,6 +235,7 @@ use crate::layout::{Case, Field, Layout, LayoutId, Shape};
 use crate::program::{Arg, Function, FunctionId, Table, TableId};
 use crate::repr::{RefMap, Repr};
 
+use super::named::NamedId;
 use super::shapes;
 use super::{Pool, PENDING};
 
@@ -581,20 +582,21 @@ pub(crate) fn refused_whole(shape: &Shape) -> bool {
 }
 
 /// What a refusal calls a value of `layout`, which [`refused_whole`] answers
-/// `true` for: the words the machine's Rust walk named it by, which
-/// `std.dynamic.refuseKey` names a boxed one by too.
+/// `true` for: its type, in the words the oracle's `MapKey::convert` names it
+/// by and `std.dynamic.refuseKey` names a boxed one by too — `Float`,
+/// `Vector`, `fn`, `Shared`, `Task`, `TaskScope` (issue #506).
 ///
-/// `operand::layout_name` in `cove-runtime`, for the families that reach it.
-/// A task, a task scope and a host handle are named as the machine named them
-/// and not as the oracle does — `a task` where the oracle says `Task` — which
-/// is a disagreement older than this function and one it keeps rather than
-/// settles (ADR 0068's Phase 4c keeps every refusal byte for byte).
-pub(crate) fn refused_word(shape: &Shape) -> &'static str {
+/// A Host resource is named by `resource`, its qualified type — `http.Server`
+/// — which the layout cannot say, because every resource shares one: the
+/// caller has it from the key's type, through [`super::named`], and it is
+/// `None` only where no resource can be. It is never the handle's number, and
+/// nothing about it is read at run time.
+pub(crate) fn refused_word<'a>(shape: &Shape, resource: Option<&'a str>) -> &'a str {
     match shape {
         Shape::Word(Repr::Float) => "Float",
-        Shape::Word(Repr::Host) => "a host resource",
-        Shape::Word(Repr::Task) => "a task",
-        Shape::Word(Repr::Scope) => "a task scope",
+        Shape::Word(Repr::Host) => resource.unwrap_or("nothing"),
+        Shape::Word(Repr::Task) => "Task",
+        Shape::Word(Repr::Scope) => "TaskScope",
         Shape::Word(Repr::Addr) => "a place",
         Shape::Word(Repr::Tag) => "an enum case",
         // A bare reference word is a function value's location, whose object
@@ -1044,6 +1046,15 @@ pub(super) fn reaches_a_box(shapes: &shapes::Shapes, op: Operation, layout: Layo
     reaches(shapes, op, layout, |shape| matches!(shape, Shape::Boxed))
 }
 
+/// Whether an admission walk of `layout` reaches a Host resource handle outside
+/// a box: whether the wording walk after it has a resource to name, which it
+/// names by the key's type and not by the layout (see [`super::named`]).
+pub(super) fn reaches_a_resource(shapes: &shapes::Shapes, layout: LayoutId) -> bool {
+    reaches(shapes, Operation::Admission, layout, |shape| {
+        *shape == Shape::Word(Repr::Host)
+    })
+}
+
 /// Whether a rendering walk of `layout` reaches a part that is one word of
 /// `repr` — and so whether it calls `std.float.renderInto`, for a
 /// `Repr::Float`, or `std.duration.renderInto`, for a `Repr::Duration`.
@@ -1321,19 +1332,42 @@ pub(super) fn function_for(
     decls: usize,
     span: Span,
 ) -> FunctionId {
-    if let Some(id) = pool.synthesized.get(&(op, layout)) {
+    function_named_for(op, layout, None, pool, decls, span)
+}
+
+/// [`function_for`] for a wording walk of a key whose type holds a Host
+/// resource: `named` is the node [`super::named`] made for the type, which
+/// the walk names each resource in it by, and so part of what the function
+/// is. `None` is the walk [`function_for`] answers.
+///
+/// Two keys of one layout whose types hold different resources — an
+/// `Array<http.Server>` and an `Array<files.Reader>` — are two walks, because
+/// the one word that tells them apart is a literal each walk emits.
+pub(super) fn function_named_for(
+    op: Operation,
+    layout: LayoutId,
+    named: Option<NamedId>,
+    pool: &mut Pool,
+    decls: usize,
+    span: Span,
+) -> FunctionId {
+    if let Some(id) = pool.synthesized.get(&(op, layout, named)) {
         return *id;
     }
     let at = pool.appended.len();
     let id = FunctionId((decls + at) as u32);
     pool.appended.push(None);
-    pool.synthesized.insert((op, layout), id);
+    pool.synthesized.insert((op, layout, named), id);
 
     // A layout's name is not unique — every `Array<T>` is called `Array` —
     // so the id goes in the name as well. It is read by a listing, a profile
     // row and a backtrace, and each of those wants to know *which* `Array`.
+    //
+    // A walk that names resources carries its node's number too, for the same
+    // reason: two such walks of one layout are two functions.
+    let named_as = named.map_or(String::new(), |named| format!("@{}", named.index()));
     let name: Arc<str> = Arc::from(format!(
-        "{}<{}#{}>",
+        "{}<{}#{}{named_as}>",
         op.verb(),
         pool.shapes.layout(layout).name,
         layout.0
@@ -1364,6 +1398,7 @@ pub(super) fn function_for(
         punctuation: None,
         path: None,
         words: None,
+        named,
     };
     if op == Operation::Equality && tracked(synth.pool, layout) {
         synth.start_path(layout, &taken);
@@ -1498,6 +1533,10 @@ struct Synth<'p> {
     /// every walk but an [`Operation::Description`] or an
     /// [`Operation::DescribeAt`] one.
     words: Option<Words>,
+    /// The node of the key's type a wording walk names the Host resources in
+    /// its value by: see [`function_named_for`]. `None` in every other walk,
+    /// and in a wording walk of a value that holds no resource.
+    named: Option<NamedId>,
 }
 
 /// The slots a wording walk writes its refusal out of, and the jumps to the
@@ -2841,7 +2880,8 @@ impl Synth<'_> {
         });
         let mut pieces = Vec::new();
         let mut nest = Vec::new();
-        self.describe(layout, taken[0], root, &mut pieces, &mut nest);
+        let named = self.named;
+        self.describe(layout, taken[0], root, named, &mut pieces, &mut nest);
         // Every part was admitted. That is the answer a walk of a part gives
         // its caller, which goes on to the next; a walk of the key its
         // admission walk refused cannot get here, and returns rather than
@@ -2865,11 +2905,15 @@ impl Synth<'_> {
     /// One value of `layout` at `at`, whose parts are walked: a struct, an
     /// enum, an array or a map. `pieces` is the path to it, and `root` whether
     /// it is the key itself.
+    ///
+    /// `named` is the node of its type that names the resources in it, and
+    /// each part is walked with the node of its own: see [`super::named`].
     fn describe(
         &mut self,
         layout: LayoutId,
         at: Slot,
         root: bool,
+        named: Option<NamedId>,
         pieces: &mut Vec<Piece>,
         nest: &mut Vec<LayoutId>,
     ) {
@@ -2882,15 +2926,23 @@ impl Synth<'_> {
                 if root {
                     pieces.push(Piece::Text(short(declared(&name)).to_string()));
                 }
-                for field in &fields {
+                for (nth, field) in fields.iter().enumerate() {
                     let step = Piece::Text(format!(".{}", field.name));
-                    self.phrase(field.layout, at + field.at as Slot, step, pieces, nest);
+                    let part = self.pool.naming.part(named, nth);
+                    self.phrase(
+                        field.layout,
+                        at + field.at as Slot,
+                        step,
+                        part,
+                        pieces,
+                        nest,
+                    );
                 }
                 if root {
                     pieces.pop();
                 }
             }
-            Shape::Enum { cases, .. } => self.phrases(&cases, &name, at, root, pieces, nest),
+            Shape::Enum { cases, .. } => self.phrases(&cases, &name, at, root, named, pieces, nest),
             Shape::Elements {
                 elem,
                 growable: false,
@@ -2903,7 +2955,8 @@ impl Synth<'_> {
                     index: each.index,
                     layout: elem,
                 });
-                self.phrase(elem, held, Piece::Index(each.index), pieces, nest);
+                let part = self.pool.naming.part(named, 0);
+                self.phrase(elem, held, Piece::Index(each.index), part, pieces, nest);
                 self.around(each);
             }
             Shape::Entries { key, value } => {
@@ -2917,7 +2970,15 @@ impl Synth<'_> {
                     index: each.index,
                     layout: entry,
                 });
-                self.phrase(value, held + keys, Piece::Key(key, held), pieces, nest);
+                let part = self.pool.naming.part(named, 0);
+                self.phrase(
+                    value,
+                    held + keys,
+                    Piece::Key(key, held),
+                    part,
+                    pieces,
+                    nest,
+                );
                 self.around(each);
             }
             // [`walks`] is what sends a layout here, and it sends only these.
@@ -2932,15 +2993,19 @@ impl Synth<'_> {
     ///
     /// The default is [`Synth::wrong_case`]'s trap, which is where the
     /// admission walk's default sends a discriminant no case names.
+    #[allow(clippy::too_many_arguments)]
     fn phrases(
         &mut self,
         cases: &[Case],
         name: &str,
         at: Slot,
         root: bool,
+        named: Option<NamedId>,
         pieces: &mut Vec<Piece>,
         nest: &mut Vec<LayoutId>,
     ) {
+        // The node's parts are every case's parts, one case after another.
+        let mut counted = 0;
         let switch = self.emit(Inst::Switch {
             on: at,
             table: TableId(0),
@@ -2960,7 +3025,16 @@ impl Synth<'_> {
                 // A part's offset is within the payload region, which begins
                 // after the discriminant.
                 let step = Piece::Text(format!("({nth})"));
-                self.phrase(part.layout, at + 1 + part.at as Slot, step, pieces, nest);
+                let each = self.pool.naming.part(named, counted);
+                counted += 1;
+                self.phrase(
+                    part.layout,
+                    at + 1 + part.at as Slot,
+                    step,
+                    each,
+                    pieces,
+                    nest,
+                );
             }
             if root {
                 pieces.pop();
@@ -3003,6 +3077,7 @@ impl Synth<'_> {
         layout: LayoutId,
         at: Slot,
         step: Piece,
+        named: Option<NamedId>,
         pieces: &mut Vec<Piece>,
         nest: &mut Vec<LayoutId>,
     ) {
@@ -3013,7 +3088,7 @@ impl Synth<'_> {
         pieces.push(step);
         if refused_whole(&shape) {
             self.spell_path(pieces);
-            self.refuse_with(&shape);
+            self.refuse_with(&shape, named);
         } else if matches!(shape, Shape::Boxed) {
             let decide = self.pool.dynamic_refuses_key.expect(
                 "a wording walk that reaches a box is asked for only after its call site resolved \
@@ -3026,16 +3101,16 @@ impl Synth<'_> {
             let past = self.here();
             self.patch(skip, past);
         } else if nest.contains(&layout) || nest.len() >= NESTING {
-            self.hand_on(layout, at, pieces);
+            self.hand_on(layout, at, named, pieces);
         } else {
-            self.describe(layout, at, false, pieces, nest);
+            self.describe(layout, at, false, named, pieces, nest);
         }
         pieces.pop();
     }
 
     /// A part of `layout` at `at` handed to `describesAt<layout>` with the
     /// trail down to it: see [`Synth::phrase`].
-    fn hand_on(&mut self, layout: LayoutId, at: Slot, pieces: &[Piece]) {
+    fn hand_on(&mut self, layout: LayoutId, at: Slot, named: Option<NamedId>, pieces: &[Piece]) {
         let trail = self.trail();
         let words = self.words.clone().expect("a wording walk has its words");
         let depth = self.alloc(shapes::INT);
@@ -3064,9 +3139,10 @@ impl Synth<'_> {
             unit,
             &[(held, trail.layout), (text, shapes::STR)],
         );
-        let callee = function_for(
+        let callee = function_named_for(
             Operation::DescribeAt,
             layout,
+            named,
             self.pool,
             self.decls,
             self.span,
@@ -3203,9 +3279,13 @@ impl Synth<'_> {
     /// else because its equality could change while a collection holds it;
     /// the two are [`crate::dynamic`]'s, and the oracle's and
     /// `std.dynamic.refuseKey`'s word for word.
-    fn refuse_with(&mut self, shape: &Shape) {
+    ///
+    /// `named` is the part's node, which names it where it is a Host
+    /// resource.
+    fn refuse_with(&mut self, shape: &Shape, named: Option<NamedId>) {
         let words = self.words.clone().expect("a wording walk has its words");
-        let word = refused_word(shape);
+        let resource = self.pool.naming.resource(named).map(str::to_string);
+        let word = refused_word(shape, resource.as_deref());
         let lead = self
             .pool
             .string(&format!("` cannot use a `{word}` inside `"));

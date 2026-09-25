@@ -149,6 +149,28 @@ fn a_comparison_of_two_host_resource_handles_is_named_rather_than_emitted() {
     );
 }
 
+/// **A Host function value cannot reach key admission on this backend**,
+/// because it cannot be lowered as a value at all — neither reached through
+/// its module nor imported by name (issue #506).
+///
+/// So no admission site can have one as an operand, and the machine has no
+/// refusal of one to word. The oracle does, in words of its own —
+/// `` `Set.of` cannot use a `host operation `clock.now`` as a set element `` —
+/// and those are left alone: they are the only evaluator that can say them.
+/// When this gap closes, a key holding one becomes reachable here, and this is
+/// the test that says the refusal has to be worded to agree before it does.
+#[test]
+fn a_host_function_value_cannot_reach_a_key_admission() {
+    assert_eq!(
+        refused("use clock\nfn f() -> Int {\n  Set.of([clock.now]).length()\n}"),
+        vec!["not yet lowered: a name reached through a module"]
+    );
+    assert_eq!(
+        refused("use clock.now\nfn f() -> Int {\n  Set.of([now]).length()\n}"),
+        vec!["not yet lowered: `now`, a host operation used as a function value"]
+    );
+}
+
 /// The converse: a run of programs over the families and the parameter
 /// shapes this lowering has been taught, asserted only to *lower*.
 ///

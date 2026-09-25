@@ -1,0 +1,24 @@
+use console.println
+
+/// A task scope as the value of a map entry, the map used as a set element:
+/// the admission refuses the scope and names it `TaskScope` inside `[7]`, by
+/// the key of its entry.
+///
+/// `fail_key_known_scope`'s row for a part: a map's values are walked and its
+/// keys are not, since they are keys by construction (issue #506).
+fn admitScopes() -> Result<Unit, Error> {
+  scope work {
+    let named = Map.of(MapEntry(key: 7, value: work))
+    let held = Set.of(named)
+    println("never printed {held.length()}")?
+    let task = work.spawn { 1 }
+    await task
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a map of task scopes as a set element")?
+  admitScopes()?
+  Ok(())
+}

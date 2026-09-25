@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `http.Server` inside `Node.kids[1].kids[0].server(0)` as a set element
+  --> <e2e>/fail_key_known_resource_deep/main.cove:23:15
+   |
+23 |   let trees = Set.of(tree)
+   |               ^^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_known_resource_deep/main.cove:31:3
+   |
+31 |   admitTree()?
+   |   ^^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

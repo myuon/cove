@@ -79,6 +79,7 @@ mod inline;
 mod interpolate;
 mod limits;
 mod methods;
+mod named;
 pub(crate) mod names;
 mod pattern;
 mod shapes;
@@ -183,7 +184,7 @@ pub fn lower(
     let Lowering {
         program, errors, ..
     } = emit(checked, sources, schemas, &mut plan, &everything);
-    finish(program, errors, Roots::Package)
+    finish(program, errors, Roots::Package, schemas)
 }
 
 /// Lowers only the declarations `roots` can reach.
@@ -258,7 +259,7 @@ pub fn lower_roots(
             wanted,
         } = emit(checked, sources, schemas, &mut plan, &reach);
         if wanted.is_empty() {
-            return finish(program, errors, Roots::Named(roots));
+            return finish(program, errors, Roots::Named(roots), schemas);
         }
         reach.extend(wanted);
     }
@@ -365,6 +366,7 @@ fn emit<'a>(
         view_layout: shapes::DYNAMIC_VIEW,
         render_path_layout: shapes::RENDER_PATH,
         names: Vec::new(),
+        resource_names: Vec::new(),
         strings: pool.strings,
         args: pool.args.lists,
         tables: pool.tables,
@@ -401,6 +403,7 @@ fn finish(
     mut program: Program,
     errors: Vec<Diagnostic>,
     roots: Roots<'_>,
+    schemas: &HostSchemas,
 ) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(only_once(errors));
@@ -443,7 +446,7 @@ fn finish(
     // exactly the layouts a box can hold — asked of the finished program,
     // after the sweep, so that a box in a body nothing calls any more places
     // nothing. See `names`.
-    names::place(&mut program);
+    names::place(&mut program, schemas);
 
     // A clear the `return` after it was going to make pointless is dropped
     // here rather than never emitted, because the emission sites are many and
@@ -1219,7 +1222,11 @@ struct Pool {
     /// recorded before the body is walked for exactly that field's reason:
     /// a layout that reaches itself finds the number rather than starting
     /// again.
-    synthesized: HashMap<(synth::Operation, LayoutId), FunctionId>,
+    synthesized: HashMap<(synth::Operation, LayoutId, Option<named::NamedId>), FunctionId>,
+    /// The Host resources in the types of the keys a wording walk refuses:
+    /// what a walk composed for a known layout names a resource by, which
+    /// the layout does not say. See [`named`].
+    naming: named::Naming,
     /// [`synth::tracked`]'s answer for each layout it has been asked about:
     /// whether a value of it can contain itself through a `Vector`. A fact
     /// about the layout table, which only grows, so an answer never changes.
@@ -1312,6 +1319,7 @@ impl Pool {
             instances: HashMap::new(),
             instance_ids: HashMap::new(),
             synthesized: HashMap::new(),
+            naming: named::Naming::default(),
             tracked: HashMap::new(),
             render_tracked: HashMap::new(),
             leaves: None,

@@ -1,0 +1,42 @@
+use console.println
+
+/// Something that can say what it is.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// A job, and the task running it.
+struct Job {
+  name: String
+  task: Task<Int>
+}
+
+impl Summary for Job {
+  fn summarize(self) -> String {
+    self.name
+  }
+}
+
+/// A job boxed as a `dyn Summary`, used as a set element: the admission of the
+/// box refuses the task inside it and names it `Task` inside `Job.task`.
+///
+/// `fail_key_known_task_part`'s row for a box: the sentence is
+/// `std.dynamic.refuseKey`'s, Cove over a view of the box, and the type is the
+/// name `core.dynamicTypeName` answers for the task — a literal placed before
+/// the run, not the text a rendering shows for it (issue #506).
+fn admitJob() -> Result<Unit, Error> {
+  scope work {
+    let task = work.spawn { 3 }
+    let job: dyn Summary = Job(name: "build", task: task)
+    let jobs = Set.of(job)
+    println("never printed {jobs.length()}")?
+    await task
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed job holding a task as a set element")?
+  admitJob()?
+  Ok(())
+}

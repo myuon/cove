@@ -1,0 +1,16 @@
+error[cove::runtime]: `Map.of` cannot use a `http.Server` as a map key
+  --> <e2e>/fail_key_known_resource/main.cove:14:15
+   |
+14 |   let keyed = Map.of(MapEntry(key: server, value: "main"))
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> std/map.cove:46:5
+   |
+46 |     core.admitKey(entry.key, "Map.of", "map key")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_known_resource/main.cove:22:3
+   |
+22 |   keyByServer()?
+   |   ^^^^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

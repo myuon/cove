@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `Task` inside `Job.task` as a set element
+  --> <e2e>/fail_key_boxed_task/main.cove:31:16
+   |
+31 |     let jobs = Set.of(job)
+   |                ^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_boxed_task/main.cove:40:3
+   |
+40 |   admitJob()?
+   |   ^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

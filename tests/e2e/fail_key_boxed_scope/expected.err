@@ -1,0 +1,16 @@
+error[cove::runtime]: `Set.of` cannot use a `TaskScope` inside `Holder.held` as a set element
+  --> <e2e>/fail_key_boxed_scope/main.cove:36:19
+   |
+36 |     let holders = Set.of(holder)
+   |                   ^^^^^^^^^^^^^^
+  --> std/set.cove:38:5
+   |
+38 |     core.admitKey(element, "Set.of", "set element")
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_key_boxed_scope/main.cove:46:3
+   |
+46 |   admitHolder()?
+   |   ^^^^^^^^^^^^^ called from here
+  rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+1 error(s)

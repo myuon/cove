@@ -545,6 +545,24 @@ pub struct LayoutNames {
     pub parts: Vec<StrId>,
 }
 
+/// The type name one kind of Host resource is called by, placed before the
+/// run: an entry of [`Program::resource_names`].
+///
+/// A refusal names a value by its type, and a resource's type is the module
+/// that issued it and the kind of resource it is — `http.Server` — never the
+/// handle's number, which is an identity of one run's. The literal is the
+/// qualified name the source writes, so a reflection answers it with one load
+/// and allocates nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceName {
+    /// The Host module that issues it, such as `http`.
+    pub module: Arc<str>,
+    /// The kind of resource, such as `Server`.
+    pub resource: Arc<str>,
+    /// The placed literal `{module}.{resource}`.
+    pub text: StrId,
+}
+
 /// A whole lowered package.
 #[derive(Clone, Debug, Default)]
 pub struct Program {
@@ -620,6 +638,16 @@ pub struct Program {
     /// `lower::names` for which layouts are given names and why that set is
     /// exact.
     pub names: Vec<LayoutNames>,
+    /// The type names of the Host resources a box can hold, placed before the
+    /// run as literals: what [`Inst::DynTypeName`] answers for a view of a
+    /// resource handle — `http.Server` (issue #506).
+    ///
+    /// Not indexed by [`LayoutId`] as [`Program::names`] is, because every
+    /// resource shares one layout: which kind of resource a handle is lives in
+    /// the run's resource table, and the machine finds the literal by the
+    /// module and the kind the table records. Empty where [`Program::names`]
+    /// places nothing for the resource layout. See `lower::names`.
+    pub resource_names: Vec<ResourceName>,
     /// `module.name` to id, for an entry point named on a command line.
     pub by_name: BTreeMap<(Arc<str>, Arc<str>), FunctionId>,
 }

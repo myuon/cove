@@ -1,0 +1,24 @@
+use console.println
+use http
+
+/// A Host resource handle used as a map key: the admission refuses the key
+/// itself, and names it by its qualified type, `http.Server`.
+///
+/// Every resource shares one layout, so the layout cannot say which type a
+/// handle is; the key's type can, and the lowering reads it off at the site
+/// and places the name as a literal. It is the type's name and never the
+/// handle's number, which a rendering shows and a refusal does not (issue
+/// #506), where the machine said `a host resource`.
+fn keyByServer() -> Result<Unit, Error> {
+  let server = http.listen(0)?
+  let keyed = Map.of(MapEntry(key: server, value: "main"))
+  println("never printed {keyed.length()}")?
+  server.close()?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a server as a map key")?
+  keyByServer()?
+  Ok(())
+}

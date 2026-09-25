@@ -1,0 +1,48 @@
+use console.println
+
+/// Something that can say what it is.
+trait Summary {
+  fn summarize(self) -> String
+}
+
+/// Anything, held. Generic, because a task scope's type has no name a field
+/// can be declared with: it is inferred where a scope is put in one.
+struct Holder<T> {
+  held: T
+}
+
+impl Summary for Holder {
+  fn summarize(self) -> String {
+    "holder"
+  }
+}
+
+/// A holder of a task scope boxed as a `dyn Summary`, used as a set element:
+/// the admission of the box refuses the scope and names it `TaskScope` inside
+/// `Holder.held`.
+///
+/// `fail_key_boxed_task`'s row for a scope, and the one way a scope reaches a
+/// box a program writes: `clock.timeout`'s `Any` refuses one at the boundary.
+/// The type is `core.dynamicTypeName`'s answer for the scope (issue #506).
+///
+/// `Holder.summarize` is a method of a generic type, which the linear-memory
+/// lowering has not been taught. Nothing calls it, so the slice `cove run`
+/// lowers never reaches it and the case runs on every evaluator; a lowering
+/// of the whole package does, and the corpus surveys count this program as
+/// one that does not lower.
+fn admitHolder() -> Result<Unit, Error> {
+  scope work {
+    let holder: dyn Summary = Holder(held: work)
+    let holders = Set.of(holder)
+    println("never printed {holders.length()}")?
+    let task = work.spawn { 1 }
+    await task
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a boxed holder of a task scope as a set element")?
+  admitHolder()?
+  Ok(())
+}

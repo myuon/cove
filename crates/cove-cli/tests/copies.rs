@@ -1660,7 +1660,22 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// before and after showed rather than the total. ADR 0068's other phases
 /// were already at a lowering share of 0, or below it: Phase 3's −19 is the
 /// only other movement, and every other paragraph above says 0.
-const FORWARDABLE_COPIES: usize = 10834;
+///
+/// **11,166 since issue #506 named a task, a task scope and a Host resource
+/// by their types in a refusal.** The lowering moved it by **0**: with the ten
+/// programs it added held out it is 10,834 over the same 239 programs, the
+/// figure above to the copy, although a key whose type holds a resource now
+/// has wording walks of its own, keyed by the resources in it — a name is a
+/// literal the walk loads, not a value being moved. **332** is the programs
+/// existing, each held out alone: `fail_key_known_task` 37,
+/// `fail_key_known_task_part` 37, `fail_key_boxed_task` 38,
+/// `fail_key_known_scope` 37, `fail_key_known_scope_part` 39,
+/// `fail_key_known_resource` 36, `fail_key_known_resource_deep` 35,
+/// `fail_key_boxed_resource` 37 and `fail_key_boxed_resource_any` 36. The
+/// tenth, `fail_key_boxed_scope`, is 0, because a lowering of its whole
+/// package stops at a method of a generic type and this survey counts only
+/// programs that lower.
+const FORWARDABLE_COPIES: usize = 11166;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

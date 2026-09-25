@@ -1,0 +1,25 @@
+use console.println
+
+/// A task handle used as a map key: the admission refuses the key itself, and
+/// names it by its type, `Task`.
+///
+/// A task handle is scheduler state, and its equality could change while a
+/// collection holds it, so it is refused under the rule every handle is. The
+/// key's layout is refused whole, so the sentence is literals placed before the
+/// run and one trap, at the site. Issue #506 is what made every evaluator call
+/// it `Task`, the oracle's word, where the machine said `a task`.
+fn keyByTask() -> Result<Unit, Error> {
+  scope work {
+    let task = work.spawn { 1 }
+    let keyed = Map.of(MapEntry(key: task, value: "one"))
+    println("never printed {keyed.length()}")?
+    await task
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("about to use a task as a map key")?
+  keyByTask()?
+  Ok(())
+}

@@ -1893,6 +1893,15 @@ pub enum Inst {
     /// anything but a struct, or of a struct whose names were never placed, is
     /// an internal runtime error; `lower::names` is what makes the second
     /// impossible.
+    ///
+    /// A view of an opaque value answers its type's name too, the one a
+    /// refused key is called by (issue #506): `Task`, `TaskScope`, `Bytes`,
+    /// `ByteBuffer` — each its layout's, placed like a struct's — and a Host
+    /// resource's qualified type, `http.Server`. Every resource shares one
+    /// layout, so that one is found by the module and the kind the run's
+    /// resource table records for the handle, among
+    /// [`crate::Program::resource_names`]: one lookup and one load, and never
+    /// the handle's number.
     DynTypeName { dst: Slot, view: Slot },
     /// `dst = <the name of field index of the struct view names>`, a `String`
     /// placed before the run: [`Inst::DynTypeName`]'s arrangement, for the

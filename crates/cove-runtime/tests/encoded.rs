@@ -303,12 +303,20 @@ fn the_run_writes_the_recording_a_run_writes() {
     // A known layout's wording walk writes the same rules and helps, and
     // `Pool::string` places a text once, so a program with one adds only its
     // own leads; this fixture has none.
+    //
+    // It is 1,744 since issue #506 named a task, a task scope and a Host
+    // resource by their types, and the thirteen words are the five literals
+    // `std.dynamic.keyWord` no longer holds: `<task>` and `a task`, two words
+    // each, and `<task scope `, `a task scope` and `a host resource`, three.
+    // It tells a handle apart by `core.dynamicTypeName` now, whose answer is a
+    // name the machine places before the run only where a box can hold one,
+    // and this fixture boxes nothing — so it places none of them either.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1757), capacity_words: Some(1757) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1744), capacity_words: Some(1744) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]
