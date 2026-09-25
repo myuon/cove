@@ -159,17 +159,20 @@ fn @m.early(Int) -> Int
 /// for the rest of the frame. A leak rather than a crash, and one at every
 /// call site rather than only in a walk.
 ///
-/// Instructions 19–21 are the answer, in the order a turn ends in: the
+/// Instructions 23–25 are the answer, in the order a turn ends in: the
 /// temporaries this turn made, innermost first, then the bindings its scopes
 /// own, then the element. `s8` is the element and is cleared by the loop
 /// because the loop owns it; `s10` and `s12` are cleared because
 /// [`Body::held`](super::super::Body) records every temporary that holds a
 /// reference and the loop took a mark of that list when it began. The byte
-/// buffer the string was assembled in is not among them: it was released at
-/// 15, as soon as the finish had consumed it.
+/// buffer the string was assembled in is not among them. The lowering
+/// releases it as soon as the finish has consumed it, with a clear of `s10`
+/// after 19 — and `lower::redefined` drops that clear, because both ways on
+/// from it write `s10` again before anything reads it: the copy at 21 and
+/// the `break`'s own clear at 23.
 ///
 /// What is *not* cleared is as much of the point: `s3`, the array being
-/// walked, is below the mark and is read again at 28, where the `break`'s
+/// walked, is below the mark and is read again at 32, where the `break`'s
 /// jump lands.
 #[test]
 fn a_break_clears_the_temporaries_the_turn_was_holding() {
@@ -188,9 +191,9 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
         "\
 fn @m.f(Array) -> Int
   frame 19: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:ref s11:unit s12:ref s13:unit s14:int s15:int s16:int s17:ref s18:int
-  local xs -> s0:Array [0, 36)
-  local total -> s2:Int [1, 35)
-  local x -> s8:String [9, 31)
+  local xs -> s0:Array [0, 35)
+  local total -> s2:Int [1, 34)
+  local x -> s8:String [9, 30)
      0  int s2:int 0
      1  copy s3:Array s0:Array
      2  len s4:int s3:ref
@@ -198,7 +201,7 @@ fn @m.f(Array) -> Int
      4  int s6:int 1
      5  jump 7
      6  add.int s5:int s5:int s6:int
-     7  lt.int.branch s7:bool s5:int s4:int 33
+     7  lt.int.branch s7:bool s5:int s4:int 32
      8  load-elem s8:String s3:ref s5:int
      9  int s9:int 16
     10  growable-alloc.bytes s10:ref s9:int
@@ -211,22 +214,21 @@ fn @m.f(Array) -> Int
     17  clear s17:<ref>
     18  growable-commit.bytes s10:ref s14:int
     19  run-finish.bytes s12:ref s10:ref String utf8
-    20  clear s10:ByteBuffer
-    21  gt.int.imm.branch s7:bool s2:int 0 24
-    22  copy s10:String s8:String
-    23  jump 28
-    24  clear s10:String
-    25  clear s12:String
-    26  clear s8:String
-    27  jump 33
-    28  int s2:int 0
-    29  clear s10:String
-    30  clear s12:String
-    31  clear s8:String
-    32  jump 6
-    33  clear s3:Array
-    34  copy s1:Int s2:Int
-    35  return s1:Int
+    20  gt.int.imm.branch s7:bool s2:int 0 23
+    21  copy s10:String s8:String
+    22  jump 27
+    23  clear s10:String
+    24  clear s12:String
+    25  clear s8:String
+    26  jump 32
+    27  int s2:int 0
+    28  clear s10:String
+    29  clear s12:String
+    30  clear s8:String
+    31  jump 6
+    32  clear s3:Array
+    33  copy s1:Int s2:Int
+    34  return s1:Int
 "
     );
 }

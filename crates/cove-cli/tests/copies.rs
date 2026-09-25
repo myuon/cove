@@ -1675,7 +1675,23 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// tenth, `fail_key_boxed_scope`, is 0, because a lowering of its whole
 /// package stops at a method of a generic type and this survey counts only
 /// programs that lower.
-const FORWARDABLE_COPIES: usize = 11166;
+///
+/// **11,178 since issue #514's F7 dropped the clears a redefinition makes
+/// pointless**, and the rise of 12 is all lowering and none of it a copy: the
+/// corpus is the same 248 programs and holds 70,903 copies before and after.
+/// What moved is what this survey can *see*. Twelve copies had a clear of
+/// their own destination between them and the call that produced their
+/// source — `call t; clear d; copy d ← t` — and `lower::redefined` drops that
+/// clear, because the copy writes `d` before anything reads it. The copy is
+/// then straight after its producer, which is the shape counted above, and it
+/// was a forwarding candidate all along: the call could have answered into
+/// `d`. A per-function listing of the counted copies before and after names
+/// all twelve — five in `values_any_equals.scalars`, three in
+/// `rules.catalog`, and one each in `callbacks.buildEvents`,
+/// `fail_equals_cycle_map.main`, `values_boxed_order.bags` and
+/// `values_render_cycle.cyclicMap` — and no other function's count moved.
+/// The same pass took 19,947 of the corpus's 177,648 clears away.
+const FORWARDABLE_COPIES: usize = 11178;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

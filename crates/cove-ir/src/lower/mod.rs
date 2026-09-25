@@ -82,6 +82,7 @@ mod methods;
 mod named;
 pub(crate) mod names;
 mod pattern;
+mod redefined;
 mod shapes;
 mod stmt;
 mod sweep;
@@ -462,11 +463,18 @@ fn finish(
     // have while it is building one. See `frees`.
     frees::drop_clears_that_free_nothing(&mut program);
 
-    // And last of the three, because it is the only one that reads what is
+    // And a clear whose words are written again before anything could see
+    // them null — not the program, which writes before it reads, and not the
+    // collector, which the window between the two gives no new place to
+    // look. Issue #514's F7, and a question about paths through the finished
+    // code for the same reason as the pass above. See `redefined`.
+    redefined::drop_clears_before_redefinition(&mut program);
+
+    // And last of these, because it is the only one that reads what is
     // *adjacent*: a comparison whose answer the branch on the next line is all
     // that consumes becomes one instruction. A clear dropped above changes
     // which instructions are next to each other, so running this before the
-    // two passes that delete would miss the pairs they create — and ADR 0054's
+    // passes that delete would miss the pairs they create — and ADR 0054's
     // condition is about the finished code's targets besides. See `branches`.
     branches::fuse_comparisons_into_branches(&mut program);
 

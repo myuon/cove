@@ -237,14 +237,14 @@ fn pointless(function: &Function, program: &Program) -> Vec<bool> {
 
 /// One function's control-flow graph, and what this pass needs to read off
 /// the program to walk it.
-struct Flow<'p> {
+pub(super) struct Flow<'p> {
     program: &'p Program,
     function: &'p Function,
     /// How many words the frame has.
-    size: usize,
+    pub(super) size: usize,
     /// The frame words some [`Inst::AddrOfSlot`] of this function put within
     /// reach of an address. See the module documentation.
-    addressed: Vec<bool>,
+    pub(super) addressed: Vec<bool>,
     /// The widest answer any function in the program returns, which is what
     /// bounds an [`Inst::CallClosure`]'s destination.
     widest: u32,
@@ -252,7 +252,7 @@ struct Flow<'p> {
 
 impl<'p> Flow<'p> {
     /// The graph for `function`, or `None` when this pass declines it.
-    fn of(function: &'p Function, program: &'p Program) -> Option<Flow<'p>> {
+    pub(super) fn of(function: &'p Function, program: &'p Program) -> Option<Flow<'p>> {
         if function.code.is_empty() {
             return None;
         }
@@ -294,7 +294,7 @@ impl<'p> Flow<'p> {
         })
     }
 
-    fn width(&self, id: LayoutId) -> u32 {
+    pub(super) fn width(&self, id: LayoutId) -> u32 {
         self.program
             .layouts
             .get(id.index())
@@ -302,7 +302,7 @@ impl<'p> Flow<'p> {
     }
 
     /// Where control can go from `pc`.
-    fn successors(&self, pc: usize, f: &mut dyn FnMut(usize)) {
+    pub(super) fn successors(&self, pc: usize, f: &mut dyn FnMut(usize)) {
         let last = self.function.code.len() - 1;
         match self.function.code[pc] {
             Inst::Return { .. } | Inst::Trap { .. } => {}
@@ -340,7 +340,7 @@ impl<'p> Flow<'p> {
     /// `wide` picks the over-estimate where the two differ, which is the one
     /// place a destination's width is not a static fact. See the module
     /// documentation.
-    fn writes(&self, inst: &Inst, wide: bool, f: &mut dyn FnMut(Slot, u32)) {
+    pub(super) fn writes(&self, inst: &Inst, wide: bool, f: &mut dyn FnMut(Slot, u32)) {
         let width = |id| self.width(id);
         match *inst {
             Inst::Unit { dst }
@@ -472,7 +472,7 @@ impl<'p> Flow<'p> {
     }
 
     /// The words `inst` reads.
-    fn reads(&self, inst: &Inst, f: &mut dyn FnMut(Slot, u32)) {
+    pub(super) fn reads(&self, inst: &Inst, f: &mut dyn FnMut(Slot, u32)) {
         let width = |id| self.width(id);
         let args = |id, f: &mut dyn FnMut(Slot, u32)| {
             for arg in self.program.arg_list(id) {
