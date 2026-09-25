@@ -764,11 +764,11 @@ pub(crate) struct Machine<'a> {
     /// shared with every task of a run — a `Vector`'s two payload words is
     /// one fact, not one per task that asks it.
     fixed_payload_words: Arc<[u32]>,
-    /// Every layout's reflection descriptor, in `LayoutId` order:
-    /// `cove_native::NativeCtx::dyn_layouts`' table, built once by
-    /// [`dynamic::descriptors`] and shared with every task of a run, for
-    /// [`Machine::fixed_payload_words`]' reasons.
-    dyn_layouts: Arc<[u64]>,
+    /// Every layout's reflection descriptor and where its children are:
+    /// `cove_native::NativeCtx::dyn_layouts`' and `dyn_children`'s tables,
+    /// built once by [`dynamic::tables`] and shared with every task of a run,
+    /// for [`Machine::fixed_payload_words`]' reasons.
+    reflection: Arc<dynamic::Tables>,
     /// [ADR 0055]'s function-entry table, while one is installed.
     ///
     /// `Program + FunctionId -> encoded entry | native entry`, and the reason it
@@ -911,7 +911,7 @@ impl<'a> Machine<'a> {
                 .iter()
                 .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
                 .collect(),
-            dyn_layouts: dynamic::descriptors(program),
+            reflection: dynamic::tables(program),
             tier: None,
             counting: None,
         };
@@ -950,7 +950,7 @@ impl<'a> Machine<'a> {
         widths: Arc<[u32]>,
         word_runs: Arc<[Option<WordRun>]>,
         fixed_payload_words: Arc<[u32]>,
-        dyn_layouts: Arc<[u64]>,
+        reflection: Arc<dynamic::Tables>,
     ) -> Machine<'a> {
         Machine {
             program,
@@ -993,7 +993,7 @@ impl<'a> Machine<'a> {
             // The parent's, for the same reason.
             word_runs,
             fixed_payload_words,
-            dyn_layouts,
+            reflection,
             // Not the parent's: see the field. A spawned task runs on the
             // encoded tier.
             tier: None,
@@ -2551,9 +2551,14 @@ impl<'a> Machine<'a> {
         self.fixed_payload_words.as_ptr()
     }
 
-    /// See [`Machine::dyn_layouts`].
+    /// See [`Machine::reflection`].
     pub(crate) fn dyn_layouts_ptr(&self) -> *const u64 {
-        self.dyn_layouts.as_ptr()
+        self.reflection.descriptors.as_ptr()
+    }
+
+    /// See [`Machine::reflection`].
+    pub(crate) fn dyn_children_ptr(&self) -> *const u64 {
+        self.reflection.children.as_ptr()
     }
 
     #[inline]
@@ -3874,7 +3879,7 @@ impl<'a> Machine<'a> {
         let widths = Arc::clone(&self.widths);
         let word_runs = Arc::clone(&self.word_runs);
         let fixed_payload_words = Arc::clone(&self.fixed_payload_words);
-        let dyn_layouts = Arc::clone(&self.dyn_layouts);
+        let reflection = Arc::clone(&self.reflection);
         let handle = threads.spawn(move || {
             run_task(
                 program,
@@ -3894,7 +3899,7 @@ impl<'a> Machine<'a> {
                 widths,
                 word_runs,
                 fixed_payload_words,
-                dyn_layouts,
+                reflection,
             )
         });
 
@@ -4730,7 +4735,7 @@ fn run_task(
     widths: Arc<[u32]>,
     word_runs: Arc<[Option<WordRun>]>,
     fixed_payload_words: Arc<[u32]>,
-    dyn_layouts: Arc<[u64]>,
+    reflection: Arc<dynamic::Tables>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -4745,7 +4750,7 @@ fn run_task(
         widths,
         word_runs,
         fixed_payload_words,
-        dyn_layouts,
+        reflection,
     );
     machine.watch(debugger);
     let started = Instant::now();
@@ -7838,7 +7843,7 @@ pub(crate) mod tests {
             Arc::clone(&entry.widths),
             Arc::clone(&entry.word_runs),
             Arc::clone(&entry.fixed_payload_words),
-            Arc::clone(&entry.dyn_layouts),
+            Arc::clone(&entry.reflection),
         );
 
         assert_eq!(

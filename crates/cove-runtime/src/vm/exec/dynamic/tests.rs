@@ -1072,3 +1072,163 @@ fn the_descriptor_table_is_this_arms_own_answers() {
         }
     }
 }
+
+/// **The child table compiled code reads is this arm's own answers** (#514
+/// F2), both ways.
+///
+/// Read against the layout table: every layout with children has a block, a
+/// struct's entry `i` is field `i`'s layout at its `at`, an enum's case block
+/// is that case's parts at `1 + at`, a run's entry is its element at its
+/// stride, a map's is its entry stride and then its key and its value — and
+/// an entry is marked `DYN_SETTLE` exactly when the child's layout is one
+/// address, which is when `settle` has something to do.
+///
+/// Read against [`super::child`]: every child of every value below, at every
+/// index from one before the count to one past it, is answered by
+/// [`super::inline_child`] with the view `child` answers when the child is
+/// inline — it keeps its parent's owner, or a vector's store — and not at all
+/// otherwise; and nothing is answered past the count, of an enum in a case its
+/// layout does not have, or of a consumed vector, each of which `child`
+/// refuses.
+#[test]
+fn the_child_table_is_this_arms_own_answers() {
+    use super::{child, children, count, inline_child, View};
+    use cove_native::{DYN_OFFSET_SHIFT, DYN_SETTLE};
+    let fixture = fixture();
+    let layouts = fixture.layouts;
+    let program = &fixture.program;
+    let table = children(program);
+    let entry = |layout: LayoutId, offset: u32| {
+        let described = program.layout(layout);
+        match matches!(described.shape, Shape::Free) || described.is_one_address() {
+            true => u64::from(layout.0) | DYN_SETTLE,
+            false => u64::from(layout.0) | u64::from(offset) << DYN_OFFSET_SHIFT,
+        }
+    };
+    let width = |layout: LayoutId| program.layout(layout).width();
+    for (at, described) in program.layouts.iter().enumerate() {
+        let block = table[at] as usize;
+        let expected: Vec<u64> = match &described.shape {
+            Shape::Struct { fields, .. } if !fields.is_empty() => fields
+                .iter()
+                .map(|field| entry(field.layout, field.at))
+                .collect(),
+            Shape::Enum { cases, .. } if !cases.is_empty() => {
+                assert_eq!(table[block], cases.len() as u64, "{}", described.name);
+                for (nth, case) in cases.iter().enumerate() {
+                    let parts = table[block + 1 + nth] as usize;
+                    let want: Vec<u64> = std::iter::once(case.parts.len() as u64)
+                        .chain(
+                            case.parts
+                                .iter()
+                                .map(|part| entry(part.layout, 1 + part.at)),
+                        )
+                        .collect();
+                    assert_eq!(
+                        table[parts..parts + want.len()],
+                        want,
+                        "{} case {nth}",
+                        described.name
+                    );
+                }
+                continue;
+            }
+            Shape::Elements { elem, .. } | Shape::Members { elem } | Shape::Vector { elem } => {
+                vec![entry(*elem, width(*elem))]
+            }
+            Shape::Entries { key, value } => vec![
+                u64::from(width(*key) + width(*value)),
+                entry(*key, 0),
+                entry(*value, width(*key)),
+            ],
+            _ => {
+                assert_eq!(block, 0, "{} has no block", described.name);
+                continue;
+            }
+        };
+        assert!(block >= program.layouts.len(), "{}", described.name);
+        assert_eq!(
+            table[block..block + expected.len()],
+            expected,
+            "{}",
+            described.name
+        );
+    }
+
+    let mut machine = machine(&fixture);
+    let machine = &mut machine;
+    let outer_name = string(machine, "outer");
+    let inner_label = string(machine, "inner");
+    let named = string(machine, "named");
+    let a = string(machine, "a");
+    let b = string(machine, "b");
+    let array = object(machine, layouts.array_int, 3, &[1, 2, 3]);
+    let vector = points(machine, &fixture, &[(1, 2), (3, 4)]);
+    let consumed = points(machine, &fixture, &[(5, 6)]);
+    machine.set_payload(consumed, GROWABLE_STORE, 0);
+    let set = object(machine, layouts.set_int, 2, &[1, 5]);
+    let map = object(machine, layouts.map, 2, &[a, 1, b, 2]);
+    let name = string(machine, "n");
+    let held = boxed(machine, layouts.inner, &[name, 5, 6]);
+    let values = [
+        boxed(machine, layouts.outer, &[outer_name, inner_label, 3, 4]),
+        boxed(machine, layouts.mark, &[0, 0, 0]),
+        boxed(machine, layouts.mark, &[1, 7, 0]),
+        boxed(machine, layouts.mark, &[2, 0, named]),
+        // A case the layout does not have.
+        boxed(machine, layouts.mark, &[3, 0, 0]),
+        boxed(machine, layouts.option_int, &[1, 5]),
+        boxed(machine, layouts.result, &[0, 1, 0]),
+        boxed(machine, layouts.array_int, &[array]),
+        boxed(machine, layouts.vector_point, &[vector]),
+        boxed(machine, layouts.vector_point, &[consumed]),
+        boxed(machine, layouts.set_int, &[set]),
+        boxed(machine, layouts.map, &[map]),
+        boxed(machine, layouts.range, &[1, 4, 0]),
+        boxed(machine, layouts.holder, &[held]),
+        boxed(machine, layouts.secret, &[9]),
+        boxed(machine, layouts.int, &[7]),
+    ];
+    let mut pending: Vec<View> = values
+        .iter()
+        .map(|value| {
+            let words = open(machine, &fixture, *value);
+            View {
+                layout: LayoutId(words[0] as u32),
+                owner: words[1],
+                at: words[2] as u32,
+            }
+        })
+        .collect();
+    let (mut inline, mut settled, mut refused) = (0, 0, 0);
+    while let Some(view) = pending.pop() {
+        // The owner an inline child keeps: a vector's elements are in its store.
+        let home = match &program.layout(view.layout).shape {
+            Shape::Vector { .. } => machine.payload(view.owner, GROWABLE_STORE),
+            _ => view.owner,
+        };
+        let counted = count(machine, view).unwrap_or(0);
+        for index in [-1, counted, counted + 1].into_iter().chain(0..counted) {
+            let fast = inline_child(machine, view, index);
+            match child(machine, view, index) {
+                Ok(answer) if answer.owner == home => {
+                    assert_eq!(fast, Some(answer), "{view:?} child {index}");
+                    inline += 1;
+                    pending.push(answer);
+                }
+                Ok(answer) => {
+                    assert_eq!(fast, None, "{view:?} child {index} settles");
+                    settled += 1;
+                    pending.push(answer);
+                }
+                Err(_) => {
+                    assert_eq!(fast, None, "{view:?} child {index} is refused");
+                    refused += 1;
+                }
+            }
+        }
+    }
+    assert!(inline >= 20, "{inline} inline children");
+    assert!(settled >= 5, "{settled} children that settle");
+    assert!(refused >= 30, "{refused} refusals");
+}

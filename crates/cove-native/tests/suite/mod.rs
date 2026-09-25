@@ -798,6 +798,9 @@ thread_local! {
     /// layout of the program it runs; empty publishes none. See
     /// [`publish_descriptors`].
     pub static DYN_LAYOUTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// The `NativeCtx::dyn_children` table the next entry is given; empty
+    /// publishes none. See [`publish_children`].
+    pub static DYN_CHILDREN: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     /// Every observation this thread's compiled code handed to the runtime, in
     /// order.
     pub static OBSERVED: RefCell<Vec<Observed>> = const { RefCell::new(Vec::new()) };
@@ -847,6 +850,7 @@ pub fn forget_observed() {
     OBSERVED.with(|held| held.borrow_mut().clear());
     OBSERVED_ANSWERS.with(|held| held.borrow_mut().clear());
     DYN_LAYOUTS.with(|held| held.borrow_mut().clear());
+    DYN_CHILDREN.with(|held| held.borrow_mut().clear());
 }
 
 /// Publishes `descriptors` as the next entries' `NativeCtx::dyn_layouts`, one
@@ -857,6 +861,14 @@ pub fn forget_observed() {
 /// classification — which is the point of the literal expectations above.
 pub fn publish_descriptors(descriptors: &[u64]) {
     DYN_LAYOUTS.with(|held| *held.borrow_mut() = descriptors.to_vec());
+}
+
+/// Publishes `children` as the next entries' `NativeCtx::dyn_children`: one
+/// block index per layout and then the blocks, as `cove-runtime`'s
+/// `dynamic::children` builds them, written out by each case for
+/// [`publish_descriptors`]' reason.
+pub fn publish_children(children: &[u64]) {
+    DYN_CHILDREN.with(|held| *held.borrow_mut() = children.to_vec());
 }
 
 /// Scripts what the next observations answer.
@@ -1562,6 +1574,10 @@ pub fn enter_with_tables<A: Arm>(
     let descriptors = DYN_LAYOUTS.with(|held| held.borrow().clone());
     if !descriptors.is_empty() {
         ctx = ctx.over_dyn_layouts(descriptors.as_ptr());
+    }
+    let children = DYN_CHILDREN.with(|held| held.borrow().clone());
+    if !children.is_empty() {
+        ctx = ctx.over_dyn_children(children.as_ptr());
     }
     let mut ctx = ctx.polling_at(POLL_AT.with(Cell::get));
     let entry = jit.entry(compiled);
@@ -8764,6 +8780,231 @@ pub fn an_observation_the_table_cannot_settle_is_the_helpers<A: Arm>() {
             }],
             "{what}: one hand-over, of the observation as it is"
         );
+    }
+}
+
+/// The child table [`a_child_is_answered_inline_from_the_child_table`]
+/// publishes, over [`inline_table`]'s ids: a pair of `Int`s, a pair whose
+/// second word is followed, `Option<Int>`, an array, a set, a vector of pairs,
+/// a vector whose element is followed, and a map of `Int` to `Int`.
+fn child_table() -> Vec<u64> {
+    use cove_native::{DYN_OFFSET_SHIFT, DYN_SETTLE};
+    let entry = |layout: LayoutId, offset: u64| u64::from(layout.0) | offset << DYN_OFFSET_SHIFT;
+    let mut table = vec![0u64; 32];
+    let mut block = |layout: LayoutId, words: &[u64]| {
+        table[layout.index()] = table.len() as u64;
+        table.extend_from_slice(words);
+    };
+    block(PAIR, &[entry(INT, 0), entry(INT, 1)]);
+    block(REF_PAIR, &[entry(INT, 0), u64::from(REF.0) | DYN_SETTLE]);
+    block(ARRAY_INT, &[entry(INT, 1)]);
+    block(SET_INT, &[entry(INT, 1)]);
+    block(PAIR_VECTOR, &[entry(PAIR, 2)]);
+    block(VECTOR, &[u64::from(REF.0) | DYN_SETTLE]);
+    block(MAP_INT, &[2, entry(INT, 0), entry(INT, 1)]);
+    // Two cases: `None`, with no parts, and `Some`, whose `Int` is at word 1.
+    let at = table.len() as u64;
+    table[OPTION_INT.index()] = at;
+    table.extend_from_slice(&[2, at + 3, at + 4, 0, 1, entry(INT, 1)]);
+    table
+}
+
+/// **An inline child is answered in emitted code, from the child table,
+/// without a call** (#514 F2): a struct's field at the parent's word plus the
+/// field's offset, an enum's part of its current case, an array's and a set's
+/// element at the stride, a vector's element in its store, and a map's key and
+/// value — each the view `cove-runtime`'s `dynamic::child` gives, which keeps
+/// the parent's owner, or the vector's store, and adds the offset.
+///
+/// **Everything else is one hand-over of the observation as it is**, and the
+/// destination keeps what it held because the double writes nothing: an index
+/// past the count or below nought, an enum in a case its layout does not have
+/// or with no parts, a consumed vector, a child marked `DYN_SETTLE`, a kind
+/// with no children, a null owner, and a layout the descriptor asks about.
+pub fn a_child_is_answered_inline_from_the_child_table<A: Arm>() {
+    use cove_ir::bytecode::Op;
+    use cove_ir::DynamicKind as K;
+    let mut heap = Heap::new(2);
+    let pair = heap.object(40, PAIR, 0);
+    heap.set(41, 11);
+    heap.set(42, 22);
+    let option = heap.object(80, OPTION_INT, 0);
+    heap.set(81, 1);
+    heap.set(82, 5);
+    let none = heap.object(84, OPTION_INT, 0);
+    let stray = heap.object(88, OPTION_INT, 0);
+    heap.set(89, 7);
+    let array = heap.object(50, ARRAY_INT, 5);
+    let set = heap.object(56, SET_INT, 2);
+    let map = heap.object(60, MAP_INT, 3);
+    let store = heap.object(100, STORE, 4);
+    let vector = heap.object(70, PAIR_VECTOR, 0);
+    heap.set(71, 2);
+    heap.set(72, store);
+    let consumed = heap.object(74, PAIR_VECTOR, 0);
+    heap.set(75, 1);
+    let ints = heap.object(77, VECTOR, 0);
+    heap.set(78, 1);
+    heap.set(79, store);
+    let mut descriptors = inline_table();
+    descriptors[PAIR_VECTOR.index()] = descriptor(K::Vector, 0, 0);
+    let asked = [0xdead, 0xbeef, 0xfeed];
+    type Case<'a> = (&'a str, [u64; 4], Option<[u64; 3]>);
+    let cases: Vec<Case> = vec![
+        (
+            "a struct's second field",
+            [PAIR.0 as u64, pair, 0, 1],
+            Some([INT.0 as u64, pair, 1]),
+        ),
+        (
+            "a struct inside its owner",
+            [PAIR.0 as u64, pair, 3, 0],
+            Some([INT.0 as u64, pair, 3]),
+        ),
+        (
+            "a field that is followed",
+            [REF_PAIR.0 as u64, pair, 0, 1],
+            None,
+        ),
+        (
+            "a field of a struct past the count",
+            [PAIR.0 as u64, pair, 0, 2],
+            None,
+        ),
+        (
+            "a field below nought",
+            [PAIR.0 as u64, pair, 0, u64::MAX],
+            None,
+        ),
+        (
+            "`Some`'s part",
+            [OPTION_INT.0 as u64, option, 0, 0],
+            Some([INT.0 as u64, option, 1]),
+        ),
+        (
+            "`None` has no parts",
+            [OPTION_INT.0 as u64, none, 0, 0],
+            None,
+        ),
+        (
+            "a case the layout does not have",
+            [OPTION_INT.0 as u64, stray, 0, 0],
+            None,
+        ),
+        (
+            "an array's last element",
+            [ARRAY_INT.0 as u64, array, 0, 4],
+            Some([INT.0 as u64, array, 4]),
+        ),
+        (
+            "an array past its length",
+            [ARRAY_INT.0 as u64, array, 0, 5],
+            None,
+        ),
+        (
+            "a set's element",
+            [SET_INT.0 as u64, set, 0, 1],
+            Some([INT.0 as u64, set, 1]),
+        ),
+        (
+            "a vector's element, in its store",
+            [PAIR_VECTOR.0 as u64, vector, 0, 1],
+            Some([PAIR.0 as u64, store, 2]),
+        ),
+        (
+            "a vector past its length",
+            [PAIR_VECTOR.0 as u64, vector, 0, 2],
+            None,
+        ),
+        (
+            "a consumed vector",
+            [PAIR_VECTOR.0 as u64, consumed, 0, 0],
+            None,
+        ),
+        (
+            "a vector whose element is followed",
+            [VECTOR.0 as u64, ints, 0, 0],
+            None,
+        ),
+        (
+            "a map's third key",
+            [MAP_INT.0 as u64, map, 0, 4],
+            Some([INT.0 as u64, map, 4]),
+        ),
+        (
+            "a map's third value",
+            [MAP_INT.0 as u64, map, 0, 5],
+            Some([INT.0 as u64, map, 5]),
+        ),
+        (
+            "a map past its entries",
+            [MAP_INT.0 as u64, map, 0, 6],
+            None,
+        ),
+        ("a scalar has no children", [INT.0 as u64, pair, 1, 0], None),
+        ("a null owner", [PAIR.0 as u64, 0, 0, 0], None),
+        ("a layout the table asks about", [0, pair, 0, 0], None),
+    ];
+    let reprs = vec![
+        Repr::Int,
+        Repr::Ref,
+        Repr::Int,
+        Repr::Int,
+        Repr::Int,
+        Repr::Ref,
+        Repr::Int,
+    ];
+    let child = Inst::DynChild {
+        dst: 4,
+        view: 0,
+        index: 3,
+    };
+    for (what, words, expected) in cases {
+        for (word, returns) in [INT, REF, INT].into_iter().enumerate() {
+            forget_observed();
+            publish_descriptors(&descriptors);
+            publish_children(&child_table());
+            let mut frame = words.to_vec();
+            frame.extend(asked);
+            let program = program(function(
+                reprs.clone(),
+                returns,
+                vec![
+                    child.clone(),
+                    Inst::Return {
+                        src: 4 + word as u32,
+                    },
+                ],
+            ));
+            let answered = run_over::<A>(&program, &mut frame, 0, &heap);
+            let observed = observed();
+            forget_observed();
+            assert_eq!(answered.outcome, Outcome::Returned, "{what}");
+            match expected {
+                Some(view) => {
+                    assert_eq!(answered.returned[0], view[word], "{what}: word {word}");
+                    assert_eq!(observed, Vec::new(), "{what}: answered without the helper");
+                }
+                None => {
+                    assert_eq!(
+                        answered.returned[0], asked[word],
+                        "{what}: the double writes nothing"
+                    );
+                    assert_eq!(
+                        observed,
+                        vec![Observed {
+                            pc: 0,
+                            op: u32::from(Op::DynChild.number()),
+                            a: 4,
+                            b: 0,
+                            c: 3,
+                            work: 0,
+                        }],
+                        "{what}: one hand-over, of the observation as it is"
+                    );
+                }
+            }
+        }
     }
 }
 

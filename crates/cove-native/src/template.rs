@@ -34,8 +34,8 @@ use cove_ir::{
 
 use crate::abi::{
     Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, DYN_ASK,
-    DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
-    HEAP_ORIGIN_WORDS,
+    DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_OFFSET_SHIFT, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT,
+    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, byte_store, leaders, literal_offset, observation, overflow_of, reserve,
@@ -51,6 +51,7 @@ const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
 const OFF_FIXED_PAYLOAD_WORDS: i32 = offset_of!(NativeCtx, fixed_payload_words) as i32;
 const OFF_DYN_LAYOUTS: i32 = offset_of!(NativeCtx, dyn_layouts) as i32;
+const OFF_DYN_CHILDREN: i32 = offset_of!(NativeCtx, dyn_children) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_POLL_AT: i32 = offset_of!(NativeCtx, poll_at) as i32;
@@ -152,6 +153,7 @@ const CC_AE: u8 = 0x3;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
 const CC_A: u8 = 0x7;
+const CC_S: u8 = 0x8;
 const CC_P: u8 = 0xa;
 const CC_NP: u8 = 0xb;
 const CC_L: u8 = 0xc;
@@ -2298,9 +2300,9 @@ impl<'a> Emit<'a> {
     /// view's three words and [`NativeCtx::dyn_layouts`] answer it, and handed
     /// to [`Emit::observe`] otherwise.
     ///
-    /// Six are answered here, and each is the reflection arm's function read
-    /// against the table the runtime built from that function's own
-    /// classification:
+    /// Seven are answered here, and each is the reflection arm's function read
+    /// against the tables the runtime built from that function's own
+    /// classification and layouts:
     ///
     /// - **`dyn.kind`** is the descriptor's low byte;
     /// - **`dyn.same-type`** is the two descriptors' kind and name number
@@ -2315,13 +2317,16 @@ impl<'a> Emit<'a> {
     ///   word, and nought for every kind with no children;
     /// - **`dyn.same-object`** is `same_object`'s whole test: one owner, both
     ///   views at word 0 with the owner's own header layout, and that layout a
-    ///   `Vector`.
+    ///   `Vector`;
+    /// - **`dyn.child`** of an inline child is its entry in
+    ///   [`NativeCtx::dyn_children`], written as a view: see [`Emit::child`].
     ///
     /// **Everything else is the helper, whole**, and so is every case above the
     /// table does not settle: a layout past the table or marked
     /// [`DYN_ASK`](crate::abi::DYN_ASK) — a reclaimed one, which the runtime
     /// refuses in its own words — a scalar read of the wrong kind, an enum's
-    /// part count, which is its case's, and a null owner. The cold path is
+    /// part count, which is its case's, a null owner, and a child that is not
+    /// inline or not there. The cold path is
     /// [`Emit::observe`] from the start of the instruction, so a refusal is the
     /// runtime's sentence at this instruction's span, and nothing here names an
     /// error. No fast path writes anything before it has decided it answers.
@@ -2482,12 +2487,187 @@ impl<'a> Emit<'a> {
                 self.bind(answer);
                 self.store_slot(dst, RAX);
             }
+            Inst::DynChild { dst, view, index } => self.child(dst, view, index, cold),
             _ => return self.observe(seen),
         }
         self.jmp(Target::Label(done));
         self.bind(cold);
         self.observe(seen);
         self.bind(done);
+    }
+
+    /// `dyn.child` of an **inline** child, from [`NativeCtx::dyn_children`]:
+    /// the parent's block, the index bounded by the count, and the child's
+    /// three words written straight into `dst` — or `cold` taken, before
+    /// anything is written, for everything else.
+    ///
+    /// What is answered here is exactly what the runtime's `child` answers
+    /// when its normalisation has nothing to do: a child whose layout is not
+    /// one address is `(its layout, the parent's owner, where it begins)`.
+    /// The count is the one `dyn.count` answers — a struct's field count from
+    /// the descriptor, the current case's part count from the block, a run's
+    /// header length, twice a map's, a vector's length word — and the index is
+    /// compared with it unsigned, so a negative one is past it. What goes to
+    /// the helper, whole:
+    ///
+    /// - a parent the descriptor gives no children, or marks `DYN_ASK`;
+    /// - a parent with no block, or a null owner;
+    /// - an index past the count, and an enum in a case its layout does not
+    ///   have — each the runtime's refusal, in its words;
+    /// - a consumed vector, whose store is null;
+    /// - a child marked [`DYN_SETTLE`](crate::abi::DYN_SETTLE): a reference,
+    ///   a box or a collection, which the runtime follows.
+    ///
+    /// `RAX`, `RCX` and `RDX` are the scratch, with [`Emit::heap_ptr`]'s three
+    /// under the two heap reads; the owner lives in `R8` and the block in `R9`,
+    /// which are argument registers and hold nothing between instructions.
+    fn child(&mut self, dst: Slot, view: Slot, index: Slot, cold: usize) {
+        use cove_ir::dynamic::{VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
+        use cove_ir::DynamicKind;
+        let code = |kind: DynamicKind| kind.code() as i32;
+        // The seven kinds with children are one run of codes, so one unsigned
+        // comparison sends every other kind — and `DYN_ASK` — to the helper.
+        const _: () = assert!(
+            DynamicKind::Range as i64 - DynamicKind::Struct as i64 == 6
+                && DynamicKind::Enum as i64 == DynamicKind::Struct as i64 + 1
+        );
+        let parts = self.label();
+        let run = self.label();
+        let vector = self.label();
+        let entries = self.label();
+        let offset = self.label();
+        let stride = self.label();
+        let write = self.label();
+        self.load_slot(RDX, view + VIEW_LAYOUT);
+        self.mov_rr(RAX, RDX);
+        self.descriptor(RAX, cold);
+        self.mov_rr(RCX, RAX);
+        self.and_imm32(RCX, DYN_KIND_MASK as i32);
+        self.add_imm32(RCX, -code(DynamicKind::Struct));
+        self.cmp_imm32(RCX, 7);
+        self.jcc(CC_AE, Target::Label(cold));
+        // `R9` is the parent's block: `children + children[layout] * 8`.
+        self.load(HEAP_TABLE, CTX, OFF_DYN_CHILDREN);
+        self.shl_imm8(RDX, 3);
+        self.add_rr(RDX, HEAP_TABLE);
+        self.load(R9, RDX, 0);
+        self.test_rr(R9, R9);
+        self.jcc(CC_E, Target::Label(cold));
+        self.shl_imm8(R9, 3);
+        self.add_rr(R9, HEAP_TABLE);
+        self.load_slot(R8, view + VIEW_OWNER);
+        self.test_rr(R8, R8);
+        self.jcc(CC_E, Target::Label(cold));
+        self.load_slot(RCX, index);
+        self.mov_rr(RDX, RAX);
+        self.and_imm32(RDX, DYN_KIND_MASK as i32);
+        for (kind, to) in [
+            (DynamicKind::Enum, parts),
+            (DynamicKind::Array, run),
+            (DynamicKind::Set, run),
+            (DynamicKind::Vector, vector),
+            (DynamicKind::Map, entries),
+        ] {
+            self.cmp_imm32(RDX, code(kind));
+            self.jcc(CC_E, Target::Label(to));
+        }
+        // A struct or a range: the count is the descriptor's, and field `i`'s
+        // entry is word `i` of the block.
+        self.shr_imm8(RAX, DYN_COUNT_SHIFT as u8);
+        self.cmp_rr(RCX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.shl_imm8(RCX, 3);
+        self.add_rr(RCX, R9);
+        self.load(RAX, RCX, 0);
+        self.load_slot(RCX, view + VIEW_AT);
+        self.jmp(Target::Label(offset));
+        // An enum: the case is its first word, bounded by the block's case
+        // count, and the case's own block holds its part count and parts.
+        self.bind(parts);
+        self.load_slot(RDX, view + VIEW_AT);
+        self.add_rr(RDX, R8);
+        // The header is one word, so a payload word is one past it.
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+        self.load(RAX, R9, 0);
+        self.cmp_rr(RDX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.shl_imm8(RDX, 3);
+        self.add_rr(RDX, R9);
+        self.load(RDX, RDX, 8);
+        self.load(HEAP_TABLE, CTX, OFF_DYN_CHILDREN);
+        self.shl_imm8(RDX, 3);
+        self.add_rr(RDX, HEAP_TABLE);
+        self.load(RAX, RDX, 0);
+        self.cmp_rr(RCX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.shl_imm8(RCX, 3);
+        self.add_rr(RCX, RDX);
+        self.load(RAX, RCX, 8);
+        self.load_slot(RCX, view + VIEW_AT);
+        self.jmp(Target::Label(offset));
+        // An array or a set: its header length.
+        self.bind(run);
+        self.mov_rr(RAX, R8);
+        self.object_len(RAX);
+        self.cmp_rr(RCX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.jmp(Target::Label(stride));
+        // A vector: its length word, and then its store, which is the owner
+        // of every element and null once the vector was consumed.
+        self.bind(vector);
+        self.mov_rr(RAX, R8);
+        self.add_imm32(RAX, 1);
+        self.heap_word(RAX);
+        self.cmp_rr(RCX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.mov_rr(RAX, R8);
+        self.add_imm32(RAX, 2);
+        self.heap_word(RAX);
+        self.test_rr(RAX, RAX);
+        self.jcc(CC_E, Target::Label(cold));
+        self.mov_rr(R8, RAX);
+        self.jmp(Target::Label(stride));
+        // A map: twice its header length; entry `i / 2` at the block's stride,
+        // and its key's entry or its value's by the index's low bit.
+        self.bind(entries);
+        self.mov_rr(RAX, R8);
+        self.object_len(RAX);
+        self.add_rr(RAX, RAX);
+        self.cmp_rr(RCX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.mov_rr(RDX, RCX);
+        self.shr_imm8(RDX, 1);
+        self.load(RAX, R9, 0);
+        self.imul_rr(RDX, RAX);
+        self.and_imm32(RCX, 1);
+        self.shl_imm8(RCX, 3);
+        self.add_rr(RCX, R9);
+        self.load(RAX, RCX, 8);
+        self.mov_rr(RCX, RDX);
+        // `RAX` is a child entry and `RCX` the word its offset is added to.
+        self.bind(offset);
+        self.test_rr(RAX, RAX);
+        self.jcc(CC_S, Target::Label(cold));
+        self.mov_rr(RDX, RAX);
+        self.shr_imm8(RDX, DYN_OFFSET_SHIFT as u8);
+        self.add_rr(RCX, RDX);
+        self.jmp(Target::Label(write));
+        // A run's element: `RCX` is the index, and the entry's offset is the
+        // stride.
+        self.bind(stride);
+        self.load(RAX, R9, 0);
+        self.test_rr(RAX, RAX);
+        self.jcc(CC_S, Target::Label(cold));
+        self.mov_rr(RDX, RAX);
+        self.shr_imm8(RDX, DYN_OFFSET_SHIFT as u8);
+        self.imul_rr(RCX, RDX);
+        // The layout is the entry's low half.
+        self.bind(write);
+        self.mov_rr32(RAX, RAX);
+        self.store_slot(dst + VIEW_LAYOUT, RAX);
+        self.store_slot(dst + VIEW_OWNER, R8);
+        self.store_slot(dst + VIEW_AT, RCX);
     }
 
     /// The [`NativeCtx::dyn_layouts`] entry of the layout id in `reg`, into
