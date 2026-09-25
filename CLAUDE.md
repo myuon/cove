@@ -31,12 +31,15 @@ Run the ignored ones with `cargo ratchet`, an alias for the same thing under
 profile is not a nicety there, because this is the one suite that is
 compute-bound rather than spawn-bound.
 
-**It costs about ten minutes now, and it has doubled twice.** Measured
-2026-09-22 by three separate runs that agreed: `cargo ratchet` **9:34 to
-9:36**, of which `vm_coverage` is **481.6s** and the formatter's comment probe
-**78.6s**, over **196 programs**. This file said 39s, then 5:11 (301s and 9.6s,
-160 programs, 2026-09-21), and both were right when they were written.
-Nothing regressed either time — the corpus did what it is supposed to do and
+**It costs about eleven minutes now, and it has doubled twice.** Measured
+2026-09-25, after ADR 0068's series: `cargo ratchet` **11:08** of tests after
+a 59s rebuild. Of that, `vm_coverage` is **550.0s** and the formatter's comment
+probe **80.1s**, over **283 corpus programs**, 248 of which run. Every pull
+request in that series recorded 541–556s for `vm_coverage`. This file said
+39s, then 5:11 (301s and 9.6s, 160 programs, 2026-09-21), then 9:34 to 9:36
+(481.6s and 78.6s, 196 programs, 2026-09-22), and each was right when it was
+written.
+Nothing regressed any of those times — the corpus did what it is supposed to do and
 grew, and `vm_coverage` runs every program on the tree-walking interpreter as
 well as on the linear-memory backend, so its cost is linear in a number this
 repository is trying to increase. **The figure here is dated because it goes
@@ -65,8 +68,9 @@ input against the ones it finds in the output — is the scanner judging itself,
 and it passed for as long as [issue 402](https://github.com/myuon/cove/issues/402)
 existed. A marker the test inserts and counts itself is an oracle the
 formatter does not supply. Every variant reparses a whole file, so the work is
-quadratic in file size, and it grows with the corpus: **78.6s over the cores**
-as of 2026-09-22, against 9s when this paragraph was written.
+quadratic in file size, and it grows with the corpus: **80.1s over the cores**
+as of 2026-09-25 (78.6s on 2026-09-22), against 9s when this paragraph was
+written.
 
 ### Adding a program to the repository trips a ratchet in `cargo t`
 
@@ -220,7 +224,8 @@ What it catches that nothing above it can is a **native tier that compiles and
 answers wrongly on a real program**. The three `-p cove-native` commands hold
 the code generator to fixtures; the second native step runs the tier from the
 runtime, on fixtures again. This is the only place the generator is asked to
-compile 103 of covefmt's 109 functions and produce 905 KB of formatted Cove —
+compile 111 of covefmt's 113 functions and produce 1.75 MB of formatted Cove
+(as of 2026-09-25; it was 107 compiled until #508 admitted `String ==`) —
 and it is the only place a wrong answer has a *right* answer sitting beside it
 to be diffed against, because the encoded VM ran the same program in the same
 command. A code generator that lowered an instruction to the wrong bits would
