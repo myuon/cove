@@ -97,9 +97,8 @@ fn @m.f() -> Int
      1  call-host s2:Any oracle.ask (s1:String)
      2  int s3:int 1
      3  unbox s4:Int s2:ref
-     4  clear s2:Any
-     5  add.int s0:int s4:int s3:int
-     6  return s0:Int
+     4  add.int s0:int s4:int s3:int
+     5  return s0:Int
 "
     );
 }
@@ -170,9 +169,8 @@ fn @m.f() -> Int
      0  str s1:ref \"n\"
      1  call-host s2:Any oracle.ask (s1:String)
      2  unbox s3:Int s2:ref
-     3  clear s2:Any
-     4  copy s0:Int s3:Int
-     5  return s0:Int
+     3  copy s0:Int s3:Int
+     4  return s0:Int
 "
     );
 }
@@ -380,15 +378,15 @@ fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
 fn @m.f() -> Int
   frame 12: s0:int s1:host s2:tag s3:ref s4:ref s5:tag s6:int s7:ref s8:int s9:ref \
 s10:ref s11:ref
-  local s -> s1:<host> [1, 26)
-  local answer -> s2..s3:Result [2, 26)
+  local s -> s1:<host> [1, 24)
+  local answer -> s2..s3:Result [2, 24)
   local inner -> s4:Any [4, 17)
   local n -> s8:Int [7, 8)
   local e -> s9:Error [10, 11)
-  local e -> s4:Error [20, 21)
+  local e -> s4:Error [19, 20)
      0  call-host s1:<host> oracle.open ()
      1  call-resource s2..s3:Result s1:host oracle.Seat.next ()
-     2  switch s2:tag [3 19] else 23
+     2  switch s2:tag [3 18] else 21
      3  copy s4:Any s3:Any
      4  unbox s5..s7:Result s4:ref
      5  switch s5:tag [6 9] else 13
@@ -403,16 +401,14 @@ s10:ref s11:ref
     14  str s10:ref \"\"
     15  trap s9:ref, s10:ref, s10:ref
     16  clear s5..s7:Result
-    17  clear s4:Any
-    18  jump 26
-    19  copy s4:Error s3:Error
-    20  call s0:Int std.string.length (s4:String)
-    21  clear s4:Error
-    22  jump 26
-    23  str s4:ref \"no `match` arm covers this value\"
-    24  str s11:ref \"\"
-    25  trap s4:ref, s11:ref, s11:ref
-    26  return s0:Int
+    17  jump 24
+    18  copy s4:Error s3:Error
+    19  call s0:Int std.string.length (s4:String)
+    20  jump 24
+    21  str s4:ref \"no `match` arm covers this value\"
+    22  str s11:ref \"\"
+    23  trap s4:ref, s11:ref, s11:ref
+    24  return s0:Int
 "
     );
 }

@@ -130,19 +130,21 @@ fn @m.shout(String String) -> Int
 /// The string is interpolated rather than written down, because a literal's
 /// object is placed once, before the run begins, and never collected — see
 /// ADR 0045 — so clearing a slot that holds one releases nothing and
-/// `lower::frees` drops it.
+/// `lower::frees` drops it. And the scope is followed by a call, because a
+/// clear with nothing but quiet work between it and the `return` is one the
+/// `return` renders pointless, and `lower::redefined` drops that too.
 #[test]
 fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
     assert_eq!(
         listing(
-            "fn f(what: String) -> Int {\n  var n = 0\n  {\n    let s = \"{what}!\"\n    n = s.length()\n  }\n  n\n}",
+            "fn f(what: String) -> Int {\n  var n = 0\n  {\n    let s = \"{what}!\"\n    n = s.length()\n  }\n  n + what.length()\n}",
             "f"
         ),
         "\
 fn @m.f(String) -> Int
   frame 17: s0!:ref s1:int s2:int s3:int s4:ref s5:unit s6:ref s7:unit s8:int s9:int s10:int s11:ref s12:unit s13:int s14:int s15:ref s16:int
-  local what -> s0:String [0, 26)
-  local n -> s2:Int [1, 25)
+  local what -> s0:String [0, 27)
+  local n -> s2:Int [1, 26)
   local s -> s6:String [22, 23)
      0  int s2:int 0
      1  int s3:int 17
@@ -168,8 +170,9 @@ fn @m.f(String) -> Int
     21  clear s4:ByteBuffer
     22  call s2:Int std.string.length (s6:String)
     23  clear s6:String
-    24  copy s1:Int s2:Int
-    25  return s1:Int
+    24  call s3:Int std.string.length (s0:String)
+    25  add.int s1:int s2:int s3:int
+    26  return s1:Int
 "
     );
 }
@@ -198,20 +201,21 @@ fn @m.f() -> Int
 /// with a string in it is ended by one instruction rather than by one per
 /// field.
 ///
-/// The scope is what keeps it: a clear the `return` renders pointless is
-/// dropped by `lower::tails`, and this one is about the instruction rather
-/// than about where it stands.
+/// The scope, and the call after it, are what keep it: a clear the `return`
+/// renders pointless — straight after it, or after nothing but quiet work —
+/// is dropped by `lower::tails` or `lower::redefined`, and this one is about
+/// the instruction rather than about where it stands.
 #[test]
 fn a_location_with_one_reference_word_among_scalars_is_cleared_whole() {
     assert_eq!(
         listing(
-            "struct User { name: String, age: Int }\nfn f() -> Int {\n  var n = 0\n  {\n    let u = User(name: \"a\", age: 1)\n    n = u.age\n  }\n  n\n}",
+            "struct User { name: String, age: Int }\nfn f() -> Int {\n  var n = 0\n  {\n    let u = User(name: \"a\", age: 1)\n    n = u.age\n  }\n  n + \"ab\".length()\n}",
             "f"
         ),
         "\
 fn @m.f() -> Int
   frame 6: s0:int s1:int s2:ref s3:int s4:ref s5:int
-  local n -> s1:Int [1, 8)
+  local n -> s1:Int [1, 10)
   local u -> s4..s5:m.User [5, 6)
      0  int s1:int 0
      1  str s2:ref \"a\"
@@ -220,8 +224,10 @@ fn @m.f() -> Int
      4  copy s5:Int s3:Int
      5  copy s1:Int s5:Int
      6  clear s4..s5:m.User
-     7  copy s0:Int s1:Int
-     8  return s0:Int
+     7  str s2:ref \"ab\"
+     8  call s3:Int std.string.length (s2:String)
+     9  add.int s0:int s1:int s3:int
+    10  return s0:Int
 "
     );
 }

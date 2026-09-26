@@ -41,7 +41,10 @@ fn @m.f(m.E) -> Int
 
 /// It has to be a copy: the binding belongs to the arm's scope and is
 /// cleared when that scope ends, and clearing a borrowed part of the value
-/// being matched would zero the value itself.
+/// being matched would zero the value itself. Here the arm's end is a jump
+/// to the `return`, so `lower::redefined` drops that clear once it is
+/// emitted — the frame is popped before anything could see the slot — and
+/// what the listing pins is the copy.
 #[test]
 fn a_binding_is_a_copy_of_the_words_it_names() {
     assert_eq!(
@@ -52,19 +55,18 @@ fn a_binding_is_a_copy_of_the_words_it_names() {
         "\
 fn @m.f(m.Msg) -> String
   frame 5: s0!:tag s1!:ref s2:ref s3:ref s4:ref
-  local m -> s0..s1:m.Msg [0, 11)
+  local m -> s0..s1:m.Msg [0, 10)
   local s -> s3:String [2, 3)
-     0  switch s0:tag [5 1] else 7
+     0  switch s0:tag [4 1] else 6
      1  copy s3:String s1:String
      2  copy s2:String s3:String
-     3  clear s3:String
-     4  jump 10
-     5  str s2:ref \"\"
-     6  jump 10
-     7  str s3:ref \"no `match` arm covers this value\"
-     8  str s4:ref \"\"
-     9  trap s3:ref, s4:ref, s4:ref
-    10  return s2:String
+     3  jump 9
+     4  str s2:ref \"\"
+     5  jump 9
+     6  str s3:ref \"no `match` arm covers this value\"
+     7  str s4:ref \"\"
+     8  trap s3:ref, s4:ref, s4:ref
+     9  return s2:String
 "
     );
 }

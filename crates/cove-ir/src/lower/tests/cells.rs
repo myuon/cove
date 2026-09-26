@@ -51,7 +51,7 @@ fn a_lock_is_acquire_call_release() {
         "\
 fn @m.bump(Shared) -> Int
   frame 5: s0!:ref s1:int s2:ref s3:int s4:addr
-  local cell -> s0:Shared [0, 11)
+  local cell -> s0:Shared [0, 10)
      0  alloc s2:ref closure m.bump#0<closure>
      1  func-ref s3:int @m.bump#0
      2  store-field s2:ref +0 s3:Int
@@ -60,9 +60,8 @@ fn @m.bump(Shared) -> Int
      5  call-closure s3:Int s2:ref (s4:<addr>)
      6  clear s4:<addr>
      7  shared.unlock s0:ref
-     8  clear s2:fn
-     9  copy s1:Int s3:Int
-    10  return s1:Int
+     8  copy s1:Int s3:Int
+     9  return s1:Int
 "
     );
 }
@@ -115,7 +114,7 @@ fn a_closure_without_var_is_handed_a_copy() {
         "\
 fn @m.read(Shared) -> Int
   frame 6: s0!:ref s1:int s2:ref s3:int s4:addr s5:int
-  local cell -> s0:Shared [0, 12)
+  local cell -> s0:Shared [0, 11)
      0  alloc s2:ref closure m.read#0<closure>
      1  func-ref s3:int @m.read#0
      2  store-field s2:ref +0 s3:Int
@@ -125,9 +124,8 @@ fn @m.read(Shared) -> Int
      6  call-closure s5:Int s2:ref (s3:Int)
      7  clear s4:<addr>
      8  shared.unlock s0:ref
-     9  clear s2:fn
-    10  copy s1:Int s5:Int
-    11  return s1:Int
+     9  copy s1:Int s5:Int
+    10  return s1:Int
 "
     );
 }
@@ -150,7 +148,7 @@ fn a_cell_wrapping_a_struct_holds_its_fields_inline() {
         "\
 fn @m.count#0(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:addr s3:int s4:int
-  local value -> s0:<addr> [0, 12)
+  local value -> s0:<addr> [0, 11)
      0  addr-of-part s2:addr s0:addr +1
      1  load s3:Int s2:addr
      2  clear s2:<addr>
@@ -160,9 +158,8 @@ fn @m.count#0(<addr>) -> Int
      6  clear s2:<addr>
      7  addr-of-part s2:addr s0:addr +1
      8  load s4:Int s2:addr
-     9  clear s2:<addr>
-    10  copy s1:Int s4:Int
-    11  return s1:Int
+     9  copy s1:Int s4:Int
+    10  return s1:Int
 "
     );
 }

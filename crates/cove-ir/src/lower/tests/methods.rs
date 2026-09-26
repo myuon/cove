@@ -389,16 +389,15 @@ fn a_var_self_receiver_is_an_address() {
         "\
 fn @m.Point.bump(<addr>) -> Unit
   frame 6: s0!:addr s1:unit s2:addr s3:int s4:int s5:unit
-  local self -> s0:<addr> [0, 9)
+  local self -> s0:<addr> [0, 8)
      0  addr-of-part s2:addr s0:addr +1
      1  load s3:Int s2:addr
      2  clear s2:<addr>
      3  add.int.imm s4:int s3:int 1
      4  addr-of-part s2:addr s0:addr +1
      5  store s2:addr s4:Int
-     6  clear s2:<addr>
-     7  copy s1:Unit s5:Unit
-     8  return s1:Unit
+     6  copy s1:Unit s5:Unit
+     7  return s1:Unit
 "
     );
 }
