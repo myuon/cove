@@ -172,8 +172,10 @@ fn @m.early(Int) -> Int
 /// the `break`'s own clear at 23.
 ///
 /// What is *not* cleared is as much of the point: `s3`, the array being
-/// walked, is below the mark and is read again at 32, where the `break`'s
-/// jump lands.
+/// walked, is below the mark, so the `break` leaves it to the code after the
+/// loop at 32, where its jump lands. The lowering's clear of `s3` stood there
+/// once; `lower::redefined` drops it, because nothing but a scalar copy
+/// stands between it and the `return`, which pops the frame.
 #[test]
 fn a_break_clears_the_temporaries_the_turn_was_holding() {
     assert_eq!(
@@ -191,8 +193,8 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
         "\
 fn @m.f(Array) -> Int
   frame 19: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:ref s11:unit s12:ref s13:unit s14:int s15:int s16:int s17:ref s18:int
-  local xs -> s0:Array [0, 35)
-  local total -> s2:Int [1, 34)
+  local xs -> s0:Array [0, 34)
+  local total -> s2:Int [1, 33)
   local x -> s8:String [9, 30)
      0  int s2:int 0
      1  copy s3:Array s0:Array
@@ -226,9 +228,8 @@ fn @m.f(Array) -> Int
     29  clear s12:String
     30  clear s8:String
     31  jump 6
-    32  clear s3:Array
-    33  copy s1:Int s2:Int
-    34  return s1:Int
+    32  copy s1:Int s2:Int
+    33  return s1:Int
 "
     );
 }

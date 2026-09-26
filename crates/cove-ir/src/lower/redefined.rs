@@ -1,4 +1,5 @@
-//! Dropping the clears a redefinition of the same words makes pointless.
+//! Dropping the clears a redefinition of the same words, or a `return`,
+//! makes pointless.
 //!
 //! [`Inst::Clear`] turns a dead reference slot into null so that the
 //! collector, which reads a frame through a [`RefMap`](crate::RefMap) that
@@ -11,11 +12,17 @@
 //! pass, and it is a fact about the finished code rather than about any one
 //! body — nothing here knows which function it is looking at.
 //!
+//! A `return` ends the life of every word of the frame at once, so it ends a
+//! window as a redefinition does: a clear followed by nothing but quiet work
+//! and then the function's exit is a null nobody will read either. That is
+//! issue #514's F7b, and it is the general case of what [`super::tails`] does
+//! for a clear *immediately* before a `return`.
+//!
 //! # The rule
 //!
 //! A clear of the words `W` is dropped when **every path** from it reaches a
-//! *redefinition* of `W` through a *window* of instructions that are each
-//! *quiet*, and nothing else:
+//! *redefinition* of `W` or a *`return`* through a *window* of instructions
+//! that are each *quiet*, and nothing else:
 //!
 //! - **A redefinition** definitely writes every word of `W` — the narrow
 //!   answer [`Flow::writes`] gives, so a closure call's guessed width never
@@ -23,14 +30,22 @@
 //!   or [`Inst::DynChild`] or [`Inst::DynOpen`], which write a view and do
 //!   not allocate, or another [`Inst::Clear`] of the same words, which writes
 //!   the null this one would have.
+//! - **A `return`** ends the window when the answer it carries away shares no
+//!   word with `W` — the read every instruction in the window is asked about,
+//!   with [`Flow::reads`] giving the answer's run at
+//!   [`Function::returns`](crate::Function::returns)' width. Where they share
+//!   one, the clear is part of the answer and stays.
 //! - **A quiet instruction** is one on a fixed list of instructions that
 //!   neither allocate, nor call, nor park, nor write the heap; that reads no
 //!   word of `W`; and whose every destination word is *not a root* — no
 //!   [`Repr::Ref`](crate::Repr::Ref) word of the frame. Branches and jumps
 //!   are on the list, so a window may fork, and then each arm has to end in
 //!   a redefinition of its own.
-//! - A path that returns, traps, loops back to a program counter the walk is
-//!   already inside, or meets anything else keeps the clear.
+//! - A path that traps, loops back to a program counter the walk is already
+//!   inside, or meets anything else keeps the clear. A trap is kept on
+//!   purpose: it leaves the frame standing, because the refusal's call chain
+//!   is read out of the frames, and nothing here shows that no reader of a
+//!   standing frame looks at `W`.
 //!
 //! Two more conditions keep the edit invisible to the two readers that are
 //! not the program. A clear whose words some [`Inst::AddrOfSlot`] of the
@@ -66,6 +81,38 @@
 //! at fewer places than the encoded loop — back edges, calls and allocations
 //! — and is covered by the same argument a fortiori.
 //!
+//! # Why a `return` ends the window
+//!
+//! The argument above covers every boundary *up to* the `return`. What is
+//! left is the `return` itself and what comes after it, and after it there
+//! is nothing: the frame is popped, and a popped frame is not read by
+//! anybody.
+//!
+//! - **The encoded tier.** `RETURN` copies the answer's words into the
+//!   caller's destination — a word copy, which allocates nothing and polls
+//!   nothing — or, for the outermost frame of a call, reads them out; then
+//!   `Memory::pop_frame` truncates the stack and the frame is gone from
+//!   `machine.frames`. There is no safepoint between the copy and the pop,
+//!   so the last boundary a collection can see this frame at is the one
+//!   before the `return`, which is inside the window.
+//! - **The compiled tier.** The emitted `return` stores the answer's words
+//!   into the caller's destination and leaves; the frame comes off in
+//!   `close` for a call compiled code made itself and in `enter` for one the
+//!   encoded tier made. Both charge the pending work and neither polls:
+//!   `close` is documented as a charge point that is deliberately not a
+//!   safepoint, and `enter` moves the dispatch loop's threshold and pops. So
+//!   the frame is never presented to a collection after its last compiled
+//!   boundary either.
+//! - **Nobody reads the words afterwards.** The collector's roots are the
+//!   frames in `machine.frames`, which no longer holds this one; the caller
+//!   reads its own frame, which ends where this one began; and
+//!   `Memory::push_frame` zeroes the words on the way back up, so what the
+//!   dropped clear left behind never becomes a stale root of the next frame
+//!   built there. That is the same three facts [`super::tails`] rests on.
+//!
+//! The named-local condition still applies up to and including the
+//! `return`'s own program counter, because a debugger can stop there.
+//!
 //! This is the conservative rule issue #514 chose, and it is conservative on
 //! purpose. A window that writes a root — a `load-field` of another
 //! reference, a `dyn.child` into another view, a clear of another slot —
@@ -86,8 +133,8 @@ use crate::program::{Function, Program};
 use super::dropping;
 use super::frees::Flow;
 
-/// Drops every clear whose words are redefined before anything could observe
-/// them being null.
+/// Drops every clear whose words are redefined, or whose frame is popped,
+/// before anything could observe them being null.
 pub(super) fn drop_clears_before_redefinition(program: &mut Program) {
     let dropped: Vec<Vec<bool>> = program
         .functions
@@ -107,8 +154,8 @@ pub(super) fn drop_clears_before_redefinition(program: &mut Program) {
 /// needs more than this is not looking at one.
 const WINDOW: usize = 64;
 
-/// Which of a function's instructions are clears that a redefinition makes
-/// pointless.
+/// Which of a function's instructions are clears that a redefinition or a
+/// `return` makes pointless.
 fn redefined(function: &Function, program: &Program) -> Vec<bool> {
     let mut dropped = vec![false; function.code.len()];
     let Some(flow) = Flow::of(function, program) else {
@@ -175,8 +222,9 @@ enum Seen {
     /// On the path being walked: arriving here again is a loop that never
     /// redefined the words.
     Walking,
-    /// Every path on from here redefines them.
-    Redefines,
+    /// Every path on from here ends the window: it redefines the words or
+    /// returns without reading them.
+    Ends,
     Fails,
 }
 
@@ -192,8 +240,8 @@ struct Walk<'w, 'p> {
 }
 
 impl Walk<'_, '_> {
-    /// Whether every path from the boundary before `pc` redefines the words
-    /// through quiet instructions alone.
+    /// Whether every path from the boundary before `pc` redefines the words,
+    /// or returns without reading them, through quiet instructions alone.
     ///
     /// Recursive over the window, and bounded by [`WINDOW`] instructions in
     /// all, so that a long run of scalar arithmetic costs neither depth nor
@@ -201,7 +249,7 @@ impl Walk<'_, '_> {
     /// clear.
     fn reaches(&mut self, pc: usize) -> bool {
         match self.state[pc] {
-            Seen::Redefines => return true,
+            Seen::Ends => return true,
             Seen::Fails | Seen::Walking => return false,
             Seen::No => {}
         }
@@ -225,8 +273,10 @@ impl Walk<'_, '_> {
             self.state[pc] = Seen::Fails;
             return false;
         }
-        if self.redefines(inst) {
-            self.state[pc] = Seen::Redefines;
+        // A `return` that does not carry the words away — the read above —
+        // pops the frame they are in, and a popped frame is nobody's root.
+        if self.redefines(inst) || matches!(inst, Inst::Return { .. }) {
+            self.state[pc] = Seen::Ends;
             return true;
         }
         if !self.quiet(inst) {
@@ -236,10 +286,11 @@ impl Walk<'_, '_> {
         self.state[pc] = Seen::Walking;
         let mut next = Vec::new();
         self.flow.successors(pc, &mut |to| next.push(to));
-        // No successor is a fall off the end, which the verifier refuses; a
-        // path that goes nowhere redefines nothing.
+        // No successor is a trap here — a `return` was answered above — or a
+        // fall off the end, which the verifier refuses; neither ends the
+        // window.
         let all = !next.is_empty() && next.into_iter().all(|to| self.reaches(to));
-        self.state[pc] = if all { Seen::Redefines } else { Seen::Fails };
+        self.state[pc] = if all { Seen::Ends } else { Seen::Fails };
         all
     }
 
@@ -458,6 +509,15 @@ mod tests {
         Inst::Return { src: 0 }
     }
 
+    /// A trap whose three sentences are the `String` at slot 2.
+    fn trapped() -> Inst {
+        Inst::Trap {
+            message: 2,
+            rule: 2,
+            help: 2,
+        }
+    }
+
     /// The shape the pass is for: the slot is written straight after it was
     /// cleared, so the null is never there to be seen.
     #[test]
@@ -530,18 +590,20 @@ mod tests {
         assert_eq!(ran(code.clone()), code);
     }
 
-    /// Every way on has to write the words: one arm that returns without
-    /// doing so keeps the clear, and two arms that both do drop it. A later
-    /// clear of the same words writes the same null and counts.
+    /// Every way on has to end the window: one arm that traps without
+    /// writing the words keeps the clear, and two arms that both write them
+    /// drop it. A later clear of the same words writes the same null and
+    /// counts — and is itself dropped, because the `return` after it ends its
+    /// own window.
     #[test]
-    fn every_arm_of_a_branch_has_to_write_the_words() {
+    fn every_arm_of_a_branch_has_to_end_the_window() {
         let kept = vec![
             allocated(1),
             clear(1),
             Inst::BranchFalse { cond: 4, to: 5 },
             load(1),
             done(),
-            done(),
+            trapped(),
         ];
         assert_eq!(ran(kept.clone()), kept);
         assert_eq!(
@@ -559,10 +621,90 @@ mod tests {
                 Inst::BranchFalse { cond: 4, to: 4 },
                 load(1),
                 done(),
-                clear(1),
                 done(),
             ]
         );
+    }
+
+    /// Issue #514's F7b: a `return` pops the frame, so a clear that nothing
+    /// but quiet work stands between and the function's exit is a null
+    /// nobody reads.
+    #[test]
+    fn a_return_after_quiet_work_ends_the_window() {
+        assert_eq!(
+            ran(vec![allocated(1), clear(1), scalar(), scalar(), done()]),
+            [allocated(1), scalar(), scalar(), done()]
+        );
+    }
+
+    /// And every arm counts: one that redefines the words and one that
+    /// returns without reading them both end the window.
+    #[test]
+    fn a_branch_whose_arms_redefine_or_return_drops_the_clear() {
+        assert_eq!(
+            ran(vec![
+                allocated(1),
+                clear(1),
+                Inst::BranchFalse { cond: 4, to: 5 },
+                load(1),
+                done(),
+                scalar(),
+                done(),
+            ]),
+            [
+                allocated(1),
+                Inst::BranchFalse { cond: 4, to: 4 },
+                load(1),
+                done(),
+                scalar(),
+                done(),
+            ]
+        );
+    }
+
+    /// A `return` that carries the cleared words away is the caller reading
+    /// them: the clear is part of the answer.
+    #[test]
+    fn a_return_that_answers_the_words_keeps_the_clear() {
+        let code = vec![allocated(1), clear(1), scalar(), Inst::Return { src: 1 }];
+        let mut answering = function(code.clone());
+        answering.returns = STR;
+        assert_eq!(ran_over(answering), code);
+    }
+
+    /// The window up to the `return` is still a window: an allocation in it
+    /// is a safepoint with the slot holding the dead object, and a root
+    /// written in it is a frame the collector was never shown.
+    #[test]
+    fn what_keeps_a_clear_before_a_redefinition_keeps_it_before_a_return() {
+        let code = vec![allocated(1), clear(1), allocated(2), done()];
+        assert_eq!(ran(code.clone()), code);
+        let code = vec![allocated(1), clear(1), load(5), done()];
+        assert_eq!(ran(code.clone()), code);
+    }
+
+    /// A trap is not a `return`: it leaves the frame standing, and the clear
+    /// before it stays.
+    #[test]
+    fn a_trap_keeps_the_clear() {
+        let code = vec![allocated(1), clear(1), scalar(), trapped()];
+        assert_eq!(ran(code.clone()), code);
+    }
+
+    /// A name bound to the words at the `return` itself is something a
+    /// debugger stopped there would print.
+    #[test]
+    fn a_name_bound_at_the_return_keeps_the_clear() {
+        let code = vec![allocated(1), clear(1), scalar(), done()];
+        let mut named = function(code.clone());
+        named.locals = vec![Local {
+            name: Arc::from("x"),
+            slot: 1,
+            layout: STR,
+            from: 3,
+            to: 4,
+        }];
+        assert_eq!(ran_over(named), code);
     }
 
     /// A loop that comes back round without writing the words never

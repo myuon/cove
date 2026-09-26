@@ -174,8 +174,8 @@ fn a_for_over_an_array_walks_the_object_and_clears_the_element() {
         "\
 fn @m.count(Array) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
-  local xs -> s0:Array [0, 16)
-  local t -> s2:Int [1, 15)
+  local xs -> s0:Array [0, 15)
+  local t -> s2:Int [1, 14)
   local x -> s8:String [9, 11)
      0  int s2:int 0
      1  copy s3:Array s0:Array
@@ -190,9 +190,8 @@ fn @m.count(Array) -> Int
     10  add.int s2:int s2:int s9:int
     11  clear s8:String
     12  jump 6
-    13  clear s3:Array
-    14  copy s1:Int s2:Int
-    15  return s1:Int
+    13  copy s1:Int s2:Int
+    14  return s1:Int
 "
     );
 }
@@ -210,8 +209,8 @@ fn a_for_over_a_vector_walks_a_snapshot() {
         "\
 fn @m.count(Vector) -> Int
   frame 10: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:ref s7:int s8:bool s9:int
-  local v -> s0:Vector [0, 18)
-  local t -> s2:Int [1, 17)
+  local v -> s0:Vector [0, 17)
+  local t -> s2:Int [1, 16)
   local x -> s9:Int [13, 14)
      0  int s2:int 0
      1  load-field s3:Int s0:ref +0
@@ -228,9 +227,8 @@ fn @m.count(Vector) -> Int
     12  load-elem s9:Int s6:ref s5:int
     13  add.int s2:int s2:int s9:int
     14  jump 10
-    15  clear s6:Array
-    16  copy s1:Int s2:Int
-    17  return s1:Int
+    15  copy s1:Int s2:Int
+    16  return s1:Int
 "
     );
 }
@@ -248,8 +246,8 @@ fn a_break_out_of_a_for_clears_the_element_it_was_holding() {
         "\
 fn @m.first(Array) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit
-  local xs -> s0:Array [0, 23)
-  local t -> s2:Int [1, 22)
+  local xs -> s0:Array [0, 22)
+  local t -> s2:Int [1, 21)
   local x -> s8:String [9, 18)
      0  int s2:int 0
      1  copy s3:Array s0:Array
@@ -271,9 +269,8 @@ fn @m.first(Array) -> Int
     17  add.int.imm s2:int s2:int 1
     18  clear s8:String
     19  jump 6
-    20  clear s3:Array
-    21  copy s1:Int s2:Int
-    22  return s1:Int
+    20  copy s1:Int s2:Int
+    21  return s1:Int
 "
     );
 }
@@ -282,8 +279,10 @@ fn @m.first(Array) -> Int
 /// other half of the same rule. `Inst::Clear` exists to stop a slot
 /// retaining a reference; an `Int` element retains nothing, so a `break` out
 /// of a `for` over an `Array<Int>` writes a word the collector never reads
-/// and the next turn overwrites. This pins the absence: there is exactly one
-/// `clear` in this listing, and it is the loop's own hold on `xs`.
+/// and the next turn overwrites. This pins the absence: there is no `clear`
+/// in this listing at all. The one the lowering emits is the loop's own hold
+/// on `xs`, after the loop, and `lower::redefined` drops it because nothing
+/// but a scalar copy stands between it and the `return` that pops the frame.
 #[test]
 fn a_break_out_of_a_for_over_scalars_clears_nothing() {
     assert_eq!(
@@ -294,8 +293,8 @@ fn a_break_out_of_a_for_over_scalars_clears_nothing() {
         "\
 fn @m.first(Array) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:unit
-  local xs -> s0:Array [0, 18)
-  local t -> s2:Int [1, 17)
+  local xs -> s0:Array [0, 17)
+  local t -> s2:Int [1, 16)
   local x -> s8:Int [9, 14)
      0  int s2:int 0
      1  copy s3:Array s0:Array
@@ -312,9 +311,8 @@ fn @m.first(Array) -> Int
     12  jump 15
     13  add.int.imm s2:int s2:int 1
     14  jump 6
-    15  clear s3:Array
-    16  copy s1:Int s2:Int
-    17  return s1:Int
+    15  copy s1:Int s2:Int
+    16  return s1:Int
 "
     );
 }
@@ -359,7 +357,7 @@ fn reading_a_vector_element_is_ordinary_instructions() {
         "\
 fn @m.head(Vector) -> Option
   frame 10: s0!:ref s1:tag s2:int s3:int s4:int s5:ref s6:tag s7:int s8:int s9:bool
-  local v -> s0:Vector [0, 12)
+  local v -> s0:Vector [0, 11)
      0  int s3:int 0
      1  load-field s4:Int s0:ref +0
      2  load-field s5:<ref> s0:ref +1
@@ -369,9 +367,8 @@ fn @m.head(Vector) -> Option
      6  lt.int.branch s9:bool s3:int s4:int 9
      7  tag s6:tag Option.Some
      8  load-elem s7:Int s5:ref s3:int
-     9  clear s5:<ref>
-    10  copy s1..s2:Option s6..s7:Option
-    11  return s1..s2:Option
+     9  copy s1..s2:Option s6..s7:Option
+    10  return s1..s2:Option
 "
     );
 }
@@ -655,8 +652,8 @@ fn a_for_over_a_set_walks_the_members_in_place() {
         "\
 fn @m.f(Set) -> Int
   frame 9: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int
-  local s -> s0:Set [0, 14)
-  local n -> s2:Int [1, 13)
+  local s -> s0:Set [0, 13)
+  local n -> s2:Int [1, 12)
   local x -> s8:Int [9, 10)
      0  int s2:int 0
      1  copy s3:Set s0:Set
@@ -669,9 +666,8 @@ fn @m.f(Set) -> Int
      8  load-elem s8:Int s3:ref s5:int
      9  add.int s2:int s2:int s8:int
     10  jump 6
-    11  clear s3:Set
-    12  copy s1:Int s2:Int
-    13  return s1:Int
+    11  copy s1:Int s2:Int
+    12  return s1:Int
 "
     );
 }
@@ -698,8 +694,8 @@ fn a_for_over_a_map_binds_one_entry_at_the_layout_s_width() {
         "\
 fn @m.f(Map) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int
-  local m -> s0:Map [0, 15)
-  local n -> s2:Int [1, 14)
+  local m -> s0:Map [0, 14)
+  local n -> s2:Int [1, 13)
   local e -> s8..s9:MapEntry [9, 10)
      0  int s2:int 0
      1  copy s3:Map s0:Map
@@ -713,9 +709,8 @@ fn @m.f(Map) -> Int
      9  add.int s2:int s2:int s9:int
     10  clear s8..s9:MapEntry
     11  jump 6
-    12  clear s3:Map
-    13  copy s1:Int s2:Int
-    14  return s1:Int
+    12  copy s1:Int s2:Int
+    13  return s1:Int
 "
     );
 }
@@ -773,7 +768,7 @@ fn an_array_literal_erases_each_element_the_written_type_erases() {
         "\
 fn @m.f(m.B) -> Int
   frame 8: s0!:int s1:int s2:ref s3:ref s4:ref s5:int s6:int s7:int
-  local b -> s0:m.B [0, 11)
+  local b -> s0:m.B [0, 10)
      0  box s2:ref s0:m.B
      1  box s3:ref s0:m.B
      2  alloc s4:ref Array<array> x2
@@ -782,9 +777,8 @@ fn @m.f(m.B) -> Int
      5  int s5:int 1
      6  store-elem s4:ref s5:int s3:Any
      7  clear s3:Any
-     8  clear s2:Any
-     9  len s1:int s4:ref
-    10  return s1:Int
+     8  len s1:int s4:ref
+     9  return s1:Int
 "
     );
 }

@@ -477,7 +477,9 @@ fn finish(
     // them null — not the program, which writes before it reads, and not the
     // collector, which the window between the two gives no new place to
     // look. Issue #514's F7, and a question about paths through the finished
-    // code for the same reason as the pass above. See `redefined`.
+    // code for the same reason as the pass above. A `return` that does not
+    // carry the words away ends such a window too, because it pops the frame
+    // they are in (F7b). See `redefined`.
     redefined::drop_clears_before_redefinition(&mut program);
 
     // And last of these, because it is the only one that reads what is

@@ -96,20 +96,19 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
         "\
 fn @m.f(String) -> String
   frame 8: s0!:ref s1:ref s2:tag s3:ref s4:ref s5:ref s6:ref s7:ref
-  local key -> s0:String [0, 13)
+  local key -> s0:String [0, 12)
      0  call-host s2..s3:Option env.get (s0:String)
      1  str s4:ref \"\"
-     2  switch s2:tag [7 3] else 9
+     2  switch s2:tag [6 3] else 8
      3  copy s6:String s3:String
      4  copy s1:String s6:String
-     5  clear s6:String
-     6  jump 12
-     7  copy s1:String s4:String
-     8  jump 12
-     9  str s6:ref \"no `match` arm covers this value\"
-    10  str s7:ref \"\"
-    11  trap s6:ref, s7:ref, s7:ref
-    12  return s1:String
+     5  jump 11
+     6  copy s1:String s4:String
+     7  jump 11
+     8  str s6:ref \"no `match` arm covers this value\"
+     9  str s7:ref \"\"
+    10  trap s6:ref, s7:ref, s7:ref
+    11  return s1:String
 "
     );
 }
