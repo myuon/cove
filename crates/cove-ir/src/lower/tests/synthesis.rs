@@ -1192,10 +1192,15 @@ fn an_enum_names_its_case_and_brackets_only_a_payload() {
 /// — is not writable over an append-only buffer at all, which is why the test
 /// is here: it is the arm most likely to be rewritten into something that
 /// renders `[1, 2, 3, ]`.
+///
+/// The second literal is not the run's: the call that renders each element
+/// stands inside the run's loop, so `lower::inline`'s `LOOP_LIMIT` expands
+/// `Row`'s walk there (issue #514's F3), and its `Row(id: ` comes with it. The
+/// separator is still the only one the run loads, and it is loaded first.
 #[test]
 fn a_run_separates_every_element_but_the_first() {
     let program = rendering("struct Row { id: Int }", "Row");
-    assert_eq!(literals(&program, "renders<Array"), [", "]);
+    assert_eq!(literals(&program, "renders<Array"), [", ", "Row(id: "]);
     let walk = synthesized(&program, "renders<Array");
     assert!(walk.contains("ne.int.imm"), "{walk}");
 }

@@ -90,18 +90,17 @@ fn a_call_names_the_instantiation_it_reaches() {
         "\
 fn @m.f() -> Int
   frame 11: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int s8:int s9:int s10:int
-  local a -> s2:Int [2, 9)
-  local p -> s6..s7:m.Point [8, 9)
+  local a -> s2:Int [2, 8)
+  local p -> s6..s7:m.Point [7, 8)
      0  int s1:int 1
      1  copy s2:Int s1:Int
      2  int s1:int 2
      3  int s3:int 3
      4  copy s4:Int s1:Int
      5  copy s5:Int s3:Int
-     6  copy s9..s10:m.Point s4..s5:m.Point
-     7  copy s6..s7:m.Point s9..s10:m.Point
-     8  add.int s0:int s2:int s6:int
-     9  return s0:Int
+     6  copy s6..s7:m.Point s4..s5:m.Point
+     7  add.int s0:int s2:int s6:int
+     8  return s0:Int
 "
     );
 }

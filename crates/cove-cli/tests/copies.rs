@@ -1691,7 +1691,32 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `fail_equals_cycle_map.main`, `values_boxed_order.bags` and
 /// `values_render_cycle.cyclicMap` — and no other function's count moved.
 /// The same pass took 19,947 of the corpus's 177,648 clears away.
-const FORWARDABLE_COPIES: usize = 11178;
+///
+/// **6,528 since issue #514's F3**, a fall of 4,650 that is all lowering: the
+/// corpus is the same 248 programs. F3 is three changes to `lower::inline`,
+/// and the survey was run with each of them switched off in turn:
+///
+/// | change | forwardable |
+/// | --- | ---: |
+/// | a `return` whose answer the instruction before it made writes it into the call's destination (`answered_in_place`) | −4,662 |
+/// | a body's clears are read over its branches (`cleared_at_every_return`) | 0 |
+/// | a leaf of up to 96 instructions is expanded at a site inside a loop of its caller (`LOOP_LIMIT`) | +12 |
+///
+/// The first is the one this file is about. An expanded leaf that answers from
+/// more than one slot used to turn every `return` into `copy dst ← t` straight
+/// after whatever made `t` — `int t 0` before a `return 0`, `neg t` before a
+/// `return -1` — which is exactly the copy counted as "after a producer" here,
+/// and it was one: the producer could have written `dst`. They were 5,609 of
+/// the 11,178, and 947 are left. The twelve the loop limit adds are copies
+/// already inside the six leaves it newly expands, now standing in their
+/// callers — `covecheck.textReport` 4, `covecheck.paired`, `covefmt.padded`
+/// and `cq.usage` 2 each, `life.world.newWorld` and `seqsearch.main` one each —
+/// and a per-function listing before and after names no other function. The
+/// corpus's copies went from 70,903 to 70,659, and its instructions from
+/// 1,999,186 to 2,245,451: the survey lowers each package whole, so a leaf
+/// expanded inside a loop in the standard library is counted in every one of
+/// the 248 programs whether it reaches that loop or not.
+const FORWARDABLE_COPIES: usize = 6528;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
