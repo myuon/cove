@@ -25,8 +25,9 @@
 //! proof.
 //!
 //! It must also be small enough for where it is being put — [`LIMIT`] at a
-//! site that runs once and [`HOT_LIMIT`] at one a loop reaches, which is what
-//! [`hot_functions`] decides — take no captures — a lambda's captures
+//! site that runs once, [`HOT_LIMIT`] at one a loop reaches, which is what
+//! [`hot_functions`] decides, and [`LOOP_LIMIT`] at one that stands inside a
+//! loop of its own caller — take no captures — a lambda's captures
 //! are copied by the call and are not arguments — and not be `async`, whose
 //! answer is a task the caller wraps rather than the value the body produced.
 //!
@@ -165,7 +166,48 @@ use super::shapes;
 const LIMIT: usize = 16;
 
 /// Expands every call this pass is willing to expand.
-pub(super) fn expand_small_leaf_calls(program: &mut Program) {
+///
+/// `entries` are the functions a run enters the program at — the roots a
+/// command named, or none for a whole-package lowering, where any function may
+/// be entered and none is singled out.
+///
+/// # A run's entry is not weighed against [`LOOP_LIMIT`]
+///
+/// The frame a run begins in is always the encoded tier's: the native tier
+/// compiles the functions it calls, never the outermost one. So a callee
+/// expanded into the entry stops running as compiled code and runs as encoded
+/// instructions instead, however hot its site is. `LOOP_LIMIT` is what made
+/// that cost something: it expanded `std.string.chars` into `benches/chars`'
+/// `main`, whose loop calls it 32,000 times, and the native run went from
+/// 470 ms to 561 ms — the encoded run's time, because it had become the encoded
+/// run. That bench is left as it is, as the case that catches this if the rule
+/// goes. So an entry weighs every site as it did before that limit existed:
+/// [`HOT_LIMIT`] inside a loop, [`LIMIT`] outside one, and a thin wrapper
+/// anywhere.
+///
+/// **It is not "expand nothing into an entry"**, which was tried first and is
+/// slower than the program this pass produced before `LOOP_LIMIT` on both
+/// tiers. Those older expansions are small bodies — an `unwrapOr`, a string
+/// comparison — whose call from an encoded frame costs a crossing into compiled
+/// code and a frame each, more than the body. Nine interleaved runs of
+/// `benches/chars`, median ms, encoded and native:
+///
+/// | the entry takes | encoded | native |
+/// |---|---:|---:|
+/// | what it took before `LOOP_LIMIT` (this rule) | 566.9 | 469.5 |
+/// | before `LOOP_LIMIT`, measured on the module before it | 564.9 | 470.3 |
+/// | everything else takes (`LOOP_LIMIT` too) | 561.5 | 561.0 |
+/// | thin wrappers only | 651.2 | 541.4 |
+/// | nothing | 707.5 | 618.6 |
+///
+/// It is a rule about *which function is the entry*, and nothing about which
+/// functions the native tier would compile: the lowering does not know the
+/// tier's subset and does not ask. A function the tier refuses for its own
+/// reasons — `examples/cq`'s `cq.json.parseValue`, over a `FuncRef` — runs
+/// encoded too and takes `LOOP_LIMIT`'s expansions like any other; finding
+/// those would mean teaching the lowering the tier's refusal list, and this
+/// does not.
+pub(super) fn expand_small_leaf_calls(program: &mut Program, entries: &[FunctionId]) {
     for _ in 0..ROUNDS {
         let small: Vec<bool> = (0..program.functions.len())
             .map(|at| is_expandable(&program.functions[at], LIMIT))
@@ -173,12 +215,15 @@ pub(super) fn expand_small_leaf_calls(program: &mut Program) {
         let wide: Vec<bool> = (0..program.functions.len())
             .map(|at| is_expandable(&program.functions[at], HOT_LIMIT))
             .collect();
+        let looped: Vec<bool> = (0..program.functions.len())
+            .map(|at| is_expandable(&program.functions[at], LOOP_LIMIT))
+            .collect();
         let thin: Vec<bool> = program
             .functions
             .iter()
             .map(|f| is_thin_library(program, f))
             .collect();
-        if !wide.iter().chain(&thin).any(|held| *held) {
+        if !looped.iter().chain(&thin).any(|held| *held) {
             return;
         }
         let hot = hot_functions(program);
@@ -187,10 +232,13 @@ pub(super) fn expand_small_leaf_calls(program: &mut Program) {
         let eligible = Eligible {
             small: &small,
             wide: &wide,
+            looped: &looped,
             thin: &thin,
         };
         for (at, called_often) in hot.iter().enumerate() {
-            expand(program, FunctionId(at as u32), &eligible, *called_often);
+            let id = FunctionId(at as u32);
+            let entry = entries.contains(&id);
+            expand(program, id, &eligible, *called_often, entry);
         }
         let after: usize = program.functions.iter().map(|f| f.code.len()).sum();
         if after == before && thin_calls(program, &thin) == wrapped {
@@ -327,6 +375,59 @@ pub(super) const FRAME_BUDGET: usize = 160;
 /// what would move it.
 const HOT_LIMIT: usize = 48;
 
+/// How many instructions a function may hold and still be expanded into a
+/// call site that stands inside a loop of the function making it.
+///
+/// [`HOT_LIMIT`] answers for every site [`hot_functions`] reaches, and most of
+/// those run once per call of a function a loop somewhere else calls: a run of
+/// `if`s in `wantsASpaceBetween` is hot and holds no loop. A site that stands
+/// inside a loop of its *own* caller runs once per turn of that loop, which is
+/// the grain `hot_functions`' documentation names as the next one, and what
+/// asked for it is issue #514's F3. The reflection walks in `std.dynamic` call
+/// one leaf per value they visit, from inside the loop that visits it:
+///
+/// | leaf | instructions | per |
+/// |---|---:|---|
+/// | `children`, from `equals`' walks | 86 | value compared |
+/// | `opening`, from `renderBelow` | 72 | container rendered |
+/// | `between`, from `renderBelow` | 70 | child rendered |
+///
+/// Each was a frame per value, and on the native tier two runtime helpers per
+/// value besides — the `open` and `close` of a direct call — for bodies whose
+/// every path is a handful of instructions: `children` is fifteen arms of
+/// "compare one observation and return", and what runs of it on a value is
+/// eight to twenty instructions of the eighty-six.
+///
+/// **Ninety-six**, swept at 48 (that is, no separate limit), 64, 80, 96 and
+/// 128 over `examples/covefmt`, `examples/cq`'s two inputs, `benches/equals`,
+/// `ordering`, `admission`, `rendering` and the #514 rows, with
+/// [`answered_in_place`] and [`cleared_at_every_return`]'s graph in place at
+/// every row — so 48 is this module without the limit, not the module before
+/// it:
+///
+/// | limit | covefmt instructions | covefmt calls | covefmt machine code | cq machine code | `tree.boxed` calls |
+/// |---:|---:|---:|---:|---:|---:|
+/// | 48 | 1,692,771,421 | 21,035,366 | 806,127 | 673,101 | 2,190,736 |
+/// | 64 | 1,692,777,926 | 21,026,406 | 810,663 | 684,459 | 2,190,736 |
+/// | 80 | 1,692,739,548 | 21,003,092 | 819,059 | 691,452 | 2,190,736 |
+/// | **96** | **1,692,739,548** | **21,003,092** | **819,059** | **702,296** | **8,736** |
+/// | 128 | 1,693,690,032 | 20,527,850 | 818,691 | 702,296 | 8,736 |
+///
+/// Ninety-six is where `children` goes, and where both render helpers have
+/// (`benches/rendering` makes 546,216 calls at 48, 506,216 at 80 and 366,216
+/// at 96); covefmt is the same program from 80 to 96. A hundred and
+/// twenty-eight is the first limit that moves covefmt again, and it moves its
+/// instruction count *up* (+950,484) for the calls it removes, so the trade
+/// has turned there.
+///
+/// Raising [`HOT_LIMIT`] to ninety-six instead would have reached the same
+/// three leaves and cost covefmt 11% of its machine code (806,650 → 896,628
+/// bytes, on the module before this limit existed) and cq 27% (673,177 →
+/// 852,843), for leaves that run once per call of
+/// a hot function rather than once per turn of a loop; that is the
+/// measurement that separated the two limits.
+const LOOP_LIMIT: usize = 96;
+
 /// How many instructions, not counting its `return`s, a standard-library
 /// function may hold and be expanded wherever it is called.
 ///
@@ -401,10 +502,12 @@ fn steps(program: &Program, f: &Function) -> usize {
 }
 
 /// Which callees a site may expand, by `FunctionId`: [`LIMIT`] at a cold site,
-/// [`HOT_LIMIT`] at a hot one, and [`is_thin_library`] at either.
+/// [`HOT_LIMIT`] at a hot one, [`LOOP_LIMIT`] at one inside a loop of its
+/// caller, and [`is_thin_library`] at any of them.
 struct Eligible<'a> {
     small: &'a [bool],
     wide: &'a [bool],
+    looped: &'a [bool],
     thin: &'a [bool],
 }
 
@@ -481,7 +584,9 @@ fn renamed_words(program: &Program, leaf: &Function, ordered: bool) -> u32 {
 /// as one called forty times there. `BlockFrequencyInfo` weighs a loop as ten
 /// turns and carries a number; this carries a bit. The next grain of this is a
 /// weight per loop depth, and what would ask for it is a program where the
-/// budget is spent in the wrong place.
+/// budget is spent in the wrong place. [`LOOP_LIMIT`] is the first step of it:
+/// a site inside a loop of its own caller is weighed apart from one that is
+/// only reached from somewhere hot.
 fn hot_functions(program: &Program) -> Vec<bool> {
     let loops: Vec<Vec<bool>> = program.functions.iter().map(inside_a_loop).collect();
     let mut hot = vec![false; program.functions.len()];
@@ -528,6 +633,35 @@ fn inside_a_loop(f: &Function) -> Vec<bool> {
                     *held = true;
                 }
             }
+        }
+    }
+    held
+}
+
+/// The sites [`LOOP_LIMIT`] answers for: inside a loop of `f`, and not
+/// leaving it.
+///
+/// [`inside_a_loop`] is every counter a backward jump encloses, and that
+/// includes a `return refuseDigits(text, radix)` in the middle of a loop —
+/// which runs at most once a call, because it is how the loop is left.
+/// `std.int.parseRadix` has three of them, and expanding its refusal there
+/// grew every program that lowers it for a path that ends the parse. So a call
+/// whose answer goes straight to a `return` — with nothing between them but
+/// the clears and the one copy a `return` of a named value is lowered to — is
+/// weighed as a site that runs once a call — [`HOT_LIMIT`]'s — the way the loop
+/// it stands in weighs it.
+fn turns_with_a_loop(f: &Function, inside: &[bool]) -> Vec<bool> {
+    let mut held = inside.to_vec();
+    for (pc, inst) in f.code.iter().enumerate() {
+        if !held[pc] || !matches!(inst, Inst::Call { .. }) {
+            continue;
+        }
+        let mut at = pc + 1;
+        while matches!(f.code.get(at), Some(Inst::Clear { .. } | Inst::Copy { .. })) {
+            at += 1;
+        }
+        if matches!(f.code.get(at), Some(Inst::Return { .. })) {
+            held[pc] = false;
         }
     }
     held
@@ -703,8 +837,7 @@ fn single_return(f: &Function) -> Option<Slot> {
     held
 }
 
-/// Which words of a leaf's frame hold null at every `Return`, because the last
-/// thing written to them on the way there is a [`Inst::Clear`].
+/// Which words of a leaf's frame hold null at every `Return`.
 ///
 /// An expansion clears each reference word of its run after the body — see
 /// [`Region::refs`] — and a word the body has already cleared on every way out
@@ -715,59 +848,152 @@ fn single_return(f: &Function) -> Option<Slot> {
 /// again would make every push one instruction longer than the composite
 /// instruction it replaced.
 ///
-/// Answered only for a body that cannot be walked any other way than in
-/// order: no branch, so each `Return` is reached along the instructions above
-/// it, and no [`Inst::AddrOfSlot`], so no word is written where
-/// [`Inst::writes`] cannot see it. Anything else answers "no word", which
-/// keeps every clear the expansion used to emit.
+/// # A forward walk over the body's own graph
+///
+/// A word is null at a `Return` when, on every path from the body's first
+/// instruction to that `Return`, the last thing to touch it is a
+/// [`Inst::Clear`] — or nothing touched it at all and it was null when the
+/// body began. So this is a *may* analysis of one bit a word, "may hold
+/// something": set by any write, reset by a clear, joined by union where two
+/// paths meet, and iterated round a loop until nothing changes. A word is
+/// answered null when no `Return` can see it set.
+///
+/// **At the body's first instruction, every word but the parameters is
+/// null**, and that is a fact about where the run lives rather than about the
+/// leaf. The run is appended to the caller's frame once per callee and written
+/// by nothing but that callee's expansions; the frame is zeroed when it is
+/// pushed, and every expansion leaves every reference word of the run null
+/// when it finishes — by the clears it emits after the body, or because this
+/// function said the body had already done it. So each expansion begins where
+/// the one before it left the run, which is null. The parameters are the
+/// exception because the expansion copies the arguments into them first.
+///
+/// Issue #514's F3 is what asked for the graph. Until then this answered only
+/// a body with no branch, and `std.dynamic.children` — fifteen `return`s, and
+/// two string words written and cleared on one arm of them — paid two clears
+/// per expansion for words that were null on every way out, which is two
+/// dispatches on every value `==` compares.
+///
+/// A body that holds an [`Inst::AddrOfSlot`] answers "no word", because a word
+/// could then be written where [`Inst::writes`] cannot see it; so does a body
+/// with no `Return`. Either keeps every clear the expansion used to emit.
+///
+/// **A word whose last clear is inside one of the body's own loops is kept
+/// too**, and that one is about cost rather than soundness. A loop that reads a
+/// reference each turn clears it each turn — `std.vector.contains` loads the
+/// store, reads an element and clears the store — and what can take that clear
+/// out of the loop is `super::redefined`, which drops it where every way on
+/// from it writes the word again: the next turn's load, or the clear this
+/// expansion emits after the body. Saying the word is null at every `return`,
+/// which it is, would drop the clear after the body, and with it the reason the
+/// one inside the loop could go: measured on `benches/seqsearch`, a clear a
+/// turn came back and the run executed 1,835,412 more instructions. So a clear
+/// inside a loop leaves its words in a third state, null but not answered
+/// null. It is the *last* clear that decides, because a loop's clears are
+/// usually followed by the ones before the `return`: `std.set.contains` clears
+/// the two entries it compared inside its search and again on the way out, and
+/// keeping those words cost `benches/ordering` 100,000 instructions when any
+/// clear in a loop was enough to keep them.
 ///
 /// That the body's own clear may later be dropped does not make this wrong:
 /// `super::tails` drops one only where a `return` follows, which an expansion
-/// has replaced, and `super::frees` only where the word is already null or an
+/// has replaced; `super::frees` only where the word is already null or an
 /// interned literal's address — both of which the expansion's clear would have
-/// been dropped for too.
+/// been dropped for too; and `super::redefined` only where every path from it
+/// writes the word again before anything could see it.
 fn cleared_at_every_return(program: &Program, f: &Function) -> Vec<bool> {
     let words = f.reprs.len();
-    let linear = f.code.iter().all(|inst| {
-        !matches!(inst, Inst::AddrOfSlot { .. })
-            && (matches!(inst, Inst::Return { .. } | Inst::Trap { .. }) || !inst.ends_a_block())
-    });
-    if !linear {
+    let len = f.code.len();
+    if len == 0
+        || f.code
+            .iter()
+            .any(|inst| matches!(inst, Inst::AddrOfSlot { .. }))
+        || !f
+            .code
+            .iter()
+            .any(|inst| matches!(inst, Inst::Return { .. }))
+    {
         return vec![false; words];
     }
-    let mut now = vec![false; words];
-    let mut every = vec![true; words];
-    let mut returned = false;
-    for inst in &f.code {
+    let taken = (f.param_words(&program.layouts) as usize).min(words);
+    let looping = inside_a_loop(f);
+    let mut entry = vec![NULL; words];
+    for word in entry.iter_mut().take(taken) {
+        *word = HELD;
+    }
+    // What each word may be as each instruction begins, the highest of the
+    // three over every path there; `None` where no path has reached it yet.
+    let mut before: Vec<Option<Vec<u8>>> = vec![None; len];
+    before[0] = Some(entry);
+    let mut seen = vec![NULL; words];
+    let mut work = vec![0usize];
+    while let Some(pc) = work.pop() {
+        let Some(mut held) = before[pc].clone() else {
+            continue;
+        };
+        let inst = &f.code[pc];
+        let mut mark = |slot: Slot, width: u32, to: u8| {
+            for at in slot..slot.saturating_add(width) {
+                if let Some(word) = held.get_mut(at as usize) {
+                    *word = to;
+                }
+            }
+        };
         match *inst {
             Inst::Return { .. } => {
-                returned = true;
-                for (held, cleared) in every.iter_mut().zip(&now) {
-                    *held &= *cleared;
+                for (any, now) in seen.iter_mut().zip(&held) {
+                    *any = (*any).max(*now);
                 }
+                continue;
             }
+            Inst::Trap { .. } => continue,
             Inst::Clear { slot, layout } => {
-                let width = program.layout(layout).width();
-                for at in slot..slot.saturating_add(width) {
-                    if let Some(word) = now.get_mut(at as usize) {
-                        *word = true;
-                    }
-                }
+                let to = if looping[pc] { TURNED } else { NULL };
+                mark(slot, program.layout(layout).width(), to)
             }
-            _ => inst.writes(program, &mut |slot, width| {
-                for at in slot..slot.saturating_add(width) {
-                    if let Some(word) = now.get_mut(at as usize) {
-                        *word = false;
-                    }
+            _ => inst.writes(program, &mut |slot, width| mark(slot, width, HELD)),
+        }
+        let mut next: Vec<usize> = Vec::new();
+        inst.targets(program, &mut |to| next.push(to as usize));
+        if !matches!(inst, Inst::Jump { .. } | Inst::Switch { .. }) && pc + 1 < len {
+            next.push(pc + 1);
+        }
+        for to in next {
+            let Some(place) = before.get_mut(to) else {
+                continue;
+            };
+            let moved = match place {
+                None => {
+                    *place = Some(held.clone());
+                    true
                 }
-            }),
+                Some(was) => {
+                    let mut grew = false;
+                    for (old, new) in was.iter_mut().zip(&held) {
+                        if *new > *old {
+                            *old = *new;
+                            grew = true;
+                        }
+                    }
+                    grew
+                }
+            };
+            if moved {
+                work.push(to);
+            }
         }
     }
-    if !returned {
-        return vec![false; words];
-    }
-    every
+    seen.iter().map(|any| *any == NULL).collect()
 }
+
+/// [`cleared_at_every_return`]'s three answers about a word, lowest first:
+/// null, because nothing wrote it or a clear outside every loop of the body was
+/// the last thing to; null because a clear *inside* one was, which keeps the
+/// clear after the body for the reason given there; and possibly holding
+/// something.
+const NULL: u8 = 0;
+const TURNED: u8 = 1;
+const HELD: u8 = 2;
 
 /// Which words of a function's frame something writes.
 ///
@@ -931,19 +1157,26 @@ pub(super) fn expand_cold(program: &mut Program, id: FunctionId) {
     let eligible = Eligible {
         small: &small,
         wide: &small,
+        looped: &small,
         thin: &thin,
     };
-    expand(program, id, &eligible, false);
+    expand(program, id, &eligible, false, false);
 }
 
 /// Expands the calls in one function.
-fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called_hot: bool) {
+fn expand(
+    program: &mut Program,
+    id: FunctionId,
+    eligible: &Eligible<'_>,
+    called_hot: bool,
+    entry: bool,
+) {
     let caller = program.function(id).clone();
-    let hot: Vec<bool> = if called_hot {
-        vec![true; caller.code.len()]
-    } else {
-        inside_a_loop(&caller)
-    };
+    // A site inside one of the caller's own loops runs once a turn, and one in
+    // a caller that is itself hot runs once a call of something hot; the first
+    // is weighed against `LOOP_LIMIT` and the second against `HOT_LIMIT`.
+    let inside = inside_a_loop(&caller);
+    let looping = turns_with_a_loop(&caller, &inside);
     // What this caller may still take on. A callee's run is appended once
     // however many sites call it, so the budget is spent per *callee* and the
     // sites after the first are free.
@@ -964,7 +1197,11 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
                 if eligible.thin[callee.index()] {
                     return true;
                 }
-                let admitted = if hot[at] {
+                // A run's entry is never weighed against `LOOP_LIMIT`: see
+                // `expand_small_leaf_calls`.
+                let admitted = if looping[at] && !entry {
+                    eligible.looped[callee.index()]
+                } else if called_hot || inside[at] {
                     eligible.wide[callee.index()]
                 } else {
                     eligible.small[callee.index()]
@@ -1124,13 +1361,20 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
         // below once `return` began forwarding its destination and a leaf
         // started answering in place.
         let body = code.len();
+        // The `return`s whose answer the instruction before them can write
+        // into the destination itself: see `answered_in_place`.
+        let direct = if ordered.contains(callee) {
+            vec![false; leaf.code.len()]
+        } else {
+            answered_in_place(program, &leaf, &where_of, *dst)
+        };
         let mut place: Vec<usize> = Vec::with_capacity(leaf.code.len() + 1);
         let mut at_new = body;
         for (pc, held) in leaf.code.iter().enumerate() {
             place.push(at_new);
             at_new += match held {
                 Inst::Return { src } => {
-                    let copies = usize::from(where_of[*src as usize] != *dst);
+                    let copies = usize::from(where_of[*src as usize] != *dst && !direct[pc]);
                     let jumps = usize::from(pc + 1 < leaf.code.len());
                     copies + jumps
                 }
@@ -1148,7 +1392,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
                     // straight into the destination looks like here, and it
                     // is not emitted.
                     let from = where_of[*src as usize];
-                    if from != *dst {
+                    if from != *dst && !direct[pc] {
                         code.push(Inst::Copy {
                             dst: *dst,
                             src: from,
@@ -1165,14 +1409,14 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
                     }
                 }
                 other => {
-                    code.push(relocated(
-                        other,
-                        &where_of,
-                        &place,
-                        &mut tables,
-                        &mut lists,
-                        program,
-                    ));
+                    let mut moved =
+                        relocated(other, &where_of, &place, &mut tables, &mut lists, program);
+                    if direct.get(pc + 1).copied().unwrap_or(false) {
+                        if let Some(written) = produced_into(&mut moved) {
+                            *written = *dst;
+                        }
+                    }
+                    code.push(moved);
                     spans.push(leaf.spans[pc]);
                 }
             }
@@ -1314,6 +1558,115 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
     // locals.
     inlined.extend(records);
     held.inlined = inlined;
+}
+
+/// Which of `leaf`'s `return`s can have their answer written straight into
+/// the call's destination `dst` by the instruction before them, so that the
+/// copy the `return` would have become is not emitted.
+///
+/// [`single_return`] forwards the answer of a leaf whose `return`s agree on one
+/// slot. A leaf that answers from several — `std.dynamic.children` has fifteen
+/// `return`s, most of them `return -1` or `return 0` straight after the
+/// constant — got none of that: every one became `int t; copy dst ← t; jump`,
+/// which is one instruction more than `int dst; jump` on every value, and a
+/// copy `crates/cove-cli/tests/copies.rs` counts as a forwarding candidate,
+/// because it is one.
+///
+/// A `return` is answered in place when all of these hold:
+///
+/// - it is not where a jump lands, so the instruction before it is the one that
+///   ran before it on every path to it;
+/// - that instruction is one [`produced_into`] can retarget, and it writes the
+///   whole answer and nothing else;
+/// - none of the words it reads, where the expansion put them, overlaps the
+///   destination — so writing the destination early changes no operand;
+/// - no source name is bound at the answer's slot there, so a debugger that
+///   stops on it reads what it read before.
+///
+/// Nothing in the body runs between that instruction and the `return`, so the
+/// answer's own slot is never read after it on that path, and the only thing
+/// that changes is which word the value lands in first.
+fn answered_in_place(
+    program: &Program,
+    leaf: &Function,
+    where_of: &[Slot],
+    dst: Slot,
+) -> Vec<bool> {
+    let mut held = vec![false; leaf.code.len()];
+    let width = program.layout(leaf.returns).width();
+    let leaders = crate::flow::leaders(program, leaf);
+    let overlaps = |slot: Slot, words: u32| slot < dst + width && dst < slot + words;
+    for (pc, inst) in leaf.code.iter().enumerate() {
+        let Inst::Return { src } = *inst else {
+            continue;
+        };
+        if pc == 0 || leaders[pc] || where_of[src as usize] == dst {
+            continue;
+        }
+        let producer = &leaf.code[pc - 1];
+        let mut runs: Vec<(Slot, u32)> = Vec::new();
+        producer.writes(program, &mut |slot, words| runs.push((slot, words)));
+        if runs != [(src, width)] {
+            continue;
+        }
+        let Some(reads) = read_by(program, producer) else {
+            continue;
+        };
+        if reads
+            .iter()
+            .any(|(slot, words)| overlaps(where_of[*slot as usize], *words))
+        {
+            continue;
+        }
+        let at = (pc - 1) as Pc;
+        let named = leaf.locals.iter().any(|local| {
+            local.from <= at
+                && at < local.to
+                && local.slot <= src
+                && src < local.slot + program.layout(local.layout).width()
+        });
+        held[pc] = !named;
+    }
+    held
+}
+
+/// The runs of frame words an instruction [`produced_into`] can retarget
+/// reads, or `None` for every other instruction.
+fn read_by(program: &Program, inst: &Inst) -> Option<Vec<(Slot, u32)>> {
+    Some(match *inst {
+        Inst::Unit { .. }
+        | Inst::Bool { .. }
+        | Inst::Int { .. }
+        | Inst::Float { .. }
+        | Inst::Str { .. } => Vec::new(),
+        Inst::Copy { src, layout, .. } => vec![(src, program.layout(layout).width())],
+        Inst::Neg { a, .. }
+        | Inst::Not { a, .. }
+        | Inst::ArithImm { a, .. }
+        | Inst::CmpImm { a, .. } => vec![(a, 1)],
+        Inst::Arith { a, b, .. } | Inst::Cmp { a, b, .. } => vec![(a, 1), (b, 1)],
+        _ => return None,
+    })
+}
+
+/// The destination of an instruction [`answered_in_place`] may write into a
+/// call's destination instead: a constant, a copy, or one scalar operation.
+fn produced_into(inst: &mut Inst) -> Option<&mut Slot> {
+    match inst {
+        Inst::Unit { dst }
+        | Inst::Bool { dst, .. }
+        | Inst::Int { dst, .. }
+        | Inst::Float { dst, .. }
+        | Inst::Str { dst, .. }
+        | Inst::Copy { dst, .. }
+        | Inst::Neg { dst, .. }
+        | Inst::Not { dst, .. }
+        | Inst::ArithImm { dst, .. }
+        | Inst::CmpImm { dst, .. }
+        | Inst::Arith { dst, .. }
+        | Inst::Cmp { dst, .. } => Some(dst),
+        _ => None,
+    }
 }
 
 /// The target a jump this pass has not landed yet carries.

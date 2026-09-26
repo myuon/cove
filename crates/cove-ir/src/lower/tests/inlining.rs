@@ -851,3 +851,124 @@ fn an_argument_an_address_reaches_is_copied_before_a_var_body_runs() {
         program.function(into).code
     );
 }
+
+/// A leaf of twelve comparisons, each answering on its own arm: over
+/// `inline::HOT_LIMIT` and under `inline::LOOP_LIMIT`, which is the shape of
+/// `std.dynamic.children` at a size a test can hold.
+const ARMS: &str = "fn arms(n: Int) -> Int {\n  \
+     if n == 1 { return 11 }\n  if n == 2 { return 12 }\n  if n == 3 { return 13 }\n  \
+     if n == 4 { return 14 }\n  if n == 5 { return 15 }\n  if n == 6 { return 16 }\n  \
+     if n == 7 { return 17 }\n  if n == 8 { return 18 }\n  if n == 9 { return 19 }\n  \
+     if n == 10 { return 20 }\n  if n == 11 { return 21 }\n  if n == 12 { return 22 }\n  \
+     n * 3 - 1\n}\n";
+
+/// A leaf over the hot limit is expanded at a site inside a loop of its own
+/// caller, and stays a call at a site that is hot only because its caller is.
+///
+/// Issue #514's F3: the reflection walks call one such leaf per value, from
+/// inside the loop that visits the value, and each was a frame. A site a loop
+/// merely *reaches* runs once per call of the function holding it, which is
+/// what `HOT_LIMIT` was measured against and keeps answering for.
+#[test]
+fn a_leaf_over_the_hot_limit_is_expanded_inside_a_loop_of_its_caller() {
+    let (program, main) = program(&format!(
+        "{ARMS}fn once(n: Int) -> Int {{\n  arms(n) + 1\n}}\n\
+         fn main() -> Int {{\n  var total = 0\n  var at = 0\n  while at < 20 {{\n    \
+         total = total + arms(at) + once(at)\n    at = at + 1\n  }}\n  total\n}}"
+    ));
+    let named = |id: FunctionId| program.function(id).qualified();
+    assert!(
+        main.inlined
+            .iter()
+            .any(|held| named(held.callee) == "m.arms"),
+        "the call inside `main`'s loop is expanded"
+    );
+    let once = program
+        .functions
+        .iter()
+        .find(|f| f.qualified() == "m.once")
+        .expect("`once` is lowered");
+    assert!(
+        once.code
+            .iter()
+            .any(|inst| matches!(inst, Inst::Call { callee, .. } if named(*callee) == "m.arms")),
+        "the call in `once`, which a loop reaches but which holds none, is left a call"
+    );
+}
+
+/// A body that clears a reference on the one arm that wrote it is not cleared
+/// again after it is expanded, although it branches.
+///
+/// The expansion clears every reference word of its run once the body is done,
+/// unless the body has left it null on every way out. That used to be asked
+/// only of a body without a branch, so a leaf like `std.dynamic.children` —
+/// which reads two strings on one of fifteen arms and clears them there — paid
+/// two clears per expansion for words that were already null, one dispatch
+/// each on every value `==` walks.
+#[test]
+fn a_branching_body_that_clears_its_references_is_not_cleared_again() {
+    let (program, main) = program(
+        "fn same(n: Int, a: String, b: String) -> Int {\n  \
+         if n == 1 {\n    if \"{a}{b}\" == \"xy\" {\n      return 0\n    }\n    return 1\n  }\n  n\n}\n\
+         fn main() -> Int {\n  var total = 0\n  var at = 0\n  while at < 3 {\n    \
+         total = total + same(at, \"x\", \"y\")\n    at = at + 1\n  }\n  total\n}",
+    );
+    let record = main
+        .inlined
+        .iter()
+        .find(|held| program.function(held.callee).qualified() == "m.same")
+        .expect("`same` is expanded");
+    let body = &main.code[record.from as usize..record.to as usize];
+    assert!(
+        body.iter().any(|inst| matches!(inst, Inst::Clear { .. })),
+        "the body clears the concatenation it compared"
+    );
+    let after = &main.code[record.to as usize];
+    assert!(
+        !matches!(after, Inst::Clear { .. }),
+        "nothing is cleared a second time after the body: {after:?}"
+    );
+}
+
+/// A run's entry takes no `LOOP_LIMIT` expansion: a leaf over the hot limit,
+/// called in a loop of `main`, is still a call there when `main` is the entry
+/// a lowering was given, and is expanded at the same kind of site in a
+/// function that is not the entry.
+///
+/// The entry frame always runs on the encoded tier, so an expansion into it
+/// moves the callee out of compiled code: `benches/chars` measured it, 470 ms
+/// against 561 ms native. See `inline::expand_small_leaf_calls`.
+#[test]
+fn a_run_s_entry_takes_no_loop_limit_expansion() {
+    let source = format!(
+        "{ARMS}fn turns(n: Int) -> Int {{\n  var total = 0\n  var at = 0\n  \
+         while at < n {{\n    total = total + arms(at)\n    at = at + 1\n  }}\n  total\n}}\n\
+         fn main() -> Int {{\n  var total = 0\n  var at = 0\n  while at < 20 {{\n    \
+         total = total + arms(at)\n    at = at + 1\n  }}\n  total + turns(3)\n}}"
+    );
+    let (sources, held) = checked(&source);
+    let program = crate::lower_entry(&held, &sources, &HostSchemas::new(), "m", "main")
+        .expect("the program lowers");
+    let named = |id: FunctionId| program.function(id).qualified();
+    let body = |name: &str| {
+        program
+            .functions
+            .iter()
+            .find(|f| f.qualified() == name)
+            .unwrap_or_else(|| panic!("`{name}` is lowered"))
+    };
+    assert!(
+        body("m.main")
+            .code
+            .iter()
+            .any(|inst| matches!(inst, Inst::Call { callee, .. } if named(*callee) == "m.arms")),
+        "the call inside the entry's loop survives"
+    );
+    assert!(
+        body("m.turns")
+            .inlined
+            .iter()
+            .any(|held| named(held.callee) == "m.arms"),
+        "the same call inside a loop of a function that is not the entry is expanded"
+    );
+}

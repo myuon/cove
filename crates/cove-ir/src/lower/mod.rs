@@ -427,7 +427,17 @@ fn finish(
     // they are for — a clear that frees nothing, and a clear a `return` was
     // about to make pointless — and running them first would mean running
     // them twice. See `inline`.
-    inline::expand_small_leaf_calls(&mut program);
+    // The entries a run begins at, which `inline` weighs apart from every
+    // other caller: see `inline::expand_small_leaf_calls`. A whole-package
+    // lowering names none.
+    let entries: Vec<FunctionId> = match roots {
+        Roots::Named(named) => named
+            .iter()
+            .filter_map(|(module, name)| program.function_named(module, name))
+            .collect(),
+        Roots::Package => Vec::new(),
+    };
+    inline::expand_small_leaf_calls(&mut program, &entries);
 
     // And then the slice's own question, asked again about what that left:
     // expanding every call site of a function removes the last reference to
