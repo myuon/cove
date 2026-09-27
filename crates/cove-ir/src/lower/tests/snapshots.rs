@@ -64,7 +64,7 @@ fn a_vector_of_immutable_elements_is_copied_out_and_back() {
         "\
 fn @m.v(Vector) -> Vector
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:int s5:ref s6:ref
-  local xs -> s0:Vector [0, 16)
+  local xs -> s0:Vector [0, 14)
      0  load-field s2:Int s0:ref +0
      1  load-field s3:<ref> s0:ref +1
      2  int s4:int 0
@@ -77,10 +77,8 @@ fn @m.v(Vector) -> Vector
      9  alloc s6:ref Vector<vector>
     10  store-field s6:ref +0 s2:Int
     11  store-field s6:ref +1 s3:<ref>
-    12  clear s3:<ref>
-    13  clear s5:Array
-    14  copy s1:Vector s6:Vector
-    15  return s1:Vector
+    12  copy s1:Vector s6:Vector
+    13  return s1:Vector
 "
     );
 }

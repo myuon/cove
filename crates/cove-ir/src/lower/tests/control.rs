@@ -173,9 +173,16 @@ fn @m.early(Int) -> Int
 ///
 /// What is *not* cleared is as much of the point: `s3`, the array being
 /// walked, is below the mark, so the `break` leaves it to the code after the
-/// loop at 32, where its jump lands. The lowering's clear of `s3` stood there
-/// once; `lower::redefined` drops it, because nothing but a scalar copy
-/// stands between it and the `return`, which pops the frame.
+/// loop at 32, where its jump lands and the lowering clears it.
+///
+/// The function goes on past the loop — the call to `both` after it, which
+/// the inliner expands into two literals and a zero — and that is on purpose.
+/// Were the loop followed by nothing but the `return`, `lower::redefined`
+/// would drop every clear on the `break`'s path, because the frame is popped
+/// before any collection could find them (issue #514's F7b), and since step
+/// (a)(ii) a clear of other words no longer keeps a window open. The literal
+/// at 33 is an instruction the window may not cross, so the clears this test
+/// is about are still in the listing.
 #[test]
 fn a_break_clears_the_temporaries_the_turn_was_holding() {
     assert_eq!(
@@ -186,15 +193,15 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
                for x in xs {\n    \
                  total = both(\"{x}\", if total > 0 { x } else { break })\n  \
                }\n  \
-               total\n\
+               total + both(\"\", \"\")\n\
              }",
             "f"
         ),
         "\
 fn @m.f(Array) -> Int
   frame 19: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:ref s11:unit s12:ref s13:unit s14:int s15:int s16:int s17:ref s18:int
-  local xs -> s0:Array [0, 34)
-  local total -> s2:Int [1, 33)
+  local xs -> s0:Array [0, 38)
+  local total -> s2:Int [1, 37)
   local x -> s8:String [9, 30)
      0  int s2:int 0
      1  copy s3:Array s0:Array
@@ -228,8 +235,12 @@ fn @m.f(Array) -> Int
     29  clear s12:String
     30  clear s8:String
     31  jump 6
-    32  copy s1:Int s2:Int
-    33  return s1:Int
+    32  clear s3:Array
+    33  str s3:ref \"\"
+    34  str s8:ref \"\"
+    35  int s4:int 0
+    36  add.int s1:int s2:int s4:int
+    37  return s1:Int
 "
     );
 }

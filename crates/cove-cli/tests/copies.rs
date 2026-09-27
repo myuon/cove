@@ -1731,7 +1731,19 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// into the same temporary each stood before a copy out of it: the second
 /// `unit` wrote zero over zero and `lower::nulls` drops it, so the two copies
 /// sit together and the second is no longer straight after a producer.
-const FORWARDABLE_COPIES: usize = 6638;
+///
+/// **6,652 since step (a)(ii) relaxed F7's rule**, a rise of 14 that is all
+/// lowering and none of it a copy: the corpus is the same 253 programs. It is
+/// F7's own mechanism again, now reaching windows that write another root. A
+/// copy whose producer was separated from it by a clear — of the copy's own
+/// destination, or of another slot the window writes — is straight after its
+/// producer once `lower::redefined` drops that clear, and was a forwarding
+/// candidate all along. A per-function listing of the counted copies before
+/// and after names every one: `cq.pipeline.transform` 2 in each of its three
+/// instantiations, `values_boxed_order.chainRows` 5, `values_boxed_order.links`
+/// 1, and `links` in `fail_key_boxed_deep_200` and `fail_key_boxed_deep_1000`
+/// 1 each. No other function's count moved.
+const FORWARDABLE_COPIES: usize = 6652;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

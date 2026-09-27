@@ -6,11 +6,12 @@
 //! cannot change with the program counter, stops seeing an object the
 //! program has finished with. A slot the lowering reuses is cleared at the
 //! end of one value's life and written again at the start of the next, and
-//! when the second comes straight after the first the null is never seen by
-//! anybody: not by the program, which writes the slot before it reads it, and
-//! not by the collector, which cannot run in between. Issue #514's F7 is this
-//! pass, and it is a fact about the finished code rather than about any one
-//! body — nothing here knows which function it is looking at.
+//! when the second comes straight after the first the null is never read by
+//! the program, which writes the slot before it reads it. The collector can
+//! notice its absence only as one root more, in a collection another task
+//! runs in between — see *What the collector can see*. Issue #514's F7 is this pass, and it
+//! is a fact about the finished code rather than about any one body — nothing
+//! here knows which function it is looking at.
 //!
 //! A `return` ends the life of every word of the frame at once, so it ends a
 //! window as a redefinition does: a clear followed by nothing but quiet work
@@ -36,11 +37,14 @@
 //!   [`Function::returns`](crate::Function::returns)' width. Where they share
 //!   one, the clear is part of the answer and stays.
 //! - **A quiet instruction** is one on a fixed list of instructions that
-//!   neither allocate, nor call, nor park, nor write the heap; that reads no
-//!   word of `W`; and whose every destination word is *not a root* — no
-//!   [`Repr::Ref`](crate::Repr::Ref) word of the frame. Branches and jumps
-//!   are on the list, so a window may fork, and then each arm has to end in
-//!   a redefinition of its own.
+//!   neither allocate, nor call, nor park, nor write the heap, and that
+//!   reads no word of `W`. It *may* write the frame's other root words — a
+//!   `load-field` of another reference, [`Inst::DynChild`] or
+//!   [`Inst::DynOpen`] into another view, a clear of other words: this is the
+//!   relaxed rule of issue #514's step (a)(ii), and what it costs is under
+//!   *What the collector can see*. Branches and jumps are on the list, so a
+//!   window may fork, and then each arm has to end in a redefinition of its
+//!   own.
 //! - A path that traps, loops back to a program counter the walk is already
 //!   inside, or meets anything else keeps the clear. A trap is kept on
 //!   purpose: it leaves the frame standing, because the refusal's call chain
@@ -55,31 +59,66 @@
 //! counter in the window is kept, because a debugger stopped there would
 //! print the old value where it used to print null.
 //!
-//! # Why the collector cannot tell
+//! # The window is post-dominated by its ends
+//!
+//! Call the instructions the walk from one clear visits its *window* `R`, and
+//! the redefinitions and `return`s it stops at its *ends* `E`. The walk
+//! drops the clear only when it answered yes for every successor, and it
+//! answers yes for an instruction only when that instruction is an end, or is
+//! quiet and every one of *its* successors answers yes; an instruction it is
+//! already inside answers no, so does one past the budget, and so does
+//! anything that is neither quiet nor an end. So when the clear is dropped:
+//!
+//! - every path from the clear stays inside `R` until it reaches `E` — it
+//!   cannot leave `R` any other way, because the only instructions `R`
+//!   admits are quiet ones and ends;
+//! - no path goes round inside `R` without reaching `E`, because a back edge
+//!   to an instruction still being walked answers no;
+//! - `R` is finite, bounded by [`WINDOW`].
+//!
+//! Together: **every path from the clear reaches `E`, within `R`**, which is
+//! to say the set `E` post-dominates the clear on the function's
+//! control-flow graph, and every instruction of the window lies between the
+//! two. Where the window does not fork `E` is one instruction — the later
+//! redefinition or clear of the same words — and it post-dominates the clear
+//! in the ordinary, single-node sense; where it forks, each arm ends in one
+//! of its own, and the arms together do. The dropped clear's null is
+//! therefore replaced, on every way on, by a write of the same words or by
+//! the frame's end, before anything but quiet work has run.
+//!
+//! # What the collector can see
 //!
 //! The collector reads the static map at a safepoint. Removing the clear
 //! changes what it would read in exactly one place — the words `W`, at the
-//! boundaries inside the window — and the question is whether a collection
-//! can happen there and see the difference.
+//! boundaries inside the window — which still hold what they held before the
+//! clear: an object the program has finished with.
 //!
-//! **Alone, it cannot.** A task that is the only one running collects only
-//! inside an instruction that allocates, and the window holds none: a
-//! quiet instruction does not allocate and does not call anything that
-//! could, and neither does a redefinition.
+//! **A task running alone cannot tell.** It collects only inside an
+//! instruction that allocates, and the window holds none: a quiet
+//! instruction does not allocate and does not call anything that could, and
+//! neither does a redefinition. A safepoint's poll, on either tier, parks for
+//! a collection only when another task has started one.
 //!
-//! **Beside another task, the encoded loop polls at any boundary**, because
-//! its safepoint is counted in instructions and not placed at particular
-//! ones, so a collection another task started can find this one parked
-//! inside the window. That is why a quiet instruction may not write a root or
-//! the heap. Then the collector's view of this frame at every boundary of
-//! the window — every root word, and every object they reach — is exactly
-//! its view at the boundary *before the clear* in the program as it was:
-//! only scalar words have changed since. So a collection in the window finds
-//! what it would have found had this task parked one boundary earlier, which
-//! was always possible, and no collection can retain anything the original
-//! program could not have had retained. The compiled tier takes a safepoint
+//! **Beside another task, it can**, and this is the trade the relaxed rule
+//! makes on purpose. The encoded loop polls at any boundary, because its
+//! safepoint is counted in instructions and not placed at particular ones, so
+//! a collection another task started can find this one parked inside the
+//! window, with `W` still naming the object and other roots already written.
+//! What that collection sees differently is one more root, and a root only
+//! ever *keeps* an object: the object `W` named, and whatever only it
+//! reaches, may survive that one collection, and is released by the first
+//! collection after the redefinition or the `return` that ends the window.
+//! Nothing is freed that the original program kept, no word the program
+//! reads is different, and no answer is. The compiled tier takes a safepoint
 //! at fewer places than the encoded loop — back edges, calls and allocations
-//! — and is covered by the same argument a fortiori.
+//! — and a back edge inside a window is one of them, so the same delayed
+//! release can happen there, and nothing else can.
+//!
+//! **Cove does not guarantee prompt collection, prompt finalization, or
+//! prompt release of Host resources.** A dead object may be retained
+//! conservatively until a later clear or redefinition of the slot that
+//! named it — or its frame's return — and a program that needs a resource
+//! released at a particular point says so by closing it.
 //!
 //! # Why a `return` ends the window
 //!
@@ -113,12 +152,12 @@
 //! The named-local condition still applies up to and including the
 //! `return`'s own program counter, because a debugger can stop there.
 //!
-//! This is the conservative rule issue #514 chose, and it is conservative on
-//! purpose. A window that writes a root — a `load-field` of another
-//! reference, a `dyn.child` into another view, a clear of another slot —
-//! would let the collector see a frame the original never presented, and
-//! whether the object `W` held is then reachable from elsewhere is a
-//! question this pass does not try to answer. Those clears stay.
+//! Issue #514's F7 first took the conservative rule, which kept a clear
+//! whenever the window wrote another root, so that the collector's view of
+//! the frame at every boundary of the window was one the original program
+//! had shown it. Step (a)(ii) relaxed that to the rule above: a window may
+//! write roots, but may still neither allocate nor call, and its ends must
+//! post-dominate it.
 //!
 //! # Renumbering
 //!
@@ -328,18 +367,15 @@ impl Walk<'_, '_> {
         all
     }
 
-    /// Whether `inst` leaves the collector's view of the frame and the heap
-    /// exactly as it found it: on the list, and writing no root word.
+    /// Whether `inst` may stand inside a window: it neither allocates, nor
+    /// calls, nor parks, nor writes the heap. It may write the frame's own
+    /// root words — see *What the collector can see*.
     fn quiet(&self, inst: &Inst) -> bool {
-        if !listed(inst) {
-            return false;
-        }
-        let refs = &self.function.refs;
-        let mut rooted = false;
-        self.flow.writes(inst, true, &mut |slot, width| {
-            rooted |= (slot..slot.saturating_add(width)).any(|word| refs.is_ref(word));
-        });
-        !rooted
+        listed(inst)
+            || matches!(
+                inst,
+                Inst::Clear { .. } | Inst::DynChild { .. } | Inst::DynOpen { .. }
+            )
     }
 }
 
@@ -573,15 +609,47 @@ mod tests {
         assert_eq!(ran(code.clone()), code);
     }
 
-    /// And a write of another root, allocating or not, shows the collector a
-    /// frame it was never shown before: the conservative rule keeps the
-    /// clear rather than ask whether the object is reachable from elsewhere.
+    /// A write of another root that neither allocates nor calls does not
+    /// keep the clear: the relaxed rule of issue #514's step (a)(ii). A load
+    /// of another reference, and a clear of other words, are both allowed in
+    /// the window.
     #[test]
-    fn a_root_written_between_them_keeps_the_clear() {
-        let code = vec![allocated(1), clear(1), load(5), load(1), done()];
-        assert_eq!(ran(code.clone()), code);
-        let code = vec![allocated(1), clear(1), clear(2), load(1), done()];
-        assert_eq!(ran(code.clone()), code);
+    fn a_root_written_between_them_does_not_keep_the_clear() {
+        assert_eq!(
+            ran(vec![allocated(1), clear(1), load(5), load(1), done()]),
+            [allocated(1), load(5), load(1), done()]
+        );
+        assert_eq!(
+            ran(vec![allocated(1), clear(1), clear(2), load(1), done()]),
+            [allocated(1), clear(2), load(1), done()]
+        );
+    }
+
+    /// A call in the window keeps the clear, whatever it writes: the callee
+    /// can allocate, and so collect with the slot still naming the object.
+    #[test]
+    fn a_call_between_them_keeps_the_clear() {
+        let code = vec![
+            allocated(1),
+            clear(1),
+            Inst::Call {
+                dst: 3,
+                callee: FunctionId(0),
+                args: crate::ArgsId(0),
+            },
+            load(1),
+            done(),
+        ];
+        let mut program = Program {
+            functions: vec![function(code.clone())],
+            layouts: layouts(),
+            strings: vec![Arc::from("s")],
+            args: vec![Vec::new()],
+            str_layout: STR,
+            ..Program::default()
+        };
+        drop_clears_before_redefinition(&mut program);
+        assert_eq!(program.function(FunctionId(0)).code, code);
     }
 
     /// An allocation *as* the redefinition is the same safepoint.
@@ -674,14 +742,16 @@ mod tests {
     }
 
     /// The window up to the `return` is still a window: an allocation in it
-    /// is a safepoint with the slot holding the dead object, and a root
-    /// written in it is a frame the collector was never shown.
+    /// is a safepoint with the slot holding the dead object, and keeps the
+    /// clear; a root written in it does not, as before a redefinition.
     #[test]
     fn what_keeps_a_clear_before_a_redefinition_keeps_it_before_a_return() {
         let code = vec![allocated(1), clear(1), allocated(2), done()];
         assert_eq!(ran(code.clone()), code);
-        let code = vec![allocated(1), clear(1), load(5), done()];
-        assert_eq!(ran(code.clone()), code);
+        assert_eq!(
+            ran(vec![allocated(1), clear(1), load(5), done()]),
+            [allocated(1), load(5), done()]
+        );
     }
 
     /// A trap is not a `return`: it leaves the frame standing, and the clear
@@ -722,15 +792,17 @@ mod tests {
         assert_eq!(ran(code.clone()), code);
     }
 
-    /// A write of one word of a two-word clear leaves the other one holding
-    /// what the clear would have zeroed; a write of both does not.
+    /// A write of one word of a two-word clear is not a redefinition: it
+    /// leaves the other one holding what the clear would have zeroed, so the
+    /// window goes on past it — here into an allocation, which keeps the
+    /// clear. A write of both words ends the window.
     #[test]
     fn a_write_of_part_of_the_words_keeps_the_clear() {
         let pair = Inst::Clear {
             slot: 5,
             layout: PAIR,
         };
-        let code = vec![allocated(5), pair.clone(), load(5), done()];
+        let code = vec![allocated(5), pair.clone(), load(5), allocated(2), done()];
         assert_eq!(ran(code.clone()), code);
         let whole = Inst::Copy {
             dst: 5,

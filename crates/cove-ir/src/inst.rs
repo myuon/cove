@@ -381,6 +381,17 @@ pub enum Inst {
     /// anyway, and it is emitted only where the slot would otherwise retain
     /// something — never for a scalar, and never where the slot is about to
     /// be overwritten.
+    ///
+    /// Emitting a clear is a promise about *eventually*, not about *now*. The
+    /// lowering drops a clear whose words are already null (`lower::nulls`)
+    /// and one a later write of the same words, or the frame's return,
+    /// post-dominates across a window that neither allocates nor calls
+    /// (`lower::redefined`). In the second case a collection another task runs
+    /// inside that window can still find the old object in the slot and keep
+    /// it for that one collection. **Cove does not guarantee prompt
+    /// collection, prompt finalization, or prompt release of Host
+    /// resources**: a dead object may be retained conservatively until a
+    /// later clear or redefinition of the slot that named it.
     Clear { slot: Slot, layout: LayoutId },
 
     // ---- scalar operations --------------------------------------------

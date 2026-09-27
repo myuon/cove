@@ -56,21 +56,20 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
         "\
 fn @m.take(Any) -> String
   frame 10: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int s7:ref s8:ref s9:ref
-  local v -> s0:Any [0, 14)
+  local v -> s0:Any [0, 13)
      0  load-field s2:Int s0:ref +0
-     1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
+     1  switch s2:int [8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 2 5] else 8
      2  unbox s4:m.Name s0:ref
      3  copy s3:String s4:String
-     4  clear s4:m.Name
-     5  jump 12
-     6  unbox s5..s6:m.Point s0:ref
-     7  str s3:ref \"point\"
-     8  jump 12
-     9  str s4:ref \"no implementation of `Show.show` for this value\"
-    10  str s7:ref \"\"
-    11  trap s4:ref, s7:ref, s7:ref
-    12  copy s1:String s3:String
-    13  return s1:String
+     4  jump 11
+     5  unbox s5..s6:m.Point s0:ref
+     6  str s3:ref \"point\"
+     7  jump 11
+     8  str s4:ref \"no implementation of `Show.show` for this value\"
+     9  str s7:ref \"\"
+    10  trap s4:ref, s7:ref, s7:ref
+    11  copy s1:String s3:String
+    12  return s1:String
 "
     );
 }
@@ -108,26 +107,25 @@ fn a_dyn_struct_field_holds_the_box() {
         "\
 fn @m.f() -> String
   frame 10: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int s7:ref s8:ref s9:ref
-  local h -> s2:m.Holder [5, 18)
+  local h -> s2:m.Holder [5, 17)
      0  str s1:ref \"n\"
      1  copy s2:String s1:String
      2  box s1:ref s2:m.Name
      3  copy s2:Any s1:Any
      4  clear s1:Any
      5  load-field s3:Int s2:ref +0
-     6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
+     6  switch s3:int [13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 7 10] else 13
      7  unbox s4:m.Name s2:ref
      8  copy s1:String s4:String
-     9  clear s4:m.Name
-    10  jump 17
-    11  unbox s5..s6:m.Point s2:ref
-    12  str s1:ref \"point\"
-    13  jump 17
-    14  str s4:ref \"no implementation of `Show.show` for this value\"
-    15  str s7:ref \"\"
-    16  trap s4:ref, s7:ref, s7:ref
-    17  copy s0:String s1:String
-    18  return s0:String
+     9  jump 16
+    10  unbox s5..s6:m.Point s2:ref
+    11  str s1:ref \"point\"
+    12  jump 16
+    13  str s4:ref \"no implementation of `Show.show` for this value\"
+    14  str s7:ref \"\"
+    15  trap s4:ref, s7:ref, s7:ref
+    16  copy s0:String s1:String
+    17  return s0:String
 "
     );
 }

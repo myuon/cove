@@ -158,6 +158,11 @@ fn @m.total(Int) -> Int
 /// end of each — so a walk over a large array holds one element at a time
 /// rather than every element it has reached.
 ///
+/// The listing does not show that clear: `lower::redefined` drops it, because
+/// every way on from the end of a turn either loads the next element into the
+/// same slot at 8 or returns at 13, through nothing that allocates or calls
+/// (issue #514's step (a)(ii)). The slot still holds one element at a time.
+///
 /// The body asks the element for its `byteLength()`, which is one `len`. It
 /// asked for its `length()` until ADR 0064 made that a Cove loop the inliner
 /// expands here, and eighteen instructions of somebody else's body between
@@ -174,8 +179,8 @@ fn a_for_over_an_array_walks_the_object_and_clears_the_element() {
         "\
 fn @m.count(Array) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
-  local xs -> s0:Array [0, 15)
-  local t -> s2:Int [1, 14)
+  local xs -> s0:Array [0, 14)
+  local t -> s2:Int [1, 13)
   local x -> s8:String [9, 11)
      0  int s2:int 0
      1  copy s3:Array s0:Array
@@ -184,14 +189,13 @@ fn @m.count(Array) -> Int
      4  int s6:int 1
      5  jump 7
      6  add.int s5:int s5:int s6:int
-     7  lt.int.branch s7:bool s5:int s4:int 13
+     7  lt.int.branch s7:bool s5:int s4:int 12
      8  load-elem s8:String s3:ref s5:int
      9  len s9:int s8:ref
     10  add.int s2:int s2:int s9:int
-    11  clear s8:String
-    12  jump 6
-    13  copy s1:Int s2:Int
-    14  return s1:Int
+    11  jump 6
+    12  copy s1:Int s2:Int
+    13  return s1:Int
 "
     );
 }
@@ -246,8 +250,8 @@ fn a_break_out_of_a_for_clears_the_element_it_was_holding() {
         "\
 fn @m.first(Array) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit
-  local xs -> s0:Array [0, 22)
-  local t -> s2:Int [1, 21)
+  local xs -> s0:Array [0, 21)
+  local t -> s2:Int [1, 20)
   local x -> s8:String [9, 18)
      0  int s2:int 0
      1  copy s3:Array s0:Array
@@ -256,7 +260,7 @@ fn @m.first(Array) -> Int
      4  int s6:int 1
      5  jump 7
      6  add.int s5:int s5:int s6:int
-     7  lt.int.branch s7:bool s5:int s4:int 20
+     7  lt.int.branch s7:bool s5:int s4:int 19
      8  load-elem s8:String s3:ref s5:int
      9  str s9:ref \"\"
     10  eq.str.branch s7:bool s8:ref s9:ref 13
@@ -265,12 +269,11 @@ fn @m.first(Array) -> Int
     13  str s9:ref \"q\"
     14  eq.str.branch s7:bool s8:ref s9:ref 17
     15  clear s8:String
-    16  jump 20
+    16  jump 19
     17  add.int.imm s2:int s2:int 1
-    18  clear s8:String
-    19  jump 6
-    20  copy s1:Int s2:Int
-    21  return s1:Int
+    18  jump 6
+    19  copy s1:Int s2:Int
+    20  return s1:Int
 "
     );
 }
@@ -338,9 +341,8 @@ fn @m.v() -> Vector
      8  int s4:int 2
      9  store-field s5:ref +0 s4:Int
     10  store-field s5:ref +1 s3:<ref>
-    11  clear s3:<ref>
-    12  copy s0:Vector s5:Vector
-    13  return s0:Vector
+    11  copy s0:Vector s5:Vector
+    12  return s0:Vector
 "
     );
 }
@@ -503,9 +505,8 @@ fn @m.f() -> Set
     10  store-elem s4:ref s6:int s3:Int
     11  add.int s6:int s6:int s5:int
     12  call s7:Set std.set.of<Int> (s4:Array)
-    13  clear s4:Array
-    14  copy s0:Set s7:Set
-    15  return s0:Set
+    13  copy s0:Set s7:Set
+    14  return s0:Set
 "
     );
 }
@@ -539,9 +540,8 @@ fn @m.f() -> Map
      8  add.int s5:int s5:int s2:int
      9  clear s3..s4:MapEntry
     10  call s6:Map std.map.of<String, Int> (s1:Array)
-    11  clear s1:Array
-    12  copy s0:Map s6:Map
-    13  return s0:Map
+    11  copy s0:Map s6:Map
+    12  return s0:Map
 "
     );
 }
@@ -683,7 +683,10 @@ fn @m.f(Set) -> Int
 /// `s9` the value, so `e.value` is slot arithmetic and emits nothing.
 ///
 /// The entry holds a reference, so it is cleared at the end of every turn —
-/// the same discipline every other element binding is under.
+/// the same discipline every other element binding is under — and, as for
+/// an array, `lower::redefined` drops that clear, because the next turn's
+/// `load-elem` or the `return` follows it through nothing that allocates or
+/// calls.
 #[test]
 fn a_for_over_a_map_binds_one_entry_at_the_layout_s_width() {
     assert_eq!(
@@ -694,8 +697,8 @@ fn a_for_over_a_map_binds_one_entry_at_the_layout_s_width() {
         "\
 fn @m.f(Map) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int
-  local m -> s0:Map [0, 14)
-  local n -> s2:Int [1, 13)
+  local m -> s0:Map [0, 13)
+  local n -> s2:Int [1, 12)
   local e -> s8..s9:MapEntry [9, 10)
      0  int s2:int 0
      1  copy s3:Map s0:Map
@@ -704,13 +707,12 @@ fn @m.f(Map) -> Int
      4  int s6:int 1
      5  jump 7
      6  add.int s5:int s5:int s6:int
-     7  lt.int.branch s7:bool s5:int s4:int 12
+     7  lt.int.branch s7:bool s5:int s4:int 11
      8  load-elem s8..s9:MapEntry s3:ref s5:int
      9  add.int s2:int s2:int s9:int
-    10  clear s8..s9:MapEntry
-    11  jump 6
-    12  copy s1:Int s2:Int
-    13  return s1:Int
+    10  jump 6
+    11  copy s1:Int s2:Int
+    12  return s1:Int
 "
     );
 }
@@ -768,7 +770,7 @@ fn an_array_literal_erases_each_element_the_written_type_erases() {
         "\
 fn @m.f(m.B) -> Int
   frame 8: s0!:int s1:int s2:ref s3:ref s4:ref s5:int s6:int s7:int
-  local b -> s0:m.B [0, 10)
+  local b -> s0:m.B [0, 9)
      0  box s2:ref s0:m.B
      1  box s3:ref s0:m.B
      2  alloc s4:ref Array<array> x2
@@ -776,9 +778,8 @@ fn @m.f(m.B) -> Int
      4  store-elem s4:ref s5:int s2:Any
      5  int s5:int 1
      6  store-elem s4:ref s5:int s3:Any
-     7  clear s3:Any
-     8  len s1:int s4:ref
-     9  return s1:Int
+     7  len s1:int s4:ref
+     8  return s1:Int
 "
     );
 }

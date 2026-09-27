@@ -28,6 +28,14 @@ use super::listing;
 /// element it has reached. The clears are at the end of the body rather than
 /// left to the next turn's overwrite, because the last turn has no next one.
 ///
+/// The lowering emits both, and the listing shows one. The element's, after
+/// 13, is dropped by `lower::redefined`: every way on from it either loads
+/// the next element into `s9` at 11 or returns at 17, through nothing that
+/// allocates or calls (issue #514's step (a)(ii), under which the copy of the
+/// answer at 16 no longer keeps it). The turn's answer is cleared at 14 and
+/// kept, because the way on to the next turn's redefinition of `s10` passes
+/// the call at 12.
+///
 /// Allocating at the receiver's length is also what makes an empty receiver
 /// answer an empty array with no calls: `len` is zero, the test fails on the
 /// first turn, and the object the loop allocated is the answer.
@@ -41,7 +49,7 @@ fn map_is_a_loop_that_clears_the_element_and_the_turn_s_answer() {
         "\
 fn @m.f(Array) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:ref s10:ref
-  local xs -> s0:Array [0, 21)
+  local xs -> s0:Array [0, 18)
      0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
@@ -52,17 +60,14 @@ fn @m.f(Array) -> Array
      7  int s7:int 1
      8  jump 10
      9  add.int s6:int s6:int s7:int
-    10  lt.int.branch s8:bool s6:int s4:int 17
+    10  lt.int.branch s8:bool s6:int s4:int 16
     11  load-elem s9:String s2:ref s6:int
     12  call-closure s10:String s3:ref (s9:String)
     13  store-elem s5:ref s6:int s10:String
     14  clear s10:String
-    15  clear s9:String
-    16  jump 9
-    17  clear s3:fn
-    18  clear s2:Array
-    19  copy s1:Array s5:Array
-    20  return s1:Array
+    15  jump 9
+    16  copy s1:Array s5:Array
+    17  return s1:Array
 "
     );
 }
@@ -137,7 +142,7 @@ fn a_vector_is_walked_through_a_copy_taken_before_the_first_call() {
         "\
 fn @m.f(Vector) -> Array
   frame 11: s0!:ref s1:ref s2:int s3:ref s4:int s5:ref s6:ref s7:int s8:bool s9:int s10:int
-  local v -> s0:Vector [0, 23)
+  local v -> s0:Vector [0, 21)
      0  load-field s2:Int s0:ref +0
      1  load-field s3:<ref> s0:ref +1
      2  int s4:int 0
@@ -157,10 +162,8 @@ fn @m.f(Vector) -> Array
     16  call-closure s10:Int s3:ref (s9:Int)
     17  store-elem s6:ref s4:int s10:Int
     18  jump 13
-    19  clear s3:fn
-    20  clear s5:Array
-    21  copy s1:Array s6:Array
-    22  return s1:Array
+    19  copy s1:Array s6:Array
+    20  return s1:Array
 "
     );
 }
@@ -181,7 +184,7 @@ fn a_declared_function_handed_to_map_is_the_same_loop() {
         "\
 fn @m.f(Array) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int
-  local xs -> s0:Array [0, 19)
+  local xs -> s0:Array [0, 17)
      0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.double<closure>
      2  func-ref s4:int @m.double
@@ -197,10 +200,8 @@ fn @m.f(Array) -> Array
     12  call-closure s10:Int s3:ref (s9:Int)
     13  store-elem s5:ref s6:int s10:Int
     14  jump 9
-    15  clear s3:fn
-    16  clear s2:Array
-    17  copy s1:Array s5:Array
-    18  return s1:Array
+    15  copy s1:Array s5:Array
+    16  return s1:Array
 "
     );
 }
@@ -219,7 +220,7 @@ fn a_walk_over_multiword_elements_is_a_stride_rather_than_an_address() {
         "\
 fn @m.f(Array) -> Array
   frame 12: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int s11:int
-  local xs -> s0:Array [0, 19)
+  local xs -> s0:Array [0, 17)
      0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
@@ -235,10 +236,8 @@ fn @m.f(Array) -> Array
     12  call-closure s10..s11:m.Point s3:ref (s9:Int)
     13  store-elem s5:ref s6:int s10..s11:m.Point
     14  jump 9
-    15  clear s3:fn
-    16  clear s2:Array
-    17  copy s1:Array s5:Array
-    18  return s1:Array
+    15  copy s1:Array s5:Array
+    16  return s1:Array
 "
     );
 }
@@ -279,7 +278,7 @@ fn sorted_is_a_bottom_up_stable_merge_over_two_runs() {
         "\
 fn @m.f(Array) -> Array
   frame 20: s0!:ref s1:ref s2:ref s3:ref s4:int s5:int s6:ref s7:int s8:int s9:int s10:int s11:int s12:int s13:int s14:int s15:bool s16:int s17:int s18:bool s19:ref
-  local xs -> s0:Array [0, 60)
+  local xs -> s0:Array [0, 58)
      0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
@@ -336,10 +335,8 @@ fn @m.f(Array) -> Array
     53  clear s19:Array
     54  add.int s8:int s8:int s8:int
     55  jump 11
-    56  clear s2:Array
-    57  clear s3:fn
-    58  copy s1:Array s6:Array
-    59  return s1:Array
+    56  copy s1:Array s6:Array
+    57  return s1:Array
 "
     );
 }
