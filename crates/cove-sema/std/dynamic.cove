@@ -141,18 +141,19 @@ use std.stringbuilder
 fn equals(a: Any, b: Any) -> Bool {
   let left = core.dynamicOpen(a)
   let right = core.dynamicOpen(b)
-  let count = children(left, right)
+  let kind = core.dynamicKind(left)
+  let count = children(left, right, kind)
   var at = 0
   while at < count {
-    let under = children(
-      core.dynamicChild(left, at),
-      core.dynamicChild(right, at),
-    )
+    let x = core.dynamicChild(left, at)
+    let y = core.dynamicChild(right, at)
+    let inner = core.dynamicKind(x)
+    let under = children(x, y, inner)
     if under < 0 {
       return false
     }
     if under > 0 {
-      return deeper(left, right, count, at, under)
+      return deeper(left, right, kind, count, at, x, y, inner, under)
     }
     at = at + 1
   }
@@ -160,9 +161,11 @@ fn equals(a: Any, b: Any) -> Bool {
   count >= 0
 }
 
-/// The rest of [`equals`] from child `from` of `left` and `right` on — a pair
-/// that is alike and has `under` children of its own each — over the two
-/// stacks.
+/// The rest of [`equals`] from child `from` of `left` and `right` on — `x`
+/// and `y`, a pair that is alike and has `under` children of its own each —
+/// over the two stacks. `kind` is `left`'s kind and `inner` is `x`'s: [`equals`]
+/// asked both already, and hands them over with `x` and `y` rather than have
+/// any of the four asked again (issue #514's F6).
 ///
 /// Every child before `from` has been compared and had nothing under it, so
 /// what is left to visit is `from`'s children and then its later siblings,
@@ -176,8 +179,12 @@ fn equals(a: Any, b: Any) -> Bool {
 fn deeper(
   left: DynamicView,
   right: DynamicView,
+  kind: Int,
   count: Int,
   from: Int,
+  x: DynamicView,
+  y: DynamicView,
+  inner: Int,
   under: Int,
 ) -> Bool {
   let lefts: Vector<DynamicView> = core.vectorWithCapacity(count)
@@ -188,12 +195,10 @@ fn deeper(
     stack(rights, core.dynamicChild(right, at))
     at = at - 1
   }
-  let x = core.dynamicChild(left, from)
-  let y = core.dynamicChild(right, from)
   // The two stacks are always the same height, so one count serves both.
   var depth = count - 1 - from
   // Two `if`s rather than one `||`, for `std.string.sliceBytes`' reason.
-  if core.dynamicKind(left) == 9 {
+  if kind == 9 {
     let way: Vector<DynamicView> = core.vectorWithCapacity(8)
     let ends: Vector<Int> = core.vectorWithCapacity(4)
     // The root's children are everything the stacks will ever hold, so it is
@@ -201,12 +206,12 @@ fn deeper(
     stack(way, left)
     stack(way, right)
     mark(ends, 0)
-    return tracked(lefts, rights, way, ends, depth, x, y, under)
+    return tracked(lefts, rights, way, ends, depth, x, y, inner, under)
   }
-  if core.dynamicKind(x) == 9 {
+  if inner == 9 {
     let way: Vector<DynamicView> = core.vectorWithCapacity(8)
     let ends: Vector<Int> = core.vectorWithCapacity(4)
-    return tracked(lefts, rights, way, ends, depth, x, y, under)
+    return tracked(lefts, rights, way, ends, depth, x, y, inner, under)
   }
   var next = under - 1
   while next >= 0 {
@@ -224,15 +229,18 @@ fn deeper(
     depth = depth - 1
     let x = core.vectorLoad(lefts, depth)
     let y = core.vectorLoad(rights, depth)
-    var next = children(x, y) - 1
+    // Asked here rather than inside [`children`], so that the vector test
+    // below reads the answer rather than asking it again.
+    let inner = core.dynamicKind(x)
+    var next = children(x, y, inner) - 1
     if next < -1 {
       return false
     }
     if next >= 0 {
-      if core.dynamicKind(x) == 9 {
+      if inner == 9 {
         let way: Vector<DynamicView> = core.vectorWithCapacity(8)
         let ends: Vector<Int> = core.vectorWithCapacity(4)
-        return tracked(lefts, rights, way, ends, depth, x, y, next + 1)
+        return tracked(lefts, rights, way, ends, depth, x, y, inner, next + 1)
       }
       while next >= 0 {
         let leftChild = core.dynamicChild(x, next)
@@ -254,9 +262,9 @@ fn deeper(
 }
 
 /// The rest of [`deeper`]'s walk once it has a vector to be inside: `x` and
-/// `y` — alike, with `under` children each — expanded above the `depth` pairs
-/// on `lefts` and `rights`, and then those, with the path of vector pairs kept
-/// in `way` and `ends`.
+/// `y` — alike, of kind `kind`, with `under` children each — expanded above
+/// the `depth` pairs on `lefts` and `rights`, and then those, with the path of
+/// vector pairs kept in `way` and `ends`.
 ///
 /// `way` holds the pairs of vectors the walk is inside, outermost first, as a
 /// left view and then a right one; `ends` holds, for each, how high the stacks
@@ -282,6 +290,7 @@ fn tracked(
   depth: Int,
   x: DynamicView,
   y: DynamicView,
+  kind: Int,
   under: Int,
 ) -> Bool {
   var depth = depth
@@ -306,7 +315,7 @@ fn tracked(
   // it, and holds none otherwise.
   let inside = core.identitySet()
   var deep = false
-  if core.dynamicKind(x) == 9 {
+  if kind == 9 {
     if held < 8 {
       if onPath(way, held, x, y) {
         core.refuse(
@@ -404,12 +413,14 @@ fn tracked(
       }
       held = open
     }
-    var next = children(x, y) - 1
+    // [`deeper`]'s reason: asked once, for [`children`] and the vector test.
+    let inner = core.dynamicKind(x)
+    var next = children(x, y, inner) - 1
     if next < -1 {
       return false
     }
     if next >= 0 {
-      if core.dynamicKind(x) == 9 {
+      if inner == 9 {
         if held < 8 {
           if onPath(way, held, x, y) {
             core.refuse(
@@ -556,10 +567,19 @@ fn containsItselfHelp() -> String {
 
 /// How many children `x` and `y` each have if they agree in everything but
 /// their children — the same type, the same scalar, the same case, the same
-/// number of children to compare next — and `-1` if they do not.
+/// number of children to compare next — and `-1` if they do not. `kind` is
+/// `x`'s kind.
 ///
 /// One answer rather than a `Bool` and a count asked for separately, because
 /// every caller wants both and the count is one more observation a node.
+///
+/// # The caller asks the kind
+///
+/// Every caller wants the kind as well — whether `x` is a vector is whether the
+/// walk has to look for it on its path — so the caller asks `core.dynamicKind`
+/// once and hands the answer in, rather than this asking it and the caller
+/// asking it again (issue #514's F6). That the kind is now asked before the
+/// type test rather than after it changes no answer: every view has a kind.
 ///
 /// The kind codes are `cove_ir::DynamicKind`'s one table: 0 unit, 1 bool, 2
 /// int, 3 float, 4 duration, 5 string, 6 struct, 7 enum, 8 array, 9 vector,
@@ -572,11 +592,10 @@ fn containsItselfHelp() -> String {
 /// one declaration have one field count, two cases of one enum one payload —
 /// because a count is what a collection is compared by first, and one
 /// comparison for every kind is shorter than a list of the kinds that need it.
-fn children(x: DynamicView, y: DynamicView) -> Int {
+fn children(x: DynamicView, y: DynamicView, kind: Int) -> Int {
   if !core.dynamicSameType(x, y) {
     return -1
   }
-  let kind = core.dynamicKind(x)
   if kind == 2 {
     if core.dynamicInt(x) == core.dynamicInt(y) {
       return 0
@@ -1576,18 +1595,21 @@ fn mutableKeyHelp() -> String {
 fn renderInto(value: Any, buffer: ByteBuffer, path: RenderPath) {
   let root = core.dynamicOpen(value)
   let kind = core.dynamicKind(root)
-  if written(root, kind, buffer, path) {
+  // [`written`] asked the count to decide, and answers it rather than have it
+  // asked again (issue #514's F6).
+  let count = written(root, kind, buffer, path)
+  if count == 0 {
     return
   }
   opening(root, kind, buffer)
-  let count = core.dynamicChildCount(root)
   var at = 0
   while at < count {
     between(root, kind, at, buffer)
     let child = core.dynamicChild(root, at)
     let inner = core.dynamicKind(child)
-    if !written(child, inner, buffer, path) {
-      renderBelow(root, at, child, inner, buffer, path)
+    let under = written(child, inner, buffer, path)
+    if under > 0 {
+      renderBelow(root, kind, count, at, child, inner, under, buffer, path)
       return
     }
     at = at + 1
@@ -1605,18 +1627,19 @@ fn renderInto(value: Any, buffer: ByteBuffer, path: RenderPath) {
 /// refusal has.
 fn renderView(root: DynamicView, buffer: ByteBuffer, path: RenderPath) {
   let kind = core.dynamicKind(root)
-  if written(root, kind, buffer, path) {
+  let count = written(root, kind, buffer, path)
+  if count == 0 {
     return
   }
   opening(root, kind, buffer)
-  let count = core.dynamicChildCount(root)
   var at = 0
   while at < count {
     between(root, kind, at, buffer)
     let child = core.dynamicChild(root, at)
     let inner = core.dynamicKind(child)
-    if !written(child, inner, buffer, path) {
-      renderBelow(root, at, child, inner, buffer, path)
+    let under = written(child, inner, buffer, path)
+    if under > 0 {
+      renderBelow(root, kind, count, at, child, inner, under, buffer, path)
       return
     }
     at = at + 1
@@ -1624,9 +1647,10 @@ fn renderView(root: DynamicView, buffer: ByteBuffer, path: RenderPath) {
   closing(kind, buffer)
 }
 
-/// The rest of [`renderInto`] from child `from` of `root` on — `child`, of
-/// kind `kind`, is that child, which has children of its own and whose
-/// separator is written — over the two stacks.
+/// The rest of [`renderInto`] from child `from` of `root` on — `root` is of
+/// kind `rootKind` with `rootCount` children, and `child`, of kind `kind`, is
+/// child `from`, which has `count` children of its own and whose separator is
+/// written — over the two stacks.
 ///
 /// `views` holds the containers that are open, outermost first, and `nexts`,
 /// for each, the child to render next; so the top of the two is where the walk
@@ -1636,11 +1660,26 @@ fn renderView(root: DynamicView, buffer: ByteBuffer, path: RenderPath) {
 /// [`repeats`] within the first [`shallow`] of them, and past those by `open`,
 /// an identity set that holds every open vector while the stack is deeper than
 /// the prefix and none while it is not.
+///
+/// # The innermost container is held in locals
+///
+/// The top of the stacks — the container's view, its kind, its count and the
+/// child to render next — is kept in `parent`, `above`, `limit` and `next`, so
+/// that rendering a child reads no stack and asks nothing more of the
+/// container than the child itself (issue #514's F6). The kind and the count
+/// are the answers [`written`] and its caller already had when the container
+/// was opened; they are asked again only when the walk comes back to the
+/// container from one below it, which is once a container it holds. `nexts`
+/// is written when the walk goes down, for the container it leaves, so its
+/// top slot is stale while the locals are live.
 fn renderBelow(
   root: DynamicView,
+  rootKind: Int,
+  rootCount: Int,
   from: Int,
   child: DynamicView,
   kind: Int,
+  count: Int,
   buffer: ByteBuffer,
   path: RenderPath,
 ) {
@@ -1656,8 +1695,13 @@ fn renderBelow(
   // always as long as each other, and only an append changes it.
   var depth = 1
   var high = 1
+  var parent = root
+  var above = rootKind
+  var limit = rootCount
+  var next = from + 1
   var view = child
   var shape = kind
+  var total = count
   var going = true
   while going {
     // `view` has children and is not written yet: the repeat, or open it. A
@@ -1684,25 +1728,27 @@ fn renderBelow(
       stringbuilder.appendText(buffer, "[…]")
     } else {
       opening(view, shape, buffer)
+      // The container the walk goes down from keeps its place below the top.
+      core.vectorStore(nexts, depth - 1, next)
       if depth >= high {
         stack(views, view)
         mark(nexts, 0)
         high = high + 1
       } else {
         core.vectorStore(views, depth, view)
-        core.vectorStore(nexts, depth, 0)
       }
       depth = depth + 1
+      parent = view
+      above = shape
+      limit = total
+      next = 0
     }
     // Then the next child that has children of its own, writing every leaf
     // and closing every finished container on the way to it.
     going = false
     while depth > 0 {
-      let top = depth - 1
-      let parent = core.vectorLoad(views, top)
-      let next = core.vectorLoad(nexts, top)
-      let above = core.dynamicKind(parent)
-      if next == core.dynamicChildCount(parent) {
+      if next == limit {
+        let top = depth - 1
         if deep {
           if top < 8 {
             // Back within the prefix: every vector leaves, the one closing
@@ -1722,14 +1768,24 @@ fn renderBelow(
         }
         closing(above, buffer)
         depth = top
+        if depth > 0 {
+          // Back in the container below, whose view and next child the
+          // stacks kept; its kind and its count are asked again.
+          parent = core.vectorLoad(views, depth - 1)
+          next = core.vectorLoad(nexts, depth - 1)
+          above = core.dynamicKind(parent)
+          limit = core.dynamicChildCount(parent)
+        }
       } else {
         between(parent, above, next, buffer)
-        core.vectorStore(nexts, top, next + 1)
         let part = core.dynamicChild(parent, next)
+        next = next + 1
         let inner = core.dynamicKind(part)
-        if !written(part, inner, buffer, path) {
+        let under = written(part, inner, buffer, path)
+        if under > 0 {
           view = part
           shape = inner
+          total = under
           going = true
           break
         }
@@ -1756,12 +1812,17 @@ fn repeats(views: Vector<DynamicView>, top: Int, view: DynamicView) -> Bool {
   false
 }
 
-/// Writes the whole of `view`, of kind `kind`, and answers `true` — where it
+/// Writes the whole of `view`, of kind `kind`, and answers `0` — where it
 /// has nothing to go inside: a scalar, a string, a function, an opaque value, a
 /// range, an empty collection, a struct with no fields or an `opaque` one, the
 /// builtin `Error`, a case with no payload, and a vector on `path`, the one the
-/// walk that reached the box handed over. Answers `false` and writes nothing
-/// for everything else, which [`opening`] opens.
+/// walk that reached the box handed over. Writes nothing for everything else,
+/// which [`opening`] opens, and answers how many children it has, which is
+/// never fewer than one — so `0` is never a count this answers.
+///
+/// The count and not a `Bool`, because deciding asked it: a caller that goes
+/// on to open the value reads it rather than asking it again (issue #514's
+/// F6).
 ///
 /// The kind codes are [`children`]' table, the commonest first.
 fn written(
@@ -1769,15 +1830,15 @@ fn written(
   kind: Int,
   buffer: ByteBuffer,
   path: RenderPath,
-) -> Bool {
+) -> Int {
   if kind == 5 {
     stringbuilder.appendText(buffer, core.dynamicString(view))
-    return true
+    return 0
   }
   if kind == 2 {
     let number = core.dynamicInt(view)
     int.renderInto(number, buffer)
-    return true
+    return 0
   }
   if kind >= 6 {
     if kind <= 11 {
@@ -1789,21 +1850,21 @@ fn written(
         if kind == 9 {
           if core.dynamicOnPath(view, path) {
             stringbuilder.appendText(buffer, "[…]")
-            return true
+            return 0
           }
         }
-        return false
+        return count
       }
       if kind == 7 {
         stringbuilder.appendText(buffer, core.dynamicCaseName(view))
-        return true
+        return 0
       }
       if kind <= 9 {
         stringbuilder.appendText(buffer, "[]")
-        return true
+        return 0
       }
       stringbuilder.appendText(buffer, "\{\}")
-      return true
+      return 0
     }
   }
   if kind == 1 {
@@ -1812,15 +1873,15 @@ fn written(
     } else {
       stringbuilder.appendText(buffer, "false")
     }
-    return true
+    return 0
   }
   if kind == 3 {
     float.renderInto(core.dynamicFloat(view), buffer)
-    return true
+    return 0
   }
   if kind == 4 {
     duration.renderInto(core.dynamicDuration(view), buffer)
-    return true
+    return 0
   }
   if kind == 12 {
     int.renderInto(core.dynamicInt(core.dynamicChild(view, 0)), buffer)
@@ -1830,27 +1891,28 @@ fn written(
       stringbuilder.appendText(buffer, "..<")
     }
     int.renderInto(core.dynamicInt(core.dynamicChild(view, 1)), buffer)
-    return true
+    return 0
   }
   if kind == 0 {
     stringbuilder.appendText(buffer, "()")
-    return true
+    return 0
   }
   if kind == 13 {
     stringbuilder.appendText(buffer, "<fn>")
-    return true
+    return 0
   }
   if kind == 15 {
     stringbuilder.appendText(buffer, "<shared>")
-    return true
+    return 0
   }
   stringbuilder.appendText(buffer, core.dynamicHandleText(view))
-  true
+  0
 }
 
-/// [`written`] for a struct with `count` fields: the whole of it where it has
-/// nothing to go inside — an `opaque` one is its name, the builtin `Error` its
-/// message, and one with no fields `Name()` — and `false` otherwise.
+/// [`written`] for a struct with `count` fields: the whole of it, and `0`,
+/// where it has nothing to go inside — an `opaque` one is its name, the builtin
+/// `Error` its message, and one with no fields `Name()` — and `count`
+/// otherwise.
 ///
 /// `Error` is told by its name and its one field's, which is what the runtime's
 /// walk and `Display for Value` tell it by: a builtin a module cannot declare
@@ -1861,7 +1923,7 @@ fn record(
   count: Int,
   buffer: ByteBuffer,
   path: RenderPath,
-) -> Bool {
+) -> Int {
   if count == 1 {
     if core.dynamicTypeName(view) == "Error" {
       if core.dynamicFieldName(view, 0) == "message" {
@@ -1872,14 +1934,14 @@ fn record(
   }
   if core.dynamicOpaque(view) {
     stringbuilder.appendText(buffer, core.dynamicTypeName(view))
-    return true
+    return 0
   }
   if count > 0 {
-    return false
+    return count
   }
   stringbuilder.appendText(buffer, core.dynamicTypeName(view))
   stringbuilder.appendText(buffer, "()")
-  true
+  0
 }
 
 /// Writes what comes before the first child of `view`, of kind `kind`, which
