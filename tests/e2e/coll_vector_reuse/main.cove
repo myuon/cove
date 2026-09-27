@@ -1,0 +1,87 @@
+use console.println
+
+/// Reads `items` on every turn and pushes onto `pushed` on some, where the two
+/// may be one vector: a push that grows it replaces the store every read goes
+/// through, and the next read has to find the new one.
+///
+/// Issue #514's step (b) keeps a vector's store word in a slot of its own
+/// between reads, until something may have replaced it. A read that went on
+/// through the old store would answer the element the store held before the
+/// push — or, past its capacity, stop the run — so every turn reads the last
+/// element, which is the one the push just wrote when there was one.
+fn readWhileGrowing(items: Vector<Int>, into: Vector<Int>, rounds: Int) -> Int {
+  var pushed = into
+  var total = 0
+  var turn = 0
+  while turn < rounds {
+    if turn % 3 == 0 {
+      pushed.push(turn * 7)
+    }
+    total = total + items.get(items.length() - 1).unwrapOr(-1000)
+    total = total + items.get(0).unwrapOr(-1000)
+    turn = turn + 1
+  }
+  total
+}
+
+/// The same reads beside pushes onto a vector of another element type, which
+/// cannot be `items`: they grow a store that is not the one being read.
+fn readBesideWords(
+  items: Vector<Int>,
+  beside: Vector<String>,
+  rounds: Int,
+) -> Int {
+  var words = beside
+  var total = 0
+  var turn = 0
+  while turn < rounds {
+    words.push("w")
+    total = total + items.get(turn % items.length()).unwrapOr(-1000)
+    total = total + words.length()
+    turn = turn + 1
+  }
+  total
+}
+
+/// Writes through one name and reads through the other: the store is shared,
+/// so every read sees the write whichever name made it.
+fn writeThroughAlias(
+  items: Vector<Int>,
+  other: Vector<Int>,
+  rounds: Int,
+) -> Int {
+  var alias = other
+  var total = 0
+  var turn = 0
+  while turn < rounds {
+    let at = turn % items.length()
+    alias.set(at, turn)
+    total = total + items.get(at).unwrapOr(-1000)
+    if turn % 5 == 0 {
+      alias.push(turn)
+    }
+    turn = turn + 1
+  }
+  total
+}
+
+export fn main() -> Result<Unit, Error> {
+  // One vector under both names: every third turn grows the store the reads
+  // go through, from a capacity of one.
+  var one: Vector<Int> = Vector.of(1)
+  println("same vector {readWhileGrowing(one, one, 100)} {one.length()}")?
+
+  // Two vectors of one layout: the pushes grow the other.
+  var read: Vector<Int> = Vector.of(3, 4)
+  var other: Vector<Int> = Vector.of()
+  println("two vectors {readWhileGrowing(read, other, 100)} {other.length()}")?
+
+  // A vector of another layout grows beside the reads.
+  var words: Vector<String> = Vector.of()
+  println("beside words {readBesideWords(read, words, 50)} {words.length()}")?
+
+  var shared: Vector<Int> = Vector.of(0, 0, 0)
+  println("through an alias {writeThroughAlias(shared, shared, 60)} {shared.length()}")?
+  println("last {shared.get(shared.length() - 1)}")?
+  Ok(())
+}

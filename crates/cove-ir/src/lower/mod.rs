@@ -78,6 +78,7 @@ mod gap;
 mod inline;
 mod interpolate;
 mod limits;
+mod loads;
 mod methods;
 mod named;
 pub(crate) mod names;
@@ -462,6 +463,16 @@ fn finish(
     // after the sweep, so that a box in a body nothing calls any more places
     // nothing. See `names`.
     names::place(&mut program, schemas);
+
+    // A field read again where nothing since the last read of it can have
+    // replaced it is not read again: the load goes, and its value is kept in
+    // a slot of its own until the first instruction that may change it — a
+    // push onto a vector that may be the same one, a call, a redefinition of
+    // the slot the object is in. Issue #514's VM residue (b). Here, after the
+    // expansion that puts the reads in the loops they are hot in, and before
+    // the passes below, which drop what it leaves over null words and decide
+    // the clears it places by their own rules. See `loads`.
+    loads::reuse_loaded_fields(&mut program);
 
     // A clear the `return` after it was going to make pointless is dropped
     // here rather than never emitted, because the emission sites are many and

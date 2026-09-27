@@ -2,6 +2,10 @@
 entry = "closures.main"
 allow = ["console"]
 
+[run.coll_vector_reuse]
+entry = "coll_vector_reuse.main"
+allow = ["console"]
+
 [run.coll_array]
 entry = "coll_array.main"
 allow = ["console"]
