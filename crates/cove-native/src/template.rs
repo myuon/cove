@@ -73,6 +73,8 @@ const RSI: u8 = 6;
 const RDI: u8 = 7;
 const R8: u8 = 8;
 const R9: u8 = 9;
+const R10: u8 = 10;
+const R11: u8 = 11;
 const R12: u8 = 12;
 const R13: u8 = 13;
 const R14: u8 = 14;
@@ -137,6 +139,14 @@ const ROUND_NUDGE: i64 = 0x3fdf_ffff_ffff_ffff_u64 as i64;
 /// The biased exponent of `2^52`, which is the first magnitude at which every
 /// double is already an integer.
 const ROUND_EXPONENT: i32 = 0x433;
+
+/// The longest byte [`Inst::RunCopy`] the template arm copies in emitted code
+/// (`Emit::short_copy_bytes`) rather than handing to the run-copy helper.
+///
+/// Far below one of the helper's chunks (`BULK_CHUNK_BYTES`, 8 KiB), which is
+/// what lets the fast path skip the helper's safepoint: a copy this short is
+/// one piece and never polls inside the helper either.
+pub const SHORT_COPY_BYTES: u32 = 64;
 
 // The three SSE2 packed logicals the min/max blend is built from, and the
 // `cmpsd` predicate that drives it.
@@ -1055,7 +1065,8 @@ impl<'a> Emit<'a> {
             // ADR 0058's `run-copy`, handed to the runtime whole. See
             // [`crate::abi::RunCopyFn`] for why it has no emitted loop — memmove in
             // bounded chunks with a poll between them, and refusals whose
-            // sentences only the runtime can build.
+            // sentences only the runtime can build — and [`Emit::short_copy_bytes`]
+            // for the one short byte copy that is answered here instead.
             Inst::RunCopy { args, storage } => match storage {
                 Storage::PackedBytes => self.run_copy(args.0, RunOp::CopyBytes, 0),
                 Storage::Words(elem) => self.run_copy(args.0, RunOp::CopyWords, elem.0),
@@ -1758,6 +1769,14 @@ impl<'a> Emit<'a> {
     /// method does, and "fully inlined byte/word copy windows" would only add
     /// bytes to the table above.
     ///
+    /// That was the state #423 measured. Issue #515's F8 later put one bounded
+    /// copy back in front of the call — a byte copy of at most
+    /// [`SHORT_COPY_BYTES`], answered by [`Emit::short_copy_bytes`] with no
+    /// hand-over — because the helper's *entry safepoint*, not the copy, was a
+    /// third of a boxed render's native time. It is a fixed sequence rather than
+    /// a copy proportional to anything, and every `append.bytes` window in the
+    /// table above now carries one: about 540 bytes each.
+    ///
     /// **The one real lever costs more time than it saves size.** A recognised
     /// window can be emitted with no inline fast path at all, every heavy row
     /// going straight to the helper that is already its cold half. Measured,
@@ -2176,7 +2195,9 @@ impl<'a> Emit<'a> {
         self.frame_live = false;
     }
 
-    /// One [ADR 0058] `run-copy` or `run-slice`, handed to the runtime whole.
+    /// One [ADR 0058] `run-copy` or `run-slice`, handed to the runtime whole —
+    /// except a short byte copy, which [`Emit::short_copy_bytes`] answers first
+    /// and hands over only what it does not answer.
     ///
     /// [`Emit::growable_op`]'s shape exactly — the same six registers, the same
     /// shift back to a word index, the same test of the outcome — with the
@@ -2184,13 +2205,205 @@ impl<'a> Emit<'a> {
     /// its pair. See [`crate::abi::RunCopyFn`] for what the operands mean and why
     /// the copy is the helper's.
     ///
-    /// It is a safepoint: the helper takes one before the copy, a slice
+    /// The hand-over is a safepoint: the helper takes one before the copy, a slice
     /// allocates, and a long copy polls between chunks, any of which may collect.
     /// So the unpaid work is published before the call and the frame pointer
-    /// dropped after it.
+    /// dropped after it — and dropped after the short copy too, since the two
+    /// paths join.
     ///
     /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
     fn run_copy(&mut self, args: u32, kind: RunOp, elem: u32) {
+        if kind == RunOp::CopyBytes {
+            let cold = self.label();
+            let done = self.label();
+            self.short_copy_bytes(args, cold);
+            self.jmp(Target::Label(done));
+            self.bind(cold);
+            self.run_copy_call(args, kind, elem);
+            self.bind(done);
+            // The cold predecessor came through a helper that may have grown the
+            // stack.
+            self.frame_live = false;
+        } else {
+            self.run_copy_call(args, kind, elem);
+        }
+    }
+
+    /// A byte [`Inst::RunCopy`](cove_ir::Inst::RunCopy) of at most
+    /// [`SHORT_COPY_BYTES`], copied in emitted code — issue #515's F8 — and a
+    /// jump to `cold` for anything this does not answer, **before anything has
+    /// been written or charged**, so that the helper behind `cold` sees exactly
+    /// what it always saw.
+    ///
+    /// # What it answers, and what goes to the helper
+    ///
+    /// Everything `encoded::run_copy_bytes` would refuse goes to `cold`, which
+    /// refuses it in the runtime's own words: a null object (any address below
+    /// the heap goes, which is null and a stack address alike), a destination
+    /// that is not [`Program::bytes_layout`](cove_ir::Program::bytes_layout), a
+    /// source that is neither that nor
+    /// [`Program::str_layout`](cove_ir::Program::str_layout), and a range past
+    /// either end — with a negative offset or count read as an unsigned number
+    /// too large to pass. So do three things the helper answers and this does
+    /// not: a count above the threshold, a copy whose source and destination
+    /// are one object (the helper's memmove direction rule), and a range whose
+    /// payload words straddle two heap chunks.
+    ///
+    /// # Why there is no safepoint
+    ///
+    /// The helper's safepoint is its *entry* charge, not the copy's: a copy of at
+    /// most one chunk — and [`SHORT_COPY_BYTES`] is far below one — never polls
+    /// between pieces, so the only safepoint the helper takes on it is the one
+    /// in front, which exists because compiled code's unpaid work had to be in
+    /// the machine's account before the chunk loop measured against it. A copy
+    /// that does not enter the chunk loop does not need that, and nothing here
+    /// allocates, so nothing here can collect. The words the copy moves are added
+    /// to [`WORK`] instead, which is where every other unit of compiled work
+    /// waits for the next poll: the same `words_of_bytes(count)` the chunk loop
+    /// charges, landing in the same `bulk_work` when it is paid. Fuel is the same
+    /// sum; what moves is only *which* poll sees it, by at most
+    /// `SHORT_COPY_BYTES / 8` words — ADR 0040's `T`, as for any straight-line
+    /// instruction.
+    ///
+    /// # The copy
+    ///
+    /// A packed run's bytes are its payload words' bytes, least-significant
+    /// first, so within one heap chunk byte `i` of the run is byte `i` past the
+    /// first payload word's address. Two different objects cannot overlap, so
+    /// the copy is ascending: whole unaligned words while eight bytes remain, then
+    /// single bytes. No read goes past `src_at + count` or write past
+    /// `dst_at + count`, both of which the checks bounded by the headers.
+    fn short_copy_bytes(&mut self, args: u32, cold: usize) {
+        let row = self.program.arg_list(ArgsId(args));
+        let (dst, dst_at, src, src_at, count) = (
+            row[0].slot,
+            row[1].slot,
+            row[2].slot,
+            row[3].slot,
+            row[4].slot,
+        );
+        const DST: u8 = R8;
+        const SRC: u8 = R9;
+        const COUNT: u8 = R10;
+
+        // Both on the heap, which is below-the-origin null and every stack
+        // address at once: a run is a heap object, and anything else is the
+        // helper's to read through `Memory` and refuse.
+        self.mov_imm64(RCX, HEAP_ORIGIN_WORDS as i64);
+        self.load_slot(DST, dst);
+        self.cmp_rr(DST, RCX);
+        self.jcc(CC_B, Target::Label(cold));
+        self.load_slot(SRC, src);
+        self.cmp_rr(SRC, RCX);
+        self.jcc(CC_B, Target::Label(cold));
+        self.cmp_rr(DST, SRC);
+        self.jcc(CC_E, Target::Label(cold));
+        // Unsigned, so a negative count is one too large.
+        self.load_slot(COUNT, count);
+        self.cmp_imm32(COUNT, SHORT_COPY_BYTES as i32);
+        self.jcc(CC_A, Target::Label(cold));
+
+        self.run_end(DST, dst_at, &[self.program.bytes_layout.0], COUNT, cold);
+        self.run_end(
+            SRC,
+            src_at,
+            &[self.program.str_layout.0, self.program.bytes_layout.0],
+            COUNT,
+            cold,
+        );
+
+        // Every refusal is behind us. A copy of nothing charges nothing, as
+        // `words_of_bytes(0)` does not; otherwise `words_of_bytes(count)` goes
+        // into the unpaid work.
+        let end = self.label();
+        self.test_rr(COUNT, COUNT);
+        self.jcc(CC_E, Target::Label(end));
+        self.mov_rr(RAX, COUNT);
+        self.add_imm32(RAX, 7);
+        self.shr_imm8(RAX, 3);
+        self.add_rr(WORK, RAX);
+
+        let words = self.label();
+        let bytes = self.label();
+        let tail = self.label();
+        self.bind(words);
+        self.cmp_imm32(COUNT, 8);
+        self.jcc(CC_B, Target::Label(tail));
+        self.load(RAX, SRC, 0);
+        self.store(DST, 0, RAX);
+        self.add_imm32(SRC, 8);
+        self.add_imm32(DST, 8);
+        self.add_imm32(COUNT, -8);
+        self.jmp(Target::Label(words));
+        self.bind(tail);
+        self.test_rr(COUNT, COUNT);
+        self.jcc(CC_E, Target::Label(end));
+        self.bind(bytes);
+        self.load8(RAX, SRC, 0);
+        self.store8(DST, 0, RAX);
+        self.add_imm32(SRC, 1);
+        self.add_imm32(DST, 1);
+        self.add_imm32(COUNT, -1);
+        self.jcc(CC_NE, Target::Label(bytes));
+        self.bind(end);
+    }
+
+    /// One end of [`Emit::short_copy_bytes`]: the object at the heap address in
+    /// `obj`, whose header must name one of `layouts` and whose header length
+    /// must hold `at .. at + count`, where `at` is read from its slot — and then
+    /// the machine address of byte `at` of its payload, into `obj`. A jump to
+    /// `cold` for anything else, with nothing written.
+    ///
+    /// The address is formed once, for the header, and the payload is addressed
+    /// from it, which is sound only while the words from the header to the one
+    /// holding byte `at + count` lie in one heap chunk. The heap origin is a
+    /// multiple of a chunk, so two linear addresses share one exactly when they
+    /// agree above [`HEAP_CHUNK_SHIFT`]; a range that crosses is the helper's.
+    /// Testing byte `at + count` rather than the last byte copied is one byte
+    /// stricter and needs no case for a count of nought; it is compared as an
+    /// address and never read.
+    fn run_end(&mut self, obj: u8, at: Slot, layouts: &[u32], count: u8, cold: usize) {
+        const AT: u8 = R11;
+        let family = self.label();
+        self.mov_rr(RAX, obj);
+        self.heap_ptr(RAX);
+        self.load(RAX, HEAP_TABLE, 0);
+        self.mov_rr(RCX, RAX);
+        self.shr_imm8(RCX, 32);
+        for (i, layout) in layouts.iter().enumerate() {
+            self.cmp_imm32(RCX, *layout as i32);
+            if i + 1 == layouts.len() {
+                self.jcc(CC_NE, Target::Label(cold));
+            } else {
+                self.jcc(CC_E, Target::Label(family));
+            }
+        }
+        self.bind(family);
+        // `Memory::object_len`, and `at` against it unsigned: a negative offset
+        // is one too large, and `at + count` cannot wrap below `2^32 + 64`.
+        self.mov_rr32(RAX, RAX);
+        self.load_slot(AT, at);
+        self.cmp_rr(AT, RAX);
+        self.jcc(CC_A, Target::Label(cold));
+        self.mov_rr(RCX, AT);
+        self.add_rr(RCX, count);
+        self.cmp_rr(RCX, RAX);
+        self.jcc(CC_A, Target::Label(cold));
+        // `obj + 1 + (at + count) / 8` in the header's chunk.
+        self.shr_imm8(RCX, 3);
+        self.add_rr(RCX, obj);
+        self.add_imm32(RCX, 1);
+        self.xor_rr(RCX, obj);
+        self.shr_imm8(RCX, HEAP_CHUNK_SHIFT as u8);
+        self.jcc(CC_NE, Target::Label(cold));
+        // The header's address, one word, and `at` bytes.
+        self.mov_rr(obj, HEAP_TABLE);
+        self.add_imm32(obj, 8);
+        self.add_rr(obj, AT);
+    }
+
+    /// The helper call itself: see [`Emit::run_copy`].
+    fn run_copy_call(&mut self, args: u32, kind: RunOp, elem: u32) {
         let words = kind.abi() as i32;
         self.store(CTX, OFF_PENDING_WORK, WORK);
         self.xor_rr(WORK, WORK);
@@ -3876,6 +4089,25 @@ impl<'a> Emit<'a> {
         self.rex(false, dst, base);
         self.byte(0x8b);
         self.modrm_mem(dst, base, disp);
+    }
+
+    /// `movzx r32, byte [base + disp]`, which zeroes the rest of `dst`.
+    fn load8(&mut self, dst: u8, base: u8, disp: i32) {
+        self.rex(false, dst, base);
+        self.byte(0x0f);
+        self.byte(0xb6);
+        self.modrm_mem(dst, base, disp);
+    }
+
+    /// `mov byte [base + disp], r8`. `src` is `RAX`, `RCX`, `RDX` or `RBX`, whose
+    /// low bytes are addressable without a `REX` prefix — with one, the same
+    /// numbers would still name `al` to `bl`, so the prefix [`Emit::rex`] adds
+    /// for a high `base` changes nothing about which byte is stored.
+    fn store8(&mut self, base: u8, disp: i32, src: u8) {
+        debug_assert!(src < 4, "only `al`, `cl`, `dl` and `bl` are stored");
+        self.rex(false, src, base);
+        self.byte(0x88);
+        self.modrm_mem(src, base, disp);
     }
 
     /// `mov [base + disp], r64`
