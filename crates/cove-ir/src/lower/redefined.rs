@@ -29,8 +29,9 @@
 //!   answer [`Flow::writes`] gives, so a closure call's guessed width never
 //!   counts — reads none of them, and is one of the quiet instructions below,
 //!   or [`Inst::DynChild`] or [`Inst::DynOpen`], which write a view and do
-//!   not allocate, or another [`Inst::Clear`] of the same words, which writes
-//!   the null this one would have.
+//!   not allocate, or another [`Inst::Clear`] of the same words that is
+//!   *kept*, which writes the null this one would have — see *A clear is an
+//!   end only while it is kept*.
 //! - **A `return`** ends the window when the answer it carries away shares no
 //!   word with `W` — the read every instruction in the window is asked about,
 //!   with [`Flow::reads`] giving the answer's run at
@@ -46,7 +47,8 @@
 //!   window may fork, and then each arm has to end in a redefinition of its
 //!   own.
 //! - A path that traps, loops back to a program counter the walk is already
-//!   inside, or meets anything else keeps the clear. A trap is kept on
+//!   inside — the clear itself among them — or meets anything else keeps
+//!   the clear. A trap is kept on
 //!   purpose: it leaves the frame standing, because the refusal's call chain
 //!   is read out of the frames, and nothing here shows that no reader of a
 //!   standing frame looks at `W`.
@@ -85,6 +87,33 @@
 //! of its own, and the arms together do. The dropped clear's null is
 //! therefore replaced, on every way on, by a write of the same words or by
 //! the frame's end, before anything but quiet work has run.
+//!
+//! The second point is the one a loop tests, and it is issue #514's rule in
+//! so many words: **any cycle that can avoid every end is rejected**, because
+//! a cycle is where polling lets another task collect again and again, and a
+//! dead object the slot still named would then outlive unboundedly many
+//! collections rather than one. A back edge that returns into the window
+//! before an end — to a quiet instruction the walk is still inside, or to
+//! the clear being decided, which is not an end of its own window — answers
+//! no, and so does a cycle nothing leaves at all. A cycle that passes through
+//! an end on every way round is not a cycle *of the window*: the walk stops
+//! at the end, and what follows it is another window's business.
+//!
+//! # A clear is an end only while it is kept
+//!
+//! A later clear of the same words ends a window because it writes the null
+//! the dropped one would have — which it does only if it is itself still
+//! there. Two clears that each end the other's window would otherwise both
+//! go, and on a loop that is exactly the cycle above: `clear` at the head of a
+//! turn, quiet work, a back edge to the head, and the only end on the way
+//! round is the clear being decided. So the walk treats the clear it is
+//! deciding, and every clear already decided to go, as the quiet instruction
+//! it will be once the decision is made; and a clear it did stop at as an end
+//! is *pinned*, kept whatever its own walk would answer. The clears are
+//! decided last first, so that in a straight run of clears of one slot the
+//! last is decided — against whatever follows it — before the ones that
+//! would rest on it, and a run whose last one ends at a `return` goes whole,
+//! as it did before the rule was written down this carefully.
 //!
 //! # What the collector can see
 //!
@@ -195,19 +224,27 @@ const WINDOW: usize = 64;
 
 /// Which of a function's instructions are clears that a redefinition or a
 /// `return` makes pointless.
+///
+/// The clears are decided last first, and a clear another one's window ended
+/// at is *pinned*: kept, whatever its own walk would have answered. See *A
+/// clear is an end only while it is kept*.
 fn redefined(function: &Function, program: &Program) -> Vec<bool> {
     let mut dropped = vec![false; function.code.len()];
     let Some(flow) = Flow::of(function, program) else {
         return dropped;
     };
+    let mut pinned = vec![false; function.code.len()];
     // One table of answers for the whole function, reset between clears by
     // the walk that wrote it, so that a body with many clears does not pay
     // its own length once per clear.
     let mut state = vec![Seen::No; function.code.len()];
-    for (at, inst) in function.code.iter().enumerate() {
-        let Inst::Clear { slot, layout } = *inst else {
+    for at in (0..function.code.len()).rev() {
+        let Inst::Clear { slot, layout } = function.code[at] else {
             continue;
         };
+        if pinned[at] {
+            continue;
+        }
         let words = Words {
             from: slot as usize,
             to: slot as usize + flow.width(layout) as usize,
@@ -222,12 +259,24 @@ fn redefined(function: &Function, program: &Program) -> Vec<bool> {
             state: &mut state,
             touched: Vec::new(),
             budget: WINDOW,
+            start: at,
+            dropped: &dropped,
+            relied: Vec::new(),
         };
         let mut next = Vec::new();
         flow.successors(at, &mut |to| next.push(to));
-        dropped[at] = !next.is_empty() && next.into_iter().all(|to| walk.reaches(to));
-        for pc in walk.touched {
+        let drop = !next.is_empty() && next.into_iter().all(|to| walk.reaches(to));
+        let Walk {
+            touched, relied, ..
+        } = walk;
+        for pc in touched {
             state[pc] = Seen::No;
+        }
+        if drop {
+            dropped[at] = true;
+            for pc in relied {
+                pinned[pc] = true;
+            }
         }
     }
     dropped
@@ -276,6 +325,14 @@ struct Walk<'w, 'p> {
     touched: Vec<usize>,
     /// How many more instructions the walk may look at.
     budget: usize,
+    /// The clear being decided, which is not an end of its own window: if
+    /// it goes, it writes nothing.
+    start: usize,
+    /// The clears already decided to go, which are not ends either.
+    dropped: &'w [bool],
+    /// The clears of the same words this walk stopped at as ends, which have
+    /// to stay if this one goes.
+    relied: Vec<usize>,
 }
 
 impl Walk<'_, '_> {
@@ -314,7 +371,10 @@ impl Walk<'_, '_> {
         }
         // A `return` that does not carry the words away — the read above —
         // pops the frame they are in, and a popped frame is nobody's root.
-        if self.redefines(inst) || matches!(inst, Inst::Return { .. }) {
+        if self.redefines(pc, inst) || matches!(inst, Inst::Return { .. }) {
+            if matches!(inst, Inst::Clear { .. }) {
+                self.relied.push(pc);
+            }
             self.state[pc] = Seen::Ends;
             return true;
         }
@@ -349,9 +409,16 @@ impl Walk<'_, '_> {
             })
     }
 
-    /// Whether `inst` writes every cleared word, without allocating or
-    /// calling anything that could.
-    fn redefines(&self, inst: &Inst) -> bool {
+    /// Whether `inst`, at `pc`, writes every cleared word, without allocating
+    /// or calling anything that could.
+    ///
+    /// A clear counts only while it is kept: not the clear being decided,
+    /// and not one already decided to go, each of which is a quiet
+    /// instruction that writes nothing once the decision is made.
+    fn redefines(&self, pc: usize, inst: &Inst) -> bool {
+        if matches!(inst, Inst::Clear { .. }) && (pc == self.start || self.dropped[pc]) {
+            return false;
+        }
         let writer = matches!(
             inst,
             Inst::Clear { .. } | Inst::DynChild { .. } | Inst::DynOpen { .. }
@@ -790,6 +857,102 @@ mod tests {
             done(),
         ];
         assert_eq!(ran(code.clone()), code);
+    }
+
+    /// Issue #514's rule for a loop: a cycle that can go round without
+    /// reaching an end keeps the clear, because polling on the way round lets
+    /// another task collect as often as it likes. Here the only thing on the
+    /// way round is the clear itself, and a clear that has gone is not an end
+    /// of its own window — before the rule was written down, it counted as
+    /// one, and the loop kept the dead object in the slot for every turn.
+    #[test]
+    fn a_cycle_that_avoids_every_end_keeps_the_clear() {
+        let back_to_itself = vec![
+            allocated(1),
+            clear(1),
+            scalar(),
+            Inst::BranchFalse { cond: 4, to: 1 },
+            load(1),
+            done(),
+        ];
+        assert_eq!(ran(back_to_itself.clone()), back_to_itself);
+        // A back edge that can reach neither an end nor anything else.
+        let spinning = vec![allocated(1), clear(1), scalar(), Inst::Jump { to: 2 }];
+        assert_eq!(ran(spinning.clone()), spinning);
+    }
+
+    /// Two clears of one slot on a loop would each end the other's window,
+    /// and dropping both would leave a cycle with no end on it. One is kept:
+    /// the later is decided first, stops at the earlier as its end, and the
+    /// earlier is pinned by that.
+    #[test]
+    fn two_clears_that_end_each_other_s_window_keep_one() {
+        assert_eq!(
+            ran(vec![
+                allocated(1),
+                clear(1),
+                scalar(),
+                clear(1),
+                Inst::BranchFalse { cond: 4, to: 1 },
+                done(),
+            ]),
+            [
+                allocated(1),
+                clear(1),
+                scalar(),
+                Inst::BranchFalse { cond: 4, to: 1 },
+                done(),
+            ]
+        );
+    }
+
+    /// A cycle that passes through an end on every way round is not a cycle
+    /// of the window: the walk stops at the redefinition, and the loop after
+    /// it is another window's.
+    #[test]
+    fn a_cycle_through_an_end_on_every_way_round_drops_the_clear() {
+        assert_eq!(
+            ran(vec![
+                allocated(1),
+                clear(1),
+                scalar(),
+                load(1),
+                Inst::BranchFalse { cond: 4, to: 2 },
+                done(),
+            ]),
+            [
+                allocated(1),
+                scalar(),
+                load(1),
+                Inst::BranchFalse { cond: 4, to: 1 },
+                done(),
+            ]
+        );
+    }
+
+    /// A window whose only ends are `return`s — one on each arm — is
+    /// post-dominated by them, and the clear goes.
+    #[test]
+    fn a_window_whose_only_ends_are_returns_drops_the_clear() {
+        assert_eq!(
+            ran(vec![
+                allocated(1),
+                clear(1),
+                Inst::BranchFalse { cond: 4, to: 5 },
+                scalar(),
+                done(),
+                scalar(),
+                done(),
+            ]),
+            [
+                allocated(1),
+                Inst::BranchFalse { cond: 4, to: 4 },
+                scalar(),
+                done(),
+                scalar(),
+                done(),
+            ]
+        );
     }
 
     /// A write of one word of a two-word clear is not a redefinition: it
