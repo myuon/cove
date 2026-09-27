@@ -195,6 +195,14 @@ another task collects inside that short window the dead object survives that
 one collection (`lower/redefined.rs`). Cove promises no prompt collection,
 finalization, or Host-resource release.
 
+A field read again with nothing between that could have replaced it is kept
+in a slot of its own rather than read again (`lower/loads.rs`) — a vector's
+store word across a loop, most often. That slot is a root too, and it names
+only the field's current value, which the object holding the field names as
+well: it is cleared where it stops being read on any way that could reach a
+growth, a call or another write that may replace the field, so a store a
+growth replaced is not kept by it, beyond the same one-collection window.
+
 **"At a temporary's last use" is the intent, and a diverging sub-expression
 is where it is hard.** In `f(a, if c { b } else { break })` the last use of
 `a` on the taken path is not where the release was written, because control

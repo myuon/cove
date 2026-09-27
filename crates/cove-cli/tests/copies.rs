@@ -1743,7 +1743,15 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// instantiations, `values_boxed_order.chainRows` 5, `values_boxed_order.links`
 /// 1, and `links` in `fail_key_boxed_deep_200` and `fail_key_boxed_deep_1000`
 /// 1 each. No other function's count moved.
-const FORWARDABLE_COPIES: usize = 6652;
+///
+/// **6,678 since issue #514's step (b) kept a loaded field in a slot of its
+/// own**, a rise of 26 that is all program and no lowering: with the one it
+/// added held out, `coll_vector_reuse`, the 253 before it answer 6,652
+/// exactly, as they did before the pass and before step (a)'s rule for a
+/// cycle was written down. The pass drops loads and moves clears, and
+/// neither is a copy. The new program carries the whole standard library,
+/// which the survey counts in every program.
+const FORWARDABLE_COPIES: usize = 6678;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -823,6 +823,145 @@ fn on_the_oracle(source: &str) -> Result<Value, RuntimeError> {
     Interpreter::new(&runtime).run_entry("m", "main", Vec::new())
 }
 
+/// A vector's store word kept in a slot of its own between reads (issue
+/// #514's step (b), `cove_ir::lower::loads`), and then replaced by a growth.
+///
+/// `read` reads every element of `items` in a loop, which the pass turns into
+/// one read of the store word before the loop, kept in a cache slot; then it
+/// pushes onto `grower` — the same vector under another name, so the push
+/// kills what was kept — and the store the loop read is replaced by one twice
+/// its size. Then it churns while its own frame still stands, collecting many
+/// times. A cache slot that still named the old store would keep its 4,096
+/// words live through every one of those collections, although nothing else
+/// can reach them.
+///
+/// Two controls. `plain` makes the same growth without the loop, so nothing
+/// was ever cached and the old store is certainly garbage: `grown` has to
+/// leave as little live as it does. `kept` holds a copy of the old elements
+/// through the churn, which is what a retained store would look like: it is
+/// what shows the measurement can see 4,096 words at all.
+const GROWN: &str = "\
+fn filled(count: Int) -> Vector<Int> {
+  var items: Vector<Int> = Vector.of()
+  var at = 0
+  while at < count {
+    items.push(at)
+    at = at + 1
+  }
+  items
+}
+
+fn churn(rounds: Int) -> Int {
+  var total = 0
+  var at = 0
+  while at < rounds {
+    var items: Vector<Int> = Vector.of()
+    items.push(at)
+    total = total + items.length()
+    at = at + 1
+  }
+  total
+}
+
+fn read(items: Vector<Int>, grower: Vector<Int>, reads: Bool, keep: Bool) -> Int {
+  var total = 0
+  if reads {
+    var at = 0
+    while at < items.length() {
+      total = total + items.get(at).unwrapOr(0)
+      at = at + 1
+    }
+  }
+  var snapshot = filled(0).toArray()
+  if keep {
+    snapshot = items.toArray()
+  }
+  var grow = grower
+  grow.push(1)
+  total = total + churn(20000)
+  total + snapshot.length() + items.length()
+}
+
+export fn grown() -> Result<Unit, Error> {
+  let items = filled(4096)
+  assertEqual(read(items, items, true, false), 4096 * 4095 / 2 + 20000 + 4097)
+}
+
+export fn plain() -> Result<Unit, Error> {
+  let items = filled(4096)
+  assertEqual(read(items, items, false, false), 20000 + 4097)
+}
+
+export fn kept() -> Result<Unit, Error> {
+  let items = filled(4096)
+  assertEqual(read(items, items, true, true), 4096 * 4095 / 2 + 20000 + 4096 + 4097)
+}
+";
+
+/// See [`GROWN`].
+#[test]
+fn a_store_growth_replaced_is_not_kept_by_the_slot_its_word_was_cached_in() {
+    const HEAP_WORDS: usize = 1 << 16;
+    // The old store's elements, which the copy in `kept` has as many of.
+    const OLD_STORE: u64 = 4096;
+    let (sources, checked) = check(GROWN);
+    let lowered = Arc::new(
+        cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    // The pass did what this is about: `items`' store word is read before the
+    // loop, and not in it.
+    let read = lowered
+        .function_named("m", "read")
+        .map(|id| lowered.function(id))
+        .expect("`read` is lowered");
+    let (head, back) = read
+        .code
+        .iter()
+        .enumerate()
+        .find_map(|(pc, inst)| match *inst {
+            cove_ir::Inst::Jump { to } if (to as usize) < pc => Some((to as usize, pc)),
+            _ => None,
+        })
+        .expect("the loop's back edge");
+    let loads: Vec<usize> = read
+        .code
+        .iter()
+        .enumerate()
+        .filter(|(_, inst)| matches!(inst, cove_ir::Inst::LoadField { obj: 0, at: 1, .. }))
+        .map(|(pc, _)| pc)
+        .collect();
+    assert!(
+        loads.iter().any(|&pc| pc < head) && !loads.iter().any(|&pc| (head..=back).contains(&pc)),
+        "`items`' store word is read at {loads:?}, and the loop is {head}..={back}"
+    );
+    let live = |entry: &str| {
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let runtime = Runtime::new(
+            Arc::clone(&checked),
+            Arc::clone(&sources),
+            Arc::clone(&hosts),
+        );
+        let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, HEAP_WORDS);
+        let answer = vm.run_entry("m", entry, Vec::new());
+        assert_eq!(described(&answer), "Ok(Ok(()))", "{entry}");
+        assert!(vm.collections() > 1, "{entry}: the churn collected");
+        vm.live_words()
+            .expect("a heap that collected measured what is live")
+    };
+    let (grown, plain, kept) = (live("grown"), live("plain"), live("kept"));
+    assert!(
+        plain + OLD_STORE <= kept,
+        "a copy of the old elements held through the churn is not seen: {plain} word(s) live \
+         without it, {kept} with it"
+    );
+    assert!(
+        grown < plain + OLD_STORE / 2,
+        "the store the growth replaced was still live through the churn: {grown} word(s) live \
+         after the cached reads, {plain} after none"
+    );
+}
+
 /// Parses and checks `source` as the one module `m`.
 fn check(source: &str) -> (Arc<SourceMap>, Arc<cove_sema::resolve::Program>) {
     let mut sources = SourceMap::new();
