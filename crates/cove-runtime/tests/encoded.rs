@@ -114,7 +114,12 @@ fn one_encoded_instruction_is_one_unit_of_fuel() {
     // written, which is zero already, and `lower::frees` drops such a `unit`
     // as it drops a clear of one — since ADR 0062, which made every expanded
     // `Vector.push` and builder append answer a `()` that way.
-    assert_eq!(ran.instructions, 10_285_732);
+    //
+    // And one below that, on the same path: the body's `Ok(())` zeroed the
+    // error word of a `Result` whose whole run the `?` before it had just
+    // cleared, so it wrote null over null, and `lower::nulls` drops it
+    // (issue #514's step (a)(i)).
+    assert_eq!(ran.instructions, 10_285_731);
 }
 
 /// Source spans: a failing program points where the oracle points.
@@ -601,6 +606,157 @@ fn a_walk_leaves_nothing_reachable_once_it_returns() {
         "a tree the walk dropped was still live after it: {dropped} word(s) live without \
          the trees, {kept} with one"
     );
+}
+
+/// The same walks, with collections landing *inside* them rather than only
+/// after them.
+///
+/// Issue #514's step (a)(i) drops a clear whose words are null on every path
+/// into it, and `std.dynamic.tracked` is where it matters: its linear path
+/// scan clears its two scratch words at the end of every turn, and clears them
+/// again where the scan exits, which is the store it no longer makes. The next
+/// thing on that path can be a push onto a work stack, which is an allocation,
+/// and so a collection — the boundary right after the dropped clear.
+///
+/// So this runs many small walks back to back over a heap too small to hold
+/// many rounds of their garbage, at several sizes so that the collections
+/// land at different allocations each time: the stack growths inside
+/// `tracked`, the trees being built, the rendered text. Every size has to
+/// answer, and every size has to have released what `dropped` let go of: a
+/// word the pass had wrongly believed null would be a root the old program
+/// had cleared, and it would hold a tree through the churn after the walks,
+/// as the control does on purpose.
+const PRESSED: &str = "\
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+struct Tree {
+  tag: Int
+  kids: Vector<Tree>
+}
+
+impl Tagged for Tree {
+  fn tag(self) -> Int {
+    self.tag
+  }
+}
+
+fn grow(levels: Int) -> Tree {
+  var kids: Vector<Tree> = Vector.of()
+  if levels > 1 {
+    var at = 0
+    while at < 3 {
+      kids.push(grow(levels - 1))
+      at = at + 1
+    }
+  }
+  Tree(tag: levels, kids: kids)
+}
+
+fn churn(rounds: Int) -> Int {
+  var total = 0
+  var at = 0
+  while at < rounds {
+    var items: Vector<Int> = Vector.of()
+    items.push(at)
+    total = total + items.length()
+    at = at + 1
+  }
+  total
+}
+
+fn compared(a: dyn Tagged, b: dyn Tagged) -> Int {
+  var seen = 0
+  if a == b {
+    seen = seen + 1
+  }
+  let text = \"{a}\"
+  if text != \"\" {
+    seen = seen + 1
+  }
+  seen
+}
+
+fn rounds(held: dyn Tagged) -> Int {
+  var seen = 0
+  var round = 0
+  while round < 60 {
+    seen = seen + compared(grow(4), grow(4))
+    seen = seen + compared(held, grow(5))
+    round = round + 1
+  }
+  seen
+}
+
+export fn walks() -> Result<Unit, Error> {
+  assertEqual(rounds(grow(5)), 240)
+}
+
+export fn dropped() -> Result<Unit, Error> {
+  assertEqual(rounds(grow(5)), 240)?
+  assertEqual(churn(20000), 20000)?
+  Ok(())
+}
+
+export fn kept() -> Result<Unit, Error> {
+  let a: dyn Tagged = grow(5)
+  assertEqual(rounds(a), 240)?
+  assertEqual(churn(20000), 20000)?
+  assertEqual(a.tag(), 5)
+}
+";
+
+/// See [`PRESSED`].
+#[test]
+fn a_walk_collected_in_the_middle_leaves_nothing_reachable_once_it_returns() {
+    // 121 trees in a boxed `grow(5)`, each at least a header and two fields.
+    const TREE_FLOOR: u64 = 121 * 3;
+    let ran = |entry: &str, heap_words: usize| {
+        let (sources, checked) = check(PRESSED);
+        let lowered = Arc::new(
+            cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+                .expect("the fixture lowers"),
+        );
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let runtime = Runtime::new(
+            Arc::clone(&checked),
+            Arc::clone(&sources),
+            Arc::clone(&hosts),
+        );
+        let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, heap_words);
+        let answer = vm.run_entry("m", entry, Vec::new());
+        assert_eq!(
+            described(&answer),
+            "Ok(Ok(()))",
+            "{entry} over {heap_words}"
+        );
+        (vm.collections(), vm.live_words())
+    };
+    // Sizes a few hundred words apart, so that the collections land at
+    // different allocations in each run. At the smallest, the rounds alone
+    // collect about forty times; at the largest, twenty.
+    for heap_words in [8_000, 8_191, 9_001, 10_007, 12_000] {
+        // The walks alone, with no churn after them: the collections counted
+        // here all happened while walks were being built, compared and
+        // rendered.
+        let (during, _) = ran("walks", heap_words);
+        assert!(
+            during >= 15,
+            "over {heap_words} words the walks collected only {during} time(s)"
+        );
+        let (_, dropped) = ran("dropped", heap_words);
+        let (_, kept) = ran("kept", heap_words);
+        let (dropped, kept) = (
+            dropped.expect("a heap that collected measured what is live"),
+            kept.expect("a heap that collected measured what is live"),
+        );
+        assert!(
+            dropped + TREE_FLOOR <= kept,
+            "over {heap_words} words, a tree the walks dropped was still live after them: \
+             {dropped} word(s) live without the trees, {kept} with one"
+        );
+    }
 }
 
 // ------------------------------------------------------------------ the harness

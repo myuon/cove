@@ -1723,7 +1723,15 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `values_boxed_path_depths` and three `fail_equals_cycle_boxed_*` programs,
 /// the paths on both sides of the prefix `std.dynamic` scans — each carry the
 /// whole standard library, which the survey counts in every program.
-const FORWARDABLE_COPIES: usize = 6639;
+///
+/// **6,638 since issue #514's step (a)(i) dropped the clears of words that
+/// are already null**, a fall of 1 that is all lowering: the corpus is the
+/// same 253 programs. A per-function listing of the counted copies before and
+/// after names one function, `values_any_equals.scalars`, where two `unit`s
+/// into the same temporary each stood before a copy out of it: the second
+/// `unit` wrote zero over zero and `lower::nulls` drops it, so the two copies
+/// sit together and the second is no longer straight after a producer.
+const FORWARDABLE_COPIES: usize = 6638;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

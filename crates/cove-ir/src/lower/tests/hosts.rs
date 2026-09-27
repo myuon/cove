@@ -243,6 +243,10 @@ fn @m.f(<host> String) -> Result
 /// The handle the operation is addressed to is an ordinary value, so it
 /// reaches the call the way every other value does — here out of the `Ok`
 /// of the `files.open` that issued it.
+///
+/// The final `Ok` zeroes no error word: the clear of `s8..s10` at 16 already
+/// left it null on the only path in, and `lower::nulls` drops a clear of a
+/// word that is null already.
 #[test]
 fn a_resource_operation_reads_its_receiver_out_of_the_frame() {
     assert_eq!(
@@ -254,7 +258,7 @@ fn a_resource_operation_reads_its_receiver_out_of_the_frame() {
         "\
 fn @m.f() -> Result
   frame 15: s0:tag s1:unit s2:ref s3:ref s4:tag s5:host s6:ref s7:host s8:tag s9:unit s10:ref s11:unit s12:tag s13:unit s14:ref
-  local reader -> s7:<host> [9, 22)
+  local reader -> s7:<host> [9, 21)
      0  str s3:ref \"a.txt\"
      1  call-host s4..s6:Result files.open (s3:String)
      2  switch s4:tag [3 5] else 5
@@ -274,10 +278,9 @@ fn @m.f() -> Result
     16  clear s8..s10:Result
     17  unit s11:unit
     18  tag s8:tag Result.Ok
-    19  clear s10:<ref>
-    20  copy s9:Unit s11:Unit
-    21  copy s0..s2:Result s8..s10:Result
-    22  return s0..s2:Result
+    19  copy s9:Unit s11:Unit
+    20  copy s0..s2:Result s8..s10:Result
+    21  return s0..s2:Result
 "
     );
 }

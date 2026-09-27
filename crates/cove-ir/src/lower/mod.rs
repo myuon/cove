@@ -81,6 +81,7 @@ mod limits;
 mod methods;
 mod named;
 pub(crate) mod names;
+mod nulls;
 mod pattern;
 mod redefined;
 mod shapes;
@@ -484,6 +485,15 @@ fn finish(
     // carry the words away ends such a window too, because it pops the frame
     // they are in (F7b). See `redefined`.
     redefined::drop_clears_before_redefinition(&mut program);
+
+    // And a clear of words that are already null on every path into it —
+    // most often the second of two clears of one slot, which `frees` keeps
+    // because it cannot count on the first surviving. After `redefined`,
+    // because that pass may drop the first *because* the second follows. The
+    // edit leaves every frame bit-identical at every boundary, so it has no
+    // trade to make with the collector. Issue #514's step (a)(i). See
+    // `nulls`.
+    nulls::drop_clears_of_null_words(&mut program);
 
     // And last of these, because it is the only one that reads what is
     // *adjacent*: a comparison whose answer the branch on the next line is all
