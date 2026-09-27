@@ -504,9 +504,10 @@ pub(crate) fn byte_store(
 /// So every refusal is a row's refusal, raised at that row's pc with that row's
 /// operands, and no helper ever does a whole push.
 ///
-/// An append's write is [`RunCopyFn`](crate::abi::RunCopyFn) whole, as a
-/// `run-copy` row's is, and its commit is the commit row — the copy is a
-/// safepoint, so nothing the room test knew is known after it.
+/// An append's write is a `run-copy` row's — a short byte copy in emitted code
+/// and anything else [`RunCopyFn`](crate::abi::RunCopyFn) whole — and its commit
+/// is the commit row. The hand-over is a safepoint, and the two paths join before
+/// the commit, so nothing the room test knew is known after either.
 ///
 /// # The work is the rows'
 ///
@@ -1441,9 +1442,10 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // [ADR 0058]'s run copy, over either storage, handed to
         // [`RunCopyFn`](crate::abi::RunCopyFn) whole — whose documentation is
         // where the decision is written down: memmove in bounded chunks with a poll
-        // between them, and refusals whose sentences the runtime formats. It is
-        // the instruction `Vector.toArray` lowers to, and the census named it as
-        // the only blocker of several parser functions.
+        // between them, and refusals whose sentences the runtime formats — but for
+        // a short byte copy, which the template arm answers itself and hands over
+        // only when it cannot. It is the instruction `Vector.toArray` lowers to,
+        // and the census named it as the only blocker of several parser functions.
         //
         // What is bounded is what the helper will read
         // out of this frame. Five operands behind an `ArgsId` — `dst`, `dst_at`,

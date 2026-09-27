@@ -1087,7 +1087,12 @@ pub type GrowableFn =
 ///   check reads the program's layout table, which emitted code does not have.
 ///
 /// What the lowering buys is [`GrowableFn`]'s answer again: not a faster copy but
-/// **a compiled function around one**. The census named `RunCopyWords` as the
+/// **a compiled function around one**. The one exception is a short byte copy
+/// between two different heap objects, which the template arm answers in emitted
+/// code and hands over only when it cannot — none of the three reasons above
+/// reaches it: it is one chunk, so it never polls; a refusal of any kind goes to
+/// this helper before anything is written; and bytes carry no references for a
+/// layout check to protect. The census named `RunCopyWords` as the
 /// only blocker of several parser functions, which ran every other instruction
 /// they had on the encoded tier because of it.
 ///

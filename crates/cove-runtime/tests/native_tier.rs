@@ -805,6 +805,50 @@ export fn callsBuilds(a: String, b: String) -> String {
   builds(a, b)
 }
 
+/// Every short byte copy issue #515's F8 answers in emitted code, and the first
+/// one it does not, each written out on a line of its own.
+///
+/// For every count from nought to one past `limit` and every destination and
+/// source offset inside a word: a source string that *ends* where the copy does,
+/// copied into a builder whose capacity ends there too — and the same into a
+/// builder of capacity one, so that every growth copies the live prefix out of
+/// one byte run into another, the other source family a byte copy admits.
+export fn copiesShort(text: String, limit: Int) -> String {
+  var all = StringBuilder.withCapacity(64 + counts(0))
+  var count = 0
+  while count <= limit + 1 {
+    var dstAt = 0
+    while dstAt < 8 {
+      var srcAt = 0
+      while srcAt < 8 {
+        var exact = StringBuilder.withCapacity(srcAt + count)
+        exact.appendSlice(text, 0, srcAt + count)
+        let source = exact.finish()
+        var out = StringBuilder.withCapacity(dstAt + count)
+        out.appendSlice(text, 26, 26 + dstAt)
+        out.appendSlice(source, srcAt, srcAt + count)
+        all.append(out.finish())
+        var grown = StringBuilder.withCapacity(1)
+        grown.appendSlice(text, 26, 26 + dstAt)
+        grown.appendSlice(source, srcAt, srcAt + count)
+        grown.appendByte(33)
+        all.append(grown.finish())
+        all.appendByte(10)
+        srcAt = srcAt + 1
+      }
+      dstAt = dstAt + 1
+    }
+    count = count + 1
+  }
+  all.finish()
+}
+
+/// A refused caller, so every copy above is a compiled frame's.
+export fn callsCopiesShort(text: String, limit: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  copiesShort(text, limit)
+}
+
 /// A byte range of a string appended, in a compiled frame.
 ///
 /// ADR 0062 put `appendSlice`'s range policy in Cove, so what a compiled frame
@@ -3019,6 +3063,51 @@ fn a_builder_is_built_and_finished_in_compiled_code() {
             both.tiers
         );
     }
+}
+
+/// **A short byte copy in compiled code is the helper's copy, bit for bit.**
+///
+/// Issue #515's F8 answers a byte run copy of at most `SHORT_COPY_BYTES` in
+/// emitted code, with no hand-over and no safepoint; the encoded tier still runs
+/// `encoded::run_copy_bytes` for every one of them, so this is the emitted copy
+/// against the helper over every length up to one past the threshold, at every
+/// alignment of both ends, at the end of both a destination and a source, and
+/// from both a `String` and a byte run. Both are also held to the answer Rust
+/// writes, so a VM that agreed with a wrong native copy would not pass either.
+#[test]
+fn a_short_byte_copy_in_compiled_code_is_the_helper_s() {
+    on_each_tier(&["copiesShort"], &["callsCopiesShort"]);
+    let limit = cove_native::template::SHORT_COPY_BYTES as usize;
+    let text: String = (0..limit + 40)
+        .map(|at| char::from(b'A' + (at % 57) as u8))
+        .collect();
+    let bytes = text.as_bytes();
+    let mut expected = String::new();
+    for count in 0..=limit + 1 {
+        for dst_at in 0..8 {
+            for src_at in 0..8 {
+                let line = format!(
+                    "{}{}",
+                    &text[26..26 + dst_at],
+                    std::str::from_utf8(&bytes[src_at..src_at + count]).unwrap()
+                );
+                expected.push_str(&line);
+                expected.push_str(&line);
+                expected.push_str("!\n");
+            }
+        }
+    }
+    let both = both(
+        "callsCopiesShort",
+        vec![Value::string(text.as_str()), Value::int(limit as i64)],
+    );
+    assert_eq!(both.vm, Ok(expected), "the encoded tier's copies");
+    assert_eq!(both.native, both.vm, "and a compiled frame's");
+    assert!(
+        both.tiers.vm_to_native >= 1,
+        "the copies happened in machine code: {:?}",
+        both.tiers
+    );
 }
 
 /// A finish of a run that is not valid UTF-8 raises the VM's own sentence.

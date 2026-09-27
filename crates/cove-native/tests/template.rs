@@ -855,6 +855,16 @@ fn a_run_copy_the_runtime_refused_leaves_with_that_outcome() {
 }
 
 #[test]
+fn a_short_byte_copy_is_answered_in_emitted_code() {
+    suite::a_short_byte_copy_is_answered_in_emitted_code::<Template>();
+}
+
+#[test]
+fn a_short_byte_copy_leaves_the_rest_to_the_helper() {
+    suite::a_short_byte_copy_leaves_the_rest_to_the_helper::<Template>();
+}
+
+#[test]
 fn a_run_copy_is_admitted_with_five_one_word_operands() {
     suite::a_run_copy_is_admitted_with_five_one_word_operands::<Template>();
 }

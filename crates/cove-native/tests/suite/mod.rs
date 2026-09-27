@@ -5228,8 +5228,9 @@ pub fn run_copies() -> Program {
 
 /// ADR 0058's `run-copy`, over both storages, handed to the runtime whole.
 ///
-/// [`cove_native::RunCopyFn`] is the reason there is no fast path to check. What
-/// a case can say is what *is* emitted code: the argument list and the storage
+/// The frame's two references are not heap addresses, so the byte copy's fast
+/// path — [`a_short_byte_copy_is_answered_in_emitted_code`] — declines it and
+/// this is the hand-over alone. What a case can say is what *is* emitted code: the argument list and the storage
 /// reach the helper unchanged — a byte copy as `words = 0` with nought for the
 /// element, a word copy as `words = 1` with its element's `LayoutId` — the pc is
 /// each instruction's own, the unpaid work is published and cleared because the
@@ -5299,6 +5300,186 @@ pub fn a_run_copy_the_runtime_refused_leaves_with_that_outcome<A: Arm>() {
             "nothing was published to the destination"
         );
     }
+}
+
+/// One byte run copy over [`run_copy_row`], and a return of the count.
+pub fn one_byte_copy() -> Program {
+    program_with_args(
+        function(
+            vec![Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::RunCopy {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 4 },
+            ],
+        ),
+        run_copy_row(),
+    )
+}
+
+/// A [`BYTES`] run of `capacity` bytes at heap word `index`, every payload byte
+/// `fill` — so a byte the copy should not have touched is one that is still
+/// `fill` — and the word after it a guard of all ones.
+pub fn a_byte_run(heap: &mut Heap, index: u64, capacity: u32, fill: u8) -> u64 {
+    let addr = heap.object(index, BYTES, capacity);
+    let words = u64::from(capacity).div_ceil(8);
+    for word in 0..words {
+        heap.set(index + 1 + word, u64::from_le_bytes([fill; 8]));
+    }
+    heap.set(index + 1 + words, u64::MAX);
+    addr
+}
+
+/// The payload of the object at heap word `index`, `words` of them, as bytes,
+/// and the one word after it.
+pub fn payload_bytes(heap: &Heap, index: u64, words: u64) -> Vec<u8> {
+    (0..=words)
+        .flat_map(|word| heap.get(index + 1 + word).to_le_bytes())
+        .collect()
+}
+
+/// **A byte run copy of at most `SHORT_COPY_BYTES` is answered in emitted code,
+/// bit for bit what the helper writes, with no hand-over and its work charged
+/// into the unpaid count — and one byte longer is the helper's again.**
+///
+/// Issue #515's F8. Every length from nought to one past the threshold, at every
+/// destination and source alignment within a word, into a destination whose
+/// capacity ends exactly where the copy does and out of a source that ends
+/// exactly there too — the two places a copy that read or wrote a word too many
+/// would show it. The source is either a `String` or another byte run, the two
+/// families `encoded::run_copy_bytes` admits. The oracle is `copy_string_bytes`'
+/// meaning written out: the destination's bytes outside the range, the tail of
+/// its last word and the word after it are all as they were.
+///
+/// The work is `words_of_bytes(count)` on top of the block's two instructions,
+/// which is the chunk loop's charge — so fuel is the same sum either way.
+pub fn a_short_byte_copy_is_answered_in_emitted_code<A: Arm>() {
+    let limit = cove_native::template::SHORT_COPY_BYTES;
+    let held = one_byte_copy();
+    let text: Vec<u8> = (0..(limit + 16)).map(|at| b'a' + (at % 26) as u8).collect();
+    for from_run in [false, true] {
+        for count in 0..=limit + 1 {
+            for dst_at in 0..8u32 {
+                for src_at in 0..8u32 {
+                    forget_copied();
+                    let mut heap = Heap::new(2);
+                    let source = &text[..(src_at + count) as usize];
+                    let src = if from_run {
+                        let addr = a_byte_run(&mut heap, 10, src_at + count, 0);
+                        for (at, byte) in source.iter().enumerate() {
+                            let word = 11 + at as u64 / 8;
+                            let shift = (at % 8) * 8;
+                            let held = heap.get(word) & !(0xff << shift);
+                            heap.set(word, held | u64::from(*byte) << shift);
+                        }
+                        addr
+                    } else {
+                        a_string(&mut heap, 10, source)
+                    };
+                    let capacity = dst_at + count;
+                    let dst = a_byte_run(&mut heap, 200, capacity, 0xee);
+                    let words_of = u64::from(capacity).div_ceil(8);
+                    let before = payload_bytes(&heap, 200, words_of);
+
+                    let mut words = vec![
+                        dst,
+                        u64::from(dst_at),
+                        src,
+                        u64::from(src_at),
+                        u64::from(count),
+                    ];
+                    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+                    let at = format!("{count} byte(s), {dst_at} into and {src_at} out of");
+                    assert_eq!(answer.outcome, Outcome::Returned, "{at}");
+                    assert_eq!(answer.returned[0], u64::from(count), "{at}");
+                    if count > limit {
+                        assert_eq!(copied().len(), 1, "{at}: one past the threshold");
+                        assert_eq!(payload_bytes(&heap, 200, words_of), before, "{at}");
+                        continue;
+                    }
+                    assert!(copied().is_empty(), "{at}: no hand-over");
+                    assert_eq!(
+                        answer.pending_work,
+                        2 + u64::from(count).div_ceil(8),
+                        "{at}: the block and the words moved, unpaid"
+                    );
+                    let mut expected = before.clone();
+                    expected[dst_at as usize..(dst_at + count) as usize]
+                        .copy_from_slice(&source[src_at as usize..]);
+                    assert_eq!(payload_bytes(&heap, 200, words_of), expected, "{at}");
+                }
+            }
+        }
+    }
+}
+
+/// **Everything the short copy does not answer is the helper's, with nothing
+/// written first.**
+///
+/// The refusals `encoded::run_copy_bytes` makes — a null object, a destination
+/// that is not a byte run, a source that is neither family, a negative offset
+/// or count and a range past either end — and the three shapes it answers but
+/// emitted code leaves to it: one object at both ends, which is its memmove
+/// direction rule; a range whose words straddle two heap chunks; and a count
+/// over the threshold.
+pub fn a_short_byte_copy_leaves_the_rest_to_the_helper<A: Arm>() {
+    let held = one_byte_copy();
+    let straddle = HEAP_CHUNK_WORDS - 2;
+    // `(dst, dst_at, src, src_at, count)` as heap words and numbers; a heap word
+    // of `u64::MAX` is the null reference.
+    let cases: [(&str, u64, i64, u64, i64, i64); 12] = [
+        ("a null destination", u64::MAX, 0, 10, 0, 4),
+        ("a null source", 200, 0, u64::MAX, 0, 4),
+        ("a string destination", 10, 0, 10, 0, 4),
+        ("a source of another family", 200, 0, 300, 0, 4),
+        ("a negative count", 200, 0, 10, 0, -1),
+        ("a negative destination offset", 200, -1, 10, 0, 4),
+        ("a negative source offset", 200, 0, 10, -1, 4),
+        ("a range past the destination", 200, 13, 10, 0, 4),
+        ("a range past the source", 200, 0, 10, 14, 4),
+        ("one object at both ends", 200, 0, 200, 4, 4),
+        ("a destination across a chunk", straddle, 4, 10, 0, 12),
+        ("a source across a chunk", 200, 0, straddle, 4, 12),
+    ];
+    for (name, dst, dst_at, src, src_at, count) in cases {
+        forget_copied();
+        let mut heap = Heap::new(2);
+        a_string(&mut heap, 10, b"abcdefghijklmnopq");
+        a_byte_run(&mut heap, 200, 16, 0xee);
+        a_byte_run(&mut heap, straddle, 24, 0xee);
+        heap.object(300, INT, 16);
+        let addr = |index: u64| match index {
+            u64::MAX => 0,
+            index => heap.addr(index),
+        };
+        let mut words = vec![
+            addr(dst),
+            dst_at as u64,
+            addr(src),
+            src_at as u64,
+            count as u64,
+        ];
+        let before = payload_bytes(&heap, 200, 2);
+        let across = payload_bytes(&heap, straddle, 3);
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{name}");
+        assert_eq!(copied().len(), 1, "{name}: handed over");
+        assert_eq!(copied()[0].work, 2, "{name}: with the block's work, unpaid");
+        assert_eq!(
+            payload_bytes(&heap, 200, 2),
+            before,
+            "{name}: nothing written"
+        );
+        assert_eq!(
+            payload_bytes(&heap, straddle, 3),
+            across,
+            "{name}: nothing written"
+        );
+    }
+    forget_copied();
 }
 
 /// A run copy is admitted over both storages with five one-word operands the
