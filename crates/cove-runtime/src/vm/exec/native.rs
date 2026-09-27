@@ -750,7 +750,8 @@ unsafe extern "C" fn order_str(ctx: *mut NativeCtx, a: u64, b: u64) -> i64 {
 /// `open` or by the call helper. The observation's slots are relative to it,
 /// exactly as the encoded arm's are to `base_at`.
 ///
-/// Fourteen observations are **not a safepoint**, and nothing here makes one:
+/// Every call but an opaque value's text and an entry that may allocate is
+/// **not a safepoint**, and nothing here makes one:
 /// no work is charged and no pointer republished, which is a promise about
 /// `execute` — it allocates nothing and moves nothing, ADR 0068's own gate — so
 /// under `debug_assertions` it is checked, as [`intrinsic`] checks its plain
@@ -765,11 +766,22 @@ unsafe extern "C" fn order_str(ctx: *mut NativeCtx, a: u64, b: u64) -> i64 {
 /// [ADR 0068]: ../../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
 unsafe extern "C" fn dynamic(ctx: *mut NativeCtx, pc: u32, op: u32, a: u32, b: u32, c: u32) -> u32 {
     const HANDLE_TEXT: u32 = cove_ir::bytecode::Op::DynHandleText.number() as u32;
+    const IDENTITY_ENTER: u32 = cove_ir::bytecode::Op::DynIdentityEnter.number() as u32;
     if op == HANDLE_TEXT {
-        return dynamic_at_safepoint(ctx, pc, a, b);
+        return dynamic_at_safepoint(ctx, pc, op, a, b, c);
     }
     let host = (*ctx).host.cast::<Bridge>();
     let machine = (*host).machine;
+    // An entry into an identity set is a safepoint exactly when compiled code
+    // made it one: both ask `enter_allocates` of the same two words.
+    if op == IDENTITY_ENTER {
+        let machine = &*machine;
+        let frame = *machine.frames.last().expect("a native frame is executing");
+        let at = machine.mem.stack_index(frame.base) + a as usize;
+        if super::dynamic::enter_allocates(machine, at) {
+            return dynamic_at_safepoint(ctx, pc, op, a, b, c);
+        }
+    }
 
     // One borrow that ends before compiled code runs again; see the module's
     // aliasing note.
@@ -808,19 +820,29 @@ unsafe extern "C" fn dynamic(ctx: *mut NativeCtx, pc: u32, op: u32, a: u32, b: u
     }
 }
 
-/// [`dynamic`] for `Inst::DynHandleText`, the observation that allocates: an
-/// opaque value's text is a new `String`, so this is [`alloc`]'s three steps
-/// in front of [`super::dynamic::handle_text`], and both pointers republished
-/// after it.
+/// [`dynamic`] for the two observations that allocate: `Inst::DynHandleText`,
+/// whose opaque value's text is a new `String`, and an `Inst::DynIdentityEnter`
+/// that [`super::dynamic::enter_allocates`] says may give its set a table. So
+/// this is [`alloc`]'s three steps in front of [`super::dynamic::handle_text`]
+/// or [`super::dynamic::identity_enter`], and both pointers republished after
+/// it.
 ///
-/// Out of line so that the fourteen that allocate nothing are the short path,
+/// Out of line so that the ones that allocate nothing are the short path,
 /// as [`intrinsic_at_safepoint`] is.
 ///
 /// # Safety
 ///
 /// As [`safepoint`].
 #[inline(never)]
-unsafe fn dynamic_at_safepoint(ctx: *mut NativeCtx, pc: u32, dst: u32, view: u32) -> u32 {
+unsafe fn dynamic_at_safepoint(
+    ctx: *mut NativeCtx,
+    pc: u32,
+    op: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+) -> u32 {
+    const HANDLE_TEXT: u32 = cove_ir::bytecode::Op::DynHandleText.number() as u32;
     let host = (*ctx).host.cast::<Bridge>();
     let machine = (*host).machine;
     let budget = (*host).budget;
@@ -838,7 +860,15 @@ unsafe fn dynamic_at_safepoint(ctx: *mut NativeCtx, pc: u32, dst: u32, view: u32
         let at = machine.mem.stack_index(frame.base);
         machine
             .safepoint(budget, frame.function, pc as usize)
-            .and_then(|()| super::dynamic::handle_text(machine, at, dst as Slot, view as Slot))
+            .and_then(|()| {
+                if op == HANDLE_TEXT {
+                    super::dynamic::handle_text(machine, at, a as Slot, b as Slot)
+                } else {
+                    super::dynamic::identity_enter(
+                        machine, at, a as Slot, b as Slot, c as Slot, true,
+                    )
+                }
+            })
             .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
     };
     // The text was allocated, and the safepoint may have grown the stack, so

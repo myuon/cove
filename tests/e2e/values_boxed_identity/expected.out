@@ -1,0 +1,14 @@
+twice.self true
+twice.apart true
+twice.render Twice(first: [1, 2, 3], second: [1, 2, 3])
+diamond.self true
+diamond.twin true
+diamond.bottom false
+diamond.render Node(tag: 0, kids: [Node(tag: 1, kids: [Node(tag: 7, kids: [])]), Node(tag: 1, kids: [Node(tag: 7, kids: [])])])
+pair.self true
+pair.twin true
+pair.render [Node(tag: 0, kids: [Node(tag: 1, kids: [Node(tag: 3, kids: [])]), Node(tag: 1, kids: [Node(tag: 3, kids: [])])]), Node(tag: 0, kids: [Node(tag: 1, kids: [Node(tag: 3, kids: [])]), Node(tag: 1, kids: [Node(tag: 3, kids: [])])])]
+group.twin true
+group.render Group(members: [Node(tag: 0, kids: [Node(tag: 1, kids: [Node(tag: 3, kids: [])]), Node(tag: 1, kids: [Node(tag: 3, kids: [])])]), Node(tag: 0, kids: [Node(tag: 1, kids: [Node(tag: 3, kids: [])]), Node(tag: 1, kids: [Node(tag: 3, kids: [])])])])
+cycle.render Group(members: [Group(members: […])])
+cycle.held Group(members: [Group(members: [Group(members: […])])])

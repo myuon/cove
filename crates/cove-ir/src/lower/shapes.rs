@@ -374,6 +374,36 @@ impl Shapes {
         self.recursive.contains(name)
     }
 
+    /// The layout of an identity set, and before it the layout of its table:
+    /// see [`crate::dynamic::identity_set_layout`].
+    ///
+    /// Interned on first use rather than seeded beside [`RENDER_PATH`], so that
+    /// a program that walks no erased value — which is almost every program,
+    /// and every one a listing test pins — keeps the layout ids it had.
+    /// [`Shapes::identity_layouts`] is how the program finds the two again.
+    pub(super) fn identity_set(&mut self) -> LayoutId {
+        let table = self.intern(crate::dynamic::identity_table_layout());
+        self.intern(crate::dynamic::identity_set_layout(table, BOOL))
+    }
+
+    /// The identity set's layout and its table's, as
+    /// [`crate::Program::identity_set_layout`] and
+    /// [`crate::Program::identity_table_layout`] record them — or
+    /// [`LayoutId::FREE`] for both, in a program that never made a set and so
+    /// holds no instruction that asks.
+    pub(super) fn identity_layouts(&self) -> (LayoutId, LayoutId) {
+        let table = crate::dynamic::identity_table_layout();
+        let Some(at) = self.layouts.iter().position(|held| *held == table) else {
+            return (LayoutId::FREE, LayoutId::FREE);
+        };
+        let table = LayoutId(at as u32);
+        let set = crate::dynamic::identity_set_layout(table, BOOL);
+        match self.layouts.iter().position(|held| *held == set) {
+            Some(at) => (LayoutId(at as u32), table),
+            None => (LayoutId::FREE, LayoutId::FREE),
+        }
+    }
+
     /// The id of a layout, adding it only if the table does not hold it.
     ///
     /// A linear scan rather than a hash: a program has a handful of shapes
@@ -413,6 +443,9 @@ impl Shapes {
             Ty::DynamicView => Some(DYNAMIC_VIEW),
             // One program-wide layout, seeded for `DYNAMIC_VIEW`'s reason.
             Ty::RenderPath => Some(RENDER_PATH),
+            // One program-wide layout, interned where it is first met — see
+            // `Shapes::identity_set`.
+            Ty::IdentitySet => Some(self.identity_set()),
             Ty::Str => Some(STR),
             // One `Boxed` layout for the whole program, whatever trait was
             // written: what is inside is a question the box answers, from

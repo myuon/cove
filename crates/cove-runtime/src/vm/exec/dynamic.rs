@@ -13,7 +13,9 @@
 //! before the run; whether a struct is `opaque`; an opaque value's text, the
 //! one of them that allocates; and whether a vector is on the path a walk the
 //! lowering composed handed over, which follows that path's frames below the
-//! boundary. Beside them is [`audit_box`], which holds the placed names to the
+//! boundary. Three more are issue #514's F4, the identity set a walk keeps the
+//! vectors it is inside in: [`identity_enter`] and [`identity_leave`], and the
+//! empty set. Beside them is [`audit_box`], which holds the placed names to the
 //! boxes a run really makes.
 //!
 //! # A view never denotes a box or a bare reference
@@ -40,6 +42,11 @@
 //! inside a box, which is a new `String` because which handle it is lives in a
 //! table of the run's; it is not part of any traversal.
 //!
+//! And [`identity_enter`] allocates the table of an identity set — once, when
+//! the first pair of vectors is entered, and again only to double it — which is
+//! a cost of a walk that meets a vector with children, never of one that does
+//! not.
+//!
 //! # A disagreement is the standard library's bug
 //!
 //! Reading a `Bool` out of a string view, asking the case of a struct, or
@@ -52,7 +59,10 @@
 use std::cmp::Ordering;
 
 use cove_ir::bytecode::Op;
-use cove_ir::dynamic::{declared_name, PATH_DEPTH, PATH_ENTRY, VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
+use cove_ir::dynamic::{
+    declared_name, table_is_full, table_len, PATH_DEPTH, PATH_ENTRY, SET_ENTERED, SET_TABLE,
+    TABLE_COUNT, TABLE_FIRST_SLOTS, TABLE_SLOTS, VIEW_AT, VIEW_LAYOUT, VIEW_OWNER,
+};
 use cove_ir::{
     DynamicKind, FunctionId, Layout, LayoutId, LayoutNames, Program, Repr, Shape, Slot, StrId,
 };
@@ -101,9 +111,13 @@ impl View {
 
 /// Executes one of the reflection opcodes that do not allocate, `op`, in the
 /// frame whose first word is `frame`, with slot operands `a`, `b` and `c` of
-/// function `id`: the nine of ADR 0068's Phases 1 to 3, and five of the six
-/// its Phase 4b-ii brought. The sixth, [`handle_text`], allocates, and is an
-/// arm of its own.
+/// function `id`: the nine of ADR 0068's Phases 1 to 3, five of the six its
+/// Phase 4b-ii brought, and issue #514's F4's three. The sixth of Phase 4b-ii,
+/// [`handle_text`], allocates, and is an arm of its own; so is an entry into
+/// an identity set that may allocate, which is [`identity_enter`] called with
+/// room to — and here it is called without, because a caller of this function
+/// has promised no allocation: an entry that would need one is refused as the
+/// internal error it is.
 ///
 /// Out of line on purpose: see the reflection arm of
 /// [`super::encoded`]'s dispatch loop, whose stack frame this keeps small.
@@ -129,6 +143,9 @@ pub(crate) fn execute(
     const CASE: u8 = Op::DynCase.number();
     const COUNT: u8 = Op::DynCount.number();
     const SAME_OBJECT: u8 = Op::DynSameObject.number();
+    const IDENTITY_SET: u8 = Op::DynIdentitySet.number();
+    const IDENTITY_ENTER: u8 = Op::DynIdentityEnter.number();
+    const IDENTITY_LEAVE: u8 = Op::DynIdentityLeave.number();
     const NAME_ORDER: u8 = Op::DynNameOrder.number();
     const TYPE_NAME: u8 = Op::DynTypeName.number();
     const FIELD_NAME: u8 = Op::DynFieldName.number();
@@ -192,6 +209,13 @@ pub(crate) fn execute(
             let depth = machine.mem.word_at(at(c) + PATH_DEPTH as usize) as i64;
             u64::from(on_path(machine, View::read(machine, at(b)), entry, depth))
         }
+        IDENTITY_SET => {
+            machine.mem.set_word_at(at(a) + SET_TABLE as usize, 0);
+            machine.mem.set_word_at(at(a) + SET_ENTERED as usize, 0);
+            return Ok(());
+        }
+        IDENTITY_ENTER => return identity_enter(machine, frame, a, b, c, false),
+        IDENTITY_LEAVE => return identity_leave(machine, frame, a, b, c),
         other => unreachable!("{:?} is not a reflection opcode", Op::from_number(other)),
     };
     machine.mem.set_word_at(at(a), word);
@@ -324,9 +348,12 @@ fn classify(program: &Program, described: &Layout) -> DynamicKind {
         // ADR 0068's Decision 7: a Host handle, a task, a scope, an address,
         // a case tag and a byte run are capabilities or machinery, and boxing
         // one does not make it readable.
-        Shape::Word(_) | Shape::Bytes | Shape::ByteBuffer | Shape::Boxed | Shape::Free => {
-            DynamicKind::Opaque
-        }
+        Shape::Word(_)
+        | Shape::Bytes
+        | Shape::ByteBuffer
+        | Shape::Boxed
+        | Shape::Free
+        | Shape::IdentityTable => DynamicKind::Opaque,
     }
 }
 
@@ -506,39 +533,305 @@ pub(crate) fn name_order(machine: &Machine, a: View, b: View) -> Result<Ordering
     }
 }
 
-/// `dyn.same-object`: whether the two views denote one `Vector` object.
+/// The identity of the value a view names, if it is **identity-bearing**:
+/// the vector object it is, if it is a whole `Vector`, and `None` for every
+/// other view.
 ///
 /// A view of a heap value is `(its header layout, the object, 0)` once
 /// [`settle`] has normalised it, so a view that begins at word 0 of its owner
-/// and has its owner's own layout *is* its owner, and two such views with one
-/// owner are one object. A view of an inline value — a field, a part, an
-/// element of a run, the value inside a box — has a layout its owner's header
-/// does not, even at word 0, and is not a heap object of its own. The owner
-/// that roots a `Vector`'s view is the object the vector *is*, not its store,
-/// which growth replaces, so a vector is recognised however often it has grown.
-/// The collector does not move an object, so for as long as both views are
-/// live the answer is stable.
+/// and has its owner's own layout *is* its owner. A view of an inline value — a
+/// field, a part, an element of a run, the value inside a box — has a layout
+/// its owner's header does not, even at word 0, and is not a heap object of its
+/// own. The owner that roots a `Vector`'s view is the object the vector *is*,
+/// not its store, which growth replaces, so a vector is recognised however
+/// often it has grown. The collector does not move an object, so for as long as
+/// the view is live the answer is stable.
 ///
-/// **Only a vector is ever one object with anything.** A vector is the one
-/// value whose identity the language can observe — a push through one alias is
-/// seen through every other — and so the one whose identity both evaluators
-/// agree on. Whether two equal strings or arrays are one object is an
-/// allocation decision each evaluator makes its own way, and answering it
-/// would let the two disagree about a fact no program is meant to see.
+/// **Only a vector is ever identity-bearing.** A vector is the one value whose
+/// identity the language can observe — a push through one alias is seen
+/// through every other — and so the one whose identity both evaluators agree
+/// on. Whether two equal strings or arrays are one object is an allocation
+/// decision each evaluator makes its own way, and answering it would let the
+/// two disagree about a fact no program is meant to see. `crate::builtins`'
+/// `dynamic_identity` is the oracle's half of this rule, and each evaluator's
+/// tests hold it to "a vector, and nothing else".
+pub(crate) fn identity(machine: &Machine, view: View) -> Option<u64> {
+    let vector = view.at == 0
+        && view.owner != 0
+        && machine.mem.object_layout(view.owner) == view.layout
+        && matches!(
+            machine
+                .program
+                .layouts
+                .get(view.layout.index())
+                .map(|l| &l.shape),
+            Some(Shape::Vector { .. })
+        );
+    vector.then_some(view.owner)
+}
+
+/// `dyn.same-object`: whether the two views denote one `Vector` object — the
+/// same [`identity`], and it one at all. What a walk scans the first few pairs
+/// of its path with; past those the path is an identity set.
 pub(crate) fn same_object(machine: &Machine, a: View, b: View) -> bool {
-    let vector = |view: View| {
-        view.at == 0
-            && machine.mem.object_layout(view.owner) == view.layout
-            && matches!(
-                machine
-                    .program
-                    .layouts
-                    .get(view.layout.index())
-                    .map(|l| &l.shape),
-                Some(Shape::Vector { .. })
-            )
+    a.owner == b.owner && identity(machine, a).is_some() && identity(machine, b).is_some()
+}
+
+// ---- issue #514's F4: the identity set ---------------------------------------
+
+/// The slot a pair `(a, b)` is looked for first, in a table of `slots` slots —
+/// a power of two. Both identities are addresses, which are word aligned and
+/// close together, so they are mixed before the high bits are taken.
+fn home(a: u64, b: u64, slots: u64) -> u64 {
+    let mixed = (a ^ b.rotate_left(31))
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .rotate_left(29)
+        .wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    (mixed >> 32) & (slots - 1)
+}
+
+/// How many slots the table at `table` has.
+fn slots_of(machine: &Machine, table: u64) -> u64 {
+    u64::from(machine.mem.object_len(table).saturating_sub(TABLE_SLOTS)) / 2
+}
+
+/// The pair in slot `at` of the table at `table`: two noughts if it is empty.
+fn slot_pair(machine: &Machine, table: u64, at: u64) -> (u64, u64) {
+    let word = TABLE_SLOTS + 2 * at as u32;
+    (
+        machine.mem.payload(table, word),
+        machine.mem.payload(table, word + 1),
+    )
+}
+
+/// Writes `pair` into slot `at` of the table at `table`.
+fn set_slot(machine: &mut Machine, table: u64, at: u64, pair: (u64, u64)) {
+    let word = TABLE_SLOTS + 2 * at as u32;
+    machine.mem.set_payload(table, word, pair.0);
+    machine.mem.set_payload(table, word + 1, pair.1);
+}
+
+/// The slot the pair `(a, b)` is in, if it is in the table at `table`: linear
+/// probing from its [`home`] to the first empty slot, which the table always
+/// has, since it is never more than half full.
+fn find(machine: &Machine, table: u64, a: u64, b: u64) -> Option<u64> {
+    let slots = slots_of(machine, table);
+    let mut at = home(a, b, slots);
+    loop {
+        match slot_pair(machine, table, at) {
+            (0, 0) => return None,
+            held if held == (a, b) => return Some(at),
+            _ => at = (at + 1) & (slots - 1),
+        }
+    }
+}
+
+/// Puts the pair `(a, b)`, which is not in the table at `table` and for which
+/// it has room, into the first empty slot from its [`home`], without counting
+/// it.
+fn place(machine: &mut Machine, table: u64, a: u64, b: u64) {
+    let slots = slots_of(machine, table);
+    let mut at = home(a, b, slots);
+    while slot_pair(machine, table, at) != (0, 0) {
+        at = (at + 1) & (slots - 1);
+    }
+    set_slot(machine, table, at, (a, b));
+}
+
+/// Whether an entry into the set at frame word `set` would allocate: the set
+/// has no table yet, or one more pair would fill more than half of it
+/// ([`table_is_full`]).
+///
+/// The one rule both tiers decide a call's protocol by. The native code
+/// generator asks it of the same two words before it calls — an entry into a
+/// table with room is a leaf, and one that may allocate is a safepoint — and
+/// the native helper asks it again to take the arm the code chose. It does not
+/// ask whether the pair is identity-bearing or already there: a call that
+/// could allocate is made as a safepoint either way, and one made as a
+/// safepoint may allocate nothing.
+pub(crate) fn enter_allocates(machine: &Machine, set: usize) -> bool {
+    let table = machine.mem.word_at(set + SET_TABLE as usize);
+    table == 0
+        || table_is_full(
+            u64::from(machine.mem.object_len(table)),
+            machine.mem.payload(table, TABLE_COUNT),
+        )
+}
+
+/// `dyn.identity-enter`: enters the pair of vectors the views in slots `a`
+/// and `b` of the frame at `frame` name into the identity set in slot `set`,
+/// and writes whether it did into the set's [`SET_ENTERED`] word — `false`
+/// when the pair was already there, which is the walk meeting a vector pair it
+/// is inside.
+///
+/// A pair either of whose views is not identity-bearing ([`identity`]) is
+/// entered by nothing, allocates nothing and answers `true`.
+///
+/// # When it allocates
+///
+/// Only when `may_allocate`, and only when [`enter_allocates`]: a set with no
+/// table is given one of [`TABLE_FIRST_SLOTS`] slots, and a table one more pair
+/// would fill more than half of is replaced by one of twice as many, into which
+/// every pair is placed again. The replacement is written into the set's own
+/// table word, which is why the set is a local of one function and never a
+/// copy. A caller that has promised no allocation — [`execute`] — passes
+/// `false`, and an entry that would need one is refused as an internal error
+/// rather than made: the native tier decides which of its two protocols to call
+/// by [`enter_allocates`], so reaching this without room is a disagreement
+/// between the two, not something a program can do.
+///
+/// The pair's identities are read before anything allocates. A collection
+/// during the allocation moves nothing, and the old table is still named by
+/// the set's own word, which the frame's reference map traces, so it is read
+/// after the allocation exactly as it was before.
+///
+/// Out of line on purpose, for [`execute`]'s reason: the encoded dispatch loop
+/// calls it from an arm of its own, and inlined there its table probing grew
+/// the loop's frame enough to slow every other arm — `benches/equals`' `tree`
+/// row, which never reaches it, by 9% on the encoded machine.
+#[inline(never)]
+pub(crate) fn identity_enter(
+    machine: &mut Machine,
+    frame: usize,
+    set: Slot,
+    a: Slot,
+    b: Slot,
+    may_allocate: bool,
+) -> Result<(), RuntimeError> {
+    let at = frame + set as usize;
+    let pair = (
+        identity(machine, View::read(machine, frame + a as usize)),
+        identity(machine, View::read(machine, frame + b as usize)),
+    );
+    let entered = match pair {
+        (Some(x), Some(y)) => {
+            let held = machine.mem.word_at(at + SET_TABLE as usize);
+            if held != 0 && find(machine, held, x, y).is_some() {
+                false
+            } else {
+                let table = if enter_allocates(machine, at) {
+                    if !may_allocate {
+                        return Err(internal(
+                            "an identity set was entered into where nothing may allocate, and \
+                             it had no room"
+                                .to_string(),
+                        ));
+                    }
+                    grow(machine, at)?
+                } else {
+                    held
+                };
+                place(machine, table, x, y);
+                let count = machine.mem.payload(table, TABLE_COUNT);
+                machine.mem.set_payload(table, TABLE_COUNT, count + 1);
+                true
+            }
+        }
+        _ => true,
     };
-    a.owner == b.owner && vector(a) && vector(b)
+    machine
+        .mem
+        .set_word_at(at + SET_ENTERED as usize, u64::from(entered));
+    Ok(())
+}
+
+/// Gives the identity set at frame word `set` a table with room for one more
+/// pair — its first, of [`TABLE_FIRST_SLOTS`] slots, or one twice the size of
+/// the one it has, with every pair placed into it again — writes it into the
+/// set, and answers it.
+fn grow(machine: &mut Machine, set: usize) -> Result<u64, RuntimeError> {
+    let old = machine.mem.word_at(set + SET_TABLE as usize);
+    let slots = if old == 0 {
+        TABLE_FIRST_SLOTS
+    } else {
+        2 * slots_of(machine, old) as u32
+    };
+    #[cfg(test)]
+    tests::collect_if_asked(machine);
+    let table = machine.allocate(
+        machine.program.identity_table_layout,
+        i64::from(table_len(slots)),
+    )?;
+    // Read again after the allocation, which may have collected: the set's own
+    // word is what kept the old table alive, and it is where it was.
+    let old = machine.mem.word_at(set + SET_TABLE as usize);
+    if old != 0 {
+        let count = machine.mem.payload(old, TABLE_COUNT);
+        for at in 0..slots_of(machine, old) {
+            let (x, y) = slot_pair(machine, old, at);
+            if (x, y) != (0, 0) {
+                place(machine, table, x, y);
+            }
+        }
+        machine.mem.set_payload(table, TABLE_COUNT, count);
+    }
+    machine.mem.set_word_at(set + SET_TABLE as usize, table);
+    Ok(table)
+}
+
+/// `dyn.identity-leave`: takes the pair of vectors the views in slots `a` and
+/// `b` of the frame at `frame` name out of the identity set in slot `set`.
+///
+/// A pair that is not identity-bearing was entered by nothing and is left by
+/// nothing. An identity-bearing pair that is not in the set is an internal
+/// error: a walk leaves only what it entered. The slot it leaves is closed by
+/// **backward-shift deletion** — every pair after it in its probe run whose
+/// home is not between the two moves back into it — so the table never holds a
+/// tombstone and a probe always ends at the first empty slot. It allocates
+/// nothing.
+#[inline(never)]
+pub(crate) fn identity_leave(
+    machine: &mut Machine,
+    frame: usize,
+    set: Slot,
+    a: Slot,
+    b: Slot,
+) -> Result<(), RuntimeError> {
+    let (Some(x), Some(y)) = (
+        identity(machine, View::read(machine, frame + a as usize)),
+        identity(machine, View::read(machine, frame + b as usize)),
+    ) else {
+        return Ok(());
+    };
+    let table = machine
+        .mem
+        .word_at(frame + set as usize + SET_TABLE as usize);
+    let found = if table == 0 {
+        None
+    } else {
+        find(machine, table, x, y)
+    };
+    let Some(mut hole) = found else {
+        return Err(internal(
+            "a pair of vectors was left that the identity set does not hold".to_string(),
+        ));
+    };
+    let slots = slots_of(machine, table);
+    let mut next = (hole + 1) & (slots - 1);
+    loop {
+        let pair = slot_pair(machine, table, next);
+        if pair == (0, 0) {
+            break;
+        }
+        // The pair at `next` may move back into the hole only if its home is
+        // not in the cyclic run `(hole, next]`: otherwise a probe for it would
+        // stop at the hole before reaching it.
+        let at = home(pair.0, pair.1, slots);
+        let stays = if hole <= next {
+            hole < at && at <= next
+        } else {
+            hole < at || at <= next
+        };
+        if !stays {
+            set_slot(machine, table, hole, pair);
+            hole = next;
+        }
+        next = (next + 1) & (slots - 1);
+    }
+    set_slot(machine, table, hole, (0, 0));
+    let count = machine.mem.payload(table, TABLE_COUNT);
+    machine.mem.set_payload(table, TABLE_COUNT, count - 1);
+    Ok(())
 }
 
 /// The names placed for the layout a view names, or the internal error a
@@ -680,27 +973,16 @@ pub(crate) fn opaque(machine: &Machine, view: View) -> Result<bool, RuntimeError
 /// whose word 2 is the address of the entry before it. The frames are live:
 /// every one of them is a caller of the rendering that is asking, so the walk
 /// down them reads words that are there. It compares each entry's vector with
-/// the view's object as [`same_object`] compares two views, and a view that
-/// does not denote a whole vector is on no path. It allocates nothing and
-/// answers nothing but the `Bool`.
+/// the view's [`identity`], and a view that is not identity-bearing is on no
+/// path. It allocates nothing and answers nothing but the `Bool`.
 pub(crate) fn on_path(machine: &Machine, view: View, entry: u64, depth: i64) -> bool {
-    let vector = view.at == 0
-        && machine.mem.object_layout(view.owner) == view.layout
-        && matches!(
-            machine
-                .program
-                .layouts
-                .get(view.layout.index())
-                .map(|l| &l.shape),
-            Some(Shape::Vector { .. })
-        );
-    if !vector {
+    let Some(vector) = identity(machine, view) else {
         return false;
-    }
+    };
     let mut entry = entry;
     for _ in 0..depth.max(0) {
         let at = machine.mem.stack_index(entry);
-        if machine.mem.word_at(at) == view.owner {
+        if machine.mem.word_at(at) == vector {
             return true;
         }
         entry = machine.mem.word_at(at + 2);

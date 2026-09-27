@@ -106,9 +106,10 @@
 //! never keeps a Cove value in a register across an instruction boundary**, so
 //! at every place a collection can happen — the safepoint helper, the call
 //! helper, and now [`AllocFn`], [`IntrinsicFn`], [`GrowableFn`], [`RunCopyFn`]
-//! and [`DynamicFn`]'s one allocating observation, which are all the calls it
-//! emits that can reach one ([`OrderStrFn`] is a leaf and cannot, and neither
-//! can [`DynamicFn`]'s other fourteen) — every live reference is already in
+//! and [`DynamicFn`]'s allocating calls — an opaque value's text, and an entry
+//! into an identity set with no room — which are all the calls it emits that
+//! can reach one ([`OrderStrFn`] is a leaf and cannot, and neither can
+//! [`DynamicFn`]'s other calls) — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
 //! walks for an encoded frame, and there is no spill sequence, because there is
 //! nothing anywhere else to spill.
@@ -1176,8 +1177,12 @@ pub type OrderStrFn = unsafe extern "C" fn(ctx: *mut NativeCtx, a: u64, b: u64) 
 
 /// What the reflection helper is: one of [ADR 0068]'s structural observations
 /// of an erased value — [`Inst::DynOpen`](cove_ir::Inst::DynOpen) through
-/// [`Inst::DynOnPath`](cove_ir::Inst::DynOnPath) — answered by the runtime,
-/// **one observation per call**.
+/// [`Inst::DynOnPath`](cove_ir::Inst::DynOnPath) — or one of issue #514's F4
+/// operations on an identity set, [`Inst::DynIdentityEnter`](cove_ir::Inst::DynIdentityEnter)
+/// and [`Inst::DynIdentityLeave`](cove_ir::Inst::DynIdentityLeave), answered
+/// by the runtime, **one per call**. (The third,
+/// [`Inst::DynIdentitySet`](cove_ir::Inst::DynIdentitySet), is two noughts,
+/// which emitted code writes itself.)
 ///
 /// The ADR's Decision 9 is the whole of the rule this signature is written to:
 /// "The native tier either lowers these observations directly or calls narrow
@@ -1206,13 +1211,13 @@ pub type OrderStrFn = unsafe extern "C" fn(ctx: *mut NativeCtx, a: u64, b: u64) 
 /// and every refusal named by a [`Raise`]; a crossing that allocates nothing
 /// and moves nothing is a few nanoseconds against that.
 ///
-/// It is one helper rather than fifteen for [`GrowableFn`]'s reason: every
-/// property the boundary cares about is shared by the fourteen that do not
-/// allocate, and the fifteenth is told apart by its `op` on both sides.
+/// It is one helper rather than seventeen for [`GrowableFn`]'s reason: every
+/// property the boundary cares about is shared by the ones that do not
+/// allocate, and the two that may are told apart by their `op` on both sides.
 ///
 /// # A leaf that may raise, and one member that is a safepoint
 ///
-/// Fourteen of the fifteen **allocate nothing, collect nothing and move
+/// All but two **allocate nothing, collect nothing and move
 /// nothing**, which is ADR 0068's own gate — "no child allocation required
 /// merely to traverse a value" — seen from this side. So for them the call is
 /// [`FieldLoadFn`]'s protocol: no unpaid work is published before it, the frame
@@ -1222,7 +1227,15 @@ pub type OrderStrFn = unsafe extern "C" fn(ctx: *mut NativeCtx, a: u64, b: u64) 
 /// Those are the runtime's sentences, and the helper is holding one when it
 /// answers [`Outcome::Raised`].
 ///
-/// [`Inst::DynHandleText`](cove_ir::Inst::DynHandleText) is the fifteenth. The
+/// [`Inst::DynIdentityEnter`](cove_ir::Inst::DynIdentityEnter) is one of the
+/// two only sometimes: an entry allocates its set's table when the set has
+/// none, and a table twice the size when one more pair would fill more than
+/// half of it — `cove_ir::dynamic::table_is_full`, which emitted code asks of
+/// the set's own words before the call and the runtime asks again. So an
+/// entry into a table with room is this leaf protocol, and one that may
+/// allocate is the safepoint protocol below.
+///
+/// [`Inst::DynHandleText`](cove_ir::Inst::DynHandleText) is the other. The
 /// text of a Host handle, a scope or a task is a new `String`, so the call is
 /// [`AllocFn`]'s protocol: the unpaid work is published before it, the helper
 /// synchronises the program counter and takes [ADR 0040]'s three steps before
@@ -1470,7 +1483,7 @@ pub struct NativeCtx {
     ///
     /// Built by the runtime from the same classification its own reflection arm
     /// makes, so what an emitted `dyn.kind`, `dyn.read`, `dyn.case`,
-    /// `dyn.count`, `dyn.same-type` or `dyn.same-object` answers is what the
+    /// `dyn.count` or `dyn.same-type` answers is what the
     /// encoded machine answers of that layout — and every case the table does
     /// not settle, a reclaimed layout, an enum's parts, a scalar read of the
     /// wrong kind, is handed to [`DynamicFn`], which is that arm.

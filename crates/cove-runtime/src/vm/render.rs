@@ -147,6 +147,9 @@ pub(crate) fn parts(machine: &Machine, addr: u64) -> Option<(String, Vec<(String
         // A run under construction: not a Cove value, so the debugger shows
         // its length rather than its bytes, which may not be valid UTF-8.
         Shape::Bytes => vec![("length".to_string(), len.to_string())],
+        // An identity set's table: its words are addresses nothing may follow,
+        // so the debugger says how many it holds.
+        Shape::IdentityTable => vec![("words".to_string(), len.to_string())],
         // The owner's own two words, which is the whole of what a debugger can
         // usefully say: the *logical* length, and the capacity of the store
         // beneath it. The bytes themselves may not be valid UTF-8 yet, so they
@@ -354,6 +357,7 @@ fn object(machine: &Machine, addr: u64, depth: usize, inside: &mut Vec<u64>) -> 
         // Not yet a String, and may not hold valid UTF-8, so it is shown by
         // its length rather than as text.
         Shape::Bytes => format!("<byte run: {len}>"),
+        Shape::IdentityTable => format!("<identity table: {len}>"),
         // The logical length, taken from the owner and not from the store: a
         // store is as long as the last growth made it, and the bytes past the
         // length are spare room rather than value.

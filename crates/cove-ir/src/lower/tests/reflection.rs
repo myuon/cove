@@ -196,3 +196,68 @@ fn every_program_declares_the_view_layout() {
     assert_eq!(path.words, crate::dynamic::PATH_WORDS);
     assert!(path.is_opaque());
 }
+
+/// Issue #514's F4: an identity set is made by `dyn.identity-set` into two
+/// words of the frame, and entered and left in place — the entry's answer is
+/// the set's own second word, which a branch reads where it is, and the
+/// leaving is a statement that costs no `()`. A set that is not a local — one
+/// made in the argument itself — is a gap, because the entry would change a
+/// temporary and throw it away.
+#[test]
+fn an_identity_set_is_entered_and_left_in_place() {
+    let program = lowered(
+        "trait Probed {\n  fn probed(self) -> Int\n}\n\n\
+         fn probe(value: dyn Probed) -> Int {\n  \
+           let view = core.dynamicOpen(value)\n  \
+           let inside = core.identitySet()\n  \
+           if core.identityEnter(inside, view, view) {\n    \
+             core.identityLeave(inside, view, view)\n    \
+             return 1\n  \
+           }\n  \
+           0\n\
+         }\n",
+        MAIN,
+    )
+    .expect("the probe lowers");
+    let listed = listing(&program, "probe");
+    let rows: Vec<&str> = listed
+        .lines()
+        .filter_map(|line| line.trim_start().split_once("  ").map(|(_, inst)| inst))
+        .filter(|inst| inst.starts_with("dyn.identity") || inst.starts_with("branch"))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "dyn.identity-set s5..s6:IdentitySet",
+            "dyn.identity-enter s5..s6:IdentitySet s2..s4:DynamicView s2..s4:DynamicView",
+            "branch-false s6:bool 7",
+            "dyn.identity-leave s5..s6:IdentitySet s2..s4:DynamicView s2..s4:DynamicView",
+        ],
+        "{listed}"
+    );
+    assert!(!listed.contains("unit "), "{listed}");
+    let set = program.layout(program.identity_set_layout);
+    assert_eq!(&*set.name, "IdentitySet");
+    assert_eq!(set.words, crate::dynamic::SET_WORDS);
+    assert_eq!(
+        program.layout(program.identity_table_layout).shape,
+        crate::Shape::IdentityTable
+    );
+
+    let refused = lowered(
+        "trait Probed {\n  fn probed(self) -> Int\n}\n\n\
+         fn probe(value: dyn Probed) -> Bool {\n  \
+           let view = core.dynamicOpen(value)\n  \
+           core.identityEnter(core.identitySet(), view, view)\n\
+         }\n",
+        MAIN,
+    )
+    .expect_err("a set that is not a local is refused");
+    assert_eq!(
+        refused,
+        [
+            "not yet lowered: an identity set that is not a local of this function — \
+             `core.identityEnter` changes the set where it is"
+        ]
+    );
+}

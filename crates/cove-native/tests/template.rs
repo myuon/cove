@@ -259,6 +259,11 @@ fn an_observation_the_table_cannot_settle_is_the_helpers() {
 }
 
 #[test]
+fn an_identity_set_is_made_inline_and_entered_through_the_helper() {
+    suite::an_identity_set_is_made_inline_and_entered_through_the_helper::<Template>();
+}
+
+#[test]
 fn a_child_is_answered_inline_from_the_child_table() {
     suite::a_child_is_answered_inline_from_the_child_table::<Template>();
 }

@@ -1,0 +1,114 @@
+depth 1 equal true differ false
+depth 1 back 0 length 45 marked true differs false
+depth 1 back 0 length 45 marked true differs false
+depth 1 back 0 length 45 marked true differs false
+depth 2 equal true differ false
+depth 2 back 0 length 67 marked true differs false
+depth 2 back 1 length 67 marked true differs false
+depth 2 back 1 length 67 marked true differs false
+depth 2 back 1 length 67 marked true differs false
+depth 3 equal true differ false
+depth 3 back 0 length 89 marked true differs false
+depth 3 back 1 length 89 marked true differs false
+depth 3 back 1 length 89 marked true differs false
+depth 3 back 2 length 89 marked true differs false
+depth 4 equal true differ false
+depth 4 back 0 length 111 marked true differs false
+depth 4 back 1 length 111 marked true differs false
+depth 4 back 2 length 111 marked true differs false
+depth 4 back 3 length 111 marked true differs false
+depth 5 equal true differ false
+depth 5 back 0 length 133 marked true differs false
+depth 5 back 1 length 133 marked true differs false
+depth 5 back 2 length 133 marked true differs false
+depth 5 back 4 length 133 marked true differs false
+depth 6 equal true differ false
+depth 6 back 0 length 155 marked true differs false
+depth 6 back 1 length 155 marked true differs false
+depth 6 back 3 length 155 marked true differs false
+depth 6 back 5 length 155 marked true differs false
+depth 7 equal true differ false
+depth 7 back 0 length 177 marked true differs false
+depth 7 back 1 length 177 marked true differs false
+depth 7 back 3 length 177 marked true differs false
+depth 7 back 6 length 177 marked true differs false
+depth 8 equal true differ false
+depth 8 back 0 length 199 marked true differs false
+depth 8 back 1 length 199 marked true differs false
+depth 8 back 4 length 199 marked true differs false
+depth 8 back 7 length 199 marked true differs false
+depth 9 equal true differ false
+depth 9 back 0 length 221 marked true differs false
+depth 9 back 1 length 221 marked true differs false
+depth 9 back 4 length 221 marked true differs false
+depth 9 back 8 length 221 marked true differs false
+depth 10 equal true differ false
+depth 10 back 0 length 243 marked true differs false
+depth 10 back 1 length 243 marked true differs false
+depth 10 back 5 length 243 marked true differs false
+depth 10 back 9 length 243 marked true differs false
+depth 12 equal true differ false
+depth 12 back 0 length 288 marked true differs false
+depth 12 back 1 length 288 marked true differs false
+depth 12 back 6 length 288 marked true differs false
+depth 12 back 11 length 288 marked true differs false
+depth 15 equal true differ false
+depth 15 back 0 length 357 marked true differs false
+depth 15 back 1 length 357 marked true differs false
+depth 15 back 7 length 357 marked true differs false
+depth 15 back 14 length 357 marked true differs false
+depth 16 equal true differ false
+depth 16 back 0 length 380 marked true differs false
+depth 16 back 1 length 380 marked true differs false
+depth 16 back 8 length 380 marked true differs false
+depth 16 back 15 length 380 marked true differs false
+depth 17 equal true differ false
+depth 17 back 0 length 403 marked true differs false
+depth 17 back 1 length 403 marked true differs false
+depth 17 back 8 length 403 marked true differs false
+depth 17 back 16 length 403 marked true differs false
+depth 20 equal true differ false
+depth 20 back 0 length 472 marked true differs false
+depth 20 back 1 length 472 marked true differs false
+depth 20 back 10 length 473 marked true differs false
+depth 20 back 19 length 472 marked true differs false
+depth 31 equal true differ false
+depth 31 back 0 length 725 marked true differs false
+depth 31 back 1 length 725 marked true differs false
+depth 31 back 15 length 726 marked true differs false
+depth 31 back 30 length 725 marked true differs false
+depth 32 equal true differ false
+depth 32 back 0 length 748 marked true differs false
+depth 32 back 1 length 748 marked true differs false
+depth 32 back 16 length 749 marked true differs false
+depth 32 back 31 length 748 marked true differs false
+depth 33 equal true differ false
+depth 33 back 0 length 771 marked true differs false
+depth 33 back 1 length 771 marked true differs false
+depth 33 back 16 length 772 marked true differs false
+depth 33 back 32 length 771 marked true differs false
+depth 40 equal true differ false
+depth 40 back 0 length 932 marked true differs false
+depth 40 back 1 length 932 marked true differs false
+depth 40 back 20 length 933 marked true differs false
+depth 40 back 39 length 932 marked true differs false
+depth 63 equal true differ false
+depth 63 back 0 length 1461 marked true differs false
+depth 63 back 1 length 1461 marked true differs false
+depth 63 back 31 length 1462 marked true differs false
+depth 63 back 62 length 1461 marked true differs false
+depth 64 equal true differ false
+depth 64 back 0 length 1484 marked true differs false
+depth 64 back 1 length 1484 marked true differs false
+depth 64 back 32 length 1485 marked true differs false
+depth 64 back 63 length 1484 marked true differs false
+depth 65 equal true differ false
+depth 65 back 0 length 1507 marked true differs false
+depth 65 back 1 length 1507 marked true differs false
+depth 65 back 32 length 1508 marked true differs false
+depth 65 back 64 length 1507 marked true differs false
+depth 70 equal true differ false
+depth 70 back 0 length 1622 marked true differs false
+depth 70 back 1 length 1622 marked true differs false
+depth 70 back 35 length 1623 marked true differs false
+depth 70 back 69 length 1622 marked true differs false

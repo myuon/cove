@@ -8,14 +8,20 @@
 //! after its static type was gone. The instructions from
 //! [`Inst::DynOpen`](crate::Inst::DynOpen) to
 //! [`Inst::DynChild`](crate::Inst::DynChild) are that ability, and this module
-//! is the vocabulary they share. [`Inst::DynSameObject`](crate::Inst::DynSameObject)
-//! is the one question beside them that is not about structure: whether two
-//! views are one vector, which the standard library's walk asks to refuse a
-//! value that contains itself (issue #493), and which answers a `Bool` so that
-//! no identity reaches Cove as a number. [`Inst::DynNameOrder`](crate::Inst::DynNameOrder)
+//! is the vocabulary they share. [`Inst::DynNameOrder`](crate::Inst::DynNameOrder)
 //! is [`Inst::DynSameType`](crate::Inst::DynSameType) asked three ways — where
 //! one [`declared_name`], and then one case name, sorts against another —
 //! which `std.dynamic.order` asks so that no name reaches Cove as text.
+//!
+//! Beside them is the one question that is not about structure: whether the
+//! walk is already inside a vector — which `std.dynamic.equals` asks to refuse
+//! a value that contains itself (issue #493) and `std.dynamic.renderInto` to
+//! write one as `[…]`. Since issue #514's F4 it is asked of an
+//! [identity set](identity_set_layout) the walk keeps, by
+//! [`Inst::DynIdentityEnter`](crate::Inst::DynIdentityEnter) and
+//! [`Inst::DynIdentityLeave`](crate::Inst::DynIdentityLeave), in constant time
+//! a pair rather than a scan of the path; and it answers a `Bool`, so that no
+//! identity reaches Cove as a number.
 //!
 //! # A view is three words, and none of them is Cove's to read
 //!
@@ -151,6 +157,121 @@ pub fn render_path_layout(addr: LayoutId, int: LayoutId) -> Layout {
             opaque: true,
         },
         PATH_WORDS.to_vec(),
+    )
+}
+
+/// What an identity set's layout is called, in the table and in a listing.
+pub const IDENTITY_SET_NAME: &str = "IdentitySet";
+
+/// What the table beneath an identity set is called.
+pub const IDENTITY_TABLE_NAME: &str = "IdentityTable";
+
+/// The identity-set word holding the table, a `Ref` to an object of
+/// [`identity_table_layout`] — or null, before the first pair is entered.
+pub const SET_TABLE: u32 = 0;
+
+/// The identity-set word holding what the last
+/// [`Inst::DynIdentityEnter`](crate::Inst::DynIdentityEnter) answered, as a
+/// `Bool`: whether it entered its pair.
+pub const SET_ENTERED: u32 = 1;
+
+/// The words an identity set occupies, in order.
+pub const SET_WORDS: [Repr; 2] = [Repr::Ref, Repr::Bool];
+
+/// The table payload word holding how many pairs it holds, as an `Int`.
+pub const TABLE_COUNT: u32 = 0;
+
+/// The table payload word its first slot begins at. A slot is two words, the
+/// identities of a pair's two vectors, and an empty slot is two noughts.
+pub const TABLE_SLOTS: u32 = 1;
+
+/// How many slots the first table an identity set allocates has: a power of
+/// two, as every table's slot count is. A table is grown — to twice as many
+/// slots, rehashed — before an entry would fill more than half of it.
+pub const TABLE_FIRST_SLOTS: u32 = 16;
+
+/// The header length of a table of `slots` slots: its count word and two
+/// words a slot.
+pub const fn table_len(slots: u32) -> u32 {
+    TABLE_SLOTS + 2 * slots
+}
+
+/// Whether a table of header length `len` holding `count` pairs has to grow
+/// before one more is entered: whether `count + 1` pairs would fill more than
+/// half its slots.
+///
+/// Written once here because two readers ask it — the machine, which grows
+/// the table, and the native code generator, which must know before it calls
+/// whether the call can allocate.
+pub fn table_is_full(len: u64, count: u64) -> bool {
+    let slots = len.saturating_sub(u64::from(TABLE_SLOTS)) / 2;
+    2 * (count + 1) > slots
+}
+
+/// The layout of the table beneath an identity set: one object of
+/// [`Shape::IdentityTable`], whose words the collector never reads.
+pub fn identity_table_layout() -> Layout {
+    Layout::object(IDENTITY_TABLE_NAME, Shape::IdentityTable)
+}
+
+/// The layout of an identity set, given the layouts of its table and of a
+/// `Bool` word in the table it is going into.
+///
+/// # What an identity set is
+///
+/// Issue #514's F4: the pairs of vectors a walk of an erased value is inside,
+/// kept so that meeting one again is found in constant time rather than by a
+/// scan of the path — which made a chain of vectors O(depth²).
+///
+/// It is **two words in the frame of the function that made it**, and no heap
+/// object of its own: [`SET_TABLE`], a reference to its table or null, and
+/// [`SET_ENTERED`], where [`Inst::DynIdentityEnter`](crate::Inst::DynIdentityEnter)
+/// writes its answer. [`Inst::DynIdentitySet`](crate::Inst::DynIdentitySet)
+/// makes one empty by writing a null table, so **a walk that never enters a
+/// pair allocates nothing for its set**; the first entry allocates the table,
+/// and an entry that would fill more than half of it replaces it with one
+/// twice the size. Because an entry can replace the table, the instruction
+/// writes the set's own words, which is why a set may be held only in a local
+/// of the function that made it: a copy anywhere else would keep a table the
+/// local no longer names.
+///
+/// # What is identity-bearing
+///
+/// **A whole `Vector`, and nothing else**: a view of a value that begins at
+/// word 0 of an object whose own header is a `Vector` layout. A vector is the
+/// one value whose identity the language can observe — a push through one
+/// alias is seen through every other — and so the one whose identity both
+/// evaluators agree on; whether two equal strings or arrays are one object is
+/// an allocation decision each evaluator makes its own way. A pair either of
+/// whose views is anything else is entered by nothing and answered `true`.
+///
+/// # An identity is an address the table does not keep alive
+///
+/// A slot holds the two vectors' object addresses. The collector does not
+/// move an object, so an address names one object for as long as it lives,
+/// and the table's words are not traced ([`Shape::IdentityTable`]): what keeps
+/// a vector alive while its pair is in the table is the view of it on the
+/// walk's own stack, which the walk holds until it leaves the pair. So an
+/// address in the table is never one a later allocation has reused.
+///
+/// Like a view it is an `opaque` struct, so a listing names it, and its
+/// fields are named for what the words hold and are read by no Cove source.
+pub fn identity_set_layout(table: LayoutId, boolean: LayoutId) -> Layout {
+    let field = |name: &str, layout: LayoutId, at: u32| Field {
+        name: Arc::from(name),
+        layout,
+        at,
+    };
+    Layout::inline(
+        IDENTITY_SET_NAME,
+        Shape::Struct {
+            fields: vec![
+                field("table", table, SET_TABLE),
+                field("entered", boolean, SET_ENTERED),
+            ],
+            opaque: true,
+        },
+        SET_WORDS.to_vec(),
     )
 }
 
@@ -438,6 +559,31 @@ mod tests {
         assert_eq!(declared_name("m.Cell<Int>"), "m.Cell");
         assert_eq!(declared_name("m.Cell<m.Pair<Int, String>>"), "m.Cell");
         assert_eq!(declared_name("Option"), "Option");
+    }
+
+    /// Issue #514's F4: an identity set is two words and no object — a
+    /// reference to a table, which is null until a pair is entered, and the
+    /// last answer — and the table is the one shape whose words the collector
+    /// never reads. **Only a whole `Vector` is identity-bearing**: that is the
+    /// machine's `identity` and the oracle's, each held to it by their own
+    /// tests, and it is written here as the fact this module's documentation
+    /// states.
+    #[test]
+    fn an_identity_set_is_a_table_reference_and_an_answer() {
+        let table = identity_table_layout();
+        assert_eq!(table.shape, Shape::IdentityTable);
+        assert!(table.is_one_address());
+        assert!(!table.may_hold_refs(&[]));
+        assert_eq!(table.payload_words(table_len(16), &[]), 33);
+        let layout = identity_set_layout(LayoutId(18), LayoutId(3));
+        assert_eq!(layout.words, SET_WORDS);
+        assert!(layout.is_opaque());
+        assert!(!layout.is_one_address());
+        // Half full is the most a table holds before it grows.
+        assert!(!table_is_full(u64::from(table_len(16)), 7));
+        assert!(table_is_full(u64::from(table_len(16)), 8));
+        assert!(table_is_full(u64::from(table_len(32)), 16));
+        assert!(!table_is_full(u64::from(table_len(32)), 15));
     }
 
     #[test]

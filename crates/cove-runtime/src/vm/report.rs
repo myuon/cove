@@ -223,7 +223,7 @@ pub const RUN_OPS: usize = 5;
 /// Every opcode the bytecode calls a reflection is here, and a test holds the
 /// two together, so an observation added to the IR without a row here fails
 /// rather than being charged to the helper's total and to no row.
-pub(crate) const OBSERVATIONS: [Op; 15] = [
+pub(crate) const OBSERVATIONS: [Op; 18] = [
     Op::DynOpen,
     Op::DynKind,
     Op::DynSameType,
@@ -239,6 +239,9 @@ pub(crate) const OBSERVATIONS: [Op; 15] = [
     Op::DynOpaque,
     Op::DynHandleText,
     Op::DynOnPath,
+    Op::DynIdentitySet,
+    Op::DynIdentityEnter,
+    Op::DynIdentityLeave,
 ];
 
 /// How many [`Decline`]s there are, for [`GROWABLE_OPS`]' reason: the length of

@@ -339,6 +339,9 @@ const DYN_CASE: u8 = Op::DynCase.number();
 const DYN_COUNT: u8 = Op::DynCount.number();
 const DYN_CHILD: u8 = Op::DynChild.number();
 const DYN_SAME_OBJECT: u8 = Op::DynSameObject.number();
+const DYN_IDENTITY_SET: u8 = Op::DynIdentitySet.number();
+const DYN_IDENTITY_ENTER: u8 = Op::DynIdentityEnter.number();
+const DYN_IDENTITY_LEAVE: u8 = Op::DynIdentityLeave.number();
 const DYN_NAME_ORDER: u8 = Op::DynNameOrder.number();
 const HANDLE_TEXT: u8 = Op::HandleText.number();
 const DYN_TYPE_NAME: u8 = Op::DynTypeName.number();
@@ -451,7 +454,10 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::DynCaseName
         | Op::DynOpaque
         | Op::DynHandleText
-        | Op::DynOnPath => true,
+        | Op::DynOnPath
+        | Op::DynIdentitySet
+        | Op::DynIdentityEnter
+        | Op::DynIdentityLeave => true,
     }
 }
 
@@ -3785,9 +3791,12 @@ pub(super) fn dispatch<'s, 'a>(
             // name is a load of an address the run placed, whether a struct is
             // opaque is a flag, and whether a vector is on a path is a walk of
             // frames already there.
+            //
+            // And issue #514's F4's two that do not allocate: an empty identity
+            // set is two noughts, and leaving a pair empties a slot.
             DYN_OPEN | DYN_KIND | DYN_SAME_TYPE | DYN_READ | DYN_CASE | DYN_COUNT | DYN_CHILD
             | DYN_SAME_OBJECT | DYN_NAME_ORDER | DYN_TYPE_NAME | DYN_FIELD_NAME | DYN_CASE_NAME
-            | DYN_OPAQUE | DYN_ON_PATH => {
+            | DYN_OPAQUE | DYN_ON_PATH | DYN_IDENTITY_SET | DYN_IDENTITY_LEAVE => {
                 if let Err(error) =
                     dynamic::execute(machine, held.opcode(), base_at, a!(), b!(), c!(), id)
                 {
@@ -3810,6 +3819,20 @@ pub(super) fn dispatch<'s, 'a>(
             DYN_HANDLE_TEXT => {
                 machine.sync(pc - 1);
                 if let Err(error) = dynamic::handle_text(machine, base_at, a!(), b!()) {
+                    fail!(error)
+                }
+            }
+            // Issue #514's F4: an entry into an identity set, which allocates
+            // the set's table on the first pair and doubles it when it would be
+            // more than half full — so the frame is published first, as an
+            // allocation's is, and every entry is one call out of line for the
+            // reflection arm's reason. Publishing is one store of the counter,
+            // cheaper than asking whether this entry is one that allocates.
+            DYN_IDENTITY_ENTER => {
+                machine.sync(pc - 1);
+                if let Err(error) =
+                    dynamic::identity_enter(machine, base_at, a!(), b!(), c!(), true)
+                {
                     fail!(error)
                 }
             }

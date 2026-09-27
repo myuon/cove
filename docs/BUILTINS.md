@@ -100,6 +100,9 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `dynamicOpaque` | `core.dynamicOpaque(view: DynamicView) -> Bool` |
 | `dynamicHandleText` | `core.dynamicHandleText(view: DynamicView) -> String` |
 | `dynamicOnPath` | `core.dynamicOnPath(view: DynamicView, path: RenderPath) -> Bool` |
+| `identitySet` | `core.identitySet() -> IdentitySet` |
+| `identityEnter` | `core.identityEnter(set: IdentitySet, a: DynamicView, b: DynamicView) -> Bool` |
+| `identityLeave` | `core.identityLeave(set: IdentitySet, a: DynamicView, b: DynamicView) -> Unit` |
 
 ## Builtin types
 

@@ -394,6 +394,11 @@ impl<'p> Flow<'p> {
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 f(dst, width(self.program.view_layout))
             }
+            // Issue #514's F4: an identity set's words, which an entry writes
+            // in place — the table it may allocate, and its answer.
+            Inst::DynIdentitySet { dst: set } | Inst::DynIdentityEnter { set, .. } => {
+                f(set, width(self.program.identity_set_layout))
+            }
             Inst::Clear { slot, layout } => f(slot, width(layout)),
             Inst::Copy { dst, layout, .. }
             | Inst::Load { dst, layout, .. }
@@ -463,6 +468,7 @@ impl<'p> Flow<'p> {
             | Inst::SharedLock { .. }
             | Inst::SharedUnlock { .. }
             | Inst::AssertFailed { .. }
+            | Inst::DynIdentityLeave { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -654,6 +660,14 @@ impl<'p> Flow<'p> {
             Inst::DynOnPath { view, path, .. } => {
                 f(view, width(self.program.view_layout));
                 f(path, width(self.program.render_path_layout));
+            }
+            // A set is made from nothing, and read whole where it is entered
+            // into or left from: its table is what an entry adds to.
+            Inst::DynIdentitySet { .. } => {}
+            Inst::DynIdentityEnter { set, a, b } | Inst::DynIdentityLeave { set, a, b } => {
+                f(set, width(self.program.identity_set_layout));
+                f(a, width(self.program.view_layout));
+                f(b, width(self.program.view_layout));
             }
         }
     }

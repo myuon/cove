@@ -832,7 +832,12 @@ unsafe extern "C" fn dynamic(ctx: *mut NativeCtx, pc: u32, op: u32, a: u32, b: u
             work: (*ctx).pending_work,
         })
     });
-    if op == u32::from(cove_ir::bytecode::Op::DynHandleText.number()) {
+    // The two that are a safepoint when compiled code makes them one, and
+    // publish the block's work before the call: charged here, as the runtime's
+    // safepoint arm charges it. A leaf entry published nothing.
+    if op == u32::from(cove_ir::bytecode::Op::DynHandleText.number())
+        || op == u32::from(cove_ir::bytecode::Op::DynIdentityEnter.number())
+    {
         (*ctx).pending_work = 0;
     }
     let answer = OBSERVED_ANSWERS.with(|held| {
@@ -1096,6 +1101,9 @@ pub const BYTES: LayoutId = LayoutId(25);
 /// Last rather than beside [`INT`], so that adding it renumbered nothing —
 /// [`OPTION_INT`]'s reason, and the reason `base::CMP_ORDER` is where it is.
 pub const FLOAT: LayoutId = LayoutId(26);
+/// The table beneath an identity set: a count and two words a slot, none of
+/// them a reference (issue #514's F4).
+pub const IDENTITY_TABLE: LayoutId = LayoutId(27);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -1231,6 +1239,7 @@ pub fn program(function: Function) -> Program {
     layouts.push(Layout::object("ByteBuffer", cove_ir::Shape::ByteBuffer));
     layouts.push(Layout::object("Bytes", cove_ir::Shape::Bytes));
     layouts.push(Layout::word("Float", Repr::Float));
+    layouts.push(cove_ir::dynamic::identity_table_layout());
     Program {
         functions: vec![function],
         layouts,
@@ -8529,7 +8538,9 @@ fn observe_inline<A: Arm>(
 /// `at`, or the owner for a `String`; an enum's first word; a struct's field
 /// count, a run's header length, twice a map's, a vector's length word, and
 /// nought for a scalar; and one owner viewed twice at word 0 as its own
-/// `Vector` header.
+/// `Vector` header — the scan of the first few pairs of a walk's path; past
+/// those the path is an identity set, whose entries are the helper's:
+/// [`an_identity_set_is_made_inline_and_entered_through_the_helper`].
 pub fn the_cheap_observations_are_answered_inline<A: Arm>() {
     let mut heap = Heap::new(2);
     // A pair at 40 whose second word is 77, an array of five, a map of three
@@ -8780,6 +8791,105 @@ pub fn an_observation_the_table_cannot_settle_is_the_helpers<A: Arm>() {
             }],
             "{what}: one hand-over, of the observation as it is"
         );
+    }
+}
+
+/// Issue #514's F4, from compiled code: **an empty identity set is two
+/// noughts written in place**, with no call; **an entry and a leaving are each
+/// one hand-over** of the instruction as it is; and an entry takes one of two
+/// protocols, chosen at the call from the set's own words — `cove_ir::dynamic`'s
+/// `table_is_full` — so that only an entry that may allocate is a safepoint.
+///
+/// - An entry into a set with no table may allocate its first table, so it
+///   publishes the block's work before the call, as an allocation does.
+/// - An entry into a table with room — sixteen slots and seven pairs — is a
+///   leaf, and publishes nothing.
+/// - An entry into a table one more pair would fill more than half of — eight
+///   pairs in sixteen slots — may double it, and is a safepoint again.
+/// - A leaving never allocates, and is always a leaf.
+pub fn an_identity_set_is_made_inline_and_entered_through_the_helper<A: Arm>() {
+    use cove_ir::bytecode::Op;
+    use cove_ir::dynamic::table_len;
+    let op = |op: Op| u32::from(op.number());
+    // A view at 0..=2, a set at 3..=4, and the `Int` the function answers.
+    let reprs = vec![
+        Repr::Int,
+        Repr::Ref,
+        Repr::Int,
+        Repr::Ref,
+        Repr::Bool,
+        Repr::Int,
+    ];
+    let made = program(function(
+        reprs.clone(),
+        INT,
+        vec![
+            Inst::DynIdentitySet { dst: 3 },
+            Inst::DynIdentityEnter { set: 3, a: 0, b: 0 },
+            Inst::DynIdentityLeave { set: 3, a: 0, b: 0 },
+            Inst::Return { src: 5 },
+        ],
+    ));
+    forget_observed();
+    let heap = Heap::new(1);
+    let mut words = vec![VECTOR.0 as u64, 0, 0, 0xdead, 0xdead, 7];
+    let answer = run_over::<A>(&made, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(answer.returned[0], 7);
+    assert_eq!(
+        (words[3], words[4]),
+        (0, 0),
+        "a null table and `false`, and the double wrote nothing over them"
+    );
+    let seen = observed();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(
+        (seen[0].pc, seen[0].op, seen[0].a, seen[0].b, seen[0].c),
+        (1, op(Op::DynIdentityEnter), 3, 0, 0)
+    );
+    assert_ne!(
+        seen[0].work, 0,
+        "no table yet: the entry may allocate one, so the block's work is published"
+    );
+    assert_eq!(
+        (
+            seen[1].pc,
+            seen[1].op,
+            seen[1].a,
+            seen[1].b,
+            seen[1].c,
+            seen[1].work
+        ),
+        (2, op(Op::DynIdentityLeave), 3, 0, 0, 0)
+    );
+    forget_observed();
+
+    // Now over a table: sixteen slots, holding `count` pairs.
+    let entering = program(function(
+        reprs,
+        INT,
+        vec![
+            Inst::DynIdentityEnter { set: 3, a: 0, b: 0 },
+            Inst::Return { src: 5 },
+        ],
+    ));
+    for (count, safepoint) in [(0, false), (7, false), (8, true), (15, true)] {
+        let mut heap = Heap::new(1);
+        let table = heap.object(40, IDENTITY_TABLE, table_len(16));
+        heap.set(41, count);
+        let mut words = vec![VECTOR.0 as u64, 0, 0, table, 0, 7];
+        let answer = run_over::<A>(&entering, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{count}");
+        let seen = observed();
+        assert_eq!(seen.len(), 1, "{count}: one hand-over");
+        assert_eq!(seen[0].op, op(Op::DynIdentityEnter), "{count}");
+        assert_eq!(
+            seen[0].work != 0,
+            safepoint,
+            "{count} pairs in sixteen slots: a safepoint exactly when one more would fill more \
+             than half"
+        );
+        forget_observed();
     }
 }
 

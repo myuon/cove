@@ -1317,7 +1317,8 @@ impl Reflected for Everything {
 
 /// Every one of ADR 0068's observations but `dyn.on-path`, over every kind: the
 /// root's name, kind and count, and for each field its name, kind, count, what
-/// it holds, and how it compares with the root and with itself.
+/// it holds, and how it compares with the root and with itself — the last two
+/// through an identity set, which only a vector is ever in.
 fn observesEverything(value: dyn Reflected) -> String {
   let root = core.dynamicOpen(value)
   let count = core.dynamicChildCount(root)
@@ -1329,9 +1330,22 @@ fn observesEverything(value: dyn Reflected) -> String {
     let same = core.dynamicSameType(child, root)
     let order = core.dynamicNameOrder(child, root)
     let back = core.dynamicNameOrder(root, child)
-    let itself = core.dynamicSameObject(child, child)
-    let whole = core.dynamicSameObject(child, root)
-    text = \"{text} {core.dynamicFieldName(root, at)}={kind}/{core.dynamicChildCount(child)}/{shown(child, kind)}/{same}/{order}/{back}/{itself}/{whole}\"
+    // Whether the child is identity-bearing — entered once, and then found —
+    // and whether it is the root, over an identity set made each turn: an
+    // entry that allocates and one that does not, and a leaving, all in
+    // compiled code (issue #514's F4).
+    let seen = core.identitySet()
+    var itself = false
+    if core.identityEnter(seen, child, child) {
+      itself = !core.identityEnter(seen, child, child)
+    }
+    if itself {
+      core.identityLeave(seen, child, child)
+    }
+    let whole = !core.identityEnter(seen, child, root)
+    let one = core.dynamicSameObject(child, child)
+    let atRoot = core.dynamicSameObject(child, root)
+    text = \"{text} {core.dynamicFieldName(root, at)}={kind}/{core.dynamicChildCount(child)}/{shown(child, kind)}/{same}/{order}/{back}/{itself}/{whole}/{one}/{atRoot}\"
     at = at + 1
   }
   text

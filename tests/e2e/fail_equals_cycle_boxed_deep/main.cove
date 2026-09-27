@@ -1,0 +1,52 @@
+use console.println
+
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+struct Link {
+  tag: Int
+  kids: Vector<dyn Tagged>
+}
+
+impl Tagged for Link {
+  fn tag(self) -> Int {
+    self.tag
+  }
+}
+
+/// `depth` links, erased, each link's vector holding the next and the
+/// deepest's holding the link at depth `back`.
+fn chain(depth: Int, back: Int) -> dyn Tagged {
+  var kids: Vector<Vector<dyn Tagged>> = Vector.of()
+  var links: Vector<dyn Tagged> = Vector.of()
+  var at = 0
+  while at < depth {
+    let held: Vector<dyn Tagged> = Vector.of()
+    kids.push(held)
+    links.push(Link(tag: at, kids: held))
+    at = at + 1
+  }
+  at = 0
+  while at < depth - 1 {
+    var into = kids.get(at).unwrapOr(Vector.of())
+    into.push(links.get(at + 1).unwrapOr(Link(tag: 0, kids: Vector.of())))
+    at = at + 1
+  }
+  var last = kids.get(depth - 1).unwrapOr(Vector.of())
+  last.push(links.get(back).unwrapOr(Link(tag: 0, kids: Vector.of())))
+  links.get(0).unwrapOr(Link(tag: 0, kids: Vector.of()))
+}
+
+/// Two chains seventy links deep whose deepest link holds the link at depth
+/// fifty: the cycle closes **past** the prefix `std.dynamic` scans (issue
+/// #514's F4, option B; K is `std.dynamic.shallow`, at most thirty-two), so
+/// the repeated pair is found by the identity set, and refused on every
+/// evaluator.
+export fn main() -> Result<Unit, Error> {
+  let left = chain(70, 50)
+  let right = chain(70, 50)
+  println("about to compare two chains that contain themselves")?
+  println("never printed {left == right}")?
+  Ok(())
+}
