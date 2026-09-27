@@ -199,13 +199,12 @@ fn @m.f() -> Result
      5  tag s9:tag Result.Err
      6  copy s12:Error s7:Error
      7  return s9..s12:Result
-     8  clear s5..s7:Result
-     9  tag s13:tag m.Sink.File
-    10  copy s14:<host> s8:<host>
-    11  tag s9:tag Result.Ok
-    12  copy s10..s11:m.Sink s13..s14:m.Sink
-    13  copy s0..s3:Result s9..s12:Result
-    14  return s0..s3:Result
+     8  tag s13:tag m.Sink.File
+     9  copy s14:<host> s8:<host>
+    10  tag s9:tag Result.Ok
+    11  copy s10..s11:m.Sink s13..s14:m.Sink
+    12  copy s0..s3:Result s9..s12:Result
+    13  return s0..s3:Result
 "
     );
 }
@@ -395,13 +394,11 @@ fn @m.f() -> http.Route
      3  func-ref s6:int @m.health
      4  store-field s5:ref +0 s6:Int
      5  box s7:ref s5:fn
-     6  clear s5:fn
-     7  copy s8:http.Method s3:http.Method
-     8  copy s9:String s4:String
-     9  copy s10:Any s7:Any
-    10  clear s7:Any
-    11  copy s0..s2:http.Route s8..s10:http.Route
-    12  return s0..s2:http.Route
+     6  copy s8:http.Method s3:http.Method
+     7  copy s9:String s4:String
+     8  copy s10:Any s7:Any
+     9  copy s0..s2:http.Route s8..s10:http.Route
+    10  return s0..s2:http.Route
 "
     );
 }

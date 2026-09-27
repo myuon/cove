@@ -71,11 +71,15 @@ fn @m.f() -> m.Shape
 /// the same reason — a literal is interned, and clearing a slot that holds
 /// an interned string releases nothing either.
 ///
-/// The word reads null at 25 because the scope's end cleared `s7..s8` at 24.
+/// The word reads null at 23 because the scope's end cleared `s7..s8` at 22.
 /// `Ping` still emits its own zeroing of `s8`, but on this path that is a
 /// clear of a word already null on every way in, which `lower::nulls` drops
 /// (issue #514's step (a)(i)). What the collector reads is the same either
-/// way; the listing shows the one store that does the work.
+/// way; the listing shows the one store that does the work. The releases of
+/// the byte buffer and the finished string, `s4` and `s6`, are gone too:
+/// the `return` follows them through nothing that allocates or calls, so
+/// `lower::redefined` drops them (step (a)(ii)). The clear at 22 stays,
+/// because it is what the `copy` at 24 reads.
 #[test]
 fn a_reference_word_of_another_case_reads_null() {
     assert_eq!(
@@ -86,8 +90,8 @@ fn a_reference_word_of_another_case_reads_null() {
         "\
 fn @m.f(String) -> m.Msg
   frame 19: s0!:ref s1:tag s2:ref s3:int s4:ref s5:unit s6:ref s7:tag s8:ref s9:unit s10:int s11:int s12:int s13:ref s14:unit s15:int s16:int s17:ref s18:int
-  local what -> s0:String [0, 28)
-  local said -> s7..s8:m.Msg [24, 24)
+  local what -> s0:String [0, 26)
+  local said -> s7..s8:m.Msg [22, 22)
      0  int s3:int 17
      1  growable-alloc.bytes s4:ref s3:int
      2  len s10:int s0:ref
@@ -108,14 +112,12 @@ fn @m.f(String) -> m.Msg
     17  int s18:int 1
     18  growable-commit.bytes s4:ref s18:int
     19  run-finish.bytes s6:ref s4:ref String utf8
-    20  clear s4:ByteBuffer
-    21  tag s7:tag m.Msg.Text
-    22  copy s8:String s6:String
-    23  clear s6:String
-    24  clear s7..s8:m.Msg
-    25  tag s7:tag m.Msg.Ping
-    26  copy s1..s2:m.Msg s7..s8:m.Msg
-    27  return s1..s2:m.Msg
+    20  tag s7:tag m.Msg.Text
+    21  copy s8:String s6:String
+    22  clear s7..s8:m.Msg
+    23  tag s7:tag m.Msg.Ping
+    24  copy s1..s2:m.Msg s7..s8:m.Msg
+    25  return s1..s2:m.Msg
 "
     );
 }
@@ -241,24 +243,23 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
         "\
 fn @m.f() -> Result
   frame 18: s0:tag s1:int s2:ref s3:tag s4:int s5:ref s6:int s7:tag s8:int s9:ref s10:int s11:tag s12:int s13:ref s14:int s15:tag s16:int s17:ref
-  local v -> s6:Int [12, 16)
+  local v -> s6:Int [11, 15)
      0  int s14:int 1
      1  tag s15:tag Result.Ok
      2  copy s16:Int s14:Int
      3  copy s3..s5:Result s15..s17:Result
-     4  clear s15..s17:Result
-     5  switch s3:tag [6 8] else 8
-     6  copy s6:Int s4:Int
-     7  jump 11
-     8  tag s7:tag Result.Err
-     9  copy s9:Error s5:Error
-    10  return s7..s9:Result
-    11  clear s3..s5:Result
-    12  add.int.imm s10:int s6:int 1
-    13  tag s3:tag Result.Ok
-    14  copy s4:Int s10:Int
-    15  copy s0..s2:Result s3..s5:Result
-    16  return s0..s2:Result
+     4  switch s3:tag [5 7] else 7
+     5  copy s6:Int s4:Int
+     6  jump 10
+     7  tag s7:tag Result.Err
+     8  copy s9:Error s5:Error
+     9  return s7..s9:Result
+    10  clear s3..s5:Result
+    11  add.int.imm s10:int s6:int 1
+    12  tag s3:tag Result.Ok
+    13  copy s4:Int s10:Int
+    14  copy s0..s2:Result s3..s5:Result
+    15  return s0..s2:Result
 "
     );
 }

@@ -324,9 +324,9 @@ fn an_annotation_says_what_an_erased_result_was_carrying() {
         "\
 fn @m.f() -> Result
   frame 11: s0:tag s1:int s2:ref s3:host s4:tag s5:ref s6:ref s7:tag s8:int s9:ref s10:int
-  local s -> s3:<host> [1, 13)
-  local bounded -> s4..s5:Result [2, 13)
-  local run -> s10:m.Run [10, 13)
+  local s -> s3:<host> [1, 12)
+  local bounded -> s4..s5:Result [2, 12)
+  local run -> s10:m.Run [9, 12)
      0  call-host s3:<host> oracle.open ()
      1  call-resource s4..s5:Result s3:host oracle.Seat.next ()
      2  switch s4:tag [3 5] else 5
@@ -336,11 +336,10 @@ fn @m.f() -> Result
      6  copy s9:Error s5:Error
      7  return s7..s9:Result
      8  unbox s10:m.Run s6:ref
-     9  clear s6:Any
-    10  tag s7:tag Result.Ok
-    11  copy s8:Int s10:Int
-    12  copy s0..s2:Result s7..s9:Result
-    13  return s0..s2:Result
+     9  tag s7:tag Result.Ok
+    10  copy s8:Int s10:Int
+    11  copy s0..s2:Result s7..s9:Result
+    12  return s0..s2:Result
 "
     );
 }
@@ -378,37 +377,35 @@ fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
 fn @m.f() -> Int
   frame 12: s0:int s1:host s2:tag s3:ref s4:ref s5:tag s6:int s7:ref s8:int s9:ref \
 s10:ref s11:ref
-  local s -> s1:<host> [1, 24)
-  local answer -> s2..s3:Result [2, 24)
-  local inner -> s4:Any [4, 17)
+  local s -> s1:<host> [1, 22)
+  local answer -> s2..s3:Result [2, 22)
+  local inner -> s4:Any [4, 15)
   local n -> s8:Int [7, 8)
   local e -> s9:Error [10, 11)
-  local e -> s4:Error [19, 20)
+  local e -> s4:Error [17, 18)
      0  call-host s1:<host> oracle.open ()
      1  call-resource s2..s3:Result s1:host oracle.Seat.next ()
-     2  switch s2:tag [3 18] else 21
+     2  switch s2:tag [3 16] else 19
      3  copy s4:Any s3:Any
      4  unbox s5..s7:Result s4:ref
-     5  switch s5:tag [6 9] else 13
+     5  switch s5:tag [6 9] else 12
      6  copy s8:Int s6:Int
      7  copy s0:Int s8:Int
-     8  jump 16
+     8  jump 15
      9  copy s9:Error s7:Error
     10  call s0:Int std.string.length (s9:String)
-    11  clear s9:Error
-    12  jump 16
-    13  str s9:ref \"no `match` arm covers this value\"
-    14  str s10:ref \"\"
-    15  trap s9:ref, s10:ref, s10:ref
-    16  clear s5..s7:Result
-    17  jump 24
-    18  copy s4:Error s3:Error
-    19  call s0:Int std.string.length (s4:String)
-    20  jump 24
-    21  str s4:ref \"no `match` arm covers this value\"
-    22  str s11:ref \"\"
-    23  trap s4:ref, s11:ref, s11:ref
-    24  return s0:Int
+    11  jump 15
+    12  str s9:ref \"no `match` arm covers this value\"
+    13  str s10:ref \"\"
+    14  trap s9:ref, s10:ref, s10:ref
+    15  jump 22
+    16  copy s4:Error s3:Error
+    17  call s0:Int std.string.length (s4:String)
+    18  jump 22
+    19  str s4:ref \"no `match` arm covers this value\"
+    20  str s11:ref \"\"
+    21  trap s4:ref, s11:ref, s11:ref
+    22  return s0:Int
 "
     );
 }

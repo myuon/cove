@@ -331,7 +331,11 @@ lock-state error, which no collector can answer.
 Memory is managed by a precise, non-moving mark-and-sweep collector, whose
 allocation, live-heap, peak-heap, and pause-time numbers are observable but not
 enforced: strict memory isolation is a process, container, or microVM
-boundary's job, not this runtime's. CPU, time, concurrency, and Host-call
+boundary's job, not this runtime's. Collection is not prompt: an object that
+became unreachable may survive a collection or two before it is reclaimed, so
+a program must not rely on memory being freed, or on anything being finalized,
+at a particular point. A Host resource is released by its explicit `close`,
+never by collection. CPU, time, concurrency, and Host-call
 limits are runtime controls, not termination proofs, and every one of them is
 imposed today. The concurrency limit bounds the tasks a run holds at once: a
 `spawn` past it stops the run, refused before its thread exists rather than

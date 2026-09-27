@@ -188,8 +188,12 @@ The lowering answers liveness in the data instead. `Clear` writes zero over a
 value location, and the lowering emits one at the end of the scope a binding
 belonged to and at a temporary's last use, wherever the location holds a
 reference. A dead reference slot holds null, the collector traces nothing
-from it, and the object is unreachable at the next collection rather than at
-the next return.
+from it, and the object is reclaimed long before the frame returns. Not
+necessarily at the very next collection: the lowering drops a clear whose slot
+is rewritten, or whose frame returns, before anything can allocate, and when
+another task collects inside that short window the dead object survives that
+one collection (`lower/redefined.rs`). Cove promises no prompt collection,
+finalization, or Host-resource release.
 
 **"At a temporary's last use" is the intent, and a diverging sub-expression
 is where it is hard.** In `f(a, if c { b } else { break })` the last use of

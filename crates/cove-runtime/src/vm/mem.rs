@@ -3090,6 +3090,159 @@ mod tests {
         assert!(polls.load(Ordering::Relaxed) > 0);
     }
 
+    /// A frame read the way the machine reads one for the collector: every
+    /// word its [`cove_ir::RefMap`] marks, skipping null — what `Live` does
+    /// for each of a task's frames.
+    struct Frame {
+        words: Vec<u64>,
+        refs: cove_ir::RefMap,
+    }
+
+    impl Roots for Frame {
+        fn each_root(&self, f: &mut dyn FnMut(u64)) {
+            for slot in self.refs.iter() {
+                let word = self.words[slot as usize];
+                if word != 0 {
+                    f(word);
+                }
+            }
+        }
+    }
+
+    /// What issue #514's step (a)(ii) trades, observed: another task collects
+    /// while this one is parked inside a window whose clear
+    /// `cove_ir::lower::redefined` dropped.
+    ///
+    /// The frame is the one the relaxed rule leaves at a boundary inside such
+    /// a window, three words: `W`, the cleared slot, still naming an object
+    /// the program has finished with; `Y`, a root the window has written
+    /// since; and a scalar. The original program shows the collector the
+    /// same frame with `W` null. After the window, `W` is redefined to name a
+    /// live object, which is the end the rule requires on every path.
+    ///
+    /// Each program runs twice, once as the original and once as the relaxed
+    /// rule leaves it, on two threads: the second parks at its safepoint with
+    /// the window's frame while the first collects, then moves past the
+    /// redefinition and parks again while the first collects a second time.
+    /// What is asserted is that the two runs differ in exactly one thing —
+    /// the dead object survives the collection inside the window — and that
+    /// the collection after the redefinition frees it in both.
+    #[test]
+    fn a_collection_inside_a_relaxed_window_only_delays_a_dead_object_s_release() {
+        use cove_ir::RefMap;
+
+        /// What one run saw: for each of the two collections, whether each
+        /// of the three objects was still there, and the words freed.
+        #[derive(Debug, PartialEq)]
+        struct Saw {
+            dead: [bool; 2],
+            loaded: [bool; 2],
+            next: [bool; 2],
+            freed: [u64; 2],
+            /// The words the program reads after the window.
+            read: Vec<u64>,
+        }
+
+        let run = |relaxed: bool| -> (Saw, [u64; 3]) {
+            let mut table = Table::new();
+            let array = leaf(&mut table);
+            let first = Memory::new(1 << 14);
+            let mut second = first.for_task().unwrap();
+            let refs = RefMap::of(&[Repr::Ref, Repr::Ref, Repr::Int]);
+
+            // `dead` is what `W` named before the window; `loaded` is what the
+            // window loads into `Y`, which the first task also holds, as a
+            // field read out of a live object would be; `next` is what
+            // redefines `W`, held the same way.
+            let dead = alloc(&mut second, &table, array, 4);
+            let loaded = alloc(&mut second, &table, array, 4);
+            let next = alloc(&mut second, &table, array, 4);
+            let window = Frame {
+                words: vec![if relaxed { dead } else { 0 }, loaded, 7],
+                refs: refs.clone(),
+            };
+            let after = Frame {
+                words: vec![next, loaded, 7],
+                refs,
+            };
+
+            let ready = Barrier::new(2);
+            let phase = AtomicUsize::new(0);
+            let acked = AtomicBool::new(false);
+            let mut saw = Saw {
+                dead: [false; 2],
+                loaded: [false; 2],
+                next: [false; 2],
+                freed: [0; 2],
+                read: Vec::new(),
+            };
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    ready.wait();
+                    // Parked in the window until the first collection is done.
+                    while phase.load(Ordering::Acquire) == 0 {
+                        second.poll(&window);
+                        std::thread::yield_now();
+                    }
+                    // Past the redefinition: every later safepoint shows it.
+                    acked.store(true, Ordering::Release);
+                    while phase.load(Ordering::Acquire) == 1 {
+                        second.poll(&after);
+                        std::thread::yield_now();
+                    }
+                    second.poll(&after);
+                });
+                ready.wait();
+                let held = Held(vec![loaded, next]);
+                let live = |mem: &Memory, addr| mem.object_layout(addr) == array;
+                for turn in 0..2 {
+                    let done = first.collect(table.layouts(), &held);
+                    saw.dead[turn] = live(&first, dead);
+                    saw.loaded[turn] = live(&first, loaded);
+                    saw.next[turn] = live(&first, next);
+                    saw.freed[turn] = done.freed_words;
+                    phase.store(turn + 1, Ordering::Release);
+                    if turn == 0 {
+                        while !acked.load(Ordering::Acquire) {
+                            std::thread::yield_now();
+                        }
+                    }
+                }
+            });
+            saw.read = after.words.clone();
+            let payloads = [
+                first.payload(loaded, 0),
+                first.payload(next, 0),
+                first.payload(next, 1),
+            ];
+            (saw, payloads)
+        };
+
+        let (original, original_payloads) = run(false);
+        let (relaxed, relaxed_payloads) = run(true);
+
+        // The original released the dead object at the first collection;
+        // the relaxed program kept it through that one, and only that one.
+        assert_eq!(original.dead, [false, false]);
+        assert_eq!(relaxed.dead, [true, false]);
+        // It is released by the collection after the redefinition, and the
+        // words freed over the two collections are the same: the release is
+        // late, not lost.
+        assert_eq!(relaxed.freed[0] + 5, original.freed[0]);
+        assert_eq!(relaxed.freed[1], original.freed[1] + 5);
+        assert_eq!(
+            relaxed.freed.iter().sum::<u64>(),
+            original.freed.iter().sum::<u64>()
+        );
+        // Nothing else differs: what is live, and what the program reads.
+        assert_eq!(original.loaded, [true, true]);
+        assert_eq!(relaxed.loaded, original.loaded);
+        assert_eq!(original.next, [true, true]);
+        assert_eq!(relaxed.next, original.next);
+        assert_eq!(relaxed.read, original.read);
+        assert_eq!(relaxed_payloads, original_payloads);
+    }
+
     /// A task that is blocked is already at a safepoint, so a collection does
     /// not wait for it — and does not free what it is holding.
     ///
