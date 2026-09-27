@@ -5158,6 +5158,75 @@ fn a_boxed_chain_of_vectors_is_walked_in_linear_time() {
     }
 }
 
+/// Issue #514's F6, as a ratchet: **a boxed `==` asks each view's kind once,
+/// and a boxed rendering asks a container's kind and count once when it opens
+/// it and once each time it comes back to it** — never once a child.
+///
+/// Until F6 `std.dynamic.children` asked a pair's kind and its caller asked it
+/// again to see whether the pair was a vector, and `std.dynamic.renderBelow`
+/// asked the innermost container's kind and count before every one of its
+/// children and once more to close it, after `written` had asked the count to
+/// decide. Now the answers are handed on: `children` is given the kind its
+/// caller asked, `written` answers the count it asked, and the rendering keeps
+/// the innermost container's kind and count in locals.
+///
+/// Counted per opcode by a [`Profiler`](crate::vm::profile::Profiler), over one
+/// comparison or one rendering of [`VECTOR_CHAIN`]'s chain `n` deep: a run with
+/// one turn less a run with none. Such a chain is `n` `Link`s and `n - 1`
+/// vectors with a child — `2n - 1` containers — and an empty vector at the
+/// bottom, so `3n` views a side. A comparison asks one type test a pair, and
+/// exactly as many kinds. A rendering asks `3n` kinds of the views it meets,
+/// and the `2n - 2` containers below the root are each come back from once, so
+/// their parents' kind and count are asked `2n - 2` times more; the count is
+/// asked of the `2n` containers `written` decides on, the empty one included.
+/// Before F6 the two were `8n - 4` and `7n - 3`.
+#[test]
+fn a_boxed_walk_asks_a_view_each_question_once() {
+    use crate::vm::profile::Profiler;
+    use cove_ir::Inst;
+
+    /// How many `DynKind`, `DynSameType` and `DynCount` one turn of `entry`
+    /// executes over a chain `n` deep.
+    fn asked(entry: &'static str, n: i64) -> [u64; 3] {
+        on_a_deep_stack(move || {
+            let (sources, program) = checked(VECTOR_CHAIN);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            let mut counts = Vec::new();
+            for turns in [0, 1] {
+                let profiler = Profiler::new();
+                let mut vm = Vm::debugged(&runtime, &hosts, &ir, &profiler);
+                vm.invoke("m", entry, vec![Value::int(n), Value::int(turns)])
+                    .unwrap_or_else(|error| panic!("{entry}({n}): {}", error.message));
+                let mut seen = [0u64; 3];
+                for ((id, pc), cost) in profiler.rows() {
+                    let at = match ir.function(id).code.get(pc as usize) {
+                        Some(Inst::DynKind { .. }) => 0,
+                        Some(Inst::DynSameType { .. }) => 1,
+                        Some(Inst::DynCount { .. }) => 2,
+                        _ => continue,
+                    };
+                    seen[at] += cost.ran;
+                }
+                counts.push(seen);
+            }
+            [0, 1, 2].map(|at| counts[1][at] - counts[0][at])
+        })
+    }
+    let n = 32;
+    let views = 3 * n;
+    let [kinds, types, _] = asked("compare", n as i64);
+    assert_eq!(types, views, "compare: one type test a pair");
+    assert_eq!(
+        kinds, types,
+        "compare: one kind a pair, {kinds} for {types}"
+    );
+    let [kinds, _, counts] = asked("render", n as i64);
+    assert_eq!(kinds, views + 2 * n - 2, "render: kinds");
+    assert_eq!(counts, 2 * n + 2 * n - 2, "render: counts");
+}
+
 /// **Comparing two boxed scalars allocates nothing**, and neither does
 /// comparing two values one level deep: `std.dynamic.equals` makes its two
 /// stacks only at the first child that has children of its own.
