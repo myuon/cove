@@ -523,6 +523,7 @@ fn shape_name(shape: &cove_ir::Shape) -> &'static str {
         Shape::Enum { .. } => "Enum",
         Shape::Str => "Str",
         Shape::Bytes => "Bytes",
+        Shape::IdentityTable => "IdentityTable",
         Shape::Elements { .. } => "Elements",
         Shape::Vector { .. } => "Vector",
         Shape::ByteBuffer => "ByteBuffer",

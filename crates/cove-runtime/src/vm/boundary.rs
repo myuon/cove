@@ -253,6 +253,11 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
         Shape::Bytes => Err(RuntimeError::new(
             "a byte run under construction is not a value and cannot cross the boundary",
         )),
+        // The table beneath an identity set is reflection's own bookkeeping,
+        // held only in a local of a standard-library walk: no value is one.
+        Shape::IdentityTable => Err(RuntimeError::new(
+            "an identity set's table is not a value and cannot cross the boundary",
+        )),
         // ADR 0052 makes the owner a value a *Cove call* may carry, and that is
         // as far as it goes: a host has no type for a half-built string, and
         // handing one over would hand over bytes that are not yet claimed to be
@@ -1124,7 +1129,7 @@ fn fits(program: &Program, layout: LayoutId, value: &Value, precision: Precision
         // No `Value` ever names a byte run under construction: it is not a
         // Cove type, and `fits` is answering whether a *value* could occupy
         // this position.
-        Shape::Bytes => false,
+        Shape::Bytes | Shape::IdentityTable => false,
         // Nor a byte buffer's owner. It is a Cove value rather than a Host one:
         // `value_from_object` refuses it above, so no position described by one
         // can be filled from outside.

@@ -2318,6 +2318,8 @@ impl<'a> Emit<'a> {
     /// - **`dyn.same-object`** is `same_object`'s whole test: one owner, both
     ///   views at word 0 with the owner's own header layout, and that layout a
     ///   `Vector`;
+    /// - **`dyn.identity-set`** is two noughts, a null table and `false`: it
+    ///   allocates nothing, so there is nothing to ask;
     /// - **`dyn.child`** of an inline child is its entry in
     ///   [`NativeCtx::dyn_children`], written as a view: see [`Emit::child`].
     ///
@@ -2335,6 +2337,17 @@ impl<'a> Emit<'a> {
     fn observation(&mut self, inst: Inst, seen: Observation) {
         use cove_ir::dynamic::{VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
         use cove_ir::{DynamicKind, Repr};
+        match inst {
+            Inst::DynIdentitySet { dst } => {
+                use cove_ir::dynamic::{SET_ENTERED, SET_TABLE};
+                self.xor_rr(RAX, RAX);
+                self.store_slot(dst + SET_TABLE, RAX);
+                self.store_slot(dst + SET_ENTERED, RAX);
+                return;
+            }
+            Inst::DynIdentityEnter { set, .. } => return self.identity_enter(set, seen),
+            _ => {}
+        }
         // The table's length is an `imm32` every index is compared with; a
         // program with more layouts than that has every observation handed over.
         if i32::try_from(self.program.layouts.len()).is_err() {
@@ -2493,6 +2506,48 @@ impl<'a> Emit<'a> {
         self.jmp(Target::Label(done));
         self.bind(cold);
         self.observe(seen);
+        self.bind(done);
+    }
+
+    /// `dyn.identity-enter`, handed to the helper by one of its two protocols,
+    /// chosen here from the set's own words (issue #514's F4).
+    ///
+    /// An entry allocates only when the set has no table yet, or when one more
+    /// pair would fill more than half of it —
+    /// [`cove_ir::dynamic::table_is_full`], which the runtime's entry asks of
+    /// the same two words before it decides to allocate. So an entry into a
+    /// table with room is a **leaf that may raise**, as fourteen of the
+    /// observations are, and costs no safepoint; and one that may allocate is
+    /// [`Observation::allocates`]' safepoint, `DynHandleText`'s. What is read
+    /// is the table word of the set, its header's length and its count word,
+    /// and nothing is written before the call.
+    ///
+    /// A table's header length is `1 + 2 * slots` and full is `2 * (count +
+    /// 1) > slots`, which is `4 * count + 5 > len` in whole numbers.
+    fn identity_enter(&mut self, set: Slot, seen: Observation) {
+        use cove_ir::dynamic::{table_len, SET_TABLE, TABLE_COUNT};
+        const _: () = assert!(table_len(1) == 3);
+        let grows = self.label();
+        let done = self.label();
+        self.load_slot(RAX, set + SET_TABLE);
+        self.test_rr(RAX, RAX);
+        self.jcc(CC_E, Target::Label(grows));
+        self.mov_rr(RCX, RAX);
+        self.object_len(RCX);
+        // The header is one word, so a payload word is one past it.
+        self.add_imm32(RAX, 1 + TABLE_COUNT as i32);
+        self.heap_word(RAX);
+        self.shl_imm8(RAX, 2);
+        self.add_imm32(RAX, 5);
+        self.cmp_rr(RAX, RCX);
+        self.jcc(CC_A, Target::Label(grows));
+        self.observe(seen);
+        self.jmp(Target::Label(done));
+        self.bind(grows);
+        self.observe(Observation {
+            allocates: true,
+            ..seen
+        });
         self.bind(done);
     }
 

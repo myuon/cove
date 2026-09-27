@@ -277,8 +277,15 @@ mod base {
     pub const DYN_OPAQUE: u8 = DYN_CASE_NAME + 1;
     pub const DYN_HANDLE_TEXT: u8 = DYN_OPAQUE + 1;
     pub const DYN_ON_PATH: u8 = DYN_HANDLE_TEXT + 1;
+    /// The three instructions of an identity set, which issue #514's F4
+    /// brought for the part of a walk's path past the prefix it scans with
+    /// `DYN_SAME_OBJECT`: make one, enter a pair, leave it. Last, for `CMP_ORDER`'s reason: adding them renumbered nothing
+    /// already there.
+    pub const DYN_IDENTITY_SET: u8 = DYN_ON_PATH + 1;
+    pub const DYN_IDENTITY_ENTER: u8 = DYN_IDENTITY_SET + 1;
+    pub const DYN_IDENTITY_LEAVE: u8 = DYN_IDENTITY_ENTER + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = DYN_ON_PATH + 1;
+    pub const END: u8 = DYN_IDENTITY_LEAVE + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -448,6 +455,12 @@ pub enum Op {
     DynHandleText,
     /// [`crate::Inst::DynOnPath`].
     DynOnPath,
+    /// [`crate::Inst::DynIdentitySet`].
+    DynIdentitySet,
+    /// [`crate::Inst::DynIdentityEnter`].
+    DynIdentityEnter,
+    /// [`crate::Inst::DynIdentityLeave`].
+    DynIdentityLeave,
 }
 
 /// Which of `a`, `b` and `c` an opcode uses, and for what.
@@ -489,6 +502,10 @@ pub enum Operand {
     /// [`crate::Program::render_path_layout`]'s: [`Operand::View`]'s
     /// arrangement, for the one opcode that takes one.
     Path,
+    /// The first slot of an identity set, whose width is
+    /// [`crate::Program::identity_set_layout`]'s: [`Operand::View`]'s
+    /// arrangement, for the three opcodes of issue #514's F4.
+    Set,
 }
 
 /// An operand whose `Repr` the opcode does not constrain. See
@@ -780,6 +797,11 @@ impl Op {
             Op::DynHandleText,
             Op::DynOnPath,
         ]);
+        all.extend([
+            Op::DynIdentitySet,
+            Op::DynIdentityEnter,
+            Op::DynIdentityLeave,
+        ]);
         all
     }
 
@@ -890,7 +912,6 @@ impl Op {
             Op::DynCase => base::DYN_CASE,
             Op::DynCount => base::DYN_COUNT,
             Op::DynChild => base::DYN_CHILD,
-            Op::DynSameObject => base::DYN_SAME_OBJECT,
             Op::DynNameOrder => base::DYN_NAME_ORDER,
             Op::HandleText => base::HANDLE_TEXT,
             Op::DynTypeName => base::DYN_TYPE_NAME,
@@ -899,6 +920,10 @@ impl Op {
             Op::DynOpaque => base::DYN_OPAQUE,
             Op::DynHandleText => base::DYN_HANDLE_TEXT,
             Op::DynOnPath => base::DYN_ON_PATH,
+            Op::DynSameObject => base::DYN_SAME_OBJECT,
+            Op::DynIdentitySet => base::DYN_IDENTITY_SET,
+            Op::DynIdentityEnter => base::DYN_IDENTITY_ENTER,
+            Op::DynIdentityLeave => base::DYN_IDENTITY_LEAVE,
         }
     }
 
@@ -1381,6 +1406,12 @@ impl Op {
                 Operand::Path,
                 Payload::Empty,
             ),
+            // An identity set is a run of the program's set layout, as a view
+            // is of its view layout; an entry's answer is the set's own word.
+            Op::DynIdentitySet => fields(Operand::Set, NONE, NONE, Payload::Empty),
+            Op::DynIdentityEnter | Op::DynIdentityLeave => {
+                fields(Operand::Set, Operand::View, Operand::View, Payload::Empty)
+            }
         }
     }
 }
@@ -1472,7 +1503,9 @@ mod tests {
     /// brought `HandleText` for the text of a resource, a scope or a task —
     /// one and not three, for `DynRead`'s reason — and a hundred and
     /// ninety-eight once its Phase 4b-ii brought the six observations
-    /// `std.dynamic.renderInto` renders an erased value with.
+    /// `std.dynamic.renderInto` renders an erased value with, and two hundred
+    /// and one once issue #514's F4 brought the three instructions of an
+    /// identity set.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1492,9 +1525,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_ninety_eight_opcodes() {
-        assert_eq!(Op::all().len(), 198);
-        assert_eq!(OPCODES, 198);
+    fn there_are_two_hundred_and_one_opcodes() {
+        assert_eq!(Op::all().len(), 201);
+        assert_eq!(OPCODES, 201);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

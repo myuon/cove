@@ -380,6 +380,7 @@ fn listed(inst: &Inst) -> bool {
             | Inst::DynKind { .. }
             | Inst::DynSameType { .. }
             | Inst::DynSameObject { .. }
+            | Inst::DynIdentitySet { .. }
             | Inst::DynRead { .. }
             | Inst::DynCase { .. }
             | Inst::DynCount { .. }

@@ -259,6 +259,16 @@ impl Check<'_> {
                         self.outside(at, name, slot);
                     }
                 }
+                // An identity set's width is the program's set layout's, on
+                // the view's terms.
+                Operand::Set => {
+                    let layout = self.program.identity_set_layout;
+                    if layout.index() < self.program.layouts.len() {
+                        self.fits(at, slot, layout, &format!("the identity set at {name}"));
+                    } else if self.function.repr(slot).is_none() {
+                        self.outside(at, name, slot);
+                    }
+                }
                 Operand::Value => match self.named_layout(op, bytes) {
                     Some(layout) => {
                         self.fits(at, slot, layout, &format!("the value at {name}"));
@@ -840,8 +850,8 @@ mod tests {
     #[test]
     fn an_opcode_no_encoder_produced_is_refused() {
         let held = program(vec![Inst::Return { src: 0 }]);
-        let code = [with(at(Inst::Return { src: 0 }), 0, 200)];
-        assert_eq!(faults(&held, &code), ["opcode 200 names no operation"]);
+        let code = [with(at(Inst::Return { src: 0 }), 0, 201)];
+        assert_eq!(faults(&held, &code), ["opcode 201 names no operation"]);
     }
 
     /// `flags` is reserved and must be zero, which is ADR 0041's decision

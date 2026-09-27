@@ -629,6 +629,19 @@ pub struct Program {
     /// path is the same two words, so [`Inst::DynOnPath`] names no layout and
     /// the verifier reads this to know how wide its path operand is.
     pub render_path_layout: LayoutId,
+    /// The layout every identity set occupies: see
+    /// [`crate::dynamic::identity_set_layout`].
+    ///
+    /// A program-wide constant for [`Program::view_layout`]'s reason: every
+    /// set is the same two words, so [`Inst::DynIdentityEnter`] names no layout
+    /// and the verifier reads this to know how wide its set operand is, and
+    /// that an operand is a set and not some other reference.
+    pub identity_set_layout: LayoutId,
+    /// The layout of the table beneath an identity set, which
+    /// [`Inst::DynIdentityEnter`] allocates: see
+    /// [`crate::dynamic::identity_table_layout`]. Field 0 of
+    /// [`Program::identity_set_layout`] is this layout.
+    pub identity_table_layout: LayoutId,
     /// The names a rendering of an erased value shows, placed before the run
     /// as literals and indexed by [`LayoutId`]: see [`LayoutNames`].
     ///

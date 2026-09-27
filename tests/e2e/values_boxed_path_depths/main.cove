@@ -1,0 +1,102 @@
+use console.println
+
+/// Paths of vectors on both sides of the depth `std.dynamic` stops scanning
+/// and starts keeping an identity set at (issue #514's F4, option B, whose K is
+/// `std.dynamic.shallow`): every depth from one to past twice the largest K
+/// measured, so that K − 1, K, K + 1 and 2K are among them whichever K is
+/// chosen.
+///
+/// Each value is a chain of links, erased, each link's vector holding the next
+/// — and the deepest link's vector holding, where `back` is not `-1`, the link
+/// at depth `back`: a cycle that closes within the scanned prefix, at its edge,
+/// or past it, and one whose repeated vector is in the prefix while the walk is
+/// past it. A rendering marks the repeat `[…]` and goes on, so every one of
+/// them is rendered here; an `==` refuses one, so what is compared here is a
+/// pair that differs at the deepest link's tag — which the walk reaches, having
+/// entered every vector on the way down, before it would go round — and the
+/// same chain twice without a cycle, which is equal.
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+struct Link {
+  tag: Int
+  kids: Vector<dyn Tagged>
+}
+
+impl Tagged for Link {
+  fn tag(self) -> Int {
+    self.tag
+  }
+}
+
+/// `depth` links, the deepest tagged `bottom`, its vector holding the link at
+/// depth `back` when `back` is not `-1`.
+fn chain(depth: Int, back: Int, bottom: Int) -> dyn Tagged {
+  var kids: Vector<Vector<dyn Tagged>> = Vector.of()
+  var links: Vector<dyn Tagged> = Vector.of()
+  var at = 0
+  while at < depth {
+    let held: Vector<dyn Tagged> = Vector.of()
+    kids.push(held)
+    var tag = at
+    if at == depth - 1 {
+      tag = bottom
+    }
+    links.push(Link(tag: tag, kids: held))
+    at = at + 1
+  }
+  at = 0
+  while at < depth - 1 {
+    var into = kids.get(at).unwrapOr(Vector.of())
+    into.push(links.get(at + 1).unwrapOr(Link(tag: 0, kids: Vector.of())))
+    at = at + 1
+  }
+  if back >= 0 {
+    var last = kids.get(depth - 1).unwrapOr(Vector.of())
+    last.push(links.get(back).unwrapOr(Link(tag: 0, kids: Vector.of())))
+  }
+  links.get(0).unwrapOr(Link(tag: 0, kids: Vector.of()))
+}
+
+export fn main() -> Result<Unit, Error> {
+  let depths = [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    12,
+    15,
+    16,
+    17,
+    20,
+    31,
+    32,
+    33,
+    40,
+    63,
+    64,
+    65,
+    70,
+  ]
+  for depth in depths {
+    let same = chain(depth, -1, 7) == chain(depth, -1, 7)
+    let other = chain(depth, -1, 7) == chain(depth, -1, 8)
+    println("depth {depth} equal {same} differ {other}")?
+    for back in [0, 1, depth / 2, depth - 1] {
+      if back < depth {
+        let value = chain(depth, back, 7)
+        let text = "{value}"
+        let differs = value == chain(depth, back, 8)
+        println("depth {depth} back {back} length {text.length()} marked {text.contains("[…]")} differs {differs}")?
+      }
+    }
+  }
+  Ok(())
+}

@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use cove_ir::dynamic::view_layout;
+use std::cell::Cell;
+
+use cove_ir::dynamic::{identity_set_layout, identity_table_layout, view_layout};
 use cove_ir::{
     ArithOp, CmpOp, DynamicKind, FunctionId, Inst, Layout, LayoutId, Len, Program, Repr, Shape,
     Storage,
@@ -49,6 +51,9 @@ struct Layouts {
     result: LayoutId,
     array_int: LayoutId,
     vector_point: LayoutId,
+    /// `Vector<Vector<Point>>`: a vector of vectors, each of which is
+    /// identity-bearing.
+    vector_vectors: LayoutId,
     set_int: LayoutId,
     map: LayoutId,
     range: LayoutId,
@@ -74,6 +79,9 @@ struct Functions {
     rooted_in_a_slot: FunctionId,
     rooted_in_a_vector: FunctionId,
     held_by_nothing: FunctionId,
+    entered_twice: FunctionId,
+    identity_across_collections: FunctionId,
+    enter_every: FunctionId,
 }
 
 /// The view's three words, as a frame holds them.
@@ -134,6 +142,28 @@ fn fixture() -> Fixture {
     );
     // The work stack ADR 0068's walks will keep their views on (#480).
     build.layout("Vector", Shape::Vector { elem: view });
+    build.layout(
+        "Array",
+        Shape::Elements {
+            elem: vector_point,
+            growable: true,
+        },
+    );
+    let vector_vectors = build.layout("Vector", Shape::Vector { elem: vector_point });
+    // Issue #514's F4: the identity set and the table beneath it.
+    let table = {
+        build.program.layouts.push(identity_table_layout());
+        LayoutId(build.program.layouts.len() as u32 - 1)
+    };
+    let identity = {
+        build
+            .program
+            .layouts
+            .push(identity_set_layout(table, boolean));
+        LayoutId(build.program.layouts.len() as u32 - 1)
+    };
+    build.program.identity_table_layout = table;
+    build.program.identity_set_layout = identity;
     let set_int = build.layout("Set", Shape::Members { elem: int });
     let map = build.layout(
         "Map",
@@ -263,6 +293,10 @@ fn fixture() -> Fixture {
         Hold::Vector(reference),
     );
     let held_by_nothing = rooted(&mut build, boxed, string, array_int, Hold::Nothing);
+    let entered_twice = entered_twice(&mut build, boolean);
+    let identity_across_collections =
+        identity_across_collections(&mut build, boxed, int, array_int);
+    let enter_every = enter_every(&mut build, boxed, int);
     Fixture {
         program: build.done(),
         layouts: Layouts {
@@ -283,6 +317,7 @@ fn fixture() -> Fixture {
             result,
             array_int,
             vector_point,
+            vector_vectors,
             set_int,
             map,
             range,
@@ -306,7 +341,301 @@ fn fixture() -> Fixture {
             rooted_in_a_slot,
             rooted_in_a_vector,
             held_by_nothing,
+            entered_twice,
+            identity_across_collections,
+            enter_every,
         },
+    }
+}
+
+/// `fn enteredTwice(v: DynamicView) -> Bool`: makes an identity set, enters
+/// `(v, v)` into it twice, and answers what the second entry answered —
+/// `false` exactly when the first one entered the pair, which is exactly when
+/// `v` is identity-bearing.
+fn entered_twice(build: &mut Build, boolean: LayoutId) -> FunctionId {
+    let view = build.program.view_layout;
+    build.function(
+        "enteredTwice",
+        &[view],
+        &[Repr::Int, Repr::Ref, Repr::Int, Repr::Ref, Repr::Bool],
+        boolean,
+        vec![
+            Inst::DynIdentitySet { dst: 3 },
+            Inst::DynIdentityEnter { set: 3, a: 0, b: 0 },
+            Inst::DynIdentityEnter { set: 3, a: 0, b: 0 },
+            Inst::Return { src: 4 },
+        ],
+    )
+}
+
+/// `fn identityAcrossCollections(a: Any, b: Any) -> Int`: opens two boxed
+/// vectors, lets go of the boxes, and enters `(a, b)` into an identity set;
+/// allocates until the heap has been collected; and then asks the set again.
+/// Answers `0` when every answer was the one it should be, and otherwise the
+/// number of the first that was not:
+///
+/// 1. `(a, b)` is entered;
+/// 2. after the collections, `(a, b)` is still in the set;
+/// 3. `(b, a)`, the pair swapped, is not — and is entered;
+/// 4. once both are left and the heap collected again, `(a, b)` is entered
+///    anew.
+///
+/// The vectors are held by nothing but the views, and the table by nothing but
+/// the set's own word: a table the collector did not trace would be reclaimed
+/// and handed to the garbage, and answer 2 wrong.
+fn identity_across_collections(
+    build: &mut Build,
+    boxed: LayoutId,
+    int: LayoutId,
+    garbage: LayoutId,
+) -> FunctionId {
+    let reprs = [
+        Repr::Ref, // 0 a
+        Repr::Ref, // 1 b
+        Repr::Int, // 2..=4 view of a
+        Repr::Ref,
+        Repr::Int,
+        Repr::Int, // 5..=7 view of b
+        Repr::Ref,
+        Repr::Int,
+        Repr::Ref,  // 8..=9 the set
+        Repr::Bool, //
+        Repr::Ref,  // 10 garbage
+        Repr::Int,  // 11 turns
+        Repr::Bool, // 12 more, and a negated answer
+        Repr::Int,  // 13 the answer
+    ];
+    // Twelve thousand-word arrays through a heap of a few thousand words.
+    let churn = |top: u32| {
+        vec![
+            Inst::Int { dst: 11, value: 0 },
+            Inst::Alloc {
+                dst: 10,
+                layout: garbage,
+                len: Len::Count(1000),
+            },
+            Inst::ArithImm {
+                op: ArithOp::Add,
+                dst: 11,
+                a: 11,
+                value: 1,
+            },
+            Inst::CmpImm {
+                op: CmpOp::Lt,
+                dst: 12,
+                a: 11,
+                value: 12,
+            },
+            Inst::BranchFalse {
+                cond: 12,
+                to: top + 6,
+            },
+            Inst::Jump { to: top + 1 },
+            Inst::Clear {
+                slot: 10,
+                layout: garbage,
+            },
+        ]
+    };
+    let failed = |code: &mut Vec<Inst>, at: u32| {
+        // Filled in below, once the refusal arms' counters are known.
+        code.push(Inst::BranchFalse { cond: 9, to: at });
+    };
+    let mut code = vec![
+        Inst::DynOpen { dst: 2, src: 0 },
+        Inst::DynOpen { dst: 5, src: 1 },
+        Inst::Clear {
+            slot: 0,
+            layout: boxed,
+        },
+        Inst::Clear {
+            slot: 1,
+            layout: boxed,
+        },
+        Inst::DynIdentitySet { dst: 8 },
+        Inst::DynIdentityEnter { set: 8, a: 2, b: 5 },
+    ];
+    let first = code.len();
+    failed(&mut code, 0);
+    let top = code.len() as u32;
+    code.extend(churn(top));
+    code.push(Inst::DynIdentityEnter { set: 8, a: 2, b: 5 });
+    code.push(Inst::Not { dst: 12, a: 9 });
+    let second = code.len();
+    code.push(Inst::BranchFalse { cond: 12, to: 0 });
+    code.push(Inst::DynIdentityEnter { set: 8, a: 5, b: 2 });
+    let third = code.len();
+    failed(&mut code, 0);
+    code.push(Inst::DynIdentityLeave { set: 8, a: 5, b: 2 });
+    code.push(Inst::DynIdentityLeave { set: 8, a: 2, b: 5 });
+    let top = code.len() as u32;
+    code.extend(churn(top));
+    code.push(Inst::DynIdentityEnter { set: 8, a: 2, b: 5 });
+    let fourth = code.len();
+    failed(&mut code, 0);
+    code.push(Inst::Int { dst: 13, value: 0 });
+    code.push(Inst::Return { src: 13 });
+    for (number, at) in [(1, first), (2, second), (3, third), (4, fourth)] {
+        let arm = code.len() as u32;
+        code.push(Inst::Int {
+            dst: 13,
+            value: number,
+        });
+        code.push(Inst::Return { src: 13 });
+        match &mut code[at] {
+            Inst::BranchFalse { to, .. } => *to = arm,
+            other => unreachable!("{other:?}"),
+        }
+    }
+    build.function(
+        "identityAcrossCollections",
+        &[boxed, boxed],
+        &reprs,
+        int,
+        code,
+    )
+}
+
+/// `fn enterEvery(box: Any) -> Int`: opens a boxed `Vector<Vector<Point>>` and,
+/// over an identity set, enters `(e, e)` for every element `e` — each a vector,
+/// so each a pair of its own — then enters them all again, then leaves them
+/// all, then enters them all once more. Answers `0` when the first and last
+/// passes entered every pair and the second entered none, and otherwise `1`,
+/// `2` or `4` for the pass that went wrong.
+///
+/// Forty elements grow the table from sixteen slots to a hundred and
+/// twenty-eight through three rehashes, and every growth is a place a
+/// collection can happen: [`collect_if_asked`] makes one happen there.
+fn enter_every(build: &mut Build, boxed: LayoutId, int: LayoutId) -> FunctionId {
+    let reprs = [
+        Repr::Ref, // 0 box
+        Repr::Int, // 1..=3 outer view
+        Repr::Ref,
+        Repr::Int,
+        Repr::Int,  // 4 n
+        Repr::Int,  // 5 i
+        Repr::Int,  // 6 unused
+        Repr::Bool, // 7 more
+        Repr::Int,  // 8..=10 element view
+        Repr::Ref,
+        Repr::Int,
+        Repr::Ref,  // 11..=12 the set
+        Repr::Bool, //
+        Repr::Bool, // 13 a negated answer
+        Repr::Int,  // 14 the answer
+    ];
+    let mut code = vec![
+        Inst::DynOpen { dst: 1, src: 0 },
+        Inst::DynCount { dst: 4, view: 1 },
+        Inst::DynIdentitySet { dst: 11 },
+    ];
+    // Each pass: `i = 0; while i < n { e = v[i]; <body>; i += 1 }`, with the
+    // body's branch to its refusal arm patched once the arms exist.
+    let mut patches: Vec<(usize, i64)> = Vec::new();
+    for (body, refusal) in [
+        (
+            Inst::DynIdentityEnter {
+                set: 11,
+                a: 8,
+                b: 8,
+            },
+            Some((12, 1)),
+        ),
+        (
+            Inst::DynIdentityEnter {
+                set: 11,
+                a: 8,
+                b: 8,
+            },
+            Some((13, 2)),
+        ),
+        (
+            Inst::DynIdentityLeave {
+                set: 11,
+                a: 8,
+                b: 8,
+            },
+            None,
+        ),
+        (
+            Inst::DynIdentityEnter {
+                set: 11,
+                a: 8,
+                b: 8,
+            },
+            Some((12, 4)),
+        ),
+    ] {
+        code.push(Inst::Int { dst: 5, value: 0 });
+        let head = code.len() as u32;
+        code.push(Inst::Cmp {
+            on: cove_ir::Compare::Int,
+            op: CmpOp::Lt,
+            dst: 7,
+            a: 5,
+            b: 4,
+        });
+        let exit = code.len();
+        code.push(Inst::BranchFalse { cond: 7, to: 0 });
+        code.push(Inst::DynChild {
+            dst: 8,
+            view: 1,
+            index: 5,
+        });
+        code.push(body);
+        if let Some((cond, number)) = refusal {
+            if cond == 13 {
+                code.push(Inst::Not { dst: 13, a: 12 });
+            }
+            patches.push((code.len(), number));
+            code.push(Inst::BranchFalse { cond, to: 0 });
+        }
+        code.push(Inst::ArithImm {
+            op: ArithOp::Add,
+            dst: 5,
+            a: 5,
+            value: 1,
+        });
+        code.push(Inst::Jump { to: head });
+        let after = code.len() as u32;
+        match &mut code[exit] {
+            Inst::BranchFalse { to, .. } => *to = after,
+            other => unreachable!("{other:?}"),
+        }
+    }
+    code.push(Inst::Int { dst: 14, value: 0 });
+    code.push(Inst::Return { src: 14 });
+    for (at, number) in patches {
+        let arm = code.len() as u32;
+        code.push(Inst::Int {
+            dst: 14,
+            value: number,
+        });
+        code.push(Inst::Return { src: 14 });
+        match &mut code[at] {
+            Inst::BranchFalse { to, .. } => *to = arm,
+            other => unreachable!("{other:?}"),
+        }
+    }
+    build.function("enterEvery", &[boxed], &reprs, int, code)
+}
+
+thread_local! {
+    /// Whether [`collect_if_asked`] collects: set by the test that asks for a
+    /// collection in the middle of a table's growth.
+    static COLLECT_ON_GROWTH: Cell<bool> = const { Cell::new(false) };
+    /// How many collections [`collect_if_asked`] has made on this thread.
+    static GROWTH_COLLECTIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Called by `super::grow` before it allocates a table's replacement — the one
+/// point in an entry where a collection can happen — and collects there when a
+/// test has asked it to, so that the rehash after it runs over a heap a
+/// collection has just walked.
+pub(super) fn collect_if_asked(machine: &mut Machine) {
+    if COLLECT_ON_GROWTH.with(Cell::get) {
+        machine.collect();
+        GROWTH_COLLECTIONS.with(|count| count.set(count.get() + 1));
     }
 }
 
@@ -1231,4 +1560,175 @@ fn the_child_table_is_this_arms_own_answers() {
     assert!(inline >= 20, "{inline} inline children");
     assert!(settled >= 5, "{settled} children that settle");
     assert!(refused >= 30, "{refused} refusals");
+}
+
+// ---- issue #514's F4: the identity set --------------------------------------
+
+/// **Only a whole `Vector` is identity-bearing.** Entering `(v, v)` twice
+/// answers `false` the second time for a vector — it was entered — and `true`
+/// for every other kind: a struct, an array, a set, a map, a string, a scalar,
+/// an enum and a box's struct are entered by nothing. And a set nothing was
+/// entered into allocates nothing: an empty set is two words and no object.
+#[test]
+fn only_a_whole_vector_is_identity_bearing() {
+    let fixture = fixture();
+    let layouts = fixture.layouts;
+    let mut machine = machine(&fixture);
+    let machine = &mut machine;
+    let vector = points(machine, &fixture, &[(1, 2)]);
+    let array = object(machine, layouts.array_int, 2, &[1, 2]);
+    let set = object(machine, layouts.set_int, 1, &[1]);
+    let text = string(machine, "s");
+    let cases: Vec<(&str, u64, bool)> = vec![
+        (
+            "a vector",
+            boxed(machine, layouts.vector_point, &[vector]),
+            true,
+        ),
+        (
+            "an array",
+            boxed(machine, layouts.array_int, &[array]),
+            false,
+        ),
+        ("a set", boxed(machine, layouts.set_int, &[set]), false),
+        ("a struct", boxed(machine, layouts.point, &[1, 2]), false),
+        (
+            "an enum",
+            boxed(machine, layouts.option_int, &[1, 5]),
+            false,
+        ),
+        ("a string", boxed(machine, layouts.string, &[text]), false),
+        ("an Int", boxed(machine, layouts.int, &[3]), false),
+    ];
+    for (what, value, bearing) in cases {
+        let view = open(machine, &fixture, value);
+        let (objects, words) = (machine.allocations(), machine.allocated_words());
+        let second = call(machine, fixture.functions.entered_twice, &view)[0] != 0;
+        assert_eq!(second, !bearing, "{what}");
+        if !bearing {
+            assert_eq!(
+                (
+                    machine.allocations() - objects,
+                    machine.allocated_words() - words
+                ),
+                (0, 0),
+                "{what}: an entry of nothing allocated"
+            );
+        } else {
+            assert_eq!(
+                machine.allocations() - objects,
+                1,
+                "{what}: the first entry allocates the table, and only it"
+            );
+        }
+    }
+    // An element of a vector is not the vector: a struct in a vector's store
+    // is inline in it, and is entered by nothing.
+    let owner = boxed(machine, layouts.vector_point, &[vector]);
+    let whole = open(machine, &fixture, owner);
+    let element = call(
+        machine,
+        fixture.functions.child,
+        &[whole.as_slice(), &[0]].concat(),
+    );
+    assert!(call(machine, fixture.functions.entered_twice, &element)[0] != 0);
+}
+
+/// Condition 4's first half: **a collection between an entry and its
+/// leaving** changes nothing the set answers. The two vectors are rooted by
+/// nothing but the views that name them and the table by nothing but the set's
+/// own word, and after the heap has been collected several times over the pair
+/// is still in the set, the swapped pair is not, and once both are left the
+/// pair is entered anew.
+#[test]
+fn an_identity_set_answers_the_same_across_a_collection() {
+    let fixture = fixture();
+    let layouts = fixture.layouts;
+    let mut machine = Machine::new(&fixture.program, 4096);
+    let left = points(&mut machine, &fixture, &[(1, 2)]);
+    let right = points(&mut machine, &fixture, &[(3, 4)]);
+    let a = boxed(&mut machine, layouts.vector_point, &[left]);
+    let b = boxed(&mut machine, layouts.vector_point, &[right]);
+    let answer = call(
+        &mut machine,
+        fixture.functions.identity_across_collections,
+        &[a, b],
+    )[0];
+    assert!(
+        machine.collected().collections >= 2,
+        "the run collected between the entries"
+    );
+    assert_eq!(answer, 0, "the answer that went wrong");
+}
+
+/// Condition 4's second half: **a collection during a rehash.** Forty vectors
+/// are entered, which grows the table three times, and a collection is made at
+/// every growth — after the old table's pairs were decided on and before the
+/// new table is allocated and filled. Every pair is then found again, none is
+/// entered twice, all are left, and all are entered anew.
+///
+/// The elements are rooted only through the outer vector, which the box and
+/// the view keep; the table only through the set's word. A table the collector
+/// reclaimed mid-growth would be read as garbage by the rehash.
+#[test]
+fn an_identity_set_answers_the_same_across_a_collection_in_a_rehash() {
+    let fixture = fixture();
+    let layouts = fixture.layouts;
+    let mut machine = Machine::new(&fixture.program, 1 << 14);
+    let outer = machine
+        .alloc_vector(layouts.vector_point, 40)
+        .expect("a vector fits");
+    for at in 0..40u32 {
+        let inner = points(&mut machine, &fixture, &[(i64::from(at), 0)]);
+        let store = machine.payload(outer, GROWABLE_STORE);
+        machine.set_payload(store, at, inner);
+    }
+    machine.set_payload(outer, GROWABLE_LEN, 40);
+    let value = boxed(&mut machine, layouts.vector_vectors, &[outer]);
+
+    COLLECT_ON_GROWTH.with(|on| on.set(true));
+    GROWTH_COLLECTIONS.with(|count| count.set(0));
+    let answer = call(&mut machine, fixture.functions.enter_every, &[value])[0];
+    COLLECT_ON_GROWTH.with(|on| on.set(false));
+    let collections = GROWTH_COLLECTIONS.with(Cell::get);
+    assert_eq!(answer, 0, "the pass that went wrong");
+    // Sixteen slots at the first pair, then thirty-two at the ninth,
+    // sixty-four at the seventeenth and a hundred and twenty-eight at the
+    // thirty-third: four allocations, and a collection at each.
+    assert_eq!(collections, 4, "a collection at every growth");
+    assert!(machine.collected().collections >= 4);
+}
+
+/// An entry that would allocate is refused where nothing may: [`execute`],
+/// which the native tier's leaf call reaches, is handed an entry into a set
+/// with no table, which only a disagreement between the tier and the runtime
+/// could do — so it is the internal error, and not an allocation behind
+/// compiled code's back.
+#[test]
+fn an_entry_that_needs_room_is_refused_where_nothing_may_allocate() {
+    let fixture = fixture();
+    let layouts = fixture.layouts;
+    let mut machine = machine(&fixture);
+    let vector = points(&mut machine, &fixture, &[(1, 2)]);
+    let value = boxed(&mut machine, layouts.vector_point, &[vector]);
+    let view = open(&mut machine, &fixture, value);
+    // A frame of our own: the view at 0..=2 and a set at 3..=4.
+    let base = machine.mem.push_frame(8).expect("a frame fits");
+    let at = machine.mem.stack_index(base);
+    for (offset, word) in view.iter().enumerate() {
+        machine.mem.set_word_at(at + offset, *word);
+    }
+    let refused = super::identity_enter(&mut machine, at, 3, 0, 0, false)
+        .expect_err("no table, and no room to make one");
+    assert!(
+        refused.message.contains("where nothing may allocate"),
+        "{}",
+        refused.message
+    );
+    assert!(super::enter_allocates(&machine, at + 3));
+    super::identity_enter(&mut machine, at, 3, 0, 0, true).expect("room to make one");
+    assert!(!super::enter_allocates(&machine, at + 3));
+    assert_eq!(machine.mem.word_at(at + 4), 1, "entered");
+    super::identity_enter(&mut machine, at, 3, 0, 0, false).expect("found, and nothing to add");
+    assert_eq!(machine.mem.word_at(at + 4), 0, "already there");
 }

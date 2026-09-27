@@ -122,6 +122,13 @@ pub enum BuiltinType {
     /// Written only in the core intrinsics' signatures, for
     /// [`BuiltinType::DynamicView`]'s reason — see [`CORE_RENDER_PATH_TYPE`].
     RenderPath,
+    /// `IdentitySet`, issue #514's F4: the set of vectors a walk of an erased
+    /// value is inside, asked and changed only by [`CORE_IDENTITY_ENTER`] and
+    /// [`CORE_IDENTITY_LEAVE`].
+    ///
+    /// Written only in the core intrinsics' signatures, for
+    /// [`BuiltinType::DynamicView`]'s reason — see [`CORE_IDENTITY_SET_TYPE`].
+    IdentitySet,
     /// `Any`: a value of some type, the way a Host schema's
     /// [`HostType::Any`](crate::HostType::Any) is one.
     ///
@@ -180,6 +187,7 @@ impl fmt::Display for BuiltinType {
             BuiltinType::ByteBuffer => f.write_str("ByteBuffer"),
             BuiltinType::DynamicView => f.write_str("DynamicView"),
             BuiltinType::RenderPath => f.write_str("RenderPath"),
+            BuiltinType::IdentitySet => f.write_str("IdentitySet"),
             BuiltinType::Any => f.write_str("Any"),
             BuiltinType::Array(item) => write!(f, "Array<{item}>"),
             BuiltinType::Vector(item) => write!(f, "Vector<{item}>"),
@@ -1845,6 +1853,14 @@ impl CoreIntrinsicSchema {
 /// struct shows only its name; [`CORE_DYNAMIC_HANDLE_TEXT`] an opaque value's
 /// text; and [`CORE_DYNAMIC_ON_PATH`] whether a vector is on the
 /// [`CORE_RENDER_PATH_TYPE`] a walk composed for a known layout handed over.
+///
+/// The last three are issue #514's F4, the path of vectors a walk of an erased
+/// value is inside, kept as a set rather than scanned: [`CORE_IDENTITY_SET`]
+/// makes an empty [`CORE_IDENTITY_SET_TYPE`], and [`CORE_IDENTITY_ENTER`] and
+/// [`CORE_IDENTITY_LEAVE`] add a pair of vectors to it and take one away. A
+/// walk scans the first few pairs of its path with [`CORE_DYNAMIC_SAME_OBJECT`]
+/// and keeps the rest in a set, so that a chain of vectors is linear in its
+/// depth rather than the O(depth²) a scan of the whole path was.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_ENSURE,
@@ -1899,6 +1915,9 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_DYNAMIC_OPAQUE,
     CORE_DYNAMIC_HANDLE_TEXT,
     CORE_DYNAMIC_ON_PATH,
+    CORE_IDENTITY_SET,
+    CORE_IDENTITY_ENTER,
+    CORE_IDENTITY_LEAVE,
 ];
 
 /// Every core intrinsic.
@@ -2962,8 +2981,10 @@ pub const CORE_DYNAMIC_SAME_TYPE: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// One `Inst::DynSameObject`. Identity is reflection-internal (issue #493):
 /// the answer is a `Bool`, so no address or number standing for one reaches
 /// Cove, and a view cannot leave the standard library, so neither can the
-/// question. `std.dynamic.equals` asks it at a `Vector`, the one kind these
-/// walks follow that can contain itself.
+/// question. `std.dynamic.equals` and `std.dynamic.renderInto` ask it at a
+/// `Vector`, the one kind these walks follow that can contain itself, over the
+/// first few vectors of their path; past those the path is an identity set
+/// ([`CORE_IDENTITY_ENTER`], issue #514's F4).
 pub const CORE_DYNAMIC_SAME_OBJECT: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "dynamicSameObject",
     generics: &[],
@@ -3231,6 +3252,96 @@ pub const CORE_DYNAMIC_ON_PATH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Bool,
+    fresh: false,
+};
+
+/// The name of the set of vectors a walk of an erased value is inside: issue
+/// #514's F4, the path `std.dynamic.equals` refuses a cycle on and
+/// `std.dynamic.renderInto` marks one on.
+///
+/// Private to the standard library exactly as [`CORE_DYNAMIC_VIEW_TYPE`] is,
+/// and narrower still: it may be held **only in a local of the function that
+/// made it** — not a parameter, a result, a field, an element, a capture or a
+/// box — because [`CORE_IDENTITY_ENTER`] changes the local itself. Nothing can
+/// be read out of one: it is asked one question, which is also one of its two
+/// changes, and the other is [`CORE_IDENTITY_LEAVE`].
+///
+/// **What is identity-bearing is a whole `Vector`, and nothing else**, for the
+/// reason `Inst::DynIdentityEnter` gives: a vector is the one value whose
+/// identity the language can observe, so the one both evaluators agree on. A
+/// pair of views either of which is anything else enters nothing.
+pub const CORE_IDENTITY_SET_TYPE: &str = "IdentitySet";
+
+/// `core.identitySet() -> IdentitySet`: an empty set, which **allocates
+/// nothing**.
+///
+/// One `Inst::DynIdentitySet`, which writes a null table and nothing else: the
+/// table is allocated by the first [`CORE_IDENTITY_ENTER`] that enters a pair,
+/// so a walk that never meets a vector pays for no set at all.
+pub const CORE_IDENTITY_SET: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "identitySet",
+    generics: &[],
+    params: &[],
+    result: BuiltinType::IdentitySet,
+    fresh: false,
+};
+
+/// `core.identityEnter(set: IdentitySet, a: DynamicView, b: DynamicView) ->
+/// Bool`: `false` when the pair of vectors `a` and `b` is already in `set` —
+/// the walk is inside it, so meeting it again is a cycle — and nothing is
+/// entered; otherwise `true`, having entered it.
+///
+/// One `Inst::DynIdentityEnter`. A pair either of whose views is not a whole
+/// vector is identity-bearing on neither evaluator: it enters nothing,
+/// allocates nothing and answers `true`. The pair is ordered, so `(b, a)` is
+/// not `(a, b)`. No identity reaches Cove: the answer is a `Bool`.
+pub const CORE_IDENTITY_ENTER: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "identityEnter",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "set",
+            ty: BuiltinType::IdentitySet,
+        },
+        ParamSchema {
+            name: "a",
+            ty: BuiltinType::DynamicView,
+        },
+        ParamSchema {
+            name: "b",
+            ty: BuiltinType::DynamicView,
+        },
+    ],
+    result: BuiltinType::Bool,
+    fresh: false,
+};
+
+/// `core.identityLeave(set: IdentitySet, a: DynamicView, b: DynamicView)`:
+/// takes the pair [`CORE_IDENTITY_ENTER`] entered out of `set` again, once the
+/// walk has finished everything under it.
+///
+/// One `Inst::DynIdentityLeave`, which allocates nothing. A pair that is not
+/// identity-bearing is left as it was entered, by doing nothing; an
+/// identity-bearing pair that is not in the set is an internal runtime error,
+/// because a walk leaves only what it entered.
+pub const CORE_IDENTITY_LEAVE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "identityLeave",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "set",
+            ty: BuiltinType::IdentitySet,
+        },
+        ParamSchema {
+            name: "a",
+            ty: BuiltinType::DynamicView,
+        },
+        ParamSchema {
+            name: "b",
+            ty: BuiltinType::DynamicView,
+        },
+    ],
+    result: BuiltinType::Unit,
     fresh: false,
 };
 
@@ -5731,6 +5842,60 @@ mod tests {
                     entry.method
                 ),
             }
+        }
+    }
+
+    /// Issue #514's F4, as a fact about the table: **nothing that takes an
+    /// `IdentitySet` answers anything but a `Bool`, `()` or the set itself**,
+    /// and only `core.identitySet` makes one.
+    ///
+    /// The set holds the identities of the vectors a walk is inside, and the
+    /// whole of its safety is that none of them reaches Cove: an entry that
+    /// answered an `Int` could answer an address, and one that answered a view
+    /// could answer a vector the walk is not holding. So the answers are held
+    /// to the three that carry nothing, and the one that makes a set takes
+    /// nothing a set could be made from.
+    #[test]
+    fn no_identity_set_entry_answers_what_it_holds() {
+        let makes: Vec<&str> = CORE_INTRINSICS
+            .iter()
+            .filter(|entry| entry.result == BuiltinType::IdentitySet)
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(makes, ["identitySet"]);
+        assert!(CORE_IDENTITY_SET.params.is_empty());
+        let takes: Vec<&CoreIntrinsicSchema> = CORE_INTRINSICS
+            .iter()
+            .filter(|entry| {
+                entry
+                    .params
+                    .iter()
+                    .any(|param| param.ty == BuiltinType::IdentitySet)
+            })
+            .collect();
+        assert_eq!(
+            takes.iter().map(|entry| entry.name).collect::<Vec<_>>(),
+            ["identityEnter", "identityLeave"]
+        );
+        for entry in takes {
+            assert!(
+                matches!(
+                    entry.result,
+                    BuiltinType::Bool | BuiltinType::Unit | BuiltinType::IdentitySet
+                ),
+                "`core.{}` takes an `IdentitySet` and answers a `{}`",
+                entry.name,
+                entry.result
+            );
+            // A set is asked of views and nothing else: no `Int` goes in that
+            // could name a word, and no second set.
+            let others: Vec<BuiltinType> = entry.params[1..].iter().map(|p| p.ty).collect();
+            assert_eq!(
+                others,
+                [BuiltinType::DynamicView, BuiltinType::DynamicView],
+                "`core.{}` takes what is not a view",
+                entry.name
+            );
         }
     }
 

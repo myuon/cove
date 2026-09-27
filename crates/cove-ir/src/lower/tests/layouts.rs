@@ -322,6 +322,14 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // here, as the first `Vector` rows a program that names no vector
             // had, and ADR 0068's Phase 4c moved them up, to `std.dynamic`'s
             // trail.
+            //
+            // Issue #514's F4: the identity set `std.dynamic.tracked` and
+            // `renderBelow` keep their path in, which is interned where a body
+            // first makes one rather than seeded beside `RenderPath` — so it is
+            // last, and no row above it moved. Its table first, which the set's
+            // word 0 names, and then the set.
+            "IdentityTable",
+            "IdentitySet",
         ]
     );
 }

@@ -88,6 +88,11 @@ impl Inst {
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 f(dst, width(program.view_layout))
             }
+            // An identity set is `Program::identity_set_layout`'s words, and an
+            // entry writes them all: the table it may have allocated or grown,
+            // and its answer.
+            Inst::DynIdentitySet { dst } => f(dst, width(program.identity_set_layout)),
+            Inst::DynIdentityEnter { set, .. } => f(set, width(program.identity_set_layout)),
             Inst::Clear { slot, layout } => f(slot, width(layout)),
             Inst::Copy { dst, layout, .. }
             | Inst::Load { dst, layout, .. }
@@ -153,6 +158,7 @@ impl Inst {
             | Inst::SharedLock { .. }
             | Inst::SharedUnlock { .. }
             | Inst::AssertFailed { .. }
+            | Inst::DynIdentityLeave { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -254,6 +260,9 @@ impl Inst {
             | Inst::DynKind { .. }
             | Inst::DynSameType { .. }
             | Inst::DynSameObject { .. }
+            | Inst::DynIdentitySet { .. }
+            | Inst::DynIdentityEnter { .. }
+            | Inst::DynIdentityLeave { .. }
             | Inst::DynNameOrder { .. }
             | Inst::DynRead { .. }
             | Inst::DynCase { .. }

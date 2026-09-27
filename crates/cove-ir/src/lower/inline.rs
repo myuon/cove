@@ -1077,6 +1077,11 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
                 mark(dst, width(program.view_layout))
             }
+            // An identity set is the program's set layout's words, and an entry
+            // writes them in place: its table and its answer.
+            Inst::DynIdentitySet { dst: set } | Inst::DynIdentityEnter { set, .. } => {
+                mark(set, width(program.identity_set_layout))
+            }
             // A store writes an object or an address rather than a frame
             // word, so it marks nothing; the rest are what `reaches_nothing`
             // refuses. Written out rather than caught by a `_` for the reason
@@ -1091,6 +1096,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::GrowableEnsure { .. }
             | Inst::GrowableCommit { .. }
             | Inst::RunStore { .. }
+            | Inst::DynIdentityLeave { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -1876,6 +1882,10 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::DynSameType { dst, a, b }
         | Inst::DynSameObject { dst, a, b }
         | Inst::DynNameOrder { dst, a, b } => vec![dst, a, b],
+        Inst::DynIdentitySet { dst } => vec![dst],
+        Inst::DynIdentityEnter { set, a, b } | Inst::DynIdentityLeave { set, a, b } => {
+            vec![set, a, b]
+        }
         Inst::DynChild { dst, view, index } => vec![dst, view, index],
         Inst::HandleText { dst, src } => vec![dst, src],
         Inst::DynTypeName { dst, view }

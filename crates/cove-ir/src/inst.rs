@@ -1805,8 +1805,51 @@ pub enum Inst {
     /// address, and no integer standing for one, reaches Cove. The standard
     /// library's walks ask it at a `Vector`, the one kind of value these walks
     /// follow that can contain itself (issue #493), to refuse a cycle on the
-    /// path they are walking.
+    /// path they are walking — over the first few vectors of the path, which
+    /// they scan; past those, the path is an identity set
+    /// ([`Inst::DynIdentityEnter`], issue #514's F4).
     DynSameObject { dst: Slot, a: Slot, b: Slot },
+    /// `dst = <an empty identity set>`: [`crate::Program::identity_set_layout`]'s
+    /// two words, a null table and `false`.
+    ///
+    /// **It allocates nothing** (issue #514's F4): the table is allocated by
+    /// the first [`Inst::DynIdentityEnter`] that enters a pair, so a walk that
+    /// never meets a pair of vectors pays for no set. See
+    /// [`crate::dynamic::identity_set_layout`] for what a set is.
+    DynIdentitySet { dst: Slot },
+    /// `set.entered = <whether the pair of vectors a and b view was entered
+    /// into set>`, entering it if it was not already there.
+    ///
+    /// `set` is a run of [`crate::Program::identity_set_layout`]'s two words,
+    /// and this instruction **reads and writes it**: it may allocate the table
+    /// or replace it with one twice the size, which is why it writes the set's
+    /// own table word, and it writes its answer, a `Bool`, into the set's
+    /// [`crate::dynamic::SET_ENTERED`] word — the fourth operand the three slot
+    /// fields have no room for. The lowering reads the answer from there.
+    ///
+    /// `false` means the pair is already in the set, and nothing changes: the
+    /// walk is inside it, so meeting it again is a cycle (issue #493). **Only a
+    /// whole `Vector` is identity-bearing** — a view that begins at word 0 of
+    /// an object whose own header is a `Vector` layout — so a pair either of
+    /// whose views is anything else enters nothing, allocates nothing and
+    /// answers `true`. The pair is ordered: `(b, a)` is not `(a, b)`. An
+    /// identity is a vector's address, compared below the boundary, and none
+    /// reaches Cove: the answer is a `Bool`.
+    ///
+    /// It allocates when the pair is entered into a set with no table yet, or
+    /// into one it would fill more than half of
+    /// ([`crate::dynamic::table_is_full`]), and at no other time.
+    DynIdentityEnter { set: Slot, a: Slot, b: Slot },
+    /// `<take the pair of vectors a and b view out of set>`: the pair
+    /// [`Inst::DynIdentityEnter`] entered, once the walk has finished
+    /// everything under it.
+    ///
+    /// It writes no frame word and allocates nothing: the table only ever
+    /// empties a slot. A pair that is not identity-bearing was never entered
+    /// and is left by doing nothing; an identity-bearing pair that is not in
+    /// the set is an internal runtime error, because a walk leaves only what
+    /// it entered.
+    DynIdentityLeave { set: Slot, a: Slot, b: Slot },
     /// `dst = <where the name of the value a views sorts against b's>`, an
     /// `Int`: `-1`, `0` or `1`.
     ///
@@ -1937,7 +1980,7 @@ pub enum Inst {
     /// the address of the innermost entry of a path a walk composed for a
     /// known layout is carrying, and how many entries it has. The machine
     /// follows the entries' links below the boundary and compares each one's
-    /// vector with the view as [`Inst::DynSameObject`] would — so a vector is
+    /// vector with the vector the view is, if it is a whole one — so a vector is
     /// on the path exactly when a rendering further up is still inside it
     /// (issue #499's decision 3). A path of depth nought is empty, and a view
     /// of anything but a vector is on no path. No address, depth or identity

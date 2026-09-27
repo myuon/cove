@@ -44,6 +44,9 @@ const VIEW: u32 = cove_ir::dynamic::VIEW_WORDS.len() as u32;
 /// The words a [`cove_ir::dynamic`] render path occupies in a frame.
 const PATH: u32 = cove_ir::dynamic::PATH_WORDS.len() as u32;
 
+/// The words a [`cove_ir::dynamic`] identity set occupies in a frame.
+const SET: u32 = cove_ir::dynamic::SET_WORDS.len() as u32;
+
 /// Whether a slot of this `Repr` is one this slice will touch.
 ///
 /// The scalars, and [`Repr::Ref`] — see [`crate::abi`]'s "References are live
@@ -220,8 +223,15 @@ pub(crate) struct Observation {
     pub(crate) a: Slot,
     pub(crate) b: Slot,
     pub(crate) c: Slot,
-    /// Whether the observation allocates, which is
-    /// [`Inst::DynHandleText`] and nothing else: the call is then a safepoint.
+    /// Whether the observation allocates, which is [`Inst::DynHandleText`]
+    /// and nothing else **statically**: the call is then a safepoint.
+    ///
+    /// [`Inst::DynIdentityEnter`] allocates too, but only sometimes — when its
+    /// set has no table yet, or one entry would fill more than half of it
+    /// ([`cove_ir::dynamic::table_is_full`]) — so it is `false` here and the
+    /// code generator decides at the call, from the table's own two words,
+    /// which of the two protocols this call takes. The runtime asks the same
+    /// question of the same words, so the two cannot disagree.
     pub(crate) allocates: bool,
 }
 
@@ -254,6 +264,9 @@ pub(crate) fn observation(inst: &Inst) -> Option<Observation> {
         Inst::DynOpaque { dst, view } => of(Op::DynOpaque, dst, view, 0),
         Inst::DynHandleText { dst, view } => of(Op::DynHandleText, dst, view, 0),
         Inst::DynOnPath { dst, view, path } => of(Op::DynOnPath, dst, view, path),
+        Inst::DynIdentitySet { dst } => of(Op::DynIdentitySet, dst, 0, 0),
+        Inst::DynIdentityEnter { set, a, b } => of(Op::DynIdentityEnter, set, a, b),
+        Inst::DynIdentityLeave { set, a, b } => of(Op::DynIdentityLeave, set, a, b),
         _ => None,
     }
 }
@@ -1477,7 +1490,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
-        // [ADR 0068]'s structural observations, all fifteen, each handed to
+        // [ADR 0068]'s structural observations, all fifteen, and issue #514's
+        // F4 identity set's three, each handed to
         // [`DynamicFn`](crate::abi::DynamicFn) as one observation — the ADR's
         // Decision 9, "narrow runtime helpers", and never an operation-level
         // one: the Cove walk that asks them is what compiles around the call
@@ -1498,6 +1512,12 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         Inst::DynSameType { dst, a, b }
         | Inst::DynSameObject { dst, a, b }
         | Inst::DynNameOrder { dst, a, b } => slot(*dst) && run(*a, VIEW) && run(*b, VIEW),
+        // Issue #514's F4: an identity set is `SET_WORDS`' two words, which an
+        // entry writes in place.
+        Inst::DynIdentitySet { dst } => run(*dst, SET),
+        Inst::DynIdentityEnter { set, a, b } | Inst::DynIdentityLeave { set, a, b } => {
+            run(*set, SET) && run(*a, VIEW) && run(*b, VIEW)
+        }
         Inst::DynFieldName { dst, view, index } => slot(*dst) && run(*view, VIEW) && slot(*index),
         Inst::DynOnPath { dst, view, path } => slot(*dst) && run(*view, VIEW) && run(*path, PATH),
         Inst::DynKind { dst, view }
@@ -1857,6 +1877,10 @@ mod tests {
                 view: 1,
                 path: 10,
             },
+            // Issue #514's F4: a set at 8..=9, which is `[Ref, Bool]`.
+            Inst::DynIdentitySet { dst: 8 },
+            Inst::DynIdentityEnter { set: 8, a: 1, b: 4 },
+            Inst::DynIdentityLeave { set: 8, a: 1, b: 4 },
             Inst::Return { src: 0 },
         ];
         let observations = code.len() - 1;
@@ -1872,7 +1896,7 @@ mod tests {
             .iter()
             .map(|inst| observation(inst).expect("an observation"))
             .collect();
-        assert_eq!(handed.len(), 15);
+        assert_eq!(handed.len(), 18);
         assert_eq!(
             handed[6],
             Observation {
@@ -1886,9 +1910,20 @@ mod tests {
         assert_eq!(
             handed.iter().filter(|seen| seen.allocates).count(),
             1,
-            "`DynHandleText` and nothing else allocates"
+            "`DynHandleText` and nothing else allocates, statically: an entry into \
+             an identity set chooses at the call"
         );
         assert!(handed[13].allocates);
+        assert_eq!(
+            handed[16],
+            Observation {
+                op: cove_ir::bytecode::Op::DynIdentityEnter.number(),
+                a: 8,
+                b: 1,
+                c: 4,
+                allocates: false,
+            }
+        );
         assert_eq!(observation(&Inst::Return { src: 0 }), None);
     }
 
@@ -1912,6 +1947,8 @@ mod tests {
                 },
                 Inst::Return { src: 0 },
             ],
+            // And so has an identity set.
+            vec![Inst::DynIdentitySet { dst: 4 }, Inst::Return { src: 0 }],
         ] {
             let function = function(reprs.clone(), LayoutId(2), code);
             let program = program(function);

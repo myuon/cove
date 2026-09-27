@@ -64,9 +64,44 @@ use std.stringbuilder
 /// descended into and not yet finished — and a pair it meets again while still
 /// inside it is the refusal. A pair is left when everything under it has been
 /// compared, so a vector reached twice by two routes, which is a part two
-/// fields share and not a cycle, is compared twice like any other part. Whether
-/// two views are one vector is `core.dynamicSameObject`, the one identity
-/// question reflection answers; it is asked here and nowhere a program can see.
+/// fields share and not a cycle, is compared twice like any other part.
+///
+/// # The path is scanned where it is shallow and a set where it is deep
+///
+/// Whether a pair is on the path is asked two ways, by how deep the path is
+/// (issue #514's F4, option B), and the answer is exact either way:
+///
+/// - **Within the first [`shallow`] pairs**, by a scan of them with
+///   `core.dynamicSameObject` — [`onPath`]. On a path this short a scan is a
+///   handful of comparisons compiled code answers without a call, which is
+///   cheaper than a set: a tree of vectors a few levels deep, the common case,
+///   never makes one.
+/// - **Past them**, in an `IdentitySet`: `core.identityEnter` asks and enters
+///   in one step — `false` is the pair met again — and `core.identityLeave`
+///   takes a pair out once everything under it is compared, each in constant
+///   time. When the path first goes past [`shallow`] pairs, the prefix is
+///   entered into the set too, so that a pair repeated from the prefix is found
+///   by the set as well; and when the walk comes back within the prefix, the
+///   set is emptied and the prefix scanned again. So a chain of vectors is
+///   linear in its depth, where a scan of the whole path was quadratic: a walk
+///   pays the prefix's entries once each time it crosses from within the prefix
+///   to past it, which is at most once a pair it descends into.
+///
+/// The identity either compares is reflection's own and reaches no Cove as a
+/// number: both answer a `Bool`.
+///
+/// **What is identity-bearing is a whole `Vector`, and nothing else.** A
+/// vector is the one value these walks follow that a program can change after
+/// building it, so the one that can hold itself, and the one value whose
+/// identity the language can observe — a push through one alias is seen
+/// through every other — so the one whose identity every evaluator agrees on.
+/// A pair of views either of which is anything else is the same object as
+/// nothing and is entered by nothing.
+///
+/// A set is held only in a local of the function that made it, because an
+/// entry changes the local: [`tracked`] makes its own. It allocates nothing
+/// until its first pair, which is the first pair past the prefix, so a walk
+/// that never goes more than [`shallow`] vectors deep pays for no table.
 ///
 /// The refusal comes at the first pair met again in the order the walk visits,
 /// so a difference visited before it is still `false`. That order is the one
@@ -231,9 +266,14 @@ fn deeper(
 /// innermost, and leaving them is lowering the two stacks' logical top.
 ///
 /// A vector pair with children is looked for on the path before it is added
-/// to it, and finding it is the refusal. A vector pair without children is
-/// never looked for: nothing can be under it, so it cannot close a cycle, and
-/// a vector on the path is never empty.
+/// to it — by [`onPath`] within the first [`shallow`] pairs and by the path's
+/// identity set past them, as [`equals`] says — and finding it is the refusal.
+/// A vector pair without children is never looked for: nothing can be under
+/// it, so it cannot close a cycle, and a vector on the path is never empty. A
+/// pair that is finished is left from the set, if the set holds the path, in
+/// the same turn that takes it off `way`; and when the path comes back within
+/// the prefix the set is emptied, so that a walk moving in and out of the
+/// prefix scans it again rather than holding it twice.
 fn tracked(
   lefts: Vector<DynamicView>,
   rights: Vector<DynamicView>,
@@ -260,9 +300,41 @@ fn tracked(
   if held > 0 {
     edge = core.vectorLoad(ends, held - 1)
   }
+  // The path's pairs, once it is deeper than the prefix of [`shallow`] pairs
+  // the walk scans: `deep` says the set holds every pair on the path, which it
+  // does from the first pair past the prefix until the walk comes back up into
+  // it, and holds none otherwise.
+  let inside = core.identitySet()
+  var deep = false
   if core.dynamicKind(x) == 9 {
-    if onPath(way, held, x, y) {
-      core.refuse(containsItself(), containsItselfRule(), containsItselfHelp())
+    if held < 8 {
+      if onPath(way, held, x, y) {
+        core.refuse(
+          containsItself(),
+          containsItselfRule(),
+          containsItselfHelp(),
+        )
+      }
+    } else {
+      if !deep {
+        var at = 0
+        while at < held {
+          core.identityEnter(
+            inside,
+            core.vectorLoad(way, 2 * at),
+            core.vectorLoad(way, 2 * at + 1),
+          )
+          at = at + 1
+        }
+        deep = true
+      }
+      if !core.identityEnter(inside, x, y) {
+        core.refuse(
+          containsItself(),
+          containsItselfRule(),
+          containsItselfHelp(),
+        )
+      }
     }
     if held >= paths {
       stack(way, x)
@@ -303,17 +375,34 @@ fn tracked(
     // innermost first, and then as many outward as ended above it too. A pair
     // is left once, so the loop turns once a pair over the whole walk.
     if edge > depth {
-      var inside = held - 1
+      var open = held - 1
       edge = -1
-      while inside > 0 {
-        let end = core.vectorLoad(ends, inside - 1)
+      while open > 0 {
+        let end = core.vectorLoad(ends, open - 1)
         if end <= depth {
           edge = end
           break
         }
-        inside = inside - 1
+        open = open - 1
       }
-      held = inside
+      if deep {
+        // The finished pairs leave the set; and if the path is back within
+        // the prefix, the rest leave it too, and the prefix is scanned again.
+        var from = open
+        if open < 8 {
+          from = 0
+          deep = false
+        }
+        while held > from {
+          held = held - 1
+          core.identityLeave(
+            inside,
+            core.vectorLoad(way, 2 * held),
+            core.vectorLoad(way, 2 * held + 1),
+          )
+        }
+      }
+      held = open
     }
     var next = children(x, y) - 1
     if next < -1 {
@@ -321,12 +410,34 @@ fn tracked(
     }
     if next >= 0 {
       if core.dynamicKind(x) == 9 {
-        if onPath(way, held, x, y) {
-          core.refuse(
-            containsItself(),
-            containsItselfRule(),
-            containsItselfHelp(),
-          )
+        if held < 8 {
+          if onPath(way, held, x, y) {
+            core.refuse(
+              containsItself(),
+              containsItselfRule(),
+              containsItselfHelp(),
+            )
+          }
+        } else {
+          if !deep {
+            var at = 0
+            while at < held {
+              core.identityEnter(
+                inside,
+                core.vectorLoad(way, 2 * at),
+                core.vectorLoad(way, 2 * at + 1),
+              )
+              at = at + 1
+            }
+            deep = true
+          }
+          if !core.identityEnter(inside, x, y) {
+            core.refuse(
+              containsItself(),
+              containsItselfRule(),
+              containsItselfHelp(),
+            )
+          }
         }
         if held >= paths {
           stack(way, x)
@@ -360,9 +471,48 @@ fn tracked(
   true
 }
 
+/// How many vectors of a walk's path are scanned for a repeat rather than kept
+/// in an identity set: K of issue #514's F4, option B. See [`equals`]' "The
+/// path is scanned where it is shallow and a set where it is deep".
+///
+/// # Why this number
+///
+/// A scan costs a comparison a pair on the path, and compiled code answers
+/// `core.dynamicSameObject` inline; an entry into a set and a leaving are a
+/// call each. So a shallow path is cheaper scanned and a deep one cheaper in a
+/// set, and K is where the one stops paying. It was chosen as the smallest
+/// that keeps `benches/equals`' `tree.boxed` — a tree six vectors deep —
+/// within 5% of the walk before the set on the native tier, where the scan is
+/// cheapest and a call dearest:
+///
+/// | K | native `tree.boxed` | VM `tree.boxed` | VM `tree`, the control |
+/// |---|---|---|---|
+/// | 4 | +27.0% | +17.4% | +12.8% |
+/// | **8** | **+1.0%** | +8.8% | +13.3% |
+/// | 16 | +0.7% | +8.8% | +12.4% |
+/// | 32 | +0.9% | +9.0% | +12.9% |
+///
+/// Medians of nine interleaved trials against the build before it (80498f4),
+/// both built in one directory. At K = 4 the tree is deeper than the prefix
+/// and pays the set on every comparison; from 8 on it never makes a table.
+/// The encoded machine's excess is not the walk's: the `tree` row compares
+/// the same tree through a walk the lowering composed, runs exactly the
+/// instructions it ran before, and moved further; rebuilt from one path, the
+/// two builds differ by +5.4% on `tree.boxed` and +5.4% on `tree`, and the
+/// walk executes 0.6% more instructions than before. A chain of vectors, the case the set is for, is
+/// linear at every K: 1,024 deep it is about a twentieth of what it was.
+///
+/// The walks write the number where they compare with it, so that the
+/// comparison is one instruction with an immediate: this function is its
+/// name, which the documentation above refers to, and the one place the
+/// number is explained.
+fn shallow() -> Int {
+  8
+}
+
 /// Whether the pair of vectors `x` and `y` is on the path `way`, which holds
-/// `held` pairs below its logical top: one entry at which the left is `x` and
-/// the right is `y`.
+/// `held` pairs below its logical top — fewer than [`shallow`]: one entry at
+/// which the left is `x` and the right is `y`.
 ///
 /// The pair and not either side alone. `a == a` compares a value with itself
 /// all the way down, so every left is its right, and it is only a cycle when
@@ -1395,7 +1545,12 @@ fn mutableKeyHelp() -> String {
 /// reached the box hands over the vectors *it* is inside as `path`, a
 /// capability nothing can read, and `core.dynamicOnPath` asks whether a vector
 /// is on it; the vectors this walk goes inside are the open containers on its
-/// own stack. A vector on either is the repeat. So `T(v: [T(v: […])])` is what
+/// own stack, which it asks as [`equals`] asks its path (issue #514's F4): by a
+/// scan of the stack within its first [`shallow`] containers, and past them in
+/// an `IdentitySet`, entered as each vector is opened and left as it is closed,
+/// so that a repeat deep in a value is found in constant time.
+/// A vector on either is the repeat, and only a whole `Vector` is ever one:
+/// [`equals`]' "What is identity-bearing". So `T(v: [T(v: […])])` is what
 /// a `T` whose `v: Vector<dyn Summary>` holds itself renders, on every
 /// evaluator. An interpolation of a box is inside nothing and hands over an
 /// empty path.
@@ -1477,7 +1632,10 @@ fn renderView(root: DynamicView, buffer: ByteBuffer, path: RenderPath) {
 /// for each, the child to render next; so the top of the two is where the walk
 /// is, and a container is finished and closed when its next child is past its
 /// count. The open containers are also this walk's own path: a vector among
-/// them is one it is inside, and meeting it again is the repeat.
+/// them is one it is inside, and meeting it again is the repeat: by
+/// [`repeats`] within the first [`shallow`] of them, and past those by `open`,
+/// an identity set that holds every open vector while the stack is deeper than
+/// the prefix and none while it is not.
 fn renderBelow(
   root: DynamicView,
   from: Int,
@@ -1490,6 +1648,10 @@ fn renderBelow(
   let nexts: Vector<Int> = core.vectorWithCapacity(8)
   stack(views, root)
   mark(nexts, from + 1)
+  // `deep` says `open` holds every vector on the stack, which it does from the
+  // first vector opened past the prefix until the stack comes back within it.
+  let open = core.identitySet()
+  var deep = false
   // The two stacks' logical top, [`place`]'s, and their length: they are
   // always as long as each other, and only an append changes it.
   var depth = 1
@@ -1498,8 +1660,27 @@ fn renderBelow(
   var shape = kind
   var going = true
   while going {
-    // `view` has children and is not written yet: the repeat, or open it.
-    if repeats(views, depth, view, shape) {
+    // `view` has children and is not written yet: the repeat, or open it. A
+    // vector is the repeat exactly when it is open already, and entering it
+    // is the question; nothing else is ever one.
+    var again = false
+    if shape == 9 {
+      if depth < 8 {
+        again = repeats(views, depth, view)
+      } else {
+        if !deep {
+          var at = 0
+          while at < depth {
+            let held = core.vectorLoad(views, at)
+            core.identityEnter(open, held, held)
+            at = at + 1
+          }
+          deep = true
+        }
+        again = !core.identityEnter(open, view, view)
+      }
+    }
+    if again {
       stringbuilder.appendText(buffer, "[…]")
     } else {
       opening(view, shape, buffer)
@@ -1522,6 +1703,23 @@ fn renderBelow(
       let next = core.vectorLoad(nexts, top)
       let above = core.dynamicKind(parent)
       if next == core.dynamicChildCount(parent) {
+        if deep {
+          if top < 8 {
+            // Back within the prefix: every vector leaves, the one closing
+            // among them, and the prefix is scanned again.
+            var at = top + 1
+            while at > 0 {
+              at = at - 1
+              let held = core.vectorLoad(views, at)
+              core.identityLeave(open, held, held)
+            }
+            deep = false
+          } else {
+            if above == 9 {
+              core.identityLeave(open, parent, parent)
+            }
+          }
+        }
         closing(above, buffer)
         depth = top
       } else {
@@ -1543,19 +1741,11 @@ fn renderBelow(
   ()
 }
 
-/// Whether `view`, of kind `kind` and with children, is a vector this walk is
-/// already inside: one of the open containers on `views`, below its logical top
-/// `top`. Only a vector is ever one object with anything, so the others are
-/// never it.
-fn repeats(
-  views: Vector<DynamicView>,
-  top: Int,
-  view: DynamicView,
-  kind: Int,
-) -> Bool {
-  if kind != 9 {
-    return false
-  }
+/// Whether the vector `view` is one this walk is already inside: one of the
+/// open containers on `views`, below its logical top `top` — fewer than
+/// [`shallow`]. Only a vector is ever one object with anything, so the others
+/// are never it.
+fn repeats(views: Vector<DynamicView>, top: Int, view: DynamicView) -> Bool {
   var at = top
   while at > 0 {
     at = at - 1

@@ -1184,6 +1184,11 @@ pub fn call_core(
         // what a walk the lowering composed hands over at a box. Whatever
         // stands for one here is empty.
         "dynamicOnPath" => Ok(Value(Repr::Bool(false))),
+        // Issue #514's F4: the identity set a walk keeps the vectors it is
+        // inside in. See [`identity_enter`].
+        "identitySet" => Ok(Value(Repr::Vector(VectorStorage::new(Vec::new())))),
+        "identityEnter" => identity_enter(&args[0], &args[1], &args[2]).map_err(|e| e.at(span)),
+        "identityLeave" => identity_leave(&args[0], &args[1], &args[2]).map_err(|e| e.at(span)),
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
@@ -1246,16 +1251,96 @@ pub(crate) fn dynamic_same_type(a: &Value, b: &Value) -> bool {
     kind == dynamic_kind(b) && (!kind.is_nominal() || dynamic_type_name(a) == dynamic_type_name(b))
 }
 
+/// The identity of the value a view denotes, if it is **identity-bearing**:
+/// the storage a `Vector` is — the one a push through any alias of it would be
+/// seen through, which is what a vector's identity is in a tree of values, as
+/// its object is in the machine's memory — and `None` for every other value.
+/// The machine's `dynamic::identity` says why a vector and nothing else, and
+/// this is the same rule.
+pub(crate) fn dynamic_identity(value: &Value) -> Option<&Rc<VectorStorage>> {
+    match value.erased() {
+        Value(Repr::Vector(storage)) => Some(storage),
+        _ => None,
+    }
+}
+
 /// `core.dynamicSameObject`: whether the two views are one `Vector` — the one
-/// storage a push through either would be seen through, which is what a
-/// vector's identity is in a tree of values, as its object is in the machine's
-/// memory. Nothing else is one object with anything, on either evaluator: the
-/// machine's `dynamic::same_object` says why.
+/// [`dynamic_identity`], and it one at all.
 pub(crate) fn dynamic_same_object(a: &Value, b: &Value) -> bool {
-    match (a.erased(), b.erased()) {
-        (Value(Repr::Vector(a)), Value(Repr::Vector(b))) => Rc::ptr_eq(a, b),
+    match (dynamic_identity(a), dynamic_identity(b)) {
+        (Some(a), Some(b)) => Rc::ptr_eq(a, b),
         _ => false,
     }
+}
+
+/// The pairs an identity set holds, as the oracle keeps them: a `Vector` of
+/// views, two to a pair — a representation no Cove can name, since the checker
+/// holds a set to a local of the standard library that made it and nothing
+/// but `core.identityEnter` and `core.identityLeave` reads one.
+///
+/// Holding the two views rather than two addresses is what keeps an identity
+/// from being reused while it is in the set: a view clones the `Rc` of the
+/// storage it names, so the storage outlives its pair. The oracle's cost is
+/// not what issue #514's F4 is about — no oracle `==` or rendering reaches
+/// `std.dynamic` — so a pair is found by a scan, compared by `Rc::ptr_eq`.
+fn identity_pairs(set: &Value) -> Result<&Rc<VectorStorage>, RuntimeError> {
+    match set {
+        Value(Repr::Vector(pairs)) => Ok(pairs),
+        _ => Err(dynamic_internal(
+            "an identity set was asked of something that is not one".to_string(),
+        )),
+    }
+}
+
+/// Where the pair `(a, b)` is among `pairs`, as the index of its first view.
+fn identity_position(
+    pairs: &[Value],
+    a: &Rc<VectorStorage>,
+    b: &Rc<VectorStorage>,
+) -> Option<usize> {
+    pairs.chunks(2).position(|pair| match pair {
+        [x, y] => {
+            dynamic_identity(x).is_some_and(|x| Rc::ptr_eq(x, a))
+                && dynamic_identity(y).is_some_and(|y| Rc::ptr_eq(y, b))
+        }
+        _ => false,
+    })
+}
+
+/// `core.identityEnter`: `false` when the pair of vectors `a` and `b` is in
+/// `set` already, and otherwise `true`, having entered it; `true` and nothing
+/// entered for a pair either of whose views is not identity-bearing
+/// ([`dynamic_identity`]).
+fn identity_enter(set: &Value, a: &Value, b: &Value) -> Result<Value, RuntimeError> {
+    let pairs = identity_pairs(set)?;
+    let (Some(x), Some(y)) = (dynamic_identity(a), dynamic_identity(b)) else {
+        return Ok(Value(Repr::Bool(true)));
+    };
+    let held = identity_position(&pairs.elements.borrow(), x, y).is_some();
+    if !held {
+        let mut elements = pairs.elements.borrow_mut();
+        elements.push(a.clone());
+        elements.push(b.clone());
+    }
+    Ok(Value(Repr::Bool(!held)))
+}
+
+/// `core.identityLeave`: takes the pair of vectors `a` and `b` out of `set`,
+/// refusing one that is identity-bearing and not there in the machine's
+/// words.
+fn identity_leave(set: &Value, a: &Value, b: &Value) -> Result<Value, RuntimeError> {
+    let pairs = identity_pairs(set)?;
+    let (Some(x), Some(y)) = (dynamic_identity(a), dynamic_identity(b)) else {
+        return Ok(Value(Repr::Unit));
+    };
+    let at = identity_position(&pairs.elements.borrow(), x, y);
+    let Some(at) = at else {
+        return Err(dynamic_internal(
+            "a pair of vectors was left that the identity set does not hold".to_string(),
+        ));
+    };
+    pairs.elements.borrow_mut().drain(2 * at..2 * at + 2);
+    Ok(Value(Repr::Unit))
 }
 
 /// `core.dynamicNameOrder`: the declared names, and then for two enums the
@@ -2616,6 +2701,61 @@ mod dynamic_tests {
         ] {
             let error = core(name, args).expect_err("refused");
             assert_eq!(error.message, message, "`core.{name}`");
+        }
+    }
+
+    /// Issue #514's F4 on the oracle: **only a whole `Vector` is
+    /// identity-bearing**, a pair is ordered — `(b, a)` after `(a, b)` is not a
+    /// cycle — a pair entered twice answers `false` the second time, a pair is
+    /// entered anew once it is left, and leaving a pair that is not there is
+    /// the machine's internal error, in its words.
+    #[test]
+    fn an_identity_set_holds_ordered_pairs_of_vectors_only() {
+        let vector = |n: i64| {
+            ask(
+                "dynamicOpen",
+                vec![erased(Value(Repr::Vector(VectorStorage::new(vec![
+                    Value::int(n),
+                ]))))],
+            )
+        };
+        let (a, b) = (vector(1), vector(1));
+        let set = ask("identitySet", vec![]);
+        let enter = |x: &Value, y: &Value| {
+            ask("identityEnter", vec![set.clone(), x.clone(), y.clone()])
+                .as_bool()
+                .expect("a `Bool`")
+        };
+        assert!(enter(&a, &b), "entered");
+        assert!(!enter(&a, &b), "already there");
+        assert!(enter(&b, &a), "the pair swapped is another pair");
+        assert!(enter(&a, &a), "one vector twice is a pair too");
+        for (x, y) in [(&a, &a), (&b, &a), (&a, &b)] {
+            ask("identityLeave", vec![set.clone(), x.clone(), y.clone()]);
+        }
+        assert!(enter(&a, &b), "entered anew once left");
+        ask("identityLeave", vec![set.clone(), a.clone(), b.clone()]);
+        let error =
+            core("identityLeave", vec![set.clone(), a.clone(), b.clone()]).expect_err("not there");
+        assert_eq!(
+            error.message,
+            "internal error: a pair of vectors was left that the identity set does not hold"
+        );
+        // Nothing else is identity-bearing: an array, a struct, a string and
+        // a scalar are entered by nothing, and answer `true` every time.
+        for value in [
+            Value::array([Value::int(1)]),
+            point(1, 2),
+            Value::string("s"),
+            Value::int(3),
+        ] {
+            let view = ask("dynamicOpen", vec![erased(value)]);
+            assert!(enter(&view, &view));
+            assert!(enter(&view, &view));
+            ask(
+                "identityLeave",
+                vec![set.clone(), view.clone(), view.clone()],
+            );
         }
     }
 }

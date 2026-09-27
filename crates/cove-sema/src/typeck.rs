@@ -434,8 +434,8 @@ use std::sync::Arc;
 use cove_diag::{Diagnostic, FileId, Severity, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
-    CORE_ANY_TYPE, CORE_BYTE_RUN_TYPE, CORE_DYNAMIC_VIEW_TYPE, CORE_NAMESPACE,
-    CORE_RENDER_PATH_TYPE, MAP_ENTRY, NONE_CASE, SCOPE,
+    CORE_ANY_TYPE, CORE_BYTE_RUN_TYPE, CORE_DYNAMIC_VIEW_TYPE, CORE_IDENTITY_SET_TYPE,
+    CORE_NAMESPACE, CORE_RENDER_PATH_TYPE, MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -605,8 +605,12 @@ const DYNAMIC_VIEW_ESCAPE_RULE: &str = "A `DynamicView` is a capability to read 
 /// The rule a [`DYNAMIC_VIEW_ESCAPE`] diagnostic about a `RenderPath` quotes.
 const RENDER_PATH_ESCAPE_RULE: &str = "A `RenderPath` is a capability naming the frames of the rendering that handed it over, not a value: it may be held in a local and the parameters of functions a module does not export, and nowhere it could outlive that rendering.";
 
+/// The rule a [`DYNAMIC_VIEW_ESCAPE`] diagnostic about an `IdentitySet`
+/// quotes.
+const IDENTITY_SET_ESCAPE_RULE: &str = "An `IdentitySet` is the path of vectors one walk is inside, and `core.identityEnter` changes the local that holds it: it may be held only in a local of the function that made it, and nowhere a copy of it could be changed apart from that local.";
+
 /// The capability `ty` holds anywhere a value of it could carry one — a
-/// `DynamicView` or a `RenderPath` — by name, or `None`.
+/// `DynamicView`, a `RenderPath` or an `IdentitySet` — by name, or `None`.
 ///
 /// [`mentions`] asked of both, so that one set of escape checks holds the
 /// two. A render path is narrower than a view — it names frames rather than
@@ -621,13 +625,26 @@ fn held_capability(ty: &Ty) -> Option<&'static str> {
     if mentions(ty, &|ty| matches!(ty, Ty::RenderPath)) {
         return Some(CORE_RENDER_PATH_TYPE);
     }
+    if mentions(ty, &|ty| matches!(ty, Ty::IdentitySet)) {
+        return Some(CORE_IDENTITY_SET_TYPE);
+    }
     None
+}
+
+/// Whether `ty` holds an `IdentitySet` anywhere but as the whole of itself:
+/// an element, a payload, a type argument or a function type's part — every
+/// place [`IDENTITY_SET_ESCAPE_RULE`] refuses one, because a copy held there
+/// would not see what `core.identityEnter` does to the local.
+fn nests_identity_set(ty: &Ty) -> bool {
+    !matches!(ty, Ty::IdentitySet) && mentions(ty, &|ty| matches!(ty, Ty::IdentitySet))
 }
 
 /// The rule an escape of the capability `name` is refused under.
 fn escape_rule(name: &str) -> &'static str {
     if name == CORE_RENDER_PATH_TYPE {
         RENDER_PATH_ESCAPE_RULE
+    } else if name == CORE_IDENTITY_SET_TYPE {
+        IDENTITY_SET_ESCAPE_RULE
     } else {
         DYNAMIC_VIEW_ESCAPE_RULE
     }
@@ -983,6 +1000,7 @@ fn not_task_safe(ty: &Ty) -> Option<&Ty> {
         | Ty::ByteBuffer
         | Ty::DynamicView
         | Ty::RenderPath
+        | Ty::IdentitySet
         | Ty::Task(_)
         | Ty::Scope => Some(ty),
         Ty::Shared(_) => None,
@@ -1184,6 +1202,16 @@ pub enum Ty {
     /// `cove_schema::builtins::CORE_RENDER_PATH_TYPE`. It is held to
     /// [`Ty::DynamicView`]'s escape rules.
     RenderPath,
+    /// `IdentitySet`: issue #514's F4, the set of vectors a walk of an erased
+    /// value is inside — see `cove_schema::builtins::CORE_IDENTITY_SET_TYPE`.
+    ///
+    /// Only a standard-library module can write it, and it is narrower than a
+    /// view: `core.identityEnter` changes the local that holds it, so a copy
+    /// anywhere else would go stale. `Checker::check_dynamic_view_escape`
+    /// refuses it in every signature, exported or not, and in a field;
+    /// `Checker::resolve_named` refuses it as a type argument; and a capture
+    /// and a task are refused as a view's are.
+    IdentitySet,
     Error,
     Range,
     Array(Box<Ty>),
@@ -1720,6 +1748,7 @@ impl fmt::Display for Ty {
             Ty::ByteBuffer => f.write_str("ByteBuffer"),
             Ty::DynamicView => f.write_str("DynamicView"),
             Ty::RenderPath => f.write_str("RenderPath"),
+            Ty::IdentitySet => f.write_str("IdentitySet"),
             Ty::Error => f.write_str("Error"),
             Ty::Range => f.write_str("Range"),
             Ty::Scope => f.write_str("Scope"),
@@ -2994,9 +3023,48 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
+        // An identity set is held by the function that made it and by no
+        // other: a parameter is a copy the callee's `core.identityEnter` would
+        // change apart from the caller's, and a result is one the caller
+        // would change apart from the callee's.
+        let every_function = self
+            .module
+            .functions
+            .keys()
+            .filter_map(|name| Some((name.clone(), self.functions.get(name)?)));
+        let every_method = self.module.methods.keys().filter_map(|(owner, name)| {
+            let sig = self.methods.get(&(self.key(owner), name.clone()))?;
+            Some((format!("{owner}.{name}"), sig))
+        });
+        let mut sets: Vec<(&'static str, String, Span)> = Vec::new();
+        for (name, sig) in every_function.chain(every_method) {
+            let set = |ty: &Ty| mentions(ty, &|ty| matches!(ty, Ty::IdentitySet));
+            for param in sig.params.iter().filter(|param| set(&param.ty)) {
+                sets.push((
+                    CORE_IDENTITY_SET_TYPE,
+                    format!("parameter `{}` of function `{name}`", param.name),
+                    param.span,
+                ));
+            }
+            if set(&sig.ret) {
+                sets.push((
+                    CORE_IDENTITY_SET_TYPE,
+                    format!("result of function `{name}`"),
+                    sig.ret_span,
+                ));
+            }
+        }
+        // An exported one was found above already, and is said once.
+        for held in sets {
+            if !found.iter().any(|(_, _, span)| *span == held.2) {
+                found.push(held);
+            }
+        }
         for (held, what, span) in found {
             let help = if held == CORE_RENDER_PATH_TYPE {
                 "hand the path on through the parameters of non-exported functions"
+            } else if held == CORE_IDENTITY_SET_TYPE {
+                "make the set with `core.identitySet()` in a local of the function that walks"
             } else {
                 "hold the view in a local of the non-exported function that walks it"
             };
@@ -3010,6 +3078,20 @@ impl<'a> Checker<'a> {
                 .help(help),
             );
         }
+    }
+
+    /// Refuses an `IdentitySet` written as `what`, at `span`, under
+    /// [`IDENTITY_SET_ESCAPE_RULE`].
+    fn identity_set_escape(&mut self, what: &str, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                DYNAMIC_VIEW_ESCAPE,
+                format!("a `{CORE_IDENTITY_SET_TYPE}` cannot be held by {what}"),
+            )
+            .at(span)
+            .rule(IDENTITY_SET_ESCAPE_RULE)
+            .help("make the set with `core.identitySet()` in a local of the function that walks"),
+        );
     }
 
     /// The signature of one trait method.
@@ -3783,7 +3865,11 @@ impl<'a> Checker<'a> {
                     Some(ty) => self.resolve(ty),
                     None => Ty::Unit,
                 };
-                Ty::func(*is_async, params, ret)
+                let func = Ty::func(*is_async, params, ret);
+                if nests_identity_set(&func) {
+                    self.identity_set_escape("a function type", ty.span);
+                }
+                func
             }
             TypeKind::Named { path, args } => self.resolve_named(path, args, ty.span),
             TypeKind::Dyn(name) => {
@@ -3801,6 +3887,17 @@ impl<'a> Checker<'a> {
 
     fn resolve_named(&mut self, path: &[Ident], args: &[Type], span: Span) -> Ty {
         let arguments: Vec<Ty> = args.iter().map(|arg| self.resolve(arg)).collect();
+        // An identity set is held whole or not at all: as a type argument it
+        // would be an element, a payload or a part of something a copy of
+        // which `core.identityEnter` would not change.
+        if let Some(at) = args
+            .iter()
+            .zip(&arguments)
+            .find(|(_, ty)| mentions(ty, &|ty| matches!(ty, Ty::IdentitySet)))
+            .map(|(arg, _)| arg.span)
+        {
+            self.identity_set_escape("a type argument", at);
+        }
         if path.len() > 1 {
             let head = &path[0].node;
             // A module imported whole makes its exported types writable
@@ -3958,6 +4055,15 @@ impl<'a> Checker<'a> {
             }
             self.check_type_arity(name, 0, args.len(), span);
             return Some(Ty::RenderPath);
+        }
+        // Issue #514's F4 identity set, by the same privilege: the walks of an
+        // erased value keep their path in one, and a program cannot name it.
+        if name == CORE_IDENTITY_SET_TYPE {
+            if !crate::stdlib::is_library_module(&self.module.name) {
+                return None;
+            }
+            self.check_type_arity(name, 0, args.len(), span);
+            return Some(Ty::IdentitySet);
         }
         // An erased value, by the same privilege: `std.dynamic.equals` takes
         // the two boxes `==` meets, and a program still cannot name one.
@@ -9757,6 +9863,7 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::ByteBuffer => Ty::ByteBuffer,
         BuiltinType::DynamicView => Ty::DynamicView,
         BuiltinType::RenderPath => Ty::RenderPath,
+        BuiltinType::IdentitySet => Ty::IdentitySet,
         BuiltinType::Any => Ty::Any,
         BuiltinType::Array(item) => Ty::Array(nested(item)),
         BuiltinType::Vector(item) => Ty::Vector(nested(item)),
@@ -16073,6 +16180,74 @@ fn secret() -> Int {
                 error.message
             );
         }
+    }
+
+    /// Issue #514's F4: an `IdentitySet` is the standard library's for a
+    /// view's reason, and it is held **only in a local of the function that
+    /// made it** — `core.identityEnter` changes the local, so a copy held
+    /// anywhere else would keep a table the local no longer names. A program
+    /// cannot name the type; a library module that puts one in a `Vector`, an
+    /// `Option`, a function type, a parameter — exported or not — a result or
+    /// a field is refused; and a closure may not capture one.
+    #[test]
+    fn an_identity_set_is_held_only_by_the_function_that_made_it() {
+        accepts_modules(&[(
+            "std.stringbuilder",
+            "fn walk(view: DynamicView) -> Bool {\n  let inside = core.identitySet()\n  if core.identityEnter(inside, view, view) {\n    core.identityLeave(inside, view, view)\n    return true\n  }\n  false\n}\n",
+        )]);
+        let error = rejects_modules(&[(
+            "app",
+            "/// Entry point.\nexport fn main(inside: IdentitySet) -> Int {\n  0\n}\n",
+        )]);
+        assert_eq!(error.code, UNKNOWN_TYPE, "{}", error.message);
+        assert_eq!(
+            error.message,
+            "`IdentitySet` names no type this module can see"
+        );
+        let refused = [
+            (
+                "fn walk() -> Int {\n  let held: Vector<IdentitySet> = Vector.of(core.identitySet())\n  0\n}\n",
+                "a `IdentitySet` cannot be held by a type argument",
+            ),
+            (
+                "fn walk() -> Int {\n  let held: Option<IdentitySet> = None\n  0\n}\n",
+                "a `IdentitySet` cannot be held by a type argument",
+            ),
+            (
+                "fn walk(inside: IdentitySet) -> Int {\n  0\n}\n",
+                "a `IdentitySet` cannot be held by the parameter `inside` of function `walk`",
+            ),
+            (
+                "fn walk() -> IdentitySet {\n  core.identitySet()\n}\n",
+                "a `IdentitySet` cannot be held by the result of function `walk`",
+            ),
+            (
+                "struct Held {\n  inside: IdentitySet,\n}\n",
+                "a `IdentitySet` cannot be held by the field `inside` of struct `Held`",
+            ),
+            (
+                "fn walk(view: DynamicView) -> Bool {\n  let inside = core.identitySet()\n  let enter = fn(seen: DynamicView) { core.identityEnter(inside, seen, seen) }\n  enter(view)\n}\n",
+                "a `IdentitySet` cannot be captured by a closure, and `inside` holds one",
+            ),
+            (
+                "fn walk() -> Int {\n  let held: fn(IdentitySet) -> Int = fn(inside: IdentitySet) { 0 }\n  0\n}\n",
+                "a `IdentitySet` cannot be held by a function type",
+            ),
+        ];
+        for (source, message) in refused {
+            let error = rejects_modules(&[("std.stringbuilder", source)]);
+            assert_eq!(
+                error.code, DYNAMIC_VIEW_ESCAPE,
+                "{source}: {}",
+                error.message
+            );
+            assert_eq!(error.message, message, "{source}");
+        }
+        assert_eq!(
+            not_task_safe(&Ty::IdentitySet),
+            Some(&Ty::IdentitySet),
+            "nor does one cross a task"
+        );
     }
 
     /// ADR 0068's Decision 9, the closures' and the tasks' half: a closure

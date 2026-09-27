@@ -357,6 +357,7 @@ fn emit<'a>(
             .map(|held| held.expect("every reserved function was lowered into its own slot")),
     );
 
+    let (identity_set_layout, identity_table_layout) = pool.shapes.identity_layouts();
     let program = Program {
         functions,
         layouts: pool.shapes.into_table(),
@@ -366,6 +367,8 @@ fn emit<'a>(
         boxed_layout: shapes::BOXED,
         view_layout: shapes::DYNAMIC_VIEW,
         render_path_layout: shapes::RENDER_PATH,
+        identity_set_layout,
+        identity_table_layout,
         names: Vec::new(),
         resource_names: Vec::new(),
         strings: pool.strings,

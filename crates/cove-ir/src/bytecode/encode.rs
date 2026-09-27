@@ -574,6 +574,15 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::DynOnPath { dst, view, path } => {
             build(Op::DynOnPath, slot(dst)?, slot(view)?, slot(path)?, 0)
         }
+        // No payload: a set is `Program::identity_set_layout`'s two words, and
+        // an entry's answer is the second of them rather than a fourth slot.
+        Inst::DynIdentitySet { dst } => build(Op::DynIdentitySet, slot(dst)?, 0, 0, 0),
+        Inst::DynIdentityEnter { set, a, b } => {
+            build(Op::DynIdentityEnter, slot(set)?, slot(a)?, slot(b)?, 0)
+        }
+        Inst::DynIdentityLeave { set, a, b } => {
+            build(Op::DynIdentityLeave, slot(set)?, slot(a)?, slot(b)?, 0)
+        }
         Inst::DynChild { dst, view, index } => {
             build(Op::DynChild, slot(dst)?, slot(view)?, slot(index)?, 0)
         }
@@ -1271,6 +1280,9 @@ mod tests {
             (0, Inst::DynKind { dst: 1, view: 2 }),
             (0, Inst::DynSameType { dst: 1, a: 2, b: 5 }),
             (0, Inst::DynSameObject { dst: 1, a: 2, b: 5 }),
+            (0, Inst::DynIdentitySet { dst: 1 }),
+            (0, Inst::DynIdentityEnter { set: 1, a: 2, b: 5 }),
+            (0, Inst::DynIdentityLeave { set: 1, a: 2, b: 5 }),
             (0, Inst::DynNameOrder { dst: 1, a: 2, b: 5 }),
             (0, Inst::DynRead { dst: 1, view: 2 }),
             (0, Inst::DynCase { dst: 1, view: 2 }),

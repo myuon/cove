@@ -516,6 +516,21 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             v(*a, program.view_layout),
             v(*b, program.view_layout)
         ),
+        Inst::DynIdentitySet { dst } => {
+            format!("dyn.identity-set {}", v(*dst, program.identity_set_layout))
+        }
+        Inst::DynIdentityEnter { set, a, b } => format!(
+            "dyn.identity-enter {} {} {}",
+            v(*set, program.identity_set_layout),
+            v(*a, program.view_layout),
+            v(*b, program.view_layout)
+        ),
+        Inst::DynIdentityLeave { set, a, b } => format!(
+            "dyn.identity-leave {} {} {}",
+            v(*set, program.identity_set_layout),
+            v(*a, program.view_layout),
+            v(*b, program.view_layout)
+        ),
         Inst::DynNameOrder { dst, a, b } => format!(
             "dyn.name-order {} {} {}",
             s(*dst),
@@ -750,6 +765,7 @@ fn shape_name(shape: &Shape) -> &'static str {
         Shape::Word(_) => "word",
         Shape::Str => "str",
         Shape::Bytes => "bytes",
+        Shape::IdentityTable => "identity-table",
         Shape::Struct { .. } => "struct",
         Shape::Enum { .. } => "enum",
         Shape::Elements {

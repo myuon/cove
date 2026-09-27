@@ -660,6 +660,26 @@ allow = ["console"]
 entry = "fail_equals_cycle_boxed.main"
 allow = ["console"]
 
+[run.fail_equals_cycle_boxed_self]
+entry = "fail_equals_cycle_boxed_self.main"
+allow = ["console"]
+
+[run.fail_equals_cycle_boxed_deep]
+entry = "fail_equals_cycle_boxed_deep.main"
+allow = ["console"]
+
+[run.fail_equals_cycle_boxed_prefix]
+entry = "fail_equals_cycle_boxed_prefix.main"
+allow = ["console"]
+
+[run.values_boxed_path_depths]
+entry = "values_boxed_path_depths.main"
+allow = ["console"]
+
+[run.values_boxed_identity]
+entry = "values_boxed_identity.main"
+allow = ["console"]
+
 [run.fail_equals_cycle_mutual]
 entry = "fail_equals_cycle_mutual.main"
 allow = ["console"]

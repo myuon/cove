@@ -384,7 +384,20 @@ fn count(program: &Program) -> Counts {
 ///   `fail_key_known_*` programs hold none, because their keys are known
 ///   layouts, and `fail_key_boxed_scope` is not counted: a lowering of its
 ///   whole package stops at a method of a generic type.
-const REFLECTED: [usize; 5] = [136, 44, 59, 87, 54];
+///
+/// Issue #514's F4, over 253 programs:
+///
+/// - the lowering moved nothing: with the five programs it added held out, the
+///   248 before it answer 136, 44, 59, 87 and 54, the row above. The identity
+///   set and the scan of the path's prefix are inside `std.dynamic`'s walks,
+///   and neither is a call this survey counts;
+/// - then the programs it added raised the equality by **13** and the
+///   rendering by **6**: `values_boxed_identity` 7 and 5,
+///   `values_boxed_path_depths` 3 and 1, and one equality each in
+///   `fail_equals_cycle_boxed_self`, `fail_equals_cycle_boxed_deep` and
+///   `fail_equals_cycle_boxed_prefix`. They are the paths on both sides of the
+///   prefix the walks scan, and every value in them is erased on purpose.
+const REFLECTED: [usize; 5] = [149, 44, 59, 93, 54];
 
 /// The wording walks the whole corpus carries, `describes<L>` and
 /// `describesAt<L>`, which may fall and may never rise: ADR 0068's Phase 4c.

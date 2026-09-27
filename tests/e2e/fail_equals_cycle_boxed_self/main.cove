@@ -1,0 +1,37 @@
+use console.println
+
+trait Shape {
+  fn sides(self) -> Int
+}
+
+/// A struct whose vector holds erased values, so `==` on two of them is
+/// `std.dynamic.equals`.
+struct Group {
+  members: Vector<dyn Shape>
+}
+
+impl Shape for Group {
+  fn sides(self) -> Int {
+    0
+  }
+}
+
+/// A group pushed into its own members, erased.
+fn looped() -> dyn Shape {
+  var members: Vector<dyn Shape> = Vector.of()
+  let group = Group(members: members)
+  members.push(group)
+  group
+}
+
+/// One group that contains itself, compared with itself: every pair the walk
+/// enters is one vector twice, and the second time it meets the group's vector
+/// it is still inside it — the refusal, on every evaluator (issue #514's F4
+/// keeps the path in an identity set, and a pair of one vector twice is a pair
+/// like any other).
+export fn main() -> Result<Unit, Error> {
+  let group = looped()
+  println("about to compare a group that contains itself with itself")?
+  println("never printed {group == group}")?
+  Ok(())
+}

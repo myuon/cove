@@ -1716,7 +1716,14 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// 1,999,186 to 2,245,451: the survey lowers each package whole, so a leaf
 /// expanded inside a loop in the standard library is counted in every one of
 /// the 248 programs whether it reaches that loop or not.
-const FORWARDABLE_COPIES: usize = 6528;
+///
+/// **6,639 since issue #514's F4**, a rise of 111 that is all programs and no
+/// lowering: with the five it added held out, the 248 before them answer
+/// 6,528 exactly. The five — `values_boxed_identity`,
+/// `values_boxed_path_depths` and three `fail_equals_cycle_boxed_*` programs,
+/// the paths on both sides of the prefix `std.dynamic` scans — each carry the
+/// whole standard library, which the survey counts in every program.
+const FORWARDABLE_COPIES: usize = 6639;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

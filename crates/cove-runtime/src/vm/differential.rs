@@ -4420,6 +4420,7 @@ fn probeSpan(value: Duration) -> String {
 
 fn probeDescribe(root: DynamicView) -> String {
   var out = \"\"
+  let inside = core.identitySet()
   var pending: Vector<DynamicView> = Vector.of(root)
   while pending.length() > 0 {
     let view = pending.pop().unwrapOr(root)
@@ -4461,6 +4462,12 @@ fn probeDescribe(root: DynamicView) -> String {
     }
     if core.dynamicSameObject(view, view) {
       out = \"{out}!\"
+    }
+    if core.identityEnter(inside, view, view) {
+      if !core.identityEnter(inside, view, view) {
+        out = \"{out}!\"
+        core.identityLeave(inside, view, view)
+      }
     }
     var at = count - 1
     while at >= 0 {
@@ -4545,6 +4552,9 @@ export fn main() -> String {
         "DynCase",
         "DynSameType",
         "DynSameObject",
+        "DynIdentitySet",
+        "DynIdentityEnter",
+        "DynIdentityLeave",
         "DynNameOrder",
         "DynTypeName",
         "DynFieldName",
@@ -4598,7 +4608,7 @@ export fn main() -> String {
         oracle,
         Answer::Value(
             " k6/13:ProbeBag,name,at,tags,counts,seen,index,span,ratio,wait,on,maybe,outcome,\
-             inner^-1 'bag' k6/2:ProbeAt,x,y= 1 2 k8/2= 'a' 'b' k9/2=! 3 4 k10/2= 5 6 k11/2 'k' \
+             inner^-1 'bag' k6/2:ProbeAt,x,y= 1 2 k8/2= 'a' 'b' k9/2=!! 3 4 k10/2= 5 6 k11/2 'k' \
              7 k12/3= 1 4 false 1.5 2ms true k7#1/1:Some 8 k7#1/1:Err 'bad' k6/2:ProbeAt,x,y= 9 \
              10 | k7#0/0:Plain | k7#1/1:Count 3 | k7#2/1:Named 'n' | k6/1:ProbeHolds,step k13/0"
                 .to_string()
@@ -5037,6 +5047,117 @@ export fn probeRepeat(a: Any, b: Any, n: Int) -> Int {
 }
 ";
 
+/// Two erased chains of vectors `n` deep, compared or rendered `turns` times:
+/// what [`a_boxed_chain_of_vectors_is_walked_in_linear_time`] counts.
+const VECTOR_CHAIN: &str = "
+trait Tagged {
+  fn tag(self) -> Int
+}
+
+/// A node whose one child is in a vector: a chain of `n` of them is `n`
+/// vectors, each inside the last.
+struct Link {
+  tag: Int
+  kids: Vector<Link>
+}
+
+impl Tagged for Link {
+  fn tag(self) -> Int {
+    self.tag
+  }
+}
+
+fn chain(n: Int) -> Link {
+  var node = Link(tag: 0, kids: Vector.of())
+  var at = 1
+  while at < n {
+    var kids: Vector<Link> = Vector.of()
+    kids.push(node)
+    node = Link(tag: at, kids: kids)
+    at = at + 1
+  }
+  node
+}
+
+export fn compare(n: Int, turns: Int) -> Int {
+  let x: dyn Tagged = chain(n)
+  let y: dyn Tagged = chain(n)
+  var same = 0
+  var at = 0
+  while at < turns {
+    if x == y {
+      same = same + 1
+    }
+    at = at + 1
+  }
+  same
+}
+
+export fn render(n: Int, turns: Int) -> Int {
+  let x: dyn Tagged = chain(n)
+  var total = 0
+  var at = 0
+  while at < turns {
+    total = total + \"{x}\".length()
+    at = at + 1
+  }
+  total
+}
+";
+
+/// Condition 5 of issue #514's F4, as a ratchet: **a boxed `==` and a boxed
+/// rendering of a chain of vectors cost instructions linear in its depth.**
+///
+/// Until F4 each vector a walk of an erased value went inside was looked for
+/// among every vector it was already inside — `core.dynamicSameObject` once per
+/// pair of the path — so a chain `n` deep cost `n²/2` of those, and a
+/// quadrupling of the depth sixteen times the work. The path is an identity set
+/// now, entered and left once a vector, and the work four times.
+///
+/// Counted on the encoded machine's own instruction counter, one comparison or
+/// one rendering at a time: a run with one turn, less a run with none, which
+/// builds the same two chains. The bound is 4.5 between depths four apart —
+/// linear with room for what a longer chain's stacks grow by, and far below the
+/// sixteen a scan of the path costs.
+#[test]
+fn a_boxed_chain_of_vectors_is_walked_in_linear_time() {
+    fn counted(entry: &'static str, n: i64) -> u64 {
+        on_a_deep_stack(move || {
+            let (sources, program) = checked(VECTOR_CHAIN);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            let mut spent = Vec::new();
+            for turns in [0, 1] {
+                let mut vm = Vm::new(&runtime, &hosts, &ir);
+                let answer = vm
+                    .invoke("m", entry, vec![Value::int(n), Value::int(turns)])
+                    .unwrap_or_else(|error| panic!("{entry}({n}): {}", error.message));
+                let answer = answer.as_int().expect("an `Int`");
+                if entry == "compare" {
+                    assert_eq!(answer, turns, "{entry}({n}): the chains are equal");
+                } else if turns == 1 {
+                    assert!(answer > 20 * n, "{entry}({n}): the whole chain is written");
+                }
+                spent.push(vm.instructions());
+            }
+            spent[1] - spent[0]
+        })
+    }
+    for entry in ["compare", "render"] {
+        let at: Vec<u64> = [256, 1024, 4096]
+            .into_iter()
+            .map(|n| counted(entry, n))
+            .collect();
+        let ratios = [at[1] as f64 / at[0] as f64, at[2] as f64 / at[1] as f64];
+        assert!(
+            ratios.iter().all(|ratio| *ratio <= 4.5),
+            "{entry}: instructions at depths 256, 1024 and 4096 are {at:?}, ratios {ratios:?} — \
+             more than linear"
+        );
+    }
+}
+
 /// **Comparing two boxed scalars allocates nothing**, and neither does
 /// comparing two values one level deep: `std.dynamic.equals` makes its two
 /// stacks only at the first child that has children of its own.
@@ -5056,8 +5177,14 @@ export fn probeRepeat(a: Any, b: Any, n: Int) -> Int {
 /// is a `Vector` whose elements have children, so the walk descends into a
 /// vector and makes the path of vector pairs it is inside — one vector of
 /// views and one of heights, an owner and a store each, made with room for
-/// four pairs, which one level of vectors never outgrows. Ten, and still never
-/// one per node; a value that nests without a vector does not make the path.
+/// four pairs, which one level of vectors never outgrows.
+///
+/// **And none for the path's identity set** (issue #514's F4): the set is two
+/// words of the walk's frame and no object, and its table is allocated only by
+/// the first pair past the prefix `std.dynamic.shallow` scans, which one level
+/// of vectors never reaches. Ten, and still never one per node; a value that
+/// nests without a vector makes neither the path nor a table, which the eight
+/// rows of nought above hold.
 #[test]
 fn dynamic_equality_allocates_only_to_descend() {
     /// A value to compare with itself, made afresh for each run.

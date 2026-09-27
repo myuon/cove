@@ -300,6 +300,20 @@ pub enum Shape {
     /// erasure and recursion no longer share a mechanism and this has one
     /// meaning.
     Boxed,
+    /// The header's `len` words, none of them a reference: the table beneath
+    /// an `IdentitySet`, issue #514's F4 — see
+    /// [`crate::dynamic::identity_set_layout`].
+    ///
+    /// Payload word 0 is how many pairs the table holds, and the words after
+    /// it are its slots, two words a slot: the identities of a pair of vectors
+    /// a walk is inside, or two noughts for an empty slot. An identity is the
+    /// address of a vector object, and it is **not traced**, which is why this
+    /// is a shape of its own rather than an `Array<Int>` it would otherwise be
+    /// word for word: the vectors are kept alive by the views on the walk's own
+    /// stacks, for as long as their pair is in the table, and the table
+    /// itself must not keep anything alive. [`Layout::may_hold_refs`] answers
+    /// `false`, so the collector never reads a word of one.
+    IdentityTable,
 }
 
 /// The description of one family of values.
@@ -422,6 +436,8 @@ impl Layout {
             // One word of `LayoutId` and then whatever it named, whose width
             // this layout cannot know: the header's `len` carries it.
             Shape::Boxed => 1 + len,
+            // A count and the slots, and the header's `len` is all of them.
+            Shape::IdentityTable => len,
             // Every shape whose payload the header does not decide answered
             // above.
             _ => self.width(),
@@ -477,6 +493,7 @@ impl Layout {
             // One word of `LayoutId` and then whatever it named, whose width
             // this layout cannot know: the header's `len` carries it.
             Shape::Boxed => Some(1 + u64::from(len)),
+            Shape::IdentityTable => Some(u64::from(len)),
             // Every shape whose payload the header does not decide answered
             // above.
             _ => Some(u64::from(self.width())),
@@ -518,7 +535,8 @@ impl Layout {
             | Shape::Elements { .. }
             | Shape::Members { .. }
             | Shape::Entries { .. }
-            | Shape::Boxed => None,
+            | Shape::Boxed
+            | Shape::IdentityTable => None,
         }
     }
 
@@ -528,7 +546,8 @@ impl Layout {
     /// words: a string, an `Array<Int>` and a boxed scalar are all leaves.
     pub fn may_hold_refs(&self, layouts: &[Layout]) -> bool {
         match &self.shape {
-            Shape::Free | Shape::Str | Shape::Bytes => false,
+            // An identity table's words are addresses it must not keep alive.
+            Shape::Free | Shape::Str | Shape::Bytes | Shape::IdentityTable => false,
             Shape::Word(repr) => repr.is_ref(),
             Shape::Struct { .. } | Shape::Enum { .. } => {
                 self.words.iter().any(|repr| repr.is_ref())

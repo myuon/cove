@@ -62,7 +62,10 @@
     {"name": "dynamicCaseName", "signature": "core.dynamicCaseName(view: DynamicView) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "String", "libraryOnly": true},
     {"name": "dynamicOpaque", "signature": "core.dynamicOpaque(view: DynamicView) -> Bool", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true},
     {"name": "dynamicHandleText", "signature": "core.dynamicHandleText(view: DynamicView) -> String", "generics": [], "params": [{"name": "view", "type": "DynamicView"}], "result": "String", "libraryOnly": true},
-    {"name": "dynamicOnPath", "signature": "core.dynamicOnPath(view: DynamicView, path: RenderPath) -> Bool", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "path", "type": "RenderPath"}], "result": "Bool", "libraryOnly": true}
+    {"name": "dynamicOnPath", "signature": "core.dynamicOnPath(view: DynamicView, path: RenderPath) -> Bool", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "path", "type": "RenderPath"}], "result": "Bool", "libraryOnly": true},
+    {"name": "identitySet", "signature": "core.identitySet() -> IdentitySet", "generics": [], "params": [], "result": "IdentitySet", "libraryOnly": true},
+    {"name": "identityEnter", "signature": "core.identityEnter(set: IdentitySet, a: DynamicView, b: DynamicView) -> Bool", "generics": [], "params": [{"name": "set", "type": "IdentitySet"}, {"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true},
+    {"name": "identityLeave", "signature": "core.identityLeave(set: IdentitySet, a: DynamicView, b: DynamicView) -> Unit", "generics": [], "params": [{"name": "set", "type": "IdentitySet"}, {"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Unit", "libraryOnly": true}
   ],
   "types": [
     {

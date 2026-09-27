@@ -1,0 +1,121 @@
+use console.println
+
+/// What a walk of an erased value answers now that the vectors it is inside
+/// are kept in an identity set rather than scanned (issue #514's F4): the set
+/// holds a vector only while the walk is inside it, so everything that is not a
+/// cycle compares and renders as it always did.
+///
+/// - **A part reached twice is not a cycle.** A vector two fields share, and a
+///   node two elements share, are compared and rendered in full both times:
+///   the pair is left when its elements are done.
+/// - **Every walk has a set of its own.** A vector of erased values is walked
+///   by a walk the lowering composed, which hands each element to a walk of an
+///   erased value of its own; two elements sharing one vector are two walks,
+///   and neither sees the other's path.
+/// - **A value compared with itself** is a pair of one vector twice, entered
+///   and left like any other pair.
+/// - **A cycle is still found**, one vector in, where the rendering meets a
+///   vector it is inside — through a box, and through the path a walk the
+///   lowering composed hands over.
+trait Named {
+  fn name(self) -> String
+}
+
+/// Two fields that may hold one vector.
+struct Twice {
+  first: Vector<Int>
+  second: Vector<Int>
+}
+
+impl Named for Twice {
+  fn name(self) -> String {
+    "twice"
+  }
+}
+
+/// A layout that reaches itself through a vector.
+struct Node {
+  tag: Int
+  kids: Vector<Node>
+}
+
+impl Named for Node {
+  fn name(self) -> String {
+    "node {self.tag}"
+  }
+}
+
+/// A value whose vector holds erased values.
+struct Group {
+  members: Vector<dyn Named>
+}
+
+impl Named for Group {
+  fn name(self) -> String {
+    "group"
+  }
+}
+
+/// A node whose two children are one node, whose children are one vector.
+fn diamond(bottom: Int) -> Node {
+  let shared: Vector<Node> = Vector.of(Node(tag: bottom, kids: Vector.of()))
+  let middle = Node(tag: 1, kids: shared)
+  Node(tag: 0, kids: Vector.of(middle, middle))
+}
+
+/// A group that holds itself, erased.
+fn looped() -> dyn Named {
+  var members: Vector<dyn Named> = Vector.of()
+  let group = Group(members: members)
+  members.push(group)
+  group
+}
+
+fn row(label: String, answer: Bool) -> Result<Unit, Error> {
+  println("{label} {answer}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  let numbers: Vector<Int> = Vector.of(1, 2, 3)
+  let twice: dyn Named = Twice(first: numbers, second: numbers)
+  let apart: dyn Named = Twice(
+    first: Vector.of(1, 2, 3),
+    second: Vector.of(1, 2, 3),
+  )
+  row("twice.self", twice == twice)?
+  row("twice.apart", twice == apart)?
+  println("twice.render {twice}")?
+
+  let top: dyn Named = diamond(7)
+  let twin: dyn Named = diamond(7)
+  let bottom: dyn Named = diamond(8)
+  row("diamond.self", top == top)?
+  row("diamond.twin", top == twin)?
+  row("diamond.bottom", top == bottom)?
+  println("diamond.render {top}")?
+
+  // Two elements that share one inner vector: a walk the lowering composed
+  // over the outer vector, and a walk of an erased value per element.
+  let shared: dyn Named = diamond(3)
+  let left: dyn Named = diamond(3)
+  let right: dyn Named = diamond(3)
+  let pair: Vector<dyn Named> = Vector.of(shared, shared)
+  let other: Vector<dyn Named> = Vector.of(left, right)
+  row("pair.self", pair == pair)?
+  row("pair.twin", pair == other)?
+  println("pair.render {pair}")?
+
+  // And the same shared value inside one erased group, walked whole.
+  let group: dyn Named = Group(members: Vector.of(shared, shared))
+  let groupTwin: dyn Named = Group(members: Vector.of(left, right))
+  row("group.twin", group == groupTwin)?
+  println("group.render {group}")?
+
+  // A cycle, found one vector in, through a box and through a known layout.
+  let cycle = looped()
+  println("cycle.render {cycle}")?
+  let held = Group(members: Vector.of(cycle))
+  println("cycle.held {held}")?
+  Ok(())
+}

@@ -116,7 +116,8 @@ impl Body<'_> {
             ("byteLength", [text]) => self.core_byte_length(expr, &text.value, want),
             (
                 "vectorEnsure" | "vectorStore" | "vectorCommit" | "vectorCopyFromSet"
-                | "vectorCopyFromMap" | "bytesEnsure" | "bytesStore" | "bytesCopy" | "bytesCommit",
+                | "vectorCopyFromMap" | "bytesEnsure" | "bytesStore" | "bytesCopy" | "bytesCommit"
+                | "identityLeave",
                 _,
             ) => {
                 if self.core_statement(expr, name, args) {
@@ -285,6 +286,17 @@ impl Body<'_> {
                 |dst, view, path| Inst::DynOnPath { dst, view, path },
                 want,
             ),
+            ("identitySet", []) => {
+                let Some(layout) = self.layout(&Ty::IdentitySet, expr.span) else {
+                    return self.dead(expr);
+                };
+                let dst = self.answer_at(want, layout);
+                self.emit(Inst::DynIdentitySet { dst: dst.slot }, expr.span);
+                dst
+            }
+            ("identityEnter", [set, a, b]) => {
+                self.core_identity_enter(expr, &set.value, &a.value, &b.value)
+            }
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -352,6 +364,7 @@ impl Body<'_> {
                     | "bytesStore"
                     | "bytesCopy"
                     | "bytesCommit"
+                    | "identityLeave"
             )
         {
             return false;
@@ -402,6 +415,9 @@ impl Body<'_> {
                     &out.value,
                     [&at.value, &run.value, &from.value, &count.value],
                 ),
+            ("identityLeave", [set, a, b]) => {
+                self.core_identity_leave(expr, &set.value, &a.value, &b.value)
+            }
             _ => {
                 self.gap(&format!("`core.{name}`"), expr);
                 false
@@ -2149,6 +2165,78 @@ impl Body<'_> {
         self.release(right, expr.span);
         self.release(left, expr.span);
         dst
+    }
+
+    /// The identity set `set` names, which must be **a local's own location**:
+    /// `core.identityEnter` writes the set's words where they are, so a
+    /// temporary — a set made in the argument itself, or a copy — would be
+    /// changed and thrown away. The checker holds a set to the locals of the
+    /// function that made it; this is the lowering's half, and a gap rather
+    /// than a guess.
+    fn identity_set_operand(&mut self, expr: &Expr, set: &Expr) -> Option<Val> {
+        let held = self.expr(set);
+        let layout = self.layout(&Ty::IdentitySet, expr.span);
+        if held.temp || Some(held.layout) != layout {
+            self.release(held, expr.span);
+            self.gap(
+                "an identity set that is not a local of this function — `core.identityEnter` \
+                 changes the set where it is",
+                expr,
+            );
+            return None;
+        }
+        Some(held)
+    }
+
+    /// `core.identityEnter(set, a, b)`: one [`Inst::DynIdentityEnter`], whose
+    /// answer is the set's own [`crate::dynamic::SET_ENTERED`] word.
+    ///
+    /// The instruction's three slot fields are the set and the two views, so
+    /// the `Bool` is written into the set rather than into a fourth slot, and
+    /// the answer is that word, **borrowed**: a branch on it reads it where it
+    /// is and costs no copy, and a binding that wants it elsewhere copies it
+    /// as it would any borrowed location. It is the set's until the next entry
+    /// into the same set, which is what every caller in `std.dynamic` does
+    /// with it — branch on it at once.
+    fn core_identity_enter(&mut self, expr: &Expr, set: &Expr, a: &Expr, b: &Expr) -> Val {
+        let Some(held) = self.identity_set_operand(expr, set) else {
+            return self.dead(expr);
+        };
+        let left = self.expr(a);
+        let right = self.expr(b);
+        self.emit(
+            Inst::DynIdentityEnter {
+                set: held.slot,
+                a: left.slot,
+                b: right.slot,
+            },
+            expr.span,
+        );
+        self.release(right, expr.span);
+        self.release(left, expr.span);
+        Val::borrowed(held.slot + crate::dynamic::SET_ENTERED, shapes::BOOL)
+    }
+
+    /// `core.identityLeave(set, a, b)` as a statement: one
+    /// [`Inst::DynIdentityLeave`], and nothing for its `()`. `false` where the
+    /// set is not a local, which has already been reported.
+    fn core_identity_leave(&mut self, expr: &Expr, set: &Expr, a: &Expr, b: &Expr) -> bool {
+        let Some(held) = self.identity_set_operand(expr, set) else {
+            return false;
+        };
+        let left = self.expr(a);
+        let right = self.expr(b);
+        self.emit(
+            Inst::DynIdentityLeave {
+                set: held.slot,
+                a: left.slot,
+                b: right.slot,
+            },
+            expr.span,
+        );
+        self.release(right, expr.span);
+        self.release(left, expr.span);
+        true
     }
 
     /// `core.dynamicChild(view, index)`: one [`Inst::DynChild`], answering a

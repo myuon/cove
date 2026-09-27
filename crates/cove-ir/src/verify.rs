@@ -535,6 +535,19 @@ impl Check<'_> {
                     poison(&mut objects, dst, width);
                     poison(&mut funcs, dst, width);
                 }
+                // Issue #514's F4: a set's table word is written by these two
+                // and nothing else, so a slot written only by them holds a
+                // table or null at every program counter — which is what
+                // `Check::identity_set` asks of an entry's operand. A copy of a
+                // set is a second writer, and poisons the answer: an entry
+                // into a copy is refused, because it would change a table the
+                // set it was copied from no longer names.
+                Inst::DynIdentitySet { dst: set } | Inst::DynIdentityEnter { set, .. } => {
+                    identify(&mut objects, set, self.program.identity_table_layout);
+                    poison(&mut objects, set.saturating_add(1), 1);
+                    poison(&mut funcs, set, words(self.program.identity_set_layout));
+                }
+                Inst::DynIdentityLeave { .. } => {}
                 // ADR 0052's two poison `dst` exactly as `RunLoad` does rather
                 // than `identify`ing it the way `Inst::Alloc` and `Inst::Str`
                 // do: `GrowableAlloc` allocates the owner its storage implies —
@@ -1382,6 +1395,19 @@ impl Check<'_> {
                 self.view(at, a, "the first view an object is compared of");
                 self.view(at, b, "the second view an object is compared of");
             }
+            Inst::DynIdentitySet { dst } => {
+                self.identity_set(at, dst, "what an identity set is made in", false);
+            }
+            Inst::DynIdentityEnter { set, a, b } => {
+                self.identity_set(at, set, "what a pair is entered into", true);
+                self.view(at, a, "the first view a pair is entered of");
+                self.view(at, b, "the second view a pair is entered of");
+            }
+            Inst::DynIdentityLeave { set, a, b } => {
+                self.identity_set(at, set, "what a pair is left from", true);
+                self.view(at, a, "the first view a pair is left of");
+                self.view(at, b, "the second view a pair is left of");
+            }
             Inst::DynNameOrder { dst, a, b } => {
                 self.expect(at, dst, &[Repr::Int]);
                 self.view(at, a, "the first view a name is ordered of");
@@ -1677,6 +1703,61 @@ impl Check<'_> {
             return false;
         }
         self.fits(at, slot, layout, what)
+    }
+
+    /// Whether `slot` begins an identity set: [`Program::identity_set_layout`]'s
+    /// words, which must themselves be the two [`crate::dynamic::SET_WORDS`]
+    /// says a set is, over a table of [`Program::identity_table_layout`] —
+    /// [`Check::view`]'s arrangement.
+    ///
+    /// And where the set is `used` rather than made, that it **is** one: that
+    /// its table word is written by [`Inst::DynIdentitySet`] and
+    /// [`Inst::DynIdentityEnter`] and nothing else in this function
+    /// ([`Check::slot_facts`]). Two words of the right `Repr`s are not enough —
+    /// a byte buffer's reference beside a `Bool` is a `[Ref, Bool]` too — and an
+    /// entry into anything but a set would write a table over it. A copy of a
+    /// set is refused the same way, since its table word has a second writer.
+    fn identity_set(&mut self, at: Option<usize>, slot: Slot, what: &str, used: bool) -> bool {
+        let layout = self.program.identity_set_layout;
+        let table = self.program.identity_table_layout;
+        if !self.layout_exists(at, layout) || !self.layout_exists(at, table) {
+            return false;
+        }
+        let described = self.program.layout(layout);
+        let names_its_table = matches!(
+            &described.shape,
+            Shape::Struct { fields, .. }
+                if fields.first().is_some_and(|field| field.layout == table)
+        );
+        if described.words != crate::dynamic::SET_WORDS
+            || !names_its_table
+            || self.program.layout(table).shape != Shape::IdentityTable
+        {
+            let name = described.name.clone();
+            self.fault(
+                at,
+                format!(
+                    "{what} is an identity set, and the program's set layout `{name}` is not a \
+                     table and an answer"
+                ),
+            );
+            return false;
+        }
+        if !self.fits(at, slot, layout, what) {
+            return false;
+        }
+        if used && self.objects.get(slot as usize).copied().flatten() != Some(table) {
+            self.fault(
+                at,
+                format!(
+                    "{what} is slot {slot}, which is not an identity set: its table word is \
+                     written by something other than `dyn.identity-set` and \
+                     `dyn.identity-enter`"
+                ),
+            );
+            return false;
+        }
+        true
     }
 
     fn expect(&mut self, at: Option<usize>, slot: Slot, want: &[Repr]) {
@@ -2780,6 +2861,13 @@ mod tests {
     /// ADR 0068's Phase 4b-ii render path: `[Addr, Int]`, the program's
     /// `render_path_layout`.
     const PATH: LayoutId = LayoutId(16);
+    /// Issue #514's F4: the table beneath an identity set, and the set, `[Ref,
+    /// Bool]` — the program's `identity_table_layout` and
+    /// `identity_set_layout`.
+    const TABLE: LayoutId = LayoutId(17);
+    const IDENTITY: LayoutId = LayoutId(18);
+    /// A `Bool` word, which an identity set's second word is.
+    const BOOL: LayoutId = LayoutId(19);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -2876,6 +2964,9 @@ mod tests {
             Layout::word("Float", Repr::Float),
             Layout::word("<addr>", Repr::Addr),
             crate::dynamic::render_path_layout(ADDR, INT),
+            crate::dynamic::identity_table_layout(),
+            crate::dynamic::identity_set_layout(TABLE, BOOL),
+            Layout::word("Bool", Repr::Bool),
         ]
     }
 
@@ -2910,6 +3001,8 @@ mod tests {
             boxed_layout: BOXED,
             view_layout: VIEW,
             render_path_layout: PATH,
+            identity_set_layout: IDENTITY,
+            identity_table_layout: TABLE,
             ..Program::default()
         }
     }
@@ -3067,6 +3160,106 @@ mod tests {
                 "{shown}"
             );
         }
+    }
+
+    /// Issue #514's F4: an identity set is made, entered and left over two
+    /// views, and each instruction is refused where its set is not one — a set
+    /// that begins one word off, a byte buffer's reference laid beside a
+    /// `Bool`, which has a set's words and is no set, and a copy of a set,
+    /// whose table word has a writer that is neither of the set's own.
+    #[test]
+    fn an_identity_set_is_held_to_being_one() {
+        // Two views at 0..=2 and 3..=5, a set at 6..=7, a byte buffer and a
+        // `Bool` at 8..=9, a second `[Ref, Bool]` at 10..=11, then an `Int`.
+        let frame = |code: Vec<Inst>| {
+            program(vec![function(
+                vec![
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Bool,
+                    Repr::Ref,
+                    Repr::Bool,
+                    Repr::Ref,
+                    Repr::Bool,
+                    Repr::Int,
+                ],
+                INT,
+                code.into_iter().chain([Inst::Return { src: 12 }]).collect(),
+            )])
+        };
+        let held = frame(vec![
+            Inst::DynIdentitySet { dst: 6 },
+            Inst::DynIdentityEnter { set: 6, a: 0, b: 3 },
+            Inst::DynIdentityEnter { set: 6, a: 3, b: 3 },
+            Inst::DynIdentityLeave { set: 6, a: 3, b: 3 },
+            Inst::DynIdentityLeave { set: 6, a: 0, b: 3 },
+        ]);
+        assert_eq!(faults(&held), Vec::<String>::new());
+        let buffer = frame(vec![
+            Inst::GrowableAlloc {
+                dst: 8,
+                storage: crate::Storage::PackedBytes,
+                capacity: 12,
+            },
+            Inst::DynIdentityEnter { set: 8, a: 0, b: 3 },
+        ]);
+        assert_eq!(
+            faults(&buffer),
+            vec![
+                "what a pair is entered into is slot 8, which is not an identity set: its table \
+                 word is written by something other than `dyn.identity-set` and \
+                 `dyn.identity-enter`"
+                    .to_string()
+            ]
+        );
+        let copied = frame(vec![
+            Inst::DynIdentitySet { dst: 6 },
+            Inst::Copy {
+                dst: 10,
+                src: 6,
+                layout: IDENTITY,
+            },
+            Inst::DynIdentityLeave {
+                set: 10,
+                a: 0,
+                b: 3,
+            },
+        ]);
+        assert_eq!(
+            faults(&copied),
+            vec![
+                "what a pair is left from is slot 10, which is not an identity set: its table \
+                 word is written by something other than `dyn.identity-set` and \
+                 `dyn.identity-enter`"
+                    .to_string()
+            ]
+        );
+        let misplaced = frame(vec![Inst::DynIdentitySet { dst: 7 }]);
+        assert_eq!(
+            faults(&misplaced),
+            vec![
+                "what an identity set is made in is `IdentitySet`, whose word 0 is ref, but slot \
+                 7 holds bool"
+                    .to_string()
+            ]
+        );
+        let viewless = frame(vec![
+            Inst::DynIdentitySet { dst: 6 },
+            Inst::DynIdentityEnter { set: 6, a: 1, b: 3 },
+        ]);
+        assert_eq!(
+            faults(&viewless),
+            vec![
+                "the first view a pair is entered of is `DynamicView`, whose word 0 is int, but \
+                 slot 1 holds ref"
+                    .to_string()
+            ]
+        );
     }
 
     /// ADR 0068's Phase 4b-ii observations, over the frame [`reflecting`]'s
