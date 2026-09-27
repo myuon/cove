@@ -70,6 +70,12 @@ fn @m.f() -> m.Shape
 /// write null over it. Its string is interpolated rather than a literal for
 /// the same reason — a literal is interned, and clearing a slot that holds
 /// an interned string releases nothing either.
+///
+/// The word reads null at 25 because the scope's end cleared `s7..s8` at 24.
+/// `Ping` still emits its own zeroing of `s8`, but on this path that is a
+/// clear of a word already null on every way in, which `lower::nulls` drops
+/// (issue #514's step (a)(i)). What the collector reads is the same either
+/// way; the listing shows the one store that does the work.
 #[test]
 fn a_reference_word_of_another_case_reads_null() {
     assert_eq!(
@@ -80,7 +86,7 @@ fn a_reference_word_of_another_case_reads_null() {
         "\
 fn @m.f(String) -> m.Msg
   frame 19: s0!:ref s1:tag s2:ref s3:int s4:ref s5:unit s6:ref s7:tag s8:ref s9:unit s10:int s11:int s12:int s13:ref s14:unit s15:int s16:int s17:ref s18:int
-  local what -> s0:String [0, 29)
+  local what -> s0:String [0, 28)
   local said -> s7..s8:m.Msg [24, 24)
      0  int s3:int 17
      1  growable-alloc.bytes s4:ref s3:int
@@ -108,9 +114,8 @@ fn @m.f(String) -> m.Msg
     23  clear s6:String
     24  clear s7..s8:m.Msg
     25  tag s7:tag m.Msg.Ping
-    26  clear s8:<ref>
-    27  copy s1..s2:m.Msg s7..s8:m.Msg
-    28  return s1..s2:m.Msg
+    26  copy s1..s2:m.Msg s7..s8:m.Msg
+    27  return s1..s2:m.Msg
 "
     );
 }
