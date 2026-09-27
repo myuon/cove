@@ -592,39 +592,51 @@ fn containsItselfHelp() -> String {
 /// one declaration have one field count, two cases of one enum one payload —
 /// because a count is what a collection is compared by first, and one
 /// comparison for every kind is shorter than a list of the kinds that need it.
+///
+/// # The kinds are asked by class
+///
+/// A value's parts are mostly containers and `Int`s: a node of
+/// `benches/equals`' `tree.boxed` is a struct, an `Int` and a vector, a third
+/// each, and a link of an enum chain an enum, an `Int` and an array. So the
+/// scalars and the string are one class, asked by one range test before any of
+/// them is — an `Int` is decided on the second comparison rather than the
+/// first — and a container reaches its count on the third rather than the
+/// seventh (issue #514's VM residue, step (c)).
 fn children(x: DynamicView, y: DynamicView, kind: Int) -> Int {
   if !core.dynamicSameType(x, y) {
     return -1
   }
-  if kind == 2 {
-    if core.dynamicInt(x) == core.dynamicInt(y) {
-      return 0
+  if kind < 6 {
+    if kind == 2 {
+      if core.dynamicInt(x) == core.dynamicInt(y) {
+        return 0
+      }
+      return -1
     }
-    return -1
-  }
-  if kind == 5 {
-    if core.dynamicString(x) == core.dynamicString(y) {
-      return 0
+    if kind == 5 {
+      if core.dynamicString(x) == core.dynamicString(y) {
+        return 0
+      }
+      return -1
     }
-    return -1
-  }
-  if kind == 1 {
-    if core.dynamicBool(x) == core.dynamicBool(y) {
-      return 0
+    if kind == 1 {
+      if core.dynamicBool(x) == core.dynamicBool(y) {
+        return 0
+      }
+      return -1
     }
-    return -1
-  }
-  if kind == 3 {
-    if core.dynamicFloat(x) == core.dynamicFloat(y) {
-      return 0
+    if kind == 3 {
+      if core.dynamicFloat(x) == core.dynamicFloat(y) {
+        return 0
+      }
+      return -1
     }
-    return -1
-  }
-  if kind == 4 {
-    if core.dynamicDuration(x) == core.dynamicDuration(y) {
-      return 0
+    if kind == 4 {
+      if core.dynamicDuration(x) == core.dynamicDuration(y) {
+        return 0
+      }
+      return -1
     }
-    return -1
   }
   if kind >= 13 {
     return -1
@@ -953,9 +965,11 @@ fn orderBelow(
 /// each — a signed word, a `Bool`, a string's bytes in place — and which the
 /// oracle answers by the same `MapKey` order; a struct and an enum by name
 /// first; and an `Array`, a `Set`, a `Map` and a `Range` have nothing but their
-/// children. The two most common kinds are asked first. What is left over — a
-/// float, a vector, a function, an opaque value — is not a key, and is
-/// refused.
+/// children. The containers are asked first and then the two commonest
+/// scalars, `Int` before `String`: a key that is boxed is a struct or an enum
+/// before it is anything else, and [`children`] says why a walk meets
+/// containers and `Int`s most. What is left over — a float, a vector, a
+/// function, an opaque value — is not a key, and is refused.
 ///
 /// # Two kinds apart are ordered by rank, which is the code but for one pair
 ///
@@ -986,12 +1000,6 @@ fn sorts(x: DynamicView, y: DynamicView) -> Int {
     }
     return core.order(kind, other)
   }
-  if kind == 5 {
-    return core.order(core.dynamicString(x), core.dynamicString(y))
-  }
-  if kind == 2 {
-    return core.order(core.dynamicInt(x), core.dynamicInt(y))
-  }
   if kind >= 6 {
     if kind <= 7 {
       let named = core.dynamicNameOrder(x, y)
@@ -1005,6 +1013,12 @@ fn sorts(x: DynamicView, y: DynamicView) -> Int {
         return 2
       }
     }
+  }
+  if kind == 2 {
+    return core.order(core.dynamicInt(x), core.dynamicInt(y))
+  }
+  if kind == 5 {
+    return core.order(core.dynamicString(x), core.dynamicString(y))
   }
   if kind == 1 {
     return core.order(core.dynamicBool(x), core.dynamicBool(y))
@@ -1199,15 +1213,14 @@ fn refusesBelow(
 /// of them, but for a `Map`'s keys.
 ///
 /// The kind codes are [`children`]' table, and the arms are [`refusesKey`]'s
-/// list in code order.
+/// list in code order, with the scalars and the string asked as one class:
+/// every kind below a struct is admitted but a float, so a scalar, a string, a
+/// struct, an enum and an array are each decided on the second comparison.
 fn keyParts(view: DynamicView, kind: Int) -> Int {
-  if kind < 3 {
-    return 0
-  }
-  if kind == 3 {
-    return -1
-  }
   if kind < 6 {
+    if kind == 3 {
+      return -1
+    }
     return 0
   }
   if kind < 9 {
@@ -1824,22 +1837,14 @@ fn repeats(views: Vector<DynamicView>, top: Int, view: DynamicView) -> Bool {
 /// on to open the value reads it rather than asking it again (issue #514's
 /// F6).
 ///
-/// The kind codes are [`children`]' table, the commonest first.
+/// The kind codes are [`children`]' table, the containers first and then the
+/// commonest scalars, `Int` before `String`, for [`children`]' reason.
 fn written(
   view: DynamicView,
   kind: Int,
   buffer: ByteBuffer,
   path: RenderPath,
 ) -> Int {
-  if kind == 5 {
-    stringbuilder.appendText(buffer, core.dynamicString(view))
-    return 0
-  }
-  if kind == 2 {
-    let number = core.dynamicInt(view)
-    int.renderInto(number, buffer)
-    return 0
-  }
   if kind >= 6 {
     if kind <= 11 {
       let count = core.dynamicChildCount(view)
@@ -1866,6 +1871,15 @@ fn written(
       stringbuilder.appendText(buffer, "\{\}")
       return 0
     }
+  }
+  if kind == 2 {
+    let number = core.dynamicInt(view)
+    int.renderInto(number, buffer)
+    return 0
+  }
+  if kind == 5 {
+    stringbuilder.appendText(buffer, core.dynamicString(view))
+    return 0
   }
   if kind == 1 {
     if core.dynamicBool(view) {
