@@ -1,0 +1,50 @@
+use console.println
+
+/// Counts to `limit`, which is far past anything this case waits for.
+fn spin(limit: Int) -> Int {
+  var at = 0
+  while at < limit {
+    at += 1
+  }
+  at
+}
+
+/// Returns from inside a scope while a child it spawned is still running.
+///
+/// Leaving a scope early cancels its children and waits for them to stop, so
+/// the `return` does not wait for the count. What it answers is the value it
+/// was given, whatever the child had done by then.
+fn leaveEarly(answer: Int) -> Int {
+  scope work {
+    let slow = work.spawn { spin(1000000000000) }
+    if answer > 0 {
+      return answer
+    }
+    await slow
+  }
+}
+
+/// The same obligation on a `break`: the scope is inside the loop, and the
+/// loop is left from inside the scope.
+fn breakOut() -> Int {
+  var rounds = 0
+  while true {
+    rounds += 1
+    scope work {
+      let slow = work.spawn { spin(1000000000000) }
+      if rounds == 3 {
+        break
+      }
+      slow.cancel()
+    }
+  }
+  rounds
+}
+
+/// Both early exits leave a running child behind, and neither waits for it
+/// to finish counting.
+export fn main() -> Result<Unit, Error> {
+  println("returned {leaveEarly(7)}")?
+  println("broke out after {breakOut()} rounds")?
+  Ok(())
+}

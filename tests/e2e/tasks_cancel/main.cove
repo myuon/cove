@@ -1,0 +1,27 @@
+use console.println
+
+/// Counts to `limit`, which is far past anything this case waits for.
+fn spin(limit: Int) -> Int {
+  var at = 0
+  while at < limit {
+    at += 1
+  }
+  at
+}
+
+/// Cancels a task that would otherwise run for a very long time, and leaves
+/// its scope without awaiting it.
+///
+/// Leaving a scope normally waits for every child. A cancelled child stops at
+/// its next safepoint, and every loop back edge is one, so the scope is left
+/// promptly rather than after the count. Nothing printed depends on how far
+/// the child got before the request reached it.
+export fn main() -> Result<Unit, Error> {
+  println("before the scope")?
+  scope work {
+    let job = work.spawn { spin(1000000000000) }
+    job.cancel()
+  }
+  println("the cancelled task was left behind")?
+  Ok(())
+}

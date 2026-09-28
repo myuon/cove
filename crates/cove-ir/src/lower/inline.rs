@@ -1054,10 +1054,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
             | Inst::Len { dst, .. }
-            | Inst::LayoutOf { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
             | Inst::AddrOfField { dst, .. }
-            | Inst::AddrOfElem { dst, .. }
             | Inst::AddrOfPart { dst, .. }
             | Inst::DynKind { dst, .. }
             | Inst::DynSameType { dst, .. }
@@ -1862,12 +1860,9 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // and repoints `args` at the copy, the same way it does for
         // `Inst::IntrinsicCall`.
         Inst::RunCopy { .. } | Inst::RunSlice { .. } | Inst::RunFind { .. } => Vec::new(),
-        Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
+        Inst::Len { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],
-        Inst::AddrOfElem {
-            dst, obj, index, ..
-        } => vec![dst, obj, index],
         Inst::AddrOfPart { dst, addr, .. } => vec![dst, addr],
         Inst::Load { dst, addr, .. } => vec![dst, addr],
         Inst::Store { addr, src, .. } => vec![addr, src],

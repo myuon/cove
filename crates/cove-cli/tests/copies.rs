@@ -200,10 +200,8 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
         | Inst::Alloc { dst, .. }
         | Inst::Box { dst, .. }
         | Inst::Len { dst, .. }
-        | Inst::LayoutOf { dst, .. }
         | Inst::AddrOfSlot { dst, .. }
         | Inst::AddrOfField { dst, .. }
-        | Inst::AddrOfElem { dst, .. }
         | Inst::AddrOfPart { dst, .. }
         | Inst::ScopeEnter { dst, .. }
         | Inst::Spawn { dst, .. }
@@ -1186,9 +1184,10 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// call neither method — **0 static sites and 0 dynamic calls on both** — so
 /// this is the first migration of the series whose whole-program counters are
 /// identical by construction, and they were measured to be. What it bought is
-/// that `Intrinsic` is 12, that `Effects::BULK_WORK` has six carriers, and
-/// that Cove now names its own Unicode version in a file a diff can be read
-/// from.
+/// that `Intrinsic` went down to 12 and `Effects::BULK_WORK` to six carriers,
+/// and that Cove now names its own Unicode version in a file a diff can be read
+/// from. (Both counts kept falling: `Intrinsic` has 3 variants now, and
+/// `BULK_WORK` lost its last carrier and was deleted by issue #536.)
 /// **The fiftieth rise is four new rows and no code at all.** 8275 to 8432,
 /// 192 programs to 196. The check the paragraphs above prescribe says the
 /// rest: the survey with all four directories removed is **8275 exactly**,
@@ -1751,7 +1750,17 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// cycle was written down. The pass drops loads and moves clears, and
 /// neither is a copy. The new program carries the whole standard library,
 /// which the survey counts in every program.
-const FORWARDABLE_COPIES: usize = 6678;
+///
+/// **6,736 since issue #536's cleanup added three task programs**, a rise of
+/// 58 that is again all program and no lowering. With `tasks_async_call`,
+/// `tasks_cancel` and `tasks_scope_cancel` held out, the 254 before them
+/// answer 6,678 exactly — the cleanup deleted two instructions nothing
+/// emitted, and a deletion of what no program contains cannot move a count
+/// of what programs contain. Held out one at a time they are 17, 18 and 23,
+/// each program carrying its own copy of the standard library into the
+/// survey. They are there because `ScopeCancel`,
+/// `Cancel` and `Settled` had producers and no program that executed them.
+const FORWARDABLE_COPIES: usize = 6736;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

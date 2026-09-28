@@ -465,23 +465,10 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             }
         ),
         Inst::Len { dst, obj } => format!("len {} {}", s(*dst), s(*obj)),
-        Inst::LayoutOf { dst, obj } => format!("layout-of {} {}", s(*dst), s(*obj)),
         Inst::AddrOfSlot { dst, slot } => format!("addr-of-slot {} {}", s(*dst), s(*slot)),
         Inst::AddrOfField { dst, obj, at } => {
             format!("addr-of-field {} {} +{at}", s(*dst), s(*obj))
         }
-        Inst::AddrOfElem {
-            dst,
-            obj,
-            index,
-            layout,
-        } => format!(
-            "addr-of-elem {} {} {} {}",
-            s(*dst),
-            s(*obj),
-            s(*index),
-            l(*layout)
-        ),
         Inst::AddrOfPart { dst, addr, at } => {
             format!("addr-of-part {} {} +{at}", s(*dst), s(*addr))
         }

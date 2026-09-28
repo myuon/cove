@@ -619,7 +619,6 @@ places.
 
 - `AddrOfSlot` — the address of a slot of the current frame.
 - `AddrOfField` — the address plus a statically known field-word offset.
-- `AddrOfElem` — an element's address, at a statically known stride.
 - `AddrOfPart` — a statically known word offset added to an address, which is
   what makes a place composable: the answer is again the address of the first
   word of a value location, so a field of a `var` parameter goes back through

@@ -28,10 +28,12 @@
 //! # Dynamic dispatch is the object answering what it is
 //!
 //! There is no dispatch instruction and no vtable. A `dyn Trait` value is a
-//! reference; the object behind it names its own [`crate::LayoutId`] in its
-//! header; and the lowering knows every type that conforms to the trait,
+//! reference to a box; the box names the concrete value's
+//! [`crate::LayoutId`] in its first payload word, the tag [`Inst::Box`]
+//! writes; and the lowering knows every type that conforms to the trait,
 //! because ADR 0006 makes conformance explicit and therefore enumerable. So
-//! a call site reads the layout with [`Inst::LayoutOf`] and hands it to an
+//! a call site reads the layout with an [`Inst::LoadField`] at offset 0 and
+//! hands it to an
 //! [`Inst::Switch`] over a table built from the trait's conformances, with a
 //! [`Inst::Trap`] for the entry that names no implementation.
 //!

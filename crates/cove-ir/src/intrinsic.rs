@@ -194,9 +194,8 @@ impl Intrinsic {
         // of it may reach, and an exhausted heap — which is why every
         // intrinsic that allocates carries it.
         //
-        // `MAY_BLOCK` is on none of them: nothing below reaches the scheduler
-        // or a Host boundary, which is a fact about the whole family and not
-        // one this match has to repeat per arm.
+        // Nothing below reaches the scheduler or a Host boundary, which is a
+        // fact about the whole family: it is why there is no flag for it.
         let raise = E::MAY_RAISE;
         let allocate = E::MAY_ALLOCATE.union(E::MAY_COLLECT).union(raise);
         match self {
@@ -303,11 +302,11 @@ impl Intrinsic {
 
 /// What an [`Intrinsic`] is about.
 ///
-/// Three, and not one of them a collection: ADR 0058's Phase 5 makes "a new
+/// Two, and neither of them a collection: ADR 0058's Phase 5 makes "a new
 /// collection `IntrinsicCall` a verification failure", and this is the half of
 /// that rule a verifier can read. A `Text` or `Scalar` intrinsic whose operand
 /// is a collection is refused by `crate::verify`, and there is no longer an
-/// exception: the `Array<String>` [`Class::Strings`] names was `String.join`'s
+/// exception: the `Array<String>` `Class::Strings` named was `String.join`'s
 /// operand, read as the input of a bulk text operation (#378, Q18) rather than
 /// as a collection it managed, and issue #454's Step 3 made that join Cove. No
 /// operand of any variant left is a collection at all.
@@ -317,9 +316,9 @@ pub enum Category {
     Text,
     /// An `Int` or a `Float`, and the text one is parsed from or formatted to.
     Scalar,
-    /// A rule over any value, directed by its layout: equality, key order and
-    /// admission, and rendering.
-    Value,
+    // `Value` stood here, a rule over any value directed by its layout, until
+    // ADR 0068's Phase 4c deleted `Value.admitKey`, its last member; issue
+    // #536 deleted the category nothing produced.
 }
 
 /// What an [`Intrinsic`] takes and answers, as [`Intrinsic::signature`]
@@ -341,34 +340,25 @@ pub struct Signature {
 pub enum Class {
     /// `()`, the one word a refusal that returns answers.
     Unit,
-    Bool,
     Int,
     Float,
     /// A `String`: one reference to a string object.
     Str,
-    /// An `Array<String>`: what `words`, `chars` and `split` answer and what
-    /// `join` reads.
-    Strings,
-    /// The `Option` whose `Some` carries one of these.
-    OptionOf(Carried),
     /// The `Result` whose `Ok` carries one of these, and whose `Err` carries
     /// the `Error` the machine builds.
     ResultOf(Carried),
-    /// A value of any layout, read as the layout says.
-    Value,
-    /// A `ByteBuffer`: ADR 0052's growable byte run, which a rendering appends
-    /// its text to. The one collection an operand may be besides
-    /// [`Class::Strings`], and for the same reason: it is where text work
-    /// writes, not a collection the intrinsic manages.
-    Buffer,
+    // `Bool`, `Strings` (an `Array<String>`), `OptionOf`, `Value` (any
+    // layout) and `Buffer` (a `ByteBuffer`) stood here, each the class of an
+    // intrinsic that has since moved into Cove or an instruction. Issue #536
+    // deleted them once no signature named any of them: a class nothing
+    // declares is a verifier arm nothing reaches.
 }
 
-/// What an [`Class::OptionOf`] or a [`Class::ResultOf`] carries.
+/// What a [`Class::ResultOf`] carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Carried {
     Int,
     Float,
-    Str,
 }
 
 impl fmt::Display for Class {
@@ -376,19 +366,13 @@ impl fmt::Display for Class {
         let carried = |carried: &Carried| match carried {
             Carried::Int => "Int",
             Carried::Float => "Float",
-            Carried::Str => "String",
         };
         match self {
             Class::Unit => write!(f, "Unit"),
-            Class::Bool => write!(f, "Bool"),
             Class::Int => write!(f, "Int"),
             Class::Float => write!(f, "Float"),
             Class::Str => write!(f, "String"),
-            Class::Strings => write!(f, "Array<String>"),
-            Class::OptionOf(inner) => write!(f, "Option<{}>", carried(inner)),
             Class::ResultOf(inner) => write!(f, "Result<{}, Error>", carried(inner)),
-            Class::Value => write!(f, "a value"),
-            Class::Buffer => write!(f, "ByteBuffer"),
         }
     }
 }
@@ -402,12 +386,15 @@ impl fmt::Display for Intrinsic {
 /// What generated code has to be ready for when it calls an [`Intrinsic`].
 ///
 /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
-/// asks for these seven facts because they "decide whether generated code
+/// asks for seven facts because they "decide whether generated code
 /// must publish roots, synchronize the program counter, take a safepoint and
 /// reload stack or heap pointers. A non-allocating field bound check does
-/// not pay the allocation protocol. A grow operation does." A `u8` newtype
-/// rather than a crate dependency: seven flags fit in one byte, and this
-/// crate answers to nothing before the IR does.
+/// not pay the allocation protocol. A grow operation does." Four are left:
+/// issue #536 deleted `MAY_BLOCK`, `BULK_WORK` and `WRITES_MEMORY`, which no
+/// intrinsic declared — nothing below the standard library reaches the
+/// scheduler, walks an operand's length or writes through a handle it was
+/// given any more. A `u8` newtype rather than a crate dependency: the flags
+/// fit in one byte, and this crate answers to nothing before the IR does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Effects(u8);
 
@@ -442,26 +429,6 @@ impl Effects {
     /// ran before it.
     pub const MAY_RAISE: Effects = Effects(1 << 2);
 
-    /// May park the running task at a scheduler or Host boundary.
-    ///
-    /// No [`Intrinsic`] carries this today — a core intrinsic is Rust that
-    /// stays off the scheduler and the Host boundary by construction, which
-    /// is the boundary [`crate::IntrinsicSite`]'s own doc comment draws. The flag
-    /// exists because the ADR's effect list names it as one of the seven a
-    /// future intrinsic could need, and generated code that saw it would
-    /// have to take a safepoint before the call so the scheduler can move
-    /// other work while this task is parked.
-    pub const MAY_BLOCK: Effects = Effects(1 << 3);
-
-    /// Does work proportional to an operand's length rather than bounded
-    /// work: a loop over elements or bytes, a copy, a shift.
-    ///
-    /// Generated code that calls an intrinsic with this flag set must poll
-    /// for cancellation in bounded chunks under [ADR
-    /// 0040](../../../docs/adr/0040-long-operations-are-preemptible.md)
-    /// rather than run the call to completion as one uninterruptible step.
-    pub const BULK_WORK: Effects = Effects(1 << 4);
-
     /// Reads words out of a heap object rather than only out of the operand
     /// words it was handed.
     ///
@@ -470,16 +437,6 @@ impl Effects {
     /// [`Effects::MAY_COLLECT`] means reloading it rather than reusing one
     /// computed before the call.
     pub const READS_MEMORY: Effects = Effects(1 << 5);
-
-    /// Mutates a heap object the caller already held a handle to, rather
-    /// than only writing into an object the call itself just allocated.
-    ///
-    /// Set on `Vector`'s in-place methods and on no `Set` or `Map`
-    /// operation, because the latter are immutable and every update answers
-    /// a new object instead of writing through the receiver. Generated code
-    /// must treat every other alias of the mutated object as observing the
-    /// write — there is no private copy to reason about instead.
-    pub const WRITES_MEMORY: Effects = Effects(1 << 6);
 
     /// `self` with every flag `other` sets also set.
     pub const fn union(self, other: Effects) -> Effects {
@@ -744,14 +701,17 @@ mod tests {
 
     /// No intrinsic is a collection operation: ADR 0058 moved every one into
     /// run instructions and the standard library, and Phase 5 makes a new one
-    /// a verification failure. No receiver is a collection, no category is
-    /// one — [`Category`] has none to be — and the one collection an operand
-    /// may still be is the `ByteBuffer` a rendering appends to, which is text
-    /// work's output. It was two until issue #454's Step 3: `String.join` took
-    /// an `Array<String>`, text work's *input*, and this test carried the
-    /// exception that said so. `std.string.join` walks that array with a
-    /// `for` loop now, so the exception is gone and the assertion below is
-    /// unconditional.
+    /// a verification failure. No receiver is a collection, and no category
+    /// is one — [`Category`] has none to be.
+    ///
+    /// Operands were checked here too. The `ByteBuffer` a rendering appended
+    /// to was an allowed one, as text work's output, until ADR 0068's Phase
+    /// 4b-ii made the rendering Cove; `String.join`'s `Array<String>`, text
+    /// work's *input*, was another until issue #454's Step 3. Issue #536
+    /// deleted `Class::Strings`, `Class::Buffer` and `Class::Value` once no
+    /// signature named any of them, so an operand that is a collection cannot
+    /// be written in a [`Signature`] at all, and `crate::verify` refuses a
+    /// collection handed to any intrinsic whatever its signature says.
     #[test]
     fn no_intrinsic_is_a_collection_operation() {
         const COLLECTIONS: &[&str] = &[
@@ -767,24 +727,6 @@ mod tests {
                 !COLLECTIONS.contains(&intrinsic.receiver()),
                 "`{intrinsic}` is an operation of a collection"
             );
-            let signature = intrinsic.signature();
-            for class in signature.operands {
-                assert!(
-                    *class != Class::Strings,
-                    "`{intrinsic}` takes an `Array<String>`, and nothing here may: \
-                     `String.join` was the one that did, and it is Cove now"
-                );
-                assert!(
-                    *class != Class::Buffer,
-                    "`{intrinsic}` takes a `ByteBuffer`, which only a rendering did, and \
-                     the rendering is `std.dynamic.renderInto` since ADR 0068's Phase 4b-ii"
-                );
-                assert!(
-                    *class != Class::Value || intrinsic.category() == Category::Value,
-                    "`{intrinsic}` is a {:?} intrinsic taking any value, which a collection is",
-                    intrinsic.category()
-                );
-            }
         }
     }
 
@@ -794,17 +736,6 @@ mod tests {
     fn every_operand_list_is_short() {
         for intrinsic in ALL {
             assert!(intrinsic.signature().operands.len() <= 3, "`{intrinsic}`");
-        }
-    }
-
-    /// No intrinsic reaches the scheduler or a Host boundary.
-    #[test]
-    fn nothing_blocks() {
-        for intrinsic in ALL {
-            assert!(
-                !intrinsic.effects().contains(Effects::MAY_BLOCK),
-                "`{intrinsic}` carries `MAY_BLOCK`, which no core intrinsic should"
-            );
         }
     }
 }

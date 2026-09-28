@@ -1064,11 +1064,6 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // whole and cheaply, but nothing in the corpus this slice is widened by
         // forms one, so it stays out. See the philosophy's "Earn complexity through
         // use".
-        //
-        // [`Inst::AddrOfElem`] would be cheap for the same reason `LoadElem`'s own
-        // bound is — its refusal is `Raise::IndexOutOfRange`, which `load_elem`
-        // already emits — and it is still left out because neither it nor
-        // `AddrOfField` occurs once in that corpus.
         Inst::AddrOfSlot { dst, slot: at } => slot(*dst) && slot(*at),
         // `at` has to fit an `i32`, and that is the *template* arm's bound rather
         // than a bound on the language: it adds the offset with `add r64, imm32`.
@@ -1245,9 +1240,8 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // It is here because **it is what makes an allocation reachable**: an array
         // literal is an `Inst::Alloc` followed by one of these per element, so a
         // function that built one was refused for this however well the allocation
-        // itself lowered. `Inst::StoreField` is the same story for a struct and is
-        // *not* here — see this module's note on `Inst::AddrOfField`, whose
-        // `Machine::checked` refusal names a layout by name and payload width.
+        // itself lowered. `Inst::StoreField` is the same story for a struct, and it
+        // is admitted above, bounded as `Inst::LoadField` is.
         Inst::StoreElem {
             obj,
             index,
@@ -1713,10 +1707,11 @@ mod tests {
     /// **`blockers` answers every refused instruction; `refusal` answers only
     /// the first.**
     ///
-    /// `AddrOfField` and `AddrOfElem` are both left outside the slice on
-    /// purpose — see this module's note on `Inst::AddrOfField` — so a body
-    /// that reaches one of each and then a second `AddrOfField` is refused at
-    /// three separate pcs. `refusal` is the first of them, because that is
+    /// `AddrOfField` is left outside the slice on purpose — see this module's
+    /// note on `Inst::AddrOfField` — and so is `Box`, so a body that reaches
+    /// one of each and then a second `AddrOfField` is refused at three
+    /// separate pcs. (The middle one was an `AddrOfElem` until issue #536 deleted that
+    /// instruction, which nothing lowered to; any refused instruction serves.) `refusal` is the first of them, because that is
     /// what marks the function refused at all; `blockers` is all three,
     /// because that is what says whether lowering one family would be enough.
     #[test]
@@ -1728,10 +1723,9 @@ mod tests {
                 obj: 0,
                 at: 0,
             },
-            Inst::AddrOfElem {
+            Inst::Box {
                 dst: 0,
-                obj: 0,
-                index: 0,
+                src: 0,
                 layout: LayoutId(2),
             },
             Inst::AddrOfField {

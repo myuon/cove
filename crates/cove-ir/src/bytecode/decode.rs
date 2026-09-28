@@ -354,18 +354,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             storage: Storage::Words(LayoutId(hi)),
         },
         Op::Len => Inst::Len { dst: a, obj: b },
-        Op::LayoutOf => Inst::LayoutOf { dst: a, obj: b },
         Op::AddrOfSlot => Inst::AddrOfSlot { dst: a, slot: b },
         Op::AddrOfField => Inst::AddrOfField {
             dst: a,
             obj: b,
             at: lo,
-        },
-        Op::AddrOfElem => Inst::AddrOfElem {
-            dst: a,
-            obj: b,
-            index: c,
-            layout,
         },
         Op::AddrOfPart => Inst::AddrOfPart {
             dst: a,

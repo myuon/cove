@@ -790,8 +790,10 @@ pub type IntrinsicFn = unsafe extern "C" fn(
 ///
 /// `MAY_ALLOCATE` without `MAY_COLLECT` is read as a safepoint too, although
 /// [`cove_ir::Intrinsic::effects`] sets the two together: an allocation that did
-/// not collect may still commit a heap chunk. `BULK_WORK` changes nothing here,
-/// because the encoded arm does not poll inside an intrinsic either.
+/// not collect may still commit a heap chunk. `MAY_BLOCK`, a safepoint here, and
+/// `BULK_WORK`, which changed nothing here because the encoded arm does not poll
+/// inside an intrinsic either, were deleted by issue #536: no intrinsic declared
+/// either.
 ///
 /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -810,8 +812,7 @@ impl IntrinsicProtocol {
         let effects = intrinsic.effects();
         IntrinsicProtocol {
             safepoint: effects.contains(Effects::MAY_ALLOCATE)
-                || effects.contains(Effects::MAY_COLLECT)
-                || effects.contains(Effects::MAY_BLOCK),
+                || effects.contains(Effects::MAY_COLLECT),
             raises: effects.contains(Effects::MAY_RAISE),
         }
     }
