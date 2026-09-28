@@ -374,7 +374,7 @@ fn a_key_one_instruction_orders_is_not_a_function() {
 
 /// A struct key is ordered field by field in declaration order.
 ///
-/// `key::order` compares the two type names first and then, field by field,
+/// `MapKey`'s derived order compares the two type names first and then, field by field,
 /// the field *names* before the field values. Two values of one layout are
 /// two values of one declaration, so every one of those name comparisons is
 /// equal and nothing is left but the fields — which is the same thing a
@@ -1158,8 +1158,8 @@ fn an_error_renders_as_its_message_and_appends_no_literal() {
 /// The default arm is an [`Inst::Trap`] and not a fallback: the runtime's own
 /// walk words the same refusal with the discriminant in it and rendering
 /// that discriminant into text is work this walk does not do, so this says
-/// `key::wrong_case`'s sentence — the one `Synth::ranking` already emits for
-/// the same reading of the same `switch`.
+/// the sentence `Synth::ranking` already emits for the same reading of the
+/// same `switch`.
 #[test]
 fn an_enum_names_its_case_and_brackets_only_a_payload() {
     let program = rendering(

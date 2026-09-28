@@ -276,8 +276,8 @@ fn the_run_writes_the_recording_a_run_writes() {
     // into `std.dynamic.order`, and the seven words are one literal: the
     // sentence an order raises at a value that is not a key, "this value
     // cannot be a map key or a set element", 47 bytes and so a header and six
-    // payload words. It was `key::not_a_key`'s in Rust, and `lower::synth`
-    // raises it too where a walk it composed meets such a value — but a
+    // payload words. It was also the machine's own Rust sentence until ADR
+    // 0068's Phase 5, and `lower::synth` raises it too where a walk it composed meets such a value — but a
     // composed walk is placed only by a program that orders a known key
     // holding one, and this fixture orders nothing, so `std.dynamic`, which
     // every whole-package lowering places, is where it arrives from. Its rule

@@ -904,8 +904,10 @@ fn is_range(shapes: &shapes::Shapes, layout: LayoutId, name: &str, fields: &[Fie
 /// ordered, where one instruction can — and nothing at all where a walk is
 /// needed.
 ///
-/// `key::order` ranks an `Int` and a `Duration` by their signed words, a
-/// `Bool` `false` first, and a `String` by its bytes — which are
+/// The order a key is kept in is `MapKey`'s derived order, which
+/// `std.dynamic.order`'s doc spells out part for part. It ranks an `Int` and
+/// a `Duration` by their signed words, a `Bool` `false` first, and a `String`
+/// by its bytes — which are
 /// [`Compare::Int`], [`Compare::Bool`] and [`Compare::Str`]. It ranks an
 /// enum's cases by their *names*, and a payload-free enum's word is its case
 /// *index*, so [`Compare::Tag`] is the order only where the cases were
@@ -937,7 +939,7 @@ pub(super) fn ordered_by(shapes: &shapes::Shapes, layout: LayoutId) -> Option<Co
 
 /// Where each case of `cases` sits in the order the *names* put them in.
 ///
-/// `key::order` compares an enum's cases by name and not by index, which is
+/// `MapKey`'s order compares an enum's cases by name and not by index, which is
 /// the one place a statically known layout does not simply read the
 /// discriminant: `Result` is declared `Ok` then `Err` and orders `Err`
 /// first. So the walk needs the permutation, and where it is the identity —
@@ -1997,9 +1999,9 @@ impl Synth<'_> {
             // a function value and the closure environment behind it, a
             // `Shared` cell, a host resource handle, a task, a task scope, an
             // address, and the two byte-run shapes no source expression
-            // produces. `equal.rs`'s walk falls through to `false` for every
-            // one of them, and so does `Value::eq_value` beside it — a
-            // closure "is not equal to anything, itself included".
+            // produces. The oracle's `Value::eq_value` answers `false` for
+            // every one of them — a closure "is not equal to anything, itself
+            // included".
             _ => self.constant(false),
         }
     }
@@ -2027,7 +2029,8 @@ impl Synth<'_> {
     /// that is not equal — and answering the sign *that* part gave.
     ///
     /// The families are the same as equality's and three of them are walked
-    /// differently, each because `key::order` walks them differently:
+    /// differently, each because `MapKey`'s derived order reads them
+    /// differently (`std.dynamic.order`'s doc spells it out):
     ///
     /// - an **enum** orders by its case *name* and not by its index, so the
     ///   discriminant is a rank rather than a number (see [`ranks_of`]);
@@ -2199,9 +2202,9 @@ impl Synth<'_> {
     /// the length both runs have, and then the two lengths.
     ///
     /// A `Set`'s members are already ascending, so the two families are one
-    /// walk here exactly as they are one walk in `key::order` — what a `Set`
-    /// promised about its order is part of the value, and comparing
-    /// positions is how that promise is read.
+    /// walk here: `MapKey`'s derived order compares two of either position by
+    /// position, because what a `Set` promised about its order is part of the
+    /// value, and comparing positions is how that promise is read.
     fn sequence(&mut self, elem: LayoutId, a: Slot, b: Slot) {
         let both = self.shorter(a, b);
         let held = self.alloc(elem);
@@ -2375,8 +2378,8 @@ impl Synth<'_> {
             // keyed collection: a `Float`, whose `NaN` is not equal to itself
             // and so has no total order; a `Vector` and the growable run
             // beneath it; a byte run and a byte buffer; a closure, a `Shared`
-            // cell, a host handle, a task and a task scope. `key::order`
-            // refuses every one of them in one sentence, and this is that
+            // cell, a host handle, a task and a task scope. `MapKey::from_value`
+            // admits none of them, and every walk refuses them in this one
             // sentence.
             _ => self.not_a_key(),
         }
@@ -2474,21 +2477,20 @@ impl Synth<'_> {
         });
     }
 
-    /// A value that is not a key, refused in `key::not_a_key`'s words.
+    /// A value that is not a key, refused in one sentence.
     ///
     /// The sentence is the lowering's own and quotes nothing computed at run
     /// time — see [`Synth::trap`]. It is not reachable from a checked
     /// program — `core.admitKey` refuses such a key before a single
     /// comparison is made, which is `Map.get`'s and `Set.of`'s first line —
-    /// and it is written out for the reason the runtime's own arm is:
-    /// "should never" is not "cannot", and a silent wrong answer from a
-    /// comparison costs more than the arm that reports one.
+    /// and it is written out because "should never" is not "cannot", and a
+    /// silent wrong answer from a comparison costs more than the arm that
+    /// reports one.
     fn not_a_key(&mut self) {
         self.trap("this value cannot be a map key or a set element");
     }
 
-    /// A value in a case its layout does not have, in `key::wrong_case`'s
-    /// words.
+    /// A value in a case its layout does not have.
     ///
     /// The lowering's own sentence again: the name is the layout's, known
     /// statically, and nothing else is quoted.
@@ -3992,10 +3994,9 @@ impl Synth<'_> {
     /// The default is an [`Inst::Trap`]. The runtime's own arm words the
     /// same refusal with the discriminant in it — `` is in case {index} `` —
     /// and rendering that discriminant into text is work this walk does not
-    /// do, so this one says [`Synth::wrong_case`]'s sentence instead: the
-    /// words `key::wrong_case`
-    /// already uses, which [`Synth::ranking`] already emits for the same
-    /// reading of the same `switch`. Nothing a checked program holds reaches
+    /// do, so this one says [`Synth::wrong_case`]'s sentence instead, which
+    /// [`Synth::ranking`] already emits for the same reading of the same
+    /// `switch`. Nothing a checked program holds reaches
     /// either — the machine bounds-checks what it reads out of an object
     /// rather than taking the lowering's word for it, which is the same
     /// reason a `match` the checker proved exhaustive still carries a

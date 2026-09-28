@@ -84,38 +84,9 @@ pub(super) fn vector(program: &Program, elem: LayoutId) -> Result<LayoutId, Runt
     .ok_or_else(|| operand::unknown_family("Vector"))
 }
 
-/// The layout of a `Set` of `elem`.
-///
-/// One layout per element layout, as everywhere else, and it is its own shape
-/// rather than an `Elements` with a name because "these words are sorted and
-/// distinct" is an invariant a keyed finish relies on and an array's words
-/// are neither. Only the tests build a set in Rust now (#378, P4-8).
-#[cfg(test)]
-pub(super) fn members(program: &Program, elem: LayoutId) -> Result<LayoutId, RuntimeError> {
-    find(
-        program,
-        |layout| matches!(layout.shape, Shape::Members { elem: e } if e == elem),
-    )
-    .ok_or_else(|| operand::unknown_family(cove_schema::builtins::SET.name))
-}
-
-/// The layout of a `Map` from `key` to `value`.
-///
-/// One layout per *pair* of layouts: a `Map<String, Int>` traces half its
-/// words and a `Map<Int, Int>` none of them, and the collector is told which
-/// by the layout rather than by looking.
-#[cfg(test)]
-pub(super) fn entries(
-    program: &Program,
-    key: LayoutId,
-    value: LayoutId,
-) -> Result<LayoutId, RuntimeError> {
-    find(
-        program,
-        |layout| matches!(layout.shape, Shape::Entries { key: k, value: v } if k == key && v == value),
-    )
-    .ok_or_else(|| operand::unknown_family(cove_schema::builtins::MAP.name))
-}
+// `members` and `entries` stood here: the layouts of a `Set` and a `Map`, for
+// the tests of `key`'s order, which built keyed runs in Rust. ADR 0068's
+// Phase 5 deleted the order and its tests with it.
 
 /// The layout of the builtin `Error` struct.
 ///

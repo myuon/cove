@@ -16,7 +16,7 @@
 ///
 /// The refusal was worded in two places that shared no code —
 /// `cove_runtime::builtins`' `duplicate_key_error` over `MapKey`'s `Display`,
-/// and `cove_runtime::vm::intrinsics::key`'s `duplicate` over `render_value`
+/// and the machine's Rust `duplicate` over its Rust rendering of the key
 /// — held to the same bytes by nothing but this corpus. It is one Cove
 /// sentence now, and what differs between the backends is the interpolation
 /// that names the key, so this case still carries a `both_backends` file and

@@ -34,11 +34,10 @@
 //! - one `Option` test at the top of `Machine::call_intrinsic`, which is already a
 //!   Rust call that dispatches on the intrinsic — the same shape `Machine::tiered`
 //!   puts at a `call` — and a second one right after `intrinsics::call` returns,
-//!   for [ADR 0064]'s per-variant allocations, words and examined work: the
-//!   first test's `Some` arm is what reads the allocation counters before the
-//!   call, so the second reads them again and charges the difference rather
-//!   than reading them unconditionally, and the work is a number the arm
-//!   already reported and the machine has already charged;
+//!   for [ADR 0064]'s per-variant allocations and words: the first test's
+//!   `Some` arm is what reads the allocation counters before the call, so the
+//!   second reads them again and charges the difference rather than reading
+//!   them unconditionally;
 //! - one `Option` test in the native `intrinsic` helper, which is already a call
 //!   out of compiled code into that same function;
 //! - and nothing at all in the other eight helpers: those are counted by a
@@ -480,131 +479,13 @@ pub struct IntrinsicCalls {
     /// Words the heap handed out across every call of this variant, for
     /// [`allocations`](Self::allocations)'s reason.
     pub words: u64,
-    /// Units this variant examined across every call of it, from either
-    /// tier — the proportional work [ADR 0064]'s Decision 7 asks for, and the
-    /// figure that answers "what did this variant actually walk?" where the
-    /// call count only answers how often it was asked.
-    ///
-    /// **The unit is the storage run's, so a text variant counts bytes.**
-    /// That is what `Machine::bulk_work` already counts for an
-    /// `Inst::RunCopy` — bytes over a `Storage::PackedBytes`, words over a
-    /// `Storage::Words` — and a `String` is a packed byte run. A walk over a
-    /// value counts one per scalar, field or element visited. Summing the
-    /// column across variants is therefore summing two units, and the row is
-    /// the thing to read.
-    ///
-    /// Six of the 12 variants can be non-zero here, which is exactly the
-    /// set that declares `Effects::BULK_WORK`; the other six examine
-    /// nothing proportional and report nought. It was eighteen of 31 before
-    /// ADR 0064's Phase 1 took `String.length`, then `String.endsWith`, then
-    /// `String.startsWith` out of the enum, ADR 0065 took `String.contains`
-    /// out of it in turn, and ADR 0064's fifth migration took `String.indexOf`
-    /// — both numbers fall as the enum does, and they were equal for exactly
-    /// one migration: the sixth took `Float.abs`, which examines nothing, so
-    /// the carriers stayed at thirteen and the rest fell to twelve. The last
-    /// two Phase 1 migrations took `Float.min` and `Float.max`, which examine
-    /// nothing either, so the carriers stayed at thirteen again and the rest
-    /// fell to ten. Issue #454's Step 2 took `Float.round` and then
-    /// `Float.sqrt`, neither of which examines anything either, so the
-    /// carriers stayed at thirteen for the third and fourth times running and
-    /// the rest fell to nine and then eight — thirteen of twenty-one, the
-    /// highest that fraction ever got.
-    ///
-    /// **Step 3's `String.slice` is the first migration to take a carrier**,
-    /// and it reverses the direction the paragraph above was describing: the
-    /// carriers fall to twelve and the rest stay at eight. Every migration
-    /// before it took an operation that examines nothing, because those are
-    /// the ones a typed scalar instruction can replace; `slice` walked its
-    /// whole receiver and is a Cove loop now, where the walk is charged an
-    /// instruction at a time by the mechanism that charges every instruction.
-    /// That is the same exchange ADR 0064 made for `String.length`, and it is
-    /// what the remaining twelve are queued up for.
-    ///
-    /// **Step 3's `String.fromCodePoint` is not a second carrier**, and the
-    /// direction goes back the way it was for one migration: the carriers stay
-    /// at twelve and the rest fall to seven. It is the only migration so far
-    /// whose operation examined nothing because it had **nothing to examine**
-    /// rather than because it was a scalar operation — its one operand was an
-    /// `Int` word and what it did was build, where every `Float` migration's
-    /// operand was a `Float` word and what it did was arithmetic.
-    /// `Float.toInt` and `Float.format` are the only arms left of that shape —
-    /// a word in, an allocation out, nothing read off the heap — so they are
-    /// the only two a migration could take without moving the carriers again.
-    /// (`Float.format` has since been taken, into `std.float`, and did not move
-    /// them; `Float.toInt` is the one left.)
-    ///
-    /// **Step 3's `String.join` is the second carrier to go**, so the
-    /// carriers fall to eleven and the rest stay at seven. It is the first
-    /// migration of the series that a shipped program *runs* — `examples/
-    /// covefmt` called it 8,742 times — and so the first whose charge moving
-    /// out of this column and into the instruction count is a change a
-    /// whole-program measurement can see rather than a change to a table. What
-    /// it charged was the bytes of the answer it built; what charges them now
-    /// is the `Inst::RunCopy` under each `StringBuilder.append`, plus an
-    /// instruction a part for the sum that sizes the builder.
-    ///
-    /// **Step 3's `String.chars` is the third carrier to go**, so the carriers
-    /// fall to ten and the rest stay at seven. It is the mirror of `join` and
-    /// the reading it was paired with all along: `join` charged the bytes of
-    /// the answer it built out of an array, and this charged the bytes of the
-    /// receiver it took apart into one. Both are `Inst::RunCopy` now — one per
-    /// character here, where `join` has one per part — and what sizes the run
-    /// is a walk of the same lead bytes, charged an instruction at a time.
-    /// Unlike `join`, **no shipped program calls it**: covefmt has no site at
-    /// all and cq has two that never fire, so this row going to nought is a
-    /// change to a table and to `benches/chars`, and to nothing a whole-program
-    /// measurement of `examples/` can see. Both numbers are measured off
-    /// `Intrinsic::effects` rather than counted by hand.
-    ///
-    /// **Step 4's `Int.parse` is not a fourth carrier**, so the carriers stay
-    /// at ten for the second time and the rest fall to six. It is the second
-    /// migration of the series whose operation examined nothing because there
-    /// was nothing proportional to charge — `String.fromCodePoint` was the
-    /// first — and it reaches that from the other direction: that one took a
-    /// word and built, this one takes a `String` and answers a word. The
-    /// receiver is on the heap and the body does walk it, so `READS_MEMORY`
-    /// was there and `BULK_WORK` was not, and the reason it was not is written
-    /// into `Intrinsic::effects` beside the arm: a decimal `Int` is nineteen
-    /// digits and change, and text longer than that is not a number, so the
-    /// work is bounded by the *answer's* type rather than by the caller's
-    /// data — the one shape of receiver-reading arm this column was never
-    /// going to catch anything in.
-    ///
-    /// **Step 5's `String.trim` and `String.words` are the fourth and fifth
-    /// carriers to go, and they go together**, so the carriers fall to eight
-    /// and the rest stay at six. They are the first migration of the series to
-    /// take *two* at once, and the first since `join` that a shipped program
-    /// runs: `examples/cq` calls `trim` on every line it reads, which on
-    /// 100,000 records is 100,000 calls, 100,000 allocations, 2,217,999
-    /// allocated words and **16,591,749 units of this column** — the largest
-    /// single figure any migration of the series has moved out of it. `words`
-    /// is the other kind and the one the four migrations before it all were:
-    /// nought sites and nought calls in both representative programs.
-    ///
-    /// What charges those 16.6 million now is the scan in `std.string.trim`,
-    /// an instruction a byte examined — and on cq, *far fewer than that*,
-    /// because the Cove body stops at the first character that is not
-    /// whitespace where the intrinsic charged the whole receiver's length
-    /// whatever it found there. That is the same exchange `slice` made and the
-    /// same one ADR 0065 made for the searches: a charge for what was walked,
-    /// by the mechanism that charges everything else, in place of an upper
-    /// bound declared a flag at a time.
-    ///
-    /// **Step 5's `String.toUpper` and `String.toLower` are the sixth and
-    /// seventh carriers to go, and they go together too**, so the carriers
-    /// fall to six and the rest stay at six. Both walked their whole
-    /// receiver once through Rust's own case-mapping tables and answered a
-    /// `String` built out of what they found, the same
-    /// `MAY_ALLOCATE | MAY_COLLECT | MAY_RAISE | READS_MEMORY | BULK_WORK`
-    /// `trim` carried; `std.string.toUpper` and `std.string.toLower` binary-
-    /// search the generated tables `crates/cove-sema/tests/unicase.rs` holds
-    /// byte-identical instead, one instruction a comparison rather than one
-    /// flag for the whole call. Neither `examples/covefmt` nor `examples/cq`
-    /// calls either method, so this is a change to a table rather than one
-    /// either program's own count can see.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    pub work: u64,
+    // `work` stood here: the units a variant reported having examined, which
+    // ADR 0064's Decision 7 charged as work so that a walk over a hundred
+    // thousand bytes did not cost what a walk over ten did. It fell a
+    // migration at a time as the arms that walked became Cove, charged an
+    // instruction at a time instead, and read nought for every variant once
+    // ADR 0068's Phase 4c deleted `Value.admitKey`; its Phase 5 deleted the
+    // column with the Rust walks that were its last producers.
 }
 
 impl IntrinsicCalls {
@@ -695,7 +576,7 @@ impl Emitted {
 /// Nothing is on the dispatch loop. A run that did not ask pays one `Option` test
 /// at the top of `Machine::call_intrinsic` — already a Rust call that dispatches on
 /// the intrinsic — a second one right after `intrinsics::call` returns, for the
-/// per-variant allocations, words and work this report also carries, and one in the
+/// per-variant allocations and words this report also carries, and one in the
 /// native `intrinsic` helper, which is already a call out of compiled code into
 /// that function. The per-helper counts cost such a run nothing at
 /// all, because they are a second helper table,
@@ -783,12 +664,6 @@ pub(crate) struct Counting {
     /// Words the heap handed out at each `SiteId`, for
     /// [`allocations`](Self::allocations)'s reason.
     words: Vec<u64>,
-    /// Units the calls at each `SiteId` reported having examined, which
-    /// `Machine::charge_intrinsic_costs` is handed after `Machine` has
-    /// already charged the same number to its work total. Unlike the two
-    /// above it is not a difference of counters: an arm reports it, through
-    /// `Machine::examined`.
-    examined: Vec<u64>,
     /// Whether each function, by `FunctionId`, is the standard library's.
     library: Vec<bool>,
     /// Frames the encoded tier opened for a library function.
@@ -823,7 +698,6 @@ impl Counting {
             from_native: vec![0; program.intrinsic_sites.len()],
             allocations: vec![0; program.intrinsic_sites.len()],
             words: vec![0; program.intrinsic_sites.len()],
-            examined: vec![0; program.intrinsic_sites.len()],
             library: program
                 .functions
                 .iter()
@@ -909,34 +783,23 @@ impl Counting {
         }
     }
 
-    /// What one call at `site` cost: `allocations` objects, `words` words,
-    /// and `examined` units of whatever it walked, whichever tier made the
-    /// call. Charged once per call, from
+    /// What one call at `site` cost: `allocations` objects and `words`
+    /// words, whichever tier made the call. Charged once per call, from
     /// `Machine::charge_intrinsic_costs` — so a call that allocated nothing
-    /// and examined nothing charges `0` rather than nothing at all, and the
-    /// row still exists for [`Counting::report`] to sum.
+    /// charges `0` rather than nothing at all, and the row still exists for
+    /// [`Counting::report`] to sum. Both are a difference of the machine's own
+    /// counters taken across `intrinsics::call`, and they travel together
+    /// because they are charged at one point and cost one `Option` test
+    /// between them.
     ///
-    /// The first two are a difference of the machine's own counters taken
-    /// across `intrinsics::call`; the third is not a difference at all but
-    /// what the arm reported through `Machine::examined`, which the machine
-    /// has already added to its work total by the time this is called. The
-    /// three travel together because they are charged at one point and cost
-    /// one `Option` test between them.
-    pub(crate) fn intrinsic_cost(
-        &mut self,
-        site: SiteId,
-        allocations: u64,
-        words: u64,
-        examined: u64,
-    ) {
+    /// A third, the units an arm reported having examined, travelled with
+    /// them until ADR 0068's Phase 5 deleted the last arm that reported any.
+    pub(crate) fn intrinsic_cost(&mut self, site: SiteId, allocations: u64, words: u64) {
         if let Some(total) = self.allocations.get_mut(site.index()) {
             *total += allocations;
         }
         if let Some(total) = self.words.get_mut(site.index()) {
             *total += words;
-        }
-        if let Some(total) = self.examined.get_mut(site.index()) {
-            *total += examined;
         }
     }
 
@@ -967,14 +830,12 @@ impl Counting {
                     native: 0,
                     allocations: 0,
                     words: 0,
-                    work: 0,
                 });
             row.sites += sites.get(at).copied().unwrap_or(0);
             row.native += native;
             row.encoded += all.saturating_sub(native);
             row.allocations += self.allocations.get(at).copied().unwrap_or(0);
             row.words += self.words.get(at).copied().unwrap_or(0);
-            row.work += self.examined.get(at).copied().unwrap_or(0);
         }
         let mut intrinsics: Vec<IntrinsicCalls> = rows
             .into_values()
@@ -1197,19 +1058,18 @@ impl fmt::Display for BoundaryReport {
         )?;
         writeln!(
             f,
-            "  {:>14} {:>14} {:>7} {:>11} {:>12} {:>14}  intrinsic",
-            "from encoded", "from native", "sites", "allocs", "words", "work"
+            "  {:>14} {:>14} {:>7} {:>11} {:>12}  intrinsic",
+            "from encoded", "from native", "sites", "allocs", "words"
         )?;
         for row in &self.intrinsics {
             writeln!(
                 f,
-                "  {:>14} {:>14} {:>7} {:>11} {:>12} {:>14}  {}",
+                "  {:>14} {:>14} {:>7} {:>11} {:>12}  {}",
                 thousands(row.encoded),
                 thousands(row.native),
                 row.sites,
                 thousands(row.allocations),
                 thousands(row.words),
-                thousands(row.work),
                 row.intrinsic
             )?;
         }
@@ -1347,7 +1207,6 @@ mod tests {
                     native: 7,
                     allocations: 1_007,
                     words: 5_035,
-                    work: 128_440,
                 },
                 IntrinsicCalls {
                     intrinsic: Intrinsic::FloatParse,
@@ -1356,7 +1215,6 @@ mod tests {
                     native: 0,
                     allocations: 0,
                     words: 0,
-                    work: 0,
                 },
             ],
             encoded_instructions: 1_234_567,
@@ -1422,12 +1280,10 @@ mod tests {
             "an operation that never ran is left out"
         );
         assert!(text.contains(
-            "           1,000              7       1       1,007        5,035        128,440  \
-             Float.toInt"
+            "           1,000              7       1       1,007        5,035  Float.toInt"
         ));
         assert!(text.contains(
-            "               0              0       3           0            0              0  \
-             Float.parse"
+            "               0              0       3           0            0  Float.parse"
         ));
     }
 
@@ -1590,22 +1446,19 @@ export fn main() -> Int {
             assert_eq!(calls, row.calls(), "{:?}: {row:?}", row.intrinsic);
             assert_eq!(allocations, row.allocations, "{:?}: {row:?}", row.intrinsic);
             assert_eq!(words, row.words, "{:?}: {row:?}", row.intrinsic);
-            assert_eq!(work, row.work, "{:?}: {row:?}", row.intrinsic);
+            // No intrinsic call is charged work beyond its one unit: the
+            // report's `work` column went in ADR 0068's Phase 5 because no arm
+            // was left to report any, and this is the profiler's own reading
+            // of the same fact, so a variant that started charging again
+            // would be seen here rather than lost.
+            assert_eq!(work, 0, "{:?}: {row:?}", row.intrinsic);
         }
         // And the reconciliation is not vacuous: `Float.parse` allocates the
         // message of every `Err` it answers, so the allocation column has
-        // something on both sides. The work column is nought on both, and
-        // that is a finding rather than a gap: `Value.admitKey` was the last
-        // arm that reported what it walked, and ADR 0068's Phase 4c deleted
-        // it, so no intrinsic left charges examined work at all.
+        // something on both sides.
         assert!(
             boundary.intrinsics.iter().any(|row| row.allocations > 0),
             "a program that parses text that is not a number allocates: {:?}",
-            boundary.intrinsics
-        );
-        assert!(
-            boundary.intrinsics.iter().all(|row| row.work == 0),
-            "no intrinsic left walks what it is handed: {:?}",
             boundary.intrinsics
         );
     }

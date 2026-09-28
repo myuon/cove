@@ -32,40 +32,12 @@ use cove_ir::{Arg, LayoutId, Repr, Shape};
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
 
-/// One operand: the layout of the value location an argument names, and the
-/// words at it.
-///
-/// The pair travels together everywhere, because neither half means anything
-/// without the other — a word is untagged, and a layout describes nothing on
-/// its own.
-///
-/// The words are borrowed **straight out of the caller's frame** — see
-/// [`Frame::operand`] — and not out of a buffer they were copied into, so an
-/// `Operand` lives no longer than the shared borrow of the machine it was
-/// read through. That is also what makes the aliasing contract hold by
-/// construction for a wide operand: nothing that writes the destination can
-/// run while one is held.
-///
-/// It used to be a `Repr` and one word, and that was the shape of a call
-/// rather than a choice this file made: an `IntrinsicCall`'s argument list was
-/// base slots, so nothing said how wide an operand was. A scalar described
-/// itself from its slot and a reference from its object's header, and an
-/// inline struct or enum described itself from neither — so `"{p}"` rendered
-/// a `Point`'s first word, `a == b` compared it, and the six operations that
-/// put a whole value into a collection refused rather than store half of one.
-/// [`cove_ir::Arg`] carries the layout now and all of those read the value.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Operand<'w> {
-    pub layout: LayoutId,
-    pub words: &'w [u64],
-}
-
-/// One word, and the `Repr` that says what it means.
-///
-/// What is left of the old operand, and it is still the right currency for
-/// the two things that genuinely are one word: a scalar comparison, and the
-/// address a value of a family that lives in the heap consists of.
-pub(super) type Word = (Repr, u64);
+// `Operand` and `Word` stood here: a value location's layout and the words
+// at it, borrowed out of the caller's frame, and the one-word `(Repr, u64)`
+// left of the operand before it. Their readers were the Rust walks of a
+// value's words — `equal`'s equality and `key`'s order — which ADR 0068's
+// Phase 5 deleted; every arm left reads its operands a word at a time
+// through [`Frame::word`].
 
 /// The operands of one intrinsic call, where they already are: the caller's
 /// frame, and the argument list the instruction names.
@@ -225,19 +197,9 @@ pub(super) fn text(machine: &Machine, frame: Frame<'_>, at: usize) -> Result<Str
 // for a known layout, which said those words exactly until issue #506 gave
 // every evaluator the oracle's: `Task`, `TaskScope`, `http.Server`.
 
-/// A reference slot that was read before anything was written to it.
-///
-/// Not the oracle's: a `Value` is never absent, and a null `Repr::Ref` is
-/// this representation's own way of being so. [`crate::vm::exec`] answers a
-/// null object in these words and this is the same event.
-pub(super) fn null_value() -> RuntimeError {
-    RuntimeError::new("this value was read before it was given one")
-}
-
-/// A reference into a run of words the sweeper reclaimed.
-pub(super) fn reclaimed() -> RuntimeError {
-    RuntimeError::new("this value was read after it was reclaimed")
-}
+// `null_value` and `reclaimed` stood here: a walk's refusal of a null
+// reference and of one into a reclaimed run. Their callers were the Rust
+// walks ADR 0068's Phase 5 deleted.
 
 /// A builtin has to build a value of a family this program does not declare.
 ///

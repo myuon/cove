@@ -7,7 +7,7 @@ use clock.now
 /// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 /// Decision 3 makes `"{x}"` on a piece whose layout says what the value is a
 /// **function lowering synthesizes for that layout**, where it was one
-/// `Inst::IntrinsicCall` of `Value.renderInto` reaching `render_value` in the
+/// `Inst::IntrinsicCall` of `Value.renderInto` reaching a Rust walk in the
 /// runtime. `benches/equals`, `benches/ordering` and `benches/admission` are
 /// this package's siblings, written for the same migration's first three
 /// operations; this is the fourth. A package beside them rather than a row

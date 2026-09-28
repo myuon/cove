@@ -54,10 +54,11 @@
 //!   across that same interval;
 //! - **work**, measured as what the run was charged across that interval
 //!   *beyond* the one unit every instruction costs — the words a bulk copy
-//!   moved, and, since [ADR 0064]'s Decision 7, the units a mediated
-//!   intrinsic reported having examined. It is what separates a
-//!   `String.trim` over ten bytes from one over a hundred thousand, which
-//!   until that decision were the same row and the same fuel.
+//!   moved and the bytes a window appended. From [ADR 0064]'s Decision 7
+//!   until ADR 0068's Phase 5 it carried the units a mediated intrinsic
+//!   reported having examined as well, which is what separated a
+//!   `String.trim` over ten bytes from one over a hundred thousand while
+//!   `trim` was an intrinsic; no intrinsic left walks what it is handed.
 //!
 //! The heap and work figures are exact: a difference of two counters is what
 //! happened in between, whatever it took to happen.
@@ -113,17 +114,15 @@ pub struct Cost {
     /// Objects its heap handed out while it ran.
     pub allocations: u64,
     /// Work it was charged **beyond** the one every instruction costs: the
-    /// words a bulk copy moved, the bytes a window appended, and the units a
-    /// mediated intrinsic reported having examined.
+    /// words a bulk copy moved and the bytes a window appended.
     ///
-    /// Nought for almost every opcode, which is the point of it: an
-    /// `intrinsic-call` that walked a hundred thousand bytes and an `add.int`
-    /// are one instruction each and [`ran`](Self::ran) cannot tell them
-    /// apart, while this says how much the first one looked at. It is the
-    /// per-instruction half of [ADR 0064]'s Decision 7, and it reconciles
-    /// exactly with the boundary report's per-variant `work` column — summed
-    /// over every `IntrinsicCall` site naming one variant, the two are the
-    /// same number.
+    /// Nought for almost every opcode, which is the point of it: a copy of a
+    /// hundred thousand bytes and an `add.int` are one instruction each and
+    /// [`ran`](Self::ran) cannot tell them apart, while this says how much the
+    /// first one moved. It is the per-instruction half of [ADR 0064]'s
+    /// Decision 7. An `intrinsic-call` is nought here since ADR 0068's Phase 5
+    /// deleted the last arms that reported what they walked, and the boundary
+    /// report's per-variant `work` column with them.
     ///
     /// **The unit is the storage run's**: bytes for a packed byte run, words
     /// for a word run, one per value visited for a walk over a value. Adding
