@@ -51,13 +51,18 @@ The surface that exists is:
   `VIEW_LAYOUT`, the viewed value's `LayoutId`; `VIEW_OWNER`, a `Ref` to the
   object that roots it; `VIEW_AT`, the payload word it begins at), made only by
   `core.dynamicOpen(value: Any)`.
-- **Twenty-one `core.*` observations** beside the open, in
-  `crates/cove-schema/src/builtins.rs`:
-  `dynamicKind`, `dynamicSameType`, `dynamicSameObject`, `dynamicNameOrder`,
-  the five scalar reads, `dynamicCase`, `dynamicChildCount`, `dynamicChild`,
+- **Twenty-two `core.*` schema entries** in
+  `crates/cove-schema/src/builtins.rs`, counted as entries a standard-library
+  module can call and not as instructions: `dynamicOpen`; eighteen further
+  `dynamic*` observations — `dynamicKind`, `dynamicSameType`,
+  `dynamicSameObject`, `dynamicNameOrder`, the five scalar reads
+  (`dynamicBool`, `dynamicInt`, `dynamicFloat`, `dynamicDuration`,
+  `dynamicString`), `dynamicCase`, `dynamicChildCount`, `dynamicChild`,
   `dynamicTypeName`, `dynamicFieldName`, `dynamicCaseName`, `dynamicOpaque`,
-  `dynamicHandleText`, `dynamicOnPath`, and `identitySet` / `identityEnter` /
-  `identityLeave`.
+  `dynamicHandleText` and `dynamicOnPath`; and the three set operations
+  `identitySet`, `identityEnter` and `identityLeave`. The five scalar reads
+  lower to one instruction, `DynRead`, whose destination's `Repr` says which, so
+  the entry count and the instruction count differ.
 - **`RenderPath`**, two words — an `Addr` of the innermost frame entry of a
   rendering composed for a known layout, and a depth — asked one question,
   `core.dynamicOnPath`.
@@ -67,9 +72,10 @@ The surface that exists is:
 None of it is reachable from a program. `DynamicView`, `RenderPath`,
 `IdentitySet` and `Any` are resolved only in a module
 `cove_sema::stdlib::is_library_module` answers for; in a program the names
-denote nothing and a package may declare its own. The four `std.dynamic`
-functions are not exported: "Nothing in a program calls this. The lowering
-does."
+denote nothing and a package may declare its own. No `std.dynamic`
+function is exported — neither the entry points of the four operations
+(`equals`, `order`, `refusesKey` and `refuseKey`, `renderInto`) nor their
+helpers: "Nothing in a program calls this. The lowering does."
 
 ### Nothing yet asks for it
 
@@ -96,6 +102,14 @@ next section says why it is not.
 code the lowering synthesizes. Nothing is added to `BUILTINS`, no name
 becomes resolvable in a program, no `std.dynamic` function is exported, and
 the checker's `cove::type::dynamic_view_escape` rules stay exactly as they are.
+There are three of them, one per type, and each is stated in
+`crates/cove-sema/src/typeck.rs`:
+
+| type | may be held in | refused in |
+|---|---|---|
+| `DynamicView` | a local; a `Vector` of views; a parameter or result of a non-exported function | an exported signature, a struct field, an enum payload, a closure capture, a task |
+| `RenderPath` | a local; a parameter of a non-exported function | any result, and everything `DynamicView` is refused in |
+| `IdentitySet` | only a local of the function that made it | any parameter, result or type argument, and everything `DynamicView` is refused in |
 
 This is a decision about **now**, taken on evidence that can change. It is
 not a finding that Cove must never have reflection.
@@ -103,7 +117,7 @@ not a finding that Cove must never have reflection.
 
 ### 2. What the internal capability continues to serve
 
-The four operations ADR 0068 built, and nothing else:
+The capability's **current users** are the four operations ADR 0068 built:
 
 - `Any.equals`, the `==`, `!=` and `assertEqual` of two boxed operands
   (`std.dynamic.equals`);
@@ -113,11 +127,27 @@ The four operations ADR 0068 built, and nothing else:
 - rendering, including the `[…]` cycle marker and opaque text
   (`std.dynamic.renderInto`).
 
-A new standard-library use may be written over the same capability without a
-new ADR, provided it holds to Decision 3 below and is not itself a public
-reflection API under another name: a `std` function that is exported and
-hands a program a view, a kind code, a field name enumeration or a type
-identity is publication, and needs the ADR that
+A further **internal** use may be added over the same capability without a new
+ADR only when every one of these holds; otherwise it needs one:
+
+1. **It implements an operation the language already defines** for erased
+   values, or a part of one — it gives an existing surface its answer for a
+   box; it does not create a new program-visible operation.
+2. **It is reached only by the lowering or by other non-exported
+   standard-library functions.** Nothing it introduces is exported, and no
+   program-visible result carries a view, a kind code, a type identity, an
+   enumeration of field or case names, or anything the observations answer
+   beyond what that operation's documented result already shows.
+3. **It uses the existing observations and adds none.** A new observation,
+   instruction or capability type needs its own proposal under ADR 0068's
+   gates, and a new one visible to programs needs a new ADR.
+4. **It keeps Decision 3 below and ADR 0068's Decision 5** — no statically
+   known layout is routed through reflection — and it agrees byte for byte on
+   AST, VM and native over a corpus that pins it.
+
+A `std` function that is exported and hands a program a view, a kind code, a
+field name enumeration or a type identity is publication, whatever it is
+called, and needs the ADR that
 [What would reopen this](#what-would-reopen-this) asks for.
 
 ### 3. What stays guaranteed
@@ -220,10 +250,15 @@ facts about this implementation:
 - *Kind codes.* `dynamicKind` answers an `Int` from `DynamicKind`'s sixteen
   rows. That table changed twice during ADR 0068 itself — the `opaque` struct
   moved from 14 to 6 in Phase 2, and `Shared` was appended as 15 in Phase 4b-ii
-  — and `std.dynamic.admitted` tests `kind < 13` although the table says
-  "nothing may compare two codes as numbers". That is harmless while the table
-  and its only reader change in one commit, and a compatibility promise the
-  moment a program reads a code.
+  — and the table says "nothing may compare two codes as numbers", yet
+  `std.dynamic.admitted` tests `kind < 13` and #528 added `kind < 6` class
+  tests. That is **a violation of the table's own rule, not an accepted
+  implementation**: it makes the standard library depend on the numbering, so
+  appending or renumbering a kind would silently change what those tests
+  admit. It is to be replaced by an explicit semantic classification
+  ([#533](https://github.com/myuon/cove/issues/533)). It also shows the point
+  of this section: a numbering that its own trusted reader already leans on
+  would become a compatibility promise the moment a program read a code.
 - *The view's shape.* Three inline words, `Int`/`Ref`/`Int`. `dynamic.rs`
   records the intent that "a later representation — a handle into a per-run
   table — changes this module and the machine, and no Cove"; that is true only
@@ -260,9 +295,11 @@ Consequences:
   ADR 0068.
 - **This ADR's Decision 3 holds by construction**, because the only readers
   are trusted and reviewed with the machine they read.
-- **Performance class is unaffected.** Nothing is added; static layouts keep
-  the synthesized path of ADR 0064's Decision 3, and the reflected path is the
-  one ADR 0068 measured.
+- **No additional cost.** This ADR adds nothing. The existing cost of the
+  reflected path was measured and accepted under ADR 0068 — its accepted
+  residuals are listed, each with its decision, in
+  [docs/measurements/adr-0068.md](../measurements/adr-0068.md) — and static
+  layouts keep the synthesized path of ADR 0064's Decision 3.
 - **The cost** is that a real public use case, when one appears, starts from
   zero public surface rather than from an API it could have extended.
   [What would reopen this](#what-would-reopen-this) is how that start is kept

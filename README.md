@@ -682,7 +682,9 @@ The series was measured whole in
 answers the question ADR 0068 left for last: whether that view becomes public
 Cove API. It does not, for now. `DynamicView`, the `core.dynamic*`
 observations, `RenderPath` and `IdentitySet` stay an internal capability of the
-standard library, serving the four operations ADR 0068 built. Publishing them
+standard library, whose current users are the four operations ADR 0068 built;
+a further internal use is added without a new ADR only under the conditions
+ADR 0069 lists. Publishing them
 would expose more than a way to look inside a value:
 - a view's rooting and escape rules;
 - other modules' private fields and names;
