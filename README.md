@@ -652,7 +652,7 @@ an intrinsic — that the body stays a leaf the lowering expands — stands unti
 one of them measures its replacement.
 
 [ADR 0068](docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)
-(proposed) takes the last four of ADR 0064's layout-directed operations out
+(accepted) takes the last four of ADR 0064's layout-directed operations out
 of Rust. `==`, key order, key admission and rendering over a value whose type
 was erased (`dyn Trait`, or a Host `Any`) used to reach a Rust walk through
 `Inst::IntrinsicCall`. They are now ordinary standard-library Cove,
@@ -674,7 +674,9 @@ The series was measured whole in
 - covefmt did not get slower on either tier;
 - cq pays the accepted Float rendering cost on the VM and is faster on
   native;
-- the costs that remain are four decisions and one deletion, listed there.
+- every cost that remains was decided, and each is listed there as an
+  accepted residual with the decision that closed it;
+- the Rust walks the four variants reached are deleted.
 
 Syntax is still provisional and may change.
 

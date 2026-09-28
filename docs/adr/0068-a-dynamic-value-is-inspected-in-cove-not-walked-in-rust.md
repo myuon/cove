@@ -1,13 +1,8 @@
 # ADR 0068: A dynamic value is inspected in Cove, not walked in Rust
 
-- Status: Proposed. Phases 0–4 are built (#491–#511). Phase 5's final
-  counts and performance report are in
-  [docs/measurements/adr-0068.md](../measurements/adr-0068.md), and Phase 5
-  is blocked on [#512](https://github.com/myuon/cove/issues/512),
-  [#513](https://github.com/myuon/cove/issues/513),
-  [#514](https://github.com/myuon/cove/issues/514),
-  [#515](https://github.com/myuon/cove/issues/515) and
-  [#516](https://github.com/myuon/cove/issues/516)
+- Status: Accepted. The final counts, performance report, accepted residuals
+  and Phase 0–5 checklist are in
+  [docs/measurements/adr-0068.md](../measurements/adr-0068.md)
 - Date: 2026-09-23
 - Decides: that the remaining boxed fallback is a missing structural-reflection
   capability rather than four irreducible standard-library operations; that a
@@ -19,7 +14,7 @@
 - Proposed for
   [issue #432](https://github.com/myuon/cove/issues/432), after issue #454's
   layout-directed migration found the last four dynamic arms.
-- Supersedes, when accepted:
+- Supersedes:
   [ADR 0064](0064-an-intrinsic-names-a-machine-not-a-method.md)'s Decision 4,
   which makes `Shape::Boxed` a permanent fallback through
   `Inst::IntrinsicCall`. Its observation remains correct — the concrete

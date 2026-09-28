@@ -5,6 +5,11 @@
   [ADR 0067](0067-a-trap-carries-the-sentence-it-was-handed.md), which adds a
   sixth entry — stopping a run with a sentence the caller built — to Decision
   2's acceptable vocabulary, leaving Decision 2's test as it stands
+- Superseded in part by
+  [ADR 0068](0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md),
+  which replaces Decision 4's permanent `Shape::Boxed` fallback through
+  `Inst::IntrinsicCall` with Cove algorithms over a read-only structural view
+  of the box
 - Date: 2026-09-19
 - Decides: that `Inst::IntrinsicCall` is a migration mechanism whose
   population may only shrink; the test a surviving IR primitive has to pass;
