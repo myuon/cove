@@ -1298,7 +1298,8 @@ impl Body<'_> {
     /// after `b` in the order a key is kept in.
     ///
     /// One [`Inst::Cmp`] of [`CmpOp::Order`] where the key's layout is one a
-    /// comparison instruction orders exactly as `key::order` does — see
+    /// comparison instruction orders exactly as `MapKey`'s derived order does
+    /// (`std.dynamic.order`'s doc spells it out) — see
     /// [`synth::ordered_by`] — one [`Inst::Call`] into the function
     /// `super::synth` composes out of the layout where the layout is known
     /// and wider than that, and one [`Inst::Call`] of `std.dynamic.order`

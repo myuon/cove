@@ -43,7 +43,6 @@
 //! buffer, no spill area and no fallback path, which is what ADR 0034 asks
 //! for and what the predecessor could not say.
 
-use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
 use std::time::Duration;
@@ -498,57 +497,6 @@ pub(crate) struct Machine<'a> {
     /// and `next_check` absorbs the offset instead, since it is recomputed
     /// only when something charges in bulk.
     bulk_work: u64,
-    /// What the intrinsic now running has reported it examined, in the unit
-    /// of the storage run it walked — and nothing at all between two
-    /// intrinsic calls, because [`Machine::call_intrinsic`] takes it after
-    /// every one.
-    ///
-    /// [ADR 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-    /// Decision 7 asks for "proportional-work charges per variant", and
-    /// six of the 12 variants declare
-    /// [`Effects::BULK_WORK`](cove_ir::Effects::BULK_WORK) while charging
-    /// *one* unit of [`Machine::work`] — the one every instruction costs —
-    /// whatever they examined. So the work was not merely unattributed, it
-    /// was not in the fuel total at all: 10,000 `String.length` calls over
-    /// ten characters and over 100,000 characters spent the same fuel and
-    /// 383 times the wall clock. That was measured while `String.length` was
-    /// still an intrinsic; ADR 0064's Phase 1 has since made it,
-    /// `String.endsWith` and `String.startsWith` Cove loops and ADR 0065 has
-    /// made `String.contains` and then `String.indexOf` Cove bodies over
-    /// `Inst::RunFind`, which is why the counts above are not the ADR's — they
-    /// fall with every migration.
-    /// This is
-    /// where an arm says what it walked so that `call_intrinsic` can charge
-    /// it once, for every arm, in one place.
-    ///
-    /// **A [`Cell`] rather than a plain `u64`, because the walkers hold the
-    /// machine by shared reference and must.** `key::admit_key`,
-    /// `intrinsics::render_into`, `equal::equals` and `key::value_order` —
-    /// until ADR 0068 moved every one of them into `std.dynamic`, the last in
-    /// its Phase 4c — each narrowed its `&mut Machine` to a `&Machine` before
-    /// it started, because the value it walked was borrowed *out of the
-    /// caller's frame* — see [`Operands`] — and that borrow lived for the whole
-    /// walk. What is left under a shared borrow is the tests' order walk
-    /// (`key::order`), and a text intrinsic's reading of its receiver.
-    /// A counter those walks could add to therefore has to be writable
-    /// through a shared borrow, and threading a `&mut u64` through thirteen
-    /// recursive functions in three modules would be the same counter with
-    /// the signature churn as well. Nothing here is shared between threads:
-    /// a spawned task gets a machine of its own.
-    ///
-    /// # The unit is the storage run's, so a text intrinsic charges bytes
-    ///
-    /// This is the same unit [`Machine::bulk_work`] already counts, and it is
-    /// not words. `Inst::RunCopy` over a `Storage::PackedBytes` charges one
-    /// per **byte** and over a `Storage::Words` one per **word**, which is
-    /// ADR 0052's "charged proportionally to the bytes or words examined".
-    /// A `String` is a packed byte run, so every text arm below charges the
-    /// **bytes** it walked; a walk over a value — an equality, a key order, a
-    /// rendering — charges one per scalar, field or element it visited. A
-    /// reader who assumes words will be out by a factor of eight on the
-    /// commonest variant in the repository, which is why it is written down
-    /// here as well as at [`Machine::examined`].
-    examined: Cell<u64>,
     /// The instruction count at which the loop next asks a question.
     ///
     /// The whole of what a debugger costs the dispatch loop, and it is
@@ -884,7 +832,6 @@ impl<'a> Machine<'a> {
             instructions: 0,
             charged_work: 0,
             bulk_work: 0,
-            examined: Cell::new(0),
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -971,7 +918,6 @@ impl<'a> Machine<'a> {
             instructions: 0,
             charged_work: 0,
             bulk_work: 0,
-            examined: Cell::new(0),
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -1194,8 +1140,8 @@ impl<'a> Machine<'a> {
         (self.allocations(), self.allocated_words())
     }
 
-    /// Charges `site` with the allocations, the allocated words and the
-    /// units `intrinsics::call` examined, out of line for
+    /// Charges `site` with the allocations and the allocated words
+    /// `intrinsics::call` made, out of line for
     /// [`Machine::count_intrinsic`]'s reason.
     ///
     /// `allocations_before` and `words_before` are the snapshot
@@ -1212,26 +1158,13 @@ impl<'a> Machine<'a> {
     /// only ever rise and a collection in the middle of the call does not
     /// lower either one. A charge of nought is what a future counter that
     /// could fall should answer here, not a number near `u64::MAX`.
-    ///
-    /// `examined` is neither a difference nor read here: it is the total the
-    /// arm itself reported through [`Machine::examined`], which
-    /// `call_intrinsic` has already taken and charged to
-    /// [`Machine::bulk_work`] before reaching this. It is passed in rather
-    /// than taken again for exactly that reason — a second take would answer
-    /// nought and attribute nothing.
     #[inline(never)]
     #[cold]
-    fn charge_intrinsic_costs(
-        &mut self,
-        site: SiteId,
-        allocations_before: u64,
-        words_before: u64,
-        examined: u64,
-    ) {
+    fn charge_intrinsic_costs(&mut self, site: SiteId, allocations_before: u64, words_before: u64) {
         let allocations = self.allocations().saturating_sub(allocations_before);
         let words = self.allocated_words().saturating_sub(words_before);
         if let Some(counting) = self.counting.as_deref_mut() {
-            counting.intrinsic_cost(site, allocations, words, examined);
+            counting.intrinsic_cost(site, allocations, words);
         }
     }
 
@@ -1338,31 +1271,6 @@ impl<'a> Machine<'a> {
     #[inline]
     fn work(&self) -> u64 {
         self.instructions + self.bulk_work
-    }
-
-    /// The intrinsic now running reports that it examined `units` of what it
-    /// walked.
-    ///
-    /// **A report, not a policy.** An arm knows how much it looked at and
-    /// knows nothing about safepoints, fuel or the compiled tier's poll; the
-    /// one place that does is [`Machine::call_intrinsic`], which takes the
-    /// total once the arm has returned and charges it. So an arm adds this
-    /// line where it has read the thing it is about to walk, and the question
-    /// of what a charge *does* is asked in exactly one place rather than in
-    /// twelve.
-    ///
-    /// `units` is in the unit of the run the arm walked, which for a
-    /// `String` is **bytes** — see [`Machine::examined`](Self::examined)'s
-    /// field for why, and why that is not words. Several reports in one call
-    /// add up, which is what a rendering does: one per value visited, and the
-    /// bytes it finally appended.
-    ///
-    /// Reported for a call that goes on to *fail*, too, and deliberately:
-    /// work that was done before a refusal was still done, and a bound that
-    /// forgave it would be a bound a program could walk under by raising.
-    #[inline]
-    pub(crate) fn examined(&self, units: u64) {
-        self.examined.set(self.examined.get() + units);
     }
 
     /// Work this run has been charged beyond the one per instruction.
@@ -2301,63 +2209,22 @@ impl<'a> Machine<'a> {
             Dest::new(base, dst, called.result),
         );
 
-        // What the arm said it examined, charged as work — [ADR
+        // What an arm reported having examined was charged here as work — [ADR
         // 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-        // Decision 7. This is the one funnel: the encoded `INTRINSIC_CALL`
-        // arm and both native helpers (`intrinsic` and
-        // `intrinsic_at_safepoint`) reach `call_intrinsic`, so the charge is
-        // written once and cannot be forgotten on a tier. It is taken on the
-        // error path as well, because the walk a refusal ended had already
-        // walked.
-        //
-        // `next_check` **must** be recomputed with it. `next_question`
-        // subtracts `bulk_work`, so a charge that left the old threshold
-        // standing would leave the encoded loop's next safepoint late by the
-        // whole charge — which is the very overshoot this is here to close.
-        // `encoded::in_chunks` is the precedent and does exactly this after
-        // each piece.
-        //
-        // # What this fixes, and what it does not
-        //
-        // It makes the work visible to fuel, to cancellation and to the
-        // deadline **at the next safepoint**, so the overshoot past a bound
-        // becomes one intrinsic call rather than unbounded and invisible. It
-        // does *not* make one call interruptible: nothing can poll inside
-        // `str::to_uppercase`. Splitting a bulk intrinsic into pieces that
-        // can is what ADR 0064's migration is for, and that is a point in the
-        // migration's favour rather than something this replaces.
-        //
-        // # The compiled tier feels it one poll later, and that is honest
-        //
-        // Compiled code polls on `NativeCtx::pending_work >= poll_at` and
-        // never reads `bulk_work`. `Machine::poll_budget` folds
-        // `work() - charged_work` in, so a charge made here shortens the
-        // *next* poll interval compiled code is given rather than forcing an
-        // immediate poll — ADR 0040's `S + T` with `T` including one
-        // intrinsic call. `poll_at` is deliberately **not** republished from
-        // the non-safepoint `intrinsic` helper: `pending_work` has not been
-        // reset there, so a fresh `poll_budget` and the accumulator compiled
-        // code is still counting in would disagree, and two numbers
-        // disagreeing about one budget is worse than an interval one call
-        // long.
-        //
-        // The test is against nought rather than unconditional so that the
-        // seven variants which declare no `Effects::BULK_WORK` — the three
-        // parsers, both `Float` conversions and the two refusals — pay no
-        // `next_question` for a charge of zero. Adding nought could not have
-        // moved the threshold anyway.
-        let examined = self.examined.take();
-        if examined != 0 {
-            self.bulk_work += examined;
-            self.next_check = self.next_question();
-        }
+        // Decision 7 — until no arm was left to report any: the text arms that
+        // walked their receivers became Cove over ADR 0064's and ADR 0065's
+        // migrations, and the last two walks, `equal`'s and `key`'s, went in
+        // [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
+        // Phase 5 with the report column that only ever read nought. No
+        // remaining `Intrinsic` declares `Effects::BULK_WORK`, so every
+        // variant is one unit of work a call, like the instruction it is.
 
         // Read again immediately after the call returns, so the difference
         // from `allocation_charge`'s snapshot is exactly what this call did.
         // `None` when counting is off, which is the same test `allocation_charge`
         // already paid — nothing new is read unconditionally.
         if let Some((allocations_before, words_before)) = allocation_charge {
-            self.charge_intrinsic_costs(site, allocations_before, words_before, examined);
+            self.charge_intrinsic_costs(site, allocations_before, words_before);
         }
 
         // An intrinsic that answered a `RuntimeError` while its declared
@@ -2703,7 +2570,7 @@ impl<'a> Machine<'a> {
 
     /// `-1`, `0` or `1` as two string objects order by their bytes — the
     /// three-way order `ORDER_STR` answers, which is `String`'s own `Ord` and
-    /// `key::order`'s for a `Str`.
+    /// `MapKey`'s for a `Str`.
     ///
     /// The bytes are compared where they are, a payload word at a time,
     /// rather than copied out as [`Machine::string_bytes`] copies them: a
@@ -3269,7 +3136,7 @@ impl<'a> Machine<'a> {
     /// the same three writes. The run's being ascending and distinct is the
     /// body's to have established; this crate's tests assert it before the
     /// relabel (Q4.10), and a `checked` binary does not, for the cost
-    /// `key::is_ascending_and_distinct` records.
+    /// [`Machine::keyed_run_in_order`] records.
     #[inline(never)]
     pub(crate) fn finish_words(
         &mut self,
@@ -3297,12 +3164,53 @@ impl<'a> Machine<'a> {
         };
         let (stride, width) = (self.width(elem), self.width(key));
         assert!(
-            crate::vm::intrinsics::is_ascending_and_distinct(
-                self, key, run.store, stride, width, run.len
-            ),
+            self.keyed_run_in_order(key, run.store, stride, width, run.len),
             "a keyed finish into `{}` was handed a run that is not ascending and distinct",
             self.program.layout(target).name
         );
+    }
+
+    /// Whether the `len` keys of `key`'s layout in the run at `store`, one
+    /// every `stride` words and `width` words wide, are strictly ascending.
+    ///
+    /// **This is the oracle's order, not the machine's.** Each key is
+    /// materialised by [`boundary::to_value`] and converted by
+    /// [`MapKey::from_value`](crate::value::MapKey::from_value), and the two
+    /// are compared by the `Ord` `MapKey` derives — the order the interpreter
+    /// keeps its own maps and sets in, and whose keyed finish
+    /// `debug_assert`s it. Nothing the order under test is made of answers
+    /// here: not `std.dynamic.order`, which is what a `Set` of erased keys is
+    /// sorted by, and not a walk the lowering composes for a known key. The
+    /// machine's own Rust statement of the order was this check's until ADR
+    /// 0068's Phase 5 deleted it with the other Rust walks.
+    ///
+    /// A key the boundary cannot materialise, or that `MapKey` does not
+    /// admit, answers `false`: the run holds a key no search over it could
+    /// have placed.
+    ///
+    /// **Not under `debug_assertions`**, which is where Q4.10 put it first:
+    /// the `checked` profile keeps them on and every measurement is taken
+    /// with it, and a check of every keyed finish made `benches/keyed`'s nine
+    /// `String`-keyed `inserted`s 1.31x the builtin against 1.17x without it
+    /// (#378, P4-6). It is a test's check, and it costs a materialisation per
+    /// key.
+    #[cfg(test)]
+    pub(crate) fn keyed_run_in_order(
+        &self,
+        key: LayoutId,
+        store: u64,
+        stride: u32,
+        width: u32,
+        len: u32,
+    ) -> bool {
+        let keys: Option<Vec<crate::value::MapKey>> = (0..len)
+            .map(|at| {
+                let words = self.payload_run(store, at * stride, width);
+                let value = boundary::to_value(self, key, &words).ok()?;
+                crate::value::MapKey::from_value(&value).ok()
+            })
+            .collect();
+        keys.is_some_and(|keys| keys.windows(2).all(|pair| pair[0] < pair[1]))
     }
 
     /// A byte [`Inst::RunFinish`]: the buffer's live prefix, validated and
@@ -10455,9 +10363,9 @@ pub(crate) mod tests {
                 want,
                 "the copying path disagrees on {left_bytes:x?} against {right_bytes:x?}"
             );
-            // And the three-way answer `ORDER_STR`, `key::order` and the
-            // native tier's `OrderStrFn` all carry, which is the same order
-            // narrowed to `-1`, `0` and `1`.
+            // And the three-way answer `ORDER_STR` and the native tier's
+            // `OrderStrFn` both carry, which is the same order narrowed to
+            // `-1`, `0` and `1`.
             assert_eq!(
                 machine.order_strings(*a, *b),
                 match want {

@@ -7,7 +7,7 @@ use clock.now
 /// [ADR 0064](../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
 /// Decision 3 makes `core.order` on a key whose layout is known a **function
 /// lowering synthesizes for that layout**, composed structurally, where it was
-/// one `Inst::IntrinsicCall` of `Value.order` reaching `key::order` in the
+/// one `Inst::IntrinsicCall` of `Value.order` reaching a Rust walk in the
 /// runtime. `benches/equals` is this package's sibling and was written for the
 /// same migration's first operation; this is the second.
 ///

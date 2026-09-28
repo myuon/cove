@@ -200,9 +200,7 @@ impl<'m> Stop<'m> {
     }
 
     /// Work this task has been charged beyond the one every instruction
-    /// costs: the words a bulk copy moved, the bytes a window appended, and —
-    /// since [ADR 0064]'s Decision 7 — the units a mediated intrinsic
-    /// reported having examined.
+    /// costs: the words a bulk copy moved and the bytes a window appended.
     ///
     /// Read at the same moment as the two counters above and for the same
     /// reason: the difference between two consecutive stops is what the

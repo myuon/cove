@@ -59,7 +59,7 @@ export fn of<K, V>(entries: MapEntry<K, V>...) -> Map<K, V> {
 /// that found the duplicate: the three sentences are built by calls that have
 /// returned by the time `core.refuse` stops the run, so the diagnostic blames
 /// what it blamed when the sentence was the runtime's. They were the runtime's
-/// twice over — `vm::intrinsics::key`'s `duplicate` over `render_value` and
+/// twice over — the machine's Rust `duplicate` over its Rust rendering and
 /// `builtins`' `duplicate_key_error` over `MapKey`'s `Display` — held to the
 /// same bytes by nothing but `tests/e2e/values_value_refuse_duplicate`. Now the
 /// words are Cove's and the key is named by the interpolation every other

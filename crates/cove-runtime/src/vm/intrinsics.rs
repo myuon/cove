@@ -37,36 +37,23 @@ use std::fmt::Write as _;
 
 use cove_ir::{Intrinsic, Repr, Shape};
 
-use crate::vm::boundary::short;
 use crate::vm::intrinsics::operand::{Dest, Frame};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
 
-mod equal;
-// The order a key is kept in, in the machine's own words, for this crate's
-// tests alone: see its header. Nothing in a run reaches it since ADR 0068's
-// Phase 4c took the admission out of it.
-#[cfg(test)]
-mod key;
-#[cfg(test)]
-pub(crate) use key::is_ascending_and_distinct;
+// `equal` and `key` stood here: the machine's own walks of a value's words
+// for `Any.equals` and for the order a key is kept in, which ADR 0068 moved
+// into Cove (`std.dynamic.equals`, `std.dynamic.order`) and walks the lowering
+// composes. Nothing in a run had reached either since its Phase 4c, and its
+// Phase 5 deleted both with the depth bound they shared. This crate's tests
+// check a keyed finish against the oracle's `MapKey` instead: see
+// `Machine::assert_keyed_order`.
 mod make;
 pub(crate) mod operand;
 mod scalar;
 mod seq;
 mod text;
-
-/// How deep the recursive walks still in this module may nest: [`equal`]'s,
-/// which no program reaches, and [`operand`]'s naming of a value.
-///
-/// For the reason [`crate::vm::boundary`]'s limit exists: an object graph
-/// can hold itself and a walk that met one would recurse until the native
-/// stack ran out. The rendering was bounded by this too until ADR 0068's
-/// Phase 4b-i made it a loop over a stack with the vectors it is inside on a
-/// path, which is what issue #480's "no nesting bound" and issue #493's cycle
-/// rule ask of it.
-const MAX_DEPTH: usize = 128;
 
 /// Runs `intrinsic` over the operands `frame` names, writing its answer into
 /// `dest`.
@@ -96,9 +83,9 @@ pub(crate) fn call(
         // whose layout did not say what it was, until ADR 0068's Phase 4b-ii
         // made it `std.dynamic.renderInto`, a Cove walk over a view of the
         // box. Every other piece was already a walk the lowering composes. The
-        // walk below it, `render_value`, was left for one reader — the wording
-        // of a refused key, which quotes a map key as it renders — and went
-        // with it in ADR 0068's Phase 4c.
+        // Rust walk below it was left for one reader — the wording of a
+        // refused key, which quotes a map key as it renders — and went with it
+        // in ADR 0068's Phase 4c.
 
         // ---- Array -------------------------------------------------------
         //
@@ -304,25 +291,6 @@ pub(crate) fn handle_text(
     Ok(())
 }
 
-/// The word at `at` of a value location.
-fn at(words: &[u64], at: usize) -> Result<u64, RuntimeError> {
-    words
-        .get(at)
-        .copied()
-        .ok_or_else(|| short_run("value location"))
-}
-
-/// A value location held fewer words than its layout says it has.
-///
-/// A lowering bug rather than anything a program can do, reported because the
-/// alternative is reading whatever followed the run.
-fn short_run(name: &str) -> RuntimeError {
-    RuntimeError::new(format!(
-        "this `{}` is narrower than the layout that describes it",
-        short(name)
-    ))
-}
-
 /// Whether the object at `addr` is a string.
 pub(super) fn is_string(machine: &Machine, addr: u64) -> bool {
     addr != 0
@@ -342,7 +310,6 @@ pub(super) fn string_of(machine: &Machine, addr: u64) -> Result<String, RuntimeE
 mod tests {
     use super::*;
     use crate::vm::exec::tests::Build;
-    use crate::vm::intrinsics::operand::Operand;
     use cove_ir::{LayoutId, Program, Repr, Shape};
 
     /// The program every builtin test is run against.
@@ -679,15 +646,6 @@ mod tests {
             .map(|at| LayoutId(at as u32))
     }
 
-    /// An operand naming the value location `words` of `layout`.
-    ///
-    /// What a test writes where it means a value rather than a word: a
-    /// `Point` argument is `at(point, &[1, 2])`, and the borrow lives as long
-    /// as the call it is an argument of.
-    pub(super) fn at(layout: LayoutId, words: &[u64]) -> Operand<'_> {
-        Operand { layout, words }
-    }
-
     /// The text of the string object at `addr`.
     pub(super) fn read(machine: &Machine, addr: u64) -> String {
         String::from_utf8(machine.string_bytes(addr)).expect("a builtin writes valid UTF-8")
@@ -845,5 +803,62 @@ mod tests {
             frame.word(machine, 0);
             Ok(())
         });
+    }
+
+    /// A store of `keys` of `elem`, one after another, as a keyed finish hands
+    /// [`Machine::keyed_run_in_order`] the run it is about to relabel.
+    fn keyed_store(machine: &mut Machine, elem: LayoutId, keys: &[&[u64]]) -> u64 {
+        let layout = elements(machine.program(), elem, false);
+        let store = machine
+            .new_object(layout, keys.len() as u32)
+            .expect("the fixture's heap is large enough");
+        let words: Vec<u64> = keys.iter().flat_map(|key| key.iter().copied()).collect();
+        machine.set_payload_run(store, 0, &words);
+        store
+    }
+
+    /// The keyed-finish check answers from the oracle's `MapKey` order, so it
+    /// has to be seen refusing: a check that could not fail would pass every
+    /// `Set` and `Map` a test builds whatever order `std.set`, `std.map` and
+    /// `std.dynamic.order` left them in.
+    ///
+    /// `Point` is the family that matters. A scalar or a `String` key is one
+    /// the old check compared directly, and every other family went through
+    /// the machine's own Rust order walk, which ADR 0068's Phase 5 deleted; a
+    /// struct is compared by its name and then field by field, which is
+    /// `MapKey::Struct`'s derived order.
+    #[test]
+    fn a_keyed_finish_is_checked_against_the_oracles_order_and_can_fail() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let point = named(&program, "Point");
+        let string = named(&program, "String");
+        let width = machine.words_of(point);
+
+        let ascending = keyed_store(&mut machine, point, &[&[1, 2], &[1, 3], &[2, 0]]);
+        assert!(machine.keyed_run_in_order(point, ascending, width, width, 3));
+
+        // The second field decides once the first is equal: `(1, 3)` before
+        // `(1, 2)` is out of order.
+        let swapped = keyed_store(&mut machine, point, &[&[1, 3], &[1, 2]]);
+        assert!(!machine.keyed_run_in_order(point, swapped, width, width, 2));
+
+        // The first field decides before the second: `(2, 0)` before `(1, 9)`.
+        let first = keyed_store(&mut machine, point, &[&[2, 0], &[1, 9]]);
+        assert!(!machine.keyed_run_in_order(point, first, width, width, 2));
+
+        // Distinct as well as ascending: a key twice is refused.
+        let twice = keyed_store(&mut machine, point, &[&[1, 2], &[1, 2]]);
+        assert!(!machine.keyed_run_in_order(point, twice, width, width, 2));
+
+        // A `String` key by its bytes, through the same conversion.
+        let (a, b) = (
+            machine.new_string("a").unwrap(),
+            machine.new_string("b").unwrap(),
+        );
+        let words = keyed_store(&mut machine, string, &[&[b], &[a]]);
+        assert!(!machine.keyed_run_in_order(string, words, 1, 1, 2));
+        let words = keyed_store(&mut machine, string, &[&[a], &[b]]);
+        assert!(machine.keyed_run_in_order(string, words, 1, 1, 2));
     }
 }

@@ -734,8 +734,8 @@ fn place(views: Vector<DynamicView>, at: Int, view: DynamicView) {
 ///
 /// # What it answers
 ///
-/// The order the oracle's `MapKey` derives, and the machine's `key::order`
-/// reproduced in Rust until this replaced it, part for part:
+/// The order the oracle's `MapKey` derives, which a walk in the machine's
+/// Rust reproduced until this replaced it, part for part:
 ///
 /// - **The kind first**, by rank: `()`, `Bool`, `Int`, `Duration`, `String`,
 ///   an enum, a struct, an `Array`, a `Set`, a `Map` and a `Range`, in that

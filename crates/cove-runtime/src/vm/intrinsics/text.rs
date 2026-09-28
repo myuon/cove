@@ -79,8 +79,10 @@
 //! the wall clock, and were the same to a cancellation, a deadline and a fuel
 //! bound alike.
 //!
-//! Each arm therefore calls [`Machine::examined`] with what it looked at, and
-//! **the unit is bytes**, not characters and not words: it is the unit
+//! Each arm therefore reported what it looked at, for the machine to charge
+//! as work — until no arm was left that walked, and ADR 0068's Phase 5
+//! removed the report with the Rust walks that were its last callers — and
+//! **the unit was bytes**, not characters and not words: it is the unit
 //! `Machine::bulk_work` already counts for an `Inst::RunCopy` over a
 //! `Storage::PackedBytes`, and a `String`'s object *is* a packed byte run.
 //! Charging characters would make the same text cost different amounts
