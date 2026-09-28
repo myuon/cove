@@ -412,10 +412,8 @@ fn effect(inst: &Inst) -> Effect {
         | Inst::RunFind { .. }
         | Inst::GrowableAlloc { .. }
         | Inst::Len { .. }
-        | Inst::LayoutOf { .. }
         | Inst::AddrOfSlot { .. }
         | Inst::AddrOfField { .. }
-        | Inst::AddrOfElem { .. }
         | Inst::AddrOfPart { .. }
         | Inst::Load { .. }
         | Inst::Box { .. }
@@ -698,7 +696,7 @@ fn renamed_reads(inst: &Inst, from: Slot, to: Slot) -> Option<Inst> {
     let swap = |slot: Slot| if slot == from { to } else { slot };
     let mut inst = inst.clone();
     match &mut inst {
-        Inst::LoadField { dst, obj, .. } | Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => {
+        Inst::LoadField { dst, obj, .. } | Inst::Len { dst, obj } => {
             if *dst == from {
                 return None;
             }

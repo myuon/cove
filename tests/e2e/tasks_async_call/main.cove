@@ -1,0 +1,22 @@
+use console.println
+
+/// Says it ran, then doubles `value`.
+async fn double(value: Int) -> Result<Int, Error> {
+  println("double({value}) ran")?
+  Ok(value * 2)
+}
+
+/// Calls an `async fn` outside any `spawn`.
+///
+/// The body runs at the call site and the call hands back a task that has
+/// already settled: concurrency comes from `spawn`, not from `async`. So the
+/// body's line is printed before the line after the call, and awaiting the
+/// same handle twice answers the same value without running the body again.
+export fn main() -> Result<Unit, Error> {
+  let task = double(21)
+  println("called")?
+  let first = await task?
+  let second = await task?
+  println("{first} {second}")?
+  Ok(())
+}

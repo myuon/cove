@@ -82,10 +82,10 @@
 //! [`Inst::Load`] — without this pass seeing it, from this function or from
 //! any callee it hands the address to.
 //!
-//! Of the four instructions that form an address only [`Inst::AddrOfSlot`]
-//! names a frame slot. [`Inst::AddrOfField`] and [`Inst::AddrOfElem`] answer
-//! `payload_addr(obj, …)`, which is in the heap, and no arithmetic on an
-//! object's payload address reaches a frame. [`Inst::AddrOfPart`] is
+//! Of the three instructions that form an address only [`Inst::AddrOfSlot`]
+//! names a frame slot. [`Inst::AddrOfField`] answers `payload_addr(obj, …)`,
+//! which is in the heap, and no arithmetic on an object's payload address
+//! reaches a frame. [`Inst::AddrOfPart`] is
 //! `addr + at`, so it is a frame word exactly when the address it was given
 //! already was one.
 //!
@@ -367,12 +367,10 @@ impl<'p> Flow<'p> {
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
             | Inst::Len { dst, .. }
-            | Inst::LayoutOf { dst, .. }
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
             | Inst::AddrOfField { dst, .. }
-            | Inst::AddrOfElem { dst, .. }
             | Inst::AddrOfPart { dst, .. }
             | Inst::ScopeEnter { dst, .. }
             | Inst::Spawn { dst, .. }
@@ -549,7 +547,6 @@ impl<'p> Flow<'p> {
             Inst::LoadField { obj, .. }
             | Inst::RunLoad { run: obj, .. }
             | Inst::Len { obj, .. }
-            | Inst::LayoutOf { obj, .. }
             | Inst::AddrOfField { obj, .. } => f(obj, 1),
             // The five operands live in the args row, exactly as a call's
             // do, so they are read the same way.
@@ -591,7 +588,7 @@ impl<'p> Flow<'p> {
                 f(obj, 1);
                 f(src, width(layout));
             }
-            Inst::LoadElem { obj, index, .. } | Inst::AddrOfElem { obj, index, .. } => {
+            Inst::LoadElem { obj, index, .. } => {
                 f(obj, 1);
                 f(index, 1);
             }

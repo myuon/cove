@@ -305,11 +305,9 @@ const FUSED_PUSH_BYTE: u8 = Op::FusedPushByte.number();
 const FUSED_APPEND_BYTES: u8 = Op::FusedAppendBytes.number();
 const FUSED_APPEND_WORDS: u8 = Op::FusedAppendWords.number();
 const LEN: u8 = Op::Len.number();
-const LAYOUT_OF: u8 = Op::LayoutOf.number();
 
 const ADDR_OF_SLOT: u8 = Op::AddrOfSlot.number();
 const ADDR_OF_FIELD: u8 = Op::AddrOfField.number();
-const ADDR_OF_ELEM: u8 = Op::AddrOfElem.number();
 const ADDR_OF_PART: u8 = Op::AddrOfPart.number();
 const LOAD: u8 = Op::Load.number();
 const STORE: u8 = Op::Store.number();
@@ -419,10 +417,8 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::LoadElem
         | Op::StoreElem
         | Op::Len
-        | Op::LayoutOf
         | Op::AddrOfSlot
         | Op::AddrOfField
-        | Op::AddrOfElem
         | Op::AddrOfPart
         | Op::Load
         | Op::Store
@@ -3672,19 +3668,6 @@ pub(super) fn dispatch<'s, 'a>(
                     .mem
                     .set_word_at(base_at + (a!()) as usize, len as u64);
             }
-            // The other half of the header word `len` reads. What an object
-            // *is* is an `Int` here, so a dispatch over it is an ordinary
-            // `switch`.
-            LAYOUT_OF => {
-                let addr = machine.mem.word_at(base_at + (b!() as usize));
-                if addr == 0 {
-                    fail!(null_object());
-                }
-                let layout = machine.mem.object_layout(addr).0 as i64;
-                machine
-                    .mem
-                    .set_word_at(base_at + (a!()) as usize, layout as u64);
-            }
 
             // ---- places ----------------------------------------------
             ADDR_OF_SLOT => {
@@ -3696,18 +3679,6 @@ pub(super) fn dispatch<'s, 'a>(
                 let at = held.lo();
                 match machine.checked(addr, at, 1) {
                     Ok(()) => {
-                        let word = machine.mem.payload_addr(addr, at);
-                        machine.mem.set_word_at(base_at + (a!()) as usize, word);
-                    }
-                    Err(error) => fail!(error),
-                }
-            }
-            ADDR_OF_ELEM => {
-                let addr = machine.mem.word_at(base_at + (b!() as usize));
-                let index = machine.mem.word_at(base_at + (c!() as usize)) as i64;
-                let width = machine.width(LayoutId(held.lo()));
-                match machine.element(addr, index, width) {
-                    Ok(at) => {
                         let word = machine.mem.payload_addr(addr, at);
                         machine.mem.set_word_at(base_at + (a!()) as usize, word);
                     }
@@ -4038,142 +4009,11 @@ fn handle_text(
 
 #[cfg(test)]
 mod tests {
-    use cove_ir::{Convert as ConvertTo, Inst, Len, Shape, Storage, Validation};
+    use cove_ir::{Inst, Len, Shape, Storage, Validation};
 
     use super::super::runs::MIN_GROWABLE_BYTES;
     use super::super::tests::{budget, run_words, Build};
     use super::*;
-
-    /// Every opcode ADR 0041 defines has an implementation.
-    ///
-    /// `crates/cove-cli/tests/bytecode_corpus.rs` names fifteen opcodes no
-    /// program in the repository reaches, and three of them — `addr.elem`,
-    /// `Convert(IntToFloat)` and `layout.of` — are not merely absent from the
-    /// corpus: **the lowering has no site that emits two of them**, so no
-    /// Cove source can reach them and neither the differential harness nor
-    /// any fixture written in Cove can cover them.
-    /// (`Convert(IntToFloat)` has had a site since ADR 0058's Phase 5 made
-    /// `Int.toFloat` one; it stays below as the way out to a `Float`.)
-    ///
-    /// **It was sixteen and four until issue #454's Step 2**, and the
-    /// difference is `Convert(FloatToInt)`, which this test used to reach on
-    /// the way back from that `Float`. ADR 0064's Decision 6 refused it —
-    /// its `x as i64` answered `0` for a NaN and clamped at each end where
-    /// `Float.toInt` refuses and says which of the three stopped it, and "a
-    /// second, wrong answer in the IR is not an option" — so there is no way
-    /// back from a `Float` to an `Int` in the instruction set at all now, and
-    /// the float leg below decides a branch instead of contributing a
-    /// summand.
-    ///
-    /// A program written in the IR directly is the only thing that can reach
-    /// the rest, which is what `super::tests::Build` is for. Before the
-    /// cutover this compared the two loops against each other; there is one
-    /// loop now, so what it asserts is the answer itself — a number chosen so
-    /// that a misread of any of the three is a wrong number rather than a
-    /// discarded one.
-    #[test]
-    fn the_opcodes_no_cove_source_reaches_run() {
-        let mut build = Build::default();
-        let int = build.scalar(Repr::Int);
-        let ints = build.layout(
-            "Array",
-            Shape::Elements {
-                elem: int,
-                growable: false,
-            },
-        );
-        let reprs = &[
-            Repr::Ref,
-            Repr::Int,
-            Repr::Int,
-            Repr::Addr,
-            Repr::Int,
-            Repr::Float,
-            Repr::Float,
-            Repr::Bool,
-            Repr::Int,
-            Repr::Int,
-        ];
-        let entry = build.function(
-            "erased",
-            &[],
-            reprs,
-            int,
-            vec![
-                Inst::Alloc {
-                    dst: 0,
-                    layout: ints,
-                    len: Len::Count(3),
-                },
-                Inst::Int { dst: 1, value: 0 },
-                Inst::Int { dst: 2, value: 7 },
-                Inst::StoreElem {
-                    obj: 0,
-                    index: 1,
-                    src: 2,
-                    layout: int,
-                },
-                // The address of element 0, then the word through it.
-                Inst::AddrOfElem {
-                    dst: 3,
-                    obj: 0,
-                    index: 1,
-                    layout: int,
-                },
-                Inst::Load {
-                    dst: 4,
-                    addr: 3,
-                    layout: int,
-                },
-                // Out to `Float`, which is the only way this fixture
-                // reaches a `Convert`. There is no way back: issue #454's
-                // Step 2 deleted `Convert::FloatToInt`, so what the float
-                // leg contributes is a *decision* rather than a summand.
-                Inst::Convert {
-                    to: ConvertTo::IntToFloat,
-                    dst: 5,
-                    a: 4,
-                },
-                Inst::Float {
-                    dst: 6,
-                    bits: 7.0f64.to_bits(),
-                },
-                // Equal on the answer, and the branch is taken when it is
-                // *not*: a conversion that wrote anything but `7.0` lands on
-                // the zero below instead of on the sum.
-                Inst::CmpBranch {
-                    on: Compare::Float,
-                    op: CmpOp::Eq,
-                    dst: 7,
-                    a: 5,
-                    b: 6,
-                    target: 11,
-                },
-                // And what the object says it is, folded into the answer so
-                // that a wrong reading is a wrong number rather than a
-                // discarded one.
-                Inst::LayoutOf { dst: 8, obj: 0 },
-                Inst::Arith {
-                    num: Num::Int,
-                    op: ArithOp::Add,
-                    dst: 9,
-                    a: 4,
-                    b: 8,
-                },
-                Inst::Return { src: 9 },
-                Inst::Int { dst: 9, value: 0 },
-                Inst::Return { src: 9 },
-            ],
-        );
-        let program = build.done();
-
-        let answer = run_words(&program, entry, &[]).expect("the fixture runs");
-        // Seven, plus the layout the object says it has, reached only through
-        // a comparison against the `Float` the conversion made: every one of
-        // the three opcodes contributes to it, and a misread of any of them
-        // answers a different number.
-        assert_eq!(answer, vec![7 + u64::from(ints.0)]);
-    }
 
     /// **ADR 0054's fused comparison is the two instructions it replaces, in
     /// that order.**

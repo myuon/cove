@@ -1,4 +1,4 @@
-//! The hundred and eighty-nine opcodes, and what each one makes of the four
+//! The hundred and ninety-nine opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -19,7 +19,7 @@
 //!   [`Inst::CmpImm`](crate::Inst::CmpImm) six and
 //!   [`Inst::CmpImmBranch`](crate::Inst::CmpImmBranch) six, the operator
 //!   alone;
-//! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] four;
+//! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] three;
 //!   [`Inst::FloatAbs`](crate::Inst::FloatAbs) one, because it is not a
 //!   family — see the instruction's own doc for why it is not — and
 //!   [`Inst::FloatMinMax`](crate::Inst::FloatMinMax) two, [`MinMax`], because
@@ -167,11 +167,9 @@ mod base {
     /// moved it into the standard library.
     pub const RUN_FINISH_WORDS: u8 = RUN_FINISH_BYTES + 1;
     pub const LEN: u8 = RUN_FINISH_WORDS + 1;
-    pub const LAYOUT_OF: u8 = LEN + 1;
-    pub const ADDR_OF_SLOT: u8 = LAYOUT_OF + 1;
+    pub const ADDR_OF_SLOT: u8 = LEN + 1;
     pub const ADDR_OF_FIELD: u8 = ADDR_OF_SLOT + 1;
-    pub const ADDR_OF_ELEM: u8 = ADDR_OF_FIELD + 1;
-    pub const ADDR_OF_PART: u8 = ADDR_OF_ELEM + 1;
+    pub const ADDR_OF_PART: u8 = ADDR_OF_FIELD + 1;
     pub const LOAD: u8 = ADDR_OF_PART + 1;
     pub const STORE: u8 = LOAD + 1;
     pub const BOX: u8 = STORE + 1;
@@ -401,10 +399,8 @@ pub enum Op {
     /// The head of a [`crate::legalize::Pattern::AppendWords`] window.
     FusedAppendWords,
     Len,
-    LayoutOf,
     AddrOfSlot,
     AddrOfField,
-    AddrOfElem,
     AddrOfPart,
     Load,
     Store,
@@ -738,10 +734,8 @@ impl Op {
             Op::RunFinishBytes,
             Op::RunFinishWords,
             Op::Len,
-            Op::LayoutOf,
             Op::AddrOfSlot,
             Op::AddrOfField,
-            Op::AddrOfElem,
             Op::AddrOfPart,
             Op::Load,
             Op::Store,
@@ -885,10 +879,8 @@ impl Op {
             Op::FusedAppendBytes => base::FUSED_APPEND_BYTES,
             Op::FusedAppendWords => base::FUSED_APPEND_WORDS,
             Op::Len => base::LEN,
-            Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
             Op::AddrOfField => base::ADDR_OF_FIELD,
-            Op::AddrOfElem => base::ADDR_OF_ELEM,
             Op::AddrOfPart => base::ADDR_OF_PART,
             Op::Load => base::LOAD,
             Op::Store => base::STORE,
@@ -1284,7 +1276,6 @@ impl Op {
             | Op::FusedAppendBytes
             | Op::FusedAppendWords => Op::LoadField.fields(),
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
-            Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
                 Operand::Word(ADDR),
                 Operand::Word(ANY),
@@ -1296,12 +1287,6 @@ impl Op {
                 Operand::Word(REF),
                 NONE,
                 one(Half::Offset),
-            ),
-            Op::AddrOfElem => fields(
-                Operand::Word(ADDR),
-                Operand::Word(REF),
-                Operand::Word(INT),
-                one(Half::Layout),
             ),
             // Nothing bounds `at` against the value the address names, and
             // that gap is inherited rather than introduced: a frame records
@@ -1505,7 +1490,10 @@ mod tests {
     /// ninety-eight once its Phase 4b-ii brought the six observations
     /// `std.dynamic.renderInto` renders an erased value with, and two hundred
     /// and one once issue #514's F4 brought the three instructions of an
-    /// identity set.
+    /// identity set, and a hundred and ninety-nine once issue #536 deleted
+    /// `LayoutOf` and `AddrOfElem`: neither had a producer — dynamic dispatch
+    /// reads a layout with a `LoadField` at offset 0, and no place is an
+    /// element's address — and only tests built them.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1525,9 +1513,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_two_hundred_and_one_opcodes() {
-        assert_eq!(Op::all().len(), 201);
-        assert_eq!(OPCODES, 201);
+    fn there_are_a_hundred_and_ninety_nine_opcodes() {
+        assert_eq!(Op::all().len(), 199);
+        assert_eq!(OPCODES, 199);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

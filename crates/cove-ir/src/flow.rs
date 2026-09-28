@@ -61,12 +61,10 @@ impl Inst {
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
             | Inst::Len { dst, .. }
-            | Inst::LayoutOf { dst, .. }
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
             | Inst::AddrOfField { dst, .. }
-            | Inst::AddrOfElem { dst, .. }
             | Inst::AddrOfPart { dst, .. }
             | Inst::ScopeEnter { dst, .. }
             | Inst::Spawn { dst, .. }
@@ -236,10 +234,8 @@ impl Inst {
             | Inst::GrowableCommit { .. }
             | Inst::GrowableTruncate { .. }
             | Inst::Len { .. }
-            | Inst::LayoutOf { .. }
             | Inst::AddrOfSlot { .. }
             | Inst::AddrOfField { .. }
-            | Inst::AddrOfElem { .. }
             | Inst::AddrOfPart { .. }
             | Inst::Load { .. }
             | Inst::Store { .. }

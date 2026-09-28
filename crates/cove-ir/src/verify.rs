@@ -36,7 +36,7 @@
 //! at collection time.
 
 use crate::inst::{CmpOp, Compare, Inst, Len, Num, Slot};
-use crate::intrinsic::{Carried, Category, Class};
+use crate::intrinsic::{Carried, Class};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::{RefMap, Repr};
@@ -510,7 +510,7 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                Inst::RunLoad { dst, .. } | Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
+                Inst::RunLoad { dst, .. } | Inst::Len { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -604,7 +604,7 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                Inst::AddrOfElem { dst, .. } | Inst::AddrOfPart { dst, .. } => {
+                Inst::AddrOfPart { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -1312,10 +1312,6 @@ impl Check<'_> {
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, dst, &[Repr::Int]);
             }
-            Inst::LayoutOf { dst, obj } => {
-                self.expect(at, obj, &[Repr::Ref]);
-                self.expect(at, dst, &[Repr::Int]);
-            }
             Inst::AddrOfSlot { dst, slot } => {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.repr(at, slot);
@@ -1324,17 +1320,6 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.expect(at, obj, &[Repr::Ref]);
                 self.reaches_word(at, obj, word, 1, "addressed");
-            }
-            Inst::AddrOfElem {
-                dst,
-                obj,
-                index,
-                layout,
-            } => {
-                self.expect(at, dst, &[Repr::Addr]);
-                self.expect(at, obj, &[Repr::Ref]);
-                self.expect(at, index, &[Repr::Int]);
-                self.layout_exists(at, layout);
             }
             // Nothing bounds `at` against the value the address names. A
             // frame records what each slot *holds* and not how far the value
@@ -1940,11 +1925,7 @@ impl Check<'_> {
                 continue;
             }
             let described = self.program.layout(arg.layout);
-            if intrinsic.category() != Category::Value
-                && class != Class::Strings
-                && class != Class::Buffer
-                && is_collection(&described.shape)
-            {
+            if is_collection(&described.shape) {
                 let name = described.name.clone();
                 self.fault(
                     at,
@@ -1966,19 +1947,10 @@ impl Check<'_> {
         let described = self.program.layout(layout);
         let word = |repr: Repr| described.shape == Shape::Word(repr);
         let fits = match class {
-            Class::Value => true,
-            Class::Buffer => described.shape == Shape::ByteBuffer,
             Class::Unit => word(Repr::Unit),
-            Class::Bool => word(Repr::Bool),
             Class::Int => word(Repr::Int),
             Class::Float => word(Repr::Float),
             Class::Str => described.shape == Shape::Str,
-            Class::Strings => self.is_strings(layout),
-            Class::OptionOf(carried) => self.is_case_pair(
-                layout,
-                (cove_schema::builtins::SOME_CASE.name, Some(carried)),
-                (cove_schema::builtins::NONE_CASE.name, None),
-            ),
             Class::ResultOf(carried) => self.is_case_pair(
                 layout,
                 (cove_schema::builtins::OK_CASE.name, Some(carried)),
@@ -1988,26 +1960,11 @@ impl Check<'_> {
         (!fits).then(|| format!("`{}`, where its signature has {class}", described.name))
     }
 
-    /// Whether `layout` is an `Array<String>`.
-    fn is_strings(&self, layout: LayoutId) -> bool {
-        match self.program.layout(layout).shape {
-            Shape::Elements {
-                elem,
-                growable: false,
-            } => {
-                elem.index() < self.program.layouts.len()
-                    && self.program.layout(elem).shape == Shape::Str
-            }
-            _ => false,
-        }
-    }
-
     /// Whether `layout` is an enum with a case `carrier` holding exactly one
     /// value of the carried class, and a case `other`.
     ///
-    /// `other` is named and not described: `None` carries nothing and `Err`
-    /// carries the machine's `Error`, and neither is a question a signature
-    /// asks.
+    /// `other` is named and not described: `Err` carries the machine's
+    /// `Error`, which is not a question a signature asks.
     fn is_case_pair(
         &self,
         layout: LayoutId,
@@ -2023,7 +1980,6 @@ impl Check<'_> {
                     (carried, &self.program.layout(part).shape),
                     (Some(Carried::Int), Shape::Word(Repr::Int))
                         | (Some(Carried::Float), Shape::Word(Repr::Float))
-                        | (Some(Carried::Str), Shape::Str)
                 )
         };
         cases.iter().any(|case| {
@@ -2803,7 +2759,6 @@ fn admitted_in_a_window(inst: &Inst, written: bool) -> bool {
                     | Inst::LoadElem { .. }
                     | Inst::RunLoad { .. }
                     | Inst::Len { .. }
-                    | Inst::LayoutOf { .. }
                     | Inst::Load { .. }
             ))
 }
@@ -4020,8 +3975,9 @@ mod tests {
 
     /// A text or scalar intrinsic handed a collection is refused as that,
     /// which is what makes a new collection builtin a verification failure
-    /// rather than a runtime arm (ADR 0058, Phase 5). A value intrinsic may
-    /// be handed one: `==` on two arrays is a walk of both.
+    /// rather than a runtime arm (ADR 0058, Phase 5). A value intrinsic could
+    /// be handed one, until the last of them left and issue #536 deleted the
+    /// category.
     #[test]
     fn a_collection_is_refused_by_a_text_or_scalar_intrinsic() {
         let array = |slot| Arg {
@@ -4058,15 +4014,14 @@ mod tests {
         // variant left declares a `Strings` operand at all, so there is nothing
         // to construct the case out of. `Class::Strings` was a *result* class
         // for `words`, `chars` and `split` after that, and `split` was its last
-        // user; `intrinsic.rs`'
-        // `no_intrinsic_is_a_collection_operation` now asserts unconditionally
-        // that no operand is one.
+        // user; issue #536 deleted the class, so no signature can name one.
 
         // A second half stood here, holding a *value* intrinsic silent over
         // the same `Array<Int>`: `Value.order` until ADR 0068's Phase 3, and
         // then `Value.admitKey` until its Phase 4c deleted the last variant of
-        // `Category::Value`. No intrinsic left takes a value of any layout, so
-        // there is nothing to build the silent half out of.
+        // `Category::Value`, which issue #536 then deleted. No intrinsic left
+        // takes a value of any layout, so there is nothing to build the silent
+        // half out of.
     }
 
     /// ADR 0068's Phase 4c for [`one_admission_boundary`]: a refusal is

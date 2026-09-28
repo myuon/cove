@@ -284,6 +284,18 @@ allow = ["console", "clock"]
 entry = "tasks_shared.main"
 allow = ["console"]
 
+[run.tasks_async_call]
+entry = "tasks_async_call.main"
+allow = ["console"]
+
+[run.tasks_cancel]
+entry = "tasks_cancel.main"
+allow = ["console"]
+
+[run.tasks_scope_cancel]
+entry = "tasks_scope_cancel.main"
+allow = ["console"]
+
 [run.type_enum]
 entry = "type_enum.main"
 allow = ["console"]

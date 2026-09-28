@@ -2216,8 +2216,9 @@ impl<'a> Machine<'a> {
         // migrations, and the last two walks, `equal`'s and `key`'s, went in
         // [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
         // Phase 5 with the report column that only ever read nought. No
-        // remaining `Intrinsic` declares `Effects::BULK_WORK`, so every
-        // variant is one unit of work a call, like the instruction it is.
+        // remaining `Intrinsic` declared `Effects::BULK_WORK`, and issue #536
+        // deleted the flag, so every variant is one unit of work a call, like
+        // the instruction it is.
 
         // Read again immediately after the call returns, so the difference
         // from `allocation_charge`'s snapshot is exactly what this call did.
@@ -6305,9 +6306,14 @@ pub(crate) mod tests {
     /// layout's width.
     ///
     /// The header's `len` counts *elements*, so an index is checked against
-    /// three and then multiplied — which is why writing element 1 through an
-    /// `AddrOfElem` leaves element 2 alone rather than smearing across it,
-    /// and why index 3 is refused although the object holds six words.
+    /// three and then multiplied — which is why overwriting element 1 with a
+    /// second `StoreElem` leaves element 2 alone rather than smearing across
+    /// it, and why index 3 is refused although the object holds six words.
+    ///
+    /// The overwrite went through an `AddrOfElem` and a `Store` until issue
+    /// #536 deleted `AddrOfElem`, which nothing lowered to; `StoreElem` is
+    /// the instruction the lowering writes an element with, at the same
+    /// stride.
     #[test]
     fn an_array_of_points_is_walked_at_a_two_word_stride() {
         let mut build = Build::default();
@@ -6330,7 +6336,6 @@ pub(crate) mod tests {
             Repr::Int,
             Repr::Int,
             Repr::Int,
-            Repr::Addr,
         ];
         let walk = build.function(
             "walk",
@@ -6373,19 +6378,14 @@ pub(crate) mod tests {
                     src: 2,
                     layout: point,
                 },
-                // A place naming element 1, written through: two words at
-                // one address, with nothing between the address and them.
+                // xs[1] = Point(30, 40), over what was there: two words at
+                // the element's stride, and nothing past them.
                 Inst::Int { dst: 1, value: 1 },
-                Inst::AddrOfElem {
-                    dst: 8,
-                    obj: 0,
-                    index: 1,
-                    layout: point,
-                },
                 Inst::Int { dst: 2, value: 30 },
                 Inst::Int { dst: 3, value: 40 },
-                Inst::Store {
-                    addr: 8,
+                Inst::StoreElem {
+                    obj: 0,
+                    index: 1,
                     src: 2,
                     layout: point,
                 },

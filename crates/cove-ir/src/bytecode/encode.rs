@@ -502,25 +502,12 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             }
         },
         Inst::Len { dst, obj } => build(Op::Len, slot(dst)?, slot(obj)?, 0, 0),
-        Inst::LayoutOf { dst, obj } => build(Op::LayoutOf, slot(dst)?, slot(obj)?, 0, 0),
 
         // ---- places ----------------------------------------------------------
         Inst::AddrOfSlot { dst, slot: at } => build(Op::AddrOfSlot, slot(dst)?, slot(at)?, 0, 0),
         Inst::AddrOfField { dst, obj, at } => {
             build(Op::AddrOfField, slot(dst)?, slot(obj)?, 0, halves(at, 0))
         }
-        Inst::AddrOfElem {
-            dst,
-            obj,
-            index,
-            layout,
-        } => build(
-            Op::AddrOfElem,
-            slot(dst)?,
-            slot(obj)?,
-            slot(index)?,
-            halves(layout.0, 0),
-        ),
         Inst::AddrOfPart { dst, addr, at } => {
             build(Op::AddrOfPart, slot(dst)?, slot(addr)?, 0, halves(at, 0))
         }
@@ -1163,7 +1150,6 @@ mod tests {
                 },
             ),
             (0, Inst::Len { dst: 1, obj: 2 }),
-            (0, Inst::LayoutOf { dst: 1, obj: 2 }),
             (0, Inst::AddrOfSlot { dst: 1, slot: 2 }),
             (
                 0,
@@ -1171,15 +1157,6 @@ mod tests {
                     dst: 1,
                     obj: 2,
                     at: 3,
-                },
-            ),
-            (
-                0,
-                Inst::AddrOfElem {
-                    dst: 1,
-                    obj: 2,
-                    index: 3,
-                    layout: L,
                 },
             ),
             (
