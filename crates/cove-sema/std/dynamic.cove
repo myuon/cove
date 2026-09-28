@@ -581,76 +581,155 @@ fn containsItselfHelp() -> String {
 /// asking it again (issue #514's F6). That the kind is now asked before the
 /// type test rather than after it changes no answer: every view has a kind.
 ///
-/// The kind codes are `cove_ir::DynamicKind`'s one table: 0 unit, 1 bool, 2
-/// int, 3 float, 4 duration, 5 string, 6 struct, 7 enum, 8 array, 9 vector,
-/// 10 set, 11 map, 12 range, 13 function, 14 opaque and 15 shared. The same
-/// type is the same kind, so one kind is asked for. A scalar has no children,
-/// and neither has a function, an opaque value or a `Shared` cell, each of
-/// which is equal to nothing.
+/// The kind codes are `cove_ir::DynamicKind`'s one table, named as
+/// [`unclassified`] says. The same type is the same kind, so one kind is asked
+/// for. A scalar has no children, and neither has a function, an opaque value
+/// or a `Shared` cell, each of which is equal to nothing.
 ///
 /// The counts are compared even where the type settles them — two structs of
 /// one declaration have one field count, two cases of one enum one payload —
 /// because a count is what a collection is compared by first, and one
 /// comparison for every kind is shorter than a list of the kinds that need it.
 ///
-/// # The kinds are asked by class
+/// # The commonest kinds are named first, and the arms share their ends
 ///
 /// A value's parts are mostly containers and `Int`s: a node of
 /// `benches/equals`' `tree.boxed` is a struct, an `Int` and a vector, a third
-/// each, and a link of an enum chain an enum, an `Int` and an array. So the
-/// scalars and the string are one class, asked by one range test before any of
-/// them is — an `Int` is decided on the second comparison rather than the
-/// first — and a container reaches its count on the third rather than the
-/// seventh (issue #514's VM residue, step (c)).
+/// each, and a link of an enum chain an enum, an `Int` and an array. So an
+/// `Int` is decided on the first comparison, a struct reaches its count on the
+/// second, a vector on the third, an enum on the fourth and an array on the
+/// fifth, and a `String` is decided on the sixth.
+///
+/// The containers are the arms that do not answer: each is named by a `!=`
+/// that a container fails, so that all seven fall through to the one count
+/// comparison at the bottom, and every other kind is answered — or refused —
+/// inside them, the unequal ones by the one `-1` at the end of their chain.
+/// That is for the size of the body and not only for the reader: this is
+/// expanded into every loop of [`equals`]' walk, which `lower::inline` does
+/// only for a body under its loop limit, and over it this would be a call per
+/// value compared.
+///
+/// Every kind is named once, by its code, and a code no arm names is
+/// [`unclassified`]'s — never a member of whichever class its number happens
+/// to sit next to (issue #533).
 fn children(x: DynamicView, y: DynamicView, kind: Int) -> Int {
-  if !core.dynamicSameType(x, y) {
-    return -1
-  }
-  if kind < 6 {
+  if core.dynamicSameType(x, y) {
+    // Int
     if kind == 2 {
       if core.dynamicInt(x) == core.dynamicInt(y) {
         return 0
       }
-      return -1
-    }
-    if kind == 5 {
-      if core.dynamicString(x) == core.dynamicString(y) {
-        return 0
+    } else {
+      // Struct
+      if kind != 6 {
+        // Vector
+        if kind != 9 {
+          // Enum
+          if kind == 7 {
+            if core.dynamicCase(x) != core.dynamicCase(y) {
+              return -1
+            }
+            // Array
+          } else if kind != 8 {
+            // Map
+            if kind != 11 {
+              // Set
+              if kind != 10 {
+                // Range
+                if kind != 12 {
+                  // Unit, which has no children: counted like a container,
+                  // as it always was, so that no answer rests on its having
+                  // none.
+                  if kind != 0 {
+                    // String
+                    if kind == 5 {
+                      if core.dynamicString(x) == core.dynamicString(y) {
+                        return 0
+                      }
+                      // Bool
+                    } else if kind == 1 {
+                      if core.dynamicBool(x) == core.dynamicBool(y) {
+                        return 0
+                      }
+                      // Float
+                    } else if kind == 3 {
+                      if core.dynamicFloat(x) == core.dynamicFloat(y) {
+                        return 0
+                      }
+                      // Duration
+                    } else if kind == 4 {
+                      if core.dynamicDuration(x) == core.dynamicDuration(y) {
+                        return 0
+                      }
+                      // Function, opaque and `Shared`, which are equal to
+                      // nothing.
+                    } else if kind != 13 {
+                      if kind != 14 {
+                        if kind != 15 {
+                          unclassified()
+                        }
+                      }
+                    }
+                    return -1
+                  }
+                }
+              }
+            }
+          }
+        }
       }
-      return -1
-    }
-    if kind == 1 {
-      if core.dynamicBool(x) == core.dynamicBool(y) {
-        return 0
+      let count = core.dynamicChildCount(x)
+      if count == core.dynamicChildCount(y) {
+        return count
       }
-      return -1
     }
-    if kind == 3 {
-      if core.dynamicFloat(x) == core.dynamicFloat(y) {
-        return 0
-      }
-      return -1
-    }
-    if kind == 4 {
-      if core.dynamicDuration(x) == core.dynamicDuration(y) {
-        return 0
-      }
-      return -1
-    }
-  }
-  if kind >= 13 {
-    return -1
-  }
-  if kind == 7 {
-    if core.dynamicCase(x) != core.dynamicCase(y) {
-      return -1
-    }
-  }
-  let count = core.dynamicChildCount(x)
-  if count == core.dynamicChildCount(y) {
-    return count
   }
   -1
+}
+
+/// Stops the run: a walk here was handed a kind it does not name.
+///
+/// # A kind is named, never ranged over
+///
+/// `core.dynamicKind` answers `cove_ir::DynamicKind`'s code, and a code is a
+/// name: its number is its place in that table and not a ranking, so nothing
+/// here compares two codes as numbers or does arithmetic on one. Every walk
+/// decides a kind by `==` against the codes it means, each with the kind's
+/// name beside it, and a code none of its arms names comes here. The kinds
+/// fall into three classes:
+///
+/// | class | kinds, by code |
+/// |---|---|
+/// | leaf: a value to read and no children | `()` 0, `Bool` 1, `Int` 2, `Float` 3, `Duration` 4, `String` 5 |
+/// | container: children to walk | struct 6, enum 7, `Array` 8, `Vector` 9, `Set` 10, `Map` 11, `Range` 12 |
+/// | capability, ADR 0068's Decision 7: nothing to read | function 13, opaque 14, `Shared` 15 |
+///
+/// [`children`], [`rank`], [`sorts`], [`keyParts`] and [`written`] name every
+/// kind; [`opening`], [`closing`] and [`keyWord`] name the kinds their callers
+/// can hand them. So a kind appended to the table, or a code that moved, does
+/// not quietly join whichever class its number falls beside: each walk stops
+/// here, loudly, until someone decides what it does with that kind. The
+/// `cove-ir` crate's `dynamic` tests hold this file to the table, and fail on
+/// a kind the table has and a walk does not name (issue #533).
+///
+/// # It is one sentence, and it names no code
+///
+/// This is expanded into every walk that can reach it, and [`children`] is
+/// expanded into every loop of [`equals`]' walk only while it is under
+/// `lower::inline`'s loop limit — which it is by one instruction. So the
+/// refusal is as small as a refusal can be: one sentence, with the empty rule
+/// and help read from one slot rather than two, and no code in it, because
+/// saying which code is an interpolation, a call to `std.int.renderInto`, and
+/// a function that calls anything is expanded nowhere. The tests are where a
+/// kind nobody named is meant to be found; this is what a run does if they
+/// were not run.
+fn unclassified() {
+  let none = ""
+  core.refuse(
+    "`std.dynamic` was handed a value of a kind none of its walks names: this is a fault in Cove's standard library, not in the program",
+    none,
+    none,
+  )
 }
 
 /// Pushes `view` onto `views`: ADR 0062's ensure, store and commit, written out
@@ -740,8 +819,9 @@ fn place(views: Vector<DynamicView>, at: Int, view: DynamicView) {
 /// - **The kind first**, by rank: `()`, `Bool`, `Int`, `Duration`, `String`,
 ///   an enum, a struct, an `Array`, a `Set`, a `Map` and a `Range`, in that
 ///   order. So every `Int` sorts before every `Duration`, however many
-///   nanoseconds it is, and every enum before every struct. The rank is not
-///   quite the kind code, and [`sorts`] says how the one is the other.
+///   nanoseconds it is, and every enum before every struct. The rank is
+///   [`rank`]'s, written kind by kind, and not the kind code, which is no
+///   order at all.
 /// - **A scalar** by its value: `false` before `true`, an `Int` and a
 ///   `Duration` as signed numbers, and `()` equal to `()`.
 /// - **A `String`** by its bytes, and a prefix before what extends it.
@@ -960,92 +1040,170 @@ fn orderBelow(
 /// equal scalars, two equal strings, two `()`s — and `2` where they are alike
 /// so far and their children and their counts are what is left.
 ///
-/// The kind codes are [`children`]' table. A scalar and a string are ordered
-/// by value, through `core.order`, which is one comparison instruction for
-/// each — a signed word, a `Bool`, a string's bytes in place — and which the
-/// oracle answers by the same `MapKey` order; a struct and an enum by name
+/// The kinds are named as [`unclassified`] says. A scalar and a string are
+/// ordered by value, through `core.order`, which is one comparison instruction
+/// for each — a signed word, a `Bool`, a string's bytes in place — and which
+/// the oracle answers by the same `MapKey` order; a struct and an enum by name
 /// first; and an `Array`, a `Set`, a `Map` and a `Range` have nothing but their
-/// children. The containers are asked first and then the two commonest
-/// scalars, `Int` before `String`: a key that is boxed is a struct or an enum
-/// before it is anything else, and [`children`] says why a walk meets
-/// containers and `Int`s most. What is left over — a float, a vector, a
-/// function, an opaque value — is not a key, and is refused.
+/// children. A struct is asked first and then `Int`: a key that is boxed is a
+/// struct or an enum before it is anything else, and [`children`] says why a
+/// walk meets containers and `Int`s most. A float, a vector, a function, an
+/// opaque value and a `Shared` cell are not keys, and are refused.
 ///
-/// # Two kinds apart are ordered by rank, which is the code but for one pair
-///
-/// The rank is the order the oracle's `MapKey` declares its variants in:
-///
-/// | kind code | 0 | 1 | 2 | 4 | 5 | 7 | 6 | 8 | 10 | 11 | 12 |
-/// |---|---|---|---|---|---|---|---|---|---|---|---|
-/// | rank | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
-///
-/// Among the codes a key can have, that is the order of the codes themselves
-/// with one pair turned round: an enum, 7, ranks before a struct, 6. So two
-/// kinds apart are compared as codes, and that pair the other way — which is
-/// the table without a table, and without a function whose every answer is a
-/// constant that a caller then copies (issue #302's shape). Two codes that sum
-/// to 13 are that pair only when one of them is a 6 or a 7.
+/// Two kinds apart are ordered by [`rank`], which refuses a kind that is not a
+/// key: which of two such kinds sorts first is a question only keys have an
+/// answer to.
 fn sorts(x: DynamicView, y: DynamicView) -> Int {
   let kind = core.dynamicKind(x)
   let other = core.dynamicKind(y)
   if kind != other {
-    admitted(kind)
-    admitted(other)
-    if kind + other == 13 {
-      if kind >= 6 {
-        if kind <= 7 {
-          return core.order(other, kind)
-        }
-      }
-    }
-    return core.order(kind, other)
+    let first = rank(kind)
+    return core.order(first, rank(other))
   }
-  if kind >= 6 {
-    if kind <= 7 {
-      let named = core.dynamicNameOrder(x, y)
-      if named != 0 {
-        return named
-      }
-      return 2
+  // Struct
+  if kind == 6 {
+    let named = core.dynamicNameOrder(x, y)
+    if named != 0 {
+      return named
     }
-    if kind <= 12 {
-      if kind != 9 {
-        return 2
-      }
-    }
+    return 2
   }
+  // Int
   if kind == 2 {
     return core.order(core.dynamicInt(x), core.dynamicInt(y))
   }
+  // Enum
+  if kind == 7 {
+    let named = core.dynamicNameOrder(x, y)
+    if named != 0 {
+      return named
+    }
+    return 2
+  }
+  // String
   if kind == 5 {
     return core.order(core.dynamicString(x), core.dynamicString(y))
   }
+  // Array
+  if kind == 8 {
+    return 2
+  }
+  // Set
+  if kind == 10 {
+    return 2
+  }
+  // Map
+  if kind == 11 {
+    return 2
+  }
+  // Range
+  if kind == 12 {
+    return 2
+  }
+  // Bool
   if kind == 1 {
     return core.order(core.dynamicBool(x), core.dynamicBool(y))
   }
+  // Duration
   if kind == 4 {
     return core.order(core.dynamicDuration(x), core.dynamicDuration(y))
   }
+  // Unit
   if kind == 0 {
     return 0
   }
-  core.refuse(notAKey(), "", "")
-  0
-}
-
-/// Nothing, where `kind` is a kind a key can be, and the refusal of a value
-/// that is not a key where it is not: a float, 3, a vector, 9, and a function,
-/// an opaque value or a `Shared` cell, 13 and up. [`sorts`] asks it of each of
-/// two kinds that are apart, because which of two such kinds sorts first is a
-/// question only keys have an answer to.
-fn admitted(kind: Int) {
-  if kind < 13 {
-    if kind != 3 {
-      if kind != 9 {
-        return
+  // Float, Vector, Function, Opaque and Shared are not keys.
+  if kind != 3 {
+    if kind != 9 {
+      if kind != 13 {
+        if kind != 14 {
+          if kind != 15 {
+            unclassified()
+          }
+        }
       }
     }
   }
+  unordered()
+  0
+}
+
+/// Where a key of kind `kind` sorts among keys of other kinds, and the refusal
+/// of a value that is not a key where it is not: a `Float`, a `Vector`, and
+/// the capabilities — a function, an opaque value, a `Shared` cell.
+///
+/// The rank is the order the oracle's `MapKey` declares its variants in, and
+/// each is written against its kind's name rather than read off the code,
+/// which is not an order:
+///
+/// | kind | `()` | `Bool` | `Int` | `Duration` | `String` | enum | struct | `Array` | `Set` | `Map` | `Range` |
+/// |---|---|---|---|---|---|---|---|---|---|---|---|
+/// | rank | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+fn rank(kind: Int) -> Int {
+  // Struct
+  if kind == 6 {
+    return 6
+  }
+  // Int
+  if kind == 2 {
+    return 2
+  }
+  // Enum
+  if kind == 7 {
+    return 5
+  }
+  // String
+  if kind == 5 {
+    return 4
+  }
+  // Array
+  if kind == 8 {
+    return 7
+  }
+  // Set
+  if kind == 10 {
+    return 8
+  }
+  // Map
+  if kind == 11 {
+    return 9
+  }
+  // Range
+  if kind == 12 {
+    return 10
+  }
+  // Bool
+  if kind == 1 {
+    return 1
+  }
+  // Duration
+  if kind == 4 {
+    return 3
+  }
+  // Unit
+  if kind == 0 {
+    return 0
+  }
+  // Float, Vector, Function, Opaque and Shared are not keys.
+  if kind != 3 {
+    if kind != 9 {
+      if kind != 13 {
+        if kind != 14 {
+          if kind != 15 {
+            unclassified()
+          }
+        }
+      }
+    }
+  }
+  unordered()
+  0
+}
+
+/// Stops the run with [`notAKey`]'s refusal: what [`sorts`] and [`rank`] do
+/// with a `Float`, a `Vector`, a function, an opaque value and a `Shared`
+/// cell.
+fn unordered() {
   core.refuse(notAKey(), "", "")
 }
 
@@ -1082,8 +1240,8 @@ fn notAKey() -> String {
 ///
 /// # What it answers
 ///
-/// Exactly what the oracle's `MapKey::convert` refuses, kind for kind in
-/// [`children`]' table:
+/// Exactly what the oracle's `MapKey::convert` refuses, kind for kind, the
+/// kinds named as [`unclassified`] says:
 ///
 /// - **Refused outright**: a `Float`, whose `NaN` is not equal to itself; a
 ///   `Vector`, whose equality could change while a collection holds it; a
@@ -1212,30 +1370,63 @@ fn refusesBelow(
 /// otherwise how many children it has, among which its parts are — every one
 /// of them, but for a `Map`'s keys.
 ///
-/// The kind codes are [`children`]' table, and the arms are [`refusesKey`]'s
-/// list in code order, with the scalars and the string asked as one class:
-/// every kind below a struct is admitted but a float, so a scalar, a string, a
-/// struct, an enum and an array are each decided on the second comparison.
+/// The kinds are named as [`unclassified`] says, and the arms are
+/// [`refusesKey`]'s list: a struct and an `Int` first for [`children`]'
+/// reason, then the other containers with parts, then what is admitted
+/// without looking inside, then what is refused. Each group falls through to
+/// its one answer rather than answering in every arm, because [`refusesKey`]
+/// calls this outside a loop, where `lower::inline` expands a body only under
+/// its limit for a site that runs once a call.
 fn keyParts(view: DynamicView, kind: Int) -> Int {
-  if kind < 6 {
-    if kind == 3 {
-      return -1
+  // Struct
+  if kind != 6 {
+    // Int
+    if kind == 2 {
+      return 0
     }
-    return 0
+    // Enum
+    if kind != 7 {
+      // Array
+      if kind != 8 {
+        // Map
+        if kind != 11 {
+          // String
+          if kind != 5 {
+            // Set
+            if kind != 10 {
+              // Range
+              if kind != 12 {
+                // Bool
+                if kind != 1 {
+                  // Duration
+                  if kind != 4 {
+                    // Unit
+                    if kind != 0 {
+                      // Float, Vector, Function, Opaque and Shared.
+                      if kind != 3 {
+                        if kind != 9 {
+                          if kind != 13 {
+                            if kind != 14 {
+                              if kind != 15 {
+                                unclassified()
+                              }
+                            }
+                          }
+                        }
+                      }
+                      return -1
+                    }
+                  }
+                }
+              }
+            }
+          }
+          return 0
+        }
+      }
+    }
   }
-  if kind < 9 {
-    return core.dynamicChildCount(view)
-  }
-  if kind == 11 {
-    return core.dynamicChildCount(view)
-  }
-  if kind == 10 {
-    return 0
-  }
-  if kind == 12 {
-    return 0
-  }
-  -1
+  core.dynamicChildCount(view)
 }
 
 /// The refusal of the erased value `key` as a map key or a set element, in
@@ -1435,19 +1626,29 @@ fn refuseAt(
 /// nothing, and it is the type's and never the handle's: which one of its kind
 /// a handle is, the number a rendering shows, is not part of a refusal.
 fn keyWord(view: DynamicView, kind: Int) -> String {
+  // Float
   if kind == 3 {
     return "Float"
   }
+  // Vector
   if kind == 9 {
     return "Vector"
   }
+  // Function
   if kind == 13 {
     return "fn"
   }
+  // Shared
   if kind == 15 {
     return "Shared"
   }
-  core.dynamicTypeName(view)
+  // Opaque
+  if kind == 14 {
+    return core.dynamicTypeName(view)
+  }
+  // Every other kind is a key, which nothing refuses.
+  unclassified()
+  ""
 }
 
 /// A new trail: the path a wording walk composed for a known key layout has
@@ -1541,7 +1742,8 @@ fn mutableKeyHelp() -> String {
 ///
 /// # What it writes
 ///
-/// `Display for Value`'s text, kind for kind in [`children`]' table:
+/// `Display for Value`'s text, kind for kind, the kinds named as
+/// [`unclassified`] says:
 ///
 /// - **A scalar** as the language writes it: `()`, `true` and `false`, an
 ///   `Int`, a `Float` and a `Duration` through `std.int`'s, `std.float`'s and
@@ -1837,50 +2039,80 @@ fn repeats(views: Vector<DynamicView>, top: Int, view: DynamicView) -> Bool {
 /// on to open the value reads it rather than asking it again (issue #514's
 /// F6).
 ///
-/// The kind codes are [`children`]' table, the containers first and then the
-/// commonest scalars, `Int` before `String`, for [`children`]' reason.
+/// The kinds are named as [`unclassified`] says: a struct and an `Int` first,
+/// for [`children`]' reason, then a `String`, which is what a flat value is
+/// mostly made of, and then the other containers.
 fn written(
   view: DynamicView,
   kind: Int,
   buffer: ByteBuffer,
   path: RenderPath,
 ) -> Int {
-  if kind >= 6 {
-    if kind <= 11 {
-      let count = core.dynamicChildCount(view)
-      if kind == 6 {
-        return record(view, count, buffer, path)
-      }
-      if count > 0 {
-        if kind == 9 {
-          if core.dynamicOnPath(view, path) {
-            stringbuilder.appendText(buffer, "[…]")
-            return 0
-          }
-        }
-        return count
-      }
-      if kind == 7 {
-        stringbuilder.appendText(buffer, core.dynamicCaseName(view))
-        return 0
-      }
-      if kind <= 9 {
-        stringbuilder.appendText(buffer, "[]")
-        return 0
-      }
-      stringbuilder.appendText(buffer, "\{\}")
-      return 0
-    }
+  // Struct
+  if kind == 6 {
+    return record(view, core.dynamicChildCount(view), buffer, path)
   }
+  // Int
   if kind == 2 {
     let number = core.dynamicInt(view)
     int.renderInto(number, buffer)
     return 0
   }
+  // String
   if kind == 5 {
     stringbuilder.appendText(buffer, core.dynamicString(view))
     return 0
   }
+  // Vector
+  if kind == 9 {
+    let count = core.dynamicChildCount(view)
+    if count > 0 {
+      if core.dynamicOnPath(view, path) {
+        stringbuilder.appendText(buffer, "[…]")
+        return 0
+      }
+      return count
+    }
+    stringbuilder.appendText(buffer, "[]")
+    return 0
+  }
+  // Enum
+  if kind == 7 {
+    let count = core.dynamicChildCount(view)
+    if count > 0 {
+      return count
+    }
+    stringbuilder.appendText(buffer, core.dynamicCaseName(view))
+    return 0
+  }
+  // Array
+  if kind == 8 {
+    let count = core.dynamicChildCount(view)
+    if count > 0 {
+      return count
+    }
+    stringbuilder.appendText(buffer, "[]")
+    return 0
+  }
+  // Map
+  if kind == 11 {
+    let count = core.dynamicChildCount(view)
+    if count > 0 {
+      return count
+    }
+    stringbuilder.appendText(buffer, "\{\}")
+    return 0
+  }
+  // Set
+  if kind == 10 {
+    let count = core.dynamicChildCount(view)
+    if count > 0 {
+      return count
+    }
+    stringbuilder.appendText(buffer, "\{\}")
+    return 0
+  }
+  // Bool
   if kind == 1 {
     if core.dynamicBool(view) {
       stringbuilder.appendText(buffer, "true")
@@ -1889,14 +2121,17 @@ fn written(
     }
     return 0
   }
+  // Float
   if kind == 3 {
     float.renderInto(core.dynamicFloat(view), buffer)
     return 0
   }
+  // Duration
   if kind == 4 {
     duration.renderInto(core.dynamicDuration(view), buffer)
     return 0
   }
+  // Range
   if kind == 12 {
     int.renderInto(core.dynamicInt(core.dynamicChild(view, 0)), buffer)
     if core.dynamicBool(core.dynamicChild(view, 2)) {
@@ -1907,19 +2142,27 @@ fn written(
     int.renderInto(core.dynamicInt(core.dynamicChild(view, 1)), buffer)
     return 0
   }
+  // Unit
   if kind == 0 {
     stringbuilder.appendText(buffer, "()")
     return 0
   }
+  // Function
   if kind == 13 {
     stringbuilder.appendText(buffer, "<fn>")
     return 0
   }
+  // Shared
   if kind == 15 {
     stringbuilder.appendText(buffer, "<shared>")
     return 0
   }
-  stringbuilder.appendText(buffer, core.dynamicHandleText(view))
+  // Opaque
+  if kind == 14 {
+    stringbuilder.appendText(buffer, core.dynamicHandleText(view))
+    return 0
+  }
+  unclassified()
   0
 }
 
@@ -1961,28 +2204,47 @@ fn record(
 /// Writes what comes before the first child of `view`, of kind `kind`, which
 /// [`written`] left for the walk: `Name(` for a struct, `Case(` for an enum,
 /// `[` for an `Array` and a `Vector`, and `{` for a `Set` and a `Map`.
+///
+/// Only a container [`written`] left open reaches it, and it names each one
+/// that can be; any other kind is [`unclassified`]'s.
 fn opening(view: DynamicView, kind: Int, buffer: ByteBuffer) {
+  // Struct
   if kind == 6 {
     stringbuilder.appendText(buffer, core.dynamicTypeName(view))
-    stringbuilder.appendByteInto(buffer, '(')
-    return
-  }
-  if kind == 7 {
+    // Enum
+  } else if kind == 7 {
     stringbuilder.appendText(buffer, core.dynamicCaseName(view))
-    stringbuilder.appendByteInto(buffer, '(')
-    return
-  }
-  if kind <= 9 {
+  } else {
+    // Vector
+    if kind != 9 {
+      // Array
+      if kind != 8 {
+        // Map
+        if kind != 11 {
+          // Set
+          if kind != 10 {
+            unclassified()
+          }
+        }
+        stringbuilder.appendByteInto(buffer, '{')
+        return
+      }
+    }
     stringbuilder.appendByteInto(buffer, '[')
     return
   }
-  stringbuilder.appendByteInto(buffer, '{')
+  stringbuilder.appendByteInto(buffer, '(')
 }
 
 /// Writes what comes before child `at` of `view`, of kind `kind`: a struct's
 /// field label, `, ` before it but for the first; a map's `: ` between a key
 /// and its value, and `, ` before every key but the first; and `, ` before
 /// every other child but the first.
+///
+/// Only a container [`opening`] opened reaches it, and `opening` refuses every
+/// kind it does not name, so the last arm is those containers but a struct and
+/// a map — an enum, an `Array`, a `Vector` and a `Set` — and never a kind
+/// nobody classified.
 fn between(view: DynamicView, kind: Int, at: Int, buffer: ByteBuffer) {
   if kind == 6 {
     if at > 0 {
@@ -2006,14 +2268,33 @@ fn between(view: DynamicView, kind: Int, at: Int, buffer: ByteBuffer) {
 /// Writes what closes a container of kind `kind` once its children are
 /// written: `)` for a struct and an enum, `]` for an `Array` and a `Vector`,
 /// `}` for a `Set` and a `Map`.
+///
+/// [`opening`]'s kinds, and any other is [`unclassified`]'s.
 fn closing(kind: Int, buffer: ByteBuffer) {
-  if kind <= 7 {
-    stringbuilder.appendByteInto(buffer, ')')
-    return
+  // One append, of whichever byte the kind closes with, rather than one an
+  // arm: this is expanded where [`renderInto`] calls it only while it is under
+  // `lower::inline`'s limit for a site that runs once a call.
+  var byte = ')'
+  // Struct
+  if kind != 6 {
+    // Enum
+    if kind != 7 {
+      byte = ']'
+      // Vector
+      if kind != 9 {
+        // Array
+        if kind != 8 {
+          byte = '}'
+          // Map
+          if kind != 11 {
+            // Set
+            if kind != 10 {
+              unclassified()
+            }
+          }
+        }
+      }
+    }
   }
-  if kind <= 9 {
-    stringbuilder.appendByteInto(buffer, ']')
-    return
-  }
-  stringbuilder.appendByteInto(buffer, '}')
+  stringbuilder.appendByteInto(buffer, byte)
 }
