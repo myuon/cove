@@ -3452,7 +3452,9 @@ impl Synth<'_> {
     ///   what `is` lowers to, on both sides together — `a == a` has every left
     ///   equal to its right all the way down, and it is only a cycle when the
     ///   same two come round again. The look is a loop over `depth` frames and
-    ///   nothing else: three loads a pair, no allocation.
+    ///   nothing else: three loads a pair, no allocation. A path of depth
+    ///   nought is not looked along at all, because nothing on it could be
+    ///   found; that is the root pair of every walk.
     /// - **It becomes the path's innermost pair** for everything below it. Its
     ///   own first three words already are the pair — the two vectors, which
     ///   are one word each, and the address of the pair before — so the path
@@ -3522,24 +3524,19 @@ impl Synth<'_> {
         });
         // The answer standing is the lengths', which is `true`.
         self.leaves.push(empty);
+        // An empty path is not looked along: nothing is on it to find, so the
+        // look could only answer "absent", and this pair goes straight to
+        // becoming its first entry. The test is the loop's own first one,
+        // moved above the copy that starts the walk down, so a path that is
+        // not empty pays nothing for it.
+        let unscanned = self.below_depth(seen, depth, more);
         let pair = self.alloc(shapes::ADDR);
         self.emit(Inst::Copy {
             dst: pair,
             src: at,
             layout: shapes::ADDR,
         });
-        let head = self.here();
-        self.emit(Inst::Cmp {
-            on: Compare::Int,
-            op: CmpOp::Lt,
-            dst: more,
-            a: seen,
-            b: depth,
-        });
-        let done = self.emit(Inst::BranchFalse {
-            cond: more,
-            to: PENDING,
-        });
+        let body = self.here();
         let held = self.alloc(layout);
         self.emit(Inst::Load {
             dst: held,
@@ -3600,9 +3597,11 @@ impl Synth<'_> {
             a: seen,
             value: 1,
         });
-        self.emit(Inst::Jump { to: head });
+        let done = self.below_depth(seen, depth, more);
+        self.emit(Inst::Jump { to: body });
         let end = self.here();
         self.patch(done, end);
+        self.patch(unscanned, end);
         // Not on the path: this pair is the path's innermost from here down.
         let inner = self.alloc(shapes::ADDR);
         self.emit(Inst::AddrOfSlot {
@@ -3638,6 +3637,27 @@ impl Synth<'_> {
             layout: store,
         });
         self.walk(elem, held, counterheld, length);
+    }
+
+    /// Whether the walk down a path has entries left, `seen` of `depth`: the
+    /// test into `more` and the branch taken when there are none, left
+    /// pending for the caller to patch.
+    ///
+    /// [`Synth::tracking`] and [`Synth::render_tracking`] each ask it twice:
+    /// once before the walk down starts, which is how an empty path skips the
+    /// look altogether, and once after each entry, before the jump back.
+    fn below_depth(&mut self, seen: Slot, depth: Slot, more: Slot) -> Pc {
+        self.emit(Inst::Cmp {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: more,
+            a: seen,
+            b: depth,
+        });
+        self.emit(Inst::BranchFalse {
+            cond: more,
+            to: PENDING,
+        })
     }
 
     /// The refusal of a value that contains itself, in
@@ -4380,7 +4400,8 @@ impl Synth<'_> {
     ///   so it renders as `[…]` and nothing is walked below it (issue #499's
     ///   decision 2). The look is by `Compare::Identity`, which is what `is`
     ///   lowers to, one load and one comparison an entry, and a loop over
-    ///   `depth` frames and nothing else — no allocation.
+    ///   `depth` frames and nothing else — no allocation. A path of depth
+    ///   nought is not looked along at all, for the same reason as equality's.
     /// - **It becomes the path's innermost entry** for everything below it.
     ///   Its own first three words already are the entry — the vector, the
     ///   buffer, and the address of the entry before — so the path it hands
@@ -4437,24 +4458,16 @@ impl Synth<'_> {
             cond: more,
             to: PENDING,
         });
+        // An empty path is not looked along, for [`Synth::tracking`]'s reason:
+        // the vector goes straight to becoming its first entry.
+        let unscanned = self.below_depth(seen, depth, more);
         let entry = self.alloc(shapes::ADDR);
         self.emit(Inst::Copy {
             dst: entry,
             src: path,
             layout: shapes::ADDR,
         });
-        let head = self.here();
-        self.emit(Inst::Cmp {
-            on: Compare::Int,
-            op: CmpOp::Lt,
-            dst: more,
-            a: seen,
-            b: depth,
-        });
-        let absent = self.emit(Inst::BranchFalse {
-            cond: more,
-            to: PENDING,
-        });
+        let body = self.here();
         let held = self.alloc(layout);
         self.emit(Inst::Load {
             dst: held,
@@ -4495,9 +4508,11 @@ impl Synth<'_> {
             a: seen,
             value: 1,
         });
-        self.emit(Inst::Jump { to: head });
+        let absent = self.below_depth(seen, depth, more);
+        self.emit(Inst::Jump { to: body });
         let walk = self.here();
         self.patch(absent, walk);
+        self.patch(unscanned, walk);
         self.patch(empty, walk);
         // Not on the path: this vector is the path's innermost from here down.
         let inner = self.alloc(shapes::ADDR);
