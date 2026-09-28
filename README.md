@@ -678,6 +678,24 @@ The series was measured whole in
   accepted residual with the decision that closed it;
 - the Rust walks the four variants reached are deleted.
 
+[ADR 0069](docs/adr/0069-structural-reflection-stays-inside-the-standard-library.md)
+answers the question ADR 0068 left for last: whether that view becomes public
+Cove API. It does not, for now. `DynamicView`, the `core.dynamic*`
+observations, `RenderPath` and `IdentitySet` stay an internal capability of the
+standard library, whose current users are the four operations ADR 0068 built;
+a further internal use is added without a new ADR only under the conditions
+ADR 0069 lists. Publishing them
+would expose more than a way to look inside a value:
+- a view's rooting and escape rules;
+- other modules' private fields and names;
+- views of capability-bearing values;
+- a per-program type identity;
+- a kind table and cycle machinery that changed twice during ADR 0068 itself.
+
+A limited derive/protocol mechanism is recorded as the preferred direction and
+not designed. Reopening the question takes a concrete public use case,
+representative programs showing recurring friction, and a new ADR.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
