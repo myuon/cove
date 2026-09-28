@@ -316,12 +316,18 @@ fn the_run_writes_the_recording_a_run_writes() {
     // It tells a handle apart by `core.dynamicTypeName` now, whose answer is a
     // name the machine places before the run only where a box can hold one,
     // and this fixture boxes nothing — so it places none of them either.
+    //
+    // It is 1,762 since issue #533 named every kind in `std.dynamic` by its
+    // code rather than by ranges of codes, and the eighteen words are the one
+    // literal that added: `std.dynamic.unclassified`'s sentence, 130 bytes,
+    // with which a walk refuses a kind none of its arms names. Its rule and
+    // help are the empty string, which the program already held.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1744), capacity_words: Some(1744) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1762), capacity_words: Some(1762) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

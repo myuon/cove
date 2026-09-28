@@ -2793,12 +2793,6 @@ impl<'a> Emit<'a> {
         use cove_ir::dynamic::{VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
         use cove_ir::DynamicKind;
         let code = |kind: DynamicKind| kind.code() as i32;
-        // The seven kinds with children are one run of codes, so one unsigned
-        // comparison sends every other kind — and `DYN_ASK` — to the helper.
-        const _: () = assert!(
-            DynamicKind::Range as i64 - DynamicKind::Struct as i64 == 6
-                && DynamicKind::Enum as i64 == DynamicKind::Struct as i64 + 1
-        );
         let parts = self.label();
         let run = self.label();
         let vector = self.label();
@@ -2806,14 +2800,33 @@ impl<'a> Emit<'a> {
         let offset = self.label();
         let stride = self.label();
         let write = self.label();
+        let parent = self.label();
         self.load_slot(RDX, view + VIEW_LAYOUT);
         self.mov_rr(RAX, RDX);
         self.descriptor(RAX, cold);
         self.mov_rr(RCX, RAX);
         self.and_imm32(RCX, DYN_KIND_MASK as i32);
-        self.add_imm32(RCX, -code(DynamicKind::Struct));
-        self.cmp_imm32(RCX, 7);
-        self.jcc(CC_AE, Target::Label(cold));
+        // The seven kinds with children, each named, and every other kind —
+        // and `DYN_ASK` — sent to the helper before the block table is read.
+        // Named rather than taken as a run of codes, because a code is a name
+        // and not an order (issue #533): a kind appended to the table, or
+        // renumbered, goes to the helper here until someone lists it.
+        let [last, others @ ..] = [
+            DynamicKind::Range,
+            DynamicKind::Struct,
+            DynamicKind::Enum,
+            DynamicKind::Vector,
+            DynamicKind::Array,
+            DynamicKind::Set,
+            DynamicKind::Map,
+        ];
+        for kind in others {
+            self.cmp_imm32(RCX, code(kind));
+            self.jcc(CC_E, Target::Label(parent));
+        }
+        self.cmp_imm32(RCX, code(last));
+        self.jcc(CC_NE, Target::Label(cold));
+        self.bind(parent);
         // `R9` is the parent's block: `children + children[layout] * 8`.
         self.load(HEAP_TABLE, CTX, OFF_DYN_CHILDREN);
         self.shl_imm8(RDX, 3);

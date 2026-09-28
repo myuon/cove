@@ -1427,10 +1427,16 @@ fn shown(view: DynamicView, kind: Int) -> String {
   if kind == 12 {
     return \"{core.dynamicInt(core.dynamicChild(view, 1))}\"
   }
-  if kind >= 8 {
-    if kind <= 10 {
-      return \"{core.dynamicInt(core.dynamicChild(view, 0))}\"
-    }
+  // An `Array`, a `Vector` and a `Set`, each named: a kind code is not an
+  // order (issue #533).
+  if kind == 8 {
+    return \"{core.dynamicInt(core.dynamicChild(view, 0))}\"
+  }
+  if kind == 9 {
+    return \"{core.dynamicInt(core.dynamicChild(view, 0))}\"
+  }
+  if kind == 10 {
+    return \"{core.dynamicInt(core.dynamicChild(view, 0))}\"
   }
   \"-\"
 }

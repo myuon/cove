@@ -554,6 +554,314 @@ mod tests {
         assert_eq!(DynamicKind::from_code(-1), None);
     }
 
+    /// `std/dynamic.cove`, which branches on these codes. Read as text: what
+    /// is held here is how the file names kinds, which no lowering of it can
+    /// say.
+    const STD_DYNAMIC: &str = include_str!("../../cove-sema/std/dynamic.cove");
+
+    /// The three classes `std.dynamic.unclassified`'s table sorts the kinds
+    /// into (issue #533).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Class {
+        /// A value to read and no children.
+        Leaf,
+        /// Children to walk.
+        Container,
+        /// ADR 0068's Decision 7: nothing to read.
+        Capability,
+    }
+
+    /// Every kind's class, by name. A `match` and not a table, so that a kind
+    /// added to [`DynamicKind`] does not compile here until someone says which
+    /// class it is in — and then the tests below fail until `std.dynamic`
+    /// names it too.
+    fn class(kind: DynamicKind) -> Class {
+        match kind {
+            DynamicKind::Unit
+            | DynamicKind::Bool
+            | DynamicKind::Int
+            | DynamicKind::Float
+            | DynamicKind::Duration
+            | DynamicKind::String => Class::Leaf,
+            DynamicKind::Struct
+            | DynamicKind::Enum
+            | DynamicKind::Array
+            | DynamicKind::Vector
+            | DynamicKind::Set
+            | DynamicKind::Map
+            | DynamicKind::Range => Class::Container,
+            DynamicKind::Function | DynamicKind::Opaque | DynamicKind::Shared => Class::Capability,
+        }
+    }
+
+    /// Whether a value of this kind may be a map key or a set element: what
+    /// `std.dynamic.keyWord` names the refusals of.
+    fn is_key(kind: DynamicKind) -> bool {
+        !matches!(kind, DynamicKind::Float | DynamicKind::Vector)
+            && class(kind) != Class::Capability
+    }
+
+    /// The tokens of one line of Cove, with its comment and its string
+    /// literals left out: identifiers and numbers whole, and `==`, `!=`, `<=`,
+    /// `>=` and `->` as one token each.
+    fn tokens(line: &str) -> Vec<String> {
+        let code = line.split("//").next().unwrap_or("");
+        let mut out = Vec::new();
+        let mut chars = code.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '"' {
+                // The standard library's literals here hold no escaped quote.
+                for inner in chars.by_ref() {
+                    if inner == '"' {
+                        break;
+                    }
+                }
+            } else if ch.is_alphanumeric() || ch == '_' {
+                let mut word = ch.to_string();
+                while let Some(&next) = chars.peek() {
+                    if !(next.is_alphanumeric() || next == '_') {
+                        break;
+                    }
+                    word.push(next);
+                    chars.next();
+                }
+                out.push(word);
+            } else if !ch.is_whitespace() {
+                let pair = chars.peek().map(|next| format!("{ch}{next}"));
+                match pair.as_deref() {
+                    Some("==" | "!=" | "<=" | ">=" | "->") => {
+                        out.push(pair.unwrap());
+                        chars.next();
+                    }
+                    _ => out.push(ch.to_string()),
+                }
+            }
+        }
+        out
+    }
+
+    /// Every function of `std/dynamic.cove`, by name, as the lines of its
+    /// signature and body.
+    fn functions() -> Vec<(String, Vec<&'static str>)> {
+        let mut out: Vec<(String, Vec<&'static str>)> = Vec::new();
+        let mut open = false;
+        for line in STD_DYNAMIC.lines() {
+            if let Some(rest) = line
+                .strip_prefix("fn ")
+                .or_else(|| line.strip_prefix("export fn "))
+            {
+                let name = rest.split('(').next().unwrap_or(rest).to_string();
+                out.push((name, Vec::new()));
+                open = true;
+            }
+            if open {
+                out.last_mut().expect("a function").1.push(line);
+            }
+            if line == "}" {
+                open = false;
+            }
+        }
+        out
+    }
+
+    /// The names that hold a kind code in `body`: a parameter called `kind`,
+    /// `inner` or `rootKind`, whatever is bound to `core.dynamicKind(…)`, and
+    /// whatever is bound or assigned from one of those.
+    fn kind_names(body: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        // A signature may be written over several lines, and it ends at the
+        // first `{`.
+        let head = body
+            .iter()
+            .position(|line| line.trim_end().ends_with('{'))
+            .map_or(body.len(), |at| at + 1);
+        let signature: Vec<String> = body[..head].iter().flat_map(|line| tokens(line)).collect();
+        for param in ["kind", "inner", "rootKind"] {
+            if signature
+                .windows(3)
+                .any(|w| w[0] == param && w[1] == ":" && w[2] == "Int")
+            {
+                names.push(param.to_string());
+            }
+        }
+        loop {
+            let before = names.len();
+            for line in body {
+                let words = tokens(line);
+                let (target, from) = match words.as_slice() {
+                    [kw, name, eq, rest @ ..] if (kw == "let" || kw == "var") && eq == "=" => {
+                        (name.clone(), rest.to_vec())
+                    }
+                    [name, eq, rest @ ..] if eq == "=" => (name.clone(), rest.to_vec()),
+                    _ => continue,
+                };
+                let is_kind = matches!(from.as_slice(), [core, dot, ask, ..]
+                        if core == "core" && dot == "." && ask == "dynamicKind")
+                    || (from.len() == 1 && names.contains(&from[0]));
+                if is_kind && !names.contains(&target) {
+                    names.push(target);
+                }
+            }
+            if names.len() == before {
+                return names;
+            }
+        }
+    }
+
+    /// Every code `body` compares a kind with, `==` or `!=`, in order.
+    fn named_codes(body: &[&str]) -> Vec<i64> {
+        let names = kind_names(body);
+        let mut codes = Vec::new();
+        for line in body.iter().skip(1) {
+            let words = tokens(line);
+            for w in words.windows(3) {
+                if names.contains(&w[0]) && (w[1] == "==" || w[1] == "!=") {
+                    if let Ok(code) = w[2].parse::<i64>() {
+                        codes.push(code);
+                    }
+                }
+            }
+        }
+        codes
+    }
+
+    fn body(name: &str) -> Vec<&'static str> {
+        functions()
+            .into_iter()
+            .find(|(found, _)| found == name)
+            .unwrap_or_else(|| panic!("std/dynamic.cove has no `fn {name}`"))
+            .1
+    }
+
+    fn codes_where(keep: impl Fn(DynamicKind) -> bool) -> Vec<i64> {
+        DynamicKind::ALL
+            .iter()
+            .filter(|kind| keep(**kind))
+            .map(|kind| kind.code())
+            .collect()
+    }
+
+    /// Issue #533: a kind code is a name, and `std.dynamic` decides a kind
+    /// only by `==` or `!=` against the codes it means. No code is ever an
+    /// operand of an order or of arithmetic — `kind < 13` would put a kind
+    /// appended as 16 among the capabilities without anyone having said so.
+    #[test]
+    fn std_dynamic_never_orders_a_kind() {
+        const FORBIDDEN: [&str; 9] = ["<", ">", "<=", ">=", "+", "-", "*", "/", "%"];
+        let mut looked = 0;
+        for (name, body) in functions() {
+            let names = kind_names(&body);
+            looked += names.len();
+            for line in body.iter().skip(1) {
+                let words = tokens(line);
+                for (at, word) in words.iter().enumerate() {
+                    if !names.contains(word) {
+                        continue;
+                    }
+                    let before = at.checked_sub(1).map(|at| words[at].as_str());
+                    let after = words.get(at + 1).map(String::as_str);
+                    for op in [before, after].into_iter().flatten() {
+                        assert!(
+                            !FORBIDDEN.contains(&op),
+                            "`fn {name}` uses the kind `{word}` as a number: {line}"
+                        );
+                    }
+                }
+            }
+        }
+        // The walk found the kinds it is guarding: a parser that saw none
+        // would pass everything.
+        assert!(looked >= 20, "only {looked} kind names were found");
+    }
+
+    /// The classification `std.dynamic` states, and each walk's use of it:
+    ///
+    /// - `unclassified`'s table puts every kind in the class [`class`] does;
+    /// - every walk that decides every kind names each code exactly once, so a
+    ///   kind the table gains is refused by each of them until it is named;
+    /// - the walks that are handed only some kinds name exactly those — the
+    ///   containers a rendering opens, and the values a key cannot be;
+    /// - and every one of them ends in `unclassified()`, so a code none of its
+    ///   arms names stops the run rather than falling into an arm.
+    #[test]
+    fn std_dynamic_classifies_every_kind_once() {
+        // The table in `unclassified`'s documentation.
+        let documented = body_doc("unclassified");
+        for (label, want) in [
+            ("leaf", Class::Leaf),
+            ("container", Class::Container),
+            ("capability", Class::Capability),
+        ] {
+            let row = documented
+                .iter()
+                .find(|line| line.starts_with(&format!("/// | {label}")))
+                .unwrap_or_else(|| panic!("`unclassified` documents no `{label}` row"));
+            let cell = row.trim_end_matches('|').rsplit('|').next().unwrap_or("");
+            let mut listed: Vec<i64> = tokens(cell)
+                .iter()
+                .filter_map(|word| word.parse().ok())
+                .collect();
+            listed.sort_unstable();
+            assert_eq!(
+                listed,
+                codes_where(|kind| class(kind) == want),
+                "the {label} row"
+            );
+        }
+
+        let every = codes_where(|_| true);
+        for walk in ["children", "rank", "sorts", "keyParts", "written"] {
+            let lines = body(walk);
+            let mut named = named_codes(&lines);
+            named.sort_unstable();
+            assert_eq!(named, every, "`fn {walk}` names each kind exactly once");
+            assert!(
+                lines.iter().any(|line| line.trim() == "unclassified()"),
+                "`fn {walk}` refuses a kind it does not name"
+            );
+        }
+        let opened =
+            codes_where(|kind| class(kind) == Class::Container && kind != DynamicKind::Range);
+        let refused = codes_where(|kind| !is_key(kind));
+        for (walk, want) in [
+            ("opening", &opened),
+            ("closing", &opened),
+            ("keyWord", &refused),
+        ] {
+            let lines = body(walk);
+            let mut named = named_codes(&lines);
+            named.sort_unstable();
+            assert_eq!(&named, want, "the kinds `fn {walk}` is handed");
+            assert!(
+                lines.iter().any(|line| line.trim() == "unclassified()"),
+                "`fn {walk}` refuses a kind it does not name"
+            );
+        }
+        // And nothing names a code the table does not have.
+        for (name, lines) in functions() {
+            for code in named_codes(&lines) {
+                assert!(
+                    DynamicKind::from_code(code).is_some(),
+                    "`fn {name}` names {code}, which is no kind"
+                );
+            }
+        }
+    }
+
+    /// The documentation lines above `fn {name}`.
+    fn body_doc(name: &str) -> Vec<&'static str> {
+        let lines: Vec<&'static str> = STD_DYNAMIC.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with(&format!("fn {name}(")))
+            .unwrap_or_else(|| panic!("std/dynamic.cove has no `fn {name}`"));
+        let mut from = at;
+        while from > 0 && lines[from - 1].starts_with("///") {
+            from -= 1;
+        }
+        lines[from..at].to_vec()
+    }
+
     #[test]
     fn an_instantiation_is_not_part_of_a_declared_name() {
         assert_eq!(declared_name("m.Cell<Int>"), "m.Cell");
