@@ -1,0 +1,20 @@
+use std.stringbuilder.StringBuilder
+
+/// Appends a range that starts inside a character, which
+/// `StringBuilder.appendSlice` refuses with the fourth of `String.sliceBytes`'
+/// sentences.
+///
+/// The append is inside a loop, which is the shape `examples/covefmt`'s
+/// `flattened` calls it in and the one the linear-memory backend expands it
+/// into its caller for: the first turn copies a legal range and the second
+/// asks for one from byte 2, which is inside the `é`. The diagnostic still
+/// blames the line in `main` and keeps the library's own lines as context, and
+/// the `native` file beside this holds the native tier to the encoded VM's
+/// answer.
+export fn main() -> Result<Unit, Error> {
+  var out = StringBuilder.withCapacity(4)
+  for turn in 0..<3 {
+    out.appendSlice("héllo", turn * 2, 5)
+  }
+  Ok(())
+}

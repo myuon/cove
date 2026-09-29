@@ -1,0 +1,14 @@
+error[cove::runtime]: `from` is `-1`, and a byte offset into this string is 0 to 6
+  --> <e2e>/fail_stringbuilder_range_from/main.cove:13:3
+   |
+13 |   out.appendSlice("héllo", -1, 1)
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> std/stringbuilder.cove:236:5
+    |
+236 |     core.refuseByteRange(text, from, to)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+   --> std/stringbuilder.cove:133:5
+    |
+133 |     appendRange(self.buffer, text, from, to)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here, in the standard library
+1 error(s)

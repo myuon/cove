@@ -1,0 +1,15 @@
+use std.stringbuilder.StringBuilder
+
+/// Appends a range that starts before the string does, which
+/// `StringBuilder.appendSlice` refuses with the first of `String.sliceBytes`'
+/// five sentences: `from` is not a byte offset into this string at all.
+///
+/// The call is `main`'s own, with no function of the program's between it and
+/// the library, so the diagnostic blames `main`'s line and keeps the library's
+/// two lines as context. The `native` file beside this runs it on the native
+/// tier too and holds that tier to the encoded VM's answer, blame and all.
+export fn main() -> Result<Unit, Error> {
+  var out = StringBuilder.withCapacity(4)
+  out.appendSlice("héllo", -1, 1)
+  Ok(())
+}
