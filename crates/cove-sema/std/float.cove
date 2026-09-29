@@ -154,15 +154,18 @@ export fn format(x: Float, digits: Int) -> String {
       scaled = scaled * 2.0
       exponent -= 1
     }
-    // The significand straight into its two limbs from the `Ok` it arrives
-    // in: `scaled` is a whole number below `2^53`, so `toInt` cannot refuse
-    // it, and binding it to a name first would copy it twice on the way.
-    match scaled.toInt() {
-      Ok(significand) => {
+    // The significand straight into its two limbs from the `Some` it arrives
+    // in: `scaled` is a whole number below `2^53`, so the conversion cannot
+    // refuse it, and binding it to a name first would copy it twice on the
+    // way. `core.floatTruncate` rather than `toInt`, because the value is
+    // held inside the range already and the `Err` `toInt` would build for
+    // one outside it is a call this path has no use for (issue #432).
+    match core.floatTruncate(scaled) {
+      Some(significand) => {
         pushLimb(limbs, significand % 1000000000)
         pushLimb(limbs, significand / 1000000000)
       }
-      Err(_) => {
+      None => {
         pushLimb(limbs, 0)
         pushLimb(limbs, 0)
       }
@@ -623,12 +626,13 @@ fn renderInto(value: Float, buffer: ByteBuffer) {
     return
   }
   // A whole number, asked with `round`, which is an instruction, so that a
-  // value with a fraction reaches only the one `toInt` below. Under `2^63`
-  // `toInt` cannot refuse.
+  // value with a fraction reaches only the one conversion below. Under
+  // `2^63` the conversion cannot refuse, which is why it is
+  // `core.floatTruncate` and not `toInt`: there is no `Err` to build here.
   if scaled.round() == scaled {
-    match scaled.toInt() {
-      Ok(whole) => wholeInto(whole, buffer)
-      Err(_) => { }
+    match core.floatTruncate(scaled) {
+      Some(whole) => wholeInto(whole, buffer)
+      None => { }
     }
     return
   }
@@ -676,8 +680,8 @@ fn renderInto(value: Float, buffer: ByteBuffer) {
       estimate -= 1
     }
   }
-  match scaled.toInt() {
-    Ok(significand) => {
+  match core.floatTruncate(scaled) {
+    Some(significand) => {
       if estimate >= -3 {
         if near(significand, exponent, estimate, buffer) {
           return
@@ -685,7 +689,7 @@ fn renderInto(value: Float, buffer: ByteBuffer) {
       }
       far(significand, exponent, estimate, buffer)
     }
-    Err(_) => { }
+    None => { }
   }
 }
 

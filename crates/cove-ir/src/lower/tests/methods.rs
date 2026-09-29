@@ -73,6 +73,83 @@ fn std_float_emits_no_intrinsic_call() {
     }
 }
 
+/// **`std.float`'s renderers convert with the instruction, and call nothing
+/// to do it.**
+///
+/// `format` and `renderInto` each hold a `Float` they have already bounded
+/// inside `Int`'s range — a significand below `2^53`, a whole number below
+/// `2^63` — and turn it into an `Int`. Since issue #432 they ask
+/// `core.floatTruncate` for it rather than `toInt`, so the conversion is an
+/// `Inst::FloatTruncate` in their own bodies and not a call of
+/// `std.float.toInt`, which would bring the `Err` it builds for a value out
+/// of range onto a path that never has one.
+///
+/// What is pinned is the window: from each `truncate.float` to the join
+/// where the `Some` and the `None` its lowering builds meet, there is no
+/// call of any kind — the conversion, a branch, the case's tag, and the
+/// other case's tag and cleared payload. And no function of the module
+/// calls `std.float.toInt` at all.
+#[test]
+fn std_float_renderers_truncate_in_place() {
+    let (sources, held) =
+        super::checked("fn main(x: Float) -> String {\n  \"{x} {x.format(2)} {x.toInt()}\"\n}");
+    let schemas = cove_schema::HostSchemas::new();
+    let program = crate::lower(&held, &sources, &schemas).expect("the program lowers");
+    let to_int = program
+        .functions
+        .iter()
+        .position(|f| f.qualified() == "std.float.toInt")
+        .expect("`std.float.toInt` is reached");
+    let mut windows = std::collections::BTreeMap::new();
+    for f in program.functions.iter().filter(|f| !f.stub) {
+        let name = f.qualified();
+        if !name.starts_with("std.float.") {
+            continue;
+        }
+        for (pc, inst) in f.code.iter().enumerate() {
+            if let crate::Inst::Call { callee, .. } = inst {
+                assert!(
+                    callee.index() != to_int || name == "std.float.toInt",
+                    "`{name}` calls `std.float.toInt` at {pc}"
+                );
+            }
+            if !matches!(inst, crate::Inst::FloatTruncate { .. }) {
+                continue;
+            }
+            *windows.entry(name.clone()).or_insert(0) += 1;
+            // The branch on the flag, and the jump over the `None` arm to
+            // the join: the window ends where that jump lands.
+            let Some(crate::Inst::BranchFalse { .. }) = f.code.get(pc + 1) else {
+                panic!("`{name}`: the conversion at {pc} is not followed by its branch");
+            };
+            let join = f.code[pc + 1..]
+                .iter()
+                .find_map(|later| match later {
+                    crate::Inst::Jump { to } => Some(*to as usize),
+                    _ => None,
+                })
+                .expect("the `Some` arm jumps over the `None` arm");
+            for (at, inside) in f.code.iter().enumerate().take(join).skip(pc) {
+                assert!(
+                    !matches!(
+                        inside,
+                        crate::Inst::Call { .. }
+                            | crate::Inst::CallClosure { .. }
+                            | crate::Inst::IntrinsicCall { .. }
+                    ),
+                    "`{name}`: the conversion window {pc}..{join} calls at {at}: {inside:?}"
+                );
+            }
+        }
+    }
+    for name in ["std.float.format", "std.float.renderInto"] {
+        assert!(
+            windows.get(name).is_some_and(|count| *count > 0),
+            "`{name}` truncates with the instruction; the windows found were {windows:?}"
+        );
+    }
+}
+
 /// `Duration.nanos(1)` builds a duration and `d.nanos()` reads one back
 /// out, and the language spells them the same. Neither is a runtime call:
 /// a `Duration` is a count of nanoseconds in one word, so each is a relabel
