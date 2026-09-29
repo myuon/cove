@@ -2227,8 +2227,8 @@ impl Body<'_> {
     /// rather than into a temporary copied there, so the path that succeeds
     /// is the conversion, a branch, a tag and a jump. The `None` arm zeroes
     /// the payload itself, as every construction of a case that does not
-    /// fill it does; it does not lean on the instruction's documented `0`,
-    /// which nothing may rely on.
+    /// fill it does. Which case is written is decided by `ok` alone; the
+    /// zero in an invalid pair is not read.
     fn core_float_truncate(&mut self, expr: &Expr, x: &Expr, want: Option<Dest>) -> Val {
         let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);

@@ -63,9 +63,12 @@ primitives and three notations; the decisions below are the ones taken on it.
   in the range truncates to an integer an `Int` holds. `-0.0` and every
   subnormal are `0`, `-2^63` is `Int.MIN`, and the largest double that is `ok`
   is `2^63 - 1024`.
-- When not `ok`, `dst` is **`0`**, on every tier. It is defined so that the
-  tiers write the same bits and the tables beside them can say so; nothing may
-  rely on it, and the one lowering that reads `dst` tests `ok` first.
+- **The contract is total.** Every conversion that is not valid answers the
+  one canonical pair **`(0, false)`**, on every tier. The zero is part of that
+  pair and carries no converted integer; a consumer that decides whether the
+  conversion succeeded inspects `ok`, never `dst`. Defining the pair — rather
+  than leaving `dst` unspecified — is what lets the tiers write the same bits
+  and the tables beside them compare them.
 
 Which of the three reasons made a value not `ok` is not an output. The
 standard library tells them apart in Cove on the refusal path, where the

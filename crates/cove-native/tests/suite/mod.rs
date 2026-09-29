@@ -3334,11 +3334,10 @@ pub fn truncation_reordered() -> Program {
 /// the exponent drawn from `2^-1` to `2^64`, so that most of them convert
 /// and a few do not.
 ///
-/// **The integer of a row that is not `ok` is `0`**, which is the
-/// instruction's documented value. Nothing may rely on it, and it is in the
-/// table anyway, because it is the one place a lowering that let
-/// `cvttsd2si`'s "integer indefinite" out would show: that is `i64::MIN`, and
-/// every such row here says `0`.
+/// **A row that is not `ok` answers the canonical pair `(0, false)`.** The
+/// zero carries no converted integer, and it is in the table because it is
+/// the one place a lowering that let `cvttsd2si`'s "integer indefinite" out
+/// would show: that is `i64::MIN`, and every such row here says `0`.
 ///
 /// `-2^63` is the row the indefinite value makes hard. It converts, to
 /// `i64::MIN`, and `cvttsd2si` answers exactly the bits it answers for a NaN;
