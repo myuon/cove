@@ -10,6 +10,11 @@
   which replaces Decision 4's permanent `Shape::Boxed` fallback through
   `Inst::IntrinsicCall` with Cove algorithms over a read-only structural view
   of the box
+- Superseded in part by
+  [ADR 0071](0071-a-checked-conversion-answers-a-value-and-whether-there-is-one.md),
+  which changes the value `Float.toInt`'s out-of-range refusal quotes to Cove's
+  own `Float` rendering, against Decision 8's "the primary diagnostic and its
+  blame are unchanged", for that one sentence
 - Date: 2026-09-19
 - Decides: that `Inst::IntrinsicCall` is a migration mechanism whose
   population may only shrink; the test a surviving IR primitive has to pass;
