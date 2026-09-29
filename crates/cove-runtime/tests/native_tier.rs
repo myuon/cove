@@ -851,11 +851,12 @@ export fn callsCopiesShort(text: String, limit: Int) -> String {
 
 /// A byte range of a string appended, in a compiled frame.
 ///
-/// ADR 0062 put `appendSlice`'s range policy in Cove, so what runs here is five
-/// comparisons, two byte loads and an append window — in `appendRange`'s own
-/// frame, which this one calls — and on the path that refuses, a call of
-/// `byteRangeRefusalMessage` and a `trap` of what it answered (issue #432). The
-/// `é` makes the boundary rule reachable: `2` is inside it.
+/// ADR 0062 put `appendSlice`'s range policy in Cove, so what a compiled frame
+/// runs here is five comparisons, two byte loads and an append window, and on
+/// the path that refuses, a call of `byteRangeRefusalMessage` and a `trap` of
+/// what it answered: the method is expanded here, because each of those calls
+/// has a doomed continuation (issue #432). The `é` makes the boundary rule
+/// reachable: `2` is inside it.
 export fn buildsASlice(from: Int, to: Int) -> String {
   var out = StringBuilder.withCapacity(2 + counts(0))
   out.append(\"<\")
