@@ -36,6 +36,39 @@
 //! 0058 makes a thin wrapper over a core intrinsic part of the lowering
 //! contract. See [`is_thin_library`].
 //!
+//! # A call whose continuation is doomed
+//!
+//! One call is allowed in a body that is otherwise a leaf: a call after which
+//! every path runs into an [`Inst::Trap`] without returning and without going
+//! round a loop — see [`doomed_continuations`] for the exact rule. **The
+//! property is the continuation's and not the callee's.** The callee returns;
+//! it is what the body does with the answer that stops the run. The shape is
+//! a refusal whose sentence is built by a call —
+//! `core.refuse(byteRangeRefusalMessage(text, from, to), "", "")`, five times
+//! in `std.stringbuilder`'s `appendRange` — and it is the shape every refusal
+//! the standard library words in Cove wants, because a sentence that quotes a
+//! value is an interpolation and an interpolation is calls.
+//!
+//! Such a call runs at most once per call of the body, on a path that ends the
+//! run, so expanding the body around it costs the path nothing that matters
+//! and saves the frame on every call that succeeds — which, for `appendRange`,
+//! is every call `examples/covefmt` makes, half a million a run. What it does
+//! not change is how the body is *weighed*: [`LIMIT`], [`HOT_LIMIT`] and
+//! [`LOOP_LIMIT`] count every instruction on those paths too, because an
+//! expansion copies them into every site whether they run or not.
+//!
+//! Such a body is no longer one that cannot reach its own caller — the callee
+//! may, in frames of its own, and that is an ordinary call — so what has to be
+//! proved instead is that *expansion* stops, and it still needs no call graph.
+//! A call of the body itself is never one of these, and **a call that stands
+//! inside an earlier expansion is never expanded** ([`expand`]), so a body is
+//! copied into a caller once per site and the call it brings with it stays a
+//! call — the chain an expansion could otherwise start stops at its first
+//! link. That is also why [`Inlined`] records still never nest one
+//! expansion this pass made inside another. [`is_thin_library`] asks for a
+//! strict leaf all the same: a wrapper expanded past every limit is one whose
+//! whole body is the operation it wraps.
+//!
 //! # Why there is no second rule about failing
 //!
 //! There was one, and it is worth recording what it was and what removed it,
@@ -126,7 +159,9 @@
 //! site. Two calls to one leaf cannot be live at the same time — a leaf calls
 //! nothing, so one of them has finished before the other begins — so they
 //! share the run, and a caller that reads a character forty times grows by one
-//! `Scan` frame instead of forty.
+//! `Scan` frame instead of forty. A body whose one call has a doomed
+//! continuation keeps that: what the call reaches runs in frames of its own,
+//! and after it returns the expansion traps rather than giving the run back.
 //!
 //! The arguments are copied into the callee's parameter slots exactly as the
 //! machine would have copied them into a fresh frame, and every `Return` in
@@ -210,13 +245,13 @@ const LIMIT: usize = 16;
 pub(super) fn expand_small_leaf_calls(program: &mut Program, entries: &[FunctionId]) {
     for _ in 0..ROUNDS {
         let small: Vec<bool> = (0..program.functions.len())
-            .map(|at| is_expandable(&program.functions[at], LIMIT))
+            .map(|at| is_expandable(program, FunctionId(at as u32), LIMIT))
             .collect();
         let wide: Vec<bool> = (0..program.functions.len())
-            .map(|at| is_expandable(&program.functions[at], HOT_LIMIT))
+            .map(|at| is_expandable(program, FunctionId(at as u32), HOT_LIMIT))
             .collect();
         let looped: Vec<bool> = (0..program.functions.len())
-            .map(|at| is_expandable(&program.functions[at], LOOP_LIMIT))
+            .map(|at| is_expandable(program, FunctionId(at as u32), LOOP_LIMIT))
             .collect();
         let thin: Vec<bool> = program
             .functions
@@ -478,7 +513,7 @@ const THIN: usize = 4;
 ///
 /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 pub(super) fn is_thin_library(program: &Program, f: &Function) -> bool {
-    f.is_library() && is_expandable(f, usize::MAX) && steps(program, f) <= THIN
+    f.is_library() && is_a_leaf(f, usize::MAX) && steps(program, f) <= THIN
 }
 
 /// How many steps `f` is besides its returns: [`is_thin_library`]'s count, with
@@ -668,7 +703,40 @@ fn turns_with_a_loop(f: &Function, inside: &[bool]) -> Vec<bool> {
 }
 
 /// Whether a call to this function may be expanded where it is made.
-fn is_expandable(f: &Function, limit: usize) -> bool {
+///
+/// Every instruction reaches nothing, or is a call whose continuation is
+/// doomed — see [`doomed_continuations`] and the module documentation. The
+/// limit counts every instruction, those calls and the paths they are on
+/// included: a doomed path is cold, but its instructions are still copied into
+/// every site, so it is weighed as code like any other.
+fn is_expandable(program: &Program, id: FunctionId, limit: usize) -> bool {
+    let f = program.function(id);
+    if !may_be_expanded(f, limit) {
+        return false;
+    }
+    if f.code.iter().all(reaches_nothing) {
+        return true;
+    }
+    let doomed = doomed_continuations(program, id);
+    f.code
+        .iter()
+        .zip(&doomed)
+        .all(|(inst, doomed)| reaches_nothing(inst) || *doomed)
+}
+
+/// Whether `f` is a leaf this pass may expand: [`is_expandable`] without the
+/// calls a doomed continuation admits.
+///
+/// What [`is_thin_library`] asks. A wrapper expanded wherever it is called,
+/// past every limit and the frame budget, is one whose whole body is the
+/// operation it wraps; a body with a refusal it builds by calling something is
+/// not that, however short, and is weighed against the limits instead.
+fn is_a_leaf(f: &Function, limit: usize) -> bool {
+    may_be_expanded(f, limit) && f.code.iter().all(reaches_nothing)
+}
+
+/// What every expansion needs of its callee, whatever the callee calls.
+fn may_be_expanded(f: &Function, limit: usize) -> bool {
     if f.stub || f.is_async || !f.captures.is_empty() || f.code.len() > limit {
         return false;
     }
@@ -677,10 +745,79 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
     // — and it is done for the standard library's leaves, whose `var self`
     // builder methods are a frame each around one instruction. A program's own
     // stay calls until a program shows the cost of leaving them.
-    if takes_an_address(f) && !f.is_library() {
-        return false;
+    !(takes_an_address(f) && !f.is_library())
+}
+
+/// Which of `id`'s instructions are an [`Inst::Call`] whose continuation is
+/// doomed: every path on from the instruction after it ends in an
+/// [`Inst::Trap`], without returning and without going round a loop.
+///
+/// **The property is the continuation's, not the callee's.** The callee
+/// returns — `std.stringbuilder.byteRangeRefusalMessage` builds a sentence and
+/// answers it — and it is what the caller does next that stops the run. So
+/// nothing here asks what the callee does, and nothing about a callee changes
+/// whether a call to it is one of these.
+///
+/// `doomed(pc)` is one pass from the last instruction to the first, over
+/// forward edges only:
+///
+/// - a `Trap` is doomed;
+/// - a `Return` is not, and neither is an instruction with a backward edge,
+///   because a loop can run for as long as it likes before it gets anywhere;
+/// - any other instruction is doomed when every instruction it may go to next
+///   is, provided it reaches nothing ([`reaches_nothing`]) or is itself an
+///   `Inst::Call` — a host call, a spawn or a lock on the way to a trap is an
+///   effect the program can observe, and a path through one is not cold.
+///
+/// Every successor of a forward edge has a higher counter, so it has been
+/// answered by the time the pass reaches the instruction that goes to it. A
+/// call at `pc` is then one of these when `doomed(pc + 1)` holds, it does not
+/// call `id` itself, and none of its arguments is an address. The first two
+/// are the proof that expansion terminates, with the rule that
+/// [`expand`] never expands a call standing inside an earlier expansion: a
+/// body holding such a call can be copied into a caller once, and the call it
+/// brings with it stays a call. The third keeps [`ordered_callees`]' question —
+/// which words a body may write through an address — about the callee's
+/// parameters only.
+pub(super) fn doomed_continuations(program: &Program, id: FunctionId) -> Vec<bool> {
+    let f = program.function(id);
+    let len = f.code.len();
+    let mut doomed = vec![false; len];
+    for pc in (0..len).rev() {
+        let inst = &f.code[pc];
+        let answer = match inst {
+            Inst::Trap { .. } => true,
+            Inst::Return { .. } => false,
+            _ if !reaches_nothing(inst) && !matches!(inst, Inst::Call { .. }) => false,
+            _ => {
+                let mut all = true;
+                let mut onward = |to: usize| {
+                    all &= to > pc && doomed.get(to).copied().unwrap_or(false);
+                };
+                inst.targets(program, &mut |to| onward(to as usize));
+                if !matches!(inst, Inst::Jump { .. } | Inst::Switch { .. }) {
+                    onward(pc + 1);
+                }
+                all
+            }
+        };
+        doomed[pc] = answer;
     }
-    f.code.iter().all(reaches_nothing)
+    f.code
+        .iter()
+        .enumerate()
+        .map(|(pc, inst)| match inst {
+            Inst::Call { callee, args, .. } => {
+                *callee != id
+                    && doomed.get(pc + 1).copied().unwrap_or(false)
+                    && program
+                        .arg_list(*args)
+                        .iter()
+                        .all(|arg| arg.layout != shapes::ADDR)
+            }
+            _ => false,
+        })
+        .collect()
 }
 
 /// Whether `f` has a `var` parameter, which is an address into its caller's
@@ -1022,6 +1159,9 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             Inst::IntrinsicCall { dst, site, .. } => {
                 mark(dst, width(program.intrinsic_site(site).result))
             }
+            // The one call an expanded body may hold: one whose continuation is
+            // doomed. It writes its answer, and its arguments are a list.
+            Inst::Call { dst, callee, .. } => mark(dst, width(program.function(callee).returns)),
             // The first entry of either row is the one frame word it writes.
             Inst::RunSlice { args, .. } | Inst::RunFind { args, .. } => {
                 if let Some(dst) = program.arg_list(args).first() {
@@ -1101,7 +1241,6 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Return { .. }
             | Inst::Trap { .. }
             | Inst::AssertFailed { .. }
-            | Inst::Call { .. }
             | Inst::CallClosure { .. }
             | Inst::CallHost { .. }
             | Inst::CallResource { .. }
@@ -1151,7 +1290,7 @@ struct Region {
 #[cfg(test)]
 pub(super) fn expand_cold(program: &mut Program, id: FunctionId) {
     let small: Vec<bool> = (0..program.functions.len())
-        .map(|at| is_expandable(&program.functions[at], LIMIT))
+        .map(|at| is_expandable(program, FunctionId(at as u32), LIMIT))
         .collect();
     let thin: Vec<bool> = program
         .functions
@@ -1185,6 +1324,22 @@ fn expand(
     // however many sites call it, so the budget is spent per *callee* and the
     // sites after the first are free.
     let ordered = ordered_callees(program, &caller);
+    // A call an earlier expansion brought with it — one whose continuation is
+    // doomed, which is the only call an expanded body can hold — stays a call.
+    // That is what makes the records of this pass never nest one expansion
+    // inside another, and with `doomed_continuations`' two conditions on the
+    // callee it is what bounds the pass: a body is copied into a caller at most
+    // once per site, and what it copies in is never copied again.
+    let mut expanded = vec![false; caller.code.len()];
+    for record in &caller.inlined {
+        for held in expanded
+            .iter_mut()
+            .take(record.to as usize)
+            .skip(record.from as usize)
+        {
+            *held = true;
+        }
+    }
     let mut room = FRAME_BUDGET.saturating_sub(caller.reprs.len());
     let mut taken: Vec<FunctionId> = Vec::new();
     let wanted: Vec<bool> = caller
@@ -1193,7 +1348,7 @@ fn expand(
         .enumerate()
         .map(|(at, inst)| match inst {
             Inst::Call { callee, .. } => {
-                if *callee == id {
+                if *callee == id || expanded[at] {
                     return false;
                 }
                 // A thin library wrapper is expanded wherever it is called and
@@ -1513,6 +1668,7 @@ fn expand(
                 *table = crate::TableId(first + (table.0 - PLACED));
             }
             Inst::IntrinsicCall { args, .. }
+            | Inst::Call { args, .. }
             | Inst::RunCopy { args, .. }
             | Inst::RunSlice { args, .. }
             | Inst::RunFind { args, .. }
@@ -1542,9 +1698,10 @@ fn expand(
     // nothing reads these during a run to say so.
     //
     // These come first because a new expansion is never inside an old one —
-    // an expanded body is a leaf's, and a leaf holds no call to expand — so
-    // the two groups do not nest and the order between them is free, while
-    // the order *within* each is what `inlined_at` reads.
+    // an expanded body holds no call but one whose continuation is doomed, and
+    // a call inside an earlier expansion is never expanded — so the two groups
+    // do not nest and the order between them is free, while the order *within*
+    // each is what `inlined_at` reads.
     let mut inlined = caller.inlined.clone();
     for record in inlined.iter_mut() {
         record.from = moved[record.from as usize];
@@ -1708,11 +1865,13 @@ fn relocated(
         }
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
-        // reach it. A builtin is the one call a leaf may hold, and
-        // `Inst::RunCopy`, `Inst::RunSlice` and `Inst::RunFind` are the
-        // non-call instructions that also name one — each is the list
-        // relocated into a list of its own.
+        // reach it. A builtin and a call whose continuation is doomed are the
+        // two calls an expanded body may hold, and `Inst::RunCopy`,
+        // `Inst::RunSlice` and `Inst::RunFind` are the non-call instructions
+        // that also name one — each is the list relocated into a list of its
+        // own.
         Inst::IntrinsicCall { args, .. }
+        | Inst::Call { args, .. }
         | Inst::RunCopy { args, .. }
         | Inst::RunSlice { args, .. }
         | Inst::RunFind { args, .. } => {
@@ -1889,7 +2048,8 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         | Inst::DynHandleText { dst, view } => vec![dst, view],
         Inst::DynFieldName { dst, view, index } => vec![dst, view, index],
         Inst::DynOnPath { dst, view, path } => vec![dst, view, path],
-        Inst::IntrinsicCall { dst, .. } => vec![dst],
+        // Its arguments are a list, which `relocated` moves; see `RunCopy`'s.
+        Inst::IntrinsicCall { dst, .. } | Inst::Call { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
         Inst::Trap {
             message,
@@ -1897,8 +2057,11 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
             help,
         } => vec![message, rule, help],
         Inst::Jump { .. } => Vec::new(),
-        // Every variant below is one `reaches_nothing` refuses, so a leaf
-        // never holds one and none of them can arrive here.
+        // Every variant below is one `reaches_nothing` refuses, and none is a
+        // call whose continuation is doomed, so an expanded body never holds
+        // one and none of them can arrive here. (`Inst::Call` is refused too,
+        // and is above: it is the one refused instruction a body may still
+        // hold, when what follows it is a trap.)
         //
         // Listed rather than caught by a `_`, and the difference is not
         // tidiness. A `_` here makes this function's correctness depend on a
@@ -1914,8 +2077,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // Written out, a new instruction fails to compile here until somebody
         // says which of its fields are slots — which is what
         // `vm::exec::encoded::implemented` does for the same reason.
-        Inst::Call { .. }
-        | Inst::CallClosure { .. }
+        Inst::CallClosure { .. }
         | Inst::CallHost { .. }
         | Inst::CallResource { .. }
         | Inst::Spawn { .. }

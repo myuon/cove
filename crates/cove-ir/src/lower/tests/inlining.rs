@@ -660,20 +660,25 @@ fn a_library_method_that_takes_var_self_is_expanded() {
     );
 }
 
-/// An `appendSlice` at a site that runs often is **not** expanded, because its
-/// refusals are calls: what is in the loop is one call of the method.
+/// An `appendSlice` at a site that runs often is expanded, and what lands there
+/// is one recognised append window and five refusals that are each a call and
+/// a trap.
 ///
 /// The other half of the test above. `appendSlice` costs more rows than a cold
-/// site will take since ADR 0062 put its range policy in Cove, and the point
-/// of putting it there is that the copy beneath the five questions is a window
-/// a backend fuses. Its five refusals were `core.refuseByteRange`, an
-/// intrinsic, so that the body stayed a leaf the inliner expands; issue #432
-/// made each a call of `std.stringbuilder.byteRangeRefusalMessage` under a
-/// `core.refuse`, and a body with a call in it is one the inliner does not
-/// expand at all. So the window is in `appendRange`'s own frame and this loop
-/// pays a call a turn — the cost this migration measures on its own, before
-/// anything is done about it. `examples/covefmt` calls it almost half a
-/// million times a run from inside its printer's walk, and that is this shape.
+/// site will take since ADR 0062 put its range policy in Cove, and the whole
+/// point of putting it there is that the copy beneath the five questions is a
+/// window a backend fuses — which is worth nothing if the method stays a call
+/// wherever it is hot. `examples/covefmt` calls it almost half a million times
+/// a run from inside its printer's walk, and that is this shape.
+///
+/// Its refusals were `core.refuseByteRange`, an intrinsic, so that the body
+/// stayed a leaf; issue #432 made each a call of
+/// `std.stringbuilder.byteRangeRefusalMessage` and a `core.refuse` of what it
+/// answered. The body is still expanded because each of those calls is one
+/// whose continuation is doomed: the helper returns, and the next thing that
+/// happens on every path is the trap. So what is asserted is that shape
+/// exactly, in the caller: no intrinsic call, five traps, every call left the
+/// helper's and every one of them doomed, and the copy one window.
 #[test]
 fn an_append_slice_inside_a_loop_is_expanded_as_one_window() {
     let (program, main) = program(
@@ -682,34 +687,301 @@ fn an_append_slice_inside_a_loop_is_expanded_as_one_window() {
          var at = 0\n  while at < 3 {\n    out.appendSlice(\"bcd\", at, at + 1)\n    at = at + 1\n  }\n  \
          out.finish()\n}",
     );
-    let named = |id: FunctionId| {
-        let f = program.function(id);
-        format!("{}.{}", f.module, f.name)
-    };
-    let calls: Vec<String> = main
+    an_expanded_append_slice(&program, &main);
+}
+
+/// What an expanded `appendSlice` leaves in `f`: no intrinsic call, five traps,
+/// every call left one of `byteRangeRefusalMessage` whose continuation is
+/// doomed, and the copy one append window.
+fn an_expanded_append_slice(program: &Program, f: &Function) {
+    let id = program
+        .functions
+        .iter()
+        .position(|held| held.qualified() == f.qualified())
+        .map(|at| FunctionId(at as u32))
+        .expect("the function is in the program");
+    assert!(
+        !f.code
+            .iter()
+            .any(|inst| matches!(inst, Inst::IntrinsicCall { .. })),
+        "no refusal is an intrinsic call any more"
+    );
+    assert_eq!(
+        f.code
+            .iter()
+            .filter(|inst| matches!(inst, Inst::Trap { .. }))
+            .count(),
+        5,
+        "the five refusals are each a trap in `{}`",
+        f.qualified()
+    );
+    // Expansion stays enabled: both bodies were expanded here, the method and
+    // the range it delegates to. What is pinned is that they were, and not how
+    // much room was left under the limit when they were.
+    for callee in [
+        "std.stringbuilder.StringBuilder.appendSlice",
+        "std.stringbuilder.appendRange",
+    ] {
+        assert!(
+            f.inlined
+                .iter()
+                .any(|held| program.function(held.callee).qualified() == callee),
+            "`{callee}` was expanded into `{}`",
+            f.qualified()
+        );
+    }
+    // The warm path calls nothing: every call left is one whose continuation
+    // is doomed, so a range that is legal runs the questions and the window
+    // and no call — the same instructions it ran when the refusals were an
+    // intrinsic.
+    let doomed = inline::doomed_continuations(program, id);
+    let calls: Vec<(String, bool)> = f
         .code
         .iter()
-        .filter_map(|inst| match inst {
-            Inst::Call { callee, .. } => Some(named(*callee)),
+        .enumerate()
+        .filter_map(|(pc, inst)| match inst {
+            Inst::Call { callee, .. } => Some((program.function(*callee).qualified(), doomed[pc])),
             _ => None,
         })
         .collect();
     assert_eq!(
         calls,
-        ["std.stringbuilder.StringBuilder.appendSlice"],
-        "`appendSlice` is a call at a site inside a loop, because its body \
-         calls the function that words its refusal"
+        vec![
+            (
+                "std.stringbuilder.byteRangeRefusalMessage".to_string(),
+                true
+            );
+            5
+        ],
+        "`appendSlice` was expanded into `{}`, and the calls it brought are the \
+         five that word a refusal, each with a doomed continuation",
+        f.qualified()
     );
-    assert!(
-        !main
-            .code
-            .iter()
-            .any(|inst| matches!(inst, Inst::IntrinsicCall { .. })),
-        "no refusal is an intrinsic call any more"
+    let patterns: Vec<crate::legalize::Pattern> = crate::legalize::windows(program, f)
+        .iter()
+        .map(|window| window.pattern)
+        .collect();
+    assert_eq!(
+        patterns,
+        [crate::legalize::Pattern::AppendBytes],
+        "the copy the five questions guard is one window where it was called"
     );
+}
+
+/// An `appendSlice` at a site that is hot but in no loop of its own caller is
+/// expanded too: `examples/covefmt`'s `spacing`, which `emit` reaches from its
+/// walk and which appends one range per call.
+///
+/// That site is weighed against `inline::HOT_LIMIT` rather than
+/// `inline::LOOP_LIMIT`, and it is the binding one: the expanded method is
+/// the body and its four argument copies, every instruction of the five
+/// refusals counted, with no discount for being on a path that stops the run.
+#[test]
+fn an_append_slice_at_a_hot_site_outside_a_loop_is_expanded() {
+    let (program, _) = program(
+        "use std.stringbuilder.StringBuilder\n\
+         fn spacing(var out: StringBuilder, text: String, at: Int) {\n  \
+         out.appendSlice(text, at, at + 1)\n}\n\
+         fn main() -> String {\n  var out = StringBuilder.withCapacity(4)\n  \
+         var at = 0\n  while at < 3 {\n    spacing(var out, \"bcd\", at)\n    at = at + 1\n  }\n  \
+         out.finish()\n}",
+    );
+    let spacing = program
+        .functions
+        .iter()
+        .find(|f| f.qualified() == "m.spacing")
+        .expect("`spacing` is lowered")
+        .clone();
+    an_expanded_append_slice(&program, &spacing);
+}
+
+/// A hand-built function around one call of `m.leaf`, with `code` as its body:
+/// [`caller_of`]'s frame and argument list, and the call at counter `0` of
+/// whatever `code` says.
+fn calling_leaf(program: &mut Program, code: impl Fn(&Inst) -> Vec<Inst>) -> FunctionId {
+    let id = caller_of(program, "m.leaf", 8);
+    let call = program.function(id).code[0].clone();
+    let held = &mut program.functions[id.index()];
+    held.code = code(&call);
+    held.spans = vec![held.span; held.code.len()];
+    id
+}
+
+/// A leaf, for the cases below to call.
+const LEAF: &str = "fn leaf(a: Int) -> Int {\n  a + 1\n}\nfn main() -> Int {\n  leaf(1)\n}";
+
+/// A call whose continuation is a trap is doomed, and one whose continuation
+/// is a `return` is not — `return refuseRange(...)` is the shape
+/// `std.string.sliceBytes` has, and the callee returning there is what the
+/// caller answers, not a refusal.
+#[test]
+fn a_call_is_doomed_by_the_trap_after_it_and_not_by_a_return() {
+    let (mut program, _) = program(LEAF);
+    let trap = Inst::Trap {
+        message: 3,
+        rule: 3,
+        help: 3,
+    };
+    let doomed = calling_leaf(&mut program, |call| vec![call.clone(), trap.clone()]);
+    assert_eq!(
+        inline::doomed_continuations(&program, doomed),
+        [true, false]
+    );
+
+    // Past a branch whose two arms both trap, and a constant on the way.
+    let both = calling_leaf(&mut program, |call| {
+        vec![
+            call.clone(),
+            Inst::Bool {
+                dst: 4,
+                value: true,
+            },
+            Inst::BranchFalse { cond: 4, to: 4 },
+            trap.clone(),
+            Inst::Str {
+                dst: 3,
+                text: crate::StrId(0),
+            },
+            trap.clone(),
+        ]
+    });
+    assert!(inline::doomed_continuations(&program, both)[0]);
+
+    let returned = calling_leaf(&mut program, |call| {
+        vec![call.clone(), Inst::Return { src: 0 }]
+    });
+    assert_eq!(
+        inline::doomed_continuations(&program, returned),
+        [false, false],
+        "`return f(...)` answers what the callee answered"
+    );
+
+    // One arm traps and the other returns: not every path is doomed.
+    let either = calling_leaf(&mut program, |call| {
+        vec![
+            call.clone(),
+            Inst::Bool {
+                dst: 4,
+                value: true,
+            },
+            Inst::BranchFalse { cond: 4, to: 4 },
+            trap.clone(),
+            Inst::Return { src: 0 },
+        ]
+    });
+    assert!(!inline::doomed_continuations(&program, either)[0]);
+
+    // A call of the function itself is not one either, however it continues:
+    // half of what bounds the pass.
+    let own = calling_leaf(&mut program, |call| vec![call.clone(), trap.clone()]);
+    if let Inst::Call { callee, .. } = &mut program.functions[own.index()].code[0] {
+        *callee = own;
+    }
+    assert_eq!(inline::doomed_continuations(&program, own), [false, false]);
+}
+
+/// A call on a path with a backward edge is not doomed, even when every way
+/// out of the loop traps: the loop may turn for as long as it likes first.
+#[test]
+fn a_call_before_a_backward_edge_is_not_doomed() {
+    let (mut program, _) = program(LEAF);
+    let looped = calling_leaf(&mut program, |call| {
+        vec![
+            Inst::Bool {
+                dst: 4,
+                value: true,
+            },
+            call.clone(),
+            Inst::BranchFalse { cond: 4, to: 0 },
+            Inst::Trap {
+                message: 3,
+                rule: 3,
+                help: 3,
+            },
+        ]
+    });
+    assert_eq!(
+        inline::doomed_continuations(&program, looped),
+        [false, false, false, false],
+        "the continuation goes round the loop"
+    );
+}
+
+/// A call that passes an address is not one of these, however it continues:
+/// what a body may write through an address is `inline::ordered_callees`'
+/// question, and it asks it of the callee's parameters and nothing else.
+#[test]
+fn a_call_passing_a_var_argument_is_not_doomed() {
+    use super::super::shapes::ADDR;
+    let (mut program, _) = program(LEAF);
+    let listed = program.args.len() as u32;
+    program.args.push(vec![crate::program::Arg {
+        slot: 5,
+        layout: ADDR,
+    }]);
+    let addressed = calling_leaf(&mut program, |call| {
+        let Inst::Call { dst, callee, .. } = *call else {
+            unreachable!("`caller_of` calls")
+        };
+        vec![
+            Inst::AddrOfSlot { dst: 5, slot: 1 },
+            Inst::Call {
+                dst,
+                callee,
+                args: crate::ArgsId(listed),
+            },
+            Inst::Trap {
+                message: 3,
+                rule: 3,
+                help: 3,
+            },
+        ]
+    });
+    assert_eq!(
+        inline::doomed_continuations(&program, addressed),
+        [false, false, false]
+    );
+}
+
+/// A call that stands inside an earlier expansion is never expanded, however
+/// small its callee: the other half of what bounds the pass, and what keeps
+/// one `Inlined` record from ever holding another this pass made.
+#[test]
+fn a_call_inside_an_expansion_is_not_expanded_again() {
+    let (mut program, _) = program(LEAF);
+    let leaf = program
+        .functions
+        .iter()
+        .position(|f| f.qualified() == "m.leaf")
+        .map(|at| FunctionId(at as u32))
+        .expect("`leaf` is lowered");
+
+    let plain = caller_of(&mut program, "m.leaf", 8);
+    inline::expand_cold(&mut program, plain);
     assert!(
-        crate::legalize::windows(&program, &main).is_empty(),
-        "the window is in the library's frame, not this one"
+        !still_calls(&program, plain),
+        "the leaf is expanded where nothing says the call was brought by an expansion"
+    );
+
+    let brought = caller_of(&mut program, "m.leaf", 8);
+    let span = program.function(brought).span;
+    program.functions[brought.index()].inlined = vec![crate::program::Inlined {
+        from: 0,
+        to: 1,
+        callee: leaf,
+        site: span,
+        locals: Vec::new(),
+    }];
+    inline::expand_cold(&mut program, brought);
+    assert!(
+        still_calls(&program, brought),
+        "a call inside an `Inlined` range stays a call: {:?}",
+        program.function(brought).code
+    );
+    assert_eq!(
+        program.function(brought).inlined.len(),
+        1,
+        "and no record nests"
     );
 }
 
