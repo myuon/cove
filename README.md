@@ -698,6 +698,21 @@ A limited derive/protocol mechanism is recorded as the preferred direction and
 not designed. Reopening the question takes a concrete public use case,
 representative programs showing recurring friction, and a new ADR.
 
+[ADR 0070](docs/adr/0070-a-call-whose-continuation-is-doomed-may-be-expanded.md)
+lets the inliner expand a body that holds a call, when every path after the
+call ends in a trap: the callee returns, and it is the continuation that is
+doomed. That is the shape of a refusal whose sentence is built by a call, and
+it is what let `std.stringbuilder`'s byte-range refusal become Cove —
+`core.refuse(byteRangeRefusalMessage(text, from, to), "", "")`, one copy of
+the five sentences that `std.string.sliceBytes` answers with too — while
+`StringBuilder.appendSlice` stays expanded in `examples/covefmt`'s printer.
+Measured on its own, the Cove refusal without the rule cost covefmt 0.09% more
+instructions and a million calls; with it, covefmt executes exactly the
+instructions it did before. The size limits still count every instruction on
+those paths, and a call brought in by one expansion is never expanded again,
+which is what keeps the pass terminating. `Intrinsic` is down to
+`Float.toInt` and `Float.parse`.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
