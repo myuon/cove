@@ -660,15 +660,20 @@ fn a_library_method_that_takes_var_self_is_expanded() {
     );
 }
 
-/// An `appendSlice` at a site that runs often is expanded, and what lands there
-/// is one recognised append window.
+/// An `appendSlice` at a site that runs often is **not** expanded, because its
+/// refusals are calls: what is in the loop is one call of the method.
 ///
 /// The other half of the test above. `appendSlice` costs more rows than a cold
-/// site will take since ADR 0062 put its range policy in Cove, and the whole
-/// point of putting it there is that the copy beneath the five questions is a
-/// window a backend fuses — which is worth nothing if the method stays a call
-/// wherever it is hot. `examples/covefmt` calls it two hundred thousand times
-/// from inside its printer's walk, and that is this shape.
+/// site will take since ADR 0062 put its range policy in Cove, and the point
+/// of putting it there is that the copy beneath the five questions is a window
+/// a backend fuses. Its five refusals were `core.refuseByteRange`, an
+/// intrinsic, so that the body stayed a leaf the inliner expands; issue #432
+/// made each a call of `std.stringbuilder.byteRangeRefusalMessage` under a
+/// `core.refuse`, and a body with a call in it is one the inliner does not
+/// expand at all. So the window is in `appendRange`'s own frame and this loop
+/// pays a call a turn — the cost this migration measures on its own, before
+/// anything is done about it. `examples/covefmt` calls it almost half a
+/// million times a run from inside its printer's walk, and that is this shape.
 #[test]
 fn an_append_slice_inside_a_loop_is_expanded_as_one_window() {
     let (program, main) = program(
@@ -677,34 +682,34 @@ fn an_append_slice_inside_a_loop_is_expanded_as_one_window() {
          var at = 0\n  while at < 3 {\n    out.appendSlice(\"bcd\", at, at + 1)\n    at = at + 1\n  }\n  \
          out.finish()\n}",
     );
+    let named = |id: FunctionId| {
+        let f = program.function(id);
+        format!("{}.{}", f.module, f.name)
+    };
+    let calls: Vec<String> = main
+        .code
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Call { callee, .. } => Some(named(*callee)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        ["std.stringbuilder.StringBuilder.appendSlice"],
+        "`appendSlice` is a call at a site inside a loop, because its body \
+         calls the function that words its refusal"
+    );
     assert!(
         !main
             .code
             .iter()
-            .any(|inst| matches!(inst, Inst::Call { .. })),
-        "`appendSlice` is expanded at a site inside a loop"
+            .any(|inst| matches!(inst, Inst::IntrinsicCall { .. })),
+        "no refusal is an intrinsic call any more"
     );
-    let patterns: Vec<crate::legalize::Pattern> = crate::legalize::windows(&program, &main)
-        .iter()
-        .map(|window| window.pattern)
-        .collect();
-    assert_eq!(
-        patterns,
-        [crate::legalize::Pattern::AppendBytes],
-        "the copy the five questions guard is one window where it was called"
-    );
-    assert_eq!(
-        main.code
-            .iter()
-            .filter(|inst| matches!(
-                inst,
-                Inst::IntrinsicCall { site, .. }
-                    if program.intrinsic_site(*site).intrinsic
-                        == crate::Intrinsic::StringRefuseByteRange
-            ))
-            .count(),
-        5,
-        "the five refusals are intrinsic calls, so the body is still a leaf"
+    assert!(
+        crate::legalize::windows(&program, &main).is_empty(),
+        "the window is in the library's frame, not this one"
     );
 }
 

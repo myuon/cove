@@ -7,10 +7,9 @@
 //! spells `core.<name>(...)` — `cove_schema::builtins::CORE_INTRINSICS` is the
 //! table. The checker admits such a call only inside a standard-library module,
 //! and this is the lowering's half: each entry becomes run instructions in the
-//! frame the call is written in, and never an [`Inst::IntrinsicCall`] that names
-//! a method — `core.refuseByteRange` below is the one exception, and it names a
-//! static intrinsic identity. A core intrinsic is not a name for the machine to
-//! dispatch on; it is the operation the name stands for.
+//! frame the call is written in, and never an [`Inst::IntrinsicCall`]. A core
+//! intrinsic is not a name for the machine to dispatch on; it is the operation
+//! the name stands for.
 //!
 //! The string builder is the one core type here with no public method of its
 //! own. `std.stringbuilder`'s `StringBuilder` wraps a `ByteBuffer` — ADR 0052's
@@ -46,11 +45,13 @@
 //! library [`Inst::Trap`]'s three slots: a duplicate in `Set.of` or `Map.of` is
 //! refused by `std.set` and `std.map` themselves, through `core.refuse`.
 //!
-//! `core.refuseByteRange` is of the same kind, and for the same reason:
-//! `std.stringbuilder`'s `appendRange` decides a byte range in Cove and has
-//! nothing to raise with, so ADR 0062 gives it
-//! `Intrinsic::StringRefuseByteRange`, which never answers. It is the only
-//! intrinsic this file emits, and it is a static identity rather than a name.
+//! `core.refuseByteRange` stood beside it for longer, and for the same reason:
+//! `std.stringbuilder`'s `appendRange` decided a byte range in Cove and had
+//! nothing to raise with, so ADR 0062 gave it
+//! `Intrinsic::StringRefuseByteRange`, the last intrinsic this file emitted.
+//! Issue #432 wrote its five sentences in Cove, as
+//! `std.stringbuilder.byteRangeRefusalMessage`, and raised them through
+//! `core.refuse` too, so this file emits no intrinsic at all.
 //!
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
@@ -70,9 +71,8 @@ use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, BUFFER_STORE, VECTOR_LEN, VECTOR_STORE};
 use super::{synth, Body, Dest};
 use crate::inst::{CmpOp, Inst, Len, Slot, Storage, Validation};
-use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::{Arg as Operand, IntrinsicSite};
+use crate::program::Arg as Operand;
 
 /// The text of a string literal with nothing interpolated into it, or `None`
 /// for any other expression.
@@ -153,9 +153,6 @@ impl Body<'_> {
                 self.core_string_find(expr, &text.value, &needle.value, &from.value, want)
             }
             ("bytesAllocate", [capacity]) => self.core_bytes_allocate(expr, &capacity.value, want),
-            ("refuseByteRange", [text, from, to]) => {
-                self.core_refuse_byte_range(expr, &text.value, [&from.value, &to.value], want)
-            }
             ("refuse", [message, rule, help]) => {
                 self.core_refuse(expr, [&message.value, &rule.value, &help.value], want)
             }
@@ -1174,55 +1171,22 @@ impl Body<'_> {
         store
     }
 
-    /// `core.refuseByteRange(text, from, to)`: one [`Inst::IntrinsicCall`] of
-    /// [`Intrinsic::StringRefuseByteRange`], which always raises.
-    ///
-    /// [`Body::keyed_refusal`]'s shape over a receiver and two offsets instead
-    /// of a key and two names. ADR 0062 takes the range policy out of the copy:
-    /// `std.stringbuilder`'s `appendRange` asks `String.sliceBytes`' five
-    /// questions in Cove and reaches this only when one of them has already
-    /// failed, so the sentence is written once, here, and the copy beneath it
-    /// validates nothing and can be the write half of a reservation window.
-    fn core_refuse_byte_range(
-        &mut self,
-        expr: &Expr,
-        text: &Expr,
-        [from, to]: [&Expr; 2],
-        want: Option<Dest>,
-    ) -> Val {
-        let src = self.expr(text);
-        let start = self.expr(from);
-        let end = self.expr(to);
-        let dst = self.answer_at(want, shapes::UNIT);
-        self.intrinsic_call(
-            Intrinsic::StringRefuseByteRange,
-            shapes::UNIT,
-            dst.slot,
-            &[&src, &start, &end],
-            expr.span,
-        );
-        self.release(end, expr.span);
-        self.release(start, expr.span);
-        self.release(src, expr.span);
-        dst
-    }
-
     /// `core.refuse(message, rule, help)`: one [`Inst::Trap`], whose three
     /// slots are exactly these three arguments.
     ///
-    /// [`Body::core_refuse_byte_range`]'s doc above says which of the five
-    /// things is wrong in `String.sliceBytes`'s words — that `appendRange`
-    /// has nothing to raise with was the standard library's problem in
-    /// general, not only there, and this is what answers it: any body may
-    /// build the three sentences of a refusal at run time out of values it
-    /// computed and stop the run with them, which is
-    /// [issue 461](https://github.com/myuon/cove/issues/461).
+    /// Any body may build the three sentences of a refusal at run time out of
+    /// values it computed and stop the run with them, which is
+    /// [issue 461](https://github.com/myuon/cove/issues/461). It is how
+    /// `std.stringbuilder`'s `appendRange` says which of five things is wrong
+    /// with a byte range, in `String.sliceBytes`' words: the sentence is
+    /// `byteRangeRefusalMessage`'s, and it replaced a `core.refuseByteRange`
+    /// that was an [`Inst::IntrinsicCall`] of its own (issue #432).
     ///
-    /// Unlike `core_refuse_byte_range`'s [`Inst::IntrinsicCall`], a `Trap` is
-    /// a terminator — nothing runs after it, ever, so nothing is emitted
-    /// after it either. `dst` is answered the same way a diverging `return`
-    /// or `break` answers one, a location nothing will write, so the
-    /// surrounding form still has something to hold.
+    /// Unlike that [`Inst::IntrinsicCall`], a `Trap` is a terminator — nothing
+    /// runs after it, ever, so nothing is emitted after it either. `dst` is
+    /// answered the same way a diverging `return` or `break` answers one, a
+    /// location nothing will write, so the surrounding form still has
+    /// something to hold.
     fn core_refuse(
         &mut self,
         expr: &Expr,
@@ -1729,26 +1693,6 @@ impl Body<'_> {
         self.release(method, expr.span);
         self.release(held, expr.span);
         dst
-    }
-
-    /// One [`Inst::IntrinsicCall`] of `intrinsic` over `args`, answering a
-    /// value of `result` into `dst`.
-    pub(super) fn intrinsic_call(
-        &mut self,
-        intrinsic: Intrinsic,
-        result: LayoutId,
-        dst: Slot,
-        args: &[&Val],
-        span: Span,
-    ) {
-        let site = self
-            .pool
-            .intrinsic_site(IntrinsicSite { intrinsic, result });
-        let args = self
-            .pool
-            .args
-            .intern(args.iter().map(|arg| arg.arg()).collect());
-        self.emit(Inst::IntrinsicCall { dst, site, args }, span);
     }
 
     /// `core.memberAt(members, at)`: the member at `at` of a set's sorted run.

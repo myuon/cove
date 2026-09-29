@@ -7011,7 +7011,8 @@ mod tests {
     // were the composite `growable-extend`'s, and both left with it. ADR 0062
     // moved the range policy into `std.stringbuilder`'s `appendRange` — five
     // questions in Cove, in `String.sliceBytes`' own words, raising through
-    // `Intrinsic::StringRefuseByteRange` — precisely so that what is left under
+    // `Intrinsic::StringRefuseByteRange` until issue #432 and `core.refuse`
+    // since — precisely so that what is left under
     // it is a `run-copy` that validates nothing and can therefore be the write
     // half of a window. What that copy refuses about a range, in its own words,
     // is `run_range`'s "`runCopy` reads n byte(s) from x of a source of y".

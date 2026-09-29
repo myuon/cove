@@ -5,8 +5,8 @@ error[cove::runtime]: `from` is `4` and `to` is `3`, so this range runs backward
   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    --> std/stringbuilder.cove:239:5
     |
-239 |     core.refuseByteRange(text, from, to)
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+239 |     core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
    --> std/stringbuilder.cove:133:5
     |
 133 |     appendRange(self.buffer, text, from, to)

@@ -135,15 +135,9 @@ fn is_word(machine: &Machine, frame: Frame<'_>, at: usize, repr: Repr) -> bool {
     machine.program().layout(frame.layout(at)).shape == Shape::Word(repr)
 }
 
-/// The `Int` operand `at` is.
-#[inline]
-pub(super) fn int(machine: &Machine, frame: Frame<'_>, at: usize) -> i64 {
-    debug_assert!(
-        is_word(machine, frame, at, Repr::Int),
-        "an operand verified to be an `Int`"
-    );
-    frame.word(machine, at) as i64
-}
+// `int`, the `Int` operand `at` is, stood here until issue #432 took
+// `String.refuseByteRange`'s two offsets, the last `Int` operands an intrinsic
+// read.
 
 /// The `Float` operand `at` is.
 #[inline]

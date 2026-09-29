@@ -5,8 +5,8 @@ error[cove::runtime]: `to` is `9`, and a byte offset into this string is 0 to 6
   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    --> std/stringbuilder.cove:242:5
     |
-242 |     core.refuseByteRange(text, from, to)
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+242 |     core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
    --> std/stringbuilder.cove:133:5
     |
 133 |     appendRange(self.buffer, text, from, to)

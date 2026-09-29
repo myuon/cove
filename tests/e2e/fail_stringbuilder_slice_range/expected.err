@@ -5,8 +5,8 @@ error[cove::runtime]: `to` is `2`, which is inside a character rather than at th
   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    --> std/stringbuilder.cove:258:9
     |
-258 |         core.refuseByteRange(text, from, to)
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+258 |         core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
    --> std/stringbuilder.cove:133:5
     |
 133 |     appendRange(self.buffer, text, from, to)

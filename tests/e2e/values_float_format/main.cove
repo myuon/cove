@@ -53,7 +53,7 @@ use console.println
 /// operation's migration: a Cove body has no way to raise
 /// ([issue #461](https://github.com/myuon/cove/issues/461)), the same wall
 /// `String.split`, `String.replace`, `Int.parseRadix`,
-/// `String.refuseByteRange` and `Value.refuseDuplicate` are behind.
+/// `String.refuseByteRange` and `Value.refuseDuplicate` were behind.
 export fn main() -> Result<Unit, Error> {
   everyDigit()?
   ties()?

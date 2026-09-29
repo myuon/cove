@@ -4058,10 +4058,13 @@ export fn probeGap() -> Int {
 /// checked and copied, into `std.stringbuilder`'s `appendRange`, so that the
 /// copy underneath is a write already known to be legal and can be the write
 /// half of a reservation window. The risk that move carries is not the copy: it
-/// is that a refusal changes. There are three copies of the rule now — the five
-/// questions in Cove, `crate::builtins`' `wrong_byte_range` for the oracle and
-/// `vm::intrinsics::text::refuse_byte_range` for the machine — and this is what
-/// holds them together.
+/// is that a refusal changes. There were three copies of the sentences after it
+/// — `std.string`'s `refuseRange` in Cove, an oracle arm and a machine arm for
+/// `core.refuseByteRange` — until issue #432 left one,
+/// `std.stringbuilder.byteRangeRefusalMessage`, which `appendRange` and
+/// `refuseRange` both call. What this holds together now is that one function
+/// and the two *orders* around it: the builder's five questions, which decide
+/// where the run stops, and the sentence's, which decide what it says.
 ///
 /// Every way a range can be wrong is here, and `sliceBytes`' own `Err` message
 /// for the same range is compared against the sentence the builder stopped

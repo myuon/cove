@@ -40,7 +40,10 @@ use std::fmt;
 /// directly instead of reconstructing a name to dispatch on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
-    StringRefuseByteRange,
+    // `StringRefuseByteRange` stood here, the refusal of a byte range
+    // `std.stringbuilder`'s `appendRange` had found wrong, until issue #432
+    // made its five sentences `std.stringbuilder.byteRangeRefusalMessage` and
+    // its raise ADR 0067's `core.refuse`.
     FloatToInt,
     FloatParse,
 }
@@ -50,11 +53,7 @@ pub enum Intrinsic {
 /// What [`Intrinsic::from_names`] searches and what this module's own tests
 /// walk to check the table has no gap and no duplicate — the two ways a hand-
 /// written list like this one goes wrong.
-pub const ALL: &[Intrinsic] = &[
-    Intrinsic::StringRefuseByteRange,
-    Intrinsic::FloatToInt,
-    Intrinsic::FloatParse,
-];
+pub const ALL: &[Intrinsic] = &[Intrinsic::FloatToInt, Intrinsic::FloatParse];
 
 /// How many variants there are, as the width of a per-variant table.
 ///
@@ -81,7 +80,6 @@ impl Intrinsic {
     /// `std.dynamic.equals`.)
     pub const fn receiver(self) -> &'static str {
         match self {
-            Intrinsic::StringRefuseByteRange => "String",
             Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatParse => "Float",
         }
@@ -90,7 +88,6 @@ impl Intrinsic {
     /// The operation's own name: `split`, `join`, `parse`.
     pub const fn operation(self) -> &'static str {
         match self {
-            Intrinsic::StringRefuseByteRange => "refuseByteRange",
             Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatParse => "parse",
         }
@@ -143,8 +140,9 @@ impl Intrinsic {
     /// category to be.
     pub const fn category(self) -> Category {
         match self {
-            Intrinsic::StringRefuseByteRange => Category::Text,
             Intrinsic::FloatToInt | Intrinsic::FloatParse => Category::Scalar,
+            // `String.refuseByteRange` was the last `Category::Text`, until
+            // issue #432 made it Cove.
             // `Value.admitKey` was the last `Category::Value`, a rule over
             // whatever layout the key has, until ADR 0068's Phase 4c.
         }
@@ -165,9 +163,6 @@ impl Intrinsic {
             Signature { operands, result }
         }
         match self {
-            // The text and the two offsets a refusal is worded with, in the
-            // order `String.sliceBytes` names them.
-            Intrinsic::StringRefuseByteRange => fixed(&[C::Str, C::Int, C::Int], C::Unit),
             Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
         }
@@ -231,12 +226,10 @@ impl Intrinsic {
             // allocate, which is `Float.toInt`'s and `Float.format`'s shape
             // and not any other `String` operation's. Every `String` arm left
             // below reads a receiver.
-            // The byte-range refusal always raises and allocates nothing: it
-            // reads the receiver's bytes to say which end is inside a
-            // character, and the message is the machine's rather than an
-            // object on the heap. It reads at most two bytes, so it is not
-            // bulk work.
-            Intrinsic::StringRefuseByteRange => raise.union(E::READS_MEMORY),
+            // The byte-range refusal stood here, the one arm that raised and
+            // allocated nothing. Issue #432 made its sentence
+            // `std.stringbuilder.byteRangeRefusalMessage`, a `String` a Cove
+            // body builds, and its raise ADR 0067's `core.refuse`.
 
             // No `Array` or `Vector` operation is here. `contains` and
             // `indexOf` are `std.array` and `std.vector` loops over `==`;
@@ -302,18 +295,18 @@ impl Intrinsic {
 
 /// What an [`Intrinsic`] is about.
 ///
-/// Two, and neither of them a collection: ADR 0058's Phase 5 makes "a new
-/// collection `IntrinsicCall` a verification failure", and this is the half of
-/// that rule a verifier can read. A `Text` or `Scalar` intrinsic whose operand
-/// is a collection is refused by `crate::verify`, and there is no longer an
-/// exception: the `Array<String>` `Class::Strings` named was `String.join`'s
+/// One, and not a collection: ADR 0058's Phase 5 makes "a new collection
+/// `IntrinsicCall` a verification failure", and this is the half of that rule
+/// a verifier can read. An intrinsic whose operand is a collection is refused
+/// by `crate::verify`, and there is no longer an exception: the `Array<String>` `Class::Strings` named was `String.join`'s
 /// operand, read as the input of a bulk text operation (#378, Q18) rather than
 /// as a collection it managed, and issue #454's Step 3 made that join Cove. No
 /// operand of any variant left is a collection at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
-    /// Reads or builds text: Unicode, searching, splitting, case mapping.
-    Text,
+    // `Text` stood here, for what read or built text — Unicode, searching,
+    // splitting, case mapping — until issue #432 made its last member,
+    // `String.refuseByteRange`, Cove.
     /// An `Int` or a `Float`, and the text one is parsed from or formatted to.
     Scalar,
     // `Value` stood here, a rule over any value directed by its layout, until
@@ -338,9 +331,6 @@ pub struct Signature {
 /// The layout an operand or an answer of an [`Intrinsic`] has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
-    /// `()`, the one word a refusal that returns answers.
-    Unit,
-    Int,
     Float,
     /// A `String`: one reference to a string object.
     Str,
@@ -351,7 +341,9 @@ pub enum Class {
     // layout) and `Buffer` (a `ByteBuffer`) stood here, each the class of an
     // intrinsic that has since moved into Cove or an instruction. Issue #536
     // deleted them once no signature named any of them: a class nothing
-    // declares is a verifier arm nothing reaches.
+    // declares is a verifier arm nothing reaches. `Unit` and `Int` went for
+    // the same reason with issue #432: `String.refuseByteRange`'s answer of
+    // nothing and its two offsets were the last of each.
 }
 
 /// What a [`Class::ResultOf`] carries.
@@ -368,8 +360,6 @@ impl fmt::Display for Class {
             Carried::Float => "Float",
         };
         match self {
-            Class::Unit => write!(f, "Unit"),
-            Class::Int => write!(f, "Int"),
             Class::Float => write!(f, "Float"),
             Class::Str => write!(f, "String"),
             Class::ResultOf(inner) => write!(f, "Result<{}, Error>", carried(inner)),
@@ -476,8 +466,7 @@ mod tests {
     /// operation named after a method never does.
     #[test]
     fn the_intrinsic_set_only_shrinks() {
-        const MIGRATED_BUT_STILL_HERE: &[&str] =
-            &["String.refuseByteRange", "Float.toInt", "Float.parse"];
+        const MIGRATED_BUT_STILL_HERE: &[&str] = &["Float.toInt", "Float.parse"];
 
         let here: Vec<String> = ALL.iter().map(|one| one.to_string()).collect();
         let allowed: Vec<&str> = MIGRATED_BUT_STILL_HERE.to_vec();
@@ -528,9 +517,7 @@ mod tests {
         // match has to name every one of them.
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
-                Intrinsic::StringRefuseByteRange
-                | Intrinsic::FloatToInt
-                | Intrinsic::FloatParse => 1,
+                Intrinsic::FloatToInt | Intrinsic::FloatParse => 1,
             }
         }
         let variants: usize = ALL.iter().map(|intrinsic| count(*intrinsic)).sum();
@@ -587,10 +574,7 @@ mod tests {
     #[test]
     fn display_prints_receiver_dot_operation() {
         assert_eq!(Intrinsic::FloatParse.to_string(), "Float.parse");
-        assert_eq!(
-            Intrinsic::StringRefuseByteRange.to_string(),
-            "String.refuseByteRange"
-        );
+        assert_eq!(Intrinsic::FloatToInt.to_string(), "Float.toInt");
     }
 
     #[test]
@@ -669,7 +653,9 @@ mod tests {
     /// three classes to two, and `cove-runtime`'s `native_tier.rs` lost the
     /// case that drove that path from a real program. The path itself stays:
     /// it is what the effects *mean*, and the alternative is deleting a
-    /// lowering because the census happens to be empty this week.
+    /// lowering because the census happens to be empty this week. (Issue #432
+    /// emptied the raise-only class the same way, and `INTRINSIC_CLASSES` is
+    /// down to one.)
     ///
     /// It is also why `vm::exec`'s `unraisable` has no end-to-end case and
     /// can now have none at all: that panic needs an arm that can answer an

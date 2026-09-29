@@ -15,7 +15,7 @@ fn copy(var out: StringBuilder, text: String, from: Int, to: Int) {
 ///
 /// The sentence is the one a bulk `core.bytesExtend` said. What ADR 0062
 /// changed is where it is decided: `appendRange` asks `sliceBytes`' five
-/// questions in Cove and raises through `core.refuseByteRange`, so the library
+/// questions in Cove and raises through `core.refuse`, so the library
 /// context is two lines — the raise, and the `appendSlice` that called it —
 /// where it used to be the one instruction that both checked and copied.
 export fn main() -> Result<Unit, Error> {

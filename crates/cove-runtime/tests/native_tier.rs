@@ -851,10 +851,11 @@ export fn callsCopiesShort(text: String, limit: Int) -> String {
 
 /// A byte range of a string appended, in a compiled frame.
 ///
-/// ADR 0062 put `appendSlice`'s range policy in Cove, so what a compiled frame
-/// runs here is five comparisons, two byte loads, an append window, and an
-/// `IntrinsicCall` on the path that refuses. The `é` makes the boundary rule
-/// reachable: `2` is inside it.
+/// ADR 0062 put `appendSlice`'s range policy in Cove, so what runs here is five
+/// comparisons, two byte loads and an append window — in `appendRange`'s own
+/// frame, which this one calls — and on the path that refuses, a call of
+/// `byteRangeRefusalMessage` and a `trap` of what it answered (issue #432). The
+/// `é` makes the boundary rule reachable: `2` is inside it.
 export fn buildsASlice(from: Int, to: Int) -> String {
   var out = StringBuilder.withCapacity(2 + counts(0))
   out.append(\"<\")
@@ -3177,9 +3178,9 @@ fn a_finish_of_invalid_utf8_is_the_vm_s_sentence() {
 /// The other half of ADR 0062's move of `appendSlice`'s range policy into Cove.
 /// The five questions are now *emitted code* on this tier rather than a
 /// runtime helper's, so a comparison assembled wrongly would refuse a legal
-/// range or copy an illegal one, and the raise is an `IntrinsicCall` whose
-/// sentence `cove-native` names and never builds. Every way a range can be
-/// wrong is here, and one that is not.
+/// range or copy an illegal one, and the raise is a `trap` of a sentence a Cove
+/// function built, which `cove-native` hands over from a slot and never
+/// builds. Every way a range can be wrong is here, and one that is not.
 #[test]
 fn an_append_slice_refuses_a_range_from_a_compiled_frame_in_the_vm_s_words() {
     on_each_tier(&["buildsASlice"], &["callsBuildsASlice"]);

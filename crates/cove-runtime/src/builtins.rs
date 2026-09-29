@@ -796,29 +796,15 @@ pub fn call_core(
                 .at(span)),
             }
         }
-        // Beneath `StringBuilder.appendSlice`, on the path where its range is
-        // not one: what is wrong with it, as the run stops.
+        // `refuseByteRange` stood here, beneath `StringBuilder.appendSlice` on
+        // the path where its range is not one: this interpreter's copy of
+        // `String.sliceBytes`' five sentences, with a second copy in the
+        // machine and a third in `std.string`'s `refuseRange`. Issue #432 made
+        // the sentences one Cove function,
+        // `std.stringbuilder.byteRangeRefusalMessage`, that `appendRange` and
+        // `refuseRange` both call, and the raise the `refuse` arm below — so
+        // there is one copy, and this evaluator runs it as it runs any Cove.
         //
-        // The five questions are Cove — `std.stringbuilder`'s `appendRange`
-        // asks them, in `String.sliceBytes`' shape — so this decides nothing
-        // about whether the range is legal. It says which of them failed, in
-        // `sliceBytes`' words, which ADR 0052 requires in as many words and
-        // which `std.string.sliceBytes`' `refuseRange` writes out again in
-        // Cove. What differs is what a refusal *is*: `sliceBytes` answers a
-        // `Result` because a caller asked for a value, and this stops the run
-        // because a builder's append has no `Result` to answer.
-        "refuseByteRange" => {
-            let Value(Repr::Str(text)) = &args[0] else {
-                return Err(type_error("appendSlice", "text", "String", &args[0], span));
-            };
-            let Value(Repr::Int(from)) = &args[1] else {
-                return Err(type_error("appendSlice", "from", "Int", &args[1], span));
-            };
-            let Value(Repr::Int(to)) = &args[2] else {
-                return Err(type_error("appendSlice", "to", "Int", &args[2], span));
-            };
-            Err(RuntimeError::new(wrong_byte_range(text, *from, *to)).at(span))
-        }
         // Any standard-library body's own refusal, worded in Cove out of
         // values it computed rather than by this interpreter. The compiled
         // tier's `TRAP` arm reads the same three strings out of the same
@@ -1860,8 +1846,8 @@ pub fn call_method(
             // `crates/cove-sema/tests/unicase.rs` regenerates. ADR 0064's
             // Decision 5, and issue #454's Step 5.
             // The byte-counted operations. Their diagnostics are written out
-            // again in `crates/cove-runtime/src/vm/intrinsics/text.rs` rather
-            // than shared, as every other builtin's are; what holds the two
+            // again in the linear-memory backend rather than shared, as every
+            // other builtin's are; what holds the two
             // readings together is `tests/e2e/values_string`, which runs on
             // both backends against one `expected.out`. `byteLength` is not
             // here: it is `std.string` over `call_core`'s `byteLength`, and
@@ -2333,42 +2319,10 @@ fn float_to_int(x: f64) -> Value {
     Value::ok(Value(Repr::Int(truncated as i64)))
 }
 
-/// What is wrong with the byte range `appendSlice(text, from, to)` names, which
-/// `std.stringbuilder`'s `appendRange` has already found to be wrong.
-///
-/// It is `String.sliceBytes`' rule, and was that method's own until ADR 0058
-/// moved it into `std.string`, whose `refuseRange` says the same sentences in
-/// Cove — and whose arms this walks in the same order. Five things can be
-/// wrong, asked in the order a reader would ask them: is each end a byte offset
-/// into this string at all, do they run forwards, and does each begin a
-/// character. The last is the one `slice` has no equivalent of, and it is why
-/// `appendSlice` refuses where `slice` clamps — an offset inside a character
-/// was never handed out by `codePointAtByte`, so moving it to the nearest legal
-/// one would answer a question nobody asked.
-///
-/// The final arm is the `to` boundary rather than a case of its own, exactly as
-/// `refuseRange`'s `else` is: this is reached only after a check in Cove has
-/// failed, and the two copies agree about which sentence a range gets by having
-/// the same shape rather than by each deciding.
-///
-/// The linear-memory backend's copy is `vm::intrinsics::text::refuse_byte_range`
-/// — written twice for the reason that module's rendering is, and kept honest
-/// by the differential corpus.
-fn wrong_byte_range(text: &str, from: i64, to: i64) -> String {
-    let len = text.len() as i64;
-    let boundary = |at: i64| at < len && !text.is_char_boundary(at as usize);
-    if from < 0 || from > len {
-        format!("`from` is `{from}`, and a byte offset into this string is 0 to {len}")
-    } else if to < 0 || to > len {
-        format!("`to` is `{to}`, and a byte offset into this string is 0 to {len}")
-    } else if from > to {
-        format!("`from` is `{from}` and `to` is `{to}`, so this range runs backwards")
-    } else if boundary(from) {
-        format!("`from` is `{from}`, which is inside a character rather than at the start of one")
-    } else {
-        format!("`to` is `{to}`, which is inside a character rather than at the start of one")
-    }
-}
+// `wrong_byte_range` stood here, the oracle's copy of `String.sliceBytes`'
+// five sentences for `core.refuseByteRange`, walking `std.string`'s
+// `refuseRange` arms in the same order. Issue #432 left one copy, in Cove:
+// `std.stringbuilder.byteRangeRefusalMessage`.
 
 // `one_character` stood here: a per-thread table of the 128 ASCII
 // one-character `Rc<str>`s, so that `chars()` on this backend handed out a
