@@ -90,9 +90,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -372,11 +373,76 @@ const KNOWN_DISAGREEMENTS: &[&str] = &[
             ignored cases out, and CI runs them with \
             `cargo test --workspace --lib --tests -- --ignored`"]
 fn the_corpus_says_what_the_linear_memory_backend_runs() {
-    // Everything happens on the stack the runtime sizes, for
-    // `differential.rs`'s reason: the oracle is a recursive tree walk, a test
-    // thread's stack is not one it chose, and every `Value` either side
-    // builds belongs to the thread that built it. Only the report comes back.
-    let report = cove_runtime::on_cove_stack(survey).expect("a thread to run Cove on");
+    if let Some(shard) = std::env::var_os("COVE_VM_COVERAGE_SHARD") {
+        let shard = shard.to_string_lossy();
+        let (at, total) = shard
+            .split_once('/')
+            .unwrap_or_else(|| panic!("invalid COVE_VM_COVERAGE_SHARD `{shard}`"));
+        let at = at.parse().expect("the shard index to be a number");
+        let total = total.parse().expect("the shard count to be a number");
+        let report = cove_runtime::on_cove_stack(|| survey(at, total))
+            .expect("a thread to run Cove on");
+        let path = std::env::var_os("COVE_VM_COVERAGE_REPORT")
+            .expect("a worker report path beside its shard");
+        report.write_to(Path::new(&path));
+        return;
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(2);
+    if workers == 1 {
+        check(cove_runtime::on_cove_stack(|| survey(0, 1)).expect("a thread to run Cove on"));
+        return;
+    }
+
+    let executable = std::env::current_exe().expect("the current test executable");
+    let mut children = Vec::with_capacity(workers);
+    for at in 0..workers {
+        let report = std::env::temp_dir().join(format!(
+            "cove-vm-coverage-{}-{at}.report",
+            std::process::id()
+        ));
+        let child = Command::new(&executable)
+            .args([
+                "--exact",
+                "the_corpus_says_what_the_linear_memory_backend_runs",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("COVE_VM_COVERAGE_SHARD", format!("{at}/{workers}"))
+            .env("COVE_VM_COVERAGE_REPORT", &report)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        children.push((at, report, child));
+    }
+
+    let mut combined = Report::default();
+    for (at, path, output) in children {
+        let output = output
+            .unwrap_or_else(|e| panic!("cannot start coverage worker {at}: {e}"))
+            .wait_with_output()
+            .unwrap_or_else(|e| panic!("cannot wait for coverage worker {at}: {e}"));
+        assert!(
+            output.status.success(),
+            "coverage worker {at} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        combined.extend(Report::read_from(&path));
+        std::fs::remove_file(&path)
+            .unwrap_or_else(|e| panic!("cannot remove `{}`: {e}", path.display()));
+    }
+    combined.sort();
+    check(combined);
+}
+
+/// Applies the whole-corpus ratchets after every worker's partial report has
+/// been combined. A worker never judges its own fraction against a global
+/// floor or disagreement list.
+fn check(report: Report) {
     let text = report.render();
     print!("{text}");
 
@@ -502,9 +568,14 @@ fn every_function_of_a_lowered_program_names_itself_uniquely() {
 }
 
 /// Every case of the corpus, lowered, run, and compared.
-fn survey() -> Report {
+fn survey(shard: usize, shards: usize) -> Report {
     let mut report = Report::default();
-    let cases = discover();
+    assert!(shards > 0 && shard < shards, "invalid shard {shard}/{shards}");
+    let cases: Vec<Case> = discover()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(at, case)| (at % shards == shard).then_some(case))
+        .collect();
     assert!(!cases.is_empty(), "the corpus is empty");
     report.discovered = cases.len();
 
@@ -607,6 +678,7 @@ fn lower(
 }
 
 /// One reason a program did not lower.
+#[derive(Debug, PartialEq, Eq)]
 struct Gap {
     /// `cove::lower::not_yet_lowered`, `cove::lower::unknown_type`, or the
     /// one this file makes for a panic. Kept beside the message because the
@@ -948,7 +1020,7 @@ fn read_tree(dir: &Path, prefix: String, into: &mut BTreeMap<String, String>) {
 // -------------------------------------------------------------- the report
 
 /// What the survey found.
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct Report {
     discovered: usize,
     /// Cases with no checked program behind them: a package that pins a
@@ -969,6 +1041,91 @@ struct Report {
 }
 
 impl Report {
+    /// Writes the process-local result in a private length-prefixed format.
+    /// This is deliberately not a public interchange format: parent and
+    /// workers are the same test executable, built from the same source.
+    fn write_to(&self, path: &Path) {
+        let file = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("cannot create `{}`: {e}", path.display()));
+        let mut out = std::io::BufWriter::new(file);
+        write_usize(&mut out, self.discovered);
+        write_strings(&mut out, &self.no_program);
+        write_strings(&mut out, &self.agreed);
+        write_usize(&mut out, self.disagreed.len());
+        for (name, detail) in &self.disagreed {
+            write_string(&mut out, name);
+            write_string(&mut out, detail);
+        }
+        write_usize(&mut out, self.not_lowered.len());
+        for (name, gaps) in &self.not_lowered {
+            write_string(&mut out, name);
+            write_usize(&mut out, gaps.len());
+            for gap in gaps {
+                write_string(&mut out, &gap.code);
+                write_string(&mut out, &gap.what);
+            }
+        }
+        write_usize(&mut out, self.unplaced.len());
+        for (name, layouts) in &self.unplaced {
+            write_string(&mut out, name);
+            write_strings(&mut out, layouts);
+        }
+        out.flush()
+            .unwrap_or_else(|e| panic!("cannot finish `{}`: {e}", path.display()));
+    }
+
+    fn read_from(path: &Path) -> Self {
+        let file = std::fs::File::open(path)
+            .unwrap_or_else(|e| panic!("cannot open `{}`: {e}", path.display()));
+        let mut input = std::io::BufReader::new(file);
+        let discovered = read_usize(&mut input);
+        let no_program = read_strings(&mut input);
+        let agreed = read_strings(&mut input);
+        let disagreed = (0..read_usize(&mut input))
+            .map(|_| (read_string(&mut input), read_string(&mut input)))
+            .collect();
+        let not_lowered = (0..read_usize(&mut input))
+            .map(|_| {
+                let name = read_string(&mut input);
+                let gaps = (0..read_usize(&mut input))
+                    .map(|_| Gap {
+                        code: read_string(&mut input),
+                        what: read_string(&mut input),
+                    })
+                    .collect();
+                (name, gaps)
+            })
+            .collect();
+        let unplaced = (0..read_usize(&mut input))
+            .map(|_| (read_string(&mut input), read_strings(&mut input)))
+            .collect();
+        Self {
+            discovered,
+            no_program,
+            agreed,
+            disagreed,
+            not_lowered,
+            unplaced,
+        }
+    }
+
+    fn extend(&mut self, mut other: Self) {
+        self.discovered += other.discovered;
+        self.no_program.append(&mut other.no_program);
+        self.agreed.append(&mut other.agreed);
+        self.disagreed.append(&mut other.disagreed);
+        self.not_lowered.append(&mut other.not_lowered);
+        self.unplaced.append(&mut other.unplaced);
+    }
+
+    fn sort(&mut self) {
+        self.no_program.sort();
+        self.agreed.sort();
+        self.disagreed.sort_by(|a, b| a.0.cmp(&b.0));
+        self.not_lowered.sort_by(|a, b| a.0.cmp(&b.0));
+        self.unplaced.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
     fn render(&self) -> String {
         let ran = self.agreed.len() + self.disagreed.len();
         let mut out = format!(
@@ -1087,4 +1244,72 @@ impl Report {
         ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
         ranked
     }
+}
+
+#[test]
+fn a_worker_report_round_trips() {
+    let report = Report {
+        discovered: 4,
+        no_program: vec!["no program".to_string()],
+        agreed: vec!["agreed".to_string()],
+        disagreed: vec![("disagreed".to_string(), "two answers".to_string())],
+        not_lowered: vec![(
+            "not lowered".to_string(),
+            vec![Gap {
+                code: "code".to_string(),
+                what: "what".to_string(),
+            }],
+        )],
+        unplaced: vec![("unplaced".to_string(), vec!["Layout".to_string()])],
+    };
+    let path = std::env::temp_dir().join(format!(
+        "cove-vm-coverage-codec-{}.report",
+        std::process::id()
+    ));
+    report.write_to(&path);
+    let decoded = Report::read_from(&path);
+    std::fs::remove_file(&path)
+        .unwrap_or_else(|e| panic!("cannot remove `{}`: {e}", path.display()));
+    assert_eq!(decoded, report);
+}
+
+fn write_usize(out: &mut impl Write, value: usize) {
+    let value = u64::try_from(value).expect("a report length to fit in u64");
+    out.write_all(&value.to_le_bytes())
+        .expect("a worker report to be writable");
+}
+
+fn write_string(out: &mut impl Write, value: &str) {
+    write_usize(out, value.len());
+    out.write_all(value.as_bytes())
+        .expect("a worker report to be writable");
+}
+
+fn write_strings(out: &mut impl Write, values: &[String]) {
+    write_usize(out, values.len());
+    for value in values {
+        write_string(out, value);
+    }
+}
+
+fn read_usize(input: &mut impl Read) -> usize {
+    let mut bytes = [0; 8];
+    input
+        .read_exact(&mut bytes)
+        .expect("a complete worker report length");
+    usize::try_from(u64::from_le_bytes(bytes)).expect("a report length to fit in usize")
+}
+
+fn read_string(input: &mut impl Read) -> String {
+    let mut bytes = vec![0; read_usize(input)];
+    input
+        .read_exact(&mut bytes)
+        .expect("a complete worker report string");
+    String::from_utf8(bytes).expect("a worker report string to be UTF-8")
+}
+
+fn read_strings(input: &mut impl Read) -> Vec<String> {
+    (0..read_usize(input))
+        .map(|_| read_string(input))
+        .collect()
 }
