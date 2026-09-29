@@ -190,6 +190,22 @@ pub fn lower(
     finish(program, errors, Roots::Package, schemas)
 }
 
+/// [`lower`] stopped before [`finish`]: every body as it was emitted, before
+/// the expansion and the passes that tidy what it leaves.
+///
+/// For a test about what the emitters write, which the finished code can no
+/// longer show — `tails`, `frees` and `redefined` delete what an emitter
+/// should never have written, and the inliner weighs a body before any of
+/// them has run.
+#[cfg(test)]
+pub(super) fn emitted(checked: &Checked, sources: &SourceMap, schemas: &HostSchemas) -> Program {
+    let mut plan = Plan::index(checked);
+    let everything: HashSet<FunctionId> = (0..plan.decls.len())
+        .map(|at| FunctionId(at as u32))
+        .collect();
+    emit(checked, sources, schemas, &mut plan, &everything).program
+}
+
 /// Lowers only the declarations `roots` can reach.
 ///
 /// A package holds programs that have nothing to do with each other —

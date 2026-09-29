@@ -1187,27 +1187,46 @@ impl Body<'_> {
     /// answered the same way a diverging `return` or `break` answers one, a
     /// location nothing will write, so the surrounding form still has
     /// something to hold.
+    ///
+    /// That was a claim before it was a fact: the three temporaries were
+    /// released with a `clear` each after the trap, three instructions nothing
+    /// could reach — and `super::inline` weighs a body by every instruction it
+    /// holds, reachable or not. `std.stringbuilder`'s `appendRange` has five
+    /// refusals, and when issue #432 made them `core.refuse` over a call, those
+    /// fifteen clears and a second `str ""` at each of the five were what kept
+    /// the body over the limit its hot callers weigh it against — 65
+    /// instructions where the body was 45, when that was measured on
+    /// 2026-09-29. `lower::tests::control`'s
+    /// `core_refuse_emits_nothing_after_its_trap` holds the first half.
     fn core_refuse(
         &mut self,
         expr: &Expr,
         [message, rule, help]: [&Expr; 3],
         want: Option<Dest>,
     ) -> Val {
+        // A `rule` and a `help` that are the same literal — most often `""`
+        // twice, a refusal that is only a message — are one `str` in one slot
+        // that the trap names twice: it reads the three and writes nothing.
+        let shared = literal_text(rule).is_some() && literal_text(rule) == literal_text(help);
         let message = self.expr(message);
         let rule = self.expr(rule);
-        let help = self.expr(help);
+        let help = if shared { None } else { Some(self.expr(help)) };
         let dst = self.answer_at(want, shapes::UNIT);
         self.emit(
             Inst::Trap {
                 message: message.slot,
                 rule: rule.slot,
-                help: help.slot,
+                help: help.as_ref().map_or(rule.slot, |help| help.slot),
             },
             expr.span,
         );
-        self.release(help, expr.span);
-        self.release(rule, expr.span);
-        self.release(message, expr.span);
+        // The three temporaries go back to the frame, and no `clear` of them
+        // is emitted: it would stand after a terminator, where nothing runs.
+        for value in [help, Some(rule), Some(message)].into_iter().flatten() {
+            if value.temp {
+                self.give_back(value.slot, value.layout);
+            }
+        }
         dst
     }
 
