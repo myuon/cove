@@ -2,17 +2,20 @@
 
 use super::listing;
 
-/// The receiver is the first operand where there is one and the arguments
-/// follow it in source order, which is the one shape every operation in
-/// the table has.
+/// `Float.toInt` is a call of `std.float.toInt`, and not a runtime call.
 ///
-/// The sample was `s.split(",")` until issue #454's Step 3 moved `split` into
-/// `std.string`, and `x.format(2)` until `format` moved into `std.float`.
-/// `Float.toInt` is the last method on the table that is a runtime call over
-/// its receiver, and it has no argument after it, so "in source order" is a
-/// claim this case can only make about the one operand now.
+/// This case was `a_builtin_method_is_one_call_over_its_operands`, and its
+/// sample was the last method on the table that was a runtime call over its
+/// receiver: `x.toInt()`, an `intrinsic-call` of `Float.toInt`. Issue #432
+/// made that `std.float.toInt` (ADR 0071), so **no method is an
+/// `intrinsic-call` any more** — `Float.parse`, the one intrinsic left, is an
+/// associated function — and the same source is an ordinary call with the
+/// receiver as its one argument. It is not expanded here: the body returns
+/// what `toIntRefused` answers, a call whose continuation returns rather than
+/// traps, so ADR 0070's rule does not admit it, and nothing short-circuits it
+/// either (the accepted cost is recorded in ADR 0071).
 #[test]
-fn a_builtin_method_is_one_call_over_its_operands() {
+fn a_float_to_int_is_a_call_of_the_standard_library() {
     assert_eq!(
         listing(
             "fn whole(x: Float) -> Result<Int, Error> { x.toInt() }",
@@ -22,10 +25,52 @@ fn a_builtin_method_is_one_call_over_its_operands() {
 fn @m.whole(Float) -> Result
   frame 4: s0!:float s1:tag s2:int s3:ref
   local x -> s0:Float [0, 2)
-     0  intrinsic-call s1..s3:Result Float.toInt (s0:Float)
+     0  call s1..s3:Result std.float.toInt (s0:Float)
      1  return s1..s3:Result
 "
     );
+}
+
+/// **`std.float` emits no `intrinsic-call`.**
+///
+/// Issue #432 took `Float.toInt` out of `Intrinsic`, and it was the last
+/// intrinsic `std.float` itself reached: `format` and `renderInto` each asked
+/// it for a significand or a whole number they had already held inside the
+/// range. A program that interpolates a `Float`, formats one and converts one
+/// reaches every function of the module that does any of the three, and none
+/// of them may name an intrinsic — `Float.parse`, the one left, is not called
+/// by the module at all.
+#[test]
+fn std_float_emits_no_intrinsic_call() {
+    let (sources, held) =
+        super::checked("fn main(x: Float) -> String {\n  \"{x} {x.format(2)} {x.toInt()}\"\n}");
+    let schemas = cove_schema::HostSchemas::new();
+    let program = crate::lower(&held, &sources, &schemas).expect("the program lowers");
+    let mut reached = Vec::new();
+    for f in program.functions.iter().filter(|f| !f.stub) {
+        let name = f.qualified();
+        if !name.starts_with("std.float.") {
+            continue;
+        }
+        for (pc, inst) in f.code.iter().enumerate() {
+            assert!(
+                !matches!(inst, crate::Inst::IntrinsicCall { .. }),
+                "`{name}` holds an `intrinsic-call` at {pc}: {inst:?}"
+            );
+        }
+        reached.push(name);
+    }
+    for name in [
+        "std.float.format",
+        "std.float.renderInto",
+        "std.float.toInt",
+        "std.float.toIntRefused",
+    ] {
+        assert!(
+            reached.iter().any(|had| had == name),
+            "`{name}` was meant to be reached, and the program lowered {reached:?}"
+        );
+    }
 }
 
 /// `Duration.nanos(1)` builds a duration and `d.nanos()` reads one back

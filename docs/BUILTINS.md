@@ -323,7 +323,7 @@ written as a namespace.
 
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
-| `toInt() -> Result<Int, Error>` |  |  |  | `machine` |
+| `toInt() -> Result<Int, Error>` |  |  |  | `std.float.toInt` |
 | `round() -> Float` |  |  |  | `machine` |
 | `abs() -> Float` |  |  |  | `machine` |
 | `sqrt() -> Float` |  |  |  | `machine` |

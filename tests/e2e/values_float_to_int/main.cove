@@ -46,26 +46,33 @@ use console.println
 /// largest convertible float changes nothing, and adding `1024.0` reaches the
 /// first one that refuses.
 ///
-/// # The refusal quotes the value in a notation Cove itself does not use
+/// # The refusal quotes the value as Cove renders it
 ///
-/// This is the thing the file exists to record, and it is not a rounding
-/// detail. The message is built by Rust's `{}`, which prints the shortest
-/// decimal that reads back as the same double. `cove_runtime::value`'s
-/// `write_float` prints an *integral* float with `{:.1}`, which is the exact
-/// value. Every float outside `Int`'s range is integral, so the two never
-/// agree there, and `Float.format(0)` is a third answer again. The `quote.*`
-/// rows print all three of the same value on one line:
+/// This is the thing the file was written to record. While the operation was
+/// Rust, the message was built by Rust's `{}`, which prints the shortest
+/// decimal that reads back as the same double, where Cove's interpolation
+/// prints an *integral* float's exact value and `.0`. Every float outside
+/// `Int`'s range is integral, so the two never agreed there, and
+/// `Float.format(0)` is a third answer again. The `quote.*` rows print all
+/// three of the same value on one line, and until issue #432 read:
 ///
 /// ```text
 /// quote.over 9223372036854775808.0 9223372036854775808 Err(... `9223372036854776000` ...)
 /// ```
 ///
-/// A Cove program can reach the first two and not the third. That is why
-/// those rows are here rather than in a comment, and it is the fact any
-/// reimplementation of this operation above the runtime has to answer.
+/// A Cove program could reach the first two and not the third. Issue #432
+/// answered it by quoting the value with Cove's own `{value}` — ADR 0071
+/// records the change as intentional — so the third column now repeats the
+/// first:
 ///
-/// `quote.inf` is the row where all of them agree, which is what says the
-/// disagreement is about the *finite* refusal and not about the wording.
+/// ```text
+/// quote.over 9223372036854775808.0 9223372036854775808 Err(... `9223372036854775808.0` ...)
+/// ```
+///
+/// Those rows, and every other finite refusal in this file, are the only
+/// lines of its golden that the migration changed. `quote.inf` is the row
+/// where all three always agreed, which is what says the change is about the
+/// *finite* refusal and not about the wording.
 ///
 /// # What a Cove program cannot ask
 ///
@@ -201,10 +208,10 @@ fn range() -> Result<Unit, Error> {
 /// The same value rendered three ways on one line, where only two of the
 /// three are reachable from Cove.
 ///
-/// Column one is string interpolation, which is `write_float`; column two is
-/// `Float.format(0)`; column three is the refusal, which is Rust's `{}`. For
-/// every finite operand outside the range the three disagree, and `quote.inf`
-/// is the row where they do not.
+/// Column one is string interpolation; column two is `Float.format(0)`;
+/// column three is the refusal, which quotes the value as column one does
+/// since issue #432 and in Rust's `{}` before it. `quote.inf` is the row where
+/// the three have always agreed.
 fn quoting() -> Result<Unit, Error> {
   let over = 9223372036854775808.0
   let under = -9223372036854777856.0

@@ -215,7 +215,8 @@ pub(crate) fn call(
         // radix where the ten was. `Int` has no arm here now.
 
         // ---- Float -------------------------------------------------------
-        Intrinsic::FloatToInt => scalar::float_to_int(machine, frame, dest),
+        // `Float.toInt` is `std.float.toInt`, one `Inst::FloatTruncate` and
+        // its three refusals in Cove (issue #432, ADR 0071).
         // `Float.format` is `std.float.format`, exact decimal in Cove.
         Intrinsic::FloatParse => scalar::float_parse(machine, frame, dest),
         // `Bool` has no operations: the schema gives it none beyond
@@ -602,12 +603,12 @@ mod tests {
         let payload = match (receiver, operation) {
             ("Array" | "Vector", "get" | "set" | "pop" | "remove") => inside(),
             ("String", "indexOf") => ints(),
-            ("Int", "parse" | "parseRadix") | ("Float", "toInt") => ints(),
+            ("Int", "parse" | "parseRadix") => ints(),
             ("Float", "parse") => word_layout(program, Repr::Float),
             _ => None,
         };
         let (family, carrier) = match (receiver, operation) {
-            ("Int", "parse" | "parseRadix") | ("Float", "parse" | "toInt") => ("Result", "Ok"),
+            ("Int", "parse" | "parseRadix") | ("Float", "parse") => ("Result", "Ok"),
             _ => ("Option", "Some"),
         };
         payload
@@ -774,8 +775,8 @@ mod tests {
     // **There is no sample left to write it with, and that is a finding rather
     // than a gap.** An alias needs an answer whose slot can be an operand's
     // slot, which needs an operand of the answer's own kind, and no surviving
-    // signature has one: `Float.format` answers a `String` over a `Float`,
-    // `Float.parse` and `Float.toInt` answer a `Result`, and
+    // signature has one: `Float.format` answered a `String` over a `Float`,
+    // `Float.parse` answers a `Result` as `Float.toInt` did, and
     // `String.refuseByteRange` answered nothing until issue #432, as
     // `Value.admitKey` did until ADR 0068's Phase 4c.
     // (`Value.renderInto`, which appended, stood here until ADR 0068's Phase

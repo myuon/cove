@@ -275,7 +275,7 @@
         {"name": "parse", "signature": "parse(text: String) -> Result<Float, Error>", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Result<Float, Error>", "implementedBy": "machine", "host": false}
       ],
       "methods": [
-        {"name": "toInt", "signature": "toInt() -> Result<Int, Error>", "generics": [], "params": [], "variadic": false, "result": "Result<Int, Error>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "toInt", "signature": "toInt() -> Result<Int, Error>", "generics": [], "params": [], "variadic": false, "result": "Result<Int, Error>", "mutating": false, "implementedBy": "std.float.toInt", "host": false},
         {"name": "round", "signature": "round() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "abs", "signature": "abs() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "sqrt", "signature": "sqrt() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},

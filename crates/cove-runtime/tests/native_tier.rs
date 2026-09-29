@@ -2181,11 +2181,26 @@ fn a_float_square_root_runs_as_machine_code() {
 ///   next double below it, does not. Those four are the whole edge of the
 ///   range, which is asymmetric.
 /// - `1e30` and `±MAX` are far outside it.
+///
+/// Since issue #432 the conversion is `std.float.toInt` over
+/// `Inst::FloatTruncate`, and `truncates` holds a call of it rather than an
+/// `intrinsic-call`: the refusals are Cove, compiled too, so nothing crosses
+/// back to the VM on any row. The finite refusal quotes the value as Cove
+/// renders it — `9223372036854775808.0` where Rust's `{}` said
+/// `9223372036854776000` — which is ADR 0071's intentional change and the
+/// only one these rows saw.
 #[test]
 fn a_float_truncation_is_reached_from_machine_code() {
     on_each_tier(&["truncates"], &["callsTruncates"]);
+    let names = compiled_names();
+    for name in ["std.float.toInt", "std.float.toIntRefused"] {
+        assert!(
+            names.contains(&name.to_string()),
+            "`{name}` is meant to be compiled, and the tier took {names:?}"
+        );
+    }
 
-    const MAX: &str = "179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const MAX: &str = "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0";
     let range =
         |x: &str| format!("Err(`Float.toInt` cannot convert `{x}`, which is outside Int's range)");
     for (x, expected) in [
@@ -2208,13 +2223,13 @@ fn a_float_truncation_is_reached_from_machine_code() {
             "Err(`Float.toInt` cannot convert `-inf`, which has no truncation)".to_string(),
         ),
         (9223372036854774784.0, "Ok(9223372036854774784)".to_string()),
-        (9223372036854775808.0, range("9223372036854776000")),
+        (9223372036854775808.0, range("9223372036854775808.0")),
         (
             -9223372036854775808.0,
             "Ok(-9223372036854775808)".to_string(),
         ),
-        (-9223372036854777856.0, range("-9223372036854778000")),
-        (1.0e30, range("1000000000000000000000000000000")),
+        (-9223372036854777856.0, range("-9223372036854777856.0")),
+        (1.0e30, range("1000000000000000019884624838656.0")),
         (f64::MAX, range(MAX)),
         (f64::MIN, range(&format!("-{MAX}"))),
     ] {

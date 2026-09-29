@@ -1415,6 +1415,17 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.float",
         function: "format",
     },
+    // `Float.toInt` was `Intrinsic::FloatToInt` — `f64::trunc` and three
+    // refusals worded in Rust — until issue #432. It is one
+    // `core.floatTruncate`, ADR 0064's checked typed conversion, and the
+    // three sentences in Cove on the path that refuses (ADR 0071).
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "toInt",
+        module: "std.float",
+        function: "toInt",
+    },
     // `Duration.nanos` is not here: it is the one primitive left, and both
     // its forms — the reader and the builder — stay in the machine. Each of
     // its five neighbours is bound twice, once as the method that reads it

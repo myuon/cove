@@ -322,12 +322,20 @@ fn the_run_writes_the_recording_a_run_writes() {
     // literal that added: `std.dynamic.unclassified`'s sentence, 130 bytes,
     // with which a walk refuses a kind none of its arms names. Its rule and
     // help are the empty string, which the program already held.
+    //
+    // It is 1,786 since issue #432 made `Float.toInt` `std.float.toInt`, and
+    // the 24 words are the four literals `std.float.toIntRefused` builds its
+    // three sentences from, which `Intrinsic::FloatToInt` built in Rust: the
+    // whole `NaN` sentence, 57 bytes and nine words, and the three pieces the
+    // other two are interpolated between — `` `Float.toInt` cannot convert ` ``,
+    // 30 bytes; `` `, which has no truncation ``, 26; and `` `, which is
+    // outside Int's range ``, 31 — five words each.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1762), capacity_words: Some(1762) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1786), capacity_words: Some(1786) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

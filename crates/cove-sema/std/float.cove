@@ -1281,3 +1281,72 @@ fn above(
   }
   return false
 }
+
+/// This number truncated toward zero, or the `Err` that says why no `Int` is.
+///
+/// # What it answers
+///
+/// - **Toward zero, and not down.** `(2.7).toInt()` is `Ok(2)` and
+///   `(-2.7).toInt()` is `Ok(-2)`; `(-0.9).toInt()` is `Ok(0)`, where a floor
+///   would answer `-1`.
+/// - **`Ok` exactly when `-2^63 <= value < 2^63`.** `-2^63` converts, to
+///   `Int`'s least value, and the largest `Float` that converts is
+///   `2^63 - 1024`, because `2^63 - 1` is not a `Float` — the literal
+///   `9223372036854775807.0` *is* `2^63`. `-0.0` and every subnormal are
+///   `Ok(0)`: an `Int` has one zero.
+/// - **Three refusals, named apart, in this order**: `NaN`, which is not a
+///   number; `inf` and `-inf`, which have no truncation; and every finite
+///   value outside the range. Each is an `Err`, not a stopped run — which of
+///   them it is was the data's, not the call's.
+///
+/// # How
+///
+/// One `core.floatTruncate`, ADR 0064's checked typed conversion: an
+/// `Inst::FloatTruncate` that answers the integer and whether there is one,
+/// and the `Option` the lowering builds from the two. The success path is that
+/// and an `Ok`; which of the three refusals applies is asked only in
+/// [`toIntRefused`], after the conversion has said there is one, because
+/// telling them apart costs comparisons that a value that converts has no
+/// reason to pay.
+///
+/// It was `Intrinsic::FloatToInt`, `f64::trunc` and three `format!`s in Rust,
+/// until issue #432 moved it here (ADR 0071). The range sentence quotes the
+/// value as Cove renders a `Float` — `9223372036854775808.0` — where the Rust
+/// arm quoted it in Rust's shortest round-trip notation,
+/// `9223372036854776000`; that is the one thing about the operation the move
+/// changed, and it changed on purpose. `tests/e2e/values_float_to_int` is the
+/// corpus it is held to, and `values_float_to_int_native` the same rows on the
+/// native tier.
+export fn toInt(value: Float) -> Result<Int, Error> {
+  match core.floatTruncate(value) {
+    Some(whole) => return Ok(whole)
+    None => return toIntRefused(value)
+  }
+}
+
+/// The `Err` that says why `value` has no truncation an `Int` holds, which
+/// [`toInt`] has already found that it has not.
+///
+/// A function of its own for `std.int.refuseInt`'s reason: the interpolation
+/// that quotes the value is the only allocation in the operation, and a body
+/// that inlined it would carry it where the conversion succeeds as well. The
+/// three are asked in the order the Rust arm asked them, and each branch
+/// returns its sentence.
+fn toIntRefused(value: Float) -> Result<Int, Error> {
+  if value != value {
+    return Err(Error(
+      "`Float.toInt` cannot convert `NaN`, which is not a number",
+    ))
+  }
+  if value == 1.0 / 0.0 {
+    return Err(Error(
+      "`Float.toInt` cannot convert `{value}`, which has no truncation",
+    ))
+  }
+  if value == -1.0 / 0.0 {
+    return Err(Error(
+      "`Float.toInt` cannot convert `{value}`, which has no truncation",
+    ))
+  }
+  return Err(Error("`Float.toInt` cannot convert `{value}`, which is outside Int's range"))
+}

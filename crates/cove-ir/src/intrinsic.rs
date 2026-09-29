@@ -44,7 +44,12 @@ pub enum Intrinsic {
     // `std.stringbuilder`'s `appendRange` had found wrong, until issue #432
     // made its five sentences `std.stringbuilder.byteRangeRefusalMessage` and
     // its raise ADR 0067's `core.refuse`.
-    FloatToInt,
+    // `FloatToInt` stood here, `f64::trunc` and three refusals worded in
+    // Rust, until issue #432 made it `std.float.toInt`: a Cove body over
+    // `core.floatTruncate`, which is `Inst::FloatTruncate` — ADR 0064's
+    // checked typed conversion, answering an integer and whether there is
+    // one — and the three sentences in Cove on the path that refuses
+    // (ADR 0071).
     FloatParse,
 }
 
@@ -53,7 +58,7 @@ pub enum Intrinsic {
 /// What [`Intrinsic::from_names`] searches and what this module's own tests
 /// walk to check the table has no gap and no duplicate — the two ways a hand-
 /// written list like this one goes wrong.
-pub const ALL: &[Intrinsic] = &[Intrinsic::FloatToInt, Intrinsic::FloatParse];
+pub const ALL: &[Intrinsic] = &[Intrinsic::FloatParse];
 
 /// How many variants there are, as the width of a per-variant table.
 ///
@@ -80,7 +85,6 @@ impl Intrinsic {
     /// `std.dynamic.equals`.)
     pub const fn receiver(self) -> &'static str {
         match self {
-            Intrinsic::FloatToInt => "Float",
             Intrinsic::FloatParse => "Float",
         }
     }
@@ -88,7 +92,6 @@ impl Intrinsic {
     /// The operation's own name: `split`, `join`, `parse`.
     pub const fn operation(self) -> &'static str {
         match self {
-            Intrinsic::FloatToInt => "toInt",
             Intrinsic::FloatParse => "parse",
         }
     }
@@ -140,7 +143,7 @@ impl Intrinsic {
     /// category to be.
     pub const fn category(self) -> Category {
         match self {
-            Intrinsic::FloatToInt | Intrinsic::FloatParse => Category::Scalar,
+            Intrinsic::FloatParse => Category::Scalar,
             // `String.refuseByteRange` was the last `Category::Text`, until
             // issue #432 made it Cove.
             // `Value.admitKey` was the last `Category::Value`, a rule over
@@ -163,7 +166,6 @@ impl Intrinsic {
             Signature { operands, result }
         }
         match self {
-            Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
             Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
         }
     }
@@ -175,8 +177,9 @@ impl Intrinsic {
     /// Assigned by reading the VM arm each intrinsic dispatches to in
     /// `cove-runtime`'s `vm::intrinsics`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
-    /// differently, the way [`Intrinsic::FloatToInt`] reads nothing past its
-    /// one word and [`Intrinsic::FloatParse`] reads a whole `String`.
+    /// differently, the way `Float.toInt` read nothing past its one word
+    /// while it was here and [`Intrinsic::FloatParse`] reads a whole
+    /// `String`.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // `MAY_RAISE` is language-level failure only (#378, Q5.3). An arm no
@@ -223,7 +226,7 @@ impl Intrinsic {
             // which is that decode run backwards over a `std.stringbuilder`
             // run. It was the last `String` arm here whose operand was a
             // *word*: it read nothing off the heap and what it did was
-            // allocate, which is `Float.toInt`'s and `Float.format`'s shape
+            // allocate, which was `Float.toInt`'s and `Float.format`'s shape
             // and not any other `String` operation's. Every `String` arm left
             // below reads a receiver.
             // The byte-range refusal stood here, the one arm that raised and
@@ -256,11 +259,9 @@ impl Intrinsic {
             // that takes as a test and for what it costs `cove-native`.
             //
             // The parser left reads a `String` receiver's bytes and allocates
-            // the message an `Err` carries, and `toInt` allocates the message
-            // its three refusals carry. Neither is proportional to anything
-            // past the one receiver or the
-            // one answer, which is short enough that this backend does not
-            // charge it as bulk work.
+            // the message an `Err` carries. It is not proportional to anything
+            // past the one receiver or the one answer, which is short enough
+            // that this backend does not charge it as bulk work.
             //
             // There were three parsers until issue #454's Step 4. `Int.parse`
             // left first, as `std.int.parse`: a `core.byteLength` and one
@@ -273,8 +274,10 @@ impl Intrinsic {
             // `Float.format` stood beside this, the last `Float` intrinsic that
             // built a `String`; it is `std.float.format` now, exact fixed-point
             // decimal over base-`10^9` limbs, refusing a digit count outside
-            // `0..=17` through ADR 0067's `core.refuse`.
-            Intrinsic::FloatToInt => allocate,
+            // `0..=17` through ADR 0067's `core.refuse`. `Float.toInt` stood
+            // beside it, allocating the message of each of its three
+            // refusals, until issue #432 made it `std.float.toInt` over
+            // `Inst::FloatTruncate` (ADR 0071).
             // `==` on two erased values stood here, a walk of both operands
             // together that allocated nothing and stopped the run past a
             // depth of 128. ADR 0068's Phase 2 made it `std.dynamic.equals`,
@@ -331,7 +334,6 @@ pub struct Signature {
 /// The layout an operand or an answer of an [`Intrinsic`] has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
-    Float,
     /// A `String`: one reference to a string object.
     Str,
     /// The `Result` whose `Ok` carries one of these, and whose `Err` carries
@@ -343,24 +345,25 @@ pub enum Class {
     // deleted them once no signature named any of them: a class nothing
     // declares is a verifier arm nothing reaches. `Unit` and `Int` went for
     // the same reason with issue #432: `String.refuseByteRange`'s answer of
-    // nothing and its two offsets were the last of each.
+    // nothing and its two offsets were the last of each. `Float` went with
+    // the same issue's next migration: `Float.toInt`'s operand was the last
+    // one, and it is `std.float.toInt` now.
 }
 
 /// What a [`Class::ResultOf`] carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Carried {
-    Int,
+    // `Int` stood here, what `Float.toInt`'s `Ok` carried, until issue #432
+    // made that operation `std.float.toInt`.
     Float,
 }
 
 impl fmt::Display for Class {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let carried = |carried: &Carried| match carried {
-            Carried::Int => "Int",
             Carried::Float => "Float",
         };
         match self {
-            Class::Float => write!(f, "Float"),
             Class::Str => write!(f, "String"),
             Class::ResultOf(inner) => write!(f, "Result<{}, Error>", carried(inner)),
         }
@@ -466,7 +469,7 @@ mod tests {
     /// operation named after a method never does.
     #[test]
     fn the_intrinsic_set_only_shrinks() {
-        const MIGRATED_BUT_STILL_HERE: &[&str] = &["Float.toInt", "Float.parse"];
+        const MIGRATED_BUT_STILL_HERE: &[&str] = &["Float.parse"];
 
         let here: Vec<String> = ALL.iter().map(|one| one.to_string()).collect();
         let allowed: Vec<&str> = MIGRATED_BUT_STILL_HERE.to_vec();
@@ -517,7 +520,7 @@ mod tests {
         // match has to name every one of them.
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
-                Intrinsic::FloatToInt | Intrinsic::FloatParse => 1,
+                Intrinsic::FloatParse => 1,
             }
         }
         let variants: usize = ALL.iter().map(|intrinsic| count(*intrinsic)).sum();
@@ -574,7 +577,6 @@ mod tests {
     #[test]
     fn display_prints_receiver_dot_operation() {
         assert_eq!(Intrinsic::FloatParse.to_string(), "Float.parse");
-        assert_eq!(Intrinsic::FloatToInt.to_string(), "Float.toInt");
     }
 
     #[test]
