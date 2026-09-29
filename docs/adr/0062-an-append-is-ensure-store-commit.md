@@ -41,6 +41,13 @@
   Adoption section names which stage each pull request is, what the series
   measured end to end, where the implementation decided differently from the
   Decision above, and what is left open
+- Superseded in part by
+  [ADR 0070](0070-a-call-whose-continuation-is-doomed-may-be-expanded.md):
+  its "each refusal calls `core.refuseByteRange`, an `IntrinsicCall` that
+  always raises — an intrinsic rather than a Cove call, so the body remains an
+  inlinable leaf". Each refusal is now a call of
+  `std.stringbuilder.byteRangeRefusalMessage` under `core.refuse`, and the body
+  is still expanded because that call's continuation is doomed
 
 ## Context
 
