@@ -1,0 +1,18 @@
+error[cove::runtime]: `from` is `4` and `to` is `3`, so this range runs backwards
+ --> <e2e>/fail_stringbuilder_range_backwards/main.cove:6:3
+  |
+6 |   out.appendSlice(text, from, to)
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> std/stringbuilder.cove:239:5
+    |
+239 |     core.refuseByteRange(text, from, to)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+   --> std/stringbuilder.cove:133:5
+    |
+133 |     appendRange(self.buffer, text, from, to)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here, in the standard library
+  --> <e2e>/fail_stringbuilder_range_backwards/main.cove:16:3
+   |
+16 |   copy(var out, "héllo", 4, 3)
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here
+1 error(s)

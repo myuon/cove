@@ -1,0 +1,14 @@
+error[cove::runtime]: `from` is `2`, which is inside a character rather than at the start of one
+  --> <e2e>/fail_stringbuilder_range_from_inside/main.cove:17:5
+   |
+17 |     out.appendSlice("héllo", turn * 2, 5)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> std/stringbuilder.cove:250:9
+    |
+250 |         core.refuseByteRange(text, from, to)
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+   --> std/stringbuilder.cove:133:5
+    |
+133 |     appendRange(self.buffer, text, from, to)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here, in the standard library
+1 error(s)

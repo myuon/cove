@@ -1,0 +1,18 @@
+use std.stringbuilder.StringBuilder
+
+/// Appends `text` from `from` up to `to`. Not the standard library: an ordinary
+/// Cove function with a caller, between `main` and the library body that fails.
+fn copy(var out: StringBuilder, text: String, from: Int, to: Int) {
+  out.appendSlice(text, from, to)
+}
+
+/// Appends a range that ends past the end of the string, which
+/// `StringBuilder.appendSlice` refuses with the second of `String.sliceBytes`'
+/// sentences: `to` is not a byte offset into this string. The range runs
+/// forwards and starts at a character, so the question that fails is the third
+/// the library asks, and the sentence it answers with is the second.
+export fn main() -> Result<Unit, Error> {
+  var out = StringBuilder.withCapacity(4)
+  copy(var out, "héllo", 4, 9)
+  Ok(())
+}

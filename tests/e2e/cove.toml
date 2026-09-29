@@ -124,6 +124,26 @@ allow = ["console"]
 entry = "fail_stringbuilder_invalid_utf8.main"
 allow = ["console"]
 
+[run.fail_stringbuilder_range_backwards]
+entry = "fail_stringbuilder_range_backwards.main"
+allow = ["console"]
+
+[run.fail_stringbuilder_range_from]
+entry = "fail_stringbuilder_range_from.main"
+allow = ["console"]
+
+[run.fail_stringbuilder_range_from_inside]
+entry = "fail_stringbuilder_range_from_inside.main"
+allow = ["console"]
+
+[run.fail_stringbuilder_range_to]
+entry = "fail_stringbuilder_range_to.main"
+allow = ["console"]
+
+[run.fail_stringbuilder_range_to_inside]
+entry = "fail_stringbuilder_range_to_inside.main"
+allow = ["console"]
+
 [run.fail_stringbuilder_slice_range]
 entry = "fail_stringbuilder_slice_range.main"
 allow = ["console"]

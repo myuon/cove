@@ -1760,7 +1760,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// each program carrying its own copy of the standard library into the
 /// survey. They are there because `ScopeCancel`,
 /// `Cancel` and `Settled` had producers and no program that executed them.
-const FORWARDABLE_COPIES: usize = 6736;
+///
+/// **6,816 since issue #432's range corpus added five refusal programs**, a
+/// rise of 80 that is all program and no lowering: the change that added them
+/// touched no compiler, and with the five `fail_stringbuilder_range_*` cases
+/// held out the 257 before them answer 6,736 exactly. `…_range_from` alone
+/// is 16 and the five together are 80 — each is a `main` of a few lines
+/// carrying its own copy of the standard library into the survey. They are
+/// there to pin what `StringBuilder.appendSlice` refuses, and where, before
+/// `core.refuseByteRange` is replaced.
+const FORWARDABLE_COPIES: usize = 6816;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

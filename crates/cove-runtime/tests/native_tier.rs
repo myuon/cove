@@ -868,6 +868,22 @@ export fn callsBuildsASlice(from: Int, to: Int) -> String {
   buildsASlice(from, to)
 }
 
+/// `buildsASlice` over a string its caller hands it, so that the empty string
+/// — where the only offset is `0` and there is no byte to look at — can be
+/// asked about in a compiled frame too.
+export fn buildsASliceOf(text: String, from: Int, to: Int) -> String {
+  var out = StringBuilder.withCapacity(2 + counts(0))
+  out.append(\"<\")
+  out.appendSlice(text, from, to)
+  out.finish()
+}
+
+/// A refused caller, so the refusal crosses the boundary.
+export fn callsBuildsASliceOf(text: String, from: Int, to: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  buildsASliceOf(text, from, to)
+}
+
 /// One byte appended and the run finished, in a compiled frame.
 ///
 /// `appendByte` can put anything a byte can hold into the run, so `finish` is
@@ -3212,6 +3228,76 @@ fn an_append_slice_refuses_a_range_from_a_compiled_frame_in_the_vm_s_words() {
         assert_eq!(
             both.native, both.vm,
             "the two tiers answer the same thing for {from}..{to}"
+        );
+    }
+}
+
+/// The edges of [`an_append_slice_refuses_a_range_from_a_compiled_frame_in_the_vm_s_words`]:
+/// the most negative `from`, ranges that are wrong in several ways at once, and
+/// the empty string.
+///
+/// The several-ways rows pin **precedence**, which is two orders and not one.
+/// `appendRange` asks its five questions in `sliceBytes`' order — below, above
+/// the end, backwards, then each boundary — and stops at the first that fails;
+/// the sentence it answers with is chosen by a *different* order, the one a
+/// reader asks in: is `from` an offset at all, is `to`, do they run forwards,
+/// does each begin a character. So `7..-1` fails the "backwards" question
+/// first and is told that `from` is outside the string, and a sentence that
+/// followed the question rather than the order would say something else. A
+/// replacement for the sentence has to keep both, on both tiers.
+#[test]
+fn an_append_slice_refusal_s_edges_and_precedence_are_the_vm_s_on_both_tiers() {
+    on_each_tier(&["buildsASliceOf"], &["callsBuildsASliceOf"]);
+    let outside = |name: &str, at: i64, length: i64| {
+        Err(format!(
+            "`{name}` is `{at}`, and a byte offset into this string is 0 to {length}"
+        ))
+    };
+    let inside = |name: &str, at: i64| {
+        Err(format!(
+            "`{name}` is `{at}`, which is inside a character rather than at the start of one"
+        ))
+    };
+    let backwards = |from: i64, to: i64| {
+        Err(format!(
+            "`from` is `{from}` and `to` is `{to}`, so this range runs backwards"
+        ))
+    };
+    // `héllo` is h é l l o, so the boundaries are 0, 1, 3, 4, 5 and 6, and 2 is
+    // inside the `é`.
+    for (text, from, to, said) in [
+        ("héllo", i64::MIN, 1i64, outside("from", i64::MIN, 6)),
+        ("héllo", i64::MIN, i64::MIN, outside("from", i64::MIN, 6)),
+        ("héllo", 0, i64::MIN, outside("to", i64::MIN, 6)),
+        ("héllo", 0, i64::MAX, outside("to", i64::MAX, 6)),
+        // Every way at once: `from` past the end, `to` below it, backwards.
+        ("héllo", 7, -1, outside("from", 7, 6)),
+        // Past the end and inside a character: the end is told about first.
+        ("héllo", 2, 9, outside("to", 9, 6)),
+        // Backwards with both ends inside the string, and `to` inside the `é`.
+        ("héllo", 4, 2, backwards(4, 2)),
+        // Backwards and `from` inside a character: backwards is told first.
+        ("héllo", 2, 1, backwards(2, 1)),
+        // Both ends inside the same character: `from` is told first.
+        ("héllo", 2, 2, inside("from", 2)),
+        // The empty string, whose only offset is `0` and which has no bytes.
+        ("", 0, 0, Ok("<".to_string())),
+        ("", 0, 1, outside("to", 1, 0)),
+        ("", -1, 0, outside("from", -1, 0)),
+        ("", 1, 0, outside("from", 1, 0)),
+        ("", 1, 1, outside("from", 1, 0)),
+    ] {
+        let both = both(
+            "callsBuildsASliceOf",
+            vec![Value::string(text), Value::int(from), Value::int(to)],
+        );
+        assert_eq!(
+            both.vm, said,
+            "the encoded tier's own words for {text:?} {from}..{to}"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "the two tiers answer the same thing for {text:?} {from}..{to}"
         );
     }
 }
