@@ -202,6 +202,20 @@ export fn callsTruncates(x: Float, n: Int) -> Result<Int, Error> {
   truncates(x, n)
 }
 
+/// `Float.parse`, so that the parse runs in compiled code.
+///
+/// `counts(n)` is `magnitudes`' guard and is here for its reason.
+export fn parses(text: String, n: Int) -> Result<Float, Error> {
+  let guard = counts(n)
+  Float.parse(text)
+}
+
+/// A refused caller, so the parse is reached across the boundary.
+export fn callsParses(text: String, n: Int) -> Result<Float, Error> {
+  let nothing = Shared(0).lock(fn(v) { v })
+  parses(text, n)
+}
+
 /// A refused caller of `stringbuilder.truncatesByCore`, the probe's checked
 /// conversion.
 export fn callsTruncatesByCore(x: Float, n: Int) -> Option<Int> {
@@ -2247,6 +2261,63 @@ fn a_float_truncation_is_reached_from_machine_code() {
         assert_eq!(
             answered.tiers.native_to_vm, 0,
             "and nothing went back the other way: {:?}",
+            answered.tiers
+        );
+    }
+}
+
+/// `Float.parse` is reached from compiled code, and answers what the VM
+/// answers — and what Rust's `str::parse::<f64>` answers.
+///
+/// The rows issue #432's migration of `Intrinsic::FloatParse` is held to on
+/// this tier, landed before it for ADR 0064's Decision 6. `parses` is compiled
+/// and the parse is the one thing in it that is not a guard, so every row runs
+/// it from machine code. Each row's expected answer is not written here: it is
+/// `str::parse::<f64>` of the same text, rendered as the runtime renders a
+/// `Result<Float, Error>`, which is an oracle the subject does not ship once
+/// the parse is Cove.
+///
+/// - `109.00`, `86.50` and `7` are cq's shapes: short, inside Clinger's box.
+/// - `-0` keeps its sign, and `-1e-400` reaches the same zero by underflow.
+/// - `1e23` and `9007199254740993` are one step outside the box, in the
+///   exponent and in the significand; `1.2345678901234567` is a 17-digit
+///   shortest round-trip whose significand is past `2^53`.
+/// - `2.2250738585072011e-308` is the subnormal side of the midpoint below the
+///   least normal value, and `5e-324` the least subnormal.
+/// - `1e400` overflows, `-Infinity` and `nAn` are words, and `1.0e` is a
+///   refusal quoting its text.
+#[test]
+fn a_float_parse_is_reached_from_machine_code() {
+    on_each_tier(&["parses"], &["callsParses"]);
+    for text in [
+        "109.00",
+        "86.50",
+        "7",
+        "-0",
+        "-1e-400",
+        "1e23",
+        "9007199254740993",
+        "1.2345678901234567",
+        "2.2250738585072011e-308",
+        "5e-324",
+        "1e400",
+        "-Infinity",
+        "nAn",
+        "1.0e",
+    ] {
+        let expected = match text.parse::<f64>() {
+            Ok(x) => Value::ok(Value::float(x)).to_string(),
+            Err(_) => Value::err(Value::error(format!("`{text}` is not a Float"))).to_string(),
+        };
+        let answered = both("callsParses", vec![Value::string(text), Value::int(0)]);
+        assert_eq!(answered.vm, Ok(expected), "Float.parse({text:?}) on the VM");
+        assert_eq!(
+            answered.native, answered.vm,
+            "and compiled code answers the same: Float.parse({text:?})"
+        );
+        assert!(
+            answered.tiers.vm_to_native >= 1,
+            "the crossing into the compiled parse was taken: {:?}",
             answered.tiers
         );
     }

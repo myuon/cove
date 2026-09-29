@@ -1810,7 +1810,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// of the counted copies in the standard library before and after names that
 /// one function and no other; the copies into a `return` did not move
 /// (5,935).
-const FORWARDABLE_COPIES: usize = 7358;
+///
+/// **7,392 since issue #432's `Float.parse` corpus added one parity program**,
+/// a rise of 34 that is all program and no lowering: the change touched no
+/// compiler, and with `values_float_parse_native` held out the 263 before it
+/// answer 7,358 exactly. It is `values_float_parse`'s 172 rows again, with
+/// every parse moved into one small recursive helper the native tier
+/// compiles, carrying its own copy of the standard library into the survey,
+/// and it is there so that the native tier really executes `Float.parse`
+/// before `Intrinsic::FloatParse` is replaced.
+const FORWARDABLE_COPIES: usize = 7392;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
