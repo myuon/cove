@@ -102,6 +102,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `identitySet` | `core.identitySet() -> IdentitySet` |
 | `identityEnter` | `core.identityEnter(set: IdentitySet, a: DynamicView, b: DynamicView) -> Bool` |
 | `identityLeave` | `core.identityLeave(set: IdentitySet, a: DynamicView, b: DynamicView) -> Unit` |
+| `floatTruncate` | `core.floatTruncate(x: Float) -> Option<Int>` |
 
 ## Builtin types
 

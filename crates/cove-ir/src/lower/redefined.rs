@@ -473,6 +473,7 @@ fn listed(inst: &Inst) -> bool {
             | Inst::FloatMinMax { .. }
             | Inst::FloatRound { .. }
             | Inst::FloatSqrt { .. }
+            | Inst::FloatTruncate { .. }
             | Inst::Copy { .. }
             | Inst::LoadField { .. }
             | Inst::LoadElem { .. }

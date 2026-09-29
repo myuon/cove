@@ -510,6 +510,12 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
+                Inst::FloatTruncate { dst, ok, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                    poison(&mut objects, ok, 1);
+                    poison(&mut funcs, ok, 1);
+                }
                 Inst::RunLoad { dst, .. } | Inst::Len { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
@@ -959,6 +965,27 @@ impl Check<'_> {
             | Inst::FloatSqrt { dst, a } => {
                 self.expect(at, a, &[Repr::Float]);
                 self.expect(at, dst, &[Repr::Float]);
+            }
+            // ADR 0064's checked typed conversion: one `Float` in, and two
+            // scalar answers out — an `Int` and the `Bool` that says whether
+            // it is one. **That is all it is checked for.** It writes no
+            // `Option`, so there is no layout to name and no case to ask
+            // about; the `Option` `core.floatTruncate` answers is built from
+            // the two words by instructions that know how an enum is laid
+            // out, and this is not one of them. `Int` alone for the integer,
+            // as `Inst::DynKind`'s count is: a truncation is never a
+            // `Duration`. The two answers are two slots, because a tier
+            // writes both and a slot cannot hold two answers.
+            Inst::FloatTruncate { dst, ok, a } => {
+                self.expect(at, a, &[Repr::Float]);
+                self.expect(at, dst, &[Repr::Int]);
+                self.expect(at, ok, &[Repr::Bool]);
+                if dst == ok {
+                    self.fault(
+                        at,
+                        format!("writes its integer and its flag to the same slot, {dst}"),
+                    );
+                }
             }
             // The other one, and total for the same reason: every pairing of
             // two bit patterns has an answer and the answer is one of them.
@@ -2753,6 +2780,7 @@ fn admitted_in_a_window(inst: &Inst, written: bool) -> bool {
                     | Inst::FloatMinMax { .. }
                     | Inst::FloatRound { .. }
                     | Inst::FloatSqrt { .. }
+                    | Inst::FloatTruncate { .. }
                     | Inst::LoadField { .. }
                     | Inst::LoadElem { .. }
                     | Inst::RunLoad { .. }
@@ -2983,6 +3011,45 @@ mod tests {
             identity_set_layout: IDENTITY,
             identity_table_layout: TABLE,
             ..Program::default()
+        }
+    }
+
+    /// `Inst::FloatTruncate` is held to its two scalar answers and its
+    /// operand, and to nothing else: an `Int` integer, a `Bool` flag, a
+    /// `Float` operand, and two different slots for the two answers.
+    ///
+    /// **It names no layout and no case**, and that is the decision this
+    /// case records (issue #432, ADR 0071): the `Option` `core.floatTruncate`
+    /// answers is built by the lowering from the two words, so there is no
+    /// `Option` here for the verifier to check — and a `Result` or an
+    /// `Option` in either answer's slot is refused as the non-scalar it is.
+    #[test]
+    fn a_checked_truncation_answers_two_scalars() {
+        let reprs = || vec![Repr::Float, Repr::Int, Repr::Bool, Repr::Float];
+        let truncating = |dst, ok, a| {
+            program(vec![function(
+                reprs(),
+                INT,
+                vec![Inst::FloatTruncate { dst, ok, a }, Inst::Return { src: 1 }],
+            )])
+        };
+        assert_eq!(faults(&truncating(1, 2, 0)), Vec::<String>::new());
+        for (dst, ok, a, wanted) in [
+            (3, 2, 0, "slot 3 holds float, but this wants int"),
+            (1, 3, 0, "slot 3 holds float, but this wants bool"),
+            (1, 2, 1, "slot 1 holds int, but this wants float"),
+            (
+                1,
+                1,
+                0,
+                "writes its integer and its flag to the same slot, 1",
+            ),
+        ] {
+            let found = faults(&truncating(dst, ok, a));
+            assert!(
+                found.iter().any(|fault| fault.contains(wanted)),
+                "truncate s{dst} s{ok} s{a}: wanted `{wanted}`, found {found:?}"
+            );
         }
     }
 

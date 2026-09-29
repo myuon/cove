@@ -202,6 +202,13 @@ export fn callsTruncates(x: Float, n: Int) -> Result<Int, Error> {
   truncates(x, n)
 }
 
+/// A refused caller of `stringbuilder.truncatesByCore`, the probe's checked
+/// conversion.
+export fn callsTruncatesByCore(x: Float, n: Int) -> Option<Int> {
+  let nothing = Shared(0).lock(fn(v) { v })
+  stringbuilder.truncatesByCore(x, n)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -1636,6 +1643,17 @@ export fn walksAllOf(n: Int) -> Int {
 }
 
 /// `appendByte`, `depth` frames down a recursion no expansion can reach.
+/// `core.floatTruncate`, compiled, before anything in the standard library
+/// stands on it: issue #432's `Inst::FloatTruncate` and the `Option` the
+/// lowering builds from its two answers. It calls itself once, so that it is
+/// not a leaf and stays a call of its own.
+export fn truncatesByCore(x: Float, depth: Int) -> Option<Int> {
+  if depth > 0 {
+    return truncatesByCore(x, depth - 1)
+  }
+  core.floatTruncate(x)
+}
+
 export fn appendByteBelow(var out: StringBuilder, value: Int, depth: Int) {
   if depth > 0 {
     appendByteBelow(var out, value, depth - 1)
@@ -2205,6 +2223,65 @@ fn a_float_truncation_is_reached_from_machine_code() {
         assert_eq!(
             answered.native, answered.vm,
             "and compiled code answers the same: ({x}).toInt()"
+        );
+        assert!(
+            answered.tiers.vm_to_native >= 1,
+            "the crossing into the compiled conversion was taken: {:?}",
+            answered.tiers
+        );
+        assert_eq!(
+            answered.tiers.native_to_vm, 0,
+            "and nothing went back the other way: {:?}",
+            answered.tiers
+        );
+    }
+}
+
+/// `core.floatTruncate` runs as machine code, and answers what the VM answers.
+///
+/// Issue #432's `Inst::FloatTruncate` and the `Option` the lowering builds
+/// from its two answers, reached from a standard-library body the tier
+/// compiles — `PROBE`'s `truncatesByCore` — before anything in the library
+/// itself stands on it. `cove-native`'s `TRUNCATIONS` holds the template arm
+/// to the bit and `vm::exec` holds the encoded arm to the same rows; this is
+/// the two tiers against each other on real Cove, through the `Some` and the
+/// `None` the instruction does not know how to build.
+#[test]
+fn a_checked_float_truncation_runs_as_machine_code() {
+    let names = compiled_names();
+    assert!(
+        names.contains(&"std.stringbuilder.truncatesByCore".to_string()),
+        "the probe is meant to be compiled, and the tier took {names:?}"
+    );
+    on_each_tier(&[], &["callsTruncatesByCore"]);
+
+    for (x, expected) in [
+        (2.5f64, "Some(2)"),
+        (-2.5, "Some(-2)"),
+        (0.9, "Some(0)"),
+        (-0.9, "Some(0)"),
+        (-0.0, "Some(0)"),
+        (5.0e-324, "Some(0)"),
+        (f64::NAN, "None"),
+        (f64::INFINITY, "None"),
+        (f64::NEG_INFINITY, "None"),
+        (9223372036854774784.0, "Some(9223372036854774784)"),
+        (9223372036854775808.0, "None"),
+        (-9223372036854775808.0, "Some(-9223372036854775808)"),
+        (-9223372036854777856.0, "None"),
+        (1.0e30, "None"),
+        (f64::MAX, "None"),
+        (f64::MIN, "None"),
+    ] {
+        let answered = both("callsTruncatesByCore", vec![Value::float(x), Value::int(1)]);
+        assert_eq!(
+            answered.vm,
+            Ok(expected.to_string()),
+            "core.floatTruncate({x}) on the VM"
+        );
+        assert_eq!(
+            answered.native, answered.vm,
+            "and compiled code answers the same: core.floatTruncate({x})"
         );
         assert!(
             answered.tiers.vm_to_native >= 1,

@@ -1861,6 +1861,10 @@ impl CoreIntrinsicSchema {
 /// walk scans the first few pairs of its path with [`CORE_DYNAMIC_SAME_OBJECT`]
 /// and keeps the rest in a set, so that a chain of vectors is linear in its
 /// depth rather than the O(depth²) a scan of the whole path was.
+///
+/// The last is issue #432's: [`CORE_FLOAT_TRUNCATE`], ADR 0064's checked
+/// typed conversion, which `std.float.toInt` and `std.float`'s own
+/// renderers stand on.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_ENSURE,
@@ -1917,6 +1921,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_IDENTITY_SET,
     CORE_IDENTITY_ENTER,
     CORE_IDENTITY_LEAVE,
+    CORE_FLOAT_TRUNCATE,
 ];
 
 /// Every core intrinsic.
@@ -3311,6 +3316,33 @@ pub const CORE_IDENTITY_LEAVE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.floatTruncate(x: Float) -> Option<Int>`: `x` truncated toward zero,
+/// or `None` where no `Int` is that truncation.
+///
+/// ADR 0064's Decision 2 "checked typed conversion", and the whole of what
+/// `Float.toInt` needs beneath it: `Some` exactly when `-2^63 <= x < 2^63`,
+/// so a NaN, either infinity and every finite magnitude past the range are
+/// `None`, and **which of the three it was is the caller's to ask**, in Cove,
+/// on the path where it matters. `std.float.toInt` asks it to word its three
+/// refusals; `std.float`'s renderers ask it of a value they have already held
+/// inside the range, and never see `None`.
+///
+/// The lowering is one `Inst::FloatTruncate`, which answers an `Int` and a
+/// `Bool` — two scalar words and no `Option` — and then the `Some` or the
+/// `None` built from them with a branch on the flag and the instructions
+/// any enum construction is made of, so no instruction knows an `Option`'s
+/// layout (issue #432, ADR 0071).
+pub const CORE_FLOAT_TRUNCATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "floatTruncate",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "x",
+        ty: BuiltinType::Float,
+    }],
+    result: BuiltinType::Option(&BuiltinType::Int),
     fresh: false,
 };
 

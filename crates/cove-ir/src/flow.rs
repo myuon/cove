@@ -90,6 +90,11 @@ impl Inst {
             // entry writes them all: the table it may have allocated or grown,
             // and its answer.
             Inst::DynIdentitySet { dst } => f(dst, width(program.identity_set_layout)),
+            // A checked conversion's two answers, one word each.
+            Inst::FloatTruncate { dst, ok, .. } => {
+                f(dst, 1);
+                f(ok, 1);
+            }
             Inst::DynIdentityEnter { set, .. } => f(set, width(program.identity_set_layout)),
             Inst::Clear { slot, layout } => f(slot, width(layout)),
             Inst::Copy { dst, layout, .. }
@@ -208,6 +213,7 @@ impl Inst {
             | Inst::FloatMinMax { .. }
             | Inst::FloatRound { .. }
             | Inst::FloatSqrt { .. }
+            | Inst::FloatTruncate { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::CmpBranch { .. }

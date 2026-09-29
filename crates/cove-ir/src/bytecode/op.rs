@@ -1,4 +1,4 @@
-//! The hundred and ninety-nine opcodes, and what each one makes of the four
+//! The two hundred opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -25,7 +25,8 @@
 //!   [`Inst::FloatMinMax`](crate::Inst::FloatMinMax) two, [`MinMax`], because
 //!   it is, and [`Inst::FloatRound`](crate::Inst::FloatRound) and
 //!   [`Inst::FloatSqrt`](crate::Inst::FloatSqrt) one each again, for
-//!   `FloatAbs`' reason;
+//!   `FloatAbs`' reason, and [`Inst::FloatTruncate`](crate::Inst::FloatTruncate)
+//!   one for the same reason;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
 //!   form, so no discriminant is stored anywhere.
 //!
@@ -282,8 +283,13 @@ mod base {
     pub const DYN_IDENTITY_SET: u8 = DYN_ON_PATH + 1;
     pub const DYN_IDENTITY_ENTER: u8 = DYN_IDENTITY_SET + 1;
     pub const DYN_IDENTITY_LEAVE: u8 = DYN_IDENTITY_ENTER + 1;
+    /// [`crate::Inst::FloatTruncate`], ADR 0064's checked typed conversion,
+    /// which issue #432 brought for `Float.toInt` — one opcode, for
+    /// [`FLOAT_ABS`]' reason. Last, for `CMP_ORDER`'s reason: adding it
+    /// renumbered nothing already there.
+    pub const FLOAT_TRUNCATE: u8 = DYN_IDENTITY_LEAVE + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = DYN_IDENTITY_LEAVE + 1;
+    pub const END: u8 = FLOAT_TRUNCATE + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -457,6 +463,9 @@ pub enum Op {
     DynIdentityEnter,
     /// [`crate::Inst::DynIdentityLeave`].
     DynIdentityLeave,
+    /// [`crate::Inst::FloatTruncate`]: one `Float` in, an `Int` and a `Bool`
+    /// out.
+    FloatTruncate,
 }
 
 /// Which of `a`, `b` and `c` an opcode uses, and for what.
@@ -796,6 +805,7 @@ impl Op {
             Op::DynIdentityEnter,
             Op::DynIdentityLeave,
         ]);
+        all.push(Op::FloatTruncate);
         all
     }
 
@@ -916,6 +926,7 @@ impl Op {
             Op::DynIdentitySet => base::DYN_IDENTITY_SET,
             Op::DynIdentityEnter => base::DYN_IDENTITY_ENTER,
             Op::DynIdentityLeave => base::DYN_IDENTITY_LEAVE,
+            Op::FloatTruncate => base::FLOAT_TRUNCATE,
         }
     }
 
@@ -1397,6 +1408,15 @@ impl Op {
             Op::DynIdentityEnter | Op::DynIdentityLeave => {
                 fields(Operand::Set, Operand::View, Operand::View, Payload::Empty)
             }
+            // The integer, the flag, and the operand: two answers in the two
+            // fields an answer is written to, and the operand last. `Int` only
+            // for the integer, because a truncation is never a `Duration`.
+            Op::FloatTruncate => fields(
+                Operand::Word(INT_ONLY),
+                Operand::Word(BOOL),
+                Operand::Word(FLOAT),
+                Payload::Empty,
+            ),
         }
     }
 }
@@ -1493,7 +1513,9 @@ mod tests {
     /// identity set, and a hundred and ninety-nine once issue #536 deleted
     /// `LayoutOf` and `AddrOfElem`: neither had a producer — dynamic dispatch
     /// reads a layout with a `LoadField` at offset 0, and no place is an
-    /// element's address — and only tests built them.
+    /// element's address — and only tests built them — and two hundred once
+    /// issue #432 brought `Inst::FloatTruncate`, the checked conversion
+    /// beneath `std.float.toInt`.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1513,9 +1535,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_ninety_nine_opcodes() {
-        assert_eq!(Op::all().len(), 199);
-        assert_eq!(OPCODES, 199);
+    fn there_are_two_hundred_opcodes() {
+        assert_eq!(Op::all().len(), 200);
+        assert_eq!(OPCODES, 200);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1597,6 +1619,9 @@ mod tests {
         // takes one double and answers one, so there is nothing to select
         // between and no flag to spend an opcode on.
         assert_eq!(count(|op| matches!(op, Op::FloatSqrt)), 1);
+        // And the checked conversion is one too: it has two answers, but
+        // they are two fields of one opcode and not two operations.
+        assert_eq!(count(|op| matches!(op, Op::FloatTruncate)), 1);
         assert_eq!(
             count(|op| matches!(op, Op::AllocFixed | Op::AllocImm | Op::AllocSlot)),
             3

@@ -5641,6 +5641,153 @@ pub(crate) mod tests {
         }
     }
 
+    /// `Op::FloatTruncate` answers the integer and whether there is one.
+    ///
+    /// The encoded arm of ADR 0064's checked typed conversion, held to the
+    /// same table `cove-native`'s `tests/suite`'s `TRUNCATIONS` holds the
+    /// native lowering to — deliberately duplicated rather than shared, for
+    /// `ABSOLUTES`' reason — as `(integer, ok)` pairs, the documented `0` of a
+    /// conversion that is not `ok` included. The rows were generated from the
+    /// operands' bits with integer arithmetic alone, so they are not a
+    /// transcription of `crate::float::truncate`, which is what this arm
+    /// calls.
+    #[test]
+    fn a_float_truncation_answers_the_integer_and_whether_there_is_one() {
+        // Operand, integer, ok.
+        const TRUNCATIONS: &[(&str, u64, i64, bool)] = &[
+            ("+0.0", 0x0000_0000_0000_0000, 0, true),
+            ("-0.0", 0x8000_0000_0000_0000, 0, true),
+            ("+2^-1074", 0x0000_0000_0000_0001, 0, true),
+            ("-2^-1074", 0x8000_0000_0000_0001, 0, true),
+            ("+max subnorm", 0x000f_ffff_ffff_ffff, 0, true),
+            ("+MIN_POS", 0x0010_0000_0000_0000, 0, true),
+            ("+0.5", 0x3fe0_0000_0000_0000, 0, true),
+            ("-0.5", 0xbfe0_0000_0000_0000, 0, true),
+            ("+0.9", 0x3fec_cccc_cccc_cccd, 0, true),
+            ("-0.9", 0xbfec_cccc_cccc_cccd, 0, true),
+            ("+nextdown(1)", 0x3fef_ffff_ffff_ffff, 0, true),
+            ("-nextdown(1)", 0xbfef_ffff_ffff_ffff, 0, true),
+            ("+1.0", 0x3ff0_0000_0000_0000, 1, true),
+            ("-1.0", 0xbff0_0000_0000_0000, -1, true),
+            ("+2.5", 0x4004_0000_0000_0000, 2, true),
+            ("-2.5", 0xc004_0000_0000_0000, -2, true),
+            ("+2.7", 0x4005_9999_9999_999a, 2, true),
+            ("-2.7", 0xc005_9999_9999_999a, -2, true),
+            ("+2^52-0.5", 0x432f_ffff_ffff_ffff, 4503599627370495, true),
+            ("-2^52-0.5", 0xc32f_ffff_ffff_ffff, -4503599627370495, true),
+            ("+2^53", 0x4340_0000_0000_0000, 9007199254740992, true),
+            ("+2^62", 0x43d0_0000_0000_0000, 4611686018427387904, true),
+            (
+                "+2^63-1024",
+                0x43df_ffff_ffff_ffff,
+                9223372036854774784,
+                true,
+            ),
+            (
+                "-2^63+1024",
+                0xc3df_ffff_ffff_ffff,
+                -9223372036854774784,
+                true,
+            ),
+            ("+2^63", 0x43e0_0000_0000_0000, 0, false),
+            ("-2^63", 0xc3e0_0000_0000_0000, -9223372036854775808, true),
+            ("-2^63-2048", 0xc3e0_0000_0000_0001, 0, false),
+            ("+2^64", 0x43f0_0000_0000_0000, 0, false),
+            ("+1e30", 0x4629_3e59_39a0_8cea, 0, false),
+            ("-1e30", 0xc629_3e59_39a0_8cea, 0, false),
+            ("+MAX", 0x7fef_ffff_ffff_ffff, 0, false),
+            ("-MAX", 0xffef_ffff_ffff_ffff, 0, false),
+            ("+inf", 0x7ff0_0000_0000_0000, 0, false),
+            ("-inf", 0xfff0_0000_0000_0000, 0, false),
+            ("+qNaN", 0x7ff8_0000_0000_0000, 0, false),
+            ("-qNaN", 0xfff8_0000_0000_0000, 0, false),
+            ("+qNaN payload", 0x7ff8_0000_dead_beef, 0, false),
+            ("+sNaN", 0x7ff0_0000_dead_beef, 0, false),
+            ("-sNaN", 0xfff0_0000_dead_beef, 0, false),
+            ("random 0", 0x7f6c_280b_eaa8_e3e7, 0, false),
+            ("random 1", 0xe471_1987_1cf9_abe0, 0, false),
+            ("random 2", 0x3517_4a41_58b8_a0b7, 0, true),
+            ("random 3", 0x62ce_1ffa_d85b_1c36, 0, false),
+            ("random 4", 0xec83_972c_97b6_678e, 0, false),
+            ("random 5", 0x0cf9_1633_be73_28c1, 0, true),
+            ("random 6", 0x101f_5e85_9d7d_ded0, 0, true),
+            ("random 7", 0x1fd8_9725_5030_916d, 0, true),
+            ("random 8", 0x8794_4c6b_1287_0b0f, 0, true),
+            ("random 9", 0x36ca_1465_c9b3_26d9, 0, true),
+            ("random 10", 0x34bc_346c_a79a_d6d4, 0, true),
+            ("random 11", 0x34e8_46ab_6e48_d679, 0, true),
+            ("random 12", 0x9e2c_31e9_4344_f995, 0, true),
+            ("random 13", 0x6f44_842f_b582_b526, 0, false),
+            ("random 14", 0x1ecb_49ba_af78_39cc, 0, true),
+            ("random 15", 0xbfc9_e24f_766f_3abf, 0, true),
+            ("ranged 0", 0xc1e0_24ae_c20e_ab0a, -2166715920, true),
+            ("ranged 1", 0x424c_9a34_7204_71b5, 245692425224, true),
+            ("ranged 2", 0x4211_4bd8_39ce_bcfe, 18571726451, true),
+            ("ranged 3", 0xc354_009e_3d61_b87b, -22520716675441132, true),
+            (
+                "ranged 4",
+                0xc3c8_b4fb_909f_cf00,
+                -3560648702586388480,
+                true,
+            ),
+            ("ranged 5", 0x437d_ded0_4f81_f57f, 134524169489438704, true),
+            ("ranged 6", 0x40a6_ded4_7f96_7087, 2927, true),
+            ("ranged 7", 0xc2ba_d701_4fcf_671d, -29510742298471, true),
+            ("ranged 8", 0x40e4_4132_09bb_c36e, 41481, true),
+            ("ranged 9", 0xbfe5_cf6e_4944_be36, 0, true),
+            ("ranged 10", 0x40ee_eaeb_b71f_debf, 63319, true),
+            ("ranged 11", 0x4052_89a5_0d5b_f51f, 74, true),
+            ("ranged 12", 0x416c_ae93_409e_e3bf, 15037594, true),
+            ("ranged 13", 0xc31a_cf8b_28e8_fe1b, -1886636497059718, true),
+            ("ranged 14", 0x40b0_0f83_cd25_7775, 4111, true),
+            ("ranged 15", 0xc351_3d26_a85c_629a, -19409243387038312, true),
+            ("ranged 16", 0x4364_0877_0aee_1966, 45110455293758256, true),
+            ("ranged 17", 0xc199_c81a_f2a5_1b6d, -108136124, true),
+            ("ranged 18", 0xc2ec_fe06_ef78_768f, -255018909025204, true),
+            ("ranged 19", 0xc302_85fd_bc0b_b0a9, -651734301111829, true),
+            ("ranged 20", 0x43e0_2f39_f4f7_fad3, 0, false),
+            ("ranged 21", 0x41a5_330a_4bbc_95e5, 177833253, true),
+            ("ranged 22", 0x439c_5da6_aacb_ca65, 510993264597440832, true),
+            ("ranged 23", 0x40cd_4533_7cf7_ec38, 14986, true),
+        ];
+
+        let mut build = Build::default();
+        let float = build.scalar(Repr::Float);
+        let int = build.scalar(Repr::Int);
+        let boolean = build.scalar(Repr::Bool);
+        let truncate = Inst::FloatTruncate {
+            dst: 1,
+            ok: 2,
+            a: 0,
+        };
+        let value = build.function(
+            "value",
+            &[float],
+            &[Repr::Float, Repr::Int, Repr::Bool],
+            int,
+            vec![truncate.clone(), Inst::Return { src: 1 }],
+        );
+        let flag = build.function(
+            "flag",
+            &[float],
+            &[Repr::Float, Repr::Int, Repr::Bool],
+            boolean,
+            vec![truncate, Inst::Return { src: 2 }],
+        );
+        let program = build.done();
+
+        for (label, operand, want, ok) in TRUNCATIONS {
+            let answered = run(&program, value, &[*operand]).unwrap() as i64;
+            let flagged = run(&program, flag, &[*operand]).unwrap();
+            assert_eq!(
+                (answered, flagged),
+                (*want, u64::from(*ok)),
+                "truncate({label}): 0x{operand:016x} answered ({answered}, {flagged}), \
+                 want ({want}, {ok})"
+            );
+        }
+    }
+
     /// `Op::FloatMin` and `Op::FloatMax` answer one of their two operands, to
     /// the bit.
     ///

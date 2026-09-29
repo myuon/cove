@@ -218,6 +218,11 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
         Inst::DynOpen { dst, .. } | Inst::DynChild { dst, .. } => {
             Some((dst, width(program.view_layout)))
         }
+        // Issue #432's checked conversion writes two one-word answers. The
+        // integer is the value a `copy` could forward; the flag is read by
+        // the branch that decides which case of the `Option` to build and is
+        // never a copy's source, so it is not the location asked about here.
+        Inst::FloatTruncate { dst, .. } => one(dst),
         // Writes nothing into a frame location of its own.
         _ => None,
     }

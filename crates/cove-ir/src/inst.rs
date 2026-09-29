@@ -161,7 +161,8 @@ pub enum CmpOp {
 /// available to a one-word conversion: a checked conversion has **two**
 /// answers, the value and which of the three refusals applies, and this
 /// family's whole shape is one word in and one word out. The instruction that
-/// eventually carries `Float.toInt` will not be a member here.
+/// eventually carries `Float.toInt` will not be a member here — and it is not:
+/// it is [`Inst::FloatTruncate`], one word in and two out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Convert {
     /// `Int` to `Float`, as `as`-style widening: `Int.toFloat()`.
@@ -782,6 +783,55 @@ pub enum Inst {
     /// strongly: there is no integer square root in the language to be the
     /// other member of a family.
     FloatSqrt { dst: Slot, a: Slot },
+    /// `a` truncated toward zero to an `Int`, **checked**: `dst` is the
+    /// integer and `ok` whether there was one.
+    ///
+    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
+    /// Decision 2 names "a checked typed conversion" in the vocabulary a
+    /// primitive may be written in, and [`Convert`]'s doc says why it is not a
+    /// member there: a checked conversion has two answers and that family's
+    /// shape is one word in and one word out. This is the instruction that
+    /// doc promised, and it is `core.floatTruncate` beneath
+    /// `std.float.toInt` (issue #432, ADR 0071).
+    ///
+    /// # The contract
+    ///
+    /// **Two logical outputs, and nothing else.**
+    ///
+    /// - `ok` is a `Bool`, true exactly when `-2^63 <= a < 2^63`. A NaN
+    ///   compares false with both ends, so a NaN is not `ok`; neither is
+    ///   either infinity.
+    /// - When `ok` is true, `dst` is `a` truncated toward zero — IEEE 754's
+    ///   `roundToIntegralTowardZero`, then exact, because every double in the
+    ///   range truncates to an integer the `Int` holds. `-0.0` and every
+    ///   subnormal answer `0`; `-2^63` answers `Int.MIN`; the largest double
+    ///   that is `ok` is `2^63 - 1024`.
+    /// - When `ok` is false, `dst` is **`0`**, on every tier. It is defined so
+    ///   that the two tiers write the same bits and the tables can compare
+    ///   them; **nothing may rely on it**, and nothing in the standard library
+    ///   reads `dst` without having tested `ok` first.
+    ///
+    /// Which of the three reasons made a value not `ok` is not an output. The
+    /// standard library tells a NaN from an infinity from a finite value out
+    /// of range in Cove, on the refusal path only, where the comparisons
+    /// cost nothing that matters.
+    ///
+    /// **No sentinel is part of it.** x86-64's `cvttsd2si` answers the
+    /// "integer indefinite", `0x8000_0000_0000_0000`, for every operand it
+    /// cannot convert, and that is also the correct answer for `-2^63`. The
+    /// native lowering *uses* the instruction and reads that value to compute
+    /// `ok`, but the contract is `(dst, ok)`: neither the IR nor the encoded
+    /// VM reproduces the indefinite value, and a not-`ok` conversion writes
+    /// `0` on the native tier too.
+    ///
+    /// **It does not construct Cove's `Option<Int>`**, which is what
+    /// `core.floatTruncate` answers. The lowering builds `Some(dst)` or `None`
+    /// from the two outputs with the instructions any enum construction is
+    /// made of, so no instruction knows how an `Option` is laid out.
+    ///
+    /// `dst` and `ok` are two different slots. Either may be `a`: every tier
+    /// reads the operand before it writes anything.
+    FloatTruncate { dst: Slot, ok: Slot, a: Slot },
 
     // ---- control flow --------------------------------------------------
     /// Continue at `to`.

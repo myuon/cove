@@ -1175,6 +1175,18 @@ pub fn call_core(
         "identitySet" => Ok(Value(Repr::Vector(VectorStorage::new(Vec::new())))),
         "identityEnter" => identity_enter(&args[0], &args[1], &args[2]).map_err(|e| e.at(span)),
         "identityLeave" => identity_leave(&args[0], &args[1], &args[2]).map_err(|e| e.at(span)),
+        // ADR 0064's checked typed conversion, beneath `std.float.toInt`: the
+        // one specification the encoded VM's arm shares, answered as the
+        // `Option` the lowering builds from its two words.
+        "floatTruncate" => {
+            let Value(Repr::Float(x)) = &args[0] else {
+                return Err(type_error(&shown, "x", "Float", &args[0], span));
+            };
+            Ok(match crate::float::truncate(*x) {
+                (whole, true) => Value::some(Value::int(whole)),
+                (_, false) => Value::none(),
+            })
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
@@ -2655,6 +2667,42 @@ mod dynamic_tests {
         ] {
             let error = core(name, args).expect_err("refused");
             assert_eq!(error.message, message, "`core.{name}`");
+        }
+    }
+
+    /// `core.floatTruncate` on the oracle: `Some` of the truncation toward
+    /// zero exactly when `-2^63 <= x < 2^63`, and `None` for a NaN, both
+    /// infinities and every finite value outside — the `Option` the lowering
+    /// builds from `Inst::FloatTruncate`'s two answers, over the same
+    /// `crate::float::truncate` the encoded VM's arm calls.
+    #[test]
+    fn a_float_truncation_is_some_exactly_inside_the_range() {
+        for (x, want) in [
+            (2.7, Some(2)),
+            (-2.7, Some(-2)),
+            (-0.9, Some(0)),
+            (-0.0, Some(0)),
+            (5.0e-324, Some(0)),
+            (9_223_372_036_854_774_784.0, Some(9_223_372_036_854_774_784)),
+            (-9_223_372_036_854_775_808.0, Some(i64::MIN)),
+            (9_223_372_036_854_775_808.0, None),
+            (-9_223_372_036_854_777_856.0, None),
+            (1.0e30, None),
+            (f64::MAX, None),
+            (f64::INFINITY, None),
+            (f64::NEG_INFINITY, None),
+            (f64::NAN, None),
+        ] {
+            let answered = ask("floatTruncate", vec![Value::float(x)]);
+            let expected = match want {
+                Some(whole) => Value::some(Value::int(whole)),
+                None => Value::none(),
+            };
+            assert_eq!(
+                answered.to_string(),
+                expected.to_string(),
+                "core.floatTruncate({x})"
+            );
         }
     }
 

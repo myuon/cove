@@ -77,7 +77,8 @@ const SET: u32 = cove_ir::dynamic::SET_WORDS.len() as u32;
 /// [`Inst::FloatAbs`], [`Inst::FloatMinMax`], [`Inst::FloatRound`] and
 /// [`Inst::FloatSqrt`]. Each is the one SSE2 instruction IEEE 754 binds to the
 /// same answer the VM's `f64` operation is bound to, so there is nothing to
-/// spell out. What is still refused is `%` over `Num::Float`, whose
+/// spell out. [`Inst::FloatTruncate`], the checked conversion, is admitted
+/// too; its template spells out the one thing `cvttsd2si` does not say. What is still refused is `%` over `Num::Float`, whose
 /// `f64::rem` is `fmod` and has no machine instruction, and the three-way
 /// order, which the VM refuses at run time. A float slot that is only copied
 /// is a run of bits like any other, and refusing the whole function because
@@ -1040,6 +1041,18 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // and which IEEE 754 does not fix — with `cove-runtime`'s
         // `native_tier.rs` against the VM for the part one can.
         Inst::FloatSqrt { dst, a } => slot(*dst) && slot(*a),
+        // `encoded.rs`'s `FLOAT_TRUNCATE` arm: ADR 0064's checked typed
+        // conversion, beneath `std.float.toInt` (issue #432, ADR 0071).
+        //
+        // Admitted for ADR 0065's Decision 5 like the four above it: a
+        // refusal here would take `std.float.toInt` and every caller that
+        // expands `std.float`'s renderers back to the VM. `template.rs`'s arm
+        // is fourteen instructions — `cvttsd2si`, and the test that tells
+        // `-2^63` from the "integer indefinite" it shares a bit pattern with
+        // — with no branch. What holds it to the bit is `tests/suite`'s
+        // `TRUNCATIONS`, against the VM's arm, as `(integer, ok)` pairs
+        // including the documented `0` of a conversion that is not `ok`.
+        Inst::FloatTruncate { dst, ok, a } => slot(*dst) && slot(*ok) && slot(*a),
         // ---- places ---------------------------------------------------------
         //
         // Six of the eight, and the two that are missing are missing on purpose.

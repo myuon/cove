@@ -64,7 +64,8 @@
     {"name": "dynamicOnPath", "signature": "core.dynamicOnPath(view: DynamicView, path: RenderPath) -> Bool", "generics": [], "params": [{"name": "view", "type": "DynamicView"}, {"name": "path", "type": "RenderPath"}], "result": "Bool", "libraryOnly": true},
     {"name": "identitySet", "signature": "core.identitySet() -> IdentitySet", "generics": [], "params": [], "result": "IdentitySet", "libraryOnly": true},
     {"name": "identityEnter", "signature": "core.identityEnter(set: IdentitySet, a: DynamicView, b: DynamicView) -> Bool", "generics": [], "params": [{"name": "set", "type": "IdentitySet"}, {"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Bool", "libraryOnly": true},
-    {"name": "identityLeave", "signature": "core.identityLeave(set: IdentitySet, a: DynamicView, b: DynamicView) -> Unit", "generics": [], "params": [{"name": "set", "type": "IdentitySet"}, {"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Unit", "libraryOnly": true}
+    {"name": "identityLeave", "signature": "core.identityLeave(set: IdentitySet, a: DynamicView, b: DynamicView) -> Unit", "generics": [], "params": [{"name": "set", "type": "IdentitySet"}, {"name": "a", "type": "DynamicView"}, {"name": "b", "type": "DynamicView"}], "result": "Unit", "libraryOnly": true},
+    {"name": "floatTruncate", "signature": "core.floatTruncate(x: Float) -> Option<Int>", "generics": [], "params": [{"name": "x", "type": "Float"}], "result": "Option<Int>", "libraryOnly": true}
   ],
   "types": [
     {

@@ -163,6 +163,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
         Op::FloatAbs => Inst::FloatAbs { dst: a, a: b },
         Op::FloatRound => Inst::FloatRound { dst: a, a: b },
         Op::FloatSqrt => Inst::FloatSqrt { dst: a, a: b },
+        Op::FloatTruncate => Inst::FloatTruncate {
+            dst: a,
+            ok: b,
+            a: c,
+        },
         Op::FloatMinMax(op) => Inst::FloatMinMax {
             op,
             dst: a,

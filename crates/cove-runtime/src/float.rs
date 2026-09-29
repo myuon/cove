@@ -106,3 +106,40 @@ pub(crate) fn extremum(x: u64, y: u64, op: MinMax) -> u64 {
         }
     }
 }
+
+/// [`Inst::FloatTruncate`](cove_ir::Inst::FloatTruncate), spelled out: the
+/// integer, and whether there is one.
+///
+/// ```text
+/// ok  = -2^63 <= x < 2^63            ; false for a NaN and both infinities
+/// dst = ok -> trunc(x) | otherwise 0
+/// ```
+///
+/// **It does not call `x as i64` on an operand outside the range, and that is
+/// the reason it is here.** Rust's `as` is total and saturating — a NaN is `0`,
+/// `+inf` and every magnitude past the top are `i64::MAX`, and past the bottom
+/// `i64::MIN` — which is a *second answer* for the inputs this operation
+/// refuses, and ADR 0064's Decision 6 deleted the last instruction that gave
+/// one. Inside the range the cast is exact, because the truncation of a double
+/// in `[-2^63, 2^63)` is an integer an `i64` holds, and that is the only place
+/// it is used.
+///
+/// The not-`ok` integer is `0` on every tier, and **nothing may rely on it**:
+/// it is defined so that the tiers write the same bits and the tables can say
+/// so. x86-64's `cvttsd2si` answers `i64::MIN` there, the "integer
+/// indefinite"; the native lowering reads that answer to compute `ok` and then
+/// writes `0` as this does.
+///
+/// Two callers, for [`extremum`]'s reason: the encoded VM's `FLOAT_TRUNCATE`
+/// arm and the tree-walking interpreter's `core.floatTruncate`.
+#[inline]
+pub(crate) fn truncate(x: f64) -> (i64, bool) {
+    // `2^63` is exactly a double, so both ends are exact comparisons; a NaN
+    // compares false with both.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if (-LIMIT..LIMIT).contains(&x) {
+        (x as i64, true)
+    } else {
+        (0, false)
+    }
+}
