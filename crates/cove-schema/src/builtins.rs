@@ -1812,10 +1812,10 @@ impl CoreIntrinsicSchema {
 /// [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_FINISH`] and
 /// [`CORE_BYTES_LENGTH`], and ADR 0062's append of a byte, a whole string or a
 /// range of one, [`CORE_BYTES_ENSURE`], [`CORE_BYTES_STORE`] or
-/// [`CORE_BYTES_COPY`], and [`CORE_BYTES_COMMIT`], with
-/// [`CORE_REFUSE_BYTE_RANGE`] for the range the builder decides in Cove and
-/// refuses — which are ADR 0052's growable byte run with no method of its own
-/// left.
+/// [`CORE_BYTES_COPY`], and [`CORE_BYTES_COMMIT`] — which are ADR 0052's
+/// growable byte run with no method of its own left. The range the builder
+/// decides in Cove it also refuses in Cove, through [`CORE_REFUSE`]; it was
+/// `core.refuseByteRange`, an intrinsic of its own, until issue #432.
 /// `length` of both sequences is [`CORE_ARRAY_LENGTH`] or
 /// [`CORE_VECTOR_LENGTH`].
 ///
@@ -1880,7 +1880,6 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTES_STORE,
     CORE_BYTES_COPY,
     CORE_BYTES_COMMIT,
-    CORE_REFUSE_BYTE_RANGE,
     CORE_REFUSE,
     CORE_BYTES_FINISH,
     CORE_BYTES_LENGTH,
@@ -2431,49 +2430,19 @@ pub const CORE_BYTES_COMMIT: CoreIntrinsicSchema = CoreIntrinsicSchema {
     fresh: false,
 };
 
-/// `core.refuseByteRange(text: String, from: Int, to: Int) -> Unit`: always the
-/// refusal of a byte range of `text` that `std.stringbuilder`'s `appendRange`
-/// has already found to be wrong.
-///
-/// One `Inst::IntrinsicCall` of `Intrinsic::StringRefuseByteRange`, which never
-/// answers — the shape `core.refuseDuplicate` had, for the same reason. It says
-/// which of the five things is wrong in `String.sliceBytes`'s words, the words
-/// `core.bytesExtend` said them in before
-/// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md) took
-/// the range policy out of the copy: a bulk instruction that both decides a
-/// range and copies it cannot be the write half of a reservation, because the
-/// window a backend fuses has to be a write that is already known to be legal.
-///
-/// The questions themselves are Cove, in `appendRange`; this is only the
-/// sentence, so the path that succeeds — which is every range a formatter asks
-/// about — reaches nothing here. An intrinsic rather than a standard-library
-/// function so that `appendRange` stays a leaf the lowering may expand.
-pub const CORE_REFUSE_BYTE_RANGE: CoreIntrinsicSchema = CoreIntrinsicSchema {
-    name: "refuseByteRange",
-    generics: &[],
-    params: &[
-        ParamSchema {
-            name: "text",
-            ty: BuiltinType::String,
-        },
-        ParamSchema {
-            name: "from",
-            ty: BuiltinType::Int,
-        },
-        ParamSchema {
-            name: "to",
-            ty: BuiltinType::Int,
-        },
-    ],
-    result: BuiltinType::Unit,
-    fresh: false,
-};
+// `core.refuseByteRange(text, from, to)` stood here: the refusal of a byte
+// range `std.stringbuilder`'s `appendRange` had already found wrong, one
+// `Intrinsic::StringRefuseByteRange` that never answered, and an intrinsic
+// rather than a standard-library function only so that `appendRange` stayed a
+// leaf the lowering could expand. Issue #432 wrote its five sentences in Cove,
+// as `std.stringbuilder.byteRangeRefusalMessage`, and raises them with
+// `core.refuse` below.
 
 /// `core.refuse(message: String, rule: String, help: String) -> Unit`: stop
 /// the run with a refusal the standard library worded. It never answers — a
-/// call is a divergence, the way [`CORE_REFUSE_BYTE_RANGE`]'s is and
-/// `core.refuseDuplicate`'s was until it became the first refusal worded
-/// through this.
+/// call is a divergence, the way `core.refuseByteRange`'s and
+/// `core.refuseDuplicate`'s were until each became a refusal worded through
+/// this.
 ///
 /// Lowers to one `Inst::Trap`, whose three slots are exactly these three
 /// arguments. An empty `rule` or `help` prints no such line, so a refusal

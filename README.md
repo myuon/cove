@@ -636,7 +636,7 @@ the one language wall that held six of ADR 0064's remaining variants: a Cove
 body could *answer* an `Err`, which is a value its caller asked for, and could
 not stop a run with a sentence of its own making. `Inst::Trap` carried a string
 chosen by the lowering that emitted it, so the standard library could raise —
-`core.refuseByteRange` does — but could not say which offset was wrong. The
+`core.refuseByteRange` did — but could not say which offset was wrong. The
 constraint turned out to be one layer under that, and it is what decides the
 shape of the fix: a runtime error is **three** printed sentences, `message`,
 `rule` and `help`, and a trap carried one, so a refusal whose every
@@ -648,8 +648,10 @@ of five, and the entry is *stopping* rather than *refusing*: a primitive that
 decided anything about whether to stop would be back on the wrong side of the
 test the list belongs to. The six migrations it unblocks are not in it; each is
 measured when it lands, and ADR 0062's reason for `appendRange`'s refusal being
-an intrinsic — that the body stays a leaf the lowering expands — stands until
-one of them measures its replacement.
+an intrinsic — that the body stays a leaf the lowering expands — stood until
+issue #432 measured its replacement: the five sentences are one Cove function,
+`std.stringbuilder.byteRangeRefusalMessage`, that `appendRange` and
+`std.string`'s `sliceBytes` both word their refusals with.
 
 [ADR 0068](docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)
 (accepted) takes the last four of ADR 0064's layout-directed operations out

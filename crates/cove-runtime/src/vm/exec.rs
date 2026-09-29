@@ -10390,5 +10390,6 @@ pub(crate) mod tests {
     // round took back without allocating. The pool is gone — ADR 0064's
     // `String.indexOf` migration took `operand::with_text`'s last caller, and
     // with it the last caller of `Machine::take_scratch` — so what those cases
-    // watched is not there to watch. See `vm::intrinsics::text`'s note.
+    // watched is not there to watch. The note was `vm::intrinsics::text`'s,
+    // a module issue #432 deleted with its last arm.
 }

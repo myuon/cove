@@ -53,7 +53,6 @@ mod make;
 pub(crate) mod operand;
 mod scalar;
 mod seq;
-mod text;
 
 /// Runs `intrinsic` over the operands `frame` names, writing its answer into
 /// `dest`.
@@ -187,11 +186,12 @@ pub(crate) fn call(
         // answer depends on a character's neighbours — `Σ` is `ς` at a word's
         // end and `σ` elsewhere — and the two extra tables that rule needs are
         // 40% of the asset.
-        // Not a method of `String` a program can call: the refusal
-        // `std.stringbuilder`'s `appendRange` reaches once its own range check
-        // has failed. It never answers, so there is nothing to write into
-        // `dest`.
-        Intrinsic::StringRefuseByteRange => text::refuse_byte_range(machine, frame),
+        //
+        // `StringRefuseByteRange` stood here, the refusal
+        // `std.stringbuilder`'s `appendRange` reached once its own range check
+        // had failed, and the last arm of the `text` module. Issue #432 made
+        // it `std.stringbuilder.byteRangeRefusalMessage` and `core.refuse`,
+        // an `Inst::Trap`, and deleted the module with it.
         // No byte-counted operation is here any more. All three are
         // `std.string`: `byteLength` over the core intrinsic that is an
         // `Inst::Len`, `sliceBytes` over the one that is a byte
@@ -776,8 +776,8 @@ mod tests {
     // slot, which needs an operand of the answer's own kind, and no surviving
     // signature has one: `Float.format` answers a `String` over a `Float`,
     // `Float.parse` and `Float.toInt` answer a `Result`, and
-    // `String.refuseByteRange` answers nothing, as `Value.admitKey` did until
-    // ADR 0068's Phase 4c.
+    // `String.refuseByteRange` answered nothing until issue #432, as
+    // `Value.admitKey` did until ADR 0068's Phase 4c.
     // (`Value.renderInto`, which appended, stood here until ADR 0068's Phase
     // 4b-ii.)
     // (`Value.order`, which answered an `Int` over values of any kind but

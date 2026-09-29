@@ -5966,22 +5966,22 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 }
 
 /// One intrinsic of each effect class that still has a member, as the pair of
-/// names that resolves to it: a raise (`String.refuseByteRange`: a byte range
-/// `std.stringbuilder`'s `appendRange` has already found wrong) and a
-/// safepoint (`Float.parse`: allocates the message of the `Err` it answers).
+/// names that resolves to it: a safepoint (`Float.parse`: allocates the message
+/// of the `Err` it answers). There is one class left.
 ///
 /// **The raise member was `Any.equals`** until ADR 0068's Phase 2 made `==` on
 /// two erased values `std.dynamic.equals` and deleted the variant, then
 /// `Value.order` until its Phase 3 made the order of two erased keys
-/// `std.dynamic.order` and deleted that one, and then `Value.admitKey` until
-/// its Phase 4c worded the refusal of a key in Cove and deleted the last. Each
-/// declared `MAY_RAISE | READS_MEMORY | BULK_WORK` and no allocation.
-/// `String.refuseByteRange` declares `MAY_RAISE | READS_MEMORY` and no
-/// allocation, which is the same class — [`IntrinsicProtocol`] reads only
-/// whether a call is a safepoint and whether it raises, and `BULK_WORK` decides
-/// neither — so the cases below check the same protocol over it. It takes three
-/// operands, as `Value.admitKey` did, and that changes nothing here, for the
-/// reason the paragraph on the safepoint member gives.
+/// `std.dynamic.order` and deleted that one, then `Value.admitKey` until its
+/// Phase 4c worded the refusal of a key in Cove and deleted that, and then
+/// `String.refuseByteRange`, the refusal of a byte range `std.stringbuilder`'s
+/// `appendRange` had already found wrong, until issue #432 wrote its sentence
+/// in Cove and raised it through `core.refuse`. Each declared `MAY_RAISE` and
+/// no allocation: a call the protocol makes synchronise the program counter and
+/// test the outcome, but not publish its work. **No intrinsic left raises
+/// without allocating**, so that class has no member either, and the code
+/// generator's path for it is reachable only by an intrinsic nobody has
+/// written — the plain call's situation below, for the same reason.
 ///
 /// **There were three, and the third has no member left.** A *plain call* —
 /// neither a safepoint nor a raise, so no publish, no program counter, no
@@ -6009,8 +6009,12 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 /// makes the swap free. So what the case below checks is unchanged: it is a
 /// call whose protocol publishes the unpaid work before the hand-over and tests
 /// the outcome after it.
-pub const INTRINSIC_CLASSES: [(&str, &str); 2] =
-    [("String", "refuseByteRange"), ("Float", "parse")];
+pub const INTRINSIC_CLASSES: [(&str, &str); 1] = [("Float", "parse")];
+
+/// A second variant of the one class left, for a case that needs two variants
+/// rather than two classes: `Float.toInt`, which allocates the message of each
+/// of its three refusals and so is a safepoint as `Float.parse` is.
+pub const ANOTHER_VARIANT: (&str, &str) = ("Float", "toInt");
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///
@@ -6174,10 +6178,10 @@ fn only_variant(receiver: &str, operation: &str, sites: u64) -> Vec<u64> {
 /// - **whether they are attributed at all is the arm's and not the program's**,
 ///   which is the claim `ATTRIBUTES_INTRINSIC_CALLS` exists to make failable.
 ///
-/// One case per member of [`INTRINSIC_CLASSES`], because the two differ in
+/// One case per member of [`INTRINSIC_CLASSES`], because the classes differ in
 /// exactly the thing that decides how much code a site is — the protocol — and a
 /// charge taken across the wrong span would show up on the safepoint class and
-/// on no other.
+/// on no other. There is one member now, and it is that class.
 pub fn an_intrinsic_calls_machine_code_is_charged_to_its_variant<A: Arm>() {
     let compiled = |program: &Program| {
         let mut jit = A::new(helpers());
@@ -6264,7 +6268,7 @@ pub fn every_intrinsic_call_site_is_counted<A: Arm>() {
         jit.compile(program, FunctionId(0))
             .expect("the function is inside the slice")
     };
-    let (repeated, once) = (INTRINSIC_CLASSES[0], INTRINSIC_CLASSES[1]);
+    let (repeated, once) = (INTRINSIC_CLASSES[0], ANOTHER_VARIANT);
     let handle = compiled(&intrinsic_calling_each(&[repeated, once, repeated]));
     let code = A::intrinsic_code(handle);
 

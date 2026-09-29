@@ -782,6 +782,14 @@ pub type IntrinsicFn = unsafe extern "C" fn(
 /// assertion, and `cove-native`'s `INTRINSIC_CLASSES` is down from three
 /// classes to two because of it.
 ///
+/// **Nor is any intrinsic a raise that is not a safepoint any more.** That class
+/// — the program counter synchronised and the outcome tested, but no work
+/// published and the frame pointer kept live — was `String.refuseByteRange`'s
+/// last, and issue #432 made that refusal Cove over `core.refuse`. Both
+/// variants left allocate, so `INTRINSIC_CLASSES` is down to one class, and
+/// the raise-only path is reachable only by an intrinsic nobody has written,
+/// for the reason the plain-call path is.
+///
 /// The plain-call path in the code generator stays, and is now reachable only
 /// by an intrinsic nobody has written. That is deliberate: this type is what
 /// the declared effects *mean*, and deleting a branch of the meaning because

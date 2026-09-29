@@ -1769,7 +1769,21 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// carrying its own copy of the standard library into the survey. They are
 /// there to pin what `StringBuilder.appendSlice` refuses, and where, before
 /// `core.refuseByteRange` is replaced.
-const FORWARDABLE_COPIES: usize = 6816;
+///
+/// **7,078 since issue #432 replaced it**, a rise of 262 over 262 programs
+/// that is one copy per program and **not a new copy**. The corpus's `copy`
+/// count moved by 8 (75,534 to 75,542); what moved is which of them this
+/// survey calls forwardable. `std.string.refuseRange`, which every program
+/// carries, held two copies before and holds two now: its message used to be
+/// the answer of an `if` chain, whose arms meet at a join, and the copy into
+/// the `Error` read it from there; it is now the answer of a call of
+/// `std.stringbuilder.byteRangeRefusalMessage`, and the same copy reads it
+/// straight after the call — which is issue #302's "copy after a producer",
+/// 2,387 to 2,649. The copies into a `return` did not move (5,919). The helper
+/// returns each sentence where it is built, so it adds no copy of its own;
+/// where it holds one, it is an expanded `std.int.renderInto`'s, which
+/// `refuseRange` held in the same place before.
+const FORWARDABLE_COPIES: usize = 7078;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

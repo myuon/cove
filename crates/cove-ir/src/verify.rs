@@ -1885,8 +1885,8 @@ impl Check<'_> {
     /// [`Check::each_arg`]'s; this is about its family.
     ///
     /// It is also where ADR 0058's Phase 5 makes "a new collection
-    /// `IntrinsicCall` a verification failure": a `Text` or `Scalar` intrinsic
-    /// handed a collection is refused as that, by name, whatever its
+    /// `IntrinsicCall` a verification failure": an intrinsic — every one left
+    /// is `Scalar` — handed a collection is refused as that, by name, whatever its
     /// signature says. `String.join`'s `Array<String>` was the one collection
     /// a signature named; issue #454's Step 3 made that join Cove, so no
     /// signature names one now and the check below has nothing left to
@@ -1947,8 +1947,6 @@ impl Check<'_> {
         let described = self.program.layout(layout);
         let word = |repr: Repr| described.shape == Shape::Word(repr);
         let fits = match class {
-            Class::Unit => word(Repr::Unit),
-            Class::Int => word(Repr::Int),
             Class::Float => word(Repr::Float),
             Class::Str => described.shape == Shape::Str,
             Class::ResultOf(carried) => self.is_case_pair(
@@ -2823,6 +2821,10 @@ mod tests {
     const IDENTITY: LayoutId = LayoutId(18);
     /// A `Bool` word, which an identity set's second word is.
     const BOOL: LayoutId = LayoutId(19);
+    /// `Result<Float, Error>`, what `Float.parse` answers: an `Ok` carrying the
+    /// `Float` word at index 14, and an `Err`. Last, so no index below it
+    /// moves.
+    const RESULT_FLOAT: LayoutId = LayoutId(20);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -2915,13 +2917,35 @@ mod tests {
             crate::dynamic::view_layout(INT, STR),
             // Index 14, a `Float` word, which `Value.renderInto` was refused
             // until ADR 0068's Phase 4b-ii deleted the intrinsic; kept so that
-            // no index above it moves.
+            // no index above it moves, and what `RESULT_FLOAT`'s `Ok` carries.
             Layout::word("Float", Repr::Float),
             Layout::word("<addr>", Repr::Addr),
             crate::dynamic::render_path_layout(ADDR, INT),
             crate::dynamic::identity_table_layout(),
             crate::dynamic::identity_set_layout(TABLE, BOOL),
             Layout::word("Bool", Repr::Bool),
+            Layout::inline(
+                "Result<Float, Error>",
+                Shape::Enum {
+                    cases: vec![
+                        Case {
+                            name: Arc::from("Ok"),
+                            parts: vec![crate::layout::Part {
+                                layout: LayoutId(14),
+                                at: 0,
+                            }],
+                        },
+                        // What `Err` carries is the machine's `Error`, which
+                        // is not a question a signature asks.
+                        Case {
+                            name: Arc::from("Err"),
+                            parts: Vec::new(),
+                        },
+                    ],
+                    payload: vec![Repr::Float],
+                },
+                vec![Repr::Tag, Repr::Float],
+            ),
         ]
     }
 
@@ -3889,14 +3913,16 @@ mod tests {
     fn a_builtin_call_is_held_to_its_intrinsics_signature() {
         let string = |slot| Arg { slot, layout: STR };
         let int = |slot| Arg { slot, layout: INT };
-        // Slot 0 holds the answer and slot 3 is the `Int` an operand fault is
-        // made of. This sample was `String.length` until ADR 0064 moved it
+        // Slots 0 and 1 hold the answer, slot 2 the `String` and slot 3 the
+        // `Int` an operand fault is made of. This sample was `String.length` until ADR 0064 moved it
         // into `std.string`, then `String.trim`, then `String.toUpper`, then
         // `String.replace` — and issue #454's Step 3 finished by moving that
-        // one too. **No intrinsic that takes a `String` and answers one is
-        // left**, so the sample is `String.refuseByteRange`: a `String` and two
-        // `Int`s, answering `()`, which is why the fixture has a `Unit` layout
-        // now.
+        // one too. It was `String.refuseByteRange` after that, a `String` and
+        // two `Int`s answering `()`, until issue #432 made that refusal
+        // `std.stringbuilder.byteRangeRefusalMessage` and `core.refuse`. **Only
+        // `Float.toInt` and `Float.parse` are left**, so the sample is the
+        // parser: one `String`, answering a `Result<Float, Error>`, which is
+        // why the fixture has a layout for that answer.
         //
         // What the case is about survives the change exactly, because none of
         // the three faults is about which operands these are. The first is a
@@ -3904,42 +3930,42 @@ mod tests {
         // many, where "too many" is whatever the signature says plus one; the
         // third is an `Int` at operand 0 where a `String` goes. The answer's
         // class still matches the signature's, which is what keeps the third
-        // fault the only one the third call reports — `Float.parse` below is
-        // the case about a wrong answer class.
-        let reprs = || vec![Repr::Unit, Repr::Ref, Repr::Ref, Repr::Int];
+        // fault the only one the third call reports — the `Option` answer
+        // below is the case about a wrong answer class.
+        let reprs = || vec![Repr::Tag, Repr::Float, Repr::Ref, Repr::Int];
 
-        // `String.refuseByteRange` over a `String` and two `Int`s, answering
-        // `()`: nothing.
+        // `Float.parse` over a `String`, answering a `Result<Float, Error>`:
+        // nothing.
         let held = calling(
-            crate::Intrinsic::StringRefuseByteRange,
-            UNIT,
+            crate::Intrinsic::FloatParse,
+            RESULT_FLOAT,
             reprs(),
-            vec![string(1), int(3), int(3)],
+            vec![string(2)],
         );
         assert_eq!(faults(&held), Vec::<String>::new());
 
         // One operand too many.
         let held = calling(
-            crate::Intrinsic::StringRefuseByteRange,
-            UNIT,
+            crate::Intrinsic::FloatParse,
+            RESULT_FLOAT,
             reprs(),
-            vec![string(1), int(3), int(3), int(3)],
+            vec![string(2), int(3)],
         );
         assert_eq!(
             faults(&held),
-            vec!["`String.refuseByteRange` takes 3 operand(s), and this call passes 4"]
+            vec!["`Float.parse` takes 1 operand(s), and this call passes 2"]
         );
 
         // An `Int` where a `String` goes.
         let held = calling(
-            crate::Intrinsic::StringRefuseByteRange,
-            UNIT,
+            crate::Intrinsic::FloatParse,
+            RESULT_FLOAT,
             reprs(),
-            vec![int(3), int(3), int(3)],
+            vec![int(3)],
         );
         assert_eq!(
             faults(&held),
-            vec!["operand 0 of `String.refuseByteRange` is `Int`, where its signature has String"]
+            vec!["operand 0 of `Float.parse` is `Int`, where its signature has String"]
         );
 
         // The answer a `Float.parse` writes is a `Result<Float>`, and the
@@ -3948,10 +3974,7 @@ mod tests {
         // that operation into `std.string`; no intrinsic answers an `Option`
         // at all now, so the class this arm checks is the other wrapper. It
         // was then `Int.parse` until issue #454's Step 4 moved *that* one into
-        // `std.int` — which is why this arm names the last parser of a single
-        // operand that is left, rather than `Int.parseRadix`: that one takes
-        // two, so a one-operand fixture would fault on the count before it
-        // ever reached the answer.
+        // `std.int`.
         let held = calling(
             crate::Intrinsic::FloatParse,
             ANSWER,
@@ -3973,36 +3996,35 @@ mod tests {
         // `tests/boxed.rs` holds its value operand to a box.
     }
 
-    /// A text or scalar intrinsic handed a collection is refused as that,
-    /// which is what makes a new collection builtin a verification failure
-    /// rather than a runtime arm (ADR 0058, Phase 5). A value intrinsic could
-    /// be handed one, until the last of them left and issue #536 deleted the
-    /// category.
+    /// A scalar intrinsic handed a collection is refused as that, which is
+    /// what makes a new collection builtin a verification failure rather than
+    /// a runtime arm (ADR 0058, Phase 5). A value intrinsic could be handed
+    /// one, until the last of them left and issue #536 deleted the category;
+    /// a text one could, until issue #432 deleted the last of *those*.
     #[test]
-    fn a_collection_is_refused_by_a_text_or_scalar_intrinsic() {
+    fn a_collection_is_refused_by_a_scalar_intrinsic() {
         let array = |slot| Arg {
             slot,
             layout: ARRAY_INT,
         };
-        // `String.refuseByteRange`, the one `Text` intrinsic left: it was
-        // `String.toUpper` until issue #454's Step 5 and `String.replace` until
-        // Step 3 finished, and each moved into `std.string`. The refusal is
-        // about the operand's *class* and the intrinsic's category being
-        // `Text`, and this one is that category with the same `C::Str` at
-        // operand 0. The other two operands are the two `Int`s it takes, so
-        // no count fault stands beside the one under test.
-        let int = |slot| Arg { slot, layout: INT };
+        // `Float.parse`, whose one operand is a `String`. This was a `Text`
+        // intrinsic — `String.toUpper` until issue #454's Step 5,
+        // `String.replace` until Step 3 finished, then
+        // `String.refuseByteRange` until issue #432 — and each moved into
+        // Cove, the last taking the `Text` category with it. The refusal is
+        // about the operand's being a collection and not about the category,
+        // so the one category left says it in the same words.
         let held = calling(
-            crate::Intrinsic::StringRefuseByteRange,
-            UNIT,
-            vec![Repr::Unit, Repr::Ref, Repr::Ref, Repr::Int],
-            vec![array(1), int(3), int(3)],
+            crate::Intrinsic::FloatParse,
+            RESULT_FLOAT,
+            vec![Repr::Tag, Repr::Float, Repr::Ref, Repr::Int],
+            vec![array(2)],
         );
         assert_eq!(
             faults(&held),
             vec![
-                "operand 0 of `String.refuseByteRange` is the collection `Array<Int>`, and a \
-                 Text intrinsic takes none: a collection operation is a run instruction or \
+                "operand 0 of `Float.parse` is the collection `Array<Int>`, and a \
+                 Scalar intrinsic takes none: a collection operation is a run instruction or \
                  the standard library's, not an intrinsic (ADR 0058)"
             ]
         );

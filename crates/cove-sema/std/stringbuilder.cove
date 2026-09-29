@@ -222,24 +222,24 @@ fn appendByteInto(buffer: ByteBuffer, value: Int) {
 /// formatter asks about — costs the five comparisons and two byte loads, and
 /// nothing else.
 ///
-/// A refusal is `core.refuseByteRange`, which never answers: it says which of
-/// the five things is wrong in `String.sliceBytes`' words, the words
-/// `core.bytesExtend` said them in. It is an intrinsic rather than a Cove
-/// function so that this body stays a leaf the inliner expands — a call would
-/// make it one no backend may expand at all, and `examples/covefmt` calls it
-/// two hundred thousand times.
+/// A refusal is `core.refuse` over [`byteRangeRefusalMessage`], which says
+/// which of the five things is wrong in `String.sliceBytes`' words, the words
+/// `core.bytesExtend` said them in. The sentence is a call that returns before
+/// the run stops, so the path that succeeds builds none of it: a formatter
+/// appends a range almost half a million times a run (`examples/covefmt`), and
+/// every one of them succeeds.
 ///
 /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 fn appendRange(buffer: ByteBuffer, text: String, from: Int, to: Int) {
   let length = core.byteLength(text)
   if from < 0 {
-    core.refuseByteRange(text, from, to)
+    core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
   }
   if from > to {
-    core.refuseByteRange(text, from, to)
+    core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
   }
   if to > length {
-    core.refuseByteRange(text, from, to)
+    core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
   }
   // A continuation byte is `10xxxxxx`, 128 through 191, and an ASCII byte is
   // below both; the end of the string is a boundary and has no byte to look at.
@@ -247,7 +247,7 @@ fn appendRange(buffer: ByteBuffer, text: String, from: Int, to: Int) {
     let first = text.byteAt(from)
     if first >= 128 {
       if first < 192 {
-        core.refuseByteRange(text, from, to)
+        core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
       }
     }
   }
@@ -255,7 +255,7 @@ fn appendRange(buffer: ByteBuffer, text: String, from: Int, to: Int) {
     let last = text.byteAt(to)
     if last >= 128 {
       if last < 192 {
-        core.refuseByteRange(text, from, to)
+        core.refuse(byteRangeRefusalMessage(text, from, to), "", "")
       }
     }
   }
@@ -264,4 +264,43 @@ fn appendRange(buffer: ByteBuffer, text: String, from: Int, to: Int) {
   core.bytesEnsure(buffer, count)
   core.bytesCopy(buffer, at, text, from, count)
   core.bytesCommit(buffer, count)
+}
+
+/// What is wrong with the byte range `from` to `to` of `text`, which the caller
+/// has already found to be wrong: the sentence [`appendRange`] stops a run
+/// with, and the message of the `Err` [`std.string.sliceBytes`] answers.
+///
+/// **One copy of the sentences for both**, so that a builder's append and a
+/// string's slice cannot come to word one range differently. It is a `String`
+/// and not a refusal: `appendRange` raises it through `core.refuse` and
+/// `sliceBytes` answers it, and neither is this function's business.
+///
+/// Five things can be wrong, told about in the order a reader would ask them:
+/// is `from` an offset into this string at all, is `to`, do they run
+/// forwards, and does each begin a character. A range that is wrong in several
+/// ways is told about the first. **That is not the order the callers find a
+/// range wrong in** — both ask below the start, then backwards, then past the
+/// end — and it does not need to be: whichever question failed, the sentence
+/// is chosen here and only here. So `7` to `-1` fails the callers' question
+/// about direction and is told that `from` is outside the string. The last
+/// `return` is the `to` boundary rather than a question of its own, because a
+/// caller reaches this only once one of the five has failed.
+///
+/// Each answer is a `return` of the sentence itself, so nothing is built aside
+/// and copied into the answer.
+fn byteRangeRefusalMessage(text: String, from: Int, to: Int) -> String {
+  let length = core.byteLength(text)
+  if from < 0 || from > length {
+    return "`from` is `{from}`, and a byte offset into this string is 0 to {length}"
+  }
+  if to < 0 || to > length {
+    return "`to` is `{to}`, and a byte offset into this string is 0 to {length}"
+  }
+  if from > to {
+    return "`from` is `{from}` and `to` is `{to}`, so this range runs backwards"
+  }
+  if from < length && text.byteAt(from) >= 128 && text.byteAt(from) < 192 {
+    return "`from` is `{from}`, which is inside a character rather than at the start of one"
+  }
+  return "`to` is `{to}`, which is inside a character rather than at the start of one"
 }
