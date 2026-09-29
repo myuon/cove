@@ -1426,6 +1426,19 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.float",
         function: "toInt",
     },
+    // `Float.parse` was `Intrinsic::FloatParse` — Rust's `str::parse::<f64>`
+    // behind one `Inst::IntrinsicCall` — until issue #432, the last intrinsic
+    // any program emitted. It is a Cove body over byte reads and `Int` and
+    // `Float` arithmetic, with no instruction of its own: the grammar and a
+    // Clinger fast path, and simple decimal conversion over a buffer of at
+    // most 768 digits for everything outside the fast path's box (ADR 0072).
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Float",
+        method: "parse",
+        module: "std.float",
+        function: "parse",
+    },
     // `Duration.nanos` is not here: it is the one primitive left, and both
     // its forms — the reader and the builder — stay in the machine. Each of
     // its five neighbours is bound twice, once as the method that reads it

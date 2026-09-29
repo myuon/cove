@@ -955,7 +955,14 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
 /// [#461](https://github.com/myuon/cove/issues/461)). ADR 0067's `core.refuse`
 /// is what it raises with now, and `std.int.parseRadix` is the same loop with
 /// the radix where the ten was.
-const ASSOCIATED: &[(&str, &str)] = &[("Float", "parse"), ("Duration", "nanos")];
+///
+/// **`Float.parse` is not here either**, and it was the last pair on this table
+/// that was an [`Intrinsic`]: issue #432 made it `std.float.parse`, a Cove body
+/// with no instruction of its own (ADR 0072), resolved by
+/// [`Body::call_associated`] like `Int.parse`. So **no pair left on either
+/// table reaches [`Body::emit_intrinsic_call`]**, and no program emits an
+/// `Inst::IntrinsicCall`; the mechanism itself is a later change's to delete.
+const ASSOCIATED: &[(&str, &str)] = &[("Duration", "nanos")];
 
 /// The [`Convert`] a machine method or associated function is, where it is
 /// one: a word that changes representation, or only `Repr`, and needs no
@@ -1056,12 +1063,18 @@ fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> Opti
 /// point to ask what a `Result`'s `ok` type is instead of naming each receiver
 /// here; two is not, and an arm that names its type is a line a reader
 /// finishes rather than a helper they go and look up.
+///
+/// **`Float.parse` is the third**, since issue #432 made it
+/// `std.float.parse`, and it is one more named line rather than that
+/// generalisation: the three parsers are the only schema-bound builders that
+/// answer a `Result`, and a test that asked a `Result`'s `ok` type would
+/// answer for receivers no binding names. The `"Float"` arm the
+/// [`ASSOCIATED`] check below had went with the pair.
 pub(super) fn associated(head: &str, name: &str, ty: &Ty) -> bool {
     if ASSOCIATED.contains(&(head, name)) {
         return match head {
             "Duration" => matches!(ty, Ty::Duration),
             "Int" => answers(ty, &Ty::Int),
-            "Float" => answers(ty, &Ty::Float),
             _ => false,
         };
     }
@@ -1071,6 +1084,7 @@ pub(super) fn associated(head: &str, name: &str, ty: &Ty) -> bool {
     receiver_name(ty) == Some(head)
         || (head == "String" && answers(ty, &Ty::Str))
         || (head == "Int" && answers(ty, &Ty::Int))
+        || (head == "Float" && answers(ty, &Ty::Float))
 }
 
 /// Whether `ty` is the `Result<ok, Error>` a builtin parser answers.

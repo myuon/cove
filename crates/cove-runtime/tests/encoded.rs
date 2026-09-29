@@ -330,12 +330,19 @@ fn the_run_writes_the_recording_a_run_writes() {
     // other two are interpolated between — `` `Float.toInt` cannot convert ` ``,
     // 30 bytes; `` `, which has no truncation ``, 26; and `` `, which is
     // outside Int's range ``, 31 — five words each.
+    //
+    // It is 1,793 since issue #432 made `Float.parse` `std.float.parse`, and
+    // the seven words are the three literals its body holds that the program
+    // did not already: the refusal's tail `` ` is not a Float ``, 16 bytes and
+    // three words, and the words `nan` and `infinity` it spells, two each. The
+    // refusal's opening backtick is `std.int.refuseInt`'s, and `inf` is
+    // `std.float.format`'s, each placed once already.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1786), capacity_words: Some(1786) }"
+            "HeapSummary { collections: 0, allocated_words: Some(1793), capacity_words: Some(1793) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

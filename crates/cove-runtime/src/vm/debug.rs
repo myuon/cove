@@ -955,6 +955,24 @@ export fn main() -> Int {
             }
         }
 
+        /// [`World::new`], with every call of `std.float.parse` made back
+        /// into the `Inst::IntrinsicCall` of `Intrinsic::FloatParse` it was.
+        ///
+        /// Issue #432 made `Float.parse` a Cove body (ADR 0072), and it was
+        /// the last operation any program lowered to an intrinsic call, so no
+        /// source emits one now. The mechanism is still here until the change
+        /// that deletes it, and so are the cases that hold its reporting to
+        /// account — which need an intrinsic that runs, answers `Ok` without
+        /// allocating and `Err` with one allocation. This puts the call back
+        /// by hand, over the same arguments and into the same answer, as the
+        /// IR the lowering emitted before that issue; nothing a program can
+        /// write reaches it.
+        pub(crate) fn with_the_parse_intrinsic(source: &str) -> World {
+            let mut world = World::new(source);
+            restore_the_parse_intrinsic(&mut world.program);
+            world
+        }
+
         /// A run nothing is watching.
         pub(crate) fn plain(&self) -> Vm<'_> {
             Vm::new(&self.runtime, &self.hosts, &self.program)
@@ -1002,6 +1020,30 @@ export fn main() -> Int {
             .compile(&package)
             .expect("the fixture checks");
         (Arc::new(sources), Arc::new(program))
+    }
+
+    /// Every `call` of `std.float.parse` in `program`, as an `intrinsic-call`
+    /// of `Intrinsic::FloatParse` over the same arguments into the same
+    /// answer. See [`World::with_the_parse_intrinsic`].
+    pub(crate) fn restore_the_parse_intrinsic(program: &mut cove_ir::Program) {
+        let parse = program
+            .function_named("std.float", "parse")
+            .expect("every program carries `std.float.parse`");
+        let result = program.functions[parse.index()].returns;
+        let site = cove_ir::SiteId(program.intrinsic_sites.len() as u32);
+        program.intrinsic_sites.push(cove_ir::IntrinsicSite {
+            intrinsic: cove_ir::Intrinsic::FloatParse,
+            result,
+        });
+        for f in &mut program.functions {
+            for inst in &mut f.code {
+                if let cove_ir::Inst::Call { dst, callee, args } = *inst {
+                    if callee == parse {
+                        *inst = cove_ir::Inst::IntrinsicCall { dst, site, args };
+                    }
+                }
+            }
+        }
     }
 
     fn lowered(sources: &SourceMap, checked: &Checked) -> cove_ir::Program {

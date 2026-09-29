@@ -272,7 +272,7 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "parse", "signature": "parse(text: String) -> Result<Float, Error>", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Result<Float, Error>", "implementedBy": "machine", "host": false}
+        {"name": "parse", "signature": "parse(text: String) -> Result<Float, Error>", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Result<Float, Error>", "implementedBy": "std.float.parse", "host": false}
       ],
       "methods": [
         {"name": "toInt", "signature": "toInt() -> Result<Int, Error>", "generics": [], "params": [], "variadic": false, "result": "Result<Int, Error>", "mutating": false, "implementedBy": "std.float.toInt", "host": false},

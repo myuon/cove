@@ -38,11 +38,21 @@ use crate::vm::intrinsics::{make, operand};
 // `m * 2^e` with `Float` arithmetic, then written from an exact integer in
 // base-`10^9` limbs, ties to even — and the raise is ADR 0067's `core.refuse`.
 
-/// `Float.parse(text) -> Result<Float, Error>`.
+/// `Intrinsic::FloatParse`, the arm of an intrinsic call **no program emits**.
 ///
-/// Rust's `f64::from_str` accepts `inf`, `-inf` and `NaN`, which is why this
-/// does too, and rejects the `_` separators a literal may be written with —
-/// the same thing `Int.parse` does.
+/// It was `Float.parse` until issue #432 made that `std.float.parse`: the
+/// grammar, Clinger's fast path and simple decimal conversion over at most 768
+/// digits, in Cove (ADR 0072), held to this arm's answers bit for bit by
+/// `tests/float_parse.rs` before and after. The lowering no longer reaches
+/// `Intrinsic::FloatParse`, and it was the last variant, so no source makes an
+/// `Inst::IntrinsicCall` at all.
+///
+/// **It stays until the mechanism goes, and only for the mechanism's own
+/// cases.** The reporting and the native helper protocol are held to account
+/// by cases that need an intrinsic which runs — `vm::report`'s and
+/// `native_tier.rs`'s put the call back into lowered IR by hand — and this is
+/// the only arm there is to run. The change that deletes `Intrinsic` and
+/// `IntrinsicCall` deletes this with them.
 pub(super) fn float_parse(
     machine: &mut Machine,
     frame: Frame<'_>,

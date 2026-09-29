@@ -1819,7 +1819,24 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// compiles, carrying its own copy of the standard library into the survey,
 /// and it is there so that the native tier really executes `Float.parse`
 /// before `Intrinsic::FloatParse` is replaced.
-const FORWARDABLE_COPIES: usize = 7392;
+///
+/// **7,399 since issue #432 replaced it**, a rise of 7 over the same 264
+/// programs that is all lowering and is in four programs, not in every one:
+/// a copy into a `return` each time. `examples:cq`, `examples:cqSample` and
+/// `examples:covecheck` rise by two — one in `std.float.parse` and one in
+/// `std.float.parseWord`, each the one site where the body refuses, whose
+/// `parseRefused` `cove_ir::lower::inline` expands because the parse runs in a
+/// loop there, as it expands `std.int.refuseInt` six times into
+/// `std.int.parse` in the same programs. `parse` funnels its refusals to one
+/// site for this reason; written as a `return` at each of five, it was five.
+/// And `tests/e2e:values_float_parse_native` rises by one, at `parsed`'s
+/// `Float.parse(text)` in tail position: an associated binding is lowered
+/// with no destination (`Body::call_std_associated`), so its answer is copied
+/// where the intrinsic call wrote it directly. The answers the fast path
+/// builds are written straight into the `Ok` — the sign is on the operand,
+/// `mantissa.toFloat() * sign` — which is what kept `parse`'s own count at
+/// the one.
+const FORWARDABLE_COPIES: usize = 7399;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

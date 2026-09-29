@@ -284,6 +284,12 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // the pair sat there instead.
             "Error",
             "Result",
+            // `std.float.parse`'s `Result<Float, Error>`, a second `Result`
+            // for the reason the one below is: an `Ok` that is a `Float` is a
+            // run of its own. Issue #432 made `Float.parse` that Cove body
+            // (ADR 0072), and its signature is interned ahead of every row
+            // below it.
+            "Result",
             // `std.string.join` takes an `Array<String>` and `std.string.chars`
             // answers one, and they are the only non-generic library functions
             // whose *signature* names a collection at all — `std.array`'s are
