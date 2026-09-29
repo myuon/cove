@@ -1938,10 +1938,9 @@ pub fn call_method(
             _ => Err(no_method("Int", name, span)),
         },
         Value(Repr::Float(x)) => match name {
-            "toInt" => {
-                expect_args(name, args, 0, span)?;
-                Ok(float_to_int(*x))
-            }
+            // `toInt` answered here, `float_to_int` below, until issue #432
+            // made it `std.float.toInt`: `Interpreter::eval_method_call`
+            // resolves it to that call before this function is asked.
             "round" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Float(x.round())))
@@ -2308,28 +2307,11 @@ fn no_method(type_name: &str, method: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{type_name}` has no method `{method}`")).at(span)
 }
 
-/// `Float.toInt`: truncates toward zero and names which of the three expected
-/// failures stopped it. `NaN` is not a number, an infinity has no
-/// truncation, and a magnitude at or past 2^63 does not fit in an `Int`.
-fn float_to_int(x: f64) -> Value {
-    if x.is_nan() {
-        return Value::err(Value::error(
-            "`Float.toInt` cannot convert `NaN`, which is not a number",
-        ));
-    }
-    if x.is_infinite() {
-        return Value::err(Value::error(format!(
-            "`Float.toInt` cannot convert `{x}`, which has no truncation"
-        )));
-    }
-    let truncated = x.trunc();
-    if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
-        return Value::err(Value::error(format!(
-            "`Float.toInt` cannot convert `{x}`, which is outside Int's range"
-        )));
-    }
-    Value::ok(Value(Repr::Int(truncated as i64)))
-}
+// `float_to_int` stood here, the oracle's `Float.toInt`: `f64::trunc` and
+// three sentences, the finite one quoting the value in Rust's `{}`. Issue
+// #432 left one copy, in Cove — `std.float.toInt` over `core.floatTruncate`,
+// whose oracle arm is `crate::float::truncate` — and the range sentence now
+// quotes the value as Cove renders a `Float` (ADR 0071).
 
 // `wrong_byte_range` stood here, the oracle's copy of `String.sliceBytes`'
 // five sentences for `core.refuseByteRange`, walking `std.string`'s

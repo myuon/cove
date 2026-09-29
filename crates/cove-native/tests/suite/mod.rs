@@ -6208,10 +6208,10 @@ pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
 /// the outcome after it.
 pub const INTRINSIC_CLASSES: [(&str, &str); 1] = [("Float", "parse")];
 
-/// A second variant of the one class left, for a case that needs two variants
-/// rather than two classes: `Float.toInt`, which allocates the message of each
-/// of its three refusals and so is a safepoint as `Float.parse` is.
-pub const ANOTHER_VARIANT: (&str, &str) = ("Float", "toInt");
+// `ANOTHER_VARIANT` stood here, a second variant of the one class left for
+// the case below that wanted two: `Float.toInt`, a safepoint as `Float.parse`
+// is. Issue #432 made it `std.float.toInt` over `Inst::FloatTruncate`, and
+// `Float.parse` is the only variant there is.
 
 /// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
 ///
@@ -6448,11 +6448,14 @@ pub fn an_intrinsic_calls_machine_code_is_charged_to_its_variant<A: Arm>() {
 ///
 /// The case above would pass a `charge` that ran once per *function* rather than
 /// once per site, which is the way a per-variant table most plausibly goes
-/// wrong: three calls in one body, two of them the same variant, and the table
-/// has to read two and one rather than one and one.
+/// wrong: three calls in one body, and the table has to read three rather than
+/// one. They were two of one variant and one of another until issue #432 left
+/// `Float.parse` the only variant, so what is left of the second half — a
+/// charge landing on the wrong row — is `only_variant`'s zero everywhere
+/// else, which the assertion on the whole table still reads.
 ///
-/// Where the bytes are attributed, the repeated variant's row is held to
-/// **exactly twice** what the same variant's single-site function charges. That
+/// Where the bytes are attributed, the variant's row is held to **exactly
+/// three times** what the same variant's single-site function charges. That
 /// is an equality rather than an inequality because this arm's encoder does not
 /// choose between encodings — every immediate it lays down for a site is a fixed
 /// width, whatever the pc, the destination or the site number is — so two sites
@@ -6465,20 +6468,12 @@ pub fn every_intrinsic_call_site_is_counted<A: Arm>() {
         jit.compile(program, FunctionId(0))
             .expect("the function is inside the slice")
     };
-    let (repeated, once) = (INTRINSIC_CLASSES[0], ANOTHER_VARIANT);
-    let handle = compiled(&intrinsic_calling_each(&[repeated, once, repeated]));
+    let repeated = INTRINSIC_CLASSES[0];
+    let handle = compiled(&intrinsic_calling_each(&[repeated, repeated, repeated]));
     let code = A::intrinsic_code(handle);
 
-    let mut wanted = only_variant(repeated.0, repeated.1, 2);
-    let at_once = cove_ir::Intrinsic::from_names(once.0, once.1)
-        .expect("an intrinsic")
-        .index();
-    wanted[at_once] = 1;
-    assert_eq!(
-        code.sites.to_vec(),
-        wanted,
-        "two of one variant and one of another"
-    );
+    let wanted = only_variant(repeated.0, repeated.1, 3);
+    assert_eq!(code.sites.to_vec(), wanted, "three sites of one variant");
     assert_eq!(code.total_sites(), 3, "three sites, three charges");
 
     assert_eq!(
@@ -6497,18 +6492,17 @@ pub fn every_intrinsic_call_site_is_counted<A: Arm>() {
         .expect("this arm attributes bytes");
     let alone = one_site[at_repeated];
     println!(
-        "`{}.{}`: {} byte(s) for two sites, {alone} for one",
+        "`{}.{}`: {} byte(s) for three sites, {alone} for one",
         repeated.0, repeated.1, bytes[at_repeated]
     );
     assert_eq!(
         bytes[at_repeated],
-        2 * alone,
-        "two sites of one variant are two identical spans"
+        3 * alone,
+        "three sites of one variant are three identical spans"
     );
-    assert!(bytes[at_once] > 0, "the third variant charged nothing");
     assert_eq!(
         code.total_bytes(),
-        Some(bytes[at_repeated] + bytes[at_once]),
+        Some(bytes[at_repeated]),
         "the total is the sum of the rows, and no other row was charged"
     );
     assert!(

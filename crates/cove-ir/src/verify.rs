@@ -1972,9 +1972,7 @@ impl Check<'_> {
     /// Why a value of `layout` is not a `class`, or `None` when it is one.
     fn class_fault(&self, class: Class, layout: LayoutId) -> Option<String> {
         let described = self.program.layout(layout);
-        let word = |repr: Repr| described.shape == Shape::Word(repr);
         let fits = match class {
-            Class::Float => word(Repr::Float),
             Class::Str => described.shape == Shape::Str,
             Class::ResultOf(carried) => self.is_case_pair(
                 layout,
@@ -2003,8 +2001,7 @@ impl Check<'_> {
             part.index() < self.program.layouts.len()
                 && matches!(
                     (carried, &self.program.layout(part).shape),
-                    (Some(Carried::Int), Shape::Word(Repr::Int))
-                        | (Some(Carried::Float), Shape::Word(Repr::Float))
+                    (Some(Carried::Float), Shape::Word(Repr::Float))
                 )
         };
         cases.iter().any(|case| {
@@ -3987,9 +3984,10 @@ mod tests {
         // one too. It was `String.refuseByteRange` after that, a `String` and
         // two `Int`s answering `()`, until issue #432 made that refusal
         // `std.stringbuilder.byteRangeRefusalMessage` and `core.refuse`. **Only
-        // `Float.toInt` and `Float.parse` are left**, so the sample is the
-        // parser: one `String`, answering a `Result<Float, Error>`, which is
-        // why the fixture has a layout for that answer.
+        // `Float.parse` is left** since issue #432 made `Float.toInt`
+        // `std.float.toInt`, so the sample is the parser: one `String`,
+        // answering a `Result<Float, Error>`, which is why the fixture has a
+        // layout for that answer.
         //
         // What the case is about survives the change exactly, because none of
         // the three faults is about which operands these are. The first is a

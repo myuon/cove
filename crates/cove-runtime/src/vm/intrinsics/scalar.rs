@@ -1,14 +1,12 @@
 //! `Int` and `Float`.
 //!
 //! A scalar is one word, and a `Result` is a run of words rather than an
-//! object, so the only thing any of these allocates is text: the `String` a
-//! `format` builds, and the message an `Err` explains itself with. What each
-//! one *means* is the oracle's, including the two places the answer is not
-//! the obvious one:
+//! object, so the only thing any of these allocates is text: the message an
+//! `Err` explains itself with. What each one *means* is the oracle's.
 //!
-//! - **`Float.toInt()` answers a `Result`**, because three floats have no
-//!   truncation that fits: `NaN`, an infinity, and a magnitude at or past
-//!   2^63. Each is named separately.
+//! `Float.toInt()` is not here: it is `std.float.toInt`, one
+//! `Inst::FloatTruncate` and its three refusals in Cove (issue #432, ADR
+//! 0071).
 //!
 //! `Int.toFloat` and `Duration.nanos` are not here: each is an
 //! [`Inst::Convert`](cove_ir::Inst::Convert) since ADR 0058's Phase 5 (#378,
@@ -29,31 +27,11 @@ use crate::vm::intrinsics::{make, operand};
 
 // --- Float -----------------------------------------------------------------
 
-/// `Float.toInt() -> Result<Int, Error>`, truncating toward zero.
-pub(super) fn float_to_int(
-    machine: &mut Machine,
-    frame: Frame<'_>,
-    dest: Dest,
-) -> Result<(), RuntimeError> {
-    let x = operand::float(machine, frame, 0);
-    if x.is_nan() {
-        return make::failed(
-            machine,
-            dest,
-            "`Float.toInt` cannot convert `NaN`, which is not a number",
-        );
-    }
-    if x.is_infinite() {
-        let message = format!("`Float.toInt` cannot convert `{x}`, which has no truncation");
-        return make::failed(machine, dest, &message);
-    }
-    let truncated = x.trunc();
-    if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
-        let message = format!("`Float.toInt` cannot convert `{x}`, which is outside Int's range");
-        return make::failed(machine, dest, &message);
-    }
-    make::ok(machine, dest, &[truncated as i64 as u64])
-}
+// `float_to_int` stood here: `f64::trunc`, and the three refusals worded with
+// Rust's `{}`. It is `std.float.toInt` — `core.floatTruncate`, which is
+// `Inst::FloatTruncate`, and the sentences in Cove on the path that refuses —
+// and the range sentence quotes the value as Cove renders a `Float` (issue
+// #432, ADR 0071).
 
 // `float_format` stood here: `format!("{:.*}")`, and a raise on a `digits`
 // outside `0..=17`. It is `std.float.format` — the value taken apart into
@@ -99,38 +77,13 @@ mod tests {
     // backends, and `vm::differential`'s sweep of twenty thousand binary64
     // values against `format!` itself.
 
-    /// Three floats have no truncation an `Int` can hold, and each is named
-    /// separately rather than answered with one message about conversion.
-    #[test]
-    fn to_int_names_each_of_the_three_failures() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let int = scalar(&program, Repr::Int);
-        let to_int = |machine: &mut Machine, x: f64| {
-            run(machine, "Float", "toInt", &[(Repr::Float, x.to_bits())]).unwrap()
-        };
-        let words = to_int(&mut machine, -2.9);
-        assert_eq!(
-            result_of(&program, int, &words),
-            ("Ok".to_string(), vec![-2i64 as u64]),
-            "truncated toward zero"
-        );
-        let words = to_int(&mut machine, f64::NAN);
-        assert_eq!(
-            message_of(&machine, int, &words),
-            "`Float.toInt` cannot convert `NaN`, which is not a number"
-        );
-        let words = to_int(&mut machine, f64::INFINITY);
-        assert_eq!(
-            message_of(&machine, int, &words),
-            "`Float.toInt` cannot convert `inf`, which has no truncation"
-        );
-        let words = to_int(&mut machine, 1e30);
-        assert_eq!(
-            message_of(&machine, int, &words),
-            "`Float.toInt` cannot convert `1000000000000000000000000000000`, which is outside Int's range"
-        );
-    }
+    // `to_int_names_each_of_the_three_failures` stood here, asking this
+    // module's `toInt` arm for a truncation and its three refusals. The arm is
+    // `std.float.toInt` now, and what answers for it is
+    // `tests/e2e/values_float_to_int` on the interpreter and the VM,
+    // `values_float_to_int_native` and `native_tier.rs` on the native tier,
+    // and `vm::exec`'s and `cove-native`'s `TRUNCATIONS` for the instruction
+    // beneath it.
 
     #[test]
     fn parsing_a_float_answers_a_result() {

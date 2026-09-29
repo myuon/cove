@@ -1797,7 +1797,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// the standard library into the survey, and it is there so that the native
 /// tier really executes `Float.toInt` before `Intrinsic::FloatToInt` is
 /// replaced.
-const FORWARDABLE_COPIES: usize = 7095;
+///
+/// **7,358 since issue #432 replaced it**, a rise of 263 over the same 263
+/// programs that is one copy per program and all lowering: every program
+/// carries `std.float`, and `std.float.toIntRefused` — the three refusals
+/// `Intrinsic::FloatToInt` worded in Rust, now worded in Cove — holds one
+/// copy this survey counts. It is at pc 2, the `NaN` branch's sentence, a
+/// `str` literal moved into the `Error` it is the message of: a "copy after
+/// a producer", 2,655 to 2,918. The other two sentences are interpolations
+/// finished by a `run-finish`, which this survey does not count as a
+/// producer, and `std.float.toInt` itself holds none. A per-function listing
+/// of the counted copies in the standard library before and after names that
+/// one function and no other; the copies into a `return` did not move
+/// (5,935).
+const FORWARDABLE_COPIES: usize = 7358;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

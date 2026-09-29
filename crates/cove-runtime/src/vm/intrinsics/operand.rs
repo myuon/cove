@@ -27,7 +27,7 @@
 //! `debug_assert!` what the verifier established, which the `checked` profile
 //! every test and every measurement runs under keeps on, and read the word.
 
-use cove_ir::{Arg, LayoutId, Repr, Shape};
+use cove_ir::{Arg, LayoutId};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
@@ -69,11 +69,6 @@ impl<'a> Frame<'a> {
     /// The operands `args` names in the frame based at `base`.
     pub(crate) fn new(base: u64, args: &'a [Arg]) -> Frame<'a> {
         Frame { base, args }
-    }
-
-    /// The layout of operand `at`.
-    pub(super) fn layout(self, at: usize) -> LayoutId {
-        self.args[at].layout
     }
 
     /// The first word of operand `at`, read out of the frame.
@@ -129,25 +124,17 @@ impl Dest {
     }
 }
 
-/// Whether operand `at` of `frame` is one word of `repr`, which is what the
-/// verifier held it to.
-fn is_word(machine: &Machine, frame: Frame<'_>, at: usize, repr: Repr) -> bool {
-    machine.program().layout(frame.layout(at)).shape == Shape::Word(repr)
-}
+// `is_word`, and `Frame::layout` beneath it, stood here: the check that an
+// operand is one word of a `Repr`, which `float` below asked of its operand.
+// Issue #432 took the last word operand an intrinsic read.
 
 // `int`, the `Int` operand `at` is, stood here until issue #432 took
 // `String.refuseByteRange`'s two offsets, the last `Int` operands an intrinsic
 // read.
 
-/// The `Float` operand `at` is.
-#[inline]
-pub(super) fn float(machine: &Machine, frame: Frame<'_>, at: usize) -> f64 {
-    debug_assert!(
-        is_word(machine, frame, at, Repr::Float),
-        "an operand verified to be a `Float`"
-    );
-    f64::from_bits(frame.word(machine, at))
-}
+// `float`, the `Float` operand `at` is, stood here until issue #432 made
+// `Float.toInt` `std.float.toInt`: its receiver was the last `Float` operand
+// an intrinsic read.
 
 /// The address of the `String` operand `at` is.
 #[inline]

@@ -871,8 +871,8 @@ fn snapshots_itself(ty: &Ty) -> bool {
 ///
 /// Every one of them is an operation of a value that is one word or is text,
 /// and none of them is something an instruction expresses: `Int.abs` at
-/// `Int.MIN` stops the run, `Float.toInt` answers a `Result`, `String.trim`
-/// needs a Unicode table. A `String`'s length used to head that list — it is
+/// `Int.MIN` stops the run, `Float.toInt` answered a `Result`, `String.trim`
+/// needed a Unicode table. A `String`'s length used to head that list — it is
 /// in characters rather than bytes, so no `Inst::Len` answers it — and it is
 /// the counter-example now: ADR 0064 made it `std.string.length`, a Cove loop
 /// over `core.byteLength` and one run load a character, and the thing that
@@ -908,14 +908,16 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// ADR 0064's Decision 2 typed scalar operation, and names `Float.min` and
 /// `Float.max` as the two halves of the [`Inst::FloatMinMax`] they lower to,
 /// `Float.round` as the [`Inst::FloatRound`] it lowers to and `Float.sqrt` as
-/// the [`Inst::FloatSqrt`] it lowers to.
+/// the [`Inst::FloatSqrt`] it lowers to. `Float.toInt` left this table with
+/// issue #432: it is `std.float.toInt`, resolved by
+/// [`Body::call_std_binding`] like `Duration.micros`, over the checked
+/// conversion `Inst::FloatTruncate`.
 /// **A pair leaves this table
 /// when the *method* leaves the machine, not when the intrinsic does** — an
 /// entry here is what says the lowering answers the call at all, and the three
 /// ways it can answer are an instruction, a conversion and a runtime call.
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("Int", "toFloat"),
-    ("Float", "toInt"),
     ("Float", "round"),
     ("Float", "abs"),
     ("Float", "sqrt"),

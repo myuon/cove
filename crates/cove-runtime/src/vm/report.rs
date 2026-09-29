@@ -1199,24 +1199,17 @@ mod tests {
                 intrinsic_sites: 4,
                 library_call_sites: 2,
             },
-            intrinsics: vec![
-                IntrinsicCalls {
-                    intrinsic: Intrinsic::FloatToInt,
-                    sites: 1,
-                    encoded: 1_000,
-                    native: 7,
-                    allocations: 1_007,
-                    words: 5_035,
-                },
-                IntrinsicCalls {
-                    intrinsic: Intrinsic::FloatParse,
-                    sites: 3,
-                    encoded: 0,
-                    native: 0,
-                    allocations: 0,
-                    words: 0,
-                },
-            ],
+            // One row: `Float.parse` is the one variant left since issue #432
+            // made `Float.toInt` `std.float.toInt`, which was the row above
+            // it here.
+            intrinsics: vec![IntrinsicCalls {
+                intrinsic: Intrinsic::FloatParse,
+                sites: 3,
+                encoded: 1_000,
+                native: 7,
+                allocations: 1_007,
+                words: 5_035,
+            }],
             encoded_instructions: 1_234_567,
             encoded_dispatches: 1_234_000,
             fusions: [80, 0, 3, 0],
@@ -1280,17 +1273,14 @@ mod tests {
             "an operation that never ran is left out"
         );
         assert!(text.contains(
-            "           1,000              7       1       1,007        5,035  Float.toInt"
-        ));
-        assert!(text.contains(
-            "               0              0       3           0            0  Float.parse"
+            "           1,000              7       3       1,007        5,035  Float.parse"
         ));
     }
 
-    /// A loop that calls an intrinsic that allocates (`Float.parse` builds
-    /// the message of the `Err` it answers) and one that does not
-    /// (`Float.toInt` of a number it can convert answers an `Ok` in place),
-    /// each several times over, so both [`Counting`]'s wiring and the
+    /// A loop that calls an intrinsic where it allocates (`Float.parse` of
+    /// text that is not a number builds the message of the `Err` it answers)
+    /// and where it does not (`Float.parse` of a number answers an `Ok` in
+    /// place), each several times over, so both [`Counting`]'s wiring and the
     /// reconciliation test below have more than one call and more than one
     /// site to work with.
     ///
@@ -1305,9 +1295,13 @@ mod tests {
     /// erased keys `std.dynamic.order` the same way; and it was then
     /// `Value.admitKey` over a `Node` whose `kids` are `Node`s, until the
     /// ADR's Phase 4c worded the admission's refusal in Cove and deleted the
-    /// last intrinsic that walked a value. `Float.toInt` is what is left that
-    /// answers without allocating: a conversion that succeeds writes its `Ok`
-    /// where the call asked for it, and only a refusal builds a message.
+    /// last intrinsic that walked a value. It was then `Float.toInt` — a
+    /// conversion that succeeds writes its `Ok` where the call asked for it —
+    /// until issue #432 made that `std.float.toInt`, and **no variant is left
+    /// that never allocates**. `Float.parse` of text that is a number is what
+    /// answers without allocating now: the same variant as the other call,
+    /// at another site, so the property below is about calls rather than
+    /// about variants.
     ///
     /// **The allocating one has moved twice**, and neither time because a
     /// reader found a run instruction to stand on: it was `String.join` until
@@ -1325,7 +1319,7 @@ export fn main() -> Int {
   var total = 0
   var i = 0
   while i < 50 {
-    let whole = (2.5 + 0.0).toInt()
+    let whole = Float.parse(\"2.5\")
     if whole.isOk() {
       total = total + 1
     }
@@ -1341,18 +1335,22 @@ export fn main() -> Int {
 
     /// [ADR 0064]'s Decision 7 asks that allocations and allocated words be
     /// attributed per variant, and this is the property worth pinning about
-    /// that attribution: it is not just present, it tells two operations
-    /// apart. `Float.parse` allocates the message of the `Err` it hands back,
-    /// and `Float.toInt` of a number it can convert writes its `Ok` in place,
-    /// so a run of both must show one row with allocations and one row
-    /// without — from the real machinery in `Machine::call_intrinsic`, not
-    /// from calling [`Counting::intrinsic_allocated`] directly, which would
-    /// only prove the bookkeeping adds correctly and not that it is wired to
-    /// anything.
+    /// that attribution: it is not just present, it counts what the calls
+    /// did. `Float.parse` allocates the message of the `Err` it hands back
+    /// and writes an `Ok` in place, so a run of fifty of each must show one
+    /// row with a hundred calls and fifty allocations — one per call that
+    /// refused, and none for a call that did not — from the real machinery in
+    /// `Machine::call_intrinsic`, not from calling
+    /// [`Counting::intrinsic_allocated`] directly, which would only prove the
+    /// bookkeeping adds correctly and not that it is wired to anything.
+    ///
+    /// It told two *variants* apart while there were two: `Float.toInt` of a
+    /// number it could convert was the row without allocations, until issue
+    /// #432 made that operation `std.float.toInt`.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
     #[test]
-    fn an_allocating_intrinsics_row_carries_allocations_and_a_reading_ones_does_not() {
+    fn an_intrinsics_row_carries_the_allocations_of_the_calls_that_made_them() {
         use crate::vm::debug::tests::World;
 
         let world = World::new(PARSE_AND_ADMIT);
@@ -1364,26 +1362,18 @@ export fn main() -> Int {
         let parsed = boundary
             .intrinsic(Intrinsic::FloatParse)
             .expect("the program calls Float.parse");
-        assert!(parsed.calls() > 0, "{parsed:?}");
-        assert!(
-            parsed.allocations > 0,
-            "Float.parse allocates the message of the Err it answers: {parsed:?}"
+        assert_eq!(parsed.calls(), 100, "{parsed:?}");
+        assert_eq!(parsed.sites, 2, "{parsed:?}");
+        assert_eq!(
+            parsed.allocations, 50,
+            "Float.parse allocates the message of each Err it answers, and \
+             nothing for an Ok it writes in place: {parsed:?}"
         );
         assert!(parsed.words > 0, "{parsed:?}");
         // The per-variant total is a subset of the whole run's, never past
         // it — the sanity Decision 7's own measurement leans on.
         assert!(parsed.allocations <= vm.allocations(), "{parsed:?}");
         assert!(parsed.words <= vm.allocated_words(), "{parsed:?}");
-
-        let converted = boundary
-            .intrinsic(Intrinsic::FloatToInt)
-            .expect("the program converts a Float");
-        assert!(converted.calls() > 0, "{converted:?}");
-        assert_eq!(
-            converted.allocations, 0,
-            "Float.toInt of a number it converts answers in place: {converted:?}"
-        );
-        assert_eq!(converted.words, 0, "{converted:?}");
     }
 
     /// **The totals must reconcile exactly with the opcode and site
