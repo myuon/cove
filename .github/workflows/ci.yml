@@ -138,66 +138,6 @@ jobs:
       - name: cargo test (the doc examples)
         run: cargo test --workspace --doc --profile checked
 
-      # The native tier, which every step above builds with its code generator
-      # absent.
-      #
-      # `cove-native`'s code generator is an optional feature that is *off by
-      # default*, because ADR 0055's adoption gate asks that "a build without
-      # the native feature has no executable-memory dependency" and that is a
-      # fact about the dependency graph rather than about which functions
-      # compile. The consequence is that `--workspace` compiles a crate of ABI
-      # declarations and runs none of the lowering's tests, so they need a pass
-      # of their own — a test no gate runs is not a test.
-      #
-      # One arm. ADR 0056 chose the hand-written x86-64 template compiler over
-      # Cranelift on a measured comparison, and ADR 0066 retired the loser, so
-      # there is one lowering to lint, document and run. This step was three
-      # passes while there were two arms: one each, and a third for the test
-      # that asserted they agreed, which neither single-feature pass could
-      # compile.
-      - name: cargo clippy, doc and test (the native tier)
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: |
-          cargo clippy -p cove-native --all-targets --features template --profile checked -- -D warnings
-          cargo doc -p cove-native --no-deps --features template --profile checked
-          cargo test -p cove-native --features template --profile checked
-
-      # The *runtime's* half of the tier, and the CLI's, which are behind the
-      # same features for the same reason and were untested here until issue
-      # #369 wired `--backend native`.
-      #
-      # `crates/cove-runtime/tests/native_tier.rs` is the one that matters:
-      # every case above it in `native_return.rs` runs the boundary against a
-      # hand-written third tier, which is what lets them run in the ordinary
-      # `cargo t` with no executable page — and which is exactly why they can
-      # say nothing about machine code. This file compiles the real template
-      # compiler, enters it from the encoded `CALL` arm, and compares every
-      # answer with the VM's. A default build does not compile it, so without
-      # this step nothing would run it, and "a test no gate runs is not a
-      # test" is already written above.
-      #
-      # **Since ADR 0066 this is the only place a cross-implementation check on
-      # machine code happens at all.** While there were two code generators,
-      # `cove-native`'s `tests/agree.rs` compared them against each other; with
-      # one arm the comparison that remains is this file's, and it is the
-      # better of the two — VM against compiled code, on real Cove source
-      # rather than on hand-built IR.
-      #
-      # One pass, where this was a loop over `cranelift`, `template` and both.
-      # `cove-bench` has left it: it was here for `native_compare.rs`, the bin
-      # that raced the two arms, which ADR 0066 retired with the arm.
-      - name: cargo clippy, doc and test (the native tier's runtime and CLI)
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: |
-          cargo clippy -p cove-runtime -p cove-cli --all-targets \
-            --features template --profile checked -- -D warnings
-          cargo doc -p cove-runtime -p cove-cli --no-deps \
-            --features template --profile checked
-          cargo test -p cove-runtime -p cove-cli \
-            --features template --profile checked
-
       # Dogfooding. These are the project's own claims about its own sources:
       # the repository is formatted, the representative programs check, and
       # their tests pass. They are checked with the binary this commit builds.
@@ -282,37 +222,78 @@ jobs:
       - name: cove-bench (correctness only; no threshold gate)
         run: ./target/checked/cove-bench --iterations 1
 
-      # Last, and after everything above has used the *default* toolchain, which
-      # is the one a user gets: this step rebuilds `cove` with the code
-      # generator's feature, so it goes where nothing after it reads the binary.
-      #
-      # What it checks is the experimental tier on the corpus the toolchain
-      # already dogfoods: `examples/covefmt` over every `.cove` file in the
-      # repository, on the native tier, byte for byte against the encoded VM's
-      # answer.
-      #
-      # It is a check and not a measurement. Wall-clock numbers are meaningless
-      # on a shared runner — ADR 0029, and the reason `cove-bench` runs here for
-      # correctness only — so what this asserts is the thing a runner can
-      # assert: the two backends print the same bytes and both exit 0. The
-      # mixture itself is printed to the log, unconditionally, because ADR 0055
-      # requires a native run to report it.
+  # The template compiler is optional and is absent from the default workspace
+  # build. Its lint, docs, tests and VM/native corpus comparison therefore form
+  # an independent gate. Keeping them here avoids putting their feature-specific
+  # compilation on the serial path through the default checks.
+  native:
+    name: the native tier builds and agrees with the VM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: |
+          rustup component add clippy
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - name: Cache cargo registry and target
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            examples/target
+            tests/e2e/target
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-native-
+            ${{ runner.os }}-cargo-
+
+      - name: Date the sources back, on an exact hit only
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          git ls-files -z | xargs -0 touch -d '2000-01-01T00:00:00Z'
+          echo "the cache is this commit's Rust; cargo has nothing to rebuild"
+
+      # ADR 0056 chose the hand-written x86-64 template compiler and ADR 0066
+      # retired Cranelift, so there is one code-generator arm to check.
+      - name: cargo clippy, doc and test (the native tier)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo clippy -p cove-native --all-targets --features template --profile checked -- -D warnings
+          cargo doc -p cove-native --no-deps --features template --profile checked
+          cargo test -p cove-native --features template --profile checked
+
+      # This includes the VM/native differential suite in
+      # `crates/cove-runtime/tests/native_tier.rs`.
+      - name: cargo clippy, doc and test (the native tier's runtime and CLI)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo clippy -p cove-runtime -p cove-cli --all-targets \
+            --features template --profile checked -- -D warnings
+          cargo doc -p cove-runtime -p cove-cli --no-deps \
+            --features template --profile checked
+          cargo test -p cove-runtime -p cove-cli \
+            --features template --profile checked
+
+      # Run the repository's formatter corpus on machine code and require it
+      # to print exactly what the encoded VM prints. Neither stderr stream is
+      # hidden, so a backend failure remains diagnosable from the CI log.
       - name: cove run covefmtBench on the native tier, against the VM
         run: |
           set -euo pipefail
           cargo build --profile checked -p cove-cli --features template
           cd examples
           strip_timings() { grep -v '^lex\|^parse\|^print\|^whole'; }
-          # Neither run's stderr is redirected, and the VM run's used to be.
-          # `2>/dev/null` sat on the line below and cost an investigation: the
-          # VM run exited 1 because one file no longer round-tripped through
-          # covefmt, `set -euo pipefail` ended the step before `diff` ran, and
-          # the sentence saying which — the only thing in the run that says
-          # *why* — had already been thrown away. The log held an exit code
-          # and nothing else. A step that discards the diagnostic of the
-          # command it is gating on is not quieter, it is a step whose
-          # failures have to be reproduced before they can be read. On a
-          # passing run both are silent, so this costs the log nothing.
           ../target/checked/cove run covefmtBench --files-root .. --backend vm \
             | strip_timings > /tmp/covefmt-vm.out
           ../target/checked/cove run covefmtBench --files-root .. --backend native \
@@ -337,7 +318,7 @@ jobs:
           rustc --version
           cargo --version
 
-      # This job writes a target tree independently of `build`. Keep its key
+      # This job writes a target tree independently of `checks`. Keep its key
       # separate so two concurrent jobs never contend for the same cache entry.
       # The broad fallback can seed the first run from the former shared cache;
       # subsequent runs prefer the latest ratchet-specific tree.
@@ -370,21 +351,23 @@ jobs:
       - name: cargo test (the ignored rows)
         run: cargo test --workspace --lib --tests --profile checked -- --ignored
 
-  # Preserve the existing required-check name while `checks` and `ratchet`
-  # execute concurrently. Moving the ignored rows out of the old job must not
-  # make a red ratchet optional under the repository's existing branch rule.
+  # Preserve the existing required-check name while the three arms execute
+  # concurrently. Moving work out of the old job must not make a red arm
+  # optional under the repository's existing branch rule.
   build:
     name: test, lint, and dogfood
     if: always()
-    needs: [checks, ratchet]
+    needs: [checks, native, ratchet]
     runs-on: ubuntu-latest
     steps:
-      - name: Both halves passed
+      - name: Every arm passed
         env:
           CHECKS_RESULT: ${{ needs.checks.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
           RATCHET_RESULT: ${{ needs.ratchet.result }}
         run: |
           test "$CHECKS_RESULT" = success
+          test "$NATIVE_RESULT" = success
           test "$RATCHET_RESULT" = success
 
   # Issue #241 asks for the WebAssembly build to be in CI before the UI that
