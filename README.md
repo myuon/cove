@@ -713,6 +713,20 @@ those paths, and a call brought in by one expansion is never expanded again,
 which is what keeps the pass terminating. `Intrinsic` is down to
 `Float.toInt` and `Float.parse`.
 
+[ADR 0071](docs/adr/0071-a-checked-conversion-answers-a-value-and-whether-there-is-one.md)
+moves `Float.toInt` into `std.float`. Beneath it is `Inst::FloatTruncate`, a
+checked conversion with two answers — the integer, and a `Bool` that says
+whether there is one — and not an instruction that writes an `Option`: the
+lowering builds `core.floatTruncate`'s `Option<Int>` from the two, and the
+three refusals are worded in Cove on the path that refuses. No machine's
+"integer indefinite" is part of the contract; the native tier reads it inside
+its own template and writes the documented `0`. The one visible change is
+intended: the out-of-range refusal quotes the value as Cove renders a `Float`,
+`9223372036854775808.0` where Rust's `{}` said `9223372036854776000`. A
+program's own `toInt` is a Cove call, nine instructions on the path that
+succeeds, and `std.float`'s renderers use the instruction directly. `Intrinsic`
+is down to `Float.parse`.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
