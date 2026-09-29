@@ -1313,6 +1313,14 @@ mod tests {
     /// row that attributed only the outermost object; nothing left allocates
     /// more than one per call.
     ///
+    /// **Since issue #432 no source emits the call at all**: `Float.parse` is
+    /// `std.float.parse`, a Cove body (ADR 0072), and it was the last
+    /// intrinsic. The two cases below run this program through
+    /// `World::with_the_parse_intrinsic`, which puts the `intrinsic-call` back
+    /// by hand where the lowering now emits a `call`, so that the reporting
+    /// they hold to account still has calls to report until the change that
+    /// deletes the mechanism deletes them with it.
+    ///
     /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
     const PARSE_AND_ADMIT: &str = "
 export fn main() -> Int {
@@ -1353,7 +1361,7 @@ export fn main() -> Int {
     fn an_intrinsics_row_carries_the_allocations_of_the_calls_that_made_them() {
         use crate::vm::debug::tests::World;
 
-        let world = World::new(PARSE_AND_ADMIT);
+        let world = World::with_the_parse_intrinsic(PARSE_AND_ADMIT);
         let mut vm = world.plain();
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
@@ -1400,7 +1408,7 @@ export fn main() -> Int {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::new(PARSE_AND_ADMIT);
+        let world = World::with_the_parse_intrinsic(PARSE_AND_ADMIT);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();

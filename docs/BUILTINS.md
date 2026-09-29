@@ -317,7 +317,7 @@ written as a namespace.
 
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
-| `parse(text: String) -> Result<Float, Error>` |  |  | `machine` |
+| `parse(text: String) -> Result<Float, Error>` |  |  | `std.float.parse` |
 
 **Methods.**
 

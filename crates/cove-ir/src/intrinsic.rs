@@ -50,6 +50,13 @@ pub enum Intrinsic {
     // checked typed conversion, answering an integer and whether there is
     // one — and the three sentences in Cove on the path that refuses
     // (ADR 0071).
+    //
+    // `FloatParse` is the last, and **no program emits it**: issue #432 made
+    // `Float.parse` `std.float.parse`, a Cove body with no instruction of its
+    // own (ADR 0072), so the lowering never names this variant. It stays, with
+    // its VM arm and its native protocol, only because the mechanism does:
+    // the cases that hold the mechanism to account build the call by hand, and
+    // the change that deletes `Intrinsic` and `Inst::IntrinsicCall` deletes it.
     FloatParse,
 }
 
@@ -469,6 +476,9 @@ mod tests {
     /// operation named after a method never does.
     #[test]
     fn the_intrinsic_set_only_shrinks() {
+        // `Float.parse` is migrated too (issue #432, ADR 0072) and the method
+        // reaches no intrinsic; its variant is here only until the mechanism
+        // is deleted, which deletes this whole test with it.
         const MIGRATED_BUT_STILL_HERE: &[&str] = &["Float.parse"];
 
         let here: Vec<String> = ALL.iter().map(|one| one.to_string()).collect();

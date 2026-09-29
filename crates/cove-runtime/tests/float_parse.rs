@@ -229,6 +229,15 @@ impl Subject {
             refused.contains(&"m.callsParses"),
             "`callsParses` is meant to be refused, and the tier took it"
         );
+        // Since issue #432 the parse is Cove, and all of it is compiled: a
+        // row that fell back to the VM in the slow path would be the VM's
+        // answer again.
+        for name in ["std.float.parse", "std.float.parseSlow"] {
+            assert!(
+                !refused.contains(&name),
+                "`{name}` is meant to be compiled, and the tier refused it"
+            );
+        }
         inputs
             .iter()
             .map(|text| {

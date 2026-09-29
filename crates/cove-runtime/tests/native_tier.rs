@@ -1163,6 +1163,10 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
 /// mediated calls land on the encoded side of the report and nowhere else —
 /// and that its answer is something the loop can count: `2.5` parses, so
 /// each turn adds one.
+///
+/// Since issue #432 `Float.parse` is `std.float.parse`, a Cove body (ADR
+/// 0072), and no source emits an intrinsic call at all: the case puts the call
+/// back by hand with `restore_the_parse_intrinsic` until the mechanism goes.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   var cut = 0
@@ -2286,9 +2290,26 @@ fn a_float_truncation_is_reached_from_machine_code() {
 ///   least normal value, and `5e-324` the least subnormal.
 /// - `1e400` overflows, `-Infinity` and `nAn` are words, and `1.0e` is a
 ///   refusal quoting its text.
+///
+/// Since issue #432 the parse is `std.float.parse` (ADR 0072), and `parses`
+/// holds a call of it rather than an `intrinsic-call`: the fast path, the
+/// slow path, the words and the refusal are all Cove and all compiled, so
+/// nothing crosses back to the VM on any row — the slow-path rows included.
 #[test]
 fn a_float_parse_is_reached_from_machine_code() {
     on_each_tier(&["parses"], &["callsParses"]);
+    let names = compiled_names();
+    for name in [
+        "std.float.parse",
+        "std.float.parseSlow",
+        "std.float.parseWord",
+        "std.float.parseRefused",
+    ] {
+        assert!(
+            names.contains(&name.to_string()),
+            "`{name}` is meant to be compiled, and the tier took {names:?}"
+        );
+    }
     for text in [
         "109.00",
         "86.50",
@@ -2318,6 +2339,11 @@ fn a_float_parse_is_reached_from_machine_code() {
         assert!(
             answered.tiers.vm_to_native >= 1,
             "the crossing into the compiled parse was taken: {:?}",
+            answered.tiers
+        );
+        assert_eq!(
+            answered.tiers.native_to_vm, 0,
+            "and nothing went back the other way: {:?}",
             answered.tiers
         );
     }
@@ -4426,6 +4452,58 @@ fn a_snapshot_of_references_survives_a_collection_from_compiled_code() {
     );
 }
 
+/// Every `call` of `std.float.parse` in `program`, made back into the
+/// `intrinsic-call` of `Intrinsic::FloatParse` it was, over the same arguments
+/// into the same answer.
+///
+/// Issue #432 made `Float.parse` a Cove body (ADR 0072), and it was the last
+/// operation a program lowered to an intrinsic call, so no source emits one
+/// now. The mechanism is still here until the change that deletes it, and so is
+/// the case below that holds its report to account, which needs a mediated
+/// call to count: this puts one back by hand, as `cove-runtime`'s own
+/// `World::with_the_parse_intrinsic` does for `vm::report`'s cases.
+fn restore_the_parse_intrinsic(program: &mut cove_ir::Program) {
+    let parse = program
+        .function_named("std.float", "parse")
+        .expect("every program carries `std.float.parse`");
+    let result = program.functions[parse.index()].returns;
+    let site = cove_ir::SiteId(program.intrinsic_sites.len() as u32);
+    program.intrinsic_sites.push(cove_ir::IntrinsicSite {
+        intrinsic: cove_ir::Intrinsic::FloatParse,
+        result,
+    });
+    for f in &mut program.functions {
+        for inst in &mut f.code {
+            if let cove_ir::Inst::Call { dst, callee, args } = *inst {
+                if callee == parse {
+                    *inst = cove_ir::Inst::IntrinsicCall { dst, site, args };
+                }
+            }
+        }
+    }
+    // Nothing names the parse's own functions now, and a lowering that never
+    // reached them would have left them stubs: marked so, so that the
+    // report's static counts are the slice's the case is about, as they were
+    // when the intrinsic call was the lowering's own.
+    for f in &mut program.functions {
+        let own = &*f.module == "std.float"
+            && matches!(
+                &*f.name,
+                "parse"
+                    | "parseSlow"
+                    | "parseWord"
+                    | "parseRefused"
+                    | "spells"
+                    | "divided"
+                    | "rounded"
+                    | "powerOf"
+            );
+        if own {
+            f.stub = true;
+        }
+    }
+}
+
 /// One run of `countsTheBoundary`, counted when `count` says so, answering the
 /// report it took.
 fn counted_run(
@@ -4490,7 +4568,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
     use cove_runtime::BoundaryReport;
     const N: i64 = 40;
     let (sources, program) = checked();
-    let lowered = cove_ir::lower_entry(
+    let mut lowered = cove_ir::lower_entry(
         &program,
         &sources,
         &cove_sema::HostSchemas::new(),
@@ -4498,6 +4576,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
         "countsTheBoundary",
     )
     .expect("the fixture lowers");
+    restore_the_parse_intrinsic(&mut lowered);
     let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
     let runtime = Runtime::new(
         Arc::clone(&program),

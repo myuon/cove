@@ -218,6 +218,9 @@ pub(crate) fn call(
         // `Float.toInt` is `std.float.toInt`, one `Inst::FloatTruncate` and
         // its three refusals in Cove (issue #432, ADR 0071).
         // `Float.format` is `std.float.format`, exact decimal in Cove.
+        // `Float.parse` is `std.float.parse` (issue #432, ADR 0072), and no
+        // program emits this variant; the arm is here for the mechanism's
+        // own cases, which build the call by hand, until the mechanism goes.
         Intrinsic::FloatParse => scalar::float_parse(machine, frame, dest),
         // `Bool` has no operations: the schema gives it none beyond
         // `snapshot`, and `!`, `&&` and `||` are instructions rather than

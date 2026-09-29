@@ -8,8 +8,8 @@ use super::listing;
 /// sample was the last method on the table that was a runtime call over its
 /// receiver: `x.toInt()`, an `intrinsic-call` of `Float.toInt`. Issue #432
 /// made that `std.float.toInt` (ADR 0071), so **no method is an
-/// `intrinsic-call` any more** — `Float.parse`, the one intrinsic left, is an
-/// associated function — and the same source is an ordinary call with the
+/// `intrinsic-call` any more** — `Float.parse`, the one intrinsic left then,
+/// is an associated function — and the same source is an ordinary call with the
 /// receiver as its one argument. It is not expanded here: the body returns
 /// what `toIntRefused` answers, a call whose continuation returns rather than
 /// traps, so ADR 0070's rule does not admit it, and nothing short-circuits it
@@ -38,12 +38,17 @@ fn @m.whole(Float) -> Result
 /// it for a significand or a whole number they had already held inside the
 /// range. A program that interpolates a `Float`, formats one and converts one
 /// reaches every function of the module that does any of the three, and none
-/// of them may name an intrinsic — `Float.parse`, the one left, is not called
-/// by the module at all.
+/// of them may name an intrinsic.
+///
+/// **Since issue #432 that is every `Float` operation there is:** `Float.parse`
+/// was the last intrinsic of all, and it is `std.float.parse` now (ADR
+/// 0072), so the program parses one too, and its slow path, refusal and
+/// words are held to the same rule.
 #[test]
 fn std_float_emits_no_intrinsic_call() {
-    let (sources, held) =
-        super::checked("fn main(x: Float) -> String {\n  \"{x} {x.format(2)} {x.toInt()}\"\n}");
+    let (sources, held) = super::checked(
+        "fn main(x: Float, s: String) -> String {\n  let parsed = Float.parse(s)\n  \"{x} {x.format(2)} {x.toInt()} {parsed.isOk()}\"\n}",
+    );
     let schemas = cove_schema::HostSchemas::new();
     let program = crate::lower(&held, &sources, &schemas).expect("the program lowers");
     let mut reached = Vec::new();
@@ -65,12 +70,95 @@ fn std_float_emits_no_intrinsic_call() {
         "std.float.renderInto",
         "std.float.toInt",
         "std.float.toIntRefused",
+        "std.float.parse",
+        "std.float.parseSlow",
+        "std.float.parseRefused",
+        "std.float.parseWord",
     ] {
         assert!(
             reached.iter().any(|had| had == name),
             "`{name}` was meant to be reached, and the program lowered {reached:?}"
         );
     }
+}
+
+/// **`std.float.parse` calls nothing and allocates nothing on the way to an
+/// answer it makes itself.**
+///
+/// Issue #432 made `Float.parse` a Cove body (ADR 0072), and what was
+/// measured and accepted for it rests on its fast path — the grammar, Clinger's
+/// box and one `Float` operation — being straight-line scalar work: every
+/// number cq reads takes it. So what is pinned is a property of the whole
+/// body rather than a size: **each instruction is a scalar, a comparison, a
+/// branch, a byte read or a length, or a call whose answer is returned
+/// straight away.** The three calls are the three ways out that the fast path
+/// is not — the refusal, the words and the slow path — and a call that is
+/// immediately returned is a way out and not a step, so no path to an answer
+/// the body builds itself passes through one, and none allocates.
+///
+/// The slow path is not held to this: it allocates its one digit buffer, and
+/// [`std_float_emits_no_intrinsic_call`] and `native_tier.rs` hold it to the
+/// rest.
+#[test]
+fn std_float_parse_has_a_fast_path_that_calls_and_allocates_nothing() {
+    use crate::Inst;
+    let (sources, held) =
+        super::checked("fn main(s: String) -> Result<Float, Error> {\n  Float.parse(s)\n}");
+    let schemas = cove_schema::HostSchemas::new();
+    let program = crate::lower(&held, &sources, &schemas).expect("the program lowers");
+    let at = program
+        .functions
+        .iter()
+        .position(|f| f.qualified() == "std.float.parse")
+        .expect("`std.float.parse` is reached");
+    let listed = crate::print::function(&program, crate::FunctionId(at as u32));
+    let f = &program.functions[at];
+    let mut calls = Vec::new();
+    for (pc, inst) in f.code.iter().enumerate() {
+        match inst {
+            Inst::Call { dst, callee, .. } => {
+                assert!(
+                    matches!(f.code.get(pc + 1), Some(Inst::Return { src }) if src == dst),
+                    "the call at {pc} is a step and not a way out:\n{listed}"
+                );
+                calls.push(program.functions[callee.index()].qualified());
+            }
+            Inst::Unit { .. }
+            | Inst::Bool { .. }
+            | Inst::Int { .. }
+            | Inst::Float { .. }
+            | Inst::Tag { .. }
+            | Inst::Copy { .. }
+            | Inst::Clear { .. }
+            | Inst::Neg { .. }
+            | Inst::Arith { .. }
+            | Inst::Cmp { .. }
+            | Inst::ArithImm { .. }
+            | Inst::CmpImm { .. }
+            | Inst::Not { .. }
+            | Inst::Convert { .. }
+            | Inst::Jump { .. }
+            | Inst::BranchFalse { .. }
+            | Inst::CmpBranch { .. }
+            | Inst::CmpImmBranch { .. }
+            | Inst::Switch { .. }
+            | Inst::Return { .. }
+            | Inst::RunLoad { .. }
+            | Inst::Len { .. } => {}
+            other => panic!("`std.float.parse` holds {other:?} at {pc}:\n{listed}"),
+        }
+    }
+    calls.sort();
+    calls.dedup();
+    assert_eq!(
+        calls,
+        vec![
+            "std.float.parseRefused",
+            "std.float.parseSlow",
+            "std.float.parseWord"
+        ],
+        "{listed}"
+    );
 }
 
 /// **`std.float`'s renderers convert with the instruction, and call nothing
@@ -410,18 +498,21 @@ fn @m.value(Option Int) -> Int
     );
 }
 
-/// The machine builds the `Error` carrying a failure's message itself, so
-/// the `Error` layout is interned here as well as the `Result`'s: the
-/// `Result` describes its `Err` words without saying what declared them.
+/// `Float.parse` is a call of `std.float.parse`, and not a runtime call.
 ///
-/// It was `Int.parse` until issue #454's Step 4 made that one
-/// `std.int.parse`, whose `Err` is an ordinary Cove `Error(...)` and so says
-/// nothing about what the *machine* interns. `Float.parse` is the parser that
-/// is still the machine's, and the fact under test is unchanged: a `Result`
-/// the runtime writes describes its `Err` words without naming what declared
-/// them, so the `Error` layout has to be interned beside it.
+/// This case was `a_parser_answers_a_result_and_interns_the_error_it_may_carry`:
+/// the machine built the `Error` carrying a parser's failure itself, so the
+/// `Error` layout had to be interned beside the `Result`'s. It was `Int.parse`
+/// until issue #454's Step 4 and `Float.parse` after that, the last parser
+/// the machine had, until issue #432 made it `std.float.parse` (ADR 0072).
+/// Its `Err` is an ordinary Cove `Error(...)` now, so **no parser's answer is
+/// written by the machine any more** and the fact the case was named for has
+/// no subject; what is left to pin is that the same source is one ordinary
+/// call. It is not expanded: the body is far past the inliner's size, and it
+/// returns the refusal a callee builds rather than trapping, so ADR 0070's
+/// rule does not admit it either.
 #[test]
-fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
+fn a_float_parse_is_a_call_of_the_standard_library() {
     assert_eq!(
         listing(
             "fn parse(s: String) -> Float { Float.parse(s).unwrapOr(0.0) }",
@@ -432,7 +523,7 @@ fn @m.parse(String) -> Float
   frame 10: s0!:ref s1:float s2:tag s3:float s4:ref s5:float s6:float s7:float s8:ref \
 s9:ref
   local s -> s0:String [0, 12)
-     0  intrinsic-call s2..s4:Result Float.parse (s0:String)
+     0  call s2..s4:Result std.float.parse (s0:String)
      1  float s5:float 0
      2  switch s2:tag [3 6] else 8
      3  copy s7:Float s3:Float

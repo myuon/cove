@@ -1620,21 +1620,12 @@ pub fn call_associated(
         // function is asked. `parseRadix` was the last `Int` arm, because it
         // raised on a radix outside `2..=36` and a Cove body had nothing to
         // raise with until ADR 0067's `core.refuse`.
-        // Mirrors `Int.parse` exactly in shape. Rust's `f64::from_str`
-        // accepts `inf`, `-inf`, and `NaN`, which is why this does too, and
-        // it rejects the `_` digit separators a `Float` literal may be
-        // written with — the same thing `Int.parse` above already does,
-        // not a new choice made here.
-        ("Float", "parse") => {
-            let args = expect_args("Float.parse", args, 1, span)?;
-            let Value(Repr::Str(text)) = &args[0] else {
-                return Err(type_error("Float.parse", "text", "String", &args[0], span));
-            };
-            Ok(match text.parse::<f64>() {
-                Ok(value) => Value::ok(Value(Repr::Float(value))),
-                Err(_) => Value::err(Value::error(format!("`{text}` is not a Float"))),
-            })
-        }
+        // `Float.parse` stood here, `str::parse::<f64>` and one sentence,
+        // until issue #432 made it `std.float.parse`: the grammar, Clinger's
+        // fast path and simple decimal conversion over at most 768 digits, in
+        // Cove (ADR 0072), reached through
+        // `cove_schema::builtins::standard_associated_binding` like its two
+        // `Int` neighbours. It was the last parser either evaluator had.
         _ => Err(
             RuntimeError::new(format!("`{type_name}` has no associated function `{name}`"))
                 .at(span),
