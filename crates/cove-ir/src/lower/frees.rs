@@ -397,6 +397,11 @@ impl<'p> Flow<'p> {
             Inst::DynIdentitySet { dst: set } | Inst::DynIdentityEnter { set, .. } => {
                 f(set, width(self.program.identity_set_layout))
             }
+            // A checked conversion's two answers, one word each.
+            Inst::FloatTruncate { dst, ok, .. } => {
+                f(dst, 1);
+                f(ok, 1);
+            }
             Inst::Clear { slot, layout } => f(slot, width(layout)),
             Inst::Copy { dst, layout, .. }
             | Inst::Load { dst, layout, .. }
@@ -510,7 +515,8 @@ impl<'p> Flow<'p> {
             | Inst::Convert { a, .. }
             | Inst::FloatAbs { a, .. }
             | Inst::FloatRound { a, .. }
-            | Inst::FloatSqrt { a, .. } => f(a, 1),
+            | Inst::FloatSqrt { a, .. }
+            | Inst::FloatTruncate { a, .. } => f(a, 1),
             Inst::Arith { a, b, .. }
             | Inst::Cmp { a, b, .. }
             | Inst::CmpBranch { a, b, .. }

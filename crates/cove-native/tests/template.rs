@@ -164,6 +164,11 @@ fn a_float_square_root_in_place_answers_the_same() {
 }
 
 #[test]
+fn a_float_truncation_answers_the_integer_and_whether_there_is_one() {
+    suite::a_float_truncation_answers_the_integer_and_whether_there_is_one::<Template>();
+}
+
+#[test]
 fn an_immediate_operand_fails_the_same_way() {
     suite::an_immediate_operand_fails_the_same_way::<Template>();
 }

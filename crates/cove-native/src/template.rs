@@ -117,8 +117,8 @@ const HEAP_SPARE: u8 = R15;
 // integer scratch registers are: nothing lives in one between two
 // instructions, because every value of a frame lives in the frame. Only
 // `Inst::Convert(IntToFloat)`, `Inst::FloatMinMax`, `Inst::FloatRound`,
-// `Inst::FloatSqrt`, a float comparison and float arithmetic touch them at
-// all; a float constant and a float negation are words in integer registers.
+// `Inst::FloatSqrt`, `Inst::FloatTruncate`, a float comparison and float
+// arithmetic touch them at all; a float constant and a float negation are words in integer registers.
 const XMM0: u8 = 0;
 const XMM2: u8 = 2;
 const XMM3: u8 = 3;
@@ -139,6 +139,12 @@ const ROUND_NUDGE: i64 = 0x3fdf_ffff_ffff_ffff_u64 as i64;
 /// The biased exponent of `2^52`, which is the first magnitude at which every
 /// double is already an integer.
 const ROUND_EXPONENT: i32 = 0x433;
+
+/// The bits of `-2^63`, the one double whose truncation is `i64::MIN` — the
+/// same bit pattern `cvttsd2si` answers for every operand it cannot convert.
+/// `Inst::FloatTruncate` compares the operand's bits against it to tell the
+/// two apart.
+const TRUNCATE_LEAST: i64 = 0xc3e0_0000_0000_0000_u64 as i64;
 
 /// The longest byte [`Inst::RunCopy`] the template arm copies in emitted code
 /// (`Emit::short_copy_bytes`) rather than handing to the run-copy helper.
@@ -867,6 +873,72 @@ impl<'a> Emit<'a> {
                 let dst_at = slot_offset(*dst).expect("`supported` bounded every slot");
                 self.sqrtsd_load(XMM0, FRAME, a_at);
                 self.movsd_store(FRAME, dst_at, XMM0);
+            }
+            // `encoded.rs`'s `FLOAT_TRUNCATE`: ADR 0064's checked typed
+            // conversion, beneath `std.float.toInt` (issue #432, ADR 0071).
+            //
+            // **The contract is `(dst, ok)`, and `cvttsd2si`'s sentinel is not
+            // part of it.** The instruction truncates toward zero and answers
+            // `i64::MIN` — the "integer indefinite" — for every operand it
+            // cannot convert: a NaN, either infinity, every magnitude at or
+            // past `2^63`. `i64::MIN` is also the right answer for exactly one
+            // operand, `-2^63`. So the arm *uses* the indefinite value to
+            // compute `ok` and never lets it out:
+            //
+            // ```text
+            // ok  = t != i64::MIN  ||  bits(x) == bits(-2^63)
+            // dst = ok ? t : 0
+            // ```
+            //
+            // Fourteen instructions, and no branch:
+            //
+            // ```text
+            // mov       rax, [frame+a]        ; bits(x)
+            // movq      xmm0, rax
+            // cvttsd2si rcx, xmm0             ; t, or the indefinite
+            // movabs    rdx, 0xc3e0000000000000
+            // cmp       rax, rdx
+            // sete      al                    ; x is exactly -2^63
+            // movzx     eax, al
+            // cmp       rcx, 1                ; OF exactly when t == i64::MIN
+            // mov       edx, 1                ; (a `mov` sets no flag)
+            // cmovno    rax, rdx              ; ok
+            // mov       [frame+ok], rax
+            // neg       rax                   ; all ones when ok, else nought
+            // and       rcx, rax              ; t, or the documented 0
+            // mov       [frame+dst], rcx
+            // ```
+            //
+            // `cmp rcx, 1` sets the overflow flag for `t - 1`, which overflows
+            // for `i64::MIN` and nothing else, so the test needs no second
+            // 64-bit constant. The not-`ok` integer is written as `0`, which
+            // is `crate::float::truncate`'s documented value in `cove-runtime`
+            // and what `tests/suite`'s `TRUNCATIONS` compares — a lowering
+            // that stored `t` unmasked would pass every `ok` row there and
+            // fail every other.
+            //
+            // `cvttsd2si` sets `MXCSR`'s invalid flag for an operand it
+            // cannot convert, which is masked and unobserved by Cove, as the
+            // `Inst::FloatRound` arm below says of its own use of it.
+            //
+            // Either answer may be `a`'s slot: the operand is in `rax` before
+            // anything is written. The two answers are two slots, which
+            // `cove_ir::verify` holds.
+            Inst::FloatTruncate { dst, ok, a } => {
+                self.load_slot(RAX, *a);
+                self.movq_to_xmm(XMM0, RAX);
+                self.cvttsd2si(RCX, XMM0);
+                self.mov_imm64(RDX, TRUNCATE_LEAST);
+                self.cmp_rr(RAX, RDX);
+                self.setcc(CC_E);
+                self.movzx_eax_al();
+                self.cmp_imm32(RCX, 1);
+                self.mov_imm32(RDX, 1);
+                self.cmov(CC_NO, RAX, RDX);
+                self.store_slot(*ok, RAX);
+                self.neg_r(RAX);
+                self.and_rr(RCX, RAX);
+                self.store_slot(*dst, RCX);
             }
             // `encoded.rs`'s `FLOAT_ROUND`, ADR 0064's third typed scalar
             // operation, and the longest sequence in this file that is still
@@ -4409,7 +4481,10 @@ impl<'a> Emit<'a> {
     ///
     /// Out of range — which includes every NaN and both infinities — it
     /// answers `i64::MIN`, the "integer indefinite", and sets `MXCSR`'s
-    /// invalid flag. Its one caller discards that answer with a `cmov`.
+    /// invalid flag. [`Inst::FloatRound`](cove_ir::Inst::FloatRound)
+    /// discards that answer with a `cmov`;
+    /// [`Inst::FloatTruncate`](cove_ir::Inst::FloatTruncate) reads it to
+    /// compute its `ok` and then masks it to `0`.
     fn cvttsd2si(&mut self, dst: u8, src: u8) {
         self.byte(0xf2);
         self.rex(true, dst, src);

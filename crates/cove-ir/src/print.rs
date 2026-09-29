@@ -197,6 +197,9 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::FloatAbs { dst, a } => format!("abs.float {} {}", s(*dst), s(*a)),
         Inst::FloatRound { dst, a } => format!("round.float {} {}", s(*dst), s(*a)),
         Inst::FloatSqrt { dst, a } => format!("sqrt.float {} {}", s(*dst), s(*a)),
+        Inst::FloatTruncate { dst, ok, a } => {
+            format!("truncate.float {} {} {}", s(*dst), s(*ok), s(*a))
+        }
         Inst::FloatMinMax { op, dst, a, b } => format!(
             "{}.float {} {} {}",
             match op {

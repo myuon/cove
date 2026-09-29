@@ -399,6 +399,7 @@ fn effect(inst: &Inst) -> Effect {
         | Inst::FloatMinMax { .. }
         | Inst::FloatRound { .. }
         | Inst::FloatSqrt { .. }
+        | Inst::FloatTruncate { .. }
         | Inst::Jump { .. }
         | Inst::BranchFalse { .. }
         | Inst::CmpBranch { .. }

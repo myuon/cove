@@ -69,10 +69,11 @@ use cove_syntax::ast::{Arg, Expr, ExprKind, StrPart};
 
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, BUFFER_STORE, VECTOR_LEN, VECTOR_STORE};
-use super::{synth, Body, Dest};
+use super::{synth, Body, Dest, PENDING};
 use crate::inst::{CmpOp, Inst, Len, Slot, Storage, Validation};
 use crate::layout::LayoutId;
 use crate::program::Arg as Operand;
+use crate::repr::Repr;
 
 /// The text of a string literal with nothing interpolated into it, or `None`
 /// for any other expression.
@@ -294,6 +295,7 @@ impl Body<'_> {
             ("identityEnter", [set, a, b]) => {
                 self.core_identity_enter(expr, &set.value, &a.value, &b.value)
             }
+            ("floatTruncate", [x]) => self.core_float_truncate(expr, &x.value, want),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -2201,6 +2203,97 @@ impl Body<'_> {
         self.release(right, expr.span);
         self.release(left, expr.span);
         true
+    }
+
+    /// `core.floatTruncate(x)`: `Some` of `x` truncated toward zero, or
+    /// `None` where no `Int` is that truncation.
+    ///
+    /// One [`Inst::FloatTruncate`] and the `Option` built from its two
+    /// answers. **The instruction does not build the `Option`**, and that is
+    /// the whole of how this is arranged (issue #432, ADR 0071): it writes an
+    /// `Int` and a `Bool`, and this lowering — which knows how an enum is laid
+    /// out, as every enum construction here does — writes the case.
+    ///
+    /// ```text
+    /// truncate.float  answer+1:int  ok:bool  x:float
+    /// branch-false    ok  none
+    /// tag             answer  Some
+    /// jump            done
+    /// none: tag       answer  None      ; and the payload word zeroed
+    /// done:
+    /// ```
+    ///
+    /// The integer is written straight into the payload word of `Some`
+    /// rather than into a temporary copied there, so the path that succeeds
+    /// is the conversion, a branch, a tag and a jump. The `None` arm zeroes
+    /// the payload itself, as every construction of a case that does not
+    /// fill it does; it does not lean on the instruction's documented `0`,
+    /// which nothing may rely on.
+    fn core_float_truncate(&mut self, expr: &Expr, x: &Expr, want: Option<Dest>) -> Val {
+        let Some(ty) = self.settled_ty(expr) else {
+            return self.dead(expr);
+        };
+        let Some(layout) = self.layout(&ty, expr.span) else {
+            return self.dead(expr);
+        };
+        let (Some((some, _)), Some((none, _))) = (
+            shapes::case_at(self.checked, self.module, &ty, "Some"),
+            shapes::case_at(self.checked, self.module, &ty, "None"),
+        ) else {
+            return self.gap(
+                "`core.floatTruncate` answering something that is not an `Option`",
+                expr,
+            );
+        };
+        let at =
+            match self.case_of(layout, some) {
+                Some((parts, payload))
+                    if parts.len() == 1
+                        && parts[0].layout == shapes::INT
+                        && payload.get(parts[0].at as usize) == Some(&Repr::Int) =>
+                {
+                    parts[0].at
+                }
+                _ => return self.gap(
+                    "`core.floatTruncate` answering an `Option` of something other than an `Int`",
+                    expr,
+                ),
+            };
+        let operand = self.expr(x);
+        let dst = self.answer_at(want, layout);
+        let ok = self.temp(shapes::BOOL);
+        self.emit(
+            Inst::FloatTruncate {
+                dst: dst.slot + 1 + at,
+                ok: ok.slot,
+                a: operand.slot,
+            },
+            expr.span,
+        );
+        self.release(operand, expr.span);
+        let branch = self.emit(
+            Inst::BranchFalse {
+                cond: ok.slot,
+                to: PENDING,
+            },
+            expr.span,
+        );
+        self.emit(
+            Inst::Tag {
+                dst: dst.slot,
+                layout,
+                case: crate::CaseId(some),
+            },
+            expr.span,
+        );
+        let over = self.emit(Inst::Jump { to: PENDING }, expr.span);
+        let here = self.here();
+        self.patch(branch, here);
+        self.write_case(dst.slot, layout, none, &[], expr.span);
+        let here = self.here();
+        self.patch(over, here);
+        self.release(ok, expr.span);
+        dst
     }
 
     /// `core.dynamicChild(view, index)`: one [`Inst::DynChild`], answering a

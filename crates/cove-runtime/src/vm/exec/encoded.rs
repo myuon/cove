@@ -133,6 +133,7 @@ const FLOAT_MIN: u8 = Op::FloatMinMax(MinMax::Min).number();
 const FLOAT_MAX: u8 = Op::FloatMinMax(MinMax::Max).number();
 const FLOAT_ROUND: u8 = Op::FloatRound.number();
 const FLOAT_SQRT: u8 = Op::FloatSqrt.number();
+const FLOAT_TRUNCATE: u8 = Op::FloatTruncate.number();
 
 const ADD_INT: u8 = Op::Arith(Num::Int, ArithOp::Add).number();
 const SUB_INT: u8 = Op::Arith(Num::Int, ArithOp::Sub).number();
@@ -378,6 +379,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::FloatMinMax(_)
         | Op::FloatRound
         | Op::FloatSqrt
+        | Op::FloatTruncate
         | Op::Jump
         | Op::BranchFalse
         | Op::CmpBranch(_, _)
@@ -3107,6 +3109,25 @@ pub(super) fn dispatch<'s, 'a>(
                 machine
                     .mem
                     .set_word_at(base_at + (a!()) as usize, x.sqrt().to_bits());
+            }
+
+            // ADR 0064's checked typed conversion, beneath `std.float.toInt`:
+            // `a` is the integer, `b` whether there is one, `c` the operand.
+            // The specification is `crate::float::truncate`, shared with the
+            // interpreter's `core.floatTruncate`; the operand is read before
+            // either answer is written, so either may be the operand's slot.
+            // It is as short as `FLOAT_SQRT`'s arm — two comparisons, a
+            // conversion and two stores — so it stays in the loop rather than
+            // out of line.
+            FLOAT_TRUNCATE => {
+                let x = f64::from_bits(machine.mem.word_at(base_at + (c!() as usize)));
+                let (whole, ok) = crate::float::truncate(x);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, whole as u64);
+                machine
+                    .mem
+                    .set_word_at(base_at + (b!()) as usize, u64::from(ok));
             }
 
             ADD_INT => int_op!(ArithOp::Add),

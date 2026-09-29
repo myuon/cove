@@ -1220,6 +1220,11 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             Inst::DynIdentitySet { dst: set } | Inst::DynIdentityEnter { set, .. } => {
                 mark(set, width(program.identity_set_layout))
             }
+            // A checked conversion writes both of its answers.
+            Inst::FloatTruncate { dst, ok, .. } => {
+                mark(dst, 1);
+                mark(ok, 1);
+            }
             // A store writes an object or an address rather than a frame
             // word, so it marks nothing; the rest are what `reaches_nothing`
             // refuses. Written out rather than caught by a `_` for the reason
@@ -1980,6 +1985,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         | Inst::FloatSqrt { dst, a } => {
             vec![dst, a]
         }
+        Inst::FloatTruncate { dst, ok, a } => vec![dst, ok, a],
         Inst::ArithImm { dst, a, .. } | Inst::CmpImm { dst, a, .. } => vec![dst, a],
         Inst::Arith { dst, a, b, .. }
         | Inst::Cmp { dst, a, b, .. }

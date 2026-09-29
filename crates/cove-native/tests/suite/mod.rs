@@ -3286,6 +3286,203 @@ pub fn a_float_square_root_in_place_answers_the_same<A: Arm>() {
     }
 }
 
+/// `s1, s2 = truncate(s0); return s1`, over a `Float`, an `Int` and a
+/// `Bool`.
+pub fn truncation() -> Program {
+    program(function(
+        vec![Repr::Float, Repr::Int, Repr::Bool],
+        INT,
+        vec![
+            Inst::FloatTruncate {
+                dst: 1,
+                ok: 2,
+                a: 0,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
+}
+
+/// [`truncation`] with the slots the other way round — the flag first and
+/// the operand last — so that an arm which had fixed the three at offsets of
+/// one another would write the wrong words here.
+pub fn truncation_reordered() -> Program {
+    program(function(
+        vec![Repr::Bool, Repr::Int, Repr::Float],
+        INT,
+        vec![
+            Inst::FloatTruncate {
+                dst: 1,
+                ok: 0,
+                a: 2,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
+}
+
+/// The operands `Inst::FloatTruncate` is held to, and its two answers: the
+/// integer and whether there is one.
+///
+/// **Generated, not transcribed.** A standalone `rustc` program decoded each
+/// operand's bits — sign, biased exponent, significand — and computed the
+/// truncation with integer arithmetic alone, so no row here went through a
+/// float comparison or an `as` cast, which are the two things the
+/// implementations under test are made of. Its named rows are the edges; the
+/// sixteen `random` rows are arbitrary bit patterns from a fixed-seed
+/// xorshift, and the twenty-four `ranged` rows are the same generator with
+/// the exponent drawn from `2^-1` to `2^64`, so that most of them convert
+/// and a few do not.
+///
+/// **The integer of a row that is not `ok` is `0`**, which is the
+/// instruction's documented value. Nothing may rely on it, and it is in the
+/// table anyway, because it is the one place a lowering that let
+/// `cvttsd2si`'s "integer indefinite" out would show: that is `i64::MIN`, and
+/// every such row here says `0`.
+///
+/// `-2^63` is the row the indefinite value makes hard. It converts, to
+/// `i64::MIN`, and `cvttsd2si` answers exactly the bits it answers for a NaN;
+/// the arm tells the two apart by the operand's bits. `-2^63 - 2048`, the
+/// next double below it, does not convert, and `2^63 - 1024` is the largest
+/// that does.
+///
+/// `cove-runtime`'s `vm::exec` holds the encoded VM's `FLOAT_TRUNCATE` arm to
+/// the same rows, deliberately duplicated for [`ABSOLUTES`]' reason, so the
+/// two tiers are compared as `(integer, ok)` through one table.
+pub const TRUNCATIONS: &[(&str, u64, i64, bool)] = &[
+    ("+0.0", 0x0000_0000_0000_0000, 0, true),
+    ("-0.0", 0x8000_0000_0000_0000, 0, true),
+    ("+2^-1074", 0x0000_0000_0000_0001, 0, true),
+    ("-2^-1074", 0x8000_0000_0000_0001, 0, true),
+    ("+max subnorm", 0x000f_ffff_ffff_ffff, 0, true),
+    ("+MIN_POS", 0x0010_0000_0000_0000, 0, true),
+    ("+0.5", 0x3fe0_0000_0000_0000, 0, true),
+    ("-0.5", 0xbfe0_0000_0000_0000, 0, true),
+    ("+0.9", 0x3fec_cccc_cccc_cccd, 0, true),
+    ("-0.9", 0xbfec_cccc_cccc_cccd, 0, true),
+    ("+nextdown(1)", 0x3fef_ffff_ffff_ffff, 0, true),
+    ("-nextdown(1)", 0xbfef_ffff_ffff_ffff, 0, true),
+    ("+1.0", 0x3ff0_0000_0000_0000, 1, true),
+    ("-1.0", 0xbff0_0000_0000_0000, -1, true),
+    ("+2.5", 0x4004_0000_0000_0000, 2, true),
+    ("-2.5", 0xc004_0000_0000_0000, -2, true),
+    ("+2.7", 0x4005_9999_9999_999a, 2, true),
+    ("-2.7", 0xc005_9999_9999_999a, -2, true),
+    ("+2^52-0.5", 0x432f_ffff_ffff_ffff, 4503599627370495, true),
+    ("-2^52-0.5", 0xc32f_ffff_ffff_ffff, -4503599627370495, true),
+    ("+2^53", 0x4340_0000_0000_0000, 9007199254740992, true),
+    ("+2^62", 0x43d0_0000_0000_0000, 4611686018427387904, true),
+    (
+        "+2^63-1024",
+        0x43df_ffff_ffff_ffff,
+        9223372036854774784,
+        true,
+    ),
+    (
+        "-2^63+1024",
+        0xc3df_ffff_ffff_ffff,
+        -9223372036854774784,
+        true,
+    ),
+    ("+2^63", 0x43e0_0000_0000_0000, 0, false),
+    ("-2^63", 0xc3e0_0000_0000_0000, -9223372036854775808, true),
+    ("-2^63-2048", 0xc3e0_0000_0000_0001, 0, false),
+    ("+2^64", 0x43f0_0000_0000_0000, 0, false),
+    ("+1e30", 0x4629_3e59_39a0_8cea, 0, false),
+    ("-1e30", 0xc629_3e59_39a0_8cea, 0, false),
+    ("+MAX", 0x7fef_ffff_ffff_ffff, 0, false),
+    ("-MAX", 0xffef_ffff_ffff_ffff, 0, false),
+    ("+inf", 0x7ff0_0000_0000_0000, 0, false),
+    ("-inf", 0xfff0_0000_0000_0000, 0, false),
+    ("+qNaN", 0x7ff8_0000_0000_0000, 0, false),
+    ("-qNaN", 0xfff8_0000_0000_0000, 0, false),
+    ("+qNaN payload", 0x7ff8_0000_dead_beef, 0, false),
+    ("+sNaN", 0x7ff0_0000_dead_beef, 0, false),
+    ("-sNaN", 0xfff0_0000_dead_beef, 0, false),
+    ("random 0", 0x7f6c_280b_eaa8_e3e7, 0, false),
+    ("random 1", 0xe471_1987_1cf9_abe0, 0, false),
+    ("random 2", 0x3517_4a41_58b8_a0b7, 0, true),
+    ("random 3", 0x62ce_1ffa_d85b_1c36, 0, false),
+    ("random 4", 0xec83_972c_97b6_678e, 0, false),
+    ("random 5", 0x0cf9_1633_be73_28c1, 0, true),
+    ("random 6", 0x101f_5e85_9d7d_ded0, 0, true),
+    ("random 7", 0x1fd8_9725_5030_916d, 0, true),
+    ("random 8", 0x8794_4c6b_1287_0b0f, 0, true),
+    ("random 9", 0x36ca_1465_c9b3_26d9, 0, true),
+    ("random 10", 0x34bc_346c_a79a_d6d4, 0, true),
+    ("random 11", 0x34e8_46ab_6e48_d679, 0, true),
+    ("random 12", 0x9e2c_31e9_4344_f995, 0, true),
+    ("random 13", 0x6f44_842f_b582_b526, 0, false),
+    ("random 14", 0x1ecb_49ba_af78_39cc, 0, true),
+    ("random 15", 0xbfc9_e24f_766f_3abf, 0, true),
+    ("ranged 0", 0xc1e0_24ae_c20e_ab0a, -2166715920, true),
+    ("ranged 1", 0x424c_9a34_7204_71b5, 245692425224, true),
+    ("ranged 2", 0x4211_4bd8_39ce_bcfe, 18571726451, true),
+    ("ranged 3", 0xc354_009e_3d61_b87b, -22520716675441132, true),
+    (
+        "ranged 4",
+        0xc3c8_b4fb_909f_cf00,
+        -3560648702586388480,
+        true,
+    ),
+    ("ranged 5", 0x437d_ded0_4f81_f57f, 134524169489438704, true),
+    ("ranged 6", 0x40a6_ded4_7f96_7087, 2927, true),
+    ("ranged 7", 0xc2ba_d701_4fcf_671d, -29510742298471, true),
+    ("ranged 8", 0x40e4_4132_09bb_c36e, 41481, true),
+    ("ranged 9", 0xbfe5_cf6e_4944_be36, 0, true),
+    ("ranged 10", 0x40ee_eaeb_b71f_debf, 63319, true),
+    ("ranged 11", 0x4052_89a5_0d5b_f51f, 74, true),
+    ("ranged 12", 0x416c_ae93_409e_e3bf, 15037594, true),
+    ("ranged 13", 0xc31a_cf8b_28e8_fe1b, -1886636497059718, true),
+    ("ranged 14", 0x40b0_0f83_cd25_7775, 4111, true),
+    ("ranged 15", 0xc351_3d26_a85c_629a, -19409243387038312, true),
+    ("ranged 16", 0x4364_0877_0aee_1966, 45110455293758256, true),
+    ("ranged 17", 0xc199_c81a_f2a5_1b6d, -108136124, true),
+    ("ranged 18", 0xc2ec_fe06_ef78_768f, -255018909025204, true),
+    ("ranged 19", 0xc302_85fd_bc0b_b0a9, -651734301111829, true),
+    ("ranged 20", 0x43e0_2f39_f4f7_fad3, 0, false),
+    ("ranged 21", 0x41a5_330a_4bbc_95e5, 177833253, true),
+    ("ranged 22", 0x439c_5da6_aacb_ca65, 510993264597440832, true),
+    ("ranged 23", 0x40cd_4533_7cf7_ec38, 14986, true),
+];
+
+/// `Inst::FloatTruncate` answers the integer and whether there is one, to
+/// the bit, for every row of [`TRUNCATIONS`] — including the documented `0`
+/// of a conversion that is not `ok`.
+pub fn a_float_truncation_answers_the_integer_and_whether_there_is_one<A: Arm>() {
+    for (label, operand, value, ok) in TRUNCATIONS {
+        for (shape, program, [at_operand, at_dst, at_ok]) in [
+            ("", truncation(), [0, 1, 2]),
+            (" reordered", truncation_reordered(), [2, 1, 0]),
+        ] {
+            forget_polls();
+            let mut words = vec![UNWRITTEN; 3];
+            words[at_operand] = *operand;
+            let answer = run::<A>(&program, &mut words, 0);
+            assert_eq!(
+                answer.outcome,
+                Outcome::Returned,
+                "truncate({label}){shape}"
+            );
+            assert_eq!(
+                (words[at_dst] as i64, words[at_ok]),
+                (*value, u64::from(*ok)),
+                "truncate({label}){shape}: 0x{operand:016x} answered ({}, {}), want ({value}, {ok})",
+                words[at_dst] as i64,
+                words[at_ok]
+            );
+            assert_eq!(
+                words[at_operand], *operand,
+                "the operand is not an answer and was not written: truncate({label}){shape}"
+            );
+            assert_eq!(
+                answer.returned[0], *value as u64,
+                "the destination holds what the slot holds: truncate({label}){shape}"
+            );
+        }
+    }
+}
+
 /// A `Duration` destination renames the overflow, and only for the three
 /// operations that consult the name.
 ///
