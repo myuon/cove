@@ -783,54 +783,25 @@ pub enum Inst {
     /// strongly: there is no integer square root in the language to be the
     /// other member of a family.
     FloatSqrt { dst: Slot, a: Slot },
-    /// `a` truncated toward zero to an `Int`, **checked**: `dst` is the
-    /// integer and `ok` whether there was one.
+    /// `a` truncated toward zero to an `Int`, **checked**: two logical
+    /// outputs, the integer `dst` and whether there is one, `ok`. The design
+    /// and its measurements are [ADR 0071](../../../docs/adr/0071-a-checked-conversion-answers-a-value-and-whether-there-is-one.md).
     ///
-    /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-    /// Decision 2 names "a checked typed conversion" in the vocabulary a
-    /// primitive may be written in, and [`Convert`]'s doc says why it is not a
-    /// member there: a checked conversion has two answers and that family's
-    /// shape is one word in and one word out. This is the instruction that
-    /// doc promised, and it is `core.floatTruncate` beneath
-    /// `std.float.toInt` (issue #432, ADR 0071).
+    /// **The contract is total**, and identical on every tier:
     ///
-    /// # The contract
+    /// - `ok` is true exactly when `-2^63 <= a < 2^63`; a NaN and both
+    ///   infinities are not `ok`.
+    /// - When `ok`, `dst` is `a` truncated toward zero. `-0.0` and every
+    ///   subnormal answer `0`, `-2^63` answers `Int.MIN`, and the largest
+    ///   `ok` double is `2^63 - 1024`.
+    /// - Every other operand answers the canonical pair **`(0, false)`**. The
+    ///   zero carries no converted integer: a consumer that decides success
+    ///   inspects `ok`.
     ///
-    /// **Two logical outputs, and nothing else.**
-    ///
-    /// - `ok` is a `Bool`, true exactly when `-2^63 <= a < 2^63`. A NaN
-    ///   compares false with both ends, so a NaN is not `ok`; neither is
-    ///   either infinity.
-    /// - When `ok` is true, `dst` is `a` truncated toward zero — IEEE 754's
-    ///   `roundToIntegralTowardZero`, then exact, because every double in the
-    ///   range truncates to an integer the `Int` holds. `-0.0` and every
-    ///   subnormal answer `0`; `-2^63` answers `Int.MIN`; the largest double
-    ///   that is `ok` is `2^63 - 1024`.
-    /// - When `ok` is false, `dst` is **`0`**, on every tier. It is defined so
-    ///   that the two tiers write the same bits and the tables can compare
-    ///   them; **nothing may rely on it**, and nothing in the standard library
-    ///   reads `dst` without having tested `ok` first.
-    ///
-    /// Which of the three reasons made a value not `ok` is not an output. The
-    /// standard library tells a NaN from an infinity from a finite value out
-    /// of range in Cove, on the refusal path only, where the comparisons
-    /// cost nothing that matters.
-    ///
-    /// **No sentinel is part of it.** x86-64's `cvttsd2si` answers the
-    /// "integer indefinite", `0x8000_0000_0000_0000`, for every operand it
-    /// cannot convert, and that is also the correct answer for `-2^63`. The
-    /// native lowering *uses* the instruction and reads that value to compute
-    /// `ok`, but the contract is `(dst, ok)`: neither the IR nor the encoded
-    /// VM reproduces the indefinite value, and a not-`ok` conversion writes
-    /// `0` on the native tier too.
-    ///
-    /// **It does not construct Cove's `Option<Int>`**, which is what
-    /// `core.floatTruncate` answers. The lowering builds `Some(dst)` or `None`
-    /// from the two outputs with the instructions any enum construction is
-    /// made of, so no instruction knows how an `Option` is laid out.
-    ///
-    /// `dst` and `ok` are two different slots. Either may be `a`: every tier
-    /// reads the operand before it writes anything.
+    /// No sentinel value is part of the contract, and no instruction here
+    /// knows how an `Option` is laid out; `core.floatTruncate`'s lowering
+    /// builds one from the pair. `dst` and `ok` are distinct slots; either may
+    /// be `a`, which every tier reads before writing.
     FloatTruncate { dst: Slot, ok: Slot, a: Slot },
 
     // ---- control flow --------------------------------------------------

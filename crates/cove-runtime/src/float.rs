@@ -115,20 +115,10 @@ pub(crate) fn extremum(x: u64, y: u64, op: MinMax) -> u64 {
 /// dst = ok -> trunc(x) | otherwise 0
 /// ```
 ///
-/// **It does not call `x as i64` on an operand outside the range, and that is
-/// the reason it is here.** Rust's `as` is total and saturating — a NaN is `0`,
-/// `+inf` and every magnitude past the top are `i64::MAX`, and past the bottom
-/// `i64::MIN` — which is a *second answer* for the inputs this operation
-/// refuses, and ADR 0064's Decision 6 deleted the last instruction that gave
-/// one. Inside the range the cast is exact, because the truncation of a double
-/// in `[-2^63, 2^63)` is an integer an `i64` holds, and that is the only place
-/// it is used.
-///
-/// The not-`ok` integer is `0` on every tier, and **nothing may rely on it**:
-/// it is defined so that the tiers write the same bits and the tables can say
-/// so. x86-64's `cvttsd2si` answers `i64::MIN` there, the "integer
-/// indefinite"; the native lowering reads that answer to compute `ok` and then
-/// writes `0` as this does.
+/// **`x as i64` is used only inside the range**, where it is exact. Outside
+/// it, Rust's saturating cast would be a second answer; this answers the
+/// canonical invalid pair `(0, false)` instead, as the native tier does. The
+/// zero carries no converted integer: callers decide success by `ok`.
 ///
 /// Two callers, for [`extremum`]'s reason: the encoded VM's `FLOAT_TRUNCATE`
 /// arm and the tree-walking interpreter's `core.floatTruncate`.
