@@ -380,8 +380,8 @@ fn the_corpus_says_what_the_linear_memory_backend_runs() {
             .unwrap_or_else(|| panic!("invalid COVE_VM_COVERAGE_SHARD `{shard}`"));
         let at = at.parse().expect("the shard index to be a number");
         let total = total.parse().expect("the shard count to be a number");
-        let report = cove_runtime::on_cove_stack(|| survey(at, total))
-            .expect("a thread to run Cove on");
+        let report =
+            cove_runtime::on_cove_stack(|| survey(at, total)).expect("a thread to run Cove on");
         let path = std::env::var_os("COVE_VM_COVERAGE_REPORT")
             .expect("a worker report path beside its shard");
         report.write_to(Path::new(&path));
@@ -570,7 +570,10 @@ fn every_function_of_a_lowered_program_names_itself_uniquely() {
 /// Every case of the corpus, lowered, run, and compared.
 fn survey(shard: usize, shards: usize) -> Report {
     let mut report = Report::default();
-    assert!(shards > 0 && shard < shards, "invalid shard {shard}/{shards}");
+    assert!(
+        shards > 0 && shard < shards,
+        "invalid shard {shard}/{shards}"
+    );
     let cases: Vec<Case> = discover()
         .into_iter()
         .enumerate()
@@ -1309,7 +1312,5 @@ fn read_string(input: &mut impl Read) -> String {
 }
 
 fn read_strings(input: &mut impl Read) -> Vec<String> {
-    (0..read_usize(input))
-        .map(|_| read_string(input))
-        .collect()
+    (0..read_usize(input)).map(|_| read_string(input)).collect()
 }
