@@ -244,3 +244,75 @@ fn @m.f(Array) -> Int
 "
     );
 }
+
+/// `core.refuse` emits nothing after its trap: in particular not the `clear`
+/// of a temporary the trap names, which is how it released its three until
+/// issue #432 — three instructions nothing can reach.
+///
+/// Asked of the bodies as they were *emitted* and not only as they finish,
+/// because the passes after the expansion delete dead clears like these, and
+/// the inliner weighs a body before they run: the finished listing never
+/// showed them, and they still counted against every body with a refusal in
+/// it. The program reaches `std.stringbuilder`'s five byte-range refusals, and
+/// every function of the standard library is lowered beside them, so every
+/// `core.refuse` there is.
+///
+/// **This is narrower than "nothing follows a trap", and on purpose.** That is
+/// not true of the lowering today: a trap that ends an `if` arm is followed by
+/// the arm's `jump` to the join, one that ends a `let`'s scope by the scope's
+/// `clear`, and one that ends a `Unit` function by its `return` — all of them
+/// the enclosing form's, all of them dead, and each a change to a different
+/// emitter. They are left for when a body they sit in is one whose size
+/// matters.
+#[test]
+fn core_refuse_emits_nothing_after_its_trap() {
+    let (sources, held) = super::checked(
+        "use std.stringbuilder.StringBuilder\n\
+         fn main() -> String {\n  var out = StringBuilder.withCapacity(4)\n  \
+         out.appendSlice(\"bcd\", 0, 1)\n  out.finish()\n}",
+    );
+    let schemas = cove_schema::HostSchemas::new();
+    let emitted = super::super::emitted(&held, &sources, &schemas);
+    let finished = crate::lower(&held, &sources, &schemas).expect("the program lowers");
+    for (what, program) in [("emitted", &emitted), ("finished", &finished)] {
+        let mut traps = 0;
+        for f in program.functions.iter().filter(|f| !f.stub) {
+            for (pc, inst) in f.code.iter().enumerate() {
+                let crate::Inst::Trap {
+                    message,
+                    rule,
+                    help,
+                } = *inst
+                else {
+                    continue;
+                };
+                traps += 1;
+                let mut at = pc + 1;
+                // A named binding's slot is the binding's to clear, at the end
+                // of its scope, and not the refusal's; only a temporary the
+                // trap reads is `core.refuse`'s to release.
+                let named = |slot: u32| {
+                    f.locals.iter().any(|local| {
+                        local.from as usize <= pc
+                            && pc < local.to as usize
+                            && local.slot <= slot
+                            && slot < local.slot + program.layout(local.layout).width()
+                    })
+                };
+                while let Some(crate::Inst::Clear { slot, .. }) = f.code.get(at) {
+                    assert!(
+                        named(*slot) || ![message, rule, help].contains(slot),
+                        "{what}: `{}` clears s{slot}, one of the trap's own sentences, \
+                         after the trap at {pc}",
+                        f.qualified()
+                    );
+                    at += 1;
+                }
+            }
+        }
+        assert!(
+            traps >= 5,
+            "{what}: the program holds `appendRange`'s five refusals, and {traps} traps"
+        );
+    }
+}
