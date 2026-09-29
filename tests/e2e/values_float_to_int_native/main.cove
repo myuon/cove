@@ -1,0 +1,44 @@
+use console.println
+
+/// `Float.toInt` on the native tier, held to the encoded VM.
+///
+/// `tests/e2e/values_float_to_int` is the semantic golden and runs on the
+/// interpreter and the VM. This is the parity case beside it: the `native`
+/// file asks the harness to run it on the native tier too and to hold that
+/// tier's output to the VM's byte for byte. A marker alone would check
+/// nothing, because a function that prints is refused by the tier and runs on
+/// the VM — so every conversion here happens in [`truncated`], which prints
+/// nothing and which the tier compiles.
+export fn main() -> Result<Unit, Error> {
+  let zero = 0.0
+  let one = 1.0
+  let nan = zero / zero
+  let inf = one / zero
+  println("half {truncated(2.5, 1)} {truncated(-2.5, 1)}")?
+  println("small {truncated(0.9, 1)} {truncated(-0.9, 1)}")?
+  println("zero {truncated(-0.0, 1)}")?
+  println("subnormal {truncated(5.0e-324, 1)}")?
+  println("nan {truncated(nan, 1)}")?
+  println("inf {truncated(inf, 1)} {truncated(0.0 - inf, 1)}")?
+  println("top {truncated(9223372036854774784.0, 1)}")?
+  println("over {truncated(9223372036854775808.0, 1)}")?
+  println("bottom {truncated(-9223372036854775808.0, 1)}")?
+  println("under {truncated(-9223372036854777856.0, 1)}")?
+  println("e30 {truncated(1.0e30, 1)}")?
+  println("max {truncated(1.7976931348623157e308, 1)}")?
+  println("min {truncated(-1.7976931348623157e308, 1)}")?
+  Ok(())
+}
+
+/// `x.toInt()`, in a function the native tier compiles.
+///
+/// It calls itself once before it converts, which is what keeps
+/// `cove_ir::lower::inline` from expanding it into `main`: a body that makes
+/// a call is not a leaf, and an expanded conversion would run on `main`'s
+/// tier rather than this one's.
+fn truncated(x: Float, depth: Int) -> Result<Int, Error> {
+  if depth > 0 {
+    return truncated(x, depth - 1)
+  }
+  x.toInt()
+}
