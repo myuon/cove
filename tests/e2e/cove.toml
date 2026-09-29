@@ -608,6 +608,10 @@ allow = ["console"]
 entry = "values_float_to_int.main"
 allow = ["console"]
 
+[run.values_float_to_int_native]
+entry = "values_float_to_int_native.main"
+allow = ["console"]
+
 [run.values_string_join]
 entry = "values_string_join.main"
 allow = ["console"]

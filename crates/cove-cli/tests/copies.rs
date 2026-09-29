@@ -1783,7 +1783,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// returns each sentence where it is built, so it adds no copy of its own;
 /// where it holds one, it is an expanded `std.int.renderInto`'s, which
 /// `refuseRange` held in the same place before.
-const FORWARDABLE_COPIES: usize = 7078;
+///
+/// **7,095 since issue #432's `Float.toInt` corpus added one parity program**,
+/// a rise of 17 that is all program and no lowering: the change touched no
+/// compiler, and with `values_float_to_int_native` held out the 262 before it
+/// answer 7,078 exactly, over the same 58,704 functions. It is a `main` of
+/// thirteen `println`s and one small recursive helper, carrying its own copy of
+/// the standard library into the survey, and it is there so that the native
+/// tier really executes `Float.toInt` before `Intrinsic::FloatToInt` is
+/// replaced.
+const FORWARDABLE_COPIES: usize = 7095;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

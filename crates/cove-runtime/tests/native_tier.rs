@@ -188,6 +188,20 @@ export fn callsSqrts(x: Float, n: Int) -> Float {
   sqrts(x, n)
 }
 
+/// `Float.toInt`, so that the conversion runs in compiled code.
+///
+/// `counts(n)` is `magnitudes`' guard and is here for its reason.
+export fn truncates(x: Float, n: Int) -> Result<Int, Error> {
+  let guard = counts(n)
+  x.toInt()
+}
+
+/// A refused caller, so the conversion is reached across the boundary.
+export fn callsTruncates(x: Float, n: Int) -> Result<Int, Error> {
+  let nothing = Shared(0).lock(fn(v) { v })
+  truncates(x, n)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -2122,6 +2136,79 @@ fn a_float_square_root_runs_as_machine_code() {
         assert!(
             answered.tiers.vm_to_native >= 1,
             "the crossing into the compiled square root was taken: {:?}",
+            answered.tiers
+        );
+        assert_eq!(
+            answered.tiers.native_to_vm, 0,
+            "and nothing went back the other way: {:?}",
+            answered.tiers
+        );
+    }
+}
+
+/// `Float.toInt` is reached from compiled code, and answers what the VM
+/// answers.
+///
+/// The corpus issue #432's migration of `Intrinsic::FloatToInt` is held to on
+/// this tier, landed before it for ADR 0064's Decision 6. `truncates` is
+/// compiled and the conversion is the one thing in it that is not a guard, so
+/// every row runs it from machine code.
+///
+/// - `±2.5` and `±0.9` are truncation toward zero: a floor answers `-3` and
+///   `-1` for the negative two.
+/// - `-0.0` and the least subnormal answer `Ok(0)`; an `Int` has one zero.
+/// - `NaN` and both infinities are the first two refusals, in that order.
+/// - `2^63 - 1024` is the largest double that converts and `2^63` the least
+///   that does not; `-2^63` converts to `Int.MIN` and `-2^63 - 2048`, the
+///   next double below it, does not. Those four are the whole edge of the
+///   range, which is asymmetric.
+/// - `1e30` and `±MAX` are far outside it.
+#[test]
+fn a_float_truncation_is_reached_from_machine_code() {
+    on_each_tier(&["truncates"], &["callsTruncates"]);
+
+    const MAX: &str = "179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    let range =
+        |x: &str| format!("Err(`Float.toInt` cannot convert `{x}`, which is outside Int's range)");
+    for (x, expected) in [
+        (2.5f64, "Ok(2)".to_string()),
+        (-2.5, "Ok(-2)".to_string()),
+        (0.9, "Ok(0)".to_string()),
+        (-0.9, "Ok(0)".to_string()),
+        (-0.0, "Ok(0)".to_string()),
+        (5.0e-324, "Ok(0)".to_string()),
+        (
+            f64::NAN,
+            "Err(`Float.toInt` cannot convert `NaN`, which is not a number)".to_string(),
+        ),
+        (
+            f64::INFINITY,
+            "Err(`Float.toInt` cannot convert `inf`, which has no truncation)".to_string(),
+        ),
+        (
+            f64::NEG_INFINITY,
+            "Err(`Float.toInt` cannot convert `-inf`, which has no truncation)".to_string(),
+        ),
+        (9223372036854774784.0, "Ok(9223372036854774784)".to_string()),
+        (9223372036854775808.0, range("9223372036854776000")),
+        (
+            -9223372036854775808.0,
+            "Ok(-9223372036854775808)".to_string(),
+        ),
+        (-9223372036854777856.0, range("-9223372036854778000")),
+        (1.0e30, range("1000000000000000000000000000000")),
+        (f64::MAX, range(MAX)),
+        (f64::MIN, range(&format!("-{MAX}"))),
+    ] {
+        let answered = both("callsTruncates", vec![Value::float(x), Value::int(0)]);
+        assert_eq!(answered.vm, Ok(expected), "({x}).toInt() on the VM");
+        assert_eq!(
+            answered.native, answered.vm,
+            "and compiled code answers the same: ({x}).toInt()"
+        );
+        assert!(
+            answered.tiers.vm_to_native >= 1,
+            "the crossing into the compiled conversion was taken: {:?}",
             answered.tiers
         );
         assert_eq!(
