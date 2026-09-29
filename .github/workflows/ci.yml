@@ -33,8 +33,8 @@ env:
 # the tests and again optimised for the benchmark harness.
 
 jobs:
-  build:
-    name: test, lint, and dogfood
+  checks:
+    name: test, lint, and dogfood (work)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -198,31 +198,6 @@ jobs:
           cargo test -p cove-runtime -p cove-cli \
             --features template --profile checked
 
-      # The `#[ignore]`d cases, which live in `crates/cove-cli/tests/` —
-      # `vm_coverage.rs`, `bytecode_corpus.rs` and `build.rs`. The first is
-      # the roadmap: it runs every program in the repository on the
-      # linear-memory backend and sorts the answers into agrees, disagrees,
-      # and does not lower. It is ignored because it *runs* what it lowers,
-      # and the benchmark rows are two million turns each, so it is a price
-      # worth paying once here rather than on every local `cargo test`.
-      #
-      # (This comment used to name `crates/cove-runtime/src/frame/tests.rs`
-      # and `crates/cove-cli/tests/admits_coverage.rs`. Neither file has
-      # existed since ADR 0034 replaced the execution backend.)
-      #
-      # `--lib --tests` and not `--workspace` alone, because `--ignored`
-      # would otherwise reach the doc examples fenced ```ignore, which are
-      # marked that way precisely because they do not compile on their own.
-      # A target under `tests/` is not part of `--lib`, so `--lib` by itself
-      # would build these and never execute them.
-      #
-      # This is `cargo ratchet` — the same command, character for character,
-      # that `.cargo/config.toml` aliases for running it by hand. It was the
-      # single most expensive step in the pipeline while it ran unoptimised,
-      # which is what the profile is doing here.
-      - name: cargo test (the ignored rows)
-        run: cargo test --workspace --lib --tests --profile checked -- --ignored
-
       # Dogfooding. These are the project's own claims about its own sources:
       # the repository is formatted, the representative programs check, and
       # their tests pass. They are checked with the binary this commit builds.
@@ -344,6 +319,73 @@ jobs:
             | strip_timings > /tmp/covefmt-native.out
           diff /tmp/covefmt-vm.out /tmp/covefmt-native.out
           echo "the native tier printed what the encoded VM printed, byte for byte"
+
+  # The `#[ignore]`d cases are the full coverage/ratchet gate. In particular,
+  # `vm_coverage.rs` runs every program in the repository, including benchmark
+  # rows with two million turns. It is the longest single check, and it shares
+  # no mutable state or output with the lint, ordinary-test and dogfood gate,
+  # so making it a separate job lets the two run concurrently without dropping
+  # or weakening either one.
+  ratchet:
+    name: the ignored coverage and ratchet rows pass
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      # This job writes a target tree independently of `build`. Keep its key
+      # separate so two concurrent jobs never contend for the same cache entry.
+      # The broad fallback can seed the first run from the former shared cache;
+      # subsequent runs prefer the latest ratchet-specific tree.
+      - name: Cache cargo registry and target
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            examples/target
+            tests/e2e/target
+          key: ${{ runner.os }}-cargo-ratchet-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ratchet-
+            ${{ runner.os }}-cargo-
+
+      - name: Date the sources back, on an exact hit only
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          git ls-files -z | xargs -0 touch -d '2000-01-01T00:00:00Z'
+          echo "the cache is this commit's Rust; cargo has nothing to rebuild"
+
+      # This is `cargo ratchet`, character for character. `--lib --tests`
+      # deliberately excludes doc examples fenced ```ignore while including
+      # integration-test targets under `tests/`.
+      - name: cargo test (the ignored rows)
+        run: cargo test --workspace --lib --tests --profile checked -- --ignored
+
+  # Preserve the existing required-check name while `checks` and `ratchet`
+  # execute concurrently. Moving the ignored rows out of the old job must not
+  # make a red ratchet optional under the repository's existing branch rule.
+  build:
+    name: test, lint, and dogfood
+    if: always()
+    needs: [checks, ratchet]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Both halves passed
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          RATCHET_RESULT: ${{ needs.ratchet.result }}
+        run: |
+          test "$CHECKS_RESULT" = success
+          test "$RATCHET_RESULT" = success
 
   # Issue #241 asks for the WebAssembly build to be in CI before the UI that
   # depends on it, so this is a job of its own rather than a step: it fails on
