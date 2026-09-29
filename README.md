@@ -727,6 +727,18 @@ program's own `toInt` is a Cove call, nine instructions on the path that
 succeeds, and `std.float`'s renderers use the instruction directly. `Intrinsic`
 is down to `Float.parse`.
 
+[ADR 0072](docs/adr/0072-float-parse-is-cove.md) (Proposed) moves
+`Float.parse` into `std.float` with no instruction of its own: a grammar scan,
+Clinger's fast path — exact when the digits fit in 53 bits and the exponent in
+±22, which every number cq reads does — and, for everything else, simple
+decimal conversion over a buffer of at most 768 digits and a flag for a
+nonzero digit dropped past it, the fallback Rust's own `dec2flt` uses. The ADR
+argues the rounding from the bound: every midpoint between two binary64
+values has at most 768 significant digits. The answers are Rust's bit for
+bit, which `crates/cove-runtime/tests/float_parse.rs` checks on both tiers.
+No program emits an `IntrinsicCall` now; the mechanism is a later change's to
+delete.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
