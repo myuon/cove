@@ -740,8 +740,19 @@ tier's error bound and its conservative ambiguity test, and the slow path's
 from the bound that every midpoint between two binary64 values has at most
 768 significant digits. The answers are Rust's bit for bit, which
 `crates/cove-runtime/tests/float_parse.rs` checks on both tiers.
-No program emits an `IntrinsicCall` now; the mechanism is a later change's to
-delete.
+
+[ADR 0073](docs/adr/0073-a-primitive-below-the-library-is-an-instruction.md)
+deletes the mechanism itself, now that no program emits it: `IntrinsicCall`,
+the `Intrinsic` enum, the VM's dispatcher, the native helper and the
+boundary report's mediated-intrinsics rows are gone, and the opcode table is
+199. `Intrinsic` went from 31 variants to none over twenty-eight pull
+requests, and what stands below the standard library in their place is a
+handful of instructions, each admitted by ADR 0064's test: the run search, four
+typed float operations, the checked truncation, the trap's three sentences,
+and ADR 0068's observations of an erased value. A primitive the standard
+library cannot write is an instruction of its own from here on, never a call
+into Rust by number. No executed instruction changed. ADR 0064, whose program
+this completes, is accepted.
 
 Syntax is still provisional and may change.
 
