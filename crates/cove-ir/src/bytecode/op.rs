@@ -1,4 +1,4 @@
-//! The hundred and ninety-nine opcodes, and what each one makes of the four
+//! The two hundred and six opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -27,6 +27,9 @@
 //!   [`Inst::FloatSqrt`](crate::Inst::FloatSqrt) one each again, for
 //!   `FloatAbs`' reason, and [`Inst::FloatTruncate`](crate::Inst::FloatTruncate)
 //!   one for the same reason;
+//! - [`Inst::Bits`](crate::Inst::Bits) three, [`BitOp`], and
+//!   [`Inst::Shift`](crate::Inst::Shift) three, [`ShiftOp`], for
+//!   `FloatMinMax`' reason, and [`Inst::BitNot`](crate::Inst::BitNot) one;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
 //!   form, so no discriminant is stored anywhere.
 //!
@@ -48,7 +51,7 @@
 
 use std::sync::LazyLock;
 
-use crate::inst::{ArithOp, CmpOp, Compare, Convert, MinMax, Num};
+use crate::inst::{ArithOp, BitOp, CmpOp, Compare, Convert, MinMax, Num, ShiftOp};
 use crate::legalize::Pattern;
 use crate::repr::Repr;
 
@@ -94,13 +97,19 @@ const CONVERTS: [Convert; 3] = [
 /// Every [`MinMax`], in opcode order.
 const MIN_MAXES: [MinMax; 2] = [MinMax::Min, MinMax::Max];
 
+/// Every [`BitOp`], in opcode order.
+const BIT_OPS: [BitOp; 3] = [BitOp::And, BitOp::Or, BitOp::Xor];
+
+/// Every [`ShiftOp`], in opcode order.
+const SHIFT_OPS: [ShiftOp; 3] = [ShiftOp::Left, ShiftOp::Right, ShiftOp::RightLogical];
+
 /// Where each family's opcodes begin.
 ///
 /// Each base is the one before it plus that family's size, so no number is
 /// written down twice and inserting a family renumbers the ones after it —
 /// which ADR 0041 permits, because opcode numbers are explicitly not stable.
 mod base {
-    use super::{ARITH_OPS, CMP_OPS, COMPARES, CONVERTS, MIN_MAXES, NUMS};
+    use super::{ARITH_OPS, BIT_OPS, CMP_OPS, COMPARES, CONVERTS, MIN_MAXES, NUMS, SHIFT_OPS};
 
     pub const CONST_UNIT: u8 = 0;
     pub const CONST_BOOL: u8 = CONST_UNIT + 1;
@@ -287,8 +296,16 @@ mod base {
     /// [`FLOAT_ABS`]' reason. Last, for `CMP_ORDER`'s reason: adding it
     /// renumbered nothing already there.
     pub const FLOAT_TRUNCATE: u8 = DYN_IDENTITY_LEAVE + 1;
+    /// [ADR 0074](../../../../docs/adr/0074-an-int-also-carries-a-fixed-width-bit-pattern.md)'s
+    /// seven bit operations: [`crate::Inst::Bits`] one per [`crate::BitOp`],
+    /// [`crate::Inst::BitNot`], and [`crate::Inst::Shift`] one per
+    /// [`crate::ShiftOp`]. Last, for `CMP_ORDER`'s reason: adding them
+    /// renumbered nothing already there.
+    pub const BITS: u8 = FLOAT_TRUNCATE + 1;
+    pub const BIT_NOT: u8 = BITS + BIT_OPS.len() as u8;
+    pub const SHIFT: u8 = BIT_NOT + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = FLOAT_TRUNCATE + 1;
+    pub const END: u8 = SHIFT + SHIFT_OPS.len() as u8;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -464,6 +481,12 @@ pub enum Op {
     /// [`crate::Inst::FloatTruncate`]: one `Float` in, an `Int` and a `Bool`
     /// out.
     FloatTruncate,
+    /// [`crate::Inst::Bits`]: two `Int`s in, one `Int` out.
+    Bits(BitOp),
+    /// [`crate::Inst::BitNot`]: one `Int` in, one `Int` out.
+    BitNot,
+    /// [`crate::Inst::Shift`]: an `Int` and a count in, one `Int` out.
+    Shift(ShiftOp),
 }
 
 /// Which of `a`, `b` and `c` an opcode uses, and for what.
@@ -801,6 +824,9 @@ impl Op {
             Op::DynIdentityLeave,
         ]);
         all.push(Op::FloatTruncate);
+        all.extend(BIT_OPS.map(Op::Bits));
+        all.push(Op::BitNot);
+        all.extend(SHIFT_OPS.map(Op::Shift));
         all
     }
 
@@ -921,6 +947,9 @@ impl Op {
             Op::DynIdentityEnter => base::DYN_IDENTITY_ENTER,
             Op::DynIdentityLeave => base::DYN_IDENTITY_LEAVE,
             Op::FloatTruncate => base::FLOAT_TRUNCATE,
+            Op::Bits(op) => base::BITS + index_of!(BIT_OPS, op),
+            Op::BitNot => base::BIT_NOT,
+            Op::Shift(op) => base::SHIFT + index_of!(SHIFT_OPS, op),
         }
     }
 
@@ -1408,6 +1437,21 @@ impl Op {
                 Operand::Word(FLOAT),
                 Payload::Empty,
             ),
+            // ADR 0074's bit operations: `Int` only in every field, because a
+            // bit pattern is an `Int`'s and not a `Duration`'s. The shift's
+            // count is the third field, where `Op::Bits`' right operand is.
+            Op::Bits(_) | Op::Shift(_) => fields(
+                Operand::Word(INT_ONLY),
+                Operand::Word(INT_ONLY),
+                Operand::Word(INT_ONLY),
+                Payload::Empty,
+            ),
+            Op::BitNot => fields(
+                Operand::Word(INT_ONLY),
+                Operand::Word(INT_ONLY),
+                NONE,
+                Payload::Empty,
+            ),
         }
     }
 }
@@ -1509,7 +1553,9 @@ mod tests {
     /// beneath `std.float.toInt`, and a hundred and ninety-nine once ADR 0073
     /// deleted `IntrinsicCall` — the one opcode for every runtime call a
     /// closed `Intrinsic` named — after issue #432 had migrated its last
-    /// variant and no lowering emitted it.
+    /// variant and no lowering emitted it — and two hundred and six once ADR
+    /// 0074 brought `Int`'s seven bit operations: three `Op::Bits`, one
+    /// `Op::BitNot` and three `Op::Shift`.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1529,9 +1575,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_ninety_nine_opcodes() {
-        assert_eq!(Op::all().len(), 199);
-        assert_eq!(OPCODES, 199);
+    fn there_are_two_hundred_and_six_opcodes() {
+        assert_eq!(Op::all().len(), 206);
+        assert_eq!(OPCODES, 206);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1616,6 +1662,11 @@ mod tests {
         // And the checked conversion is one too: it has two answers, but
         // they are two fields of one opcode and not two operations.
         assert_eq!(count(|op| matches!(op, Op::FloatTruncate)), 1);
+        // ADR 0074's bit operations: two families of three, for
+        // `FloatMinMax`' reason, and the one-operand complement alone.
+        assert_eq!(count(|op| matches!(op, Op::Bits(_))), 3);
+        assert_eq!(count(|op| matches!(op, Op::BitNot)), 1);
+        assert_eq!(count(|op| matches!(op, Op::Shift(_))), 3);
         assert_eq!(
             count(|op| matches!(op, Op::AllocFixed | Op::AllocImm | Op::AllocSlot)),
             3

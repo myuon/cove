@@ -400,6 +400,9 @@ fn effect(inst: &Inst) -> Effect {
         | Inst::FloatRound { .. }
         | Inst::FloatSqrt { .. }
         | Inst::FloatTruncate { .. }
+        | Inst::Bits { .. }
+        | Inst::BitNot { .. }
+        | Inst::Shift { .. }
         | Inst::Jump { .. }
         | Inst::BranchFalse { .. }
         | Inst::CmpBranch { .. }

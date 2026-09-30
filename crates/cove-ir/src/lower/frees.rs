@@ -363,6 +363,9 @@ impl<'p> Flow<'p> {
             | Inst::FloatMinMax { dst, .. }
             | Inst::FloatRound { dst, .. }
             | Inst::FloatSqrt { dst, .. }
+            | Inst::Bits { dst, .. }
+            | Inst::BitNot { dst, .. }
+            | Inst::Shift { dst, .. }
             | Inst::RunLoad { dst, .. }
             | Inst::GrowableAlloc { dst, .. }
             | Inst::RunFinish { dst, .. }
@@ -509,11 +512,14 @@ impl<'p> Flow<'p> {
             | Inst::FloatAbs { a, .. }
             | Inst::FloatRound { a, .. }
             | Inst::FloatSqrt { a, .. }
-            | Inst::FloatTruncate { a, .. } => f(a, 1),
+            | Inst::FloatTruncate { a, .. }
+            | Inst::BitNot { a, .. } => f(a, 1),
             Inst::Arith { a, b, .. }
             | Inst::Cmp { a, b, .. }
             | Inst::CmpBranch { a, b, .. }
-            | Inst::FloatMinMax { a, b, .. } => {
+            | Inst::FloatMinMax { a, b, .. }
+            | Inst::Bits { a, b, .. }
+            | Inst::Shift { a, n: b, .. } => {
                 f(a, 1);
                 f(b, 1);
             }

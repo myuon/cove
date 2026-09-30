@@ -56,7 +56,8 @@ pub mod verify;
 pub use bytecode::{EncodedInst, MAX_FRAME_WORDS};
 pub use dynamic::DynamicKind;
 pub use inst::{
-    ArithOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, Pc, Slot, Storage, Validation,
+    shift_count_refused, ArithOp, BitOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, Pc,
+    ShiftOp, Slot, Storage, Validation, SHIFT_COUNT_GREATEST, SHIFT_COUNT_LEAST,
 };
 pub use layout::{
     enum_layout, finishes_as_keyed_run_of, is_entry_of, reads_as_units_of, struct_layout, Case,

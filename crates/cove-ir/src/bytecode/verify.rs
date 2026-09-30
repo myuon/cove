@@ -842,8 +842,8 @@ mod tests {
     #[test]
     fn an_opcode_no_encoder_produced_is_refused() {
         let held = program(vec![Inst::Return { src: 0 }]);
-        let code = [with(at(Inst::Return { src: 0 }), 0, 201)];
-        assert_eq!(faults(&held, &code), ["opcode 201 names no operation"]);
+        let code = [with(at(Inst::Return { src: 0 }), 0, 250)];
+        assert_eq!(faults(&held, &code), ["opcode 250 names no operation"]);
     }
 
     /// `flags` is reserved and must be zero, which is ADR 0041's decision

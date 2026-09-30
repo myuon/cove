@@ -93,8 +93,8 @@ use cove_diag::Span;
 
 use cove_ir::bytecode::{disasm, encode_program, verify, Encoded, EncodedInst, Op};
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, MinMax, Num, Program,
-    Repr, Shape, Slot, Storage, StrId, TableId, Validation,
+    ArgsId, ArithOp, BitOp, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, MinMax, Num,
+    Program, Repr, Shape, ShiftOp, Slot, Storage, StrId, TableId, Validation,
 };
 
 use crate::budget::Meter;
@@ -134,6 +134,14 @@ const FLOAT_MAX: u8 = Op::FloatMinMax(MinMax::Max).number();
 const FLOAT_ROUND: u8 = Op::FloatRound.number();
 const FLOAT_SQRT: u8 = Op::FloatSqrt.number();
 const FLOAT_TRUNCATE: u8 = Op::FloatTruncate.number();
+
+const AND_INT: u8 = Op::Bits(BitOp::And).number();
+const OR_INT: u8 = Op::Bits(BitOp::Or).number();
+const XOR_INT: u8 = Op::Bits(BitOp::Xor).number();
+const NOT_INT: u8 = Op::BitNot.number();
+const SHL_INT: u8 = Op::Shift(ShiftOp::Left).number();
+const SAR_INT: u8 = Op::Shift(ShiftOp::Right).number();
+const SHR_INT: u8 = Op::Shift(ShiftOp::RightLogical).number();
 
 const ADD_INT: u8 = Op::Arith(Num::Int, ArithOp::Add).number();
 const SUB_INT: u8 = Op::Arith(Num::Int, ArithOp::Sub).number();
@@ -379,6 +387,9 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::FloatRound
         | Op::FloatSqrt
         | Op::FloatTruncate
+        | Op::Bits(_)
+        | Op::BitNot
+        | Op::Shift(_)
         | Op::Jump
         | Op::BranchFalse
         | Op::CmpBranch(_, _)
@@ -2739,6 +2750,35 @@ pub(super) fn dispatch<'s, 'a>(
                 }
             }};
         }
+        // ADR 0074's bit operations: `crate::bits` is the specification,
+        // shared with the interpreter. Both operands are read before the
+        // answer is written, so any of the three fields may be one slot.
+        macro_rules! bits_op {
+            ($op:expr) => {{
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let y = machine.mem.word_at(base_at + (c!() as usize)) as i64;
+                machine.mem.set_word_at(
+                    base_at + (a!()) as usize,
+                    crate::bits::bits($op, x, y) as u64,
+                );
+            }};
+        }
+        // The count is checked before anything is shifted or written, and a
+        // count outside `0..=63` fails with the call's span; the sentence is
+        // built out of line, in `crate::bits::shift_count`, so the arm in this
+        // loop is two loads, a range test and a store.
+        macro_rules! shift_op {
+            ($op:expr) => {{
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let n = machine.mem.word_at(base_at + (c!() as usize)) as i64;
+                match crate::bits::shift($op, x, n) {
+                    Some(value) => machine
+                        .mem
+                        .set_word_at(base_at + (a!()) as usize, value as u64),
+                    None => fail!(crate::bits::shift_count(n)),
+                }
+            }};
+        }
         macro_rules! float_op {
             ($op:expr) => {{
                 let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
@@ -3127,6 +3167,19 @@ pub(super) fn dispatch<'s, 'a>(
                     .mem
                     .set_word_at(base_at + (b!()) as usize, u64::from(ok));
             }
+
+            AND_INT => bits_op!(BitOp::And),
+            OR_INT => bits_op!(BitOp::Or),
+            XOR_INT => bits_op!(BitOp::Xor),
+            NOT_INT => {
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, crate::bits::bit_not(x) as u64);
+            }
+            SHL_INT => shift_op!(ShiftOp::Left),
+            SAR_INT => shift_op!(ShiftOp::Right),
+            SHR_INT => shift_op!(ShiftOp::RightLogical),
 
             ADD_INT => int_op!(ArithOp::Add),
             SUB_INT => int_op!(ArithOp::Sub),

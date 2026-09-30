@@ -202,6 +202,55 @@ pub enum MinMax {
     Max,
 }
 
+/// Which bitwise combination an [`Inst::Bits`] computes.
+///
+/// [ADR 0074](../../../docs/adr/0074-an-int-also-carries-a-fixed-width-bit-pattern.md)'s
+/// three two-operand bit operations. A flag, for [`MinMax`]'s reason: the
+/// three share one shape on every tier — two words in, one word out, no
+/// failure — and differ in one operator, one machine opcode byte. The
+/// bytecode gives each its own opcode all the same, so nothing reads this at
+/// run time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitOp {
+    /// `Int.bitAnd`.
+    And,
+    /// `Int.bitOr`.
+    Or,
+    /// `Int.bitXor`.
+    Xor,
+}
+
+/// Which way an [`Inst::Shift`] moves the bits, and what it fills with.
+///
+/// A flag for [`BitOp`]'s reason, and for one more: the three share the
+/// count check, which is the part of a shift that is Cove's rather than the
+/// machine's, so a flag writes that check once per tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShiftOp {
+    /// `Int.shiftLeft`: toward bit 63, discarding what passes it and filling
+    /// with zeros.
+    Left,
+    /// `Int.shiftRight`: toward bit 0, filling with copies of the sign bit —
+    /// `floor(x / 2^n)`, for a negative `x` too.
+    Right,
+    /// `Int.shiftRightLogical`: toward bit 0, filling with zeros — the word
+    /// read as unsigned, shifted, and read back as an `Int`.
+    RightLogical,
+}
+
+/// The least shift count [`Inst::Shift`] accepts.
+pub const SHIFT_COUNT_LEAST: i64 = 0;
+/// The greatest shift count [`Inst::Shift`] accepts: an `Int` is 64 bits.
+pub const SHIFT_COUNT_GREATEST: i64 = 63;
+
+/// The sentence [`Inst::Shift`] traps with, for the count it was given.
+///
+/// One function rather than a format string in each tier, so the interpreter,
+/// the encoded VM and the native tier's raise all say the same words.
+pub fn shift_count_refused(count: i64) -> String {
+    format!("a shift count must be between 0 and 63, got {count}")
+}
+
 /// How many elements an [`Inst::Alloc`] asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Len {
@@ -803,6 +852,62 @@ pub enum Inst {
     /// builds one from the pair. `dst` and `ok` are distinct slots; either may
     /// be `a`, which every tier reads before writing.
     FloatTruncate { dst: Slot, ok: Slot, a: Slot },
+    /// `dst = a op b`, over the 64 bits of two `Int` words.
+    ///
+    /// [ADR 0074](../../../docs/adr/0074-an-int-also-carries-a-fixed-width-bit-pattern.md)'s
+    /// `bitAnd`, `bitOr` and `bitXor`: the operation is applied to the two
+    /// words as unsigned 64-bit patterns and the answer's bits are read back
+    /// as an `Int`. Total, and it allocates nothing, so it cannot fail.
+    ///
+    /// **Not a member of [`Inst::Arith`].** `Arith` is checked arithmetic on a
+    /// number, one of [`Num`]'s readings of a word, and a `Duration` is one of
+    /// them; this is an operation on a representation, and only an `Int` has
+    /// one a program may see. An `Arith` arm here would be the `Num` × op
+    /// cross product ADR 0074 declines, with a `Float` half nobody asked for.
+    ///
+    /// Any of `dst`, `a` and `b` may be the same slot: every tier reads both
+    /// operands before it writes.
+    Bits {
+        op: BitOp,
+        dst: Slot,
+        a: Slot,
+        b: Slot,
+    },
+    /// `dst = !a`, all 64 bits of an `Int` complemented: `Int.bitNot`.
+    ///
+    /// One operand, so not a [`BitOp`] — and not [`Inst::Not`] either, which
+    /// is `Bool`'s negation and answers a `Bool`. `dst` may be `a`.
+    BitNot { dst: Slot, a: Slot },
+    /// `dst = a` shifted by `n` bits, **checked**: `n` must be `0` to `63`.
+    ///
+    /// [ADR 0074](../../../docs/adr/0074-an-int-also-carries-a-fixed-width-bit-pattern.md)'s
+    /// three shifts. For a count in range, with `u(x)` the word read as
+    /// unsigned and `s(w)` a word read as an `Int`:
+    ///
+    /// - [`ShiftOp::Left`] is `s((u(a) * 2^n) mod 2^64)` — the bits past bit
+    ///   63 are discarded, and that is not an overflow: it never traps,
+    ///   whatever it does to the sign;
+    /// - [`ShiftOp::Right`] is `floor(a / 2^n)`, the sign bit copied in;
+    /// - [`ShiftOp::RightLogical`] is `s(floor(u(a) / 2^n))`, zeros copied in.
+    ///
+    /// A count of `0` answers `a` for all three.
+    ///
+    /// **Any other count stops the run**, before anything is written, with
+    /// [`shift_count_refused`]'s sentence — the division-by-zero shape, a
+    /// domain check on a scalar operand. It is not masked: x86-64 reads a
+    /// shift count modulo 64 and that is a fact about one machine, not the
+    /// contract, so a tier that lowers this to a machine shift tests the count
+    /// first. The span the error is blamed on is this instruction's, which is
+    /// the source call's.
+    ///
+    /// Any of `dst`, `a` and `n` may be the same slot: every tier reads both
+    /// operands before it writes.
+    Shift {
+        op: ShiftOp,
+        dst: Slot,
+        a: Slot,
+        n: Slot,
+    },
 
     // ---- control flow --------------------------------------------------
     /// Continue at `to`.

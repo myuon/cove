@@ -28,8 +28,8 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, MinMax, Num,
-    Program, Slot, Storage, StrId,
+    ArgsId, ArithOp, BitOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, MinMax, Num,
+    Program, ShiftOp, Slot, Storage, StrId,
 };
 
 use crate::abi::{
@@ -1172,6 +1172,29 @@ impl<'a> Emit<'a> {
                 self.load_slot(RCX, *b);
                 self.arith(*op, *dst);
             }
+            // `encoded.rs`'s `AND_INT`, `OR_INT` and `XOR_INT`: ADR 0074's
+            // two-operand bit operations, one instruction each and nothing to
+            // test. Both operands are in registers before the answer is
+            // stored, so any of the three slots may be one slot.
+            Inst::Bits { op, dst, a, b } => {
+                self.load_slot(RAX, *a);
+                self.load_slot(RCX, *b);
+                match op {
+                    BitOp::And => self.and_rr(RAX, RCX),
+                    BitOp::Or => self.or_rr(RAX, RCX),
+                    BitOp::Xor => self.xor_rr(RAX, RCX),
+                }
+                self.store_slot(*dst, RAX);
+            }
+            // `encoded.rs`'s `NOT_INT`: `not`, which sets no flag and cannot
+            // fail.
+            Inst::BitNot { dst, a } => {
+                self.load_slot(RAX, *a);
+                self.not_r(RAX);
+                self.store_slot(*dst, RAX);
+            }
+            // `encoded.rs`'s three shift arms. See [`Emit::shift`].
+            Inst::Shift { op, dst, a, n } => self.shift(*op, *dst, *a, *n),
             // `encoded.rs`'s four `float_op!` arms that `crate::subset`
             // admits. See [`Emit::float_arith`].
             Inst::Arith {
@@ -3348,6 +3371,49 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// `encoded.rs`'s `shift_op!`: ADR 0074's checked shift, `shl`, `sar` or
+    /// `shr` by `cl` behind a test of the count.
+    ///
+    /// ```text
+    /// mov   rax, [frame+a]
+    /// mov   rcx, [frame+n]
+    /// cmp   rcx, 64            ; unsigned: a negative count is huge
+    /// jb    fine
+    /// mov   [ctx+raise_a], rcx
+    /// ...raise ShiftCount      ; not taken by a correct program
+    /// fine:
+    /// shl   rax, cl            ; or sar, or shr
+    /// mov   [frame+dst], rax
+    /// ```
+    ///
+    /// **The test is the contract and the machine's masking is not.** x86-64
+    /// reads a 64-bit shift's count modulo 64, so `shl rax, cl` with `cl` at
+    /// 64 is a shift by nothing; the count is compared first, as an unsigned
+    /// word so that one comparison refuses every negative count and every one
+    /// past 63, and the raise carries it out for the sentence.
+    ///
+    /// The count has to be in `cl` — that is the instruction's encoding, not
+    /// a choice — and the operand is in `rax`, so the two are in different
+    /// registers whichever slots they came from: `x.shiftLeft(x)` loads the
+    /// one slot twice. Both are loaded before the answer is stored, so `dst`
+    /// may be either of them. No helper is called on either path.
+    fn shift(&mut self, op: ShiftOp, dst: Slot, a: Slot, n: Slot) {
+        self.load_slot(RAX, a);
+        self.load_slot(RCX, n);
+        let fine = self.label();
+        self.cmp_imm32(RCX, 64);
+        self.jcc(CC_B, Target::Label(fine));
+        self.store(CTX, OFF_RAISE_A, RCX);
+        self.raise(Raise::ShiftCount);
+        self.bind(fine);
+        match op {
+            ShiftOp::Left => self.shl_cl(RAX),
+            ShiftOp::Right => self.sar_cl(RAX),
+            ShiftOp::RightLogical => self.shr_cl(RAX),
+        }
+        self.store_slot(dst, RAX);
+    }
+
     /// `encoded.rs`'s `cmp_int!`: a signed comparison of the two words, stored
     /// as `answer as u64` — a zero or a one and never a mask.
     ///
@@ -4168,6 +4234,13 @@ impl<'a> Emit<'a> {
         self.rex(true, 0, dst);
         self.byte(0xd3);
         self.modrm_reg(4, dst);
+    }
+
+    /// `sar r64, cl`, the arithmetic shift: the sign bit is copied in.
+    fn sar_cl(&mut self, dst: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0xd3);
+        self.modrm_reg(7, dst);
     }
 
     /// `not r64`

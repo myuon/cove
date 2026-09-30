@@ -417,6 +417,14 @@ pub enum Raise {
     /// "negation". `int_arith`'s `named` closure is what renames the other three,
     /// and `NEG_INT` does not go through `int_arith` at all.
     NegOverflowed = 14,
+    /// [ADR 0074](../../../docs/adr/0074-an-int-also-carries-a-fixed-width-bit-pattern.md)'s
+    /// shift count refusal — "a shift count must be between 0 and 63, got
+    /// {a}" — where the count is [`NativeCtx::raise_a`].
+    ///
+    /// One variant for all three shifts, because the sentence names the count
+    /// and not the direction, and last for [`Raise::NegOverflowed`]'s reason:
+    /// these numbers are an ABI.
+    ShiftCount = 15,
 }
 
 impl Raise {
@@ -443,6 +451,7 @@ impl Raise {
             12 => Some(Raise::ByteOffset),
             13 => Some(Raise::Called),
             14 => Some(Raise::NegOverflowed),
+            15 => Some(Raise::ShiftCount),
             _ => None,
         }
     }
@@ -1476,7 +1485,8 @@ pub struct NativeCtx {
     /// The first of the two numbers an out-of-range refusal names.
     ///
     /// The offending index for [`Raise::IndexOutOfRange`], the offending byte
-    /// offset for [`Raise::ByteOffset`], and unused by everything else. Signed,
+    /// offset for [`Raise::ByteOffset`], the offending count for
+    /// [`Raise::ShiftCount`], and unused by everything else. Signed,
     /// because the refusal is *for* a negative one as much as for a large one
     /// and the message prints what it was given.
     pub raise_a: i64,
@@ -1644,12 +1654,13 @@ mod tests {
             (12, Raise::ByteOffset),
             (13, Raise::Called),
             (14, Raise::NegOverflowed),
+            (15, Raise::ShiftCount),
         ] {
             assert_eq!(raise.abi(), code);
             assert_eq!(Raise::from_abi(code), Some(raise));
         }
         assert_eq!(Raise::from_abi(0), None);
-        assert_eq!(Raise::from_abi(15), None);
+        assert_eq!(Raise::from_abi(16), None);
 
         for (code, op) in [
             (0, GrowableOp::Alloc),
