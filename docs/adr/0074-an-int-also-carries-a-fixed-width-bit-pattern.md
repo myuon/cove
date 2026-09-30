@@ -1,4 +1,4 @@
-# ADR 0073: An Int also carries a fixed-width bit pattern
+# ADR 0074: An Int also carries a fixed-width bit pattern
 
 - Status: Proposed
 - Date: 2026-09-30
