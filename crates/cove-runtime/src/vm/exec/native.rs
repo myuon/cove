@@ -1725,6 +1725,9 @@ fn raised(
         // a refusal says the same three things whichever tier raised it.
         Some(Raise::Trapped) => machine.refusal(ctx.raise_message, ctx.raise_rule, ctx.raise_help),
         Some(Raise::NullObject) => null_object(),
+        // ADR 0074's shift count, which the encoded tier's `shift_op!` builds
+        // out of the same function.
+        Some(Raise::ShiftCount) => crate::bits::shift_count(ctx.raise_a),
         // `Machine::element`'s sentence and its rule, word for word.
         Some(Raise::IndexOutOfRange) => RuntimeError::new(format!(
             "index {} is outside a collection of {}",

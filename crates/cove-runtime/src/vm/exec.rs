@@ -5268,6 +5268,131 @@ pub(crate) mod tests {
         }
     }
 
+    /// `Op::Bits`, `Op::BitNot` and `Op::Shift` answer ADR 0074's contract,
+    /// in every aliasing of their slots.
+    ///
+    /// The encoded arms are `crate::bits`, so what is held here is the arms'
+    /// reading and writing of their fields — an operand read after the answer
+    /// was stored would disagree in the aliased shapes — and `crate::bits`
+    /// itself, against a reference in 128-bit arithmetic that is the ADR's
+    /// definition written out: `u(x) * 2^n mod 2^64`, `floor(x / 2^n)` and
+    /// `floor(u(x) / 2^n)`. `cove-native`'s `tests/suite` holds the native
+    /// lowering to the same reference and the same boundary operands.
+    #[test]
+    fn a_bit_operation_answers_the_adr_s_contract_in_every_aliasing() {
+        use cove_ir::{BitOp, ShiftOp};
+        const FIVES: i64 = 0x5555_5555_5555_5555;
+        const AS: i64 = 0xAAAA_AAAA_AAAA_AAAA_u64 as i64;
+        const OPERANDS: &[i64] = &[0, -1, i64::MIN, i64::MAX, FIVES, AS, 1, 5, -3];
+        const SHAPES: &[(Slot, Slot, Slot)] =
+            &[(2, 0, 1), (0, 0, 1), (1, 0, 1), (2, 0, 0), (0, 0, 0)];
+        let reference = |op: ShiftOp, x: i64, n: u32| -> i64 {
+            let unsigned = u128::from(x as u64);
+            let power = 1u128 << n;
+            match op {
+                ShiftOp::Left => (unsigned * power) as u64 as i64,
+                ShiftOp::Right => i128::from(x).div_euclid(power as i128) as i64,
+                ShiftOp::RightLogical => (unsigned / power) as u64 as i64,
+            }
+        };
+        // `inst` in a function whose two parameters are copied into the slots
+        // `shape` names, built once per instruction and shape.
+        let built = |inst: Inst, shape: (Slot, Slot, Slot)| {
+            let (dst, a, b) = shape;
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            let f = build.function(
+                "bits",
+                &[int, int],
+                &[Repr::Int, Repr::Int, Repr::Int, Repr::Int, Repr::Int],
+                int,
+                vec![
+                    Inst::Copy {
+                        dst: 3,
+                        src: 0,
+                        layout: int,
+                    },
+                    Inst::Copy {
+                        dst: 4,
+                        src: 1,
+                        layout: int,
+                    },
+                    Inst::Copy {
+                        dst: a,
+                        src: 3,
+                        layout: int,
+                    },
+                    Inst::Copy {
+                        dst: b,
+                        src: 4,
+                        layout: int,
+                    },
+                    inst,
+                    Inst::Return { src: dst },
+                ],
+            );
+            (build.done(), f)
+        };
+        let answer = |built: &(Program, FunctionId), x: i64, y: i64| {
+            run(&built.0, built.1, &[x as u64, y as u64]).map(|word| word as i64)
+        };
+        for &shape in SHAPES {
+            let (dst, a, b) = shape;
+            for op in [BitOp::And, BitOp::Or, BitOp::Xor] {
+                let program = built(Inst::Bits { op, dst, a, b }, shape);
+                for &x in OPERANDS {
+                    for &y in OPERANDS {
+                        if a == b && x != y {
+                            continue;
+                        }
+                        let want = match op {
+                            BitOp::And => (x as u64) & (y as u64),
+                            BitOp::Or => (x as u64) | (y as u64),
+                            BitOp::Xor => (x as u64) ^ (y as u64),
+                        } as i64;
+                        assert_eq!(
+                            answer(&program, x, y).unwrap(),
+                            want,
+                            "{x} {op:?} {y} as {shape:?}"
+                        );
+                    }
+                }
+            }
+            let program = built(Inst::BitNot { dst, a }, shape);
+            for &x in OPERANDS {
+                assert_eq!(
+                    answer(&program, x, x).unwrap(),
+                    (!(x as u64)) as i64,
+                    "not {x} as {shape:?}"
+                );
+            }
+            for op in [ShiftOp::Left, ShiftOp::Right, ShiftOp::RightLogical] {
+                let program = built(Inst::Shift { op, dst, a, n: b }, shape);
+                for &x in OPERANDS {
+                    for count in 0..64u32 {
+                        let x = if a == b { i64::from(count) } else { x };
+                        assert_eq!(
+                            answer(&program, x, i64::from(count)).unwrap(),
+                            reference(op, x, count),
+                            "{x} {op:?} {count} as {shape:?}"
+                        );
+                    }
+                }
+                for count in [-1, 64, 65, i64::MIN, i64::MAX] {
+                    let x = if a == b { count } else { 1 };
+                    let error = answer(&program, x, count)
+                        .expect_err("a count outside the word stops the run");
+                    assert_eq!(
+                        error.message,
+                        format!("a shift count must be between 0 and 63, got {count}"),
+                        "{x} {op:?} {count} as {shape:?}"
+                    );
+                    assert!(error.span.is_some(), "and it says where");
+                }
+            }
+        }
+    }
+
     /// `Op::FloatTruncate` answers the integer and whether there is one.
     ///
     /// The encoded arm of ADR 0064's checked typed conversion, held to the

@@ -1,5 +1,9 @@
 //! The Cove runtime: values, Host API dispatch, and the MVP interpreter.
 
+// Private: ADR 0074's bit operations on an `Int`, shared by the two evaluators
+// for `float`'s reason below — one specification, and the shift count checked
+// before any host shift is asked for.
+mod bits;
 pub mod budget;
 pub mod builtins;
 pub mod clock;

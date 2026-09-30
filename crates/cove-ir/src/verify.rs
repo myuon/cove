@@ -488,7 +488,10 @@ impl Check<'_> {
                 | Inst::FloatAbs { dst, .. }
                 | Inst::FloatMinMax { dst, .. }
                 | Inst::FloatRound { dst, .. }
-                | Inst::FloatSqrt { dst, .. } => {
+                | Inst::FloatSqrt { dst, .. }
+                | Inst::Bits { dst, .. }
+                | Inst::BitNot { dst, .. }
+                | Inst::Shift { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -960,6 +963,22 @@ impl Check<'_> {
                         format!("writes its integer and its flag to the same slot, {dst}"),
                     );
                 }
+            }
+            // ADR 0074's bit operations: every operand and the answer an
+            // `Int`, and an `Int` alone — a bit pattern is not a `Duration`'s
+            // to show, and `Inst::Arith`'s admission of one is about
+            // nanoseconds adding like integers, which says nothing about bits.
+            // A shift's count is an `Int` too, and whether it is in range is
+            // the instruction's own run-time check rather than a claim this
+            // can make. Any operand may be the destination.
+            Inst::Bits { dst, a, b, .. } | Inst::Shift { dst, a, n: b, .. } => {
+                self.expect(at, a, &[Repr::Int]);
+                self.expect(at, b, &[Repr::Int]);
+                self.expect(at, dst, &[Repr::Int]);
+            }
+            Inst::BitNot { dst, a } => {
+                self.expect(at, a, &[Repr::Int]);
+                self.expect(at, dst, &[Repr::Int]);
             }
             // The other one, and total for the same reason: every pairing of
             // two bit patterns has an answer and the answer is one of them.
@@ -2629,6 +2648,9 @@ fn admitted_in_a_window(inst: &Inst, written: bool) -> bool {
                     | Inst::FloatRound { .. }
                     | Inst::FloatSqrt { .. }
                     | Inst::FloatTruncate { .. }
+                    | Inst::Bits { .. }
+                    | Inst::BitNot { .. }
+                    | Inst::Shift { .. }
                     | Inst::LoadField { .. }
                     | Inst::LoadElem { .. }
                     | Inst::RunLoad { .. }
@@ -2871,6 +2893,98 @@ mod tests {
             assert!(
                 found.iter().any(|fault| fault.contains(wanted)),
                 "truncate s{dst} s{ok} s{a}: wanted `{wanted}`, found {found:?}"
+            );
+        }
+    }
+
+    /// ADR 0074's bit operations are held to `Int` in every operand and in
+    /// the answer, a `Duration` included among the refusals, and to nothing
+    /// about aliasing: any operand may be the destination.
+    #[test]
+    fn a_bit_operation_is_an_int_in_and_an_int_out() {
+        use crate::inst::{BitOp, ShiftOp};
+        let reprs = || vec![Repr::Int, Repr::Int, Repr::Int, Repr::Duration, Repr::Float];
+        let run = |inst: Inst| {
+            program(vec![function(
+                reprs(),
+                INT,
+                vec![inst, Inst::Return { src: 0 }],
+            )])
+        };
+        let all = |dst, a, b| {
+            vec![
+                Inst::Bits {
+                    op: BitOp::And,
+                    dst,
+                    a,
+                    b,
+                },
+                Inst::Bits {
+                    op: BitOp::Or,
+                    dst,
+                    a,
+                    b,
+                },
+                Inst::Bits {
+                    op: BitOp::Xor,
+                    dst,
+                    a,
+                    b,
+                },
+                Inst::Shift {
+                    op: ShiftOp::Left,
+                    dst,
+                    a,
+                    n: b,
+                },
+                Inst::Shift {
+                    op: ShiftOp::Right,
+                    dst,
+                    a,
+                    n: b,
+                },
+                Inst::Shift {
+                    op: ShiftOp::RightLogical,
+                    dst,
+                    a,
+                    n: b,
+                },
+            ]
+        };
+        // Every aliasing of three `Int` slots is well formed.
+        for (dst, a, b) in [(0, 1, 2), (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1)] {
+            for inst in all(dst, a, b) {
+                assert_eq!(faults(&run(inst.clone())), Vec::<String>::new(), "{inst:?}");
+            }
+            assert_eq!(
+                faults(&run(Inst::BitNot { dst, a })),
+                Vec::<String>::new(),
+                "not s{dst} s{a}"
+            );
+        }
+        for (dst, a, b, wanted) in [
+            (3, 1, 2, "slot 3 holds duration, but this wants int"),
+            (0, 3, 2, "slot 3 holds duration, but this wants int"),
+            (0, 1, 3, "slot 3 holds duration, but this wants int"),
+            (0, 4, 2, "slot 4 holds float, but this wants int"),
+            (0, 1, 4, "slot 4 holds float, but this wants int"),
+        ] {
+            for inst in all(dst, a, b) {
+                let found = faults(&run(inst.clone()));
+                assert!(
+                    found.iter().any(|fault| fault.contains(wanted)),
+                    "{inst:?}: wanted `{wanted}`, found {found:?}"
+                );
+            }
+        }
+        for (dst, a, wanted) in [
+            (3, 1, "slot 3 holds duration, but this wants int"),
+            (0, 4, "slot 4 holds float, but this wants int"),
+        ] {
+            let found = faults(&run(Inst::BitNot { dst, a }));
+            assert!(
+                found.iter().any(|fault| fault.contains(wanted)),
+                "not s{dst} s{a}: wanted `{wanted}`, found {found:?}"
             );
         }
     }

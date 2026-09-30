@@ -164,6 +164,21 @@ fn a_float_truncation_answers_the_integer_and_whether_there_is_one() {
 }
 
 #[test]
+fn a_bit_operation_answers_every_row_in_every_aliasing() {
+    suite::a_bit_operation_answers_every_row_in_every_aliasing::<Template>();
+}
+
+#[test]
+fn a_shift_answers_every_count_in_every_aliasing() {
+    suite::a_shift_answers_every_count_in_every_aliasing::<Template>();
+}
+
+#[test]
+fn a_shift_count_outside_the_word_raises() {
+    suite::a_shift_count_outside_the_word_raises::<Template>();
+}
+
+#[test]
 fn an_immediate_operand_fails_the_same_way() {
     suite::an_immediate_operand_fails_the_same_way::<Template>();
 }

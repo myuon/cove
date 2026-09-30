@@ -224,6 +224,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::FloatTruncate { dst, ok, a } => {
             build(Op::FloatTruncate, slot(dst)?, slot(ok)?, slot(a)?, 0)
         }
+        Inst::Bits { op, dst, a, b } => build(Op::Bits(op), slot(dst)?, slot(a)?, slot(b)?, 0),
+        Inst::BitNot { dst, a } => build(Op::BitNot, slot(dst)?, slot(a)?, 0, 0),
+        Inst::Shift { op, dst, a, n } => build(Op::Shift(op), slot(dst)?, slot(a)?, slot(n)?, 0),
 
         // ---- control flow --------------------------------------------------
         Inst::Jump { to } => build(Op::Jump, 0, 0, 0, displacement(pc, to)? as u64),
@@ -658,7 +661,7 @@ mod tests {
     use super::*;
     use crate::bytecode::decode::decode;
     use crate::bytecode::op::Op;
-    use crate::inst::{ArithOp, CmpOp, Compare, Convert, MinMax, Num};
+    use crate::inst::{ArithOp, BitOp, CmpOp, Compare, Convert, MinMax, Num, ShiftOp};
     use crate::layout::LayoutId;
     use crate::{ArgsId, FunctionId, HostOpId, StrId, TableId};
 
@@ -900,6 +903,29 @@ mod tests {
                 a: 5,
             },
         ));
+        for op in [BitOp::And, BitOp::Or, BitOp::Xor] {
+            held.push((
+                0,
+                Inst::Bits {
+                    op,
+                    dst: 1,
+                    a: 2,
+                    b: 3,
+                },
+            ));
+        }
+        held.push((0, Inst::BitNot { dst: 1, a: 2 }));
+        for op in [ShiftOp::Left, ShiftOp::Right, ShiftOp::RightLogical] {
+            held.push((
+                0,
+                Inst::Shift {
+                    op,
+                    dst: 1,
+                    a: 2,
+                    n: 3,
+                },
+            ));
+        }
         for op in [MinMax::Min, MinMax::Max] {
             held.push((
                 0,

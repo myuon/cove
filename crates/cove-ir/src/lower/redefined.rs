@@ -474,6 +474,9 @@ fn listed(inst: &Inst) -> bool {
             | Inst::FloatRound { .. }
             | Inst::FloatSqrt { .. }
             | Inst::FloatTruncate { .. }
+            | Inst::Bits { .. }
+            | Inst::BitNot { .. }
+            | Inst::Shift { .. }
             | Inst::Copy { .. }
             | Inst::LoadField { .. }
             | Inst::LoadElem { .. }

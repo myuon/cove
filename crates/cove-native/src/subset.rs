@@ -1053,6 +1053,20 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // `TRUNCATIONS`, against the VM's arm, as `(integer, ok)` pairs
         // including the documented `0` of a conversion that is not `ok`.
         Inst::FloatTruncate { dst, ok, a } => slot(*dst) && slot(*ok) && slot(*a),
+        // `encoded.rs`'s `AND_INT`, `OR_INT`, `XOR_INT`, `NOT_INT` and the
+        // three shift arms: ADR 0074's bit operations on an `Int`, which the
+        // ADR requires this backend to admit. The first four are one machine
+        // instruction each and cannot fail. The shifts are `shl`, `sar` and
+        // `shr` by `cl`, behind a test of the count against `0..=63` that
+        // raises `Raise::ShiftCount` — the count is checked in emitted code
+        // because x86-64 masks it to six bits, and that is not the contract.
+        // No helper is called on either path. What holds them to the bit is
+        // `tests/suite`'s `BIT_OPERATIONS` and `SHIFTS`, and `cove-runtime`'s
+        // `native_tier.rs` and `int_bits.rs` against the VM.
+        Inst::Bits { dst, a, b, .. } | Inst::Shift { dst, a, n: b, .. } => {
+            slot(*dst) && slot(*a) && slot(*b)
+        }
+        Inst::BitNot { dst, a } => slot(*dst) && slot(*a),
         // ---- places ---------------------------------------------------------
         //
         // Six of the eight, and the two that are missing are missing on purpose.

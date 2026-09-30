@@ -36,8 +36,9 @@ use std::sync::Arc;
 
 use cove_diag::{FileId, Span};
 use cove_ir::{
-    Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
-    Len, MinMax, Num, Program, RefMap, Repr, Slot, Storage, StrId, Table, TableId, Validation,
+    Arg, ArgsId, ArithOp, BitOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
+    LayoutId, Len, MinMax, Num, Program, RefMap, Repr, ShiftOp, Slot, Storage, StrId, Table,
+    TableId, Validation,
 };
 use cove_native::{
     Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp, WindowCode,
@@ -3355,6 +3356,269 @@ pub fn a_float_truncation_answers_the_integer_and_whether_there_is_one<A: Arm>()
                 answer.returned[0], *value as u64,
                 "the destination holds what the slot holds: truncate({label}){shape}"
             );
+        }
+    }
+}
+
+// ------------------------------------------------------------ bit operations
+
+/// `0x5555_5555_5555_5555`, the alternating mask with bit 0 set.
+pub const MASK_FIVES: i64 = 0x5555_5555_5555_5555;
+/// `0xAAAA_AAAA_AAAA_AAAA`, the alternating mask with bit 63 set.
+pub const MASK_AS: i64 = 0xAAAA_AAAA_AAAA_AAAA_u64 as i64;
+
+/// The operands every bit operation is held to over every valid count:
+/// ADR 0074's boundary list — nought, all ones, both ends of `Int` and the two
+/// alternating masks — and a few small ones.
+pub const BIT_OPERANDS: &[i64] = &[0, -1, i64::MIN, i64::MAX, MASK_FIVES, MASK_AS, 1, 5, -3];
+
+/// The five ways three `Int` slots can alias, as `(dst, a, b)`: all
+/// different, the answer over either operand, both operands one slot, and all
+/// three one slot. An arm that loaded an operand after it stored the answer
+/// would answer wrongly in the second, third or fifth.
+pub const BIT_SHAPES: &[(Slot, Slot, Slot)] =
+    &[(2, 0, 1), (0, 0, 1), (1, 0, 1), (2, 0, 0), (0, 0, 0)];
+
+/// `inst; return dst`, over three `Int` slots.
+pub fn bit_program(inst: Inst, dst: Slot) -> Program {
+    program(function(
+        vec![Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![inst, Inst::Return { src: dst }],
+    ))
+}
+
+/// ADR 0074's two-operand bit operations, and what each answers — the ADR's
+/// own examples first, then its boundary operands.
+pub const BIT_OPERATIONS: &[(&str, BitOp, i64, i64, i64)] = &[
+    ("5 and 3", BitOp::And, 5, 3, 1),
+    ("5 or 3", BitOp::Or, 5, 3, 7),
+    ("5 xor 3", BitOp::Xor, 5, 3, 6),
+    ("-1 and MIN", BitOp::And, -1, i64::MIN, i64::MIN),
+    ("MIN and MAX", BitOp::And, i64::MIN, i64::MAX, 0),
+    ("fives and as", BitOp::And, MASK_FIVES, MASK_AS, 0),
+    ("0 and -1", BitOp::And, 0, -1, 0),
+    ("fives or as", BitOp::Or, MASK_FIVES, MASK_AS, -1),
+    ("MIN or MAX", BitOp::Or, i64::MIN, i64::MAX, -1),
+    ("MIN or 1", BitOp::Or, i64::MIN, 1, -9223372036854775807),
+    ("0 or 0", BitOp::Or, 0, 0, 0),
+    ("-1 xor fives", BitOp::Xor, -1, MASK_FIVES, MASK_AS),
+    ("MIN xor -1", BitOp::Xor, i64::MIN, -1, i64::MAX),
+    ("MAX xor MAX", BitOp::Xor, i64::MAX, i64::MAX, 0),
+    ("fives xor as", BitOp::Xor, MASK_FIVES, MASK_AS, -1),
+];
+
+/// `Int.bitNot`'s rows: every one of them its operand's complement.
+pub const COMPLEMENTS: &[(i64, i64)] = &[
+    (0, -1),
+    (-1, 0),
+    (i64::MIN, i64::MAX),
+    (i64::MAX, i64::MIN),
+    (MASK_FIVES, MASK_AS),
+    (MASK_AS, MASK_FIVES),
+];
+
+/// ADR 0074's three shifts, and what each answers — the ADR's own examples
+/// first, then the edges of the word.
+pub const SHIFTS: &[(&str, ShiftOp, i64, i64, i64)] = &[
+    ("1 << 63", ShiftOp::Left, 1, 63, i64::MIN),
+    ("-1 << 1", ShiftOp::Left, -1, 1, -2),
+    ("-3 >> 1", ShiftOp::Right, -3, 1, -2),
+    ("-1 >>> 1", ShiftOp::RightLogical, -1, 1, i64::MAX),
+    ("-1 >>> 63", ShiftOp::RightLogical, -1, 63, 1),
+    ("-1 >> 63", ShiftOp::Right, -1, 63, -1),
+    ("MIN >> 63", ShiftOp::Right, i64::MIN, 63, -1),
+    ("MIN >>> 63", ShiftOp::RightLogical, i64::MIN, 63, 1),
+    (
+        "MIN >>> 1",
+        ShiftOp::RightLogical,
+        i64::MIN,
+        1,
+        4611686018427387904,
+    ),
+    ("-2 >>> 1", ShiftOp::RightLogical, -2, 1, i64::MAX),
+    ("MAX << 1", ShiftOp::Left, i64::MAX, 1, -2),
+    ("3 << 62", ShiftOp::Left, 3, 62, -4611686018427387904),
+    ("-1 << 63", ShiftOp::Left, -1, 63, i64::MIN),
+    ("fives << 1", ShiftOp::Left, MASK_FIVES, 1, MASK_AS),
+    ("as >>> 1", ShiftOp::RightLogical, MASK_AS, 1, MASK_FIVES),
+    ("as >> 1", ShiftOp::Right, MASK_AS, 1, -3074457345618258603),
+    ("MAX >> 62", ShiftOp::Right, i64::MAX, 62, 1),
+    ("MIN << 0", ShiftOp::Left, i64::MIN, 0, i64::MIN),
+    ("MIN >> 0", ShiftOp::Right, i64::MIN, 0, i64::MIN),
+    ("MIN >>> 0", ShiftOp::RightLogical, i64::MIN, 0, i64::MIN),
+];
+
+/// The counts a shift refuses: one either side of the word and the two ends
+/// of `Int`, which a masking CPU would read as 63, 0, 1, 0 and 63.
+pub const INVALID_COUNTS: &[i64] = &[-1, 64, 65, i64::MIN, i64::MAX];
+
+/// A reference for the shifts in 128-bit arithmetic, which is the ADR's
+/// definition written out rather than a second copy of any tier's `<<`:
+/// `u(x) * 2^n mod 2^64`, `floor(x / 2^n)` and `floor(u(x) / 2^n)`.
+pub fn shift_reference(op: ShiftOp, x: i64, n: u32) -> i64 {
+    let unsigned = u128::from(x as u64);
+    let power = 1u128 << n;
+    match op {
+        ShiftOp::Left => (unsigned * power) as u64 as i64,
+        ShiftOp::Right => i128::from(x).div_euclid(power as i128) as i64,
+        ShiftOp::RightLogical => (unsigned / power) as u64 as i64,
+    }
+}
+
+/// Every [`ShiftOp`].
+pub const SHIFT_OPS: [ShiftOp; 3] = [ShiftOp::Left, ShiftOp::Right, ShiftOp::RightLogical];
+
+/// Every [`BitOp`].
+pub const BIT_OPS: [BitOp; 3] = [BitOp::And, BitOp::Or, BitOp::Xor];
+
+/// Enters `compiled` over `(a, b)` placed in slots per `shape`, and answers
+/// the answer and what the three slots hold afterwards.
+fn entered<A: Arm>(
+    jit: &A,
+    compiled: A::Handle,
+    shape: (Slot, Slot, Slot),
+    a: i64,
+    b: i64,
+) -> (Answer, Vec<u64>) {
+    let (_, at_a, at_b) = shape;
+    forget_polls();
+    let mut words = vec![UNWRITTEN; 3];
+    words[at_a as usize] = a as u64;
+    words[at_b as usize] = b as u64;
+    let answer = enter(jit, compiled, &mut words, 0);
+    (answer, words)
+}
+
+/// `Inst::Bits` and `Inst::BitNot` answer [`BIT_OPERATIONS`] and
+/// [`COMPLEMENTS`], and every pairing of [`BIT_OPERANDS`], in every aliasing
+/// of the three slots.
+pub fn a_bit_operation_answers_every_row_in_every_aliasing<A: Arm>() {
+    for op in BIT_OPS {
+        for &shape in BIT_SHAPES {
+            let (dst, a, b) = shape;
+            let (jit, compiled) =
+                compiled_once::<A>(&bit_program(Inst::Bits { op, dst, a, b }, dst));
+            let mut rows: Vec<(String, i64, i64, i64)> = BIT_OPERATIONS
+                .iter()
+                .filter(|row| row.1 == op)
+                .map(|row| (row.0.to_string(), row.2, row.3, row.4))
+                .collect();
+            for &x in BIT_OPERANDS {
+                for &y in BIT_OPERANDS {
+                    let (x64, y64) = (x as u64, y as u64);
+                    let want = match op {
+                        BitOp::And => x64 & y64,
+                        BitOp::Or => x64 | y64,
+                        BitOp::Xor => x64 ^ y64,
+                    } as i64;
+                    rows.push((format!("{x} {op:?} {y}"), x, y, want));
+                }
+            }
+            for (label, x, y, want) in rows {
+                // One slot for both operands can only hold one of them.
+                if a == b && x != y {
+                    continue;
+                }
+                let (answer, words) = entered(&jit, compiled, shape, x, y);
+                assert_eq!(answer.outcome, Outcome::Returned, "{label} as {shape:?}");
+                assert_eq!(words[dst as usize] as i64, want, "{label} as {shape:?}");
+                assert_eq!(answer.returned[0] as i64, want, "{label} as {shape:?}");
+            }
+        }
+    }
+    for (dst, a) in [(1, 0), (0, 0)] {
+        let (jit, compiled) = compiled_once::<A>(&bit_program(Inst::BitNot { dst, a }, dst));
+        let mut rows = COMPLEMENTS.to_vec();
+        rows.extend(BIT_OPERANDS.iter().map(|&x| (x, (!(x as u64)) as i64)));
+        for (x, want) in rows {
+            let (answer, words) = entered(&jit, compiled, (dst, a, a), x, x);
+            assert_eq!(answer.outcome, Outcome::Returned, "not {x} as s{dst} s{a}");
+            assert_eq!(words[dst as usize] as i64, want, "not {x} as s{dst} s{a}");
+            assert_eq!(answer.returned[0] as i64, want, "not {x} as s{dst} s{a}");
+        }
+    }
+}
+
+/// `Inst::Shift` answers [`SHIFTS`], and every operand of [`BIT_OPERANDS`]
+/// shifted by every count from 0 to 63 answers [`shift_reference`], in every
+/// aliasing of the three slots — `x.shiftLeft(x)` included, which puts one
+/// slot in both `rax` and `cl`.
+pub fn a_shift_answers_every_count_in_every_aliasing<A: Arm>() {
+    for op in SHIFT_OPS {
+        for &shape in BIT_SHAPES {
+            let (dst, a, n) = shape;
+            let (jit, compiled) =
+                compiled_once::<A>(&bit_program(Inst::Shift { op, dst, a, n }, dst));
+            let mut rows: Vec<(String, i64, i64, i64)> = SHIFTS
+                .iter()
+                .filter(|row| row.1 == op)
+                .map(|row| (row.0.to_string(), row.2, row.3, row.4))
+                .collect();
+            for &x in BIT_OPERANDS {
+                for count in 0..64u32 {
+                    rows.push((
+                        format!("{x} {op:?} {count}"),
+                        x,
+                        i64::from(count),
+                        shift_reference(op, x, count),
+                    ));
+                }
+            }
+            // The count *is* the operand when the two are one slot, so every
+            // valid count shifts itself.
+            for count in 0..64u32 {
+                rows.push((
+                    format!("{count} {op:?} itself"),
+                    i64::from(count),
+                    i64::from(count),
+                    shift_reference(op, i64::from(count), count),
+                ));
+            }
+            for (label, x, count, want) in rows {
+                if a == n && x != count {
+                    continue;
+                }
+                let (answer, words) = entered(&jit, compiled, shape, x, count);
+                assert_eq!(answer.outcome, Outcome::Returned, "{label} as {shape:?}");
+                assert_eq!(words[dst as usize] as i64, want, "{label} as {shape:?}");
+                assert_eq!(answer.returned[0] as i64, want, "{label} as {shape:?}");
+            }
+        }
+    }
+}
+
+/// A count outside `0..=63` raises `Raise::ShiftCount` carrying the count,
+/// before anything is written — on all three shifts, for [`INVALID_COUNTS`],
+/// each of which a CPU that masked the count would have answered.
+pub fn a_shift_count_outside_the_word_raises<A: Arm>() {
+    for op in SHIFT_OPS {
+        for shape in [(2, 0, 1), (0, 0, 1), (1, 0, 1), (0, 0, 0)] {
+            let (dst, a, n) = shape;
+            let (jit, compiled) =
+                compiled_once::<A>(&bit_program(Inst::Shift { op, dst, a, n }, dst));
+            for &count in INVALID_COUNTS {
+                // With one slot for both, the operand is the count.
+                let operand = if a == n { count } else { 1 };
+                let (answer, words) = entered(&jit, compiled, shape, operand, count);
+                let label = format!("{operand} {op:?} {count} as {shape:?}");
+                assert_eq!(answer.outcome, Outcome::Raised, "{label}");
+                assert_eq!(answer.raise, Some(Raise::ShiftCount), "{label}");
+                assert_eq!(answer.raise_a, count, "the count is carried out: {label}");
+                assert_eq!(answer.raise_pc, 0, "the shift is what raised: {label}");
+                assert_eq!(
+                    answer.returned, [UNWRITTEN; DESTINATION_WORDS],
+                    "a raise wrote no word of the destination: {label}"
+                );
+                let before = if dst == n {
+                    count as u64
+                } else if dst == a {
+                    operand as u64
+                } else {
+                    UNWRITTEN
+                };
+                assert_eq!(words[dst as usize], before, "nothing was written: {label}");
+            }
         }
     }
 }

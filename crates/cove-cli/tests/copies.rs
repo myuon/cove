@@ -185,6 +185,10 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
         | Inst::FuncRef { dst, .. }
         | Inst::Neg { dst, .. }
         | Inst::Arith { dst, .. }
+        // ADR 0074's bit operations write one `Int` word, as `Arith` does.
+        | Inst::Bits { dst, .. }
+        | Inst::BitNot { dst, .. }
+        | Inst::Shift { dst, .. }
         | Inst::Cmp { dst, .. }
         | Inst::ArithImm { dst, .. }
         | Inst::CmpImm { dst, .. }

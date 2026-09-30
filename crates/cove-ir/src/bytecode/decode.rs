@@ -174,6 +174,19 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             a: b,
             b: c,
         },
+        Op::Bits(op) => Inst::Bits {
+            op,
+            dst: a,
+            a: b,
+            b: c,
+        },
+        Op::BitNot => Inst::BitNot { dst: a, a: b },
+        Op::Shift(op) => Inst::Shift {
+            op,
+            dst: a,
+            a: b,
+            n: c,
+        },
         Op::Jump => Inst::Jump {
             to: target(pc, code.payload() as i64)?,
         },

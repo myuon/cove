@@ -49,7 +49,8 @@
 use std::fmt::Write as _;
 
 use crate::inst::{
-    ArithOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, Slot, Storage, Validation,
+    ArithOp, BitOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, ShiftOp, Slot, Storage,
+    Validation,
 };
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
@@ -200,6 +201,32 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::FloatTruncate { dst, ok, a } => {
             format!("truncate.float {} {} {}", s(*dst), s(*ok), s(*a))
         }
+        // ADR 0074's bit operations, named for the machine operation each is:
+        // `shl`, `sar` and `shr` are the three shifts' x86 mnemonics, and the
+        // `.int` says the operand is an `Int`'s bits rather than a `Bool`.
+        Inst::Bits { op, dst, a, b } => format!(
+            "{}.int {} {} {}",
+            match op {
+                BitOp::And => "and",
+                BitOp::Or => "or",
+                BitOp::Xor => "xor",
+            },
+            s(*dst),
+            s(*a),
+            s(*b)
+        ),
+        Inst::BitNot { dst, a } => format!("not.int {} {}", s(*dst), s(*a)),
+        Inst::Shift { op, dst, a, n } => format!(
+            "{}.int {} {} {}",
+            match op {
+                ShiftOp::Left => "shl",
+                ShiftOp::Right => "sar",
+                ShiftOp::RightLogical => "shr",
+            },
+            s(*dst),
+            s(*a),
+            s(*n)
+        ),
         Inst::FloatMinMax { op, dst, a, b } => format!(
             "{}.float {} {} {}",
             match op {

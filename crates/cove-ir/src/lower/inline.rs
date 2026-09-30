@@ -1179,6 +1179,9 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::FloatMinMax { dst, .. }
             | Inst::FloatRound { dst, .. }
             | Inst::FloatSqrt { dst, .. }
+            | Inst::Bits { dst, .. }
+            | Inst::BitNot { dst, .. }
+            | Inst::Shift { dst, .. }
             | Inst::Arith { dst, .. }
             | Inst::Cmp { dst, .. }
             | Inst::ArithImm { dst, .. }
@@ -1976,14 +1979,17 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         | Inst::Convert { dst, a, .. }
         | Inst::FloatAbs { dst, a }
         | Inst::FloatRound { dst, a }
-        | Inst::FloatSqrt { dst, a } => {
+        | Inst::FloatSqrt { dst, a }
+        | Inst::BitNot { dst, a } => {
             vec![dst, a]
         }
         Inst::FloatTruncate { dst, ok, a } => vec![dst, ok, a],
         Inst::ArithImm { dst, a, .. } | Inst::CmpImm { dst, a, .. } => vec![dst, a],
         Inst::Arith { dst, a, b, .. }
         | Inst::Cmp { dst, a, b, .. }
-        | Inst::FloatMinMax { dst, a, b, .. } => vec![dst, a, b],
+        | Inst::FloatMinMax { dst, a, b, .. }
+        | Inst::Bits { dst, a, b, .. }
+        | Inst::Shift { dst, a, n: b, .. } => vec![dst, a, b],
         Inst::CmpImmBranch { dst, a, .. } => vec![dst, a],
         Inst::CmpBranch { dst, a, b, .. } => vec![dst, a, b],
         Inst::BranchFalse { cond, .. } => vec![cond],
