@@ -730,12 +730,16 @@ is down to `Float.parse`.
 [ADR 0072](docs/adr/0072-float-parse-is-cove.md) (Proposed) moves
 `Float.parse` into `std.float` with no instruction of its own: a grammar scan,
 Clinger's fast path — exact when the digits fit in 53 bits and the exponent in
-±22, which every number cq reads does — and, for everything else, simple
-decimal conversion over a buffer of at most 768 digits and a flag for a
-nonzero digit dropped past it, the fallback Rust's own `dec2flt` uses. The ADR
-argues the rounding from the bound: every midpoint between two binary64
-values has at most 768 significant digits. The answers are Rust's bit for
-bit, which `crates/cove-runtime/tests/float_parse.rs` checks on both tiers.
+±22, which every number cq reads does — then an Eisel–Lemire middle tier, the
+mantissa times a ninety-bit power of five in thirty-bit limbs from a table
+held as one string literal, which decides every 17-digit round-trip without
+allocating; and, for what it cannot decide, simple decimal conversion over a
+buffer of at most 768 digits and a flag for a nonzero digit dropped past it,
+the fallback Rust's own `dec2flt` uses. The ADR derives both: the middle
+tier's error bound and its conservative ambiguity test, and the slow path's
+from the bound that every midpoint between two binary64 values has at most
+768 significant digits. The answers are Rust's bit for bit, which
+`crates/cove-runtime/tests/float_parse.rs` checks on both tiers.
 No program emits an `IntrinsicCall` now; the mechanism is a later change's to
 delete.
 
