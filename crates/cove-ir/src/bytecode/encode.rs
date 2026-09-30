@@ -301,9 +301,6 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             0,
             halves(op.0, args.0),
         ),
-        Inst::IntrinsicCall { dst, site, args } => {
-            build(Op::IntrinsicCall, slot(dst)?, 0, 0, halves(site.0, args.0))
-        }
 
         // ---- the heap --------------------------------------------------------
         // Three opcodes rather than a discriminant in a field: `Len`'s three
@@ -663,7 +660,7 @@ mod tests {
     use crate::bytecode::op::Op;
     use crate::inst::{ArithOp, CmpOp, Compare, Convert, MinMax, Num};
     use crate::layout::LayoutId;
-    use crate::{ArgsId, FunctionId, HostOpId, SiteId, StrId, TableId};
+    use crate::{ArgsId, FunctionId, HostOpId, StrId, TableId};
 
     const L: LayoutId = LayoutId(3);
 
@@ -961,14 +958,6 @@ mod tests {
                     receiver: 2,
                     op: HostOpId(3),
                     args: ArgsId(4),
-                },
-            ),
-            (
-                0,
-                Inst::IntrinsicCall {
-                    dst: 1,
-                    site: SiteId(2),
-                    args: ArgsId(3),
                 },
             ),
             (

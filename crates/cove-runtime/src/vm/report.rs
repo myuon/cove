@@ -4,21 +4,16 @@
 //! encoded VM instructions, native-to-VM crossings and native-to-runtime calls
 //! separately", and its gates list what a performance report includes: "emitted,
 //! mediated and encoded instruction counts" and "VM-to-native, native-to-VM,
-//! direct-native and runtime-helper crossings". [`BoundaryReport`] is those five
+//! direct-native and runtime-helper crossings". [`BoundaryReport`] is those
 //! quantities as one value, so that every later phase of the ADR is measured
-//! against the same five numbers rather than against whichever one a reader
+//! against the same numbers rather than against whichever one a reader
 //! happened to print.
 //!
-//! # Five quantities, because no two of them are one
+//! # Four quantities, because no two of them are one
 //!
 //! - **emitted IR** is static: the instructions the lowering left in the
-//!   program after optimization, and how many of them are `IntrinsicCall` sites.
-//!   It is a fact about the program and answers the same whatever runs it;
-//! - **mediated intrinsics** are dynamic: each `IntrinsicCall` that reached
-//!   `Machine::call_intrinsic`, by [`Intrinsic`], split by the tier that made the
-//!   call. A native fast path that answered in emitted code never reaches the
-//!   runtime and is *not* counted — which is the point: a mediated call is the
-//!   one that crossed;
+//!   program after optimization. It is a fact about the program and answers the
+//!   same whatever runs it;
 //! - **encoded instructions** are what the dispatch loop ran, which is
 //!   `Machine::instructions` and not a second counter beside it. Since
 //!   [ADR 0062] fused a window's rows behind its head that is a count of
@@ -27,29 +22,24 @@
 //! - **tier crossings** are [`Tiers`], unchanged;
 //! - **native-to-runtime calls** are one counter per [`NativeHelpers`] field.
 //!
+//! There was a fifth, **mediated intrinsics**: each `IntrinsicCall` that reached
+//! the runtime, by `Intrinsic`, split by the tier that made the call, with the
+//! allocations and words [ADR 0064]'s Decision 7 asked for. [ADR 0073] deleted
+//! the mechanism once issue #432 had migrated its last variant, and the row with
+//! it: no call is left to count.
+//!
 //! # Free when it is off
 //!
-//! Nothing here is on the dispatch loop. What a run that did not ask pays is:
-//!
-//! - one `Option` test at the top of `Machine::call_intrinsic`, which is already a
-//!   Rust call that dispatches on the intrinsic — the same shape `Machine::tiered`
-//!   puts at a `call` — and a second one right after `intrinsics::call` returns,
-//!   for [ADR 0064]'s per-variant allocations and words: the first test's
-//!   `Some` arm is what reads the allocation counters before the call, so the
-//!   second reads them again and charges the difference rather than reading
-//!   them unconditionally;
-//! - one `Option` test in the native `intrinsic` helper, which is already a call
-//!   out of compiled code into that same function;
-//! - and nothing at all in the other eight helpers: those are counted by a
-//!   **second helper table**, [`helpers_counting`], which a run that wants the
-//!   counts compiles against and a run that does not never binds. That is
-//!   `ablate::CENSUS`'s discipline — the production helpers are the same
-//!   function bodies they were, not a copy with a branch in them.
+//! Nothing here is on the dispatch loop. What a run that did not ask pays is
+//! nothing at all in the helpers: those are counted by a **second helper
+//! table**, [`helpers_counting`], which a run that wants the counts compiles
+//! against and a run that does not never binds. That is `ablate::CENSUS`'s
+//! discipline — the production helpers are the same function bodies they were,
+//! not a copy with a branch in them.
 //!
 //! A fused arm pays one `Option` test per window it runs or declines, and only
-//! where it already stands: the count is taken out of line, as
-//! `Machine::count_intrinsic`'s is, and nothing on the path of an unfused
-//! instruction reads it. [`Windows`]' census adds no test the fast paths did
+//! where it already stands: the count is taken out of line, and nothing on the
+//! path of an unfused instruction reads it. [`Windows`]' census adds no test the fast paths did
 //! not already have a branch for — a decline is a `return` that was there — and
 //! [`BoundaryReport::growths`] adds one to the runtime's `grow`, which is out of
 //! line and is entered once per reallocation.
@@ -57,15 +47,15 @@
 //! [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
 //! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 //! [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+//! [ADR 0073]: ../../../../docs/adr/0073-a-primitive-below-the-library-is-an-instruction.md
 //! [`NativeHelpers`]: cove_native::NativeHelpers
 //! [`helpers_counting`]: crate::native_helpers_counting
 
-use std::collections::HashMap;
 use std::fmt;
 
 use cove_ir::bytecode::Op;
 use cove_ir::legalize::Pattern;
-use cove_ir::{FunctionId, Inst, Intrinsic, Program, SiteId};
+use cove_ir::{FunctionId, Inst, Program};
 use cove_native::{GrowableOp, RunOp};
 
 use crate::vm::exec::native::Tiers;
@@ -89,8 +79,6 @@ pub struct HelperCalls {
     pub close: u64,
     /// [`AllocFn`](cove_native::AllocFn): one `Inst::Alloc`.
     pub alloc: u64,
-    /// [`IntrinsicFn`](cove_native::IntrinsicFn): one intrinsic call.
-    pub intrinsic: u64,
     /// [`GrowableFn`](cove_native::GrowableFn): one growable-run operation.
     pub growable: u64,
     /// The same calls, by the [`GrowableOp`] each one named, indexed by
@@ -132,14 +120,13 @@ impl HelperCalls {
     }
 
     /// Each helper's name, as `NativeHelpers` spells the field, and its count.
-    pub fn rows(self) -> [(&'static str, u64); 12] {
+    pub fn rows(self) -> [(&'static str, u64); 11] {
         [
             ("safepoint", self.safepoint),
             ("call", self.call),
             ("open", self.open),
             ("close", self.close),
             ("alloc", self.alloc),
-            ("intrinsic", self.intrinsic),
             ("growable", self.growable),
             ("run_copy", self.run_copy),
             ("field_load", self.field_load),
@@ -457,44 +444,6 @@ impl Windows {
     }
 }
 
-/// One intrinsic's row: where the program names it, and how often each tier
-/// asked the runtime to perform it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IntrinsicCalls {
-    /// The operation.
-    pub intrinsic: Intrinsic,
-    /// `IntrinsicCall` instructions naming it, over every function with a body.
-    pub sites: u64,
-    /// Calls the encoded dispatch loop made.
-    pub encoded: u64,
-    /// Calls compiled code made through the `intrinsic` helper.
-    pub native: u64,
-    /// Objects the heap handed out across every call of this variant, from
-    /// either tier — [ADR 0064]'s Decision 7, which the opcode table's
-    /// `OPCODE_FLOOR` leaves off any variant that ran fewer than a thousand
-    /// times. This row has no such floor.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    pub allocations: u64,
-    /// Words the heap handed out across every call of this variant, for
-    /// [`allocations`](Self::allocations)'s reason.
-    pub words: u64,
-    // `work` stood here: the units a variant reported having examined, which
-    // ADR 0064's Decision 7 charged as work so that a walk over a hundred
-    // thousand bytes did not cost what a walk over ten did. It fell a
-    // migration at a time as the arms that walked became Cove, charged an
-    // instruction at a time instead, and read nought for every variant once
-    // ADR 0068's Phase 4c deleted `Value.admitKey`; its Phase 5 deleted the
-    // column with the Rust walks that were its last producers.
-}
-
-impl IntrinsicCalls {
-    /// Calls that reached the runtime, from either tier.
-    pub fn calls(self) -> u64 {
-        self.encoded + self.native
-    }
-}
-
 /// The lowered program, counted statically.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Emitted {
@@ -503,8 +452,6 @@ pub struct Emitted {
     pub functions: usize,
     /// IR instructions in those functions, after optimization.
     pub instructions: u64,
-    /// How many of them are `IntrinsicCall`.
-    pub intrinsic_sites: u64,
     /// How many of them are an `Inst::Call` to a standard-library function:
     /// the library calls the lowering left calls rather than expanding.
     ///
@@ -534,52 +481,38 @@ pub struct LibraryCalls {
 }
 
 impl Emitted {
-    /// Counts `program`, and the `IntrinsicCall` sites of each builtin by
-    /// `SiteId`.
-    fn of(program: &Program) -> (Emitted, Vec<u64>) {
+    /// Counts `program`.
+    fn of(program: &Program) -> Emitted {
         let mut emitted = Emitted::default();
-        let mut sites = vec![0u64; program.intrinsic_sites.len()];
         for function in program.functions.iter().filter(|f| !f.is_stub()) {
             emitted.functions += 1;
             emitted.instructions += function.code.len() as u64;
             for inst in &function.code {
-                match inst {
-                    Inst::IntrinsicCall { site, .. } => {
-                        emitted.intrinsic_sites += 1;
-                        if let Some(count) = sites.get_mut(site.index()) {
-                            *count += 1;
-                        }
-                    }
-                    Inst::Call { callee, .. } if program.function(*callee).is_library() => {
+                if let Inst::Call { callee, .. } = inst {
+                    if program.function(*callee).is_library() {
                         emitted.library_call_sites += 1;
                     }
-                    _ => {}
                 }
             }
         }
-        (emitted, sites)
+        emitted
     }
 }
 
-/// The five quantities of ADR 0058's boundary, for one run.
+/// The quantities of ADR 0058's boundary, for one run.
 ///
-/// Emitted IR (static), mediated intrinsics by the tier that called them,
-/// instructions the encoded VM dispatched, tier crossings, and calls compiled code
-/// made into each runtime helper — reported apart because no two of them are one
-/// number. Taken with [`Vm::boundary`](crate::Vm::boundary) after
+/// Emitted IR (static), instructions the encoded VM dispatched, tier crossings,
+/// and calls compiled code made into each runtime helper — reported apart
+/// because no two of them are one number. Mediated intrinsics were a fifth until
+/// ADR 0073 deleted the mechanism. Taken with [`Vm::boundary`](crate::Vm::boundary) after
 /// [`Vm::count_boundary`](crate::Vm::count_boundary), or with
 /// [`NativeSession::count_boundary`](crate::NativeSession::count_boundary) and
 /// [`NativeSession::take_boundary`](crate::NativeSession::take_boundary).
 ///
 /// # Free when it is off
 ///
-/// Nothing is on the dispatch loop. A run that did not ask pays one `Option` test
-/// at the top of `Machine::call_intrinsic` — already a Rust call that dispatches on
-/// the intrinsic — a second one right after `intrinsics::call` returns, for the
-/// per-variant allocations and words this report also carries, and one in the
-/// native `intrinsic` helper, which is already a call out of compiled code into
-/// that function. The per-helper counts cost such a run nothing at
-/// all, because they are a second helper table,
+/// Nothing is on the dispatch loop. The per-helper counts cost a run that did
+/// not ask nothing at all, because they are a second helper table,
 /// [`native_helpers_counting`](crate::native_helpers_counting), which only
 /// [`compile_native_counting`](crate::compile_native_counting) binds:
 /// `ablate::CENSUS`'s discipline, where the production helpers stay the bodies
@@ -592,9 +525,6 @@ impl Emitted {
 pub struct BoundaryReport {
     /// The program, counted statically.
     pub emitted: Emitted,
-    /// Every intrinsic the program names, sorted by dynamic calls descending,
-    /// then by sites descending, then by name.
-    pub intrinsics: Vec<IntrinsicCalls>,
     /// Instructions the encoded dispatch loop ran while counting: semantic
     /// instructions, a fused window's rows each counted, as fuel counts them.
     pub encoded_instructions: u64,
@@ -631,39 +561,12 @@ pub struct BoundaryReport {
     pub helpers: Option<HelperCalls>,
 }
 
-impl BoundaryReport {
-    /// Every mediated call, from either tier.
-    pub fn mediated(&self) -> u64 {
-        self.intrinsics.iter().map(|row| row.calls()).sum()
-    }
-
-    /// The row for `intrinsic`, if the program names it.
-    pub fn intrinsic(&self, intrinsic: Intrinsic) -> Option<IntrinsicCalls> {
-        self.intrinsics
-            .iter()
-            .copied()
-            .find(|row| row.intrinsic == intrinsic)
-    }
-}
-
 /// The counters a counting run keeps on its machine.
 ///
 /// A `Box` on the machine, for [`Tiering`](super::exec::native::Tiering)'s reason:
 /// a helper reaches the machine through one raw pointer, and this is written from
 /// inside helpers.
 pub(crate) struct Counting {
-    /// `IntrinsicCall`s that reached `Machine::call_intrinsic`, by `SiteId`, from
-    /// either tier.
-    sites: Vec<u64>,
-    /// The ones among them the native `intrinsic` helper made.
-    from_native: Vec<u64>,
-    /// Objects the heap handed out while running the calls at each `SiteId`,
-    /// charged by `Machine::charge_intrinsic_allocations` as the difference
-    /// of `Machine::allocations()` read before and after `intrinsics::call`.
-    allocations: Vec<u64>,
-    /// Words the heap handed out at each `SiteId`, for
-    /// [`allocations`](Self::allocations)'s reason.
-    words: Vec<u64>,
     /// Whether each function, by `FunctionId`, is the standard library's.
     library: Vec<bool>,
     /// Frames the encoded tier opened for a library function.
@@ -694,10 +597,6 @@ pub(crate) struct Counting {
 impl Counting {
     pub(crate) fn new(program: &Program, instructions: u64, tiers: Tiers) -> Counting {
         Counting {
-            sites: vec![0; program.intrinsic_sites.len()],
-            from_native: vec![0; program.intrinsic_sites.len()],
-            allocations: vec![0; program.intrinsic_sites.len()],
-            words: vec![0; program.intrinsic_sites.len()],
             library: program
                 .functions
                 .iter()
@@ -754,13 +653,6 @@ impl Counting {
         self.growths[at] += 1;
     }
 
-    /// One `IntrinsicCall` of `builtin`, whichever tier made it.
-    pub(crate) fn intrinsic(&mut self, site: SiteId) {
-        if let Some(count) = self.sites.get_mut(site.index()) {
-            *count += 1;
-        }
-    }
-
     /// One call the encoded tier made to `callee`, counted if it is the
     /// library's.
     pub(crate) fn encoded_call(&mut self, callee: FunctionId) {
@@ -776,33 +668,6 @@ impl Counting {
         }
     }
 
-    /// One of those, made by the native `intrinsic` helper.
-    pub(crate) fn native_intrinsic(&mut self, site: SiteId) {
-        if let Some(count) = self.from_native.get_mut(site.index()) {
-            *count += 1;
-        }
-    }
-
-    /// What one call at `site` cost: `allocations` objects and `words`
-    /// words, whichever tier made the call. Charged once per call, from
-    /// `Machine::charge_intrinsic_costs` — so a call that allocated nothing
-    /// charges `0` rather than nothing at all, and the row still exists for
-    /// [`Counting::report`] to sum. Both are a difference of the machine's own
-    /// counters taken across `intrinsics::call`, and they travel together
-    /// because they are charged at one point and cost one `Option` test
-    /// between them.
-    ///
-    /// A third, the units an arm reported having examined, travelled with
-    /// them until ADR 0068's Phase 5 deleted the last arm that reported any.
-    pub(crate) fn intrinsic_cost(&mut self, site: SiteId, allocations: u64, words: u64) {
-        if let Some(total) = self.allocations.get_mut(site.index()) {
-            *total += allocations;
-        }
-        if let Some(total) = self.words.get_mut(site.index()) {
-            *total += words;
-        }
-    }
-
     /// The report, over `program` and the machine's current counts.
     ///
     /// `tiers` is `None` for a run with no native tier, and `helpers_counted`
@@ -814,44 +679,11 @@ impl Counting {
         tiers: Option<Tiers>,
         helpers_counted: bool,
     ) -> BoundaryReport {
-        let (emitted, sites) = Emitted::of(program);
-        // Several `SiteId`s may name one intrinsic — one per result layout —
-        // and a reader asks about the operation, so they are summed.
-        let mut rows: HashMap<Intrinsic, IntrinsicCalls> = HashMap::new();
-        for (at, builtin) in program.intrinsic_sites.iter().enumerate() {
-            let native = self.from_native.get(at).copied().unwrap_or(0);
-            let all = self.sites.get(at).copied().unwrap_or(0);
-            let row = rows
-                .entry(builtin.intrinsic)
-                .or_insert_with(|| IntrinsicCalls {
-                    intrinsic: builtin.intrinsic,
-                    sites: 0,
-                    encoded: 0,
-                    native: 0,
-                    allocations: 0,
-                    words: 0,
-                });
-            row.sites += sites.get(at).copied().unwrap_or(0);
-            row.native += native;
-            row.encoded += all.saturating_sub(native);
-            row.allocations += self.allocations.get(at).copied().unwrap_or(0);
-            row.words += self.words.get(at).copied().unwrap_or(0);
-        }
-        let mut intrinsics: Vec<IntrinsicCalls> = rows
-            .into_values()
-            .filter(|row| row.sites > 0 || row.calls() > 0)
-            .collect();
-        intrinsics.sort_by(|a, b| {
-            b.calls()
-                .cmp(&a.calls())
-                .then_with(|| b.sites.cmp(&a.sites))
-                .then_with(|| a.intrinsic.to_string().cmp(&b.intrinsic.to_string()))
-        });
+        let emitted = Emitted::of(program);
         let tiers = tiers.map(|now| since(now, self.tiers_at));
         let native_counted = tiers.is_some() && helpers_counted;
         BoundaryReport {
             emitted,
-            intrinsics,
             encoded_instructions: instructions.saturating_sub(self.instructions_at),
             encoded_dispatches: instructions
                 .saturating_sub(self.instructions_at)
@@ -904,10 +736,9 @@ impl fmt::Display for BoundaryReport {
         let emitted = self.emitted;
         writeln!(
             f,
-            "boundary: emitted IR, {} instruction(s) in {} function(s), {} of them `IntrinsicCall` site(s)",
+            "boundary: emitted IR, {} instruction(s) in {} function(s)",
             thousands(emitted.instructions),
             emitted.functions,
-            thousands(emitted.intrinsic_sites)
         )?;
         let fused: Vec<String> = Pattern::ALL
             .iter()
@@ -1050,29 +881,6 @@ impl fmt::Display for BoundaryReport {
             )?,
             (None, _) => {}
         }
-        writeln!(
-            f,
-            "boundary: mediated intrinsics, {} call(s) that reached the runtime \
-             (a native fast path that answered in emitted code is not one)",
-            thousands(self.mediated())
-        )?;
-        writeln!(
-            f,
-            "  {:>14} {:>14} {:>7} {:>11} {:>12}  intrinsic",
-            "from encoded", "from native", "sites", "allocs", "words"
-        )?;
-        for row in &self.intrinsics {
-            writeln!(
-                f,
-                "  {:>14} {:>14} {:>7} {:>11} {:>12}  {}",
-                thousands(row.encoded),
-                thousands(row.native),
-                row.sites,
-                thousands(row.allocations),
-                thousands(row.words),
-                row.intrinsic
-            )?;
-        }
         Ok(())
     }
 }
@@ -1189,27 +997,15 @@ mod tests {
         assert!(calls.run_copy_rows().contains(&(RunOp::CopyBytes, 1)));
     }
 
-    /// The printed report says each quantity once and sorts intrinsics by calls.
+    /// The printed report says each quantity once.
     #[test]
     fn a_report_prints_each_quantity_apart() {
         let report = BoundaryReport {
             emitted: Emitted {
                 functions: 3,
                 instructions: 12_345,
-                intrinsic_sites: 4,
                 library_call_sites: 2,
             },
-            // One row: `Float.parse` is the one variant left since issue #432
-            // made `Float.toInt` `std.float.toInt`, which was the row above
-            // it here.
-            intrinsics: vec![IntrinsicCalls {
-                intrinsic: Intrinsic::FloatParse,
-                sites: 3,
-                encoded: 1_000,
-                native: 7,
-                allocations: 1_007,
-                words: 5_035,
-            }],
             encoded_instructions: 1_234_567,
             encoded_dispatches: 1_234_000,
             fusions: [80, 0, 3, 0],
@@ -1233,15 +1029,14 @@ mod tests {
                 ..Tiers::default()
             }),
             helpers: Some(HelperCalls {
-                intrinsic: 7,
+                alloc: 7,
                 growable: 3,
                 growable_ops: [1, 0, 0, 0, 0, 2, 0, 0, 0, 0],
                 ..HelperCalls::default()
             }),
         };
-        assert_eq!(report.mediated(), 1_007);
         let text = report.to_string();
-        assert!(text.contains("emitted IR, 12,345 instruction(s) in 3 function(s), 4 of them"));
+        assert!(text.contains("emitted IR, 12,345 instruction(s) in 3 function(s)\n"));
         assert!(text.contains(
             "encoded VM, 1,234,567 instruction(s) in 1,234,000 dispatch(es); windows fused: \
              push.words 80, push.byte 0, append.bytes 3, append.words 0"
@@ -1266,62 +1061,27 @@ mod tests {
         );
         assert!(text.contains("VM->native 2,"));
         assert!(text.contains("helper calls, 10 in all"));
+        assert!(text.contains(&format!("\n  {:<12} {:>14}\n", "alloc", "7")));
         assert!(text.contains("\n    Alloc                     1\n"));
         assert!(text.contains("\n    EnsureWords               2\n"));
         assert!(
             !text.contains("    Finish "),
             "an operation that never ran is left out"
         );
-        assert!(text.contains(
-            "           1,000              7       3       1,007        5,035  Float.parse"
-        ));
+        assert!(
+            !text.contains("intrinsic"),
+            "no row of the report is an intrinsic's since ADR 0073"
+        );
     }
 
-    /// A loop that calls an intrinsic where it allocates (`Float.parse` of
-    /// text that is not a number builds the message of the `Err` it answers)
-    /// and where it does not (`Float.parse` of a number answers an `Ok` in
-    /// place), each several times over, so both [`Counting`]'s wiring and the
-    /// reconciliation test below have more than one call and more than one
-    /// site to work with.
+    /// A loop that parses text that is a number and text that is not, fifty
+    /// times each: the second allocates the message of the `Err` it answers, so
+    /// the run allocates and the reconciliation below has something on both
+    /// sides of it.
     ///
-    /// **The one that does not allocate has moved six times, and each move is
-    /// a migration.** It was `String.length` until ADR 0064 made the count
-    /// `std.string.length`; it was then `String.contains` until ADR 0065 gave
-    /// that a run search to stand on; it was then `String.indexOf`, until ADR
-    /// 0064's next migration wrote that over the same run search; it was then
-    /// `Any.equals`, until [ADR 0068]'s Phase 2 made `==` on two erased values
-    /// `std.dynamic.equals`, a Cove loop charged by the instruction; it was
-    /// then `Value.order`, until the ADR's Phase 3 made the order of two
-    /// erased keys `std.dynamic.order` the same way; and it was then
-    /// `Value.admitKey` over a `Node` whose `kids` are `Node`s, until the
-    /// ADR's Phase 4c worded the admission's refusal in Cove and deleted the
-    /// last intrinsic that walked a value. It was then `Float.toInt` — a
-    /// conversion that succeeds writes its `Ok` where the call asked for it —
-    /// until issue #432 made that `std.float.toInt`, and **no variant is left
-    /// that never allocates**. `Float.parse` of text that is a number is what
-    /// answers without allocating now: the same variant as the other call,
-    /// at another site, so the property below is about calls rather than
-    /// about variants.
-    ///
-    /// **The allocating one has moved twice**, and neither time because a
-    /// reader found a run instruction to stand on: it was `String.join` until
-    /// issue #454's Step 3 wrote that over a `StringBuilder` in Cove, and then
-    /// `String.split` until the end of that step moved it to `std.string` too,
-    /// and then `Float.format` until that moved to `std.float`. `Float.parse`
-    /// on text that is not a number is what is left: it allocates the message
-    /// of the `Err` it answers, one object a call, so this no longer catches a
-    /// row that attributed only the outermost object; nothing left allocates
-    /// more than one per call.
-    ///
-    /// **Since issue #432 no source emits the call at all**: `Float.parse` is
-    /// `std.float.parse`, a Cove body (ADR 0072), and it was the last
-    /// intrinsic. The two cases below run this program through
-    /// `World::with_the_parse_intrinsic`, which puts the `intrinsic-call` back
-    /// by hand where the lowering now emits a `call`, so that the reporting
-    /// they hold to account still has calls to report until the change that
-    /// deletes the mechanism deletes them with it.
-    ///
-    /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+    /// It drove `Float.parse` as an `intrinsic-call` put back by hand until ADR
+    /// 0073 deleted the mechanism; `Float.parse` is `std.float.parse`, a Cove
+    /// body (ADR 0072), and this runs it as the lowering emits it.
     const PARSE_AND_ADMIT: &str = "
 export fn main() -> Int {
   var total = 0
@@ -1341,124 +1101,48 @@ export fn main() -> Int {
 }
 ";
 
-    /// [ADR 0064]'s Decision 7 asks that allocations and allocated words be
-    /// attributed per variant, and this is the property worth pinning about
-    /// that attribution: it is not just present, it counts what the calls
-    /// did. `Float.parse` allocates the message of the `Err` it hands back
-    /// and writes an `Ok` in place, so a run of fifty of each must show one
-    /// row with a hundred calls and fifty allocations — one per call that
-    /// refused, and none for a call that did not — from the real machinery in
-    /// `Machine::call_intrinsic`, not from calling
-    /// [`Counting::intrinsic_allocated`] directly, which would only prove the
-    /// bookkeeping adds correctly and not that it is wired to anything.
+    /// **The report reconciles exactly with the instruction profile.**
     ///
-    /// It told two *variants* apart while there were two: `Float.toInt` of a
-    /// number it could convert was the row without allocations, until issue
-    /// #432 made that operation `std.float.toInt`.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    #[test]
-    fn an_intrinsics_row_carries_the_allocations_of_the_calls_that_made_them() {
-        use crate::vm::debug::tests::World;
-
-        let world = World::with_the_parse_intrinsic(PARSE_AND_ADMIT);
-        let mut vm = world.plain();
-        vm.count_boundary();
-        vm.run_entry("m", "main", Vec::new()).expect("it answers");
-        let boundary = vm.boundary().expect("count_boundary was called");
-
-        let parsed = boundary
-            .intrinsic(Intrinsic::FloatParse)
-            .expect("the program calls Float.parse");
-        assert_eq!(parsed.calls(), 100, "{parsed:?}");
-        assert_eq!(parsed.sites, 2, "{parsed:?}");
-        assert_eq!(
-            parsed.allocations, 50,
-            "Float.parse allocates the message of each Err it answers, and \
-             nothing for an Ok it writes in place: {parsed:?}"
-        );
-        assert!(parsed.words > 0, "{parsed:?}");
-        // The per-variant total is a subset of the whole run's, never past
-        // it — the sanity Decision 7's own measurement leans on.
-        assert!(parsed.allocations <= vm.allocations(), "{parsed:?}");
-        assert!(parsed.words <= vm.allocated_words(), "{parsed:?}");
-    }
-
-    /// **The totals must reconcile exactly with the opcode and site
-    /// profile.** [ADR 0064]'s Decision 7 says so in those words, for the
-    /// same reason `vm_coverage.rs`'s ratchets are compared as sets rather
-    /// than as counts: a total that merely matches in aggregate could still
-    /// be attributing the right number of allocations to the wrong variant.
-    /// So this checks it per variant, from one run watched by both a
-    /// [`Profiler`](crate::vm::profile::Profiler) and boundary counting at
-    /// once — the same instructions, read two ways — rather than trusting
-    /// that two separate runs of the same program would have counted the
-    /// same thing.
-    ///
-    /// For every `Intrinsic` the boundary report names, this sums the
-    /// profiler's own per-instruction cost over every `IntrinsicCall` site
-    /// naming that variant, and checks the sum against the boundary row's
-    /// calls, allocations and words. `program.intrinsic_site` is what turns a
-    /// profiled `(FunctionId, pc)` back into the `Intrinsic` an
-    /// `IntrinsicCall` there names, exactly as `Counting::report` does.
+    /// [ADR 0064]'s Decision 7 asked that the boundary's totals "reconcile
+    /// exactly with the opcode and site profile", and this held it per
+    /// intrinsic variant — calls, allocations and words summed over every
+    /// `IntrinsicCall` site the profiler saw — until [ADR 0073] deleted the
+    /// mechanism and the per-variant rows with it. What is left to reconcile
+    /// is the run itself: one run watched by both a
+    /// [`Profiler`](crate::vm::profile::Profiler) and boundary counting at once
+    /// — the same instructions, read two ways — must agree **exactly** on how
+    /// many instructions ran. The profiler's per-instruction allocations and
+    /// words are bounded by what the run's heap handed out rather than equal to
+    /// it: the literals ADR 0045 places before the first instruction are no
+    /// instruction's, and are in the heap's count and not in any row.
     ///
     /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
+    /// [ADR 0073]: ../../../../docs/adr/0073-a-primitive-below-the-library-is-an-instruction.md
     #[test]
-    fn the_boundary_report_and_the_profile_reconcile_by_variant() {
+    fn the_boundary_report_and_the_profile_reconcile() {
         use crate::vm::debug::tests::World;
         use crate::vm::profile::Profiler;
 
-        let world = World::with_the_parse_intrinsic(PARSE_AND_ADMIT);
+        let world = World::new(PARSE_AND_ADMIT);
         let profiler = Profiler::new();
         let mut vm = world.watched(&profiler);
         vm.count_boundary();
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
         let boundary = vm.boundary().expect("count_boundary was called");
-        assert!(
-            !boundary.intrinsics.is_empty(),
-            "the program names some intrinsic"
-        );
 
-        let program = world.program();
         let rows = profiler.rows();
-        for row in &boundary.intrinsics {
-            let mut calls = 0u64;
-            let mut allocations = 0u64;
-            let mut words = 0u64;
-            let mut work = 0u64;
-            for ((id, pc), cost) in &rows {
-                let Some(function) = program.functions.get(id.index()) else {
-                    continue;
-                };
-                let Some(Inst::IntrinsicCall { site, .. }) = function.code.get(*pc as usize) else {
-                    continue;
-                };
-                if program.intrinsic_site(*site).intrinsic != row.intrinsic {
-                    continue;
-                }
-                calls += cost.ran;
-                allocations += cost.allocations;
-                words += cost.words;
-                work += cost.work;
-            }
-            assert_eq!(calls, row.calls(), "{:?}: {row:?}", row.intrinsic);
-            assert_eq!(allocations, row.allocations, "{:?}: {row:?}", row.intrinsic);
-            assert_eq!(words, row.words, "{:?}: {row:?}", row.intrinsic);
-            // No intrinsic call is charged work beyond its one unit: the
-            // report's `work` column went in ADR 0068's Phase 5 because no arm
-            // was left to report any, and this is the profiler's own reading
-            // of the same fact, so a variant that started charging again
-            // would be seen here rather than lost.
-            assert_eq!(work, 0, "{:?}: {row:?}", row.intrinsic);
-        }
-        // And the reconciliation is not vacuous: `Float.parse` allocates the
-        // message of every `Err` it answers, so the allocation column has
-        // something on both sides.
+        let ran: u64 = rows.iter().map(|(_, cost)| cost.ran).sum();
+        let allocations: u64 = rows.iter().map(|(_, cost)| cost.allocations).sum();
+        let words: u64 = rows.iter().map(|(_, cost)| cost.words).sum();
+        assert_eq!(ran, boundary.encoded_instructions, "{boundary:?}");
         assert!(
-            boundary.intrinsics.iter().any(|row| row.allocations > 0),
-            "a program that parses text that is not a number allocates: {:?}",
-            boundary.intrinsics
+            allocations <= vm.allocations(),
+            "{allocations}: {boundary:?}"
         );
+        assert!(words <= vm.allocated_words(), "{words}: {boundary:?}");
+        // And the reconciliation is not vacuous: `Float.parse` allocates the
+        // message of every `Err` it answers.
+        assert!(allocations >= 50, "{allocations}");
     }
 
     // `the_work_a_variant_is_charged_scales_with_what_it_examined` stood here,

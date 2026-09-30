@@ -45,7 +45,6 @@ pub mod bytecode;
 pub mod dynamic;
 pub mod flow;
 pub mod inst;
-pub mod intrinsic;
 pub mod layout;
 pub mod legalize;
 pub mod lower;
@@ -59,15 +58,14 @@ pub use dynamic::DynamicKind;
 pub use inst::{
     ArithOp, CmpOp, Compare, Convert, Inst, Len, MinMax, Num, Pc, Slot, Storage, Validation,
 };
-pub use intrinsic::{Carried, Category, Class, Effects, Intrinsic, Signature};
 pub use layout::{
     enum_layout, finishes_as_keyed_run_of, is_entry_of, reads_as_units_of, struct_layout, Case,
     Field, Layout, LayoutId, Part, Shape, SHARED_STATE, SHARED_VALUE,
 };
 pub use lower::{lower, lower_entry, lower_roots};
 pub use program::{
-    Arg, ArgsId, Capture, CaseId, Function, FunctionId, HostOp, HostOpId, IntrinsicSite,
-    LayoutNames, Local, Program, ResourceName, SiteId, StrId, Table, TableId,
+    Arg, ArgsId, Capture, CaseId, Function, FunctionId, HostOp, HostOpId, LayoutNames, Local,
+    Program, ResourceName, StrId, Table, TableId,
 };
 pub use repr::{RefMap, Repr};
 pub use verify::{verify, Invalid};

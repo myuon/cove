@@ -31,58 +31,9 @@ fn @m.whole(Float) -> Result
     );
 }
 
-/// **`std.float` emits no `intrinsic-call`.**
-///
-/// Issue #432 took `Float.toInt` out of `Intrinsic`, and it was the last
-/// intrinsic `std.float` itself reached: `format` and `renderInto` each asked
-/// it for a significand or a whole number they had already held inside the
-/// range. A program that interpolates a `Float`, formats one and converts one
-/// reaches every function of the module that does any of the three, and none
-/// of them may name an intrinsic.
-///
-/// **Since issue #432 that is every `Float` operation there is:** `Float.parse`
-/// was the last intrinsic of all, and it is `std.float.parse` now (ADR
-/// 0072), so the program parses one too, and its slow path, refusal and
-/// words are held to the same rule.
-#[test]
-fn std_float_emits_no_intrinsic_call() {
-    let (sources, held) = super::checked(
-        "fn main(x: Float, s: String) -> String {\n  let parsed = Float.parse(s)\n  \"{x} {x.format(2)} {x.toInt()} {parsed.isOk()}\"\n}",
-    );
-    let schemas = cove_schema::HostSchemas::new();
-    let program = crate::lower(&held, &sources, &schemas).expect("the program lowers");
-    let mut reached = Vec::new();
-    for f in program.functions.iter().filter(|f| !f.stub) {
-        let name = f.qualified();
-        if !name.starts_with("std.float.") {
-            continue;
-        }
-        for (pc, inst) in f.code.iter().enumerate() {
-            assert!(
-                !matches!(inst, crate::Inst::IntrinsicCall { .. }),
-                "`{name}` holds an `intrinsic-call` at {pc}: {inst:?}"
-            );
-        }
-        reached.push(name);
-    }
-    for name in [
-        "std.float.format",
-        "std.float.renderInto",
-        "std.float.toInt",
-        "std.float.toIntRefused",
-        "std.float.parse",
-        "std.float.parseMiddle",
-        "std.float.eiselLemire",
-        "std.float.parseSlow",
-        "std.float.parseRefused",
-        "std.float.parseWord",
-    ] {
-        assert!(
-            reached.iter().any(|had| had == name),
-            "`{name}` was meant to be reached, and the program lowered {reached:?}"
-        );
-    }
-}
+// `std_float_emits_no_intrinsic_call` stood here: no `std.float` function
+// held an `intrinsic-call`, once issue #432 had made `Float.toInt` and then
+// `Float.parse` Cove. ADR 0073 deleted the instruction, so no function can.
 
 /// **`std.float.parse` calls nothing and allocates nothing on the way to an
 /// answer it makes itself.**
@@ -101,9 +52,8 @@ fn std_float_emits_no_intrinsic_call() {
 ///
 /// The middle tier is held to a rule of its own by
 /// [`std_float_parse_has_a_middle_tier_that_allocates_nothing`]. The slow path
-/// is held to neither: it allocates its one digit buffer, and
-/// [`std_float_emits_no_intrinsic_call`] and `native_tier.rs` hold it to the
-/// rest.
+/// is held to neither: it allocates its one digit buffer, and `native_tier.rs`
+/// holds it to the rest.
 #[test]
 fn std_float_parse_has_a_fast_path_that_calls_and_allocates_nothing() {
     use crate::Inst;
@@ -319,9 +269,7 @@ fn std_float_renderers_truncate_in_place() {
                 assert!(
                     !matches!(
                         inside,
-                        crate::Inst::Call { .. }
-                            | crate::Inst::CallClosure { .. }
-                            | crate::Inst::IntrinsicCall { .. }
+                        crate::Inst::Call { .. } | crate::Inst::CallClosure { .. }
                     ),
                     "`{name}`: the conversion window {pc}..{join} calls at {at}: {inside:?}"
                 );

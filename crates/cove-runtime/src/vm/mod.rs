@@ -118,11 +118,11 @@ mod differential;
 #[cfg(test)]
 mod erasure;
 pub(crate) mod exec;
-pub(crate) mod intrinsics;
 pub(crate) mod mem;
 pub mod profile;
 pub(crate) mod render;
 pub(crate) mod report;
+mod sequences;
 
 /// The words a run's heap region may grow to, for every [`Vm`] [`Vm::new`]
 /// builds. [`Vm::with_heap_words`] is the one way to build a run over a

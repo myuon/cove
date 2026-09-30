@@ -175,13 +175,6 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
                 .get(op.index())
                 .map_or(1, |op| width(op.result)),
         )),
-        Inst::IntrinsicCall { dst, site, .. } => Some((
-            dst,
-            program
-                .intrinsic_sites
-                .get(site.index())
-                .map_or(1, |held| width(held.result)),
-        )),
         // One word, whatever it holds.
         Inst::Unit { dst }
         | Inst::Bool { dst, .. }

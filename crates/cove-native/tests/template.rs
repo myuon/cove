@@ -55,12 +55,7 @@ impl Arm for Template {
         handle.windows
     }
 
-    fn intrinsic_code(handle: Compiled) -> cove_native::IntrinsicCode {
-        handle.intrinsics
-    }
-
     const ATTRIBUTES_WINDOWS: bool = true;
-    const ATTRIBUTES_INTRINSIC_CALLS: bool = true;
 }
 
 #[test]
@@ -364,16 +359,6 @@ fn a_freeze_refuses_a_null_receiver() {
 }
 
 #[test]
-fn an_intrinsic_call_is_handed_over_by_its_effects() {
-    suite::an_intrinsic_call_is_handed_over_by_its_effects::<Template>();
-}
-
-#[test]
-fn an_intrinsic_call_out_of_bounds_refuses_the_function() {
-    suite::an_intrinsic_call_out_of_bounds_refuses_the_function::<Template>();
-}
-
-#[test]
 fn a_load_elem_strides_and_bounds_its_index() {
     suite::a_load_elem_strides_and_bounds_its_index::<Template>();
 }
@@ -581,7 +566,6 @@ fn direct_helpers() -> NativeHelpers {
         // rather than two more panicking stubs: a table with a `todo!()` in it is
         // a table somebody has to keep honest.
         alloc: shared.alloc,
-        intrinsic: shared.intrinsic,
         growable: shared.growable,
         run_copy: shared.run_copy,
         field_load: shared.field_load,
@@ -816,12 +800,7 @@ impl Arm for TemplateDirect {
         handle.windows
     }
 
-    fn intrinsic_code(handle: Compiled) -> cove_native::IntrinsicCode {
-        handle.intrinsics
-    }
-
     const ATTRIBUTES_WINDOWS: bool = true;
-    const ATTRIBUTES_INTRINSIC_CALLS: bool = true;
 }
 
 #[test]
@@ -952,14 +931,4 @@ fn a_window_is_less_code_than_its_rows() {
 #[test]
 fn a_windows_machine_code_is_charged_to_its_pattern() {
     suite::a_windows_machine_code_is_charged_to_its_pattern::<Template>();
-}
-
-#[test]
-fn an_intrinsic_calls_machine_code_is_charged_to_its_variant() {
-    suite::an_intrinsic_calls_machine_code_is_charged_to_its_variant::<Template>();
-}
-
-#[test]
-fn every_intrinsic_call_site_is_counted() {
-    suite::every_intrinsic_call_site_is_counted::<Template>();
 }

@@ -439,13 +439,6 @@ impl<'p> Flow<'p> {
                 };
                 f(dst, answer);
             }
-            Inst::IntrinsicCall { dst, site, .. } => {
-                let answer = match self.program.intrinsic_sites.get(site.index()) {
-                    Some(builtin) => width(builtin.result),
-                    None => 1,
-                };
-                f(dst, answer);
-            }
             // The two rows whose first entry is written rather than read: a
             // run slice's `dst`, which receives the fresh run's address, and a
             // run find's, which receives an offset.
@@ -528,7 +521,6 @@ impl<'p> Flow<'p> {
             Inst::Switch { on, .. } => f(on, 1),
             Inst::Return { src } => f(src, width(self.function.returns)),
             Inst::Call { args: list, .. } | Inst::CallHost { args: list, .. } => args(list, f),
-            Inst::IntrinsicCall { args: list, .. } => args(list, f),
             Inst::CallClosure {
                 closure,
                 args: list,

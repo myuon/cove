@@ -53,9 +53,10 @@
 //!
 //! # What the reference is
 //!
-//! `format!("{m}e{e}").parse::<f64>()` — which is `Intrinsic::FloatParse`'s
-//! own arm in `crates/cove-runtime/src/vm/intrinsics/scalar.rs`, reached
-//! directly. That is deliberate and is what the question needs: this file asks
+//! `format!("{m}e{e}").parse::<f64>()` — which was `Intrinsic::FloatParse`'s
+//! own arm in `crates/cove-runtime/src/vm/intrinsics/scalar.rs` when this was
+//! written, reached directly (ADR 0072 made the operation Cove, and ADR 0073
+//! deleted the arm with the mechanism). That is deliberate and is what the question needs: this file asks
 //! whether an arithmetic body would **agree with the operation as it ships**,
 //! so the operation as it ships is the reference by construction. That it is
 //! also correctly rounded is established elsewhere and not assumed here —

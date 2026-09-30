@@ -469,7 +469,7 @@ impl Body<'_> {
     ///
     /// Nothing else reaches here. `isEmpty`, `contains`, `inserted`, `removed`
     /// and `toArray` are `std.set` — a binary search over the order
-    /// `cove_runtime::vm::intrinsics::key` defines, and run copies, slices and a
+    /// `core.order` defines (ADR 0059), and run copies, slices and a
     /// keyed finish (ADR 0059, #378) — which `Body::call_builtin_method`
     /// resolves through `cove_schema::builtins::standard_binding` before this
     /// function is ever called for it.
@@ -1127,8 +1127,8 @@ impl Body<'_> {
     ///
     /// # What this replaced, and why it is not a boxing site any more
     ///
-    /// It used to be one [`Inst::IntrinsicCall`] of `Any.equals`, and
-    /// [`Inst::IntrinsicCall`] hands the machine slot numbers and nothing
+    /// It used to be one `Inst::IntrinsicCall` of `Any.equals`, and
+    /// `Inst::IntrinsicCall` hands the machine slot numbers and nothing
     /// else: there is no channel on it for the layout of each operand. A
     /// reference carries its description in the object's own header, so an
     /// array or a vector needed nothing; an *inline* struct, enum or range is
@@ -1146,7 +1146,7 @@ impl Body<'_> {
     /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
     /// Phase 2 that fallback is an ordinary [`Inst::Call`] of
     /// `std.dynamic.equals`, a Cove walk over a view of each box, rather than
-    /// an [`Inst::IntrinsicCall`] into Rust. `Body::opened` has already
+    /// an `Inst::IntrinsicCall` into Rust. `Body::opened` has already
     /// unboxed the side that could be, so a pair that arrives here boxed is a
     /// pair that is boxed on both sides — which is what the function takes,
     /// and what `cove-cli`'s `tests/boxed.rs` holds every call of it to

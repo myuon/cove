@@ -12,7 +12,6 @@ use std::sync::Arc;
 use cove_diag::Span;
 
 use crate::inst::{Inst, Pc, Slot};
-use crate::intrinsic::Intrinsic;
 use crate::layout::{Layout, LayoutId};
 use crate::repr::{RefMap, Repr};
 
@@ -99,10 +98,6 @@ id!(
     /// Names a host operation in [`Program::host_ops`].
     HostOpId, "host"
 );
-id!(
-    /// Names a builtin in [`Program::intrinsic_sites`].
-    SiteId, "builtin"
-);
 
 /// One argument of a call: where the value is, and what it is.
 ///
@@ -166,22 +161,6 @@ impl HostOp {
             None => format!("{}.{}", self.module, self.operation),
         }
     }
-}
-
-/// One builtin a program calls: `Array.length`, `String.split`, `Int.abs`.
-///
-/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
-/// identifies a builtin statically, as a closed [`Intrinsic`] rather than a
-/// pair of strings a machine matched at run time: "lowering resolves it to
-/// an intrinsic identifier with a fixed operand and result shape." A
-/// builtin's name — `Array.length`, for a disassembly or a diagnostic — is
-/// derived from the intrinsic it carries rather than stored beside it, so
-/// there is exactly one place that pairing is written down.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IntrinsicSite {
-    /// The operation this call performs.
-    pub intrinsic: Intrinsic,
-    pub result: LayoutId,
 }
 
 /// Where a [`Inst::Switch`] goes.
@@ -572,7 +551,6 @@ pub struct Program {
     pub args: Vec<Vec<Arg>>,
     pub tables: Vec<Table>,
     pub host_ops: Vec<HostOp>,
-    pub intrinsic_sites: Vec<IntrinsicSite>,
     /// The layout every string object shares.
     ///
     /// One field rather than a layout in each [`Inst::Str`], because every
@@ -688,10 +666,6 @@ impl Program {
 
     pub fn host_op(&self, id: HostOpId) -> &HostOp {
         &self.host_ops[id.index()]
-    }
-
-    pub fn intrinsic_site(&self, id: SiteId) -> &IntrinsicSite {
-        &self.intrinsic_sites[id.index()]
     }
 
     /// The id of `module.name`, if the program has it.

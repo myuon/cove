@@ -7,7 +7,7 @@
 //! spells `core.<name>(...)` — `cove_schema::builtins::CORE_INTRINSICS` is the
 //! table. The checker admits such a call only inside a standard-library module,
 //! and this is the lowering's half: each entry becomes run instructions in the
-//! frame the call is written in, and never an [`Inst::IntrinsicCall`]. A core
+//! frame the call is written in, and never an `Inst::IntrinsicCall`. A core
 //! intrinsic is not a name for the machine to dispatch on; it is the operation
 //! the name stands for.
 //!
@@ -1182,9 +1182,9 @@ impl Body<'_> {
     /// `std.stringbuilder`'s `appendRange` says which of five things is wrong
     /// with a byte range, in `String.sliceBytes`' words: the sentence is
     /// `byteRangeRefusalMessage`'s, and it replaced a `core.refuseByteRange`
-    /// that was an [`Inst::IntrinsicCall`] of its own (issue #432).
+    /// that was an `Inst::IntrinsicCall` of its own (issue #432).
     ///
-    /// Unlike that [`Inst::IntrinsicCall`], a `Trap` is a terminator — nothing
+    /// Unlike that `Inst::IntrinsicCall`, a `Trap` is a terminator — nothing
     /// runs after it, ever, so nothing is emitted after it either. `dst` is
     /// answered the same way a diverging `return` or `break` answers one, a
     /// location nothing will write, so the surrounding form still has
@@ -1412,7 +1412,7 @@ impl Body<'_> {
     ///   decides, and under the one branch its answer decides, the walk that
     ///   words the refusal. See [`Body::admit_by_walk`].
     ///
-    /// Nothing here is an [`Inst::IntrinsicCall`] any more. `Value.admitKey`
+    /// Nothing here is an `Inst::IntrinsicCall` any more. `Value.admitKey`
     /// worded every refusal in Rust until [ADR
     /// 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
     /// Phase 4c, and its variant is deleted.

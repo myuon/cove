@@ -1,4 +1,4 @@
-//! `Array` and `Vector`.
+//! `Array` and `Vector`, and the keyed runs a `Set` and a `Map` finish into.
 //!
 //! The two are one shape apart. An `Array` holds its elements in the object,
 //! one indirection nearer than a `Vector`, and cannot grow. A `Vector` is a
@@ -80,30 +80,210 @@
 //! dead element left in the spare room would be a root, and a vector used as
 //! a work queue would retain everything it had ever held.
 
-#[cfg(test)]
-use crate::vm::intrinsics::make;
-
 // `Array.contains`, `Array.indexOf`, `Vector.contains` and `Vector.indexOf`
 // are not here: each is `std.array` or `std.vector`, a Cove loop over `==`
-// (ADR 0058, #378). They were the last operations this module dispatched, so
-// what is left is the documentation above and the growable-run cases below,
-// which exercise `Machine::ensure_growable`, `Machine::commit_growable`,
-// `Machine::truncate_words` and `Machine::finish_words` over sequences.
+// (ADR 0058, #378). They were the last operations this module dispatched, when
+// it was `vm::intrinsics::seq`, so what is left is the documentation above and
+// the cases below, which exercise `Machine::ensure_growable`,
+// `Machine::commit_growable`, `Machine::truncate_words`,
+// `Machine::finish_words` and `Machine::keyed_run_in_order` over sequences and
+// keyed runs. ADR 0073 deleted the rest of `vm::intrinsics` with the
+// `IntrinsicCall` mechanism and moved these here.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use cove_ir::{LayoutId, Repr, Shape};
+    use cove_ir::{Layout, LayoutId, Program, Repr, Shape};
 
     use crate::error::RuntimeError;
+    use crate::vm::exec::tests::Build;
     use crate::vm::exec::Machine;
-    use crate::vm::intrinsics::tests::{elements, named, read, scalar, vector, words_of, world};
+
+    /// The program every case below is run against.
+    ///
+    /// One fixture with every family a run operation here reaches for, so that
+    /// a test that declared only the families it thought it needed is not
+    /// testing its own fixture. A hand-written program is the only kind any of
+    /// them uses, for the reason [`crate::vm::exec::tests::Build`] gives.
+    ///
+    /// It was the fixture of every intrinsic arm's cases too, and declared the
+    /// `Error` and `Result` families those arms built answers into, until ADR
+    /// 0073 deleted the arms with the `IntrinsicCall` mechanism.
+    ///
+    /// A family is named by a `LayoutId` rather than by a `Repr` now, so the
+    /// scalars are declared first and everything else is built out of them —
+    /// which is also what makes an `Array<Point>` expressible here at all.
+    fn world() -> Program {
+        let mut build = Build::default();
+        let _unit = build.word("Unit", Repr::Unit);
+        let boolean = build.word("Bool", Repr::Bool);
+        let int = build.word("Int", Repr::Int);
+        let _float = build.word("Float", Repr::Float);
+        let _duration = build.word("Duration", Repr::Duration);
+        let string = build.layout("String", Shape::Str);
+        build.program.str_layout = string;
+
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+
+        for elem in [string, int, point] {
+            build.layout(
+                "Array",
+                Shape::Elements {
+                    elem,
+                    growable: false,
+                },
+            );
+            build.layout(
+                "Vector",
+                Shape::Elements {
+                    elem,
+                    growable: true,
+                },
+            );
+            build.layout("Vector", Shape::Vector { elem });
+            build.enumeration("Option", &[("None", vec![]), ("Some", vec![elem])]);
+        }
+        build.layout("Boxed", Shape::Boxed);
+        // A `Range` is a struct with the three fields the design fixes, and
+        // it is in here because a key sorts after every other family when it
+        // is one.
+        build.structure(
+            "Range",
+            &[("start", int), ("end", int), ("inclusive", boolean)],
+        );
+        for elem in [int, string] {
+            build.layout("Set", Shape::Members { elem });
+        }
+        build.layout(
+            "Map",
+            Shape::Entries {
+                key: int,
+                value: int,
+            },
+        );
+        build.layout(
+            "Map",
+            Shape::Entries {
+                key: string,
+                value: int,
+            },
+        );
+        build.structure("MapEntry", &[("key", int), ("value", int)]);
+
+        // A two-word element whose reference is **not** its first word.
+        //
+        // `Point` is two words of `Int` and `String` is one word that is a
+        // reference; neither can tell a walk at the element's stride from a
+        // walk at a stride of one, because the two coincide. A `Note` can: a
+        // clear at the wrong stride leaves word 3 — the second note's text —
+        // standing, and a clear at the wrong offset takes out word 1, which is
+        // the first note's. `Vector<Note>` is what
+        // `a_truncate_of_a_two_word_element_clears_the_reference_in_its_second_word`
+        // is built over.
+        let note = build.structure("Note", &[("at", int), ("text", string)]);
+        build.layout(
+            "Array",
+            Shape::Elements {
+                elem: note,
+                growable: false,
+            },
+        );
+        build.layout(
+            "Vector",
+            Shape::Elements {
+                elem: note,
+                growable: true,
+            },
+        );
+        build.layout("Vector", Shape::Vector { elem: note });
+        build.done()
+    }
+
+    /// The text of the string object at `addr`.
+    fn read(machine: &Machine, addr: u64) -> String {
+        String::from_utf8(machine.string_bytes(addr)).expect("a string holds valid UTF-8")
+    }
+
+    /// The first layout `wanted` accepts.
+    fn find(program: &Program, wanted: impl Fn(&Layout) -> bool) -> LayoutId {
+        program
+            .layouts
+            .iter()
+            .position(wanted)
+            .map(|at| LayoutId(at as u32))
+            .expect("the fixture declares every family")
+    }
+
+    /// The layout of a run of `elem` elements, growable or not.
+    fn elements(program: &Program, elem: LayoutId, growable: bool) -> LayoutId {
+        find(
+            program,
+            |layout| matches!(layout.shape, Shape::Elements { elem: e, growable: g } if e == elem && g == growable),
+        )
+    }
+
+    /// The layout of a `Vector` header over `elem` elements.
+    fn vector(program: &Program, elem: LayoutId) -> LayoutId {
+        find(
+            program,
+            |layout| matches!(layout.shape, Shape::Vector { elem: e } if e == elem),
+        )
+    }
+
+    /// The one-word layout of `repr`.
+    fn scalar(program: &Program, repr: Repr) -> LayoutId {
+        find(program, |layout| layout.shape == Shape::Word(repr))
+    }
+
+    /// The first layout the fixture declares under `name`.
+    fn named(program: &Program, name: &str) -> LayoutId {
+        find(program, |layout| &*layout.name == name)
+    }
+
+    /// The element words of a run-shaped object at `addr`.
+    fn words_of(machine: &Machine, addr: u64) -> Vec<u64> {
+        let layout = machine.program().layout(machine.object_layout(addr));
+        let stride = match layout.shape {
+            Shape::Elements { elem, .. } | Shape::Members { elem } => machine.words_of(elem),
+            _ => 1,
+        };
+        machine.payload_run(addr, 0, machine.object_len(addr) * stride)
+    }
+
+    /// A `Vector` of `elem` holding `words`, which the caller holds rooted.
+    ///
+    /// The store is allocated to exactly the elements it was given. See
+    /// [`crate::vm::exec::runs::growable_ensure`] for what happens when it
+    /// fills. No run builds a vector in Rust since ADR 0058 moved
+    /// `Array.toVector` into instructions, so only these cases do.
+    fn vector_of(
+        machine: &mut Machine,
+        elem: LayoutId,
+        words: &[u64],
+    ) -> Result<u64, RuntimeError> {
+        let store_layout = elements(machine.program(), elem, true);
+        let header_layout = vector(machine.program(), elem);
+        let stride = machine.words_of(elem).max(1) as usize;
+        let len = words.len() / stride;
+        let store = machine.new_object(store_layout, len as u32)?;
+        // The store exists and nothing walks it, and allocating the header can
+        // collect. It is released the moment the header exists, because the two
+        // writes below cannot allocate and word 1 is what holds it afterwards.
+        let mark = machine.temps();
+        machine.push_temp(store);
+        let header = machine.new_object(header_layout, 0);
+        machine.release_temps(mark);
+        let header = header?;
+        machine.set_payload(header, 0, len as u64);
+        machine.set_payload(header, 1, store);
+        machine.set_payload_run(store, 0, words);
+        Ok(header)
+    }
 
     /// A `Vector<Int>` holding `values`, with a store of exactly that many.
     fn growable(machine: &mut Machine, values: &[i64]) -> u64 {
         let int = scalar(machine.program(), Repr::Int);
         let words: Vec<u64> = values.iter().map(|value| *value as u64).collect();
-        make::vector_of(machine, int, &words).expect("the fixture declares every family")
+        vector_of(machine, int, &words).expect("the fixture declares every family")
     }
 
     /// `Vector.push(value)`, which since ADR 0062 is what `std.vector.push`
@@ -147,7 +327,7 @@ mod tests {
 
         // And a `Vector` over the same elements keeps both: three in the
         // header's count, six in the store.
-        let grown = make::vector_of(&mut machine, point, &[1, 2, 3, 4, 5, 6]).unwrap();
+        let grown = vector_of(&mut machine, point, &[1, 2, 3, 4, 5, 6]).unwrap();
         assert_eq!(machine.payload(grown, 0), 3);
         let store = machine.payload(grown, 1);
         assert_eq!(machine.object_len(store), 3);
@@ -174,7 +354,7 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let point = named(&program, "Point");
-        let grown = make::vector_of(&mut machine, point, &[1, 2, 3, 4]).unwrap();
+        let grown = vector_of(&mut machine, point, &[1, 2, 3, 4]).unwrap();
         let vectors = machine.object_layout(grown);
 
         // A `push` writes both words at the element's own stride.
@@ -655,5 +835,62 @@ mod tests {
             read(&machine, machine.payload(grown, 1)),
             "the one that must survive"
         );
+    }
+
+    /// A store of `keys` of `elem`, one after another, as a keyed finish hands
+    /// [`Machine::keyed_run_in_order`] the run it is about to relabel.
+    fn keyed_store(machine: &mut Machine, elem: LayoutId, keys: &[&[u64]]) -> u64 {
+        let layout = elements(machine.program(), elem, false);
+        let store = machine
+            .new_object(layout, keys.len() as u32)
+            .expect("the fixture's heap is large enough");
+        let words: Vec<u64> = keys.iter().flat_map(|key| key.iter().copied()).collect();
+        machine.set_payload_run(store, 0, &words);
+        store
+    }
+
+    /// The keyed-finish check answers from the oracle's `MapKey` order, so it
+    /// has to be seen refusing: a check that could not fail would pass every
+    /// `Set` and `Map` a test builds whatever order `std.set`, `std.map` and
+    /// `std.dynamic.order` left them in.
+    ///
+    /// `Point` is the family that matters. A scalar or a `String` key is one
+    /// the old check compared directly, and every other family went through
+    /// the machine's own Rust order walk, which ADR 0068's Phase 5 deleted; a
+    /// struct is compared by its name and then field by field, which is
+    /// `MapKey::Struct`'s derived order.
+    #[test]
+    fn a_keyed_finish_is_checked_against_the_oracles_order_and_can_fail() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let point = named(&program, "Point");
+        let string = named(&program, "String");
+        let width = machine.words_of(point);
+
+        let ascending = keyed_store(&mut machine, point, &[&[1, 2], &[1, 3], &[2, 0]]);
+        assert!(machine.keyed_run_in_order(point, ascending, width, width, 3));
+
+        // The second field decides once the first is equal: `(1, 3)` before
+        // `(1, 2)` is out of order.
+        let swapped = keyed_store(&mut machine, point, &[&[1, 3], &[1, 2]]);
+        assert!(!machine.keyed_run_in_order(point, swapped, width, width, 2));
+
+        // The first field decides before the second: `(2, 0)` before `(1, 9)`.
+        let first = keyed_store(&mut machine, point, &[&[2, 0], &[1, 9]]);
+        assert!(!machine.keyed_run_in_order(point, first, width, width, 2));
+
+        // Distinct as well as ascending: a key twice is refused.
+        let twice = keyed_store(&mut machine, point, &[&[1, 2], &[1, 2]]);
+        assert!(!machine.keyed_run_in_order(point, twice, width, width, 2));
+
+        // A `String` key by its bytes, through the same conversion.
+        let (a, b) = (
+            machine.new_string("a").unwrap(),
+            machine.new_string("b").unwrap(),
+        );
+        let words = keyed_store(&mut machine, string, &[&[b], &[a]]);
+        assert!(!machine.keyed_run_in_order(string, words, 1, 1, 2));
+        let words = keyed_store(&mut machine, string, &[&[a], &[b]]);
+        assert!(machine.keyed_run_in_order(string, words, 1, 1, 2));
     }
 }

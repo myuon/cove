@@ -686,7 +686,8 @@ export fn f(n: Int, x: Float, b: Bool) -> String {
 
 /// An `Error` renders as the message it carries rather than as the struct it
 /// happens to be, on both backends. The two say so in two places — the
-/// oracle in `Display for Value`, the machine in `vm::intrinsics` — because
+/// oracle in `Display for Value`, the machine in the rendering walk the
+/// lowering composes (ADR 0068) — because
 /// one reads a materialised tree and the other reads the heap, and this is
 /// what keeps the two copies in step.
 #[test]
@@ -1380,11 +1381,10 @@ export fn f(pairs: Array<String>) -> String {
 /// producer, and a body that still reached a runtime arm would pass every
 /// semantic case above while migrating nothing.
 ///
-/// Three claims, and each would fail differently:
+/// Two claims, and each would fail differently. (A third, **no
+/// `Inst::IntrinsicCall` anywhere in the lowered program**, was asserted here
+/// until ADR 0073 deleted the instruction, which no program can hold now.)
 ///
-/// - **no `Inst::IntrinsicCall` anywhere in the lowered program**, and so no
-///   `IntrinsicSite` either — the static count `--boundary` reports for
-///   `String.indexOf` is gone because there is nothing to count;
 /// - **exactly one `Inst::RunFind`**, which is the `core.stringFind`
 ///   ADR 0065 already added, expanded at the one call site. One and not two:
 ///   a body that searched again to count would be a second search;
@@ -1413,24 +1413,6 @@ export fn f(s: String, needle: String) -> Option<Int> {
         "f",
     )
     .expect("the program lowers");
-
-    for function in &program.functions {
-        assert!(
-            function
-                .code
-                .iter()
-                .all(|inst| !matches!(inst, cove_ir::Inst::IntrinsicCall { .. })),
-            "`{}.{}` makes a builtin call: {:?}",
-            function.module,
-            function.name,
-            function.code
-        );
-    }
-    assert!(
-        program.intrinsic_sites.is_empty(),
-        "a program whose only builtin is `indexOf` names {} intrinsic site(s)",
-        program.intrinsic_sites.len()
-    );
 
     let mut finds = 0;
     let mut loads = 0;
@@ -2391,23 +2373,6 @@ export fn main(text: String) -> Int {
         "`core.byteLength` is a `len`: {:?}",
         probe.code
     );
-    let main = ir
-        .functions
-        .iter()
-        .find(|f| &*f.module == "m" && &*f.name == "main")
-        .expect("the caller was lowered");
-    for f in [probe, main] {
-        assert!(
-            f.code
-                .iter()
-                .all(|inst| !matches!(inst, cove_ir::Inst::IntrinsicCall { .. })),
-            "`{}.{}` makes no builtin call: {:?}",
-            f.module,
-            f.name,
-            f.code
-        );
-    }
-
     for (module, name, arg) in [
         ("std.string", "probeBytes", "h\u{e9}llo"),
         ("m", "main", "caf\u{e9}"),
@@ -2719,18 +2684,6 @@ export fn main() -> Int {
             .find(|f| &*f.module == "std.set" && &*f.name == name)
             .unwrap_or_else(|| panic!("`{name}` is lowered"))
     };
-    let intrinsics = |name: &str| -> Vec<cove_ir::Intrinsic> {
-        function(name)
-            .code
-            .iter()
-            .filter_map(|inst| match inst {
-                cove_ir::Inst::IntrinsicCall { site, .. } => {
-                    Some(program.intrinsic_site(*site).intrinsic)
-                }
-                _ => None,
-            })
-            .collect()
-    };
     let orders = |name: &str| -> Vec<cove_ir::Compare> {
         function(name)
             .code
@@ -2791,28 +2744,16 @@ export fn main() -> Int {
         reflected, 0,
         "a layout the lowering knows is a walk it wrote"
     );
-    assert_eq!(
-        intrinsics("probeOrders"),
-        Vec::new(),
-        "and no order is an intrinsic any more"
-    );
-    assert_eq!(
-        intrinsics("probeAdmitted"),
-        Vec::new(),
-        "an admission that cannot refuse is removed"
-    );
     // Neither refusal is an intrinsic since ADR 0068's Phase 4c deleted
     // `Value.admitKey`. A `Float` key is refused whole, so its refusal is the
     // site's own literal sentence and one trap; a key that nests one is
     // decided by the walk the lowering composed for its layout, and worded by
     // the walk it composed to word it, `describes<L>`, under the branch on
     // the answer.
-    assert_eq!(intrinsics("probeFloat"), Vec::new());
     assert!(function("probeFloat")
         .code
         .iter()
         .any(|inst| matches!(inst, cove_ir::Inst::Trap { .. })));
-    assert_eq!(intrinsics("probeNested"), Vec::new());
     assert!(function("probeNested").code.iter().any(|inst| match inst {
         cove_ir::Inst::Call { callee, .. } => {
             let called = &program.functions[callee.index()];
@@ -2823,7 +2764,6 @@ export fn main() -> Int {
     // The duplicate's refusal is `std.set.of`'s own Cove since ADR 0067, so
     // what the probe reaches is no intrinsic at all: the sentence is an
     // interpolation of a layout the lowering knows, which is a walk it wrote.
-    assert_eq!(intrinsics("probeDuplicate"), Vec::new());
     assert!(function("probeElements")
         .code
         .iter()
@@ -3597,13 +3537,6 @@ export fn main() -> Int {
             code.iter()
                 .any(|inst| matches!(inst, cove_ir::Inst::Trap { .. })),
             "`{name}` stops the run with a trap"
-        );
-        assert!(
-            !code
-                .iter()
-                .any(|inst| matches!(inst, cove_ir::Inst::IntrinsicCall { .. })),
-            "`{name}` reaches no intrinsic: a refusal primitive that was one \
-             would be a variant rather than the end of six"
         );
     }
 
@@ -4596,27 +4529,13 @@ export fn main() -> String {
             "the walk holds a `{wanted}`"
         );
     }
-    // No builtin call is left at all. The text of a `Float` or a `Duration`
-    // scalar the walk has already read — Phase 0's census found that
+    // No builtin call is left at all, and since ADR 0073 there is no
+    // instruction a builtin call could be: the text of a `Float` or a
+    // `Duration` scalar the walk has already read — Phase 0's census found that
     // `Value.renderInto`'s scalar sites were these two, which reflection does
     // not write — is `std.float.renderInto` and `std.duration.renderInto`
     // since Phase 4a, reached from `probeText` and `probeSpan`. Nothing is
     // asked of a box.
-    let called: Vec<String> = walk
-        .code
-        .iter()
-        .filter_map(|inst| match inst {
-            cove_ir::Inst::IntrinsicCall { site, .. } => {
-                Some(format!("{:?}", ir.intrinsic_site(*site).intrinsic))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        called,
-        Vec::<String>::new(),
-        "the walk makes no builtin call over a value"
-    );
 
     let oracle = on_a_deep_stack(move || {
         let (sources, program) = probed();

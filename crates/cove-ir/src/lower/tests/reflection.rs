@@ -124,7 +124,6 @@ fn every_dynamic_intrinsic_is_its_one_instruction() {
         ],
         "{listed}"
     );
-    assert!(!listed.contains("intrinsic-call"), "{listed}");
     assert!(!listed.contains(" call "), "{listed}");
 }
 

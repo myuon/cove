@@ -42,7 +42,7 @@
 //! of it throws away.
 
 use crate::layout::LayoutId;
-use crate::{ArgsId, CaseId, FunctionId, HostOpId, SiteId, StrId, TableId};
+use crate::{ArgsId, CaseId, FunctionId, HostOpId, StrId, TableId};
 
 /// A slot in the current frame: `memory[frame_base + slot]`.
 pub type Slot = u32;
@@ -603,7 +603,7 @@ pub enum Inst {
     ///
     /// [ADR 0064](../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
     /// Decision 2 names `round` in its list of typed scalar operations, and
-    /// this is it. `Float.round` was an [`Inst::IntrinsicCall`] carrying the
+    /// this is it. `Float.round` was an `Inst::IntrinsicCall` carrying the
     /// method's own name until this replaced it; the Cove-body route the
     /// census proposes instead is **blocked**, for the reason it is blocked
     /// for [`Inst::FloatMinMax`]: `crates/cove-native/src/subset.rs` admits no
@@ -695,7 +695,7 @@ pub enum Inst {
     /// not be a Newton iteration in Cove. A typed scalar IR operation that
     /// maps to `sqrtsd` passes Decision 2: it names machine semantics and
     /// would not be renamed if `Float.sqrt` were." This is it, and it is the
-    /// last of the four. `Float.sqrt` was an [`Inst::IntrinsicCall`] carrying
+    /// last of the four. `Float.sqrt` was an `Inst::IntrinsicCall` carrying
     /// the method's own name until this replaced it; the Cove-body route the
     /// census proposes instead was **blocked**, for the reason it was blocked
     /// for [`Inst::FloatAbs`], [`Inst::FloatMinMax`] and [`Inst::FloatRound`]:
@@ -907,7 +907,7 @@ pub enum Inst {
     ///
     /// It is carried rather than looked up because there is nowhere to look:
     /// every other call names a callee the program declares — a
-    /// [`FunctionId`], a [`crate::HostOpId`], a [`crate::SiteId`] — and
+    /// [`FunctionId`] or a [`crate::HostOpId`] — and
     /// the answer's layout is read from that declaration. A closure call
     /// names a word in a slot. Without this field the destination's width
     /// was known to the checker, thrown away by the lowering, and then
@@ -959,15 +959,11 @@ pub enum Inst {
         op: HostOpId,
         args: ArgsId,
     },
-    /// `dst = <builtin>(args...)`
-    ///
-    /// A builtin operates on words and heap objects directly. It is not a
-    /// boundary and it does not materialise anything.
-    IntrinsicCall {
-        dst: Slot,
-        site: SiteId,
-        args: ArgsId,
-    },
+    // `IntrinsicCall` stood here: `dst = <builtin>(args...)`, a Rust algorithm
+    // reached by a closed `Intrinsic` identifier (ADR 0058). ADR 0064 made its
+    // population one that only fell, issue #432 migrated the last variant, and
+    // ADR 0073 deleted the mechanism. A primitive the standard library cannot
+    // write is an instruction of its own, admitted under ADR 0064's Decision 2.
 
     // ---- the heap --------------------------------------------------------
     /// `dst = <a new object of `layout`>`
@@ -1976,7 +1972,7 @@ pub enum Inst {
     ///
     /// [`Inst::HandleText`] for a view: a Host resource, a task scope and a
     /// task inside a box are `<{module}.{Type}#{n}>`, `<task scope {name}>` and
-    /// `<task>`, from the same `intrinsics::handle_text` the other writes with,
+    /// `<task>`, from the same `text_of_handle` the other writes with,
     /// so the two cannot come to say different things of one handle. A byte
     /// run and a byte buffer, the other opaque values, keep the text they
     /// always had. **It allocates**, for [`Inst::HandleText`]'s reason: which

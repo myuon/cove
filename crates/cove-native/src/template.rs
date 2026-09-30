@@ -33,16 +33,16 @@ use cove_ir::{
 };
 
 use crate::abi::{
-    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, DYN_ASK,
-    DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_OFFSET_SHIFT, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT,
-    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, DYN_ASK, DYN_COUNT_SHIFT,
+    DYN_KIND_MASK, DYN_OFFSET_SHIFT, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
+    HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, byte_store, leaders, literal_offset, observation, overflow_of, reserve,
     slot_offset, supported, windows, word_finish, BufferWindow, ByteStore, Observation, Reserve,
     WordFinish,
 };
-use crate::{IntrinsicCode, Unavailable, WindowCode};
+use crate::{Unavailable, WindowCode};
 
 // The `NativeCtx` field offsets, read from the declaration rather than
 // written out, so that they cannot drift from `NativeCtx` itself.
@@ -199,19 +199,6 @@ pub struct Compiled {
     ///
     /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     pub windows: WindowCode,
-    /// How much of that code is [ADR 0064]'s mediated intrinsic calls, by
-    /// variant.
-    ///
-    /// Attributed exactly here, and for the same reason `windows` is: this arm's
-    /// private `Emit::intrinsic_call` — named without a link, because it is
-    /// private and an intra-doc link to it fails `cargo doc` — lays a whole call
-    /// sequence down contiguously, so the charge is the difference of two code
-    /// lengths taken across it. [`IntrinsicCode`] is where the property is
-    /// written out, along with why a generator that cannot attribute it
-    /// answers `None`.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    pub intrinsics: IntrinsicCode,
 }
 
 /// One mapping: the machine code of one function.
@@ -326,7 +313,6 @@ struct Helpers {
     open: usize,
     close: usize,
     alloc: usize,
-    intrinsic: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -355,7 +341,6 @@ impl Jit {
                 open: helpers.open as usize,
                 close: helpers.close as usize,
                 alloc: helpers.alloc as usize,
-                intrinsic: helpers.intrinsic as usize,
                 growable: helpers.growable as usize,
                 run_copy: helpers.run_copy as usize,
                 field_load: helpers.field_load as usize,
@@ -390,8 +375,7 @@ impl Jit {
         if !supported(program, function) {
             return None;
         }
-        let (code, windows, intrinsics) =
-            Emit::new(program, function, &self.helpers, self.direct).run();
+        let (code, windows) = Emit::new(program, function, &self.helpers, self.direct).run();
         let mapping = Mapping::write(&code)?;
         self.code.push(mapping);
         self.finalized = false;
@@ -400,7 +384,6 @@ impl Jit {
             function: id,
             code_bytes: code.len() as u32,
             windows,
-            intrinsics,
         })
     }
 
@@ -466,7 +449,6 @@ struct Emit<'a> {
     open: usize,
     close: usize,
     alloc: usize,
-    intrinsic: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -511,16 +493,6 @@ struct Emit<'a> {
     /// inserts nothing, so a byte count taken before it is the byte count after
     /// it.
     window_code: WindowCode,
-    /// What each mediated intrinsic call this function emitted cost, by variant.
-    ///
-    /// Charged in [`Emit::intrinsic_call`] and nowhere else, as the difference
-    /// of [`Emit::code`]'s length across it, and true for the reason the field
-    /// above is true: the hand-over, the call and the outcome test are laid down
-    /// in that order and no part of the call is emitted anywhere else. The one
-    /// label the sequence binds is bound *inside* it — the jump over the leave
-    /// and its target are both within the range — so [`Emit::patch`] has nothing
-    /// to add to it afterwards either.
-    intrinsic_code: IntrinsicCode,
 }
 
 impl<'a> Emit<'a> {
@@ -535,7 +507,6 @@ impl<'a> Emit<'a> {
             open: helpers.open,
             close: helpers.close,
             alloc: helpers.alloc,
-            intrinsic: helpers.intrinsic,
             growable: helpers.growable,
             run_copy: helpers.run_copy,
             field_load: helpers.field_load,
@@ -552,13 +523,11 @@ impl<'a> Emit<'a> {
             windows,
             frame_live: false,
             window_code: WindowCode::default(),
-            intrinsic_code: IntrinsicCode::default(),
         }
     }
 
-    /// The function's machine code, and what its windows and its mediated
-    /// intrinsic calls are of it.
-    fn run(mut self) -> (Vec<u8>, WindowCode, IntrinsicCode) {
+    /// The function's machine code, and what its windows are of it.
+    fn run(mut self) -> (Vec<u8>, WindowCode) {
         self.prologue();
         let mut pc = 0;
         while pc < self.function.code.len() {
@@ -581,7 +550,7 @@ impl<'a> Emit<'a> {
             pc += 1;
         }
         self.patch();
-        (self.code, self.window_code, self.intrinsic_code)
+        (self.code, self.window_code)
     }
 
     /// [`Entry`] received: `ctx` in `rdi`, `base` in `rsi`, `return_base` in
@@ -1345,9 +1314,6 @@ impl<'a> Emit<'a> {
                 rule,
                 help,
             } => self.trap(*message, *rule, *help),
-            // `encoded.rs`'s `INTRINSIC_CALL` arm, through the one helper. See
-            // [`Emit::intrinsic_call`].
-            Inst::IntrinsicCall { dst, site, args } => self.intrinsic_call(*dst, *site, *args),
             // ADR 0068's observations, one each through the reflection helper.
             // See [`Emit::observe`].
             other => match observation(other) {
@@ -2498,87 +2464,6 @@ impl<'a> Emit<'a> {
         self.leave_answered();
         self.bind(on);
         self.frame_live = false;
-    }
-
-    /// One `intrinsic-call`, handed to [`IntrinsicFn`](crate::abi::IntrinsicFn)
-    /// with the protocol its effects ask for.
-    ///
-    /// [`Emit::growable_op`]'s six registers, with the destination, the site and
-    /// the argument list in place of the operation and its pair — and everything
-    /// around the call read off one [`IntrinsicProtocol`], which is the whole of
-    /// this arm's decision:
-    ///
-    /// - a **safepoint** publishes and clears [`WORK`] before the call and drops the
-    ///   frame pointer after it, exactly as [`Emit::growable_op`] does;
-    /// - an intrinsic that **cannot collect** does neither: the helper charges
-    ///   nothing, so the work stays in [`WORK`], and it can neither grow the stack
-    ///   nor commit a chunk, so [`FRAME`] — callee-saved — is still the frame;
-    /// - the outcome is tested only where [`IntrinsicProtocol::tests_outcome`] says
-    ///   an answer other than `Returned` can come back, and an exit that did not
-    ///   publish before the call publishes on the way out, for
-    ///   [`Emit::field_call`]'s reason.
-    ///
-    /// # Everything above is one contiguous range, which is what makes it
-    /// measurable
-    ///
-    /// [ADR 0064]'s Decision 7 asks for "machine-code bytes attributable to
-    /// intrinsic calls, beside the window bytes ADR 0063 already reports", and
-    /// this arm can answer it exactly for the reason [`Emit::window`] can answer
-    /// the window question exactly: the order in the list above is the order it
-    /// is laid down in, no part of an intrinsic call is emitted anywhere else,
-    /// and nothing is moved afterwards. So the difference of [`Emit::code`]'s
-    /// length across this method is exactly this site's machine code, and it is
-    /// charged to the site's own variant in [`Emit::intrinsic_code`].
-    ///
-    /// The one thing that could have broken that is the outcome test, which
-    /// binds a label. It is bound *here*, between the jump and the end of this
-    /// method, so the whole of the jump's range is inside the measured span;
-    /// [`Emit::patch`] then rewrites the `rel32` in place and inserts nothing,
-    /// so the byte count taken before it is the byte count after it. Keep the
-    /// emission contiguous, or the number stops being true silently.
-    ///
-    /// What is *not* charged here is the intrinsic's algorithm. That is Rust in
-    /// the runtime, compiled once for the whole program and reached through one
-    /// helper address; a site's charge is the cost of crossing to it, which is
-    /// precisely the cost ADR 0064 is asking after.
-    ///
-    /// [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    fn intrinsic_call(&mut self, dst: Slot, site: cove_ir::SiteId, args: ArgsId) {
-        let started = self.code.len();
-        let which = self.program.intrinsic_site(site).intrinsic;
-        let protocol = IntrinsicProtocol::of(which);
-        if protocol.safepoint {
-            self.store(CTX, OFF_PENDING_WORK, WORK);
-            self.xor_rr(WORK, WORK);
-        }
-
-        self.mov_rr(RDI, CTX);
-        self.mov_rr(RSI, BASE_BYTES);
-        self.shr_imm8(RSI, 3);
-        self.mov_imm32(RDX, self.pc as i32);
-        self.mov_imm32(RCX, dst as i32);
-        self.mov_imm32(R8, site.0 as i32);
-        self.mov_imm32(R9, args.0 as i32);
-        self.mov_imm64(RAX, self.intrinsic as i64);
-        self.call(RAX);
-
-        if protocol.tests_outcome() {
-            let on = self.label();
-            self.test_rr32(RAX, RAX);
-            self.jcc(CC_E, Target::Label(on));
-            if !protocol.safepoint {
-                // `RAX` holds the outcome `leave_answered` returns: one store of
-                // `WORK` and nothing else.
-                self.store(CTX, OFF_PENDING_WORK, WORK);
-            }
-            self.leave_answered();
-            self.bind(on);
-        }
-        if protocol.safepoint {
-            self.frame_live = false;
-        }
-        self.intrinsic_code
-            .charge(which, Some((self.code.len() - started) as u64));
     }
 
     /// One of [ADR 0068]'s structural observations: emitted inline where the

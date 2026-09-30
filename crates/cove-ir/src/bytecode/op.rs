@@ -1,4 +1,4 @@
-//! The two hundred opcodes, and what each one makes of the four
+//! The hundred and ninety-nine opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -131,8 +131,7 @@ mod base {
     pub const CALL_CLOSURE: u8 = CALL + 1;
     pub const CALL_HOST: u8 = CALL_CLOSURE + 1;
     pub const CALL_RESOURCE: u8 = CALL_HOST + 1;
-    pub const INTRINSIC_CALL: u8 = CALL_RESOURCE + 1;
-    pub const ALLOC_FIXED: u8 = INTRINSIC_CALL + 1;
+    pub const ALLOC_FIXED: u8 = CALL_RESOURCE + 1;
     pub const ALLOC_IMM: u8 = ALLOC_FIXED + 1;
     pub const ALLOC_SLOT: u8 = ALLOC_IMM + 1;
     pub const LOAD_FIELD: u8 = ALLOC_SLOT + 1;
@@ -328,7 +327,6 @@ pub enum Op {
     CallClosure,
     CallHost,
     CallResource,
-    IntrinsicCall,
     AllocFixed,
     AllocImm,
     AllocSlot,
@@ -593,7 +591,6 @@ pub enum Half {
     Layout,
     Table,
     Args,
-    Site,
     HostOp,
     /// An element count: `Len::Count`'s `n`.
     Count,
@@ -618,7 +615,6 @@ impl Half {
             Half::Layout => "layout",
             Half::Table => "table",
             Half::Args => "argument list",
-            Half::Site => "builtin",
             Half::HostOp => "host op",
             Half::Count => "count",
             Half::Case => "case",
@@ -725,7 +721,6 @@ impl Op {
             Op::CallClosure,
             Op::CallHost,
             Op::CallResource,
-            Op::IntrinsicCall,
             Op::AllocFixed,
             Op::AllocImm,
             Op::AllocSlot,
@@ -856,7 +851,6 @@ impl Op {
             Op::CallClosure => base::CALL_CLOSURE,
             Op::CallHost => base::CALL_HOST,
             Op::CallResource => base::CALL_RESOURCE,
-            Op::IntrinsicCall => base::INTRINSIC_CALL,
             Op::AllocFixed => base::ALLOC_FIXED,
             Op::AllocImm => base::ALLOC_IMM,
             Op::AllocSlot => base::ALLOC_SLOT,
@@ -1118,9 +1112,6 @@ impl Op {
                 NONE,
                 ids(Half::HostOp, Half::Args),
             ),
-            Op::IntrinsicCall => {
-                fields(Operand::Word(ANY), NONE, NONE, ids(Half::Site, Half::Args))
-            }
             Op::AllocFixed => fields(Operand::Word(REF), NONE, NONE, one(Half::Layout)),
             Op::AllocImm => fields(
                 Operand::Word(REF),
@@ -1515,7 +1506,10 @@ mod tests {
     /// reads a layout with a `LoadField` at offset 0, and no place is an
     /// element's address — and only tests built them — and two hundred once
     /// issue #432 brought `Inst::FloatTruncate`, the checked conversion
-    /// beneath `std.float.toInt`.
+    /// beneath `std.float.toInt`, and a hundred and ninety-nine once ADR 0073
+    /// deleted `IntrinsicCall` — the one opcode for every runtime call a
+    /// closed `Intrinsic` named — after issue #432 had migrated its last
+    /// variant and no lowering emitted it.
     ///
     /// Before that, a hundred and eighty-two once that step's last commit took
     /// one away: ADR 0064's Decision 6 refused `Convert::FloatToInt` — no
@@ -1535,9 +1529,9 @@ mod tests {
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_two_hundred_opcodes() {
-        assert_eq!(Op::all().len(), 200);
-        assert_eq!(OPCODES, 200);
+    fn there_are_a_hundred_and_ninety_nine_opcodes() {
+        assert_eq!(Op::all().len(), 199);
+        assert_eq!(OPCODES, 199);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
