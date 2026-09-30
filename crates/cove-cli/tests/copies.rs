@@ -1833,7 +1833,15 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// builds are written straight into the `Ok` — the sign is on the operand,
 /// `mantissa.toFloat() * sign` — which is what kept `parse`'s own count at
 /// the one.
-const FORWARDABLE_COPIES: usize = 7399;
+///
+/// **7,490 since ADR 0074 brought `Int`'s bit operations**, a rise of 91 that
+/// is all program and no lowering: with the five new `tests/e2e` directories
+/// held out, the 264 programs before them answer 7,399 exactly. Added back one
+/// at a time they are `values_int_bits` +18, `values_int_bits_native` +19 and
+/// each of the three `fail_shift_count_*` +18 — the standard library a program
+/// that prints carries into the survey, and nothing of the new instructions,
+/// each of which writes its answer where the surrounding form asked.
+const FORWARDABLE_COPIES: usize = 7490;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -1,0 +1,23 @@
+use console.println
+
+/// Shifts right by -1, which `Int.shiftRight` refuses by stopping the run: a
+/// negative count names no bit, and it is not read as 63, which is what a
+/// CPU that masked it to six bits would have made of it. The diagnostic names
+/// the count and blames the call in `shifted`, and the `native` file holds
+/// the native tier, which compiles `shifted`, to the same sentence and the
+/// same blame.
+export fn main() -> Result<Unit, Error> {
+  let count = -1
+  println("count {count}")?
+  println("never printed {shifted(-8, count, 1)}")?
+  Ok(())
+}
+
+/// `x.shiftRight(n)`, in a function the native tier compiles. It calls itself
+/// once first, so that the inliner cannot expand it into `main`.
+fn shifted(x: Int, n: Int, depth: Int) -> Int {
+  if depth > 0 {
+    return shifted(x, n, depth - 1)
+  }
+  x.shiftRight(n)
+}

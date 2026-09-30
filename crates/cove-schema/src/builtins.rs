@@ -4763,6 +4763,109 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             mutating: false,
             fresh: false,
         },
+        // ADR 0074's seven bit operations read an `Int` as the 64-bit
+        // two's-complement word it is stored as, and answer the word the
+        // operation leaves, read back as an `Int`. None of them is arithmetic:
+        // `+`, `-` and `*` still trap on overflow, and a left shift that pushes
+        // bits past bit 63 discards them without trapping, whatever it does to
+        // the sign. They are answered by the machine directly, one instruction
+        // each, and they allocate nothing.
+        //
+        // Bitwise AND of the two words.
+        MethodSchema {
+            name: "bitAnd",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "other",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // Bitwise OR of the two words.
+        MethodSchema {
+            name: "bitOr",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "other",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // Bitwise exclusive OR of the two words.
+        MethodSchema {
+            name: "bitXor",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "other",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // All 64 bits complemented: `0.bitNot()` is `-1`.
+        MethodSchema {
+            name: "bitNot",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // The word moved `count` bits toward bit 63, zeros shifted in and the
+        // bits past bit 63 discarded — `1.shiftLeft(63)` is `Int`'s least
+        // value, and that is not an overflow. `count` must be 0 through 63;
+        // any other count stops the run rather than being masked, so
+        // `x.shiftLeft(64)` is an error and not `x`. The same holds for both
+        // right shifts.
+        MethodSchema {
+            name: "shiftLeft",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "count",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // The arithmetic right shift: copies of the sign bit shifted in, which
+        // is `floor(x / 2^count)` — `(-3).shiftRight(1)` is `-2`, not `-1`.
+        MethodSchema {
+            name: "shiftRight",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "count",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // The logical right shift: zeros shifted in, the word read as unsigned
+        // — `(-1).shiftRightLogical(1)` is `Int`'s greatest value.
+        MethodSchema {
+            name: "shiftRightLogical",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "count",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
         SNAPSHOT,
     ],
     associated: &[

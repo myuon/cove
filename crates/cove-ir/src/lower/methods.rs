@@ -44,7 +44,9 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START};
 use super::{Body, Dest, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, MinMax, Num, Slot, Storage};
+use crate::inst::{
+    ArithOp, BitOp, CmpOp, Compare, Convert, Inst, MinMax, Num, ShiftOp, Slot, Storage,
+};
 
 impl Body<'_> {
     /// A method call on a value of a builtin type.
@@ -380,8 +382,10 @@ impl Body<'_> {
             // `min` and `max` take the one argument the checker has settled
             // they take; `abs`, `round` and `sqrt` take none.
             let other = match (scalar, args) {
-                (ScalarOp::Abs | ScalarOp::Round | ScalarOp::Sqrt, []) => None,
-                (ScalarOp::MinMax(_), [arg]) => Some(self.expr(&arg.value)),
+                (ScalarOp::Abs | ScalarOp::Round | ScalarOp::Sqrt | ScalarOp::BitNot, []) => None,
+                (ScalarOp::MinMax(_) | ScalarOp::Bits(_) | ScalarOp::Shift(_), [arg]) => {
+                    Some(self.expr(&arg.value))
+                }
                 _ => {
                     self.release(operand, expr.span);
                     return self.gap(&format!("`{receiver}.{operation}`"), expr);
@@ -407,7 +411,29 @@ impl Body<'_> {
                     a: operand.slot,
                     b: other.slot,
                 },
-                (ScalarOp::MinMax(_), None) => unreachable!("the arm above bound one argument"),
+                // ADR 0074's bit operations: the receiver is `a` and the one
+                // argument `b`, or the shift's count. The shift checks its own
+                // count at run time and blames this call's span, which is the
+                // span the instruction is emitted with.
+                (ScalarOp::Bits(op), Some(other)) => Inst::Bits {
+                    op,
+                    dst: dst.slot,
+                    a: operand.slot,
+                    b: other.slot,
+                },
+                (ScalarOp::BitNot, _) => Inst::BitNot {
+                    dst: dst.slot,
+                    a: operand.slot,
+                },
+                (ScalarOp::Shift(op), Some(other)) => Inst::Shift {
+                    op,
+                    dst: dst.slot,
+                    a: operand.slot,
+                    n: other.slot,
+                },
+                (ScalarOp::MinMax(_) | ScalarOp::Bits(_) | ScalarOp::Shift(_), None) => {
+                    unreachable!("the arm above bound one argument")
+                }
             };
             self.emit(inst, expr.span);
             if let Some(other) = other {
@@ -843,6 +869,13 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("Float", "sqrt"),
     ("Float", "min"),
     ("Float", "max"),
+    ("Int", "bitAnd"),
+    ("Int", "bitOr"),
+    ("Int", "bitXor"),
+    ("Int", "bitNot"),
+    ("Int", "shiftLeft"),
+    ("Int", "shiftRight"),
+    ("Int", "shiftRightLogical"),
     ("Duration", "nanos"),
 ];
 
@@ -911,6 +944,12 @@ enum ScalarOp {
     Round,
     /// [`Inst::FloatSqrt`].
     Sqrt,
+    /// [`Inst::Bits`], which of the three it is.
+    Bits(BitOp),
+    /// [`Inst::BitNot`].
+    BitNot,
+    /// [`Inst::Shift`], which of the three it is.
+    Shift(ShiftOp),
 }
 
 /// Which typed scalar operation `receiver.operation(...)` is, where it is one.
@@ -943,6 +982,17 @@ fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> Opti
         ("Float", "max", true) => Some(ScalarOp::MinMax(MinMax::Max)),
         ("Float", "round", true) => Some(ScalarOp::Round),
         ("Float", "sqrt", true) => Some(ScalarOp::Sqrt),
+        // ADR 0074's seven bit operations on an `Int`, each one instruction
+        // over the receiver and its argument, for the same reason as the
+        // five above: a typed scalar operation that maps to a machine
+        // operation, and not a runtime call named after a method.
+        ("Int", "bitAnd", true) => Some(ScalarOp::Bits(BitOp::And)),
+        ("Int", "bitOr", true) => Some(ScalarOp::Bits(BitOp::Or)),
+        ("Int", "bitXor", true) => Some(ScalarOp::Bits(BitOp::Xor)),
+        ("Int", "bitNot", true) => Some(ScalarOp::BitNot),
+        ("Int", "shiftLeft", true) => Some(ScalarOp::Shift(ShiftOp::Left)),
+        ("Int", "shiftRight", true) => Some(ScalarOp::Shift(ShiftOp::Right)),
+        ("Int", "shiftRightLogical", true) => Some(ScalarOp::Shift(ShiftOp::RightLogical)),
         _ => None,
     }
 }

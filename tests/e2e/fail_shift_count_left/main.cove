@@ -1,0 +1,23 @@
+use console.println
+
+/// Shifts left by 64, which `Int.shiftLeft` refuses by stopping the run: an
+/// `Int` has 64 bits and a count of 64 names none of them. The count is
+/// checked rather than masked, so it is not a shift by 0, which is what
+/// x86-64 would have made of it. The diagnostic names the count and blames
+/// the call in `shifted`, and the `native` file holds the native tier, which
+/// compiles `shifted`, to the same sentence and the same blame.
+export fn main() -> Result<Unit, Error> {
+  let count = 64
+  println("count {count}")?
+  println("never printed {shifted(1, count, 1)}")?
+  Ok(())
+}
+
+/// `x.shiftLeft(n)`, in a function the native tier compiles. It calls itself
+/// once first, so that the inliner cannot expand it into `main`.
+fn shifted(x: Int, n: Int, depth: Int) -> Int {
+  if depth > 0 {
+    return shifted(x, n, depth - 1)
+  }
+  x.shiftLeft(n)
+}

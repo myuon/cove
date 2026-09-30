@@ -1,0 +1,15 @@
+error[cove::runtime]: a shift count must be between 0 and 63, got -9223372036854775808
+  --> <e2e>/fail_shift_count_right_logical/main.cove:23:3
+   |
+23 |   x.shiftRightLogical(n)
+   |   ^^^^^^^^^^^^^^^^^^^^^^
+  --> <e2e>/fail_shift_count_right_logical/main.cove:21:12
+   |
+21 |     return shifted(x, n, depth - 1)
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^ called from here
+  --> <e2e>/fail_shift_count_right_logical/main.cove:13:27
+   |
+13 |   println("never printed {shifted(-1, count, 1)}")?
+   |                           ^^^^^^^^^^^^^^^^^^^^^ called from here
+  rule: A shift count is 0 through 63. It is checked rather than masked, so a count of 64 is an error and not a shift by 0.
+1 error(s)

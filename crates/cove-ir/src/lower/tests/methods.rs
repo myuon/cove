@@ -428,6 +428,52 @@ fn @m.f(Float) -> Float
     );
 }
 
+/// `Int`'s seven bit operations are one instruction each and not a call.
+///
+/// ADR 0074's structural check: the methods resolve straight to
+/// `Inst::Bits`, `Inst::BitNot` and `Inst::Shift` — no `call`, no
+/// allocation, nothing from `std` — and the shift's count is an ordinary
+/// operand slot whose range the instruction checks at run time. A count
+/// written as a literal is materialised like any other, so a constant count
+/// and a dynamic one reach the same instruction.
+#[test]
+fn an_int_bit_operation_is_one_instruction() {
+    assert_eq!(
+        listing(
+            "fn f(x: Int, y: Int) -> Int { x.bitAnd(y).bitOr(y).bitXor(x).bitNot() }",
+            "f"
+        ),
+        "\
+fn @m.f(Int Int) -> Int
+  frame 5: s0!:int s1!:int s2:int s3:int s4:int
+  local x -> s0:Int [0, 5)
+  local y -> s1:Int [0, 5)
+     0  and.int s3:int s0:int s1:int
+     1  or.int s4:int s3:int s1:int
+     2  xor.int s3:int s4:int s0:int
+     3  not.int s2:int s3:int
+     4  return s2:Int
+"
+    );
+    assert_eq!(
+        listing(
+            "fn f(x: Int, n: Int) -> Int { x.shiftLeft(n).shiftRight(n).shiftRightLogical(3) }",
+            "f"
+        ),
+        "\
+fn @m.f(Int Int) -> Int
+  frame 5: s0!:int s1!:int s2:int s3:int s4:int
+  local x -> s0:Int [0, 5)
+  local n -> s1:Int [0, 5)
+     0  shl.int s3:int s0:int s1:int
+     1  sar.int s4:int s3:int s1:int
+     2  int s3:int 3
+     3  shr.int s2:int s4:int s3:int
+     4  return s2:Int
+"
+    );
+}
+
 /// `Int.toFloat` is the conversion instruction the IR has always had, and
 /// not a runtime call.
 #[test]

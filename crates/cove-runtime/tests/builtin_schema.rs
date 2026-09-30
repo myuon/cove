@@ -501,6 +501,41 @@ static EXERCISES: &[Exercise] = &[
         body: "  let count = 7\n  count.max(3)",
     },
     Exercise {
+        ty: "Int",
+        name: "bitAnd",
+        body: "  let count = 7\n  count.bitAnd(3)",
+    },
+    Exercise {
+        ty: "Int",
+        name: "bitOr",
+        body: "  let count = 7\n  count.bitOr(8)",
+    },
+    Exercise {
+        ty: "Int",
+        name: "bitXor",
+        body: "  let count = 7\n  count.bitXor(2)",
+    },
+    Exercise {
+        ty: "Int",
+        name: "bitNot",
+        body: "  let count = 7\n  count.bitNot()",
+    },
+    Exercise {
+        ty: "Int",
+        name: "shiftLeft",
+        body: "  let count = 7\n  count.shiftLeft(2)",
+    },
+    Exercise {
+        ty: "Int",
+        name: "shiftRight",
+        body: "  let count = -7\n  count.shiftRight(1)",
+    },
+    Exercise {
+        ty: "Int",
+        name: "shiftRightLogical",
+        body: "  let count = -7\n  count.shiftRightLogical(60)",
+    },
+    Exercise {
         ty: "Float",
         name: "snapshot",
         body: "  let ratio = 1.5\n  let copy = ratio.snapshot()\n  0",
