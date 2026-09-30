@@ -289,6 +289,19 @@ fn agree(source: &str, name: &str, args: Vec<Value>) -> Answer {
     oracle
 }
 
+/// The heap the GC-stress cases below run over.
+///
+/// It was `1 << 12` words, and each case's floor on collections was set
+/// against that. ADR 0072's middle tier added one literal to `std.float`, its
+/// table of powers of five — 9,765 bytes, 1,222 words — and a whole-package
+/// lowering, which is what these cases run, places every literal of every
+/// function before the first instruction, whether or not the program parses
+/// a `Float`. So the table is added on top: what the collector has to work
+/// with is what it had when the floors were set, and `keeps_a_lot`, whose
+/// last doubling of its vector was already close to the budget, ran out of
+/// memory without it.
+const PRESSURE_HEAP_WORDS: usize = (1 << 12) + 1_222;
+
 /// [`agree`], but the machine runs over a heap bounded to `heap_words`, and
 /// the answer comes back with how many collections it took to produce.
 ///
@@ -1974,8 +1987,12 @@ export fn keeps_a_little(n: Int) -> Int {
   kept.length()
 }
 "#;
-    let (answer, collections) =
-        agree_under_heap_pressure(source, "keeps_a_little", vec![Value::int(4000)], 1 << 12);
+    let (answer, collections) = agree_under_heap_pressure(
+        source,
+        "keeps_a_little",
+        vec![Value::int(4000)],
+        PRESSURE_HEAP_WORDS,
+    );
     assert_eq!(answer, Answer::Value("3".to_string()));
     assert!(
         collections >= 3,
@@ -2023,8 +2040,12 @@ export fn keeps_a_lot(n: Int) -> Int {
   sum + v.length()
 }
 "#;
-    let (answer, collections) =
-        agree_under_heap_pressure(source, "keeps_a_lot", vec![Value::int(3000)], 1 << 12);
+    let (answer, collections) = agree_under_heap_pressure(
+        source,
+        "keeps_a_lot",
+        vec![Value::int(3000)],
+        PRESSURE_HEAP_WORDS,
+    );
     assert_eq!(answer, Answer::Value("4499250".to_string()));
     assert!(
         collections >= 3,
@@ -2066,7 +2087,7 @@ export fn splits_under_pressure(n: Int) -> String {
         source,
         "splits_under_pressure",
         vec![Value::int(2000)],
-        1 << 12,
+        PRESSURE_HEAP_WORDS,
     );
     assert_eq!(
         answer,
@@ -2099,8 +2120,12 @@ export fn closure_survives(n: Int) -> Int {
   greet()
 }
 "#;
-    let (answer, collections) =
-        agree_under_heap_pressure(source, "closure_survives", vec![Value::int(6000)], 1 << 12);
+    let (answer, collections) = agree_under_heap_pressure(
+        source,
+        "closure_survives",
+        vec![Value::int(6000)],
+        PRESSURE_HEAP_WORDS,
+    );
     assert_eq!(answer, Answer::Value("10".to_string()));
     assert!(
         collections >= 3,

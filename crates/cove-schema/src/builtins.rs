@@ -1429,9 +1429,10 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
     // `Float.parse` was `Intrinsic::FloatParse` — Rust's `str::parse::<f64>`
     // behind one `Inst::IntrinsicCall` — until issue #432, the last intrinsic
     // any program emitted. It is a Cove body over byte reads and `Int` and
-    // `Float` arithmetic, with no instruction of its own: the grammar and a
-    // Clinger fast path, and simple decimal conversion over a buffer of at
-    // most 768 digits for everything outside the fast path's box (ADR 0072).
+    // `Float` arithmetic, with no instruction of its own: the grammar, a
+    // Clinger fast path, an Eisel–Lemire middle tier in thirty-bit limbs, and
+    // simple decimal conversion over a buffer of at most 768 digits for what
+    // the middle tier cannot decide (ADR 0072).
     StdBinding {
         kind: StdBindingKind::Associated,
         receiver: "Float",
