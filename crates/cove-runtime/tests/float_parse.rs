@@ -35,10 +35,19 @@
 //!   digits; random digit strings of 1 to 800 digits with a random point and a
 //!   random exponent; and random strings over the grammar's own alphabet, most
 //!   of which are refused.
+//! - **The middle tier's rows** (ADR 0072's Eisel–Lemire product), in
+//!   [`middle_tier`]: the edges of its table of powers of five, its exact
+//!   ties and the inputs its ambiguity test sends on, midpoints cut to 18 and
+//!   19 digits where a dropped digit makes it ask twice, the subnormals it
+//!   rounds itself and the least normal value's boundary.
+//! - **Seeded round-trips**, in [`round_trips`]: random bit patterns spelled
+//!   shortest, with 17 digits and with 18, and random strings of 15 to 19
+//!   digits with an exponent anywhere from −350 to 310.
 //!
-//! The default run is a few thousand inputs. The four
-//! `a_wide_random_sweep_agrees_*` cases are a hundred thousand more and are
-//! `#[ignore]`d, which is what `cargo ratchet` runs.
+//! The default run is about eighteen thousand inputs. The four
+//! `a_wide_random_sweep_agrees_*` cases are a hundred thousand more, the two
+//! `a_wide_round_trip_sweep_agrees_*` cases another hundred thousand, and all
+//! six are `#[ignore]`d, which is what `cargo ratchet` runs.
 //!
 //! # The tiers
 //!
@@ -230,9 +239,14 @@ impl Subject {
             "`callsParses` is meant to be refused, and the tier took it"
         );
         // Since issue #432 the parse is Cove, and all of it is compiled: a
-        // row that fell back to the VM in the slow path would be the VM's
-        // answer again.
-        for name in ["std.float.parse", "std.float.parseSlow"] {
+        // row that fell back to the VM in the middle tier or the slow path
+        // would be the VM's answer again.
+        for name in [
+            "std.float.parse",
+            "std.float.parseMiddle",
+            "std.float.eiselLemire",
+            "std.float.parseSlow",
+        ] {
             assert!(
                 !refused.contains(&name),
                 "`{name}` is meant to be compiled, and the tier refused it"
@@ -811,6 +825,170 @@ fn random(seed: u64, count: usize) -> Vec<String> {
     rows
 }
 
+/// The rows ADR 0072's middle tier — Eisel and Lemire's truncated product,
+/// in thirty-bit limbs over a table of `5^q` for `q` in `[-342, 308]` — fails
+/// first, if it fails.
+///
+/// - **The table's edges**: mantissas of one to eighteen digits at the
+///   first and last `q` the table holds, one past each (decided before the
+///   table is read), and the `q`s where its entries stop being exact (38, 39)
+///   and where its exact-division case stops (−26, −27); each also with a
+///   nineteenth digit that is not nought and with three dropped zeros.
+/// - **Ties and the ambiguity test**: the exact midpoints of floats between
+///   `2^40` and `2^64`, whose decimal expansions are short enough for the
+///   tier to hold — an integer, or a fraction whose `5^-q` divides the
+///   mantissa — and those cut to 17, 18 and 19 digits, with one unit either
+///   side in the last; the same cuts of the midpoints of floats across the
+///   whole range, where a nineteenth digit is dropped and `m` and `m + 1`
+///   are asked; and the named ties `1e23` and the 40-digit halfway.
+/// - **Subnormals** the tier rounds itself, and the least normal value's
+///   boundary at 17 to 20 digits.
+fn middle_tier() -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mantissas: [u64; 9] = [
+        1,
+        2,
+        5,
+        9,
+        17976931348623157,
+        247032822920623272,
+        494065645841246544,
+        222507385850720138,
+        999999999999999999,
+    ];
+    for q in [
+        -345, -344, -343, -342, -341, -340, -326, -325, -324, -323, -310, -309, -308, -307, -28,
+        -27, -26, -25, -1, 0, 1, 22, 23, 37, 38, 39, 40, 290, 291, 292, 306, 307, 308, 309, 310,
+    ] {
+        for m in mantissas {
+            rows.push(format!("{m}e{q}"));
+            rows.push(format!("{m}1e{}", q - 1));
+            rows.push(format!("{m}000e{}", q - 3));
+            rows.push(format!("-{m}9e{}", q - 1));
+        }
+    }
+    let mut rng = Seeded(0x0e15_e11e_3f1e);
+    // Floats whose midpoints are short: between `2^40` and `2^64`.
+    for _ in 0..300 {
+        let exponent = 40 + rng.below(24) as i32;
+        let x = f64::from_bits(((1023 + exponent as u64) << 52) | (rng.next() >> 12));
+        let mid = Decimal::midpoint_above(x);
+        rows.push(mid.scientific());
+        rows.push(mid.positional());
+        for n in [17, 18, 19] {
+            let at = mid.with_digits(n);
+            rows.push(at.scientific());
+            rows.push(at.up().scientific());
+            rows.push(at.down().scientific());
+        }
+    }
+    // Floats across the whole range, subnormals included, their midpoints
+    // cut to 18 and 19 digits.
+    for _ in 0..300 {
+        let x = f64::from_bits(rng.next() & !(1 << 63));
+        if !x.is_finite() || x == 0.0 {
+            continue;
+        }
+        let mid = Decimal::midpoint_above(x);
+        for n in [18, 19] {
+            let at = mid.with_digits(n);
+            rows.push(at.scientific());
+            rows.push(at.up().scientific());
+            rows.push(at.down().scientific());
+        }
+    }
+    // Subnormals: random ones, spelled shortest and with 17 digits.
+    for _ in 0..300 {
+        let x = f64::from_bits(1 + rng.below((1 << 52) - 1));
+        rows.push(format!("{x:e}"));
+        rows.push(format!("{x:.16e}"));
+    }
+    for text in [
+        "1e23",
+        "-1e23",
+        "9007199254740993",
+        "9007199254740993.000000000000000000000000",
+        "9007199254740993.000000000000000000000001",
+        "9007199254740992.999999999999999999999999",
+        "9007199254740993.00001",
+        "9007199254740992.5",
+        "9007199254740993.5",
+        "11920928955078125",
+        "59604644775390625",
+        "298023223876953125",
+        "1490116119384765625",
+        "4.9406564584124654e-320",
+        "5e-324",
+        "1e-320",
+        "2.4703282292062328e-324",
+        "2.4703282292062327e-324",
+        "7.4109846876186982e-324",
+        "2.225073858507201e-308",
+        "2.2250738585072009e-308",
+        "2.2250738585072010e-308",
+        "2.2250738585072011e-308",
+        "2.2250738585072012e-308",
+        "2.2250738585072013e-308",
+        "2.2250738585072014e-308",
+        "2.22507385850720113e-308",
+        "2.22507385850720114e-308",
+        "2.225073858507201136e-308",
+        "2.225073858507201137e-308",
+        "2.2250738585072011360574e-308",
+        "2.22507385850720138e-308",
+        "2.225073858507201383e-308",
+        "1.7976931348623157e308",
+        "1.79769313486231580e308",
+        "1.797693134862315807e308",
+        "1.797693134862315808e308",
+    ] {
+        rows.push(text.to_string());
+    }
+    rows
+}
+
+/// `count` random bit patterns, each spelled shortest (`{:e}`), with 17
+/// digits and with 18, and as many random strings of 15 to 19 digits with a
+/// point somewhere and an exponent anywhere from −350 to 310: the inputs the
+/// middle tier exists for, across the whole range.
+fn round_trips(seed: u64, count: usize) -> Vec<String> {
+    let mut rng = Seeded(seed);
+    let mut rows = Vec::new();
+    let mut made = 0;
+    while made < count {
+        let x = f64::from_bits(rng.next());
+        if !x.is_finite() {
+            continue;
+        }
+        rows.push(format!("{x:e}"));
+        rows.push(format!("{x:.16e}"));
+        rows.push(format!("{x:.17e}"));
+        made += 1;
+    }
+    for _ in 0..count {
+        let length = 15 + rng.below(5) as usize;
+        let point = rng.below(length as u64 + 1) as usize;
+        let mut text = String::new();
+        if rng.below(2) == 0 {
+            text.push('-');
+        }
+        for at in 0..length {
+            if at == point {
+                text.push('.');
+            }
+            let digit = if at == 0 {
+                1 + rng.below(9)
+            } else {
+                rng.below(10)
+            };
+            text.push((b'0' + digit as u8) as char);
+        }
+        text.push_str(&format!("e{}", rng.below(661) as i64 - 350));
+        rows.push(text);
+    }
+    rows
+}
+
 // ------------------------------------------------------------------ cases
 
 /// The adversarial rows, on the VM.
@@ -843,6 +1021,40 @@ fn every_adversarial_row_agrees_on_the_native_tier() {
 #[test]
 fn seeded_random_inputs_agree_on_the_native_tier() {
     let inputs = random(0x5eed_f10a7, 700);
+    let answers = Subject::new().on_the_native_tier(&inputs);
+    agree("native tier", &inputs, &answers);
+}
+
+/// The middle tier's rows, on the VM.
+#[test]
+fn every_middle_tier_row_agrees_on_the_vm() {
+    let inputs = middle_tier();
+    let answers = Subject::new().on_the_vm(&inputs);
+    agree("VM", &inputs, &answers);
+}
+
+/// Seeded round-trips and 15- to 19-digit strings, on the VM.
+#[test]
+fn seeded_round_trips_agree_on_the_vm() {
+    let inputs = round_trips(0x5eed_1e3f, 1_500);
+    let answers = Subject::new().on_the_vm(&inputs);
+    agree("VM", &inputs, &answers);
+}
+
+/// The middle tier's rows, on the native tier.
+#[cfg(feature = "template")]
+#[test]
+fn every_middle_tier_row_agrees_on_the_native_tier() {
+    let inputs = middle_tier();
+    let answers = Subject::new().on_the_native_tier(&inputs);
+    agree("native tier", &inputs, &answers);
+}
+
+/// The same round-trips, on the native tier.
+#[cfg(feature = "template")]
+#[test]
+fn seeded_round_trips_agree_on_the_native_tier() {
+    let inputs = round_trips(0x5eed_1e3f, 1_500);
     let answers = Subject::new().on_the_native_tier(&inputs);
     agree("native tier", &inputs, &answers);
 }
@@ -888,4 +1100,33 @@ fn a_wide_random_sweep_agrees_3() {
 #[ignore = "a wide sweep, run by `cargo ratchet`"]
 fn a_wide_random_sweep_agrees_4() {
     sweep(16..=20);
+}
+
+/// Five seeds of the middle tier's sweep: 2,500 bit patterns in three
+/// spellings and 2,500 strings of 15 to 19 digits each, fifty thousand in
+/// all.
+fn round_trip_sweep(seeds: std::ops::RangeInclusive<u64>) {
+    let subject = Subject::new();
+    for seed in seeds {
+        let inputs = round_trips(seed.wrapping_mul(0x0fed_cba9_8765_4321), 2_500);
+        let answers = subject.on_the_vm(&inputs);
+        agree("VM", &inputs, &answers);
+    }
+}
+
+// A hundred thousand more for the middle tier, from ten seeds, on the VM:
+// `cargo ratchet`, in two cases for the same reason as the four above.
+
+/// The middle tier's sweep, first half.
+#[test]
+#[ignore = "a wide sweep, run by `cargo ratchet`"]
+fn a_wide_round_trip_sweep_agrees_1() {
+    round_trip_sweep(1..=5);
+}
+
+/// The middle tier's sweep, second half.
+#[test]
+#[ignore = "a wide sweep, run by `cargo ratchet`"]
+fn a_wide_round_trip_sweep_agrees_2() {
+    round_trip_sweep(6..=10);
 }

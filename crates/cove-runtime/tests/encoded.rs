@@ -337,12 +337,20 @@ fn the_run_writes_the_recording_a_run_writes() {
     // three words, and the words `nan` and `infinity` it spells, two each. The
     // refusal's opening backtick is `std.int.refuseInt`'s, and `inf` is
     // `std.float.format`'s, each placed once already.
+    //
+    // It is 3,015 since ADR 0072's middle tier, and the 1,222 words are one
+    // literal: `std.float.eiselLemire`'s table of the powers of five from
+    // `5^-342` to `5^308`, ninety bits each as fifteen bytes of six bits,
+    // 9,765 bytes in all — 1,221 words of bytes and the one word of its
+    // length. It is the cost that ADR records as accepted, and this fixture
+    // pays it without parsing a `Float` because a whole-package lowering
+    // places every function's literals.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(1793), capacity_words: Some(1793) }"
+            "HeapSummary { collections: 0, allocated_words: Some(3015), capacity_words: Some(3015) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

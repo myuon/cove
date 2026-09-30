@@ -2295,12 +2295,18 @@ fn a_float_truncation_is_reached_from_machine_code() {
 /// holds a call of it rather than an `intrinsic-call`: the fast path, the
 /// slow path, the words and the refusal are all Cove and all compiled, so
 /// nothing crosses back to the VM on any row — the slow-path rows included.
+/// Since ADR 0072's middle tier, `1e23`, `9007199254740993`,
+/// `1.2345678901234567`, `2.2250738585072011e-308` and `5e-324` are that
+/// tier's — its table read, its limb product and its subnormal rounding, all
+/// from machine code — and `1e400` is its range test.
 #[test]
 fn a_float_parse_is_reached_from_machine_code() {
     on_each_tier(&["parses"], &["callsParses"]);
     let names = compiled_names();
     for name in [
         "std.float.parse",
+        "std.float.parseMiddle",
+        "std.float.eiselLemire",
         "std.float.parseSlow",
         "std.float.parseWord",
         "std.float.parseRefused",
@@ -4490,6 +4496,9 @@ fn restore_the_parse_intrinsic(program: &mut cove_ir::Program) {
             && matches!(
                 &*f.name,
                 "parse"
+                    | "parseMiddle"
+                    | "eiselLemire"
+                    | "timesPowerOfTwo"
                     | "parseSlow"
                     | "parseWord"
                     | "parseRefused"

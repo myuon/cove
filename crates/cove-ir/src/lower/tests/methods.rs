@@ -71,6 +71,8 @@ fn std_float_emits_no_intrinsic_call() {
         "std.float.toInt",
         "std.float.toIntRefused",
         "std.float.parse",
+        "std.float.parseMiddle",
+        "std.float.eiselLemire",
         "std.float.parseSlow",
         "std.float.parseRefused",
         "std.float.parseWord",
@@ -92,11 +94,14 @@ fn std_float_emits_no_intrinsic_call() {
 /// body rather than a size: **each instruction is a scalar, a comparison, a
 /// branch, a byte read or a length, or a call whose answer is returned
 /// straight away.** The three calls are the three ways out that the fast path
-/// is not — the refusal, the words and the slow path — and a call that is
-/// immediately returned is a way out and not a step, so no path to an answer
-/// the body builds itself passes through one, and none allocates.
+/// is not — the refusal, the words and the middle tier, which has the slow
+/// path behind it — and a call that is immediately returned is a way out and
+/// not a step, so no path to an answer the body builds itself passes through
+/// one, and none allocates.
 ///
-/// The slow path is not held to this: it allocates its one digit buffer, and
+/// The middle tier is held to a rule of its own by
+/// [`std_float_parse_has_a_middle_tier_that_allocates_nothing`]. The slow path
+/// is held to neither: it allocates its one digit buffer, and
 /// [`std_float_emits_no_intrinsic_call`] and `native_tier.rs` hold it to the
 /// rest.
 #[test]
@@ -153,12 +158,105 @@ fn std_float_parse_has_a_fast_path_that_calls_and_allocates_nothing() {
     assert_eq!(
         calls,
         vec![
+            "std.float.parseMiddle",
             "std.float.parseRefused",
-            "std.float.parseSlow",
             "std.float.parseWord"
         ],
         "{listed}"
     );
+}
+
+/// **`std.float.parse`'s middle tier allocates nothing, and leaves only for
+/// the slow path.**
+///
+/// ADR 0072's middle tier — `std.float.parseMiddle` and the Eisel–Lemire
+/// product it asks, in thirty-bit limbs over a table of powers of five held
+/// as one string literal — answers every 17-digit round-trip without the
+/// slow path's 772-word buffer, and what was measured for it rests on that.
+/// So what is pinned is a property of every function of the tier, whichever
+/// of them `cove_ir::lower::inline` has left standing, and not a size: **each
+/// instruction is a scalar, a comparison, a branch, a byte read, a length, a
+/// literal — which ADR 0045 places before the run, so loading one allocates
+/// nothing — a call of another function of the tier, or a call of the slow
+/// path whose answer is returned straight away.** The slow path is the one
+/// way out, and the only allocation behind it.
+#[test]
+fn std_float_parse_has_a_middle_tier_that_allocates_nothing() {
+    use crate::Inst;
+    let (sources, held) =
+        super::checked("fn main(s: String) -> Result<Float, Error> {\n  Float.parse(s)\n}");
+    let schemas = cove_schema::HostSchemas::new();
+    let program = crate::lower(&held, &sources, &schemas).expect("the program lowers");
+    let tier = [
+        "std.float.parseMiddle",
+        "std.float.eiselLemire",
+        "std.float.timesPowerOfTwo",
+    ];
+    let mut held_to = Vec::new();
+    for (at, f) in program.functions.iter().enumerate() {
+        let name = f.qualified();
+        if f.stub || !tier.contains(&name.as_str()) {
+            continue;
+        }
+        let listed = crate::print::function(&program, crate::FunctionId(at as u32));
+        let mut ways_out = 0;
+        for (pc, inst) in f.code.iter().enumerate() {
+            match inst {
+                Inst::Call { dst, callee, .. } => {
+                    let called = program.functions[callee.index()].qualified();
+                    if called == "std.float.parseSlow" {
+                        assert!(
+                            matches!(f.code.get(pc + 1), Some(Inst::Return { src }) if src == dst),
+                            "`{name}`'s call of the slow path at {pc} is a step:\n{listed}"
+                        );
+                        ways_out += 1;
+                    } else {
+                        assert!(
+                            tier.contains(&called.as_str()),
+                            "`{name}` calls `{called}` at {pc}, outside the tier:\n{listed}"
+                        );
+                    }
+                }
+                Inst::Unit { .. }
+                | Inst::Bool { .. }
+                | Inst::Int { .. }
+                | Inst::Float { .. }
+                | Inst::Str { .. }
+                | Inst::Tag { .. }
+                | Inst::Copy { .. }
+                | Inst::Clear { .. }
+                | Inst::Neg { .. }
+                | Inst::Arith { .. }
+                | Inst::Cmp { .. }
+                | Inst::ArithImm { .. }
+                | Inst::CmpImm { .. }
+                | Inst::Not { .. }
+                | Inst::Convert { .. }
+                | Inst::Jump { .. }
+                | Inst::BranchFalse { .. }
+                | Inst::CmpBranch { .. }
+                | Inst::CmpImmBranch { .. }
+                | Inst::Switch { .. }
+                | Inst::Return { .. }
+                | Inst::RunLoad { .. }
+                | Inst::Len { .. } => {}
+                other => panic!("`{name}` holds {other:?} at {pc}:\n{listed}"),
+            }
+        }
+        assert!(
+            ways_out <= 1,
+            "`{name}` leaves for the slow path at {ways_out} places:\n{listed}"
+        );
+        held_to.push(name);
+    }
+    // The tier's entry and its product are always functions of their own:
+    // `parse` leaves for the one, and the other is called twice from it.
+    for name in ["std.float.parseMiddle", "std.float.eiselLemire"] {
+        assert!(
+            held_to.iter().any(|had| had == name),
+            "`{name}` was meant to be held to the rule, and only {held_to:?} were"
+        );
+    }
 }
 
 /// **`std.float`'s renderers convert with the instruction, and call nothing
