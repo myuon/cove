@@ -1,6 +1,6 @@
 # ADR 0064: An intrinsic names a machine, not a method
 
-- Status: Proposed
+- Status: Accepted
 - Superseded in part by
   [ADR 0067](0067-a-trap-carries-the-sentence-it-was-handed.md), which adds a
   sixth entry — stopping a run with a sentence the caller built — to Decision

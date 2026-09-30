@@ -3,6 +3,16 @@
 - Status: Accepted. Superseded in part by
   [ADR 0059](0059-a-keyed-collection-is-searched-by-order-not-hashed.md),
   which replaces the Phase 4 `value-hash` intrinsic with `value-order`
+- Superseded in part by
+  [ADR 0064](0064-an-intrinsic-names-a-machine-not-a-method.md), which
+  withdraws Phase 3's "Unicode case conversion, parsing and formatting may
+  remain direct intrinsics"
+- Superseded in part by
+  [ADR 0073](0073-a-primitive-below-the-library-is-an-instruction.md), which
+  replaces "Runtime calls are statically identified and typed" — the
+  `intrinsic-call` instruction, its per-intrinsic effect metadata, and its
+  dispatch by identifier — with an IR instruction of its own for each
+  primitive
 - Date: 2026-09-15
 - Decides: what belongs in executable IR beneath `String`, `Array`,
   `Vector`, builders, `Map` and `Set`; how the standard library reaches
