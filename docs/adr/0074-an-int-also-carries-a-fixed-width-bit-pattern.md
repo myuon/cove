@@ -1,6 +1,6 @@
 # ADR 0074: An Int also carries a fixed-width bit pattern
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-30
 - Decides: seven public bit operations on `Int`, interpreted as a 64-bit
   two's-complement word; checked shift counts; typed scalar IR operations
