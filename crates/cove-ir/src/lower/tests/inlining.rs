@@ -677,7 +677,7 @@ fn a_library_method_that_takes_var_self_is_expanded() {
 /// answered. The body is still expanded because each of those calls is one
 /// whose continuation is doomed: the helper returns, and the next thing that
 /// happens on every path is the trap. So what is asserted is that shape
-/// exactly, in the caller: no intrinsic call, five traps, every call left the
+/// exactly, in the caller: five traps, every call left the
 /// helper's and every one of them doomed, and the copy one window.
 #[test]
 fn an_append_slice_inside_a_loop_is_expanded_as_one_window() {
@@ -690,7 +690,7 @@ fn an_append_slice_inside_a_loop_is_expanded_as_one_window() {
     an_expanded_append_slice(&program, &main);
 }
 
-/// What an expanded `appendSlice` leaves in `f`: no intrinsic call, five traps,
+/// What an expanded `appendSlice` leaves in `f`: five traps,
 /// every call left one of `byteRangeRefusalMessage` whose continuation is
 /// doomed, and the copy one append window.
 fn an_expanded_append_slice(program: &Program, f: &Function) {
@@ -700,12 +700,6 @@ fn an_expanded_append_slice(program: &Program, f: &Function) {
         .position(|held| held.qualified() == f.qualified())
         .map(|at| FunctionId(at as u32))
         .expect("the function is in the program");
-    assert!(
-        !f.code
-            .iter()
-            .any(|inst| matches!(inst, Inst::IntrinsicCall { .. })),
-        "no refusal is an intrinsic call any more"
-    );
     assert_eq!(
         f.code
             .iter()

@@ -30,8 +30,9 @@
 //! So each of the two remaining **lowers to a loop in the IR**, and the
 //! closure's calls are [`Inst::CallClosure`] frames like any other: depth,
 //! the collector's roots and a stack overflow all work without a second
-//! story. `cove_runtime::vm::intrinsics` stays a library over words with
-//! nothing in it that can call anything.
+//! story. Nothing below the IR calls back into Cove: the runtime's builtins
+//! over words never could, and ADR 0073 deleted the last of them with the
+//! `IntrinsicCall` mechanism.
 //!
 //! # What the loops promise, and where it comes from
 //!

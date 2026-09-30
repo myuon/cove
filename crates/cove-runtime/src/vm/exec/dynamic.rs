@@ -28,7 +28,7 @@
 //! through as many boxes as there are. So a heap value is viewed as
 //! `(its header layout, the object, 0)`, an inline value as
 //! `(its layout, the object it is in, where)`, and erasure is looked through
-//! everywhere — as [`crate::vm::intrinsics`]' equality looks through it.
+//! everywhere — as `std.dynamic.equals` looks through it.
 //!
 //! # Nothing here allocates
 //!
@@ -57,6 +57,7 @@
 //! machine exists to make loud.
 
 use std::cmp::Ordering;
+use std::fmt::Write as _;
 
 use cove_ir::bytecode::Op;
 use cove_ir::dynamic::{
@@ -995,7 +996,7 @@ pub(crate) fn on_path(machine: &Machine, view: View, entry: u64, depth: i64) -> 
 /// into slot `dst`.
 ///
 /// A Host resource, a task scope and a task are
-/// [`crate::vm::intrinsics::handle_text`]'s, which `Inst::HandleText` writes
+/// [`text_of_handle`]'s, which `Inst::HandleText` writes
 /// with too, so the two cannot say different things of one handle. A byte
 /// run and a byte buffer are the text the runtime's rendering always gave
 /// them; an address and a case tag are not values, and are refused in its
@@ -1013,7 +1014,7 @@ pub(crate) fn handle_text(
     match &described.shape {
         Shape::Word(repr @ (Repr::Host | Repr::Scope | Repr::Task)) => {
             let word = machine.mem.payload(view.owner, view.at);
-            crate::vm::intrinsics::handle_text(machine, *repr, word, &mut text)?;
+            text_of_handle(machine, *repr, word, &mut text)?;
         }
         Shape::Bytes => text.push_str("<byte run>"),
         Shape::ByteBuffer => text.push_str("<byte buffer>"),
@@ -1454,6 +1455,57 @@ pub(crate) fn unplaced_in(machine: &Machine, boxed: u64) -> Vec<String> {
         }
     }
     found
+}
+
+/// The text of the handle `word`, read as `repr`, appended to `out` — what
+/// `Inst::HandleText` answers as a new `String`, and what
+/// `core.dynamicHandleText` answers for a handle inside a box.
+///
+/// Written once for the two, so that a walk the lowering composed for a known
+/// layout and the rendering of an erased one cannot come to say different
+/// things of one handle. It was `vm::intrinsics::handle_text` until ADR 0073
+/// deleted that module with the `IntrinsicCall` mechanism; it is here, beside
+/// the view's own [`handle_text`], which is one of its two readers — the other
+/// is `encoded.rs`'s `HANDLE_TEXT` arm.
+pub(crate) fn text_of_handle(
+    machine: &Machine,
+    repr: Repr,
+    word: u64,
+    out: &mut String,
+) -> Result<(), RuntimeError> {
+    match repr {
+        // A handle shows as what it names, identity included — `Display for
+        // Value`'s `<{handle}>`, which is `<{module}.{Type}#{n}>`: two
+        // connections are told apart by the number the host issued and by
+        // nothing else. The module, the type and the number are the run's
+        // resource table's, which is why a walk the lowering composed cannot
+        // place this as a literal and asks `Inst::HandleText` for it (issue
+        // #499).
+        Repr::Host => {
+            let handle = machine
+                .resource(word)
+                .ok_or_else(crate::vm::boundary::no_such_resource)?;
+            write!(out, "<{handle}>").expect("a string never fails to be written to");
+        }
+        // A scope shows the name it is bound to, which is the scheduler's
+        // entry for it rather than anything in the layout.
+        Repr::Scope => {
+            let name = machine.scope_name(word)?;
+            write!(out, "<task scope {name}>").expect("a string never fails to be written to");
+        }
+        // A task shows as the handle it is, never as the value it will
+        // produce: that value is observable only through `await` or the scope
+        // settling it. A walk writes this one itself, as a literal; it is here
+        // for a task inside a box.
+        Repr::Task => out.push_str("<task>"),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "internal error: a `{}` word is not a handle with a text",
+                other.name()
+            )))
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

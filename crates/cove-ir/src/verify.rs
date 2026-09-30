@@ -36,27 +36,9 @@
 //! at collection time.
 
 use crate::inst::{CmpOp, Compare, Inst, Len, Num, Slot};
-use crate::intrinsic::{Carried, Class};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::{RefMap, Repr};
-
-/// Whether a value of `shape` is a collection: a run of elements, a vector,
-/// a set, a map, or a byte buffer or run.
-///
-/// A `StringBuilder` is not named: it is a standard-library struct over a
-/// byte buffer, and no signature class matches a struct.
-fn is_collection(shape: &Shape) -> bool {
-    matches!(
-        shape,
-        Shape::Elements { .. }
-            | Shape::Vector { .. }
-            | Shape::Members { .. }
-            | Shape::Entries { .. }
-            | Shape::ByteBuffer
-            | Shape::Bytes
-    )
-}
 
 /// A way in which a lowered program is not well formed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -642,14 +624,6 @@ impl Check<'_> {
                     poison(&mut objects, dst, width);
                     poison(&mut funcs, dst, width);
                 }
-                Inst::IntrinsicCall { dst, site, .. } => {
-                    let width = match self.program.intrinsic_sites.get(site.index()) {
-                        Some(builtin) => words(builtin.result),
-                        None => 1,
-                    };
-                    poison(&mut objects, dst, width);
-                    poison(&mut funcs, dst, width);
-                }
             }
         }
         (
@@ -1113,21 +1087,6 @@ impl Check<'_> {
                     }
                     if self.layout_exists(at, held.result) {
                         self.fits(at, dst, held.result, "the answer of a host call");
-                    }
-                }
-                self.each_arg(at, args);
-            }
-            Inst::IntrinsicCall { dst, site, args } => {
-                if self.in_range(
-                    at,
-                    site.index(),
-                    self.program.intrinsic_sites.len(),
-                    "intrinsic site",
-                ) {
-                    let called = *self.program.intrinsic_site(site);
-                    if self.layout_exists(at, called.result) {
-                        self.fits(at, dst, called.result, "the answer of a builtin");
-                        self.check_signature(at, called, args);
                     }
                 }
                 self.each_arg(at, args);
@@ -1901,114 +1860,6 @@ impl Check<'_> {
     /// of what an argument was — so a call passing the last slot of a frame
     /// as a two-word `Point` was checked by nothing, and the machine read the
     /// frame above it.
-    /// Whether an `IntrinsicCall` passes what its intrinsic takes and names the
-    /// answer it writes: the argument count, each argument's layout and the
-    /// answer's layout, against [`crate::Intrinsic::signature`].
-    ///
-    /// ADR 0058 gives an intrinsic "a fixed operand and result shape", and
-    /// this is where the shape is held to — once, before anything runs — so
-    /// that the machine's arms read their operands without re-checking any of
-    /// it on every call (#378, P5-3). An argument's *location* is
-    /// [`Check::each_arg`]'s; this is about its family.
-    ///
-    /// It is also where ADR 0058's Phase 5 makes "a new collection
-    /// `IntrinsicCall` a verification failure": an intrinsic — every one left
-    /// is `Scalar` — handed a collection is refused as that, by name, whatever its
-    /// signature says. `String.join`'s `Array<String>` was the one collection
-    /// a signature named; issue #454's Step 3 made that join Cove, so no
-    /// signature names one now and the check below has nothing left to
-    /// excuse — which is why `intrinsic.rs`'
-    /// `no_intrinsic_is_a_collection_operation` asserts it unconditionally.
-    fn check_signature(
-        &mut self,
-        at: Option<usize>,
-        called: crate::IntrinsicSite,
-        args: crate::ArgsId,
-    ) {
-        let intrinsic = called.intrinsic;
-        let signature = intrinsic.signature();
-        if let Some(fault) = self.class_fault(signature.result, called.result) {
-            self.fault(at, format!("the answer of `{intrinsic}` is {fault}"));
-        }
-        let Some(list) = self.program.args.get(args.index()) else {
-            // `each_arg` reports a list that is not there.
-            return;
-        };
-        let fixed = signature.operands.len();
-        if list.len() != fixed {
-            self.fault(
-                at,
-                format!(
-                    "`{intrinsic}` takes {fixed} operand(s), and this call passes {}",
-                    list.len()
-                ),
-            );
-            return;
-        }
-        for (index, arg) in list.clone().into_iter().enumerate() {
-            let class = signature.operands[index];
-            if arg.layout.index() >= self.program.layouts.len() {
-                // `each_arg` reports a layout that is not there.
-                continue;
-            }
-            let described = self.program.layout(arg.layout);
-            if is_collection(&described.shape) {
-                let name = described.name.clone();
-                self.fault(
-                    at,
-                    format!(
-                        "operand {index} of `{intrinsic}` is the collection `{name}`, and a \
-                         {:?} intrinsic takes none: a collection operation is a run instruction \
-                         or the standard library's, not an intrinsic (ADR 0058)",
-                        intrinsic.category()
-                    ),
-                );
-            } else if let Some(fault) = self.class_fault(class, arg.layout) {
-                self.fault(at, format!("operand {index} of `{intrinsic}` is {fault}"));
-            }
-        }
-    }
-
-    /// Why a value of `layout` is not a `class`, or `None` when it is one.
-    fn class_fault(&self, class: Class, layout: LayoutId) -> Option<String> {
-        let described = self.program.layout(layout);
-        let fits = match class {
-            Class::Str => described.shape == Shape::Str,
-            Class::ResultOf(carried) => self.is_case_pair(
-                layout,
-                (cove_schema::builtins::OK_CASE.name, Some(carried)),
-                (cove_schema::builtins::ERR_CASE.name, None),
-            ),
-        };
-        (!fits).then(|| format!("`{}`, where its signature has {class}", described.name))
-    }
-
-    /// Whether `layout` is an enum with a case `carrier` holding exactly one
-    /// value of the carried class, and a case `other`.
-    ///
-    /// `other` is named and not described: `Err` carries the machine's
-    /// `Error`, which is not a question a signature asks.
-    fn is_case_pair(
-        &self,
-        layout: LayoutId,
-        (carrier, carried): (&str, Option<Carried>),
-        (other, _): (&str, Option<Carried>),
-    ) -> bool {
-        let Shape::Enum { cases, .. } = &self.program.layout(layout).shape else {
-            return false;
-        };
-        let carries = |part: LayoutId| {
-            part.index() < self.program.layouts.len()
-                && matches!(
-                    (carried, &self.program.layout(part).shape),
-                    (Some(Carried::Float), Shape::Word(Repr::Float))
-                )
-        };
-        cases.iter().any(|case| {
-            &*case.name == carrier && case.parts.len() == 1 && carries(case.parts[0].layout)
-        }) && cases.iter().any(|case| &*case.name == other)
-    }
-
     fn each_arg(&mut self, at: Option<usize>, args: crate::ArgsId) {
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
@@ -2846,10 +2697,6 @@ mod tests {
     const IDENTITY: LayoutId = LayoutId(18);
     /// A `Bool` word, which an identity set's second word is.
     const BOOL: LayoutId = LayoutId(19);
-    /// `Result<Float, Error>`, what `Float.parse` answers: an `Ok` carrying the
-    /// `Float` word at index 14, and an `Err`. Last, so no index below it
-    /// moves.
-    const RESULT_FLOAT: LayoutId = LayoutId(20);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -2942,35 +2789,13 @@ mod tests {
             crate::dynamic::view_layout(INT, STR),
             // Index 14, a `Float` word, which `Value.renderInto` was refused
             // until ADR 0068's Phase 4b-ii deleted the intrinsic; kept so that
-            // no index above it moves, and what `RESULT_FLOAT`'s `Ok` carries.
+            // no index above it moves.
             Layout::word("Float", Repr::Float),
             Layout::word("<addr>", Repr::Addr),
             crate::dynamic::render_path_layout(ADDR, INT),
             crate::dynamic::identity_table_layout(),
             crate::dynamic::identity_set_layout(TABLE, BOOL),
             Layout::word("Bool", Repr::Bool),
-            Layout::inline(
-                "Result<Float, Error>",
-                Shape::Enum {
-                    cases: vec![
-                        Case {
-                            name: Arc::from("Ok"),
-                            parts: vec![crate::layout::Part {
-                                layout: LayoutId(14),
-                                at: 0,
-                            }],
-                        },
-                        // What `Err` carries is the machine's `Error`, which
-                        // is not a question a signature asks.
-                        Case {
-                            name: Arc::from("Err"),
-                            parts: Vec::new(),
-                        },
-                    ],
-                    payload: vec![Repr::Float],
-                },
-                vec![Repr::Tag, Repr::Float],
-            ),
         ]
     }
 
@@ -3944,172 +3769,13 @@ mod tests {
         );
     }
 
-    /// A program with one function calling `intrinsic` over `args`, answering
-    /// `result` into slot 0 of a frame of `reprs`.
-    fn calling(
-        intrinsic: crate::Intrinsic,
-        result: LayoutId,
-        reprs: Vec<Repr>,
-        args: Vec<Arg>,
-    ) -> Program {
-        let f = function(
-            reprs,
-            result,
-            vec![
-                Inst::IntrinsicCall {
-                    dst: 0,
-                    site: crate::SiteId(0),
-                    args: crate::ArgsId(0),
-                },
-                Inst::Return { src: 0 },
-            ],
-        );
-        let mut held = program(vec![f]);
-        held.intrinsic_sites = vec![crate::IntrinsicSite { intrinsic, result }];
-        held.args = vec![args];
-        held
-    }
-
-    /// An intrinsic's signature is held to at every call: how many operands,
-    /// what each one is, and what the answer is (#378, P5-3). The machine's
-    /// arms re-check none of the three.
-    #[test]
-    fn a_builtin_call_is_held_to_its_intrinsics_signature() {
-        let string = |slot| Arg { slot, layout: STR };
-        let int = |slot| Arg { slot, layout: INT };
-        // Slots 0 and 1 hold the answer, slot 2 the `String` and slot 3 the
-        // `Int` an operand fault is made of. This sample was `String.length` until ADR 0064 moved it
-        // into `std.string`, then `String.trim`, then `String.toUpper`, then
-        // `String.replace` — and issue #454's Step 3 finished by moving that
-        // one too. It was `String.refuseByteRange` after that, a `String` and
-        // two `Int`s answering `()`, until issue #432 made that refusal
-        // `std.stringbuilder.byteRangeRefusalMessage` and `core.refuse`. **Only
-        // `Float.parse` is left** since issue #432 made `Float.toInt`
-        // `std.float.toInt`, so the sample is the parser: one `String`,
-        // answering a `Result<Float, Error>`, which is why the fixture has a
-        // layout for that answer.
-        //
-        // What the case is about survives the change exactly, because none of
-        // the three faults is about which operands these are. The first is a
-        // call that is right and must be silent; the second is one operand too
-        // many, where "too many" is whatever the signature says plus one; the
-        // third is an `Int` at operand 0 where a `String` goes. The answer's
-        // class still matches the signature's, which is what keeps the third
-        // fault the only one the third call reports — the `Option` answer
-        // below is the case about a wrong answer class.
-        let reprs = || vec![Repr::Tag, Repr::Float, Repr::Ref, Repr::Int];
-
-        // `Float.parse` over a `String`, answering a `Result<Float, Error>`:
-        // nothing.
-        let held = calling(
-            crate::Intrinsic::FloatParse,
-            RESULT_FLOAT,
-            reprs(),
-            vec![string(2)],
-        );
-        assert_eq!(faults(&held), Vec::<String>::new());
-
-        // One operand too many.
-        let held = calling(
-            crate::Intrinsic::FloatParse,
-            RESULT_FLOAT,
-            reprs(),
-            vec![string(2), int(3)],
-        );
-        assert_eq!(
-            faults(&held),
-            vec!["`Float.parse` takes 1 operand(s), and this call passes 2"]
-        );
-
-        // An `Int` where a `String` goes.
-        let held = calling(
-            crate::Intrinsic::FloatParse,
-            RESULT_FLOAT,
-            reprs(),
-            vec![int(3)],
-        );
-        assert_eq!(
-            faults(&held),
-            vec!["operand 0 of `Float.parse` is `Int`, where its signature has String"]
-        );
-
-        // The answer a `Float.parse` writes is a `Result<Float>`, and the
-        // fixture's wrapper is an `Option`. It was `String.indexOf` and an
-        // `Option<Int>` against the same `Option<String>` until ADR 0064 moved
-        // that operation into `std.string`; no intrinsic answers an `Option`
-        // at all now, so the class this arm checks is the other wrapper. It
-        // was then `Int.parse` until issue #454's Step 4 moved *that* one into
-        // `std.int`.
-        let held = calling(
-            crate::Intrinsic::FloatParse,
-            ANSWER,
-            vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Ref],
-            vec![string(2)],
-        );
-        assert_eq!(
-            faults(&held),
-            vec![
-                "the answer of `Float.parse` is `Option`, where its signature has Result<Float, Error>"
-            ]
-        );
-
-        // A rendering took a piece of any layout and a byte buffer here, and
-        // the rule that a piece whose layout was known was refused. ADR 0068's
-        // Phase 4b-ii deleted `Value.renderInto`: the rendering of an erased
-        // value is a call of `std.dynamic.renderInto`, whose operands are held
-        // to its parameters as every call's are, and `cove-cli`'s
-        // `tests/boxed.rs` holds its value operand to a box.
-    }
-
-    /// A scalar intrinsic handed a collection is refused as that, which is
-    /// what makes a new collection builtin a verification failure rather than
-    /// a runtime arm (ADR 0058, Phase 5). A value intrinsic could be handed
-    /// one, until the last of them left and issue #536 deleted the category;
-    /// a text one could, until issue #432 deleted the last of *those*.
-    #[test]
-    fn a_collection_is_refused_by_a_scalar_intrinsic() {
-        let array = |slot| Arg {
-            slot,
-            layout: ARRAY_INT,
-        };
-        // `Float.parse`, whose one operand is a `String`. This was a `Text`
-        // intrinsic — `String.toUpper` until issue #454's Step 5,
-        // `String.replace` until Step 3 finished, then
-        // `String.refuseByteRange` until issue #432 — and each moved into
-        // Cove, the last taking the `Text` category with it. The refusal is
-        // about the operand's being a collection and not about the category,
-        // so the one category left says it in the same words.
-        let held = calling(
-            crate::Intrinsic::FloatParse,
-            RESULT_FLOAT,
-            vec![Repr::Tag, Repr::Float, Repr::Ref, Repr::Int],
-            vec![array(2)],
-        );
-        assert_eq!(
-            faults(&held),
-            vec![
-                "operand 0 of `Float.parse` is the collection `Array<Int>`, and a \
-                 Scalar intrinsic takes none: a collection operation is a run instruction or \
-                 the standard library's, not an intrinsic (ADR 0058)"
-            ]
-        );
-
-        // A case stood here holding `String.join` — the one intrinsic whose
-        // signature named `Class::Strings` — to an `Array<Int>` in that
-        // position, so that "not the `Array<String>` `join` names" was a fault
-        // with its own wording. Issue #454's Step 3 made that join Cove, and no
-        // variant left declares a `Strings` operand at all, so there is nothing
-        // to construct the case out of. `Class::Strings` was a *result* class
-        // for `words`, `chars` and `split` after that, and `split` was its last
-        // user; issue #536 deleted the class, so no signature can name one.
-
-        // A second half stood here, holding a *value* intrinsic silent over
-        // the same `Array<Int>`: `Value.order` until ADR 0068's Phase 3, and
-        // then `Value.admitKey` until its Phase 4c deleted the last variant of
-        // `Category::Value`, which issue #536 then deleted. No intrinsic left
-        // takes a value of any layout, so there is nothing to build the silent
-        // half out of.
-    }
+    // `calling`, `a_builtin_call_is_held_to_its_intrinsics_signature` and
+    // `a_collection_is_refused_by_a_scalar_intrinsic` stood here: an
+    // `Inst::IntrinsicCall` held to its intrinsic's operand and answer
+    // signature, and a collection refused as the operand of one (ADR 0058's
+    // Phase 5). ADR 0073 deleted the instruction with the last variant, and
+    // every call left is to a function, whose arguments `each_arg` holds to
+    // its parameters.
 
     /// ADR 0068's Phase 4c for [`one_admission_boundary`]: a refusal is
     /// worded only under the branch on a decision.

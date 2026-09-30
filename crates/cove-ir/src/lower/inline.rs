@@ -1156,9 +1156,6 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::LoadElem { dst, layout, .. }
             | Inst::Unbox { dst, layout, .. } => mark(dst, width(layout)),
             Inst::Clear { slot, layout } => mark(slot, width(layout)),
-            Inst::IntrinsicCall { dst, site, .. } => {
-                mark(dst, width(program.intrinsic_site(site).result))
-            }
             // The one call an expanded body may hold: one whose continuation is
             // doomed. It writes its answer, and its arguments are a list.
             Inst::Call { dst, callee, .. } => mark(dst, width(program.function(callee).returns)),
@@ -1672,8 +1669,7 @@ fn expand(
             Inst::Switch { table, .. } if table.0 >= PLACED => {
                 *table = crate::TableId(first + (table.0 - PLACED));
             }
-            Inst::IntrinsicCall { args, .. }
-            | Inst::Call { args, .. }
+            Inst::Call { args, .. }
             | Inst::RunCopy { args, .. }
             | Inst::RunSlice { args, .. }
             | Inst::RunFind { args, .. }
@@ -1870,13 +1866,11 @@ fn relocated(
         }
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
-        // reach it. A builtin and a call whose continuation is doomed are the
-        // two calls an expanded body may hold, and `Inst::RunCopy`,
-        // `Inst::RunSlice` and `Inst::RunFind` are the non-call instructions
-        // that also name one — each is the list relocated into a list of its
-        // own.
-        Inst::IntrinsicCall { args, .. }
-        | Inst::Call { args, .. }
+        // reach it. A call whose continuation is doomed is the one call an
+        // expanded body may hold, and `Inst::RunCopy`, `Inst::RunSlice` and
+        // `Inst::RunFind` are the non-call instructions that also name one —
+        // each is the list relocated into a list of its own.
+        Inst::Call { args, .. }
         | Inst::RunCopy { args, .. }
         | Inst::RunSlice { args, .. }
         | Inst::RunFind { args, .. } => {
@@ -2023,7 +2017,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
-        // `Inst::IntrinsicCall`.
+        // `Inst::Call`.
         Inst::RunCopy { .. } | Inst::RunSlice { .. } | Inst::RunFind { .. } => Vec::new(),
         Inst::Len { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
@@ -2055,7 +2049,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::DynFieldName { dst, view, index } => vec![dst, view, index],
         Inst::DynOnPath { dst, view, path } => vec![dst, view, path],
         // Its arguments are a list, which `relocated` moves; see `RunCopy`'s.
-        Inst::IntrinsicCall { dst, .. } | Inst::Call { dst, .. } => vec![dst],
+        Inst::Call { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
         Inst::Trap {
             message,

@@ -303,15 +303,6 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 args_of(program, *args)
             )
         }
-        Inst::IntrinsicCall { dst, site, args } => {
-            let builtin = program.intrinsic_site(*site);
-            format!(
-                "intrinsic-call {} {} ({})",
-                v(*dst, builtin.result),
-                builtin.intrinsic,
-                args_of(program, *args)
-            )
-        }
         Inst::Alloc { dst, layout, len } => {
             let shape = &program.layout(*layout).shape;
             let len = match len {

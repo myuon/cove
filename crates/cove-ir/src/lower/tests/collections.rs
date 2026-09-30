@@ -741,10 +741,6 @@ fn an_empty_collection_literal_is_allocated_where_its_layout_is_known() {
             text.contains("alloc "),
             "an empty literal is built rather than called:\n{text}"
         );
-        assert!(
-            !text.contains("intrinsic-call"),
-            "and it is not the call the machine refuses:\n{text}"
-        );
     }
 }
 

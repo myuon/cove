@@ -1152,8 +1152,8 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
   snapshotsWhileCollecting(n)
 }
 
-/// A refused caller making `n` calls to `Float.parse`, which nothing
-/// lowers, before handing the same `n` to the compiled loop above.
+/// A refused caller making `n` calls to `Float.parse`, which the refusal
+/// keeps on the encoded tier, before handing the same `n` to the compiled loop above.
 ///
 /// It was `String.indexOf` until ADR 0064 moved that into `std.string`,
 /// `String.toUpper` until issue #454's Step 5 moved that one, `String.replace`
@@ -1165,8 +1165,9 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
 /// each turn adds one.
 ///
 /// Since issue #432 `Float.parse` is `std.float.parse`, a Cove body (ADR
-/// 0072), and no source emits an intrinsic call at all: the case puts the call
-/// back by hand with `restore_the_parse_intrinsic` until the mechanism goes.
+/// 0072), and since ADR 0073 there is no intrinsic call to put back: what the
+/// case counts of it now is a library call from the encoded tier, and a
+/// crossing into the parser's machine code, `n` times each.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   var cut = 0
@@ -1188,12 +1189,9 @@ export fn countsTheBoundary(s: String, n: Int) -> Int {
 /// no program counter, tests no outcome and keeps the frame pointer live. Its
 /// subject was `String.contains`, then `String.indexOf`, then `Float.sqrt`,
 /// and issue #454's Step 2 made that last one `Inst::FloatSqrt`. Every
-/// variant of `cove_ir::Intrinsic` left declares `MAY_RAISE`, so no program
-/// can be written that takes that path, and a fixture that claimed to take it
-/// would be testing the protocol the *other* two shapes use. See
-/// `cove_ir::intrinsic`'s `every_intrinsic_left_can_be_refused`, which is
-/// where the fact is asserted and where the instruction to restore this pair
-/// lives if an intrinsic is ever added back below that bar.
+/// variant of `cove_ir::Intrinsic` left then declared `MAY_RAISE`, so no
+/// program could be written that took that path. ADR 0073 has since deleted the
+/// protocol, the enum and the `IntrinsicCall` mechanism together.
 
 /// `String.split` over a separator the caller chose: an intrinsic that may raise,
 /// because an empty separator is the language's own refusal.
@@ -2959,21 +2957,19 @@ fn every_address_family_resolves_on_a_later_stack_segment() {
     }
 }
 
-/// **A refusal says which builtin, or which allocation, stopped it.**
+/// **A refusal says which allocation stopped it.**
 ///
-/// `Refused::instruction` names an opcode, and for two opcodes that is not a task
-/// a reader can act on: `IntrinsicCall` is every builtin the language has and the
-/// `Alloc` opcodes are every layout a program declares. `Refused::blocked` is the
-/// second key, and what is asserted here is the join — that it is present for
-/// exactly those two opcodes, absent for every other, and names the thing the
-/// source actually wrote.
+/// `Refused::instruction` names an opcode, and for the `Alloc` opcodes that is
+/// not a task a reader can act on: they are every layout a program declares.
+/// `Refused::blocked` is the second key, and what is asserted here is the join —
+/// that it is present for exactly those opcodes, absent for every other, and
+/// names the thing the source actually wrote. `IntrinsicCall`, every builtin the
+/// language had, was the other aggregate until ADR 0073 deleted it.
 ///
-/// # Both tables are expected to be *empty*, and that is the assertion
+/// # The table is expected to be *empty*, and that is the assertion
 ///
-/// `Inst::Alloc` is lowered, and so is `Inst::IntrinsicCall` for every intrinsic
-/// (#378, P5-6), so no function can be refused at either
-/// and both halves of the census have no rows. What follows is the allocation
-/// half's argument, and the intrinsic half's is the same. Asserting that rather than deleting
+/// `Inst::Alloc` is lowered, so no function can be refused at one and the
+/// census has no rows. Asserting that rather than deleting
 /// the arm is deliberate in both directions: the arm has to stay, because
 /// `Refused::blocked` is a fact about a *program* and an operand bound could still
 /// refuse an allocation; and a row appearing again is news, because it would mean
@@ -2991,18 +2987,9 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     );
     let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
 
-    let mut builtins = 0;
     let mut allocations = 0;
     for row in native.refusals() {
         match (row.instruction.as_deref(), &row.blocked) {
-            (Some("IntrinsicCall"), Some(Blocked::Intrinsic(named))) => {
-                assert!(
-                    named.contains('.'),
-                    "a builtin is a receiver and an operation: `{named}` in `{}`",
-                    row.name
-                );
-                builtins += 1;
-            }
             (Some("AllocImm" | "AllocFixed" | "AllocSlot"), Some(Blocked::Allocation { .. })) => {
                 allocations += 1
             }
@@ -3011,16 +2998,11 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
             (_, None) => {}
             (opcode, blocked) => panic!(
                 "`{}` was refused at {opcode:?} and the census says {blocked:?}, \
-                 which is neither of the two aggregates nor nothing",
+                 which is neither the aggregate nor nothing",
                 row.name
             ),
         }
     }
-    assert_eq!(
-        builtins, 0,
-        "`Inst::IntrinsicCall` is lowered for every intrinsic, so nothing is refused at \
-         one — see this case's own note before changing this number"
-    );
     assert_eq!(
         allocations, 0,
         "`Inst::Alloc` is lowered, so nothing is refused at one — see this case's \
@@ -4458,61 +4440,6 @@ fn a_snapshot_of_references_survives_a_collection_from_compiled_code() {
     );
 }
 
-/// Every `call` of `std.float.parse` in `program`, made back into the
-/// `intrinsic-call` of `Intrinsic::FloatParse` it was, over the same arguments
-/// into the same answer.
-///
-/// Issue #432 made `Float.parse` a Cove body (ADR 0072), and it was the last
-/// operation a program lowered to an intrinsic call, so no source emits one
-/// now. The mechanism is still here until the change that deletes it, and so is
-/// the case below that holds its report to account, which needs a mediated
-/// call to count: this puts one back by hand, as `cove-runtime`'s own
-/// `World::with_the_parse_intrinsic` does for `vm::report`'s cases.
-fn restore_the_parse_intrinsic(program: &mut cove_ir::Program) {
-    let parse = program
-        .function_named("std.float", "parse")
-        .expect("every program carries `std.float.parse`");
-    let result = program.functions[parse.index()].returns;
-    let site = cove_ir::SiteId(program.intrinsic_sites.len() as u32);
-    program.intrinsic_sites.push(cove_ir::IntrinsicSite {
-        intrinsic: cove_ir::Intrinsic::FloatParse,
-        result,
-    });
-    for f in &mut program.functions {
-        for inst in &mut f.code {
-            if let cove_ir::Inst::Call { dst, callee, args } = *inst {
-                if callee == parse {
-                    *inst = cove_ir::Inst::IntrinsicCall { dst, site, args };
-                }
-            }
-        }
-    }
-    // Nothing names the parse's own functions now, and a lowering that never
-    // reached them would have left them stubs: marked so, so that the
-    // report's static counts are the slice's the case is about, as they were
-    // when the intrinsic call was the lowering's own.
-    for f in &mut program.functions {
-        let own = &*f.module == "std.float"
-            && matches!(
-                &*f.name,
-                "parse"
-                    | "parseMiddle"
-                    | "eiselLemire"
-                    | "timesPowerOfTwo"
-                    | "parseSlow"
-                    | "parseWord"
-                    | "parseRefused"
-                    | "spells"
-                    | "divided"
-                    | "rounded"
-                    | "powerOf"
-            );
-        if own {
-            f.stub = true;
-        }
-    }
-}
-
 /// One run of `countsTheBoundary`, counted when `count` says so, answering the
 /// report it took.
 fn counted_run(
@@ -4550,13 +4477,18 @@ fn counted_run(
 ///
 /// ADR 0058's Phase 1 asks for "emitted IR, mediated intrinsics, encoded VM
 /// instructions, native-to-VM crossings and native-to-runtime calls" to be
-/// reported separately. `countsTheBoundary` is refused and calls
+/// reported separately; mediated intrinsics went with the mechanism in ADR
+/// 0073, and the rest are here. `countsTheBoundary` is refused and calls
 /// `parse` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
 /// `byteLength` and `push` `n` times each in machine code. So each lands in a
 /// different place, and a report that lumped any two of them together would fail
 /// one of the rows below:
 ///
-/// - `Float.parse`: `n` from the encoded tier, none from native code;
+/// - `Float.parse`: `std.float.parse`, a library call the encoded tier makes
+///   `n` times and a VM-to-native crossing each time, because the parser
+///   compiles and its caller does not. It was an `intrinsic-call` the case put
+///   back by hand, to have a mediated call to count, until ADR 0073 deleted the
+///   mechanism;
 /// - `String.byteLength`: not an intrinsic at all. It is `std.string` over
 ///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
@@ -4573,11 +4505,9 @@ fn counted_run(
 /// static counts are this slice's own.
 #[test]
 fn the_boundary_report_counts_each_quantity_apart() {
-    use cove_ir::Intrinsic;
-    use cove_runtime::BoundaryReport;
     const N: i64 = 40;
     let (sources, program) = checked();
-    let mut lowered = cove_ir::lower_entry(
+    let lowered = cove_ir::lower_entry(
         &program,
         &sources,
         &cove_sema::HostSchemas::new(),
@@ -4585,7 +4515,6 @@ fn the_boundary_report_counts_each_quantity_apart() {
         "countsTheBoundary",
     )
     .expect("the fixture lowers");
-    restore_the_parse_intrinsic(&mut lowered);
     let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
     let runtime = Runtime::new(
         Arc::clone(&program),
@@ -4615,42 +4544,26 @@ fn the_boundary_report_counts_each_quantity_apart() {
     // Emitted IR is a fact about the program, so every run says the same.
     assert_eq!(on_vm.emitted, on_native.emitted);
     assert_eq!(on_vm.emitted, uncounted.emitted);
-    assert!(
-        on_vm.emitted.instructions > on_vm.emitted.intrinsic_sites,
-        "{:?}",
-        on_vm.emitted
-    );
-    let row = |report: &BoundaryReport, intrinsic: Intrinsic| {
-        report
-            .intrinsic(intrinsic)
-            .unwrap_or_else(|| panic!("the program names {intrinsic}"))
-    };
-    assert_eq!(row(&on_vm, Intrinsic::FloatParse).sites, 1);
-    assert_eq!(
-        on_vm.emitted.intrinsic_sites,
-        on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
-        "every site is some intrinsic's"
-    );
+    assert!(on_vm.emitted.instructions > 0, "{:?}", on_vm.emitted);
 
-    // Mediated intrinsics, by tier.
+    // The library: `byteLength` was expanded, so nothing is left to call of
+    // it; what is left is `std.float.parse` and the functions behind it, which
+    // is a call site from `countsTheBoundary` and the parser's own ways out.
+    // How many of those there are is `std.float`'s shape and not this case's,
+    // so only that there are some is asserted.
+    assert!(on_vm.emitted.library_call_sites >= 1, "{:?}", on_vm.emitted);
+    // Every call made is the refused caller's, from the encoded tier, one per
+    // turn: `2.5` takes the parser's fast path, which calls nothing. That is
+    // the same on every run, whichever table was bound, because the caller is
+    // encoded on every one of them.
     let n = N as u64;
-    let calls = |report: &BoundaryReport, intrinsic: Intrinsic| {
-        let held = row(report, intrinsic);
-        (held.encoded, held.native)
-    };
-    assert_eq!(calls(&on_vm, Intrinsic::FloatParse), (n, 0));
-    for report in [&on_native, &uncounted] {
-        assert_eq!(calls(report, Intrinsic::FloatParse), (n, 0));
-        // Sorted by dynamic calls, most first.
-        assert!(report
-            .intrinsics
-            .windows(2)
-            .all(|pair| pair[0].calls() >= pair[1].calls()));
+    for report in [&on_vm, &on_native, &uncounted] {
+        assert_eq!(
+            report.library_calls.encoded, n,
+            "{:?}",
+            report.library_calls
+        );
     }
-
-    // The library: `byteLength` was expanded, so nothing is left to call.
-    assert_eq!(on_vm.emitted.library_call_sites, 0, "{:?}", on_vm.emitted);
-    assert_eq!(on_vm.library_calls.encoded, 0);
     assert_eq!(
         on_vm.library_calls.native, None,
         "no tier, so no native count"
@@ -4678,8 +4591,10 @@ fn the_boundary_report_counts_each_quantity_apart() {
     assert_eq!(on_vm.tiers, None);
     assert_eq!(on_vm.helpers, None);
     let tiers = on_native.tiers.expect("a native tier was installed");
-    // Two: the marker's `fn(v) { v }`, which compiles, and `measuresAndPushes`.
-    assert_eq!(tiers.vm_to_native, 2, "{tiers:?}");
+    // The marker's `fn(v) { v }`, which compiles, `measuresAndPushes`, and one
+    // per turn for `std.float.parse`, which compiles and is called from the
+    // refused, encoded frame.
+    assert_eq!(tiers.vm_to_native, 2 + n, "{tiers:?}");
     assert_eq!(uncounted.tiers, Some(tiers));
 
     // Native-to-runtime calls: counted with the counting table, and said to be
@@ -4699,10 +4614,6 @@ fn the_boundary_report_counts_each_quantity_apart() {
         };
         assert_eq!(calls, expected, "{op:?}: {helpers:?}");
     }
-    assert_eq!(
-        helpers.intrinsic, 0,
-        "no intrinsic was mediated: {helpers:?}"
-    );
     // Every call compiled code made went out through `open` or `call` — an `open`
     // whose callee has no machine code runs the mediated call itself, and is
     // still one `open` — and only a direct one comes back through `close`.

@@ -49,7 +49,7 @@
 use std::time::Duration;
 
 use cove_ir::{FunctionId, Program};
-use cove_native::{IntrinsicCode, Unavailable, WindowCode};
+use cove_native::{Unavailable, WindowCode};
 
 use crate::vm::exec::native::Tiered;
 use crate::NativeEntry;
@@ -90,22 +90,6 @@ pub struct NativeProgram {
     ///
     /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     windows: WindowCode,
-    /// How much of `code_bytes` is [ADR 0064] mediated intrinsic calls, by
-    /// variant, and how many call sites of each variant were emitted.
-    ///
-    /// Beside the windows above because that is where ADR 0064's Decision 7
-    /// asks for it — "machine-code bytes attributable to intrinsic calls,
-    /// beside the window bytes ADR 0063 already reports" — and the two answer
-    /// the same question about different parts of the same total. What this one
-    /// is *for* is different, though: a window's bytes are asked after because
-    /// ADR 0062 made a program larger and something had to say what of, while
-    /// these bytes are the size of a boundary ADR 0064 intends to delete, so the
-    /// figure a reader wants from them is a share that should fall with every
-    /// migrated variant and reach zero when the last one goes. See
-    /// [`IntrinsicCode`] for why the bytes are optional and the sites are not.
-    ///
-    /// [ADR 0064]: ../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    intrinsics: IntrinsicCode,
     compile: Duration,
     /// Whether the code was compiled against the counting helpers. See
     /// [`compile_counting`].
@@ -157,8 +141,7 @@ pub struct Refused {
 /// The same pair [`Refused::instruction`] and [`Refused::blocked`] name for the
 /// *first* blocker, carried so the whole set can be grouped and counted: two
 /// instructions with the same opcode and the same subject are one blocker
-/// however many pcs they sit at, and two `IntrinsicCall`s of different builtins
-/// are two.
+/// however many pcs they sit at, and two `Alloc`s of different layouts are two.
 ///
 /// A `String` inside for the reason [`Refused::reason`] is: this type has to
 /// exist in a build with no code generator, because the CLI must be able to
@@ -168,7 +151,7 @@ pub struct Blocker {
     /// The opcode, by the name `cove_ir::bytecode::Op` gives it. Same spelling
     /// as `Refused::instruction`.
     pub instruction: Option<String>,
-    /// What that opcode was about, for the two aggregate opcodes. See
+    /// What that opcode was about, for the aggregate opcodes. See
     /// [`Blocked`].
     pub blocked: Option<Blocked>,
 }
@@ -177,13 +160,13 @@ pub struct Blocker {
 ///
 /// An opcode is the unit [`Refused::instruction`] reports and it is the right one
 /// for deciding *whether* to lower a family. It is the wrong one for deciding
-/// *what to build*, because two of the opcodes at the top of a ranked table are
-/// aggregates: `IntrinsicCall` is every builtin the language has, and the `Alloc`
-/// opcodes are every layout a program declares. "Lower `IntrinsicCall`" is not a
-/// task; "lower `String.byteAt`" is.
+/// *what to build*, because the `Alloc` opcodes at the top of a ranked table are
+/// an aggregate: every layout a program declares. `IntrinsicCall` was the other,
+/// every builtin the language had, until ADR 0073 deleted it with the last
+/// variant.
 ///
 /// So this is the second key a census groups by, and it exists for exactly the
-/// two aggregates. Everything else — `LoadField`, `Str`, `RunFinish` — names
+/// aggregates. Everything else — `LoadField`, `Str`, `RunFinish` — names
 /// one operation already, and inventing a subject for it would add a column that
 /// repeats the opcode.
 ///
@@ -192,10 +175,6 @@ pub struct Blocker {
 /// generator, because the CLI must be able to name the report it cannot produce.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Blocked {
-    /// [`Inst::IntrinsicCall`](cove_ir::Inst::IntrinsicCall)'s builtin, as the
-    /// receiver and the operation the IR's own `Builtin` names it by:
-    /// `String.byteAt`, `Vector.push`.
-    Intrinsic(String),
     /// [`Inst::Alloc`](cove_ir::Inst::Alloc)'s layout: what is being allocated.
     ///
     /// Both halves are carried because neither is the other. The name is the
@@ -282,23 +261,6 @@ impl NativeProgram {
         self.windows
     }
 
-    /// Which part of [`code_bytes`](Self::code_bytes) is ADR 0064's mediated
-    /// intrinsic calls, and how many call sites of each variant were emitted.
-    ///
-    /// The bytes are `None` from a code generator that cannot attribute them,
-    /// which is a fact about the generator rather than about the program —
-    /// [`IntrinsicCode`] says which and why. The sites are counted either way.
-    ///
-    /// The sites are **static**: this is a fact about a compiled program and
-    /// not about a run, exactly as [`Refused`] is, and how often each variant
-    /// was actually called comes from the run's own boundary report. A reader
-    /// who wants both has to join them, and that is the honest shape — a
-    /// program that emits one `String.length` site and calls it 405,588 times
-    /// has one site.
-    pub fn intrinsic_code(&self) -> IntrinsicCode {
-        self.intrinsics
-    }
-
     /// What compiling cost, which is never part of what executing cost.
     pub fn compile_time(&self) -> Duration {
         self.compile
@@ -351,7 +313,6 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
     let mut done = Vec::new();
     let mut code_bytes = 0u64;
     let mut windows = WindowCode::default();
-    let mut intrinsics = IntrinsicCode::default();
     // One clock over the whole loop rather than one per function: what issue #369
     // asks to keep apart from execution is the *total*, and a per-function sample
     // is the comparison harness's question rather than this one's.
@@ -370,7 +331,6 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
             Some(compiled) => {
                 code_bytes += u64::from(compiled.code_bytes);
                 windows.add(&compiled.windows);
-                intrinsics.add(&compiled.intrinsics);
                 done.push((id, compiled));
             }
             None => refusals.push(refused_row(program, id)),
@@ -392,7 +352,6 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
         stubs,
         code_bytes,
         windows,
-        intrinsics,
         compile,
         counts_helpers: counting,
     })
@@ -448,18 +407,14 @@ fn grouped_blockers(program: &Program, function: &cove_ir::Function) -> Vec<(Blo
     rows
 }
 
-/// What the instruction at `pc` operates on, for the two opcodes that aggregate.
+/// What the instruction at `pc` operates on, for the opcodes that aggregate.
 ///
-/// See [`Blocked`] for why only two. The `None` arm is the ordinary answer and
+/// See [`Blocked`] for why only those. The `None` arm is the ordinary answer and
 /// not a failure: most opcodes are their own subject.
 #[cfg(feature = "template")]
 fn blocked_on(program: &Program, function: &cove_ir::Function, pc: u32) -> Option<Blocked> {
     use cove_ir::Inst;
     match function.code.get(pc as usize)? {
-        Inst::IntrinsicCall { site, .. } => {
-            let held = program.intrinsic_site(*site);
-            Some(Blocked::Intrinsic(held.intrinsic.to_string()))
-        }
         Inst::Alloc { layout, .. } => {
             let held = program.layout(*layout);
             Some(Blocked::Allocation {

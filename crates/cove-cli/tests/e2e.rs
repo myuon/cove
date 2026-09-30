@@ -414,7 +414,7 @@ impl Case {
     /// to reach a suite of `test fn`s rather than to choose a backend, and a
     /// suite of refusals is precisely the thing worth running on both — the
     /// two evaluators word a runtime refusal in two different places
-    /// (`cove_runtime::builtins` and `cove_runtime::vm::intrinsics`), so
+    /// (`cove_runtime::builtins` and the standard library's Cove), so
     /// agreement between them is a fact about the language and not about the
     /// harness.
     ///

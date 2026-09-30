@@ -1163,7 +1163,7 @@ pub fn call_core(
             Value(Repr::Struct(s)) if s.opaque
         )))),
         // An opaque value's text is `Display for Value`'s, which is the text
-        // the machine's `intrinsics::handle_text` writes for a handle.
+        // the machine's `text_of_handle` writes for a handle.
         "dynamicHandleText" => Ok(Value::string(args[0].erased().to_string())),
         // No render path is ever made on this evaluator: its rendering is
         // `Display for Value`, one walk over the whole value, and a path is

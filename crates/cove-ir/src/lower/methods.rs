@@ -8,12 +8,14 @@
 //!
 //! # The machine's table is the specification
 //!
-//! `cove_runtime::vm::intrinsics` dispatches on the pair
-//! [`IntrinsicSite`] names — a receiver and an operation — and what it implements
-//! is what may be emitted here. Every one of them takes its operands in one
-//! shape: the receiver first where there is one, then the arguments in
-//! source order, and the answer is the word the checker settled for the
-//! call. An operation the machine does not have is a gap naming it,
+//! [`MACHINE_METHODS`] and [`ASSOCIATED`] name the receiver-and-operation
+//! pairs the machine answers itself, and each of them is one instruction: a
+//! [`Convert`] or a typed scalar operation over the receiver and the
+//! arguments in source order, whose answer is the word the checker settled
+//! for the call. The runtime call a pair could once lower to —
+//! `Inst::IntrinsicCall` — was deleted by ADR 0073, once issue #432 had
+//! migrated its last variant. An operation the machine does not have is a
+//! gap naming it,
 //! `` `Array.map` `` rather than "a method call", because the message is
 //! what says where the next piece of work is.
 //!
@@ -43,9 +45,6 @@ use super::frame::Val;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START};
 use super::{Body, Dest, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, MinMax, Num, Slot, Storage};
-use crate::intrinsic::Intrinsic;
-use crate::layout::LayoutId;
-use crate::program::IntrinsicSite;
 
 impl Body<'_> {
     /// A method call on a value of a builtin type.
@@ -341,9 +340,6 @@ impl Body<'_> {
         let Some(result) = self.layout(&ty, expr.span) else {
             return self.dead(expr);
         };
-        if !self.answer_layouts(&ty, expr.span) {
-            return self.dead(expr);
-        }
 
         // A conversion between two scalar representations is one
         // instruction over one operand, and not a runtime call — ADR 0058's
@@ -421,90 +417,14 @@ impl Body<'_> {
             return dst;
         }
 
-        let held_receiver = base.map(|base| self.expr(base));
-        let mut held = Vec::with_capacity(args.len());
-        for arg in args {
-            held.push(self.expr(&arg.value));
-        }
-        let mut passed = Vec::with_capacity(args.len() + 1);
-        passed.extend(held_receiver.iter().map(Val::arg));
-        passed.extend(held.iter().map(Val::arg));
-
-        // The receiver and the arguments are in locations of their own by
-        // now and the destination was allocated before this expression was
-        // lowered, so the builtin may write the run the surrounding form
-        // asked for. See `Body::expr_into`.
-        let dst = self.answer_at(want, result);
-        self.emit_intrinsic_call(dst.slot, receiver, operation, &passed, result, expr.span);
-        for value in held.into_iter().rev() {
-            self.release(value, expr.span);
-        }
-        // The receiver dies with the call: nothing after the answer is
-        // written reads it.
-        if let Some(value) = held_receiver {
-            self.release(value, expr.span);
-        }
-        dst
-    }
-
-    /// Interns the families the machine will look for while it builds this
-    /// call's answer.
-    ///
-    /// `cove_runtime::vm::intrinsics` finds a family by searching the
-    /// program's layout table, so a family the program never otherwise
-    /// mentions is a refusal at run time rather than a missing instruction.
-    /// The answer's own layout is interned by the caller; what is left is
-    /// the builtin `Error`, when the answer is a `Result`. The machine
-    /// builds the `Error` carrying a failure's message *itself*, and the
-    /// `Result` layout describes its `Err` words without saying what
-    /// declared them — so interning the `Result` alone would leave
-    /// `Int.parse("x")` with nowhere to put the message.
-    fn answer_layouts(&mut self, ty: &Ty, span: Span) -> bool {
-        if let Ty::Result(_, error) = ty {
-            if matches!(**error, Ty::Error) && self.layout(error, span).is_none() {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// One [`Inst::IntrinsicCall`], and the [`IntrinsicSite`] it names.
-    ///
-    /// `receiver` and `operation` are the language reference's naming of the
-    /// call — `"Array"`, `"slice"` — and this resolves the pair to the
-    /// [`Intrinsic`] `cove-runtime` dispatches on rather than carrying the
-    /// pair itself: [ADR
-    /// 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
-    /// asks that a builtin be identified statically, not matched by string at
-    /// run time. Every caller's pair is a member of [`MACHINE_METHODS`] or
-    /// [`ASSOCIATED`] — the tables this lowering is written against — so a
-    /// pair that resolves to
-    /// nothing is a mismatch between this module and `cove_ir::intrinsic`
-    /// and is reported as the internal bug it is rather than lowered as a
-    /// call nothing answers.
-    ///
-    /// The pool interns, so a program that splits a string in twenty places
-    /// names one builtin and one argument list per distinct operand shape.
-    pub(super) fn emit_intrinsic_call(
-        &mut self,
-        dst: Slot,
-        receiver: &str,
-        operation: &str,
-        args: &[crate::program::Arg],
-        result: LayoutId,
-        span: Span,
-    ) {
-        let intrinsic = Intrinsic::from_names(receiver, operation).unwrap_or_else(|| {
-            unreachable!(
-                "`{receiver}.{operation}` has no `Intrinsic`; `cove_ir::intrinsic` was not \
-                 taught an operation this lowering emits"
-            )
-        });
-        let site = self
-            .pool
-            .intrinsic_site(IntrinsicSite { intrinsic, result });
-        let args = self.pool.args.intern(args.to_vec());
-        self.emit(Inst::IntrinsicCall { dst, site, args }, span);
+        // Every pair `MACHINE_METHODS` and `ASSOCIATED` name is a conversion
+        // or a typed scalar operation, which the test below holds the two
+        // tables to; the runtime call that answered any other pair was
+        // `Inst::IntrinsicCall`, which ADR 0073 deleted.
+        unreachable!(
+            "`{receiver}.{operation}` is on a machine table and is neither a conversion nor a \
+             typed scalar operation"
+        )
     }
 
     /// The argument shapes a builtin method has no place for, named as the
@@ -561,8 +481,8 @@ impl Body<'_> {
     /// `f(a.snapshot(), g())` would then hand the call whatever `g` left in
     /// `a`.
     ///
-    /// There is no `("Any", "snapshot")` arm in
-    /// `cove_runtime::vm::intrinsics` and this does not want one. A copy is
+    /// There is no `("Any", "snapshot")` arm in the runtime and this does not
+    /// want one. A copy is
     /// instructions the machine already has, and the recursion the second
     /// answer needs is a walk that may call a conformance — which
     /// `docs/LINEAR_VM.md` puts in the lowering rather than in a builtin,
@@ -628,8 +548,8 @@ impl Body<'_> {
     ///
     /// A `Range` is three inline words — `start`, `end`, and whether the end
     /// is one the range yields — so every question about one is a comparison
-    /// of words already in the frame. `cove_runtime::vm::intrinsics` has no
-    /// `Range` arm and does not need one, for the reason `Option` and
+    /// of words already in the frame. The runtime has no `Range` arm and does
+    /// not need one, for the reason `Option` and
     /// `Result` have none: what a builtin would be handed is what the
     /// instruction set already reads.
     ///
@@ -866,8 +786,7 @@ fn snapshots_itself(ty: &Ty) -> bool {
     )
 }
 
-/// The methods the machine performs, by the receiver and operation
-/// [`IntrinsicSite`] names them with.
+/// The methods the machine performs, by receiver and operation.
 ///
 /// Every one of them is an operation of a value that is one word or is text,
 /// and none of them is something an instruction expresses: `Int.abs` at
@@ -913,9 +832,10 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// [`Body::call_std_binding`] like `Duration.micros`, over the checked
 /// conversion `Inst::FloatTruncate`.
 /// **A pair leaves this table
-/// when the *method* leaves the machine, not when the intrinsic does** — an
-/// entry here is what says the lowering answers the call at all, and the three
-/// ways it can answer are an instruction, a conversion and a runtime call.
+/// when the *method* leaves the machine** — an entry here is what says the
+/// lowering answers the call at all, and the two ways it can answer are an
+/// instruction and a conversion. The third, a runtime call, was
+/// `Inst::IntrinsicCall`, and ADR 0073 deleted it.
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("Int", "toFloat"),
     ("Float", "round"),
@@ -957,11 +877,11 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
 /// the radix where the ten was.
 ///
 /// **`Float.parse` is not here either**, and it was the last pair on this table
-/// that was an [`Intrinsic`]: issue #432 made it `std.float.parse`, a Cove body
+/// that was an `Intrinsic`: issue #432 made it `std.float.parse`, a Cove body
 /// with no instruction of its own (ADR 0072), resolved by
-/// [`Body::call_associated`] like `Int.parse`. So **no pair left on either
-/// table reaches [`Body::emit_intrinsic_call`]**, and no program emits an
-/// `Inst::IntrinsicCall`; the mechanism itself is a later change's to delete.
+/// [`Body::call_associated`] like `Int.parse`. That left no pair on either
+/// table reaching a runtime call, and ADR 0073 deleted the mechanism —
+/// `Inst::IntrinsicCall` and the `Intrinsic` it named.
 const ASSOCIATED: &[(&str, &str)] = &[("Duration", "nanos")];
 
 /// The [`Convert`] a machine method or associated function is, where it is
@@ -1072,11 +992,8 @@ fn scalar_operation(receiver: &str, operation: &str, has_receiver: bool) -> Opti
 /// [`ASSOCIATED`] check below had went with the pair.
 pub(super) fn associated(head: &str, name: &str, ty: &Ty) -> bool {
     if ASSOCIATED.contains(&(head, name)) {
-        return match head {
-            "Duration" => matches!(ty, Ty::Duration),
-            "Int" => answers(ty, &Ty::Int),
-            _ => false,
-        };
+        // `Duration.nanos` is the one name left, and it answers a `Duration`.
+        return matches!(ty, Ty::Duration);
     }
     if cove_schema::builtins::standard_associated_binding(head, name).is_none() {
         return false;
@@ -1094,10 +1011,10 @@ fn answers(ty: &Ty, ok: &Ty) -> bool {
 
 /// What the language calls the type a method was written on.
 ///
-/// It is the name [`IntrinsicSite::receiver`] carries and the name a gap names the
-/// work with, and those are one name for one reason: the set of operations
-/// is the language reference's, and the reference writes `String.split` and
-/// `Array.map`.
+/// It is the name the machine tables are written in and the name a gap names
+/// the work with, and those are one name for one reason: the set of
+/// operations is the language reference's, and the reference writes
+/// `String.split` and `Array.map`.
 ///
 /// A declared `struct` or `enum` answers `None` rather than its own name.
 /// Its methods are not the machine's and never will be — they are lowered
@@ -1133,35 +1050,31 @@ fn receiver_name(ty: &Ty) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Every pair [`MACHINE_METHODS`] and [`ASSOCIATED`] name is an
-    /// [`Intrinsic`] `emit_intrinsic_call` can resolve, or a [`conversion`] or
-    /// a [`scalar_operation`] that never reaches it.
+    /// Every pair [`MACHINE_METHODS`] and [`ASSOCIATED`] name is a
+    /// [`conversion`] or a [`scalar_operation`].
     ///
-    /// `emit_intrinsic_call` treats a pair with no `Intrinsic` as an internal bug —
-    /// see its doc comment — so a table entry that resolved to nothing would
-    /// not fail here; it would panic the first time a program's lowering
-    /// reached it. This is what checks the two tables against
-    /// `cove_ir::intrinsic` directly, independent of which corpus programs
-    /// happen to exercise which entry.
+    /// `Body::machine_call` treats a pair that is neither as an internal bug —
+    /// there is no runtime call left for it to lower to — so a table entry
+    /// that resolved to nothing would not fail here; it would panic the first
+    /// time a program's lowering reached it. This is what checks the two
+    /// tables directly, independent of which corpus programs happen to
+    /// exercise which entry.
     #[test]
-    fn machine_methods_and_associated_are_all_named_intrinsics() {
+    fn machine_methods_and_associated_are_all_instructions() {
         let named = |receiver, operation, has_receiver| {
-            Intrinsic::from_names(receiver, operation).is_some()
-                || conversion(receiver, operation, has_receiver).is_some()
+            conversion(receiver, operation, has_receiver).is_some()
                 || scalar_operation(receiver, operation, has_receiver).is_some()
         };
         for &(receiver, operation) in MACHINE_METHODS {
             assert!(
                 named(receiver, operation, true),
-                "`{receiver}.{operation}` has no `Intrinsic` and is neither a \
-                 conversion nor a scalar operation"
+                "`{receiver}.{operation}` is neither a conversion nor a scalar operation"
             );
         }
         for &(receiver, operation) in ASSOCIATED {
             assert!(
                 named(receiver, operation, false),
-                "`{receiver}.{operation}` has no `Intrinsic` and is neither a \
-                 conversion nor a scalar operation"
+                "`{receiver}.{operation}` is neither a conversion nor a scalar operation"
             );
         }
     }

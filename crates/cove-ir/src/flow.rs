@@ -129,13 +129,6 @@ impl Inst {
                     .map_or(1, |op| width(op.result));
                 f(dst, answer);
             }
-            Inst::IntrinsicCall { dst, site, .. } => {
-                let answer = program
-                    .intrinsic_sites
-                    .get(site.index())
-                    .map_or(1, |builtin| width(builtin.result));
-                f(dst, answer);
-            }
             // The two rows whose first entry is written rather than read: a
             // run slice's `dst`, which receives a fresh run's address, and a
             // run find's, which receives an offset. One word either way.
@@ -223,7 +216,6 @@ impl Inst {
             | Inst::CallClosure { .. }
             | Inst::CallHost { .. }
             | Inst::CallResource { .. }
-            | Inst::IntrinsicCall { .. }
             | Inst::Alloc { .. }
             | Inst::LoadField { .. }
             | Inst::StoreField { .. }

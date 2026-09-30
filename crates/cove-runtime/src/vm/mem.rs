@@ -821,8 +821,6 @@ impl Space {
         self.store(addr, header(layout, len));
         alloc.allocated_words += words;
         alloc.allocations += 1;
-        #[cfg(debug_assertions)]
-        THREAD_ALLOCATIONS.with(|count| count.set(count.get() + 1));
         Some(addr)
     }
 
@@ -1841,37 +1839,10 @@ impl Memory {
         self.stack.words[index] = word;
     }
 
-    /// The `words` words at `slot` of the frame based at `base`, borrowed.
-    ///
-    /// [`Memory::slot`] for a value location wider than a word: what an
-    /// intrinsic read a wide operand through, in place, rather than copying it
-    /// out first (#378, P5-4), until ADR 0068's Phase 4c deleted the last
-    /// intrinsic with a wide operand, `Value.admitKey`. Only this crate's
-    /// tests read one now.
-    #[cfg(test)]
-    #[inline(always)]
-    pub(crate) fn slots(&self, base: u64, slot: u32, words: u32) -> &[u64] {
-        let at = base + slot as u64;
-        debug_assert!(
-            is_stack(at) && self.holds(at, words),
-            "a {words}-word frame run at {at} stays on the stack"
-        );
-        let index = self.stack.at(at);
-        &self.stack.words[index..index + words as usize]
-    }
-
-    /// The same, to be written: where an intrinsic writes an answer wider
-    /// than a word.
-    #[inline(always)]
-    pub(crate) fn slots_mut(&mut self, base: u64, slot: u32, words: u32) -> &mut [u64] {
-        let at = base + slot as u64;
-        debug_assert!(
-            is_stack(at) && self.holds(at, words),
-            "a {words}-word frame run at {at} stays on the stack"
-        );
-        let index = self.stack.at(at);
-        &mut self.stack.words[index..index + words as usize]
-    }
+    // `slots` and `slots_mut` stood here: the words of a value location wider
+    // than a word, which an intrinsic arm read its operands through and wrote
+    // its answer into, in place (#378, P5-4). ADR 0073 deleted the arms with
+    // the `IntrinsicCall` mechanism.
 
     /// Copies `words` words from one frame slot to another.
     ///
@@ -2216,23 +2187,10 @@ impl Memory {
     }
 }
 
-#[cfg(debug_assertions)]
-thread_local! {
-    /// Objects this thread has allocated, from any space.
-    ///
-    /// The allocator's own count is shared by every task of a run, so a
-    /// builtin that allocated nothing can still see it move while another
-    /// task's thread allocates. `Machine::call_intrinsic` checks an
-    /// intrinsic's declared `Effects` against this one instead, which only
-    /// the calling thread moves.
-    static THREAD_ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Objects the calling thread has allocated so far; see [`THREAD_ALLOCATIONS`].
-#[cfg(debug_assertions)]
-pub(crate) fn thread_allocations() -> u64 {
-    THREAD_ALLOCATIONS.with(std::cell::Cell::get)
-}
+// `THREAD_ALLOCATIONS` stood here: the objects one thread had allocated,
+// which `Machine::call_intrinsic` checked an intrinsic's declared `Effects`
+// against under `debug_assertions`. ADR 0073 deleted the mechanism, and the
+// count had no other reader.
 
 #[cfg(test)]
 mod tests {

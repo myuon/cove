@@ -8,7 +8,7 @@
 //!
 //! # They are lowered, not performed
 //!
-//! An assertion could have been an [`Inst::IntrinsicCall`] — a receiver and an
+//! An assertion could have been an `Inst::IntrinsicCall` — a receiver and an
 //! operation the machine recognises — and it is not, because there is
 //! nothing in one the language does not already have. `assertEqual` asks
 //! whether two values are equal, which is `==`; it renders both when they

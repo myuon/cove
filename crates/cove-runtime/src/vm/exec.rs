@@ -49,8 +49,7 @@ use std::time::Duration;
 
 use cove_diag::Span;
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, FunctionId, HostOpId, LayoutId, Program, Repr, Shape, SiteId, Slot,
-    StrId,
+    ArgsId, ArithOp, CmpOp, FunctionId, HostOpId, LayoutId, Program, Repr, Shape, Slot, StrId,
 };
 
 use crate::budget::{Cancellation, Meter, Stopped};
@@ -61,10 +60,9 @@ use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
 use crate::trace::TraceEvent;
 use crate::vm::debug::{halted, Debugger, Resume, Stop};
-use crate::vm::intrinsics::operand::{Dest, Frame as Operands};
 use crate::vm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
 use crate::vm::report::Counting;
-use crate::vm::{boundary, cell, intrinsics};
+use crate::vm::{boundary, cell};
 use crate::wallclock::Instant;
 // The one import of the public `Value` outside `boundary`, and the one thing
 // ADR 0034 allows it for: a host call's arguments and its answer exist as
@@ -465,8 +463,8 @@ pub(crate) struct Machine<'a> {
     // any more — its matcher is `O(1)` in auxiliary space and reads both runs
     // where they are. So the pool had no caller, and a mechanism with no
     // caller cannot be measured: it is deleted rather than kept against a
-    // caller that might arrive. An arm that wants a `&str` calls
-    // `operand::text`, which allocates, as every arm left here already did.
+    // caller that might arrive. ADR 0073 deleted the intrinsic arms with the
+    // mechanism, and `operand::text` with them.
     /// Instructions dispatched, exactly.
     ///
     /// This is an *observable*: `cove-bench` reports it, so does
@@ -640,39 +638,16 @@ pub(crate) struct Machine<'a> {
     /// handed the parent's rather than encoding again, which is what makes
     /// one spawn cost a pointer instead of a second pass over the program.
     encoded: Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError>,
-    /// Whether the intrinsic this machine is running has written its answer
-    /// yet: the checked half of the contract
-    /// [`crate::vm::intrinsics::operand::Frame`] states, that every operand is
-    /// read before the destination — which may be one of the operands' own
-    /// slots — is written (#378, Q5.2). There is no buffer for an operand or
-    /// an answer to be in any more, so this is the only thing that could tell
-    /// an arm it read a slot it had already overwritten.
-    #[cfg(debug_assertions)]
-    answered: bool,
-    /// The last case index each enum wrapper resolved to, and for which
-    /// layout.
-    ///
-    /// `make::some` and its three siblings find their case by *name* —
-    /// `Shape::Enum`'s cases are a run and `Layout::case` scans it comparing
-    /// strings — and they do it once per call. That was 11 ns of a 110 ns
-    /// `String.codePointAtByte`, which is a builtin the lexer in
-    /// `examples/covefmt` calls once per byte of the source it reads.
-    ///
-    /// A memo and not a table, because there is nothing to invalidate: a
-    /// [`Program`]'s layouts are fixed before its first instruction runs, so
-    /// a `(layout, name)` pair has one answer for the whole run. And one
-    /// entry per wrapper rather than a map, because the shape of the miss is
-    /// known — a loop calls one builtin with one result layout over and over,
-    /// so the entry it wants is the one it left there.
-    cases: [Option<(LayoutId, u32)>; 2],
+    // `answered` and `cases` stood here: the checked half of an intrinsic
+    // arm's read-before-write contract, and a memo of the case index each
+    // `Result` wrapper an arm built resolved to. ADR 0073 deleted the arms
+    // with the `IntrinsicCall` mechanism, and nothing else wrote either.
     /// How many words a value of each layout occupies, by [`LayoutId`].
     ///
     /// [`Machine::width`] was `program.layout(id).width()` — an index into
     /// `Program::layouts`, then the length of that `Layout`'s `words` — and
     /// the dispatch loop asks it fifteen times over, once per instruction
-    /// that names a value location. `Machine::call_intrinsic` asks it *twice
-    /// per argument*: once to copy the words out of the frame and once to
-    /// slice the buffer back into operands.
+    /// that names a value location.
     ///
     /// Two chases became one index, which measured about 2.5 ns each — 10 ns
     /// of a 98 ns `String.codePointAtByte`, a builtin the lexer in
@@ -755,22 +730,6 @@ pub(crate) struct Machine<'a> {
     pub(crate) counting: Option<Box<Counting>>,
 }
 
-/// Which of [`Machine::cases`] a wrapper memoises into.
-///
-/// Two constants rather than a hash of the name: the callers are the two
-/// functions in [`crate::vm::intrinsics::make`] and nothing else, so the set is
-/// closed and naming it costs nothing at run time.
-///
-/// There were four. `Some` and `None` went with the last intrinsic that
-/// answered an `Option` — `String.indexOf`, which ADR 0064 moved into
-/// `std.string` over ADR 0065's run search — and an `Option` a Cove body
-/// builds is `Inst::MakeCase`, not a memoised case index.
-#[derive(Clone, Copy)]
-pub(crate) enum Wrapper {
-    Ok = 0,
-    Err = 1,
-}
-
 impl<'a> Machine<'a> {
     /// A machine with no host boundary, for a program that calls none.
     ///
@@ -844,9 +803,6 @@ impl<'a> Machine<'a> {
             // that happened later would happen after a frame was pushed. See
             // the field.
             encoded: encoded::prepare(program),
-            #[cfg(debug_assertions)]
-            answered: false,
-            cases: [None; 2],
             widths: program
                 .layouts
                 .iter()
@@ -930,9 +886,6 @@ impl<'a> Machine<'a> {
             // second pass over the whole program for a pointer's worth of
             // sharing.
             encoded: Ok(encoded),
-            #[cfg(debug_assertions)]
-            answered: false,
-            cases: [None; 2],
             // The parent's, for the reason `encoded` is: a table derived from
             // a program the whole run shares is the same table in every task.
             widths,
@@ -1122,55 +1075,9 @@ impl<'a> Machine<'a> {
         ))
     }
 
-    /// One `IntrinsicCall`, counted — out of line, for [`Machine::tiered`]'s
-    /// reason: what `call_intrinsic` keeps inline is the `Option` test.
-    ///
-    /// Answers the allocation counters as they stand right now, which
-    /// `call_intrinsic` takes before `intrinsics::call` runs so that
-    /// [`Machine::charge_intrinsic_allocations`] can difference against them
-    /// once it returns. This is called only from inside the `Some` arm of
-    /// that `Option` test, so the read is exactly as conditional as the count
-    /// it sits beside — see the module doc's "free when it is off".
-    #[inline(never)]
-    #[cold]
-    fn count_intrinsic(&mut self, site: SiteId) -> (u64, u64) {
-        if let Some(counting) = self.counting.as_deref_mut() {
-            counting.intrinsic(site);
-        }
-        (self.allocations(), self.allocated_words())
-    }
-
-    /// Charges `site` with the allocations and the allocated words
-    /// `intrinsics::call` made, out of line for
-    /// [`Machine::count_intrinsic`]'s reason.
-    ///
-    /// `allocations_before` and `words_before` are the snapshot
-    /// `count_intrinsic` took immediately before the call; read again here,
-    /// immediately after it, the difference is exactly what this one call
-    /// did and not what the run has done since `count_boundary`. Distinct
-    /// from the `#[cfg(debug_assertions)]` snapshot beside it in
-    /// `call_intrinsic`, which reads `thread_allocations()` for an effects
-    /// check and answers to no report.
-    ///
-    /// The subtraction saturates rather than wrapping, and that is belt and
-    /// braces rather than a case this expects: both counters are of what the
-    /// heap handed out *over the whole run, reuse counted each time*, so they
-    /// only ever rise and a collection in the middle of the call does not
-    /// lower either one. A charge of nought is what a future counter that
-    /// could fall should answer here, not a number near `u64::MAX`.
-    #[inline(never)]
-    #[cold]
-    fn charge_intrinsic_costs(&mut self, site: SiteId, allocations_before: u64, words_before: u64) {
-        let allocations = self.allocations().saturating_sub(allocations_before);
-        let words = self.allocated_words().saturating_sub(words_before);
-        if let Some(counting) = self.counting.as_deref_mut() {
-            counting.intrinsic_cost(site, allocations, words);
-        }
-    }
-
     /// `rows` instructions a fused head ran after itself without a dispatch,
     /// counted, and one window of the head's pattern if they reached its commit.
-    /// Out of line for [`Machine::count_intrinsic`]'s reason: what a fused arm
+    /// Out of line for [`Machine::tiered`]'s reason: what a fused arm
     /// keeps inline is the `Option` test.
     #[inline(never)]
     #[cold]
@@ -1181,7 +1088,7 @@ impl<'a> Machine<'a> {
     }
 
     /// What became of one window a fused head named, counted. Out of line for
-    /// [`Machine::count_intrinsic`]'s reason: what a fused arm keeps inline is
+    /// [`Machine::tiered`]'s reason: what a fused arm keeps inline is
     /// the `Option` test, on a path that has already decided to return.
     ///
     /// This is [ADR 0062]'s census, which the ADR left open: `count_fusion`
@@ -1805,43 +1712,6 @@ impl<'a> Machine<'a> {
     /// rather than a walk, because [`cove_ir::Layout`] caches the flattened
     /// words for exactly the readers that are on this path.
     #[inline]
-    /// The index of `case` in the enum `layout`, remembered.
-    ///
-    /// Nothing is searched for. Which `Option` or `Result` a builtin answers
-    /// is carried by [`cove_ir::Inst::IntrinsicCall`] and passed down from
-    /// `vm::intrinsics::call`, because the alternative — looking for an enum of
-    /// that name whose carrying case holds the right payload — cannot tell
-    /// `Result<String, Error>` from `Result<String, cq.diag.Detail>`. Both are
-    /// named `Result` and both carry a `String` in `Ok`, and they are two
-    /// words and four; answering the wrong one is a word run written into a
-    /// destination sized for the other.
-    ///
-    /// What *is* remembered is which index the name resolves to; see
-    /// [`Machine::cases`]. `family` and `case` are the names a diagnostic uses
-    /// when `layout` is not the enum it was expected to be.
-    pub(crate) fn case_index(
-        &mut self,
-        layout: LayoutId,
-        wrapper: Wrapper,
-        family: &str,
-        case: &str,
-    ) -> Result<u32, RuntimeError> {
-        if let Some((held, index)) = self.cases[wrapper as usize] {
-            if held == layout {
-                return Ok(index);
-            }
-        }
-        let index = self
-            .program
-            .layouts
-            .get(layout.index())
-            .filter(|held| matches!(held.shape, Shape::Enum { .. }))
-            .and_then(|held| held.case(case))
-            .ok_or_else(|| crate::vm::intrinsics::operand::unknown_family(family))?;
-        self.cases[wrapper as usize] = Some((layout, index));
-        Ok(index)
-    }
-
     fn width(&self, layout: LayoutId) -> u32 {
         self.widths[layout.index()]
     }
@@ -2136,213 +2006,6 @@ impl<'a> Machine<'a> {
         let answer = answer.map_err(|error| error.at(span))?;
         let result = op.result;
         boundary::from_value(self, result, &answer).map_err(|error| error.at(span))
-    }
-
-    /// Runs one `Inst::IntrinsicCall`: the intrinsic it names, over operands
-    /// read where they are, answering into its destination.
-    ///
-    /// ADR 0058: a runtime call does not "allocate an operand vector, or copy
-    /// a variable result through an untyped temporary solely to cross the
-    /// boundary. Results are written directly to the destination named by the
-    /// slot ABI." So nothing is copied on the way in or on the way out (#378,
-    /// P5-4): the arm is handed the caller's frame base and the instruction's
-    /// own argument list — a [`Frame`](crate::vm::intrinsics::operand::Frame) —
-    /// and the destination — a [`Dest`](crate::vm::intrinsics::operand::Dest) —
-    /// and reads and writes the frame itself. Nothing is re-checked either:
-    /// the intrinsic's identity is static and its operand count, operand
-    /// layouts and answer layout were verified against its signature before
-    /// the program ran (P5-3).
-    ///
-    /// Out of line on purpose. Every arm behind it is a cold call next to the
-    /// dispatch loop's own instructions, and the loop is sensitive to what is
-    /// inlined into it (#378): what this costs the loop is one call.
-    #[inline(never)]
-    fn call_intrinsic(
-        &mut self,
-        base: u64,
-        dst: Slot,
-        site: SiteId,
-        args: ArgsId,
-    ) -> Result<(), RuntimeError> {
-        // Nothing unless a caller asked for the boundary report; see
-        // [`Machine::counting`]. A discriminant test with the counting out of
-        // line, which is [`Machine::tiered`]'s shape. When it is on,
-        // `count_intrinsic` also answers the allocation counters as they
-        // stand before the call, so `allocation_charge` below is a value
-        // rather than a second, unconditional read of `self.counting`.
-        let allocation_charge = self.counting.is_some().then(|| self.count_intrinsic(site));
-        let program = self.program;
-        let called = program.intrinsic_site(site);
-        let list = program.arg_list(args);
-
-        // What the declared `Effects` of this call promise, checked against
-        // what it actually did — see [ADR
-        // 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)'s
-        // "Runtime calls are statically identified and typed". A native
-        // backend trusts these flags to decide whether generated code
-        // publishes roots, synchronizes the program counter or reloads a
-        // heap pointer, so a flag this backend's own VM arm does not live up
-        // to would be silently unsound there; `cargo t` runs under
-        // `--profile checked`, which keeps `debug_assertions` on, so the
-        // whole corpus exercises this rather than only a fuzzer that hits
-        // debug builds. The operand count is asserted here once for every
-        // arm, because the verifier already refused a call that disagrees
-        // with the signature and no arm re-checks it.
-        #[cfg(debug_assertions)]
-        let allocations_before = {
-            let signature = called.intrinsic.signature();
-            debug_assert!(
-                list.len() == signature.operands.len(),
-                "`{}` was verified to take {} operand(s), and was handed {}",
-                called.intrinsic,
-                signature.operands.len(),
-                list.len()
-            );
-            super::mem::thread_allocations()
-        };
-
-        self.begin_intrinsic();
-        let answered = intrinsics::call(
-            self,
-            called.intrinsic,
-            Operands::new(base, list),
-            Dest::new(base, dst, called.result),
-        );
-
-        // What an arm reported having examined was charged here as work — [ADR
-        // 0064](../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-        // Decision 7 — until no arm was left to report any: the text arms that
-        // walked their receivers became Cove over ADR 0064's and ADR 0065's
-        // migrations, and the last two walks, `equal`'s and `key`'s, went in
-        // [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
-        // Phase 5 with the report column that only ever read nought. No
-        // remaining `Intrinsic` declared `Effects::BULK_WORK`, and issue #536
-        // deleted the flag, so every variant is one unit of work a call, like
-        // the instruction it is.
-
-        // Read again immediately after the call returns, so the difference
-        // from `allocation_charge`'s snapshot is exactly what this call did.
-        // `None` when counting is off, which is the same test `allocation_charge`
-        // already paid — nothing new is read unconditionally.
-        if let Some((allocations_before, words_before)) = allocation_charge {
-            self.charge_intrinsic_costs(site, allocations_before, words_before);
-        }
-
-        // An intrinsic that answered a `RuntimeError` while its declared
-        // `Effects` do not carry `MAY_RAISE` has broken an invariant this
-        // backend relies on, and it is checked in *every* profile rather than
-        // under `debug_assertions` with the three below it. Compiled code omits
-        // the outcome test for such a call — see
-        // [`IntrinsicProtocol`](cove_native::IntrinsicProtocol) — so the error
-        // would be stashed in the native bridge and read by whatever raised
-        // next: a sentence from somewhere else, attached to a fault somewhere
-        // else, which is the worst failure available. One test on a path that
-        // only an `Err` reaches, and the panic itself is out of line.
-        if let Err(error) = &answered {
-            if !called
-                .intrinsic
-                .effects()
-                .contains(cove_ir::Effects::MAY_RAISE)
-            {
-                unraisable(called.intrinsic, error);
-            }
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            let intrinsic = called.intrinsic;
-            let effects = intrinsic.effects();
-            debug_assert!(
-                super::mem::thread_allocations() == allocations_before
-                    || effects.contains(cove_ir::Effects::MAY_ALLOCATE),
-                "`{intrinsic}` allocated, but its declared `Effects` do not carry \
-                 `MAY_ALLOCATE`"
-            );
-            debug_assert!(
-                answered.is_err() || self.answered,
-                "`{intrinsic}` answered without writing its destination"
-            );
-        }
-        answered
-    }
-
-    /// Marks the start of one intrinsic's run, for the checked half of
-    /// [`Frame`](crate::vm::intrinsics::operand::Frame)'s read-before-write
-    /// contract. Nothing at all without `debug_assertions`.
-    #[inline(always)]
-    pub(crate) fn begin_intrinsic(&mut self) {
-        #[cfg(debug_assertions)]
-        {
-            self.answered = false;
-        }
-    }
-
-    /// Word `slot` of the frame based at `base`, read as an intrinsic's
-    /// operand.
-    ///
-    /// Panics under `debug_assertions` if the running intrinsic has already
-    /// written its answer: the destination may be this very slot.
-    #[inline(always)]
-    pub(crate) fn operand_word(&self, base: u64, slot: u32) -> u64 {
-        self.unanswered();
-        self.mem.slot(base, slot)
-    }
-
-    /// The `width` words of an intrinsic's destination at `slot` of the frame
-    /// based at `base`, to be written.
-    #[inline(always)]
-    pub(crate) fn answer_words(&mut self, base: u64, slot: u32, width: u32) -> &mut [u64] {
-        #[cfg(debug_assertions)]
-        {
-            self.answered = true;
-        }
-        self.mem.slots_mut(base, slot, width)
-    }
-
-    /// Writes one word of an intrinsic's answer. See
-    /// [`Machine::answer_words`]. Only this crate's tests write one now.
-    #[cfg(test)]
-    #[inline(always)]
-    pub(crate) fn answer_word(&mut self, base: u64, slot: u32, word: u64) {
-        #[cfg(debug_assertions)]
-        {
-            self.answered = true;
-        }
-        self.mem.set_slot(base, slot, word);
-    }
-
-    #[inline(always)]
-    fn unanswered(&self) {
-        #[cfg(debug_assertions)]
-        assert!(
-            !self.answered,
-            "an intrinsic read an operand after writing its answer; every operand is read \
-             before the destination is written, because the destination may be one of them \
-             (#378, Q5.2)"
-        );
-    }
-
-    /// Pushes a frame holding `words` for a test to call an intrinsic in,
-    /// answering its base.
-    #[cfg(test)]
-    pub(crate) fn push_test_frame(&mut self, words: &[u64]) -> u64 {
-        let base = self
-            .mem
-            .push_frame(words.len() as u32)
-            .expect("a test frame fits the stack");
-        self.mem
-            .slots_mut(base, 0, words.len() as u32)
-            .copy_from_slice(words);
-        base
-    }
-
-    /// Pops a frame [`Machine::push_test_frame`] pushed, answering the `len`
-    /// words it holds now.
-    #[cfg(test)]
-    pub(crate) fn pop_test_frame(&mut self, base: u64, len: u32) -> Vec<u64> {
-        let words = self.mem.slots(base, 0, len).to_vec();
-        self.mem.pop_frame(base);
-        words
     }
 
     /// Places every entry of [`Program::strings`] into the heap, in
@@ -4751,42 +4414,6 @@ fn float_arith(op: ArithOp, a: f64, b: f64) -> f64 {
         ArithOp::Div => a / b,
         ArithOp::Rem => a % b,
     }
-}
-
-/// An intrinsic answered a `RuntimeError` while its declared
-/// [`Effects`](cove_ir::Effects) do not carry `MAY_RAISE`: a broken internal
-/// invariant rather than a program error, and the end of this run.
-///
-/// [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
-/// narrows `MAY_RAISE` to *language-level* failure (#378, Q5.3), and generated
-/// code reads that as licence to omit the outcome test around a call that cannot
-/// raise (#378, P5-6). So the `Err` an arm may still produce for an invariant the
-/// language does not define — a `String` whose bytes are not valid UTF-8, a
-/// reference inside a walk that names nothing — has no reader: it would be stashed
-/// in the native bridge and handed back at whatever raised *next*, one sentence
-/// attached to another fault. That is the failure mode this exists to make
-/// impossible.
-///
-/// It is a panic and not a stop, which is this file's convention for a fact no
-/// program can make false — `unreachable!("joining a task leaves it settled,
-/// failed, or cancelled")` and its neighbours — and it is right here rather than
-/// as a stop for two reasons: a stop is a thing a Cove program can be written to
-/// observe, and this is not about the program; and a panic reaching an
-/// `extern "C"` helper aborts rather than unwinding through machine code, which
-/// is exactly what should happen to a run whose runtime has broken its own rule.
-///
-/// The arm that produced it is named, with the sentence it built, because the
-/// pair is what says which of the two is wrong: the arm, or the effects it
-/// declares.
-#[cold]
-#[inline(never)]
-fn unraisable(intrinsic: cove_ir::Intrinsic, error: &RuntimeError) -> ! {
-    panic!(
-        "`{intrinsic}` answered a `RuntimeError` — \"{}\" — and its declared `Effects` do not \
-         carry `MAY_RAISE`, so no caller reads it. Either the arm must not fail this way, or \
-         the intrinsic's effects are wrong.",
-        error.message
-    )
 }
 
 fn overflowed(operation: &str) -> RuntimeError {
@@ -10225,48 +9852,10 @@ pub(crate) mod tests {
         assert_eq!(cell::holder(&machine.mem, addr), 0);
     }
 
-    /// **An intrinsic that cannot raise, answering an error, ends the run
-    /// where it happened.**
-    ///
-    /// [`unraisable`] is what a broken invariant of that shape reaches, in
-    /// every profile rather than only under `debug_assertions`: compiled code
-    /// omits the outcome test for a call whose variant declares no `MAY_RAISE`
-    /// (`cove_native::IntrinsicProtocol`), so an error that reached the native
-    /// bridge would be stashed and reported at whatever raised next — a
-    /// sentence from somewhere else attached to a fault somewhere else.
-    ///
-    /// **This case used to drive it end to end, through
-    /// [`Machine::call_intrinsic`], and there is no longer any intrinsic it
-    /// could drive it with.** Its subject was `String.indexOf`: an intrinsic
-    /// declaring no `MAY_RAISE` whose arm nonetheless decoded its receiver,
-    /// so a receiver whose bytes are not UTF-8 — an object no checked program
-    /// can build — made it answer an `Err`. ADR 0064 moved that operation
-    /// into `std.string` and then took `Float.abs`, `Float.min` and
-    /// `Float.max` out of the enum altogether; issue #454's Step 2 took
-    /// `Float.round` and then `Float.sqrt`. **Every variant left declares
-    /// `MAY_RAISE`**, which is what `cove_ir::intrinsic`'s
-    /// `every_intrinsic_left_can_be_refused` asserts from the other side, so
-    /// the `if` at [`Machine::call_intrinsic`] cannot fire for any program
-    /// the enum can now name.
-    ///
-    /// **The guard stays, and so does this test.** What the guard costs is one
-    /// branch on a path only an `Err` reaches; what it buys is that an
-    /// intrinsic added back without `MAY_RAISE` — which
-    /// `every_intrinsic_left_can_be_refused` would also catch, in the crate
-    /// that owns the flag — cannot silently hand an error to compiled code
-    /// that does not read it. So what is checked here is the panic itself:
-    /// that it names the arm and quotes the sentence, which is the pair that
-    /// says which of the two is wrong. The intrinsic below is an arbitrary
-    /// surviving variant, chosen because the message has to name *some*
-    /// operation and no operation is the right one any more.
-    #[test]
-    #[should_panic(expected = "`Float.parse` answered a `RuntimeError`")]
-    fn an_intrinsic_that_cannot_raise_must_not_answer_an_error() {
-        unraisable(
-            cove_ir::Intrinsic::FloatParse,
-            &RuntimeError::new("this string's bytes are not valid UTF-8"),
-        );
-    }
+    // `an_intrinsic_that_cannot_raise_must_not_answer_an_error` stood here, over
+    // `unraisable`: the panic that ended a run whose intrinsic answered an error
+    // its declared effects said it could not. ADR 0073 deleted the mechanism,
+    // the effects and the guard together.
 
     // --- ADR 0052: the safepoint schedule is work, not a multiple ----------
 

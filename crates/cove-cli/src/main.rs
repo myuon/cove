@@ -190,7 +190,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
   --backend <ast|vm|native>  which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle, or `native`, ADR 0055's experimental native tier — compiled machine code for the functions it can lower and the `vm` for the rest, reporting which was which. `native` needs a build with `--features template` and an x86-64 host, and says so rather than falling back when it does not have one
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
-  --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions and `IntrinsicCall` sites, the builtin calls that reached the runtime by intrinsic and by the tier that made them, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
+  --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
   --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
   --profile-rows <n|all>  how many rows each table of `--profile` prints, 40 by default; `all` prints every one, which is the per-site reading a script aggregates. Needs `--profile`
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
@@ -1479,11 +1479,6 @@ struct Coverage {
     ///
     /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     windows: cove_runtime::WindowCode,
-    /// Which part of `code_bytes` is [ADR 0064] mediated intrinsic calls, and
-    /// how many call sites of each variant the program emitted.
-    ///
-    /// [ADR 0064]: ../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
-    intrinsics: cove_runtime::IntrinsicCode,
     compile: Duration,
     tiers: cove_runtime::Tiers,
     /// Every refused function with the dynamic calls it kept in the VM, ranked by
@@ -1516,7 +1511,6 @@ impl Coverage {
             compiled: native.compiled(),
             code_bytes: native.code_bytes(),
             windows: native.window_code(),
-            intrinsics: native.intrinsic_code(),
             compile: native.compile_time(),
             tiers: vm.tiers(),
             refused,
@@ -1588,84 +1582,6 @@ impl Coverage {
         }
     }
 
-    /// How much of the machine code above is a mediated intrinsic call, by
-    /// variant.
-    ///
-    /// [ADR 0064](https://github.com/myuon/cove/blob/main/docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md)'s
-    /// Decision 7: "machine-code bytes attributable to intrinsic calls, beside
-    /// the window bytes ADR 0063 already reports". It is deliberately
-    /// `print_windows` in every respect of its shape — the sites and the
-    /// quotient beside the bytes, the share of the whole program, the sentence a
-    /// generator that cannot attribute bytes prints instead of a table of
-    /// zeroes, and a row left out where nothing was emitted — because a reader
-    /// comparing two parts of one total should not have to read two table
-    /// formats to do it.
-    ///
-    /// What differs is what the share *means*, and it is worth saying which
-    /// direction is the good one. A buffer window's share is a cost ADR 0062
-    /// decided to pay and expects to keep paying. An intrinsic call's share is
-    /// the size of a boundary ADR 0064 intends to remove: it should fall as
-    /// variants migrate and be zero when the last one is gone, and a rise in it
-    /// is the report saying a migration went the wrong way.
-    ///
-    /// The rows are **static sites**, not dynamic calls. A variant with one site
-    /// and four hundred thousand calls is one row of a few dozen bytes here, and
-    /// that is not a contradiction of the boundary report — it is the difference
-    /// between what a program *is* and what a run *did*. Both are printed, by
-    /// two reports, and joining them is the reader's.
-    fn print_intrinsics(&self) {
-        let code = &self.intrinsics;
-        let sites = code.total_sites();
-        if sites == 0 {
-            return;
-        }
-        let Some(bytes) = code.bytes else {
-            eprintln!(
-                "native: {} mediated intrinsic call site(s) emitted; this code generator does \
-                 not attribute machine code to one, because its byte layout is decided after \
-                 lowering",
-                thousands(sites)
-            );
-            return;
-        };
-        let total: u64 = bytes.iter().sum();
-        let share = match self.code_bytes {
-            0 => 0.0,
-            whole => 100.0 * total as f64 / whole as f64,
-        };
-        eprintln!(
-            "native: of that, ADR 0064 mediated intrinsic calls are {} byte(s) in {} site(s) \
-             ({:.1}% of this program's machine code)",
-            thousands(total),
-            thousands(sites),
-            share
-        );
-        eprintln!(
-            "  {:>14} {:>14} {:>14}  intrinsic",
-            "bytes", "sites", "per site"
-        );
-        // Descending by bytes, which is the order the question is asked in: what
-        // is the boundary's machine code mostly made of. Ties break on the name,
-        // so one program's report is the same report twice.
-        let mut rows: Vec<(u64, u64, String)> = cove_ir::intrinsic::ALL
-            .iter()
-            .filter(|intrinsic| code.sites[intrinsic.index()] != 0)
-            .map(|intrinsic| {
-                let at = intrinsic.index();
-                (bytes[at], code.sites[at], intrinsic.to_string())
-            })
-            .collect();
-        rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        for (charged, sites, named) in rows {
-            eprintln!(
-                "  {:>14} {:>14} {:>14}  {named}",
-                thousands(charged),
-                thousands(sites),
-                thousands(charged / sites)
-            );
-        }
-    }
-
     /// Prints the report, on stderr, whether or not `--stats` was asked for.
     ///
     /// `execution` is the run's wall time with compilation already outside it —
@@ -1685,7 +1601,6 @@ impl Coverage {
             self.code_bytes
         );
         self.print_windows();
-        self.print_intrinsics();
         // Apart from the figures above, and named, because a reader has to know
         // what the denominator excludes. See `NativeProgram::reachable`.
         eprintln!(
@@ -1775,12 +1690,13 @@ impl Coverage {
                 row.name,
                 row.reason,
                 // Through `render_blocker` rather than the opcode alone, because
-                // `IntrinsicCall` and the `Alloc` opcodes aggregate: a row reading
-                // "IntrinsicCall at pc 44" names no work a reader can go and do,
-                // and the continuation line below names the *other* blockers, so
-                // a function with exactly one is the case where nothing at all
-                // said which builtin it was. That was the whole of what stood
-                // between a 159,421-call refusal and knowing what to write.
+                // the `Alloc` opcodes aggregate: a row reading "AllocFixed at pc
+                // 44" names no work a reader can go and do, and the continuation
+                // line below names the *other* blockers, so a function with
+                // exactly one is the case where nothing at all said which layout
+                // it was. `IntrinsicCall` was the other aggregate, and the one
+                // whose missing name once stood between a 159,421-call refusal
+                // and knowing what to write, until ADR 0073 deleted it.
                 match row.at {
                     Some(pc) => format!("{} at pc {pc}", render_blocker(&first)),
                     None => "-".to_string(),
@@ -1807,24 +1723,25 @@ impl Coverage {
         self.print_census();
     }
 
-    /// The two aggregate opcodes, broken into the operations they are made of.
+    /// The aggregate opcodes, broken into the operations they are made of.
     ///
     /// The table above ranks by opcode, and for most opcodes that is the unit a
-    /// reader acts on: `LoadField` is one lowering. Two of them are not.
-    /// `IntrinsicCall` is every builtin the language has and the `Alloc` opcodes are
-    /// every layout a program declares, so a row saying `IntrinsicCall` names a
-    /// share and no task. These two tables say which builtin and which layout.
+    /// reader acts on: `LoadField` is one lowering. The `Alloc` opcodes are not:
+    /// they are every layout a program declares, so a row saying `AllocFixed`
+    /// names a share and no task. This table says which layout. `IntrinsicCall`,
+    /// every builtin the language had, had a table of its own here until ADR
+    /// 0073 deleted it.
     ///
     /// **The accounting is the table above's, unchanged**, which is what makes the
-    /// three comparable: the number is *dynamic calls to the refused function*,
+    /// two comparable: the number is *dynamic calls to the refused function*,
     /// and what a VM-to-native crossing recovered is charged to nobody. A row's
-    /// calls are summed over every function whose first blocker is that builtin or
-    /// that allocation, and `functions` is how many those were.
+    /// calls are summed over every function whose first blocker is that
+    /// allocation, and `functions` is how many those were.
     ///
     /// **Every figure here is a first-blocker figure and therefore an upper
     /// bound.** A function is refused once, at the first instruction outside the
-    /// slice, so it appears in exactly one row of one table — the one it was
-    /// stopped at soonest. Lowering that row does not move its calls to the native
+    /// slice, so it appears in at most one row — the one it was stopped at
+    /// soonest. Lowering that row does not move its calls to the native
     /// tier; it moves them to whatever the *second* blocker in the same body is.
     /// The last three families lowered each showed this, so the honest reading of
     /// a row is "at most this much is behind this one thing", never "this much
@@ -1837,11 +1754,9 @@ impl Coverage {
         // makes two runs of one program print the same table: the sort below is
         // stable, so equal call counts keep the key order and an iteration order
         // that varied would reorder them.
-        let mut builtins: BTreeMap<&str, (u64, usize)> = BTreeMap::new();
         let mut allocations: BTreeMap<(&str, &str), (u64, usize)> = BTreeMap::new();
         for (row, made) in &self.refused {
             let held = match &row.blocked {
-                Some(Blocked::Intrinsic(named)) => builtins.entry(named).or_default(),
                 Some(Blocked::Allocation { name, shape }) => {
                     allocations.entry((name, shape)).or_default()
                 }
@@ -1852,22 +1767,10 @@ impl Coverage {
         }
 
         // Descending by the native work each subject prevented, which is the
-        // refusal table's own ordering and the reason these three are comparable.
-        if !builtins.is_empty() {
-            eprintln!(
-                "native: `IntrinsicCall` refusals by intrinsic — a first blocker, so an upper bound on what lowering each would unlock"
-            );
-            eprintln!("  {:>13}  {:>9}  intrinsic", "dynamic calls", "functions");
-            let mut rows: Vec<_> = builtins.into_iter().collect();
-            rows.sort_by_key(|(_, (made, _))| std::cmp::Reverse(*made));
-            for (named, (made, functions)) in rows {
-                eprintln!("  {:>13}  {functions:>9}  {named}", thousands(made));
-            }
-        }
-
+        // refusal table's own ordering and the reason the two are comparable.
         if !allocations.is_empty() {
             eprintln!(
-                "native: `Alloc` refusals by what is allocated — a first blocker too, and read the same way"
+                "native: `Alloc` refusals by what is allocated — a first blocker, so an upper bound on what lowering each would unlock"
             );
             eprintln!(
                 "  {:>13}  {:>9}  {:<12} allocation",
@@ -1887,14 +1790,13 @@ impl Coverage {
 
 /// One [`cove_runtime::Blocker`], rendered the way the refusal table's "also
 /// blocked by" line names one: the opcode, and its subject when it has one —
-/// the builtin's name, or an allocation's layout and shape together.
+/// an allocation's layout and shape together.
 fn render_blocker(blocker: &cove_runtime::Blocker) -> String {
     use cove_runtime::Blocked;
-    let subject = match &blocker.blocked {
-        Some(Blocked::Intrinsic(name)) => Some(name.clone()),
-        Some(Blocked::Allocation { name, shape }) => Some(format!("{name} ({shape})")),
-        None => None,
-    };
+    let subject = blocker
+        .blocked
+        .as_ref()
+        .map(|Blocked::Allocation { name, shape }| format!("{name} ({shape})"));
     match (&blocker.instruction, subject) {
         (Some(op), Some(subject)) => format!("{op} {subject}"),
         (Some(op), None) => op.clone(),
@@ -2155,25 +2057,16 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler, rows: usize) {
 /// keep in step, and this one cannot fall out of step with the disassembly
 /// because it *is* the disassembly.
 ///
-/// An `intrinsic-call` keeps the builtin it calls. Grouping every one of them
-/// together would put `String.contains`, which searches, beside
-/// `Int.toString`, which allocates, and answering *which builtin is dear* is
-/// most of what this reading is for.
+/// An `intrinsic-call` kept the builtin it called, so that `String.contains`,
+/// which searched, did not share a row with `Int.toString`, which allocated,
+/// until ADR 0073 deleted the instruction.
 fn opcode_of(program: &cove_ir::Program, id: cove_ir::FunctionId, pc: u32) -> String {
     let function = program.function(id);
     let Some(inst) = function.code.get(pc as usize) else {
         return "<past the end>".to_string();
     };
     let line = cove_ir::print::one(program, function, inst);
-    let mut words = line.split_whitespace();
-    let head = words.next().unwrap_or("?");
-    if head == "intrinsic-call" {
-        // `intrinsic-call <destination> <Receiver>.<operation> (<arguments>)`,
-        // and a destination never holds a space.
-        if let Some(builtin) = words.nth(1) {
-            return format!("{head} {builtin}");
-        }
-    }
+    let head = line.split_whitespace().next().unwrap_or("?");
     head.to_string()
 }
 

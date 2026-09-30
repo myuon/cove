@@ -194,7 +194,6 @@ impl Check<'_> {
                 Half::Layout => self.program.layouts.len(),
                 Half::Table => self.program.tables.len(),
                 Half::Args => self.program.args.len(),
-                Half::Site => self.program.intrinsic_sites.len(),
                 Half::HostOp => self.program.host_ops.len(),
             };
             if value as usize >= len {
@@ -335,13 +334,6 @@ impl Check<'_> {
                 if let Some(op) = self.program.host_ops.get(op.index()) {
                     let result = op.result;
                     self.fits(at, dst, result, "the answer of a host call");
-                }
-                self.args_fit(at, args);
-            }
-            Inst::IntrinsicCall { dst, site, args } => {
-                if let Some(builtin) = self.program.intrinsic_sites.get(site.index()) {
-                    let result = builtin.result;
-                    self.fits(at, dst, result, "the answer of a builtin");
                 }
                 self.args_fit(at, args);
             }

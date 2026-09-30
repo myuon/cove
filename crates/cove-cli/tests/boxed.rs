@@ -37,8 +37,8 @@
 //! **The fallback itself is not counted any more, because there is none.** Until
 //! Phase 4c this file counted the `IntrinsicCall` sites of each variant still in
 //! Rust, and the last row, `Value.admitKey`'s, went with the variant: the
-//! variant set is `cove_ir::intrinsic`'s to hold, and it holds no rule over a
-//! value's layout at all now. The history of that row is below, where the
+//! variant set was `cove_ir::intrinsic`'s to hold, and ADR 0073 deleted it with
+//! the `IntrinsicCall` mechanism. The history of that row is below, where the
 //! constant stood.
 //!
 //! Static counts are not executed counts: a site in a function nothing calls is
