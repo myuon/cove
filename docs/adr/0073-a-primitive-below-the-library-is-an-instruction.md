@@ -1,6 +1,6 @@
 # ADR 0073: A primitive below the standard library is an instruction
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-30
 - Decides: that `Inst::IntrinsicCall` and everything that exists only for it —
   the `Intrinsic` enum and its signatures, classes and effects, `IntrinsicSite`,
