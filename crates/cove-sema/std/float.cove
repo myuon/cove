@@ -1420,51 +1420,107 @@ export fn parse(text: String) -> Result<Float, Error> {
   let end = core.byteLength(text)
   var at = 0
   var negative = false
+  // The first byte is read once, and serves both the sign and the test for a
+  // word: a digit and `.` are both at or below `9`, and anything above it can
+  // only be the first letter of one. A text with no byte, or a sign and
+  // nothing after it, has no digit, and is refused below with every other
+  // one that has none.
+  var head = 0
   if end > 0 {
-    let head = text.byteAt(0)
-    if head == '-' {
-      negative = true
-      at = 1
-    } else if head == '+' {
-      at = 1
+    head = text.byteAt(0)
+    if head < '0' {
+      if head == '-' {
+        negative = true
+        at = 1
+      } else if head == '+' {
+        at = 1
+      }
+      if at == 1 && end > 1 {
+        head = text.byteAt(1)
+      }
     }
   }
-  // A digit and `.` are both at or below `9`; anything above it can only be
-  // the first letter of a word. A text that ends here has no digit, and is
-  // refused below with every other one that has none.
-  if at < end && text.byteAt(at) > '9' {
+  if head > '9' {
     return parseWord(text, at, negative)
   }
   let start = at
-  // `mantissa` stops taking digits once it reaches `10^17`, so that the next
-  // multiply cannot overflow, and `many` says a digit came after that: a
-  // mantissa that large is past `2^53` anyway, and the slow path reads the
-  // text again. Leading zeros leave it nought, so they cost nothing here.
-  // Where the point is, is remembered rather than counted digit by digit.
+  // The digits go into `mantissa`, which stops taking them once it reaches
+  // `10^17`, so that the next multiply cannot overflow: a mantissa that large
+  // is past `2^53` anyway, and the slow path reads the text again. Leading
+  // zeros leave it nought, so they cost nothing here.
+  //
+  // The first eighteen digit bytes are taken with no test on `mantissa` at
+  // all. Eighteen digits are below `10^18` whatever they are, and before each
+  // of them the rule would have taken it anyway, because `k` digits are below
+  // `10^k`; only a longer run goes on to the loop that asks. The whole part
+  // and the fraction are loops of their own, so that the point is not a
+  // question asked of every digit.
   var mantissa = 0
-  var many = false
-  var dot = -1
-  while at < end {
+  var stop = end
+  if end > 18 {
+    stop = at + 18
+  }
+  while at < stop {
     let digit = text.byteAt(at) - '0'
-    if digit < 0 || digit > 9 {
-      // `-2` is `.`, two below `0`, and one of them may stand among the
-      // digits. Anything else ends them.
-      if digit != -2 || dot >= 0 {
+    if digit < 0 {
+      break
+    }
+    if digit > 9 {
+      break
+    }
+    mantissa = mantissa * 10 + digit
+    at += 1
+  }
+  if at >= stop {
+    while at < end {
+      let digit = text.byteAt(at) - '0'
+      if digit < 0 || digit > 9 {
         break
       }
-      dot = at
-    } else if mantissa < 100000000000000000 {
-      mantissa = mantissa * 10 + digit
-    } else {
-      many = true
+      if mantissa < 100000000000000000 {
+        mantissa = mantissa * 10 + digit
+      }
+      at += 1
     }
-    at += 1
   }
   var seen = at - start
   var fraction = 0
-  if dot >= 0 {
-    seen -= 1
-    fraction = at - dot - 1
+  if at < end && text.byteAt(at) == '.' {
+    // Two additions rather than a copy of `at` once it has moved past the
+    // point, which is a copy the lowering cannot write in place.
+    let from = at + 1
+    at += 1
+    // What is left of the eighteen: the point is the one byte after `start`
+    // that is not a digit.
+    stop = end
+    if end > start + 19 {
+      stop = start + 19
+    }
+    while at < stop {
+      let digit = text.byteAt(at) - '0'
+      if digit < 0 {
+        break
+      }
+      if digit > 9 {
+        break
+      }
+      mantissa = mantissa * 10 + digit
+      at += 1
+    }
+    if at >= stop {
+      while at < end {
+        let digit = text.byteAt(at) - '0'
+        if digit < 0 || digit > 9 {
+          break
+        }
+        if mantissa < 100000000000000000 {
+          mantissa = mantissa * 10 + digit
+        }
+        at += 1
+      }
+    }
+    fraction = at - from
+    seen += fraction
   }
   // Every refusal of a number is decided into `refused` and made at one
   // place, after the exponent: a call of [`parseRefused`] is a call
@@ -1527,104 +1583,111 @@ export fn parse(text: String) -> Result<Float, Error> {
     return Ok(0.0 * sign)
   }
   let scale = exponent - fraction
-  if !many && mantissa < 9007199254740992 && scale >= -22 && scale <= 22 {
-    let value = mantissa.toFloat() * sign
-    var power = 1.0
-    if scale != 0 {
-      var magnitude = scale
-      if magnitude < 0 {
-        magnitude = -magnitude
-      }
-      if magnitude < 3 {
-        if magnitude < 2 {
-          power = 10.0
-        } else {
-          power = 100.0
-        }
-      } else {
-        if magnitude < 13 {
-          if magnitude < 8 {
-            if magnitude < 6 {
-              if magnitude < 5 {
-                if magnitude < 4 {
-                  power = 1000.0
-                } else {
-                  power = 10000.0
-                }
-              } else {
-                power = 100000.0
-              }
+  // Clinger's box. A mantissa that stopped taking digits is at least `10^17`,
+  // past `2^53`, so the first test says that too. The three are nested
+  // rather than joined so that each is one comparison and one branch.
+  if mantissa < 9007199254740992 {
+    if scale >= -22 {
+      if scale <= 22 {
+        let value = mantissa.toFloat() * sign
+        var power = 1.0
+        if scale != 0 {
+          var magnitude = scale
+          if magnitude < 0 {
+            magnitude = -magnitude
+          }
+          if magnitude < 3 {
+            if magnitude < 2 {
+              power = 10.0
             } else {
-              if magnitude < 7 {
-                power = 1000000.0
-              } else {
-                power = 10000000.0
-              }
+              power = 100.0
             }
           } else {
-            if magnitude < 11 {
-              if magnitude < 10 {
-                if magnitude < 9 {
-                  power = 100000000.0
+            if magnitude < 13 {
+              if magnitude < 8 {
+                if magnitude < 6 {
+                  if magnitude < 5 {
+                    if magnitude < 4 {
+                      power = 1000.0
+                    } else {
+                      power = 10000.0
+                    }
+                  } else {
+                    power = 100000.0
+                  }
                 } else {
-                  power = 1000000000.0
+                  if magnitude < 7 {
+                    power = 1000000.0
+                  } else {
+                    power = 10000000.0
+                  }
                 }
               } else {
-                power = 10000000000.0
+                if magnitude < 11 {
+                  if magnitude < 10 {
+                    if magnitude < 9 {
+                      power = 100000000.0
+                    } else {
+                      power = 1000000000.0
+                    }
+                  } else {
+                    power = 10000000000.0
+                  }
+                } else {
+                  if magnitude < 12 {
+                    power = 1.0e11
+                  } else {
+                    power = 1.0e12
+                  }
+                }
               }
             } else {
-              if magnitude < 12 {
-                power = 1.0e11
+              if magnitude < 18 {
+                if magnitude < 16 {
+                  if magnitude < 15 {
+                    if magnitude < 14 {
+                      power = 1.0e13
+                    } else {
+                      power = 1.0e14
+                    }
+                  } else {
+                    power = 1.0e15
+                  }
+                } else {
+                  if magnitude < 17 {
+                    power = 1.0e16
+                  } else {
+                    power = 1.0e17
+                  }
+                }
               } else {
-                power = 1.0e12
+                if magnitude < 21 {
+                  if magnitude < 20 {
+                    if magnitude < 19 {
+                      power = 1.0e18
+                    } else {
+                      power = 1.0e19
+                    }
+                  } else {
+                    power = 1.0e20
+                  }
+                } else {
+                  if magnitude < 22 {
+                    power = 1.0e21
+                  } else {
+                    power = 1.0e22
+                  }
+                }
               }
             }
           }
-        } else {
-          if magnitude < 18 {
-            if magnitude < 16 {
-              if magnitude < 15 {
-                if magnitude < 14 {
-                  power = 1.0e13
-                } else {
-                  power = 1.0e14
-                }
-              } else {
-                power = 1.0e15
-              }
-            } else {
-              if magnitude < 17 {
-                power = 1.0e16
-              } else {
-                power = 1.0e17
-              }
-            }
-          } else {
-            if magnitude < 21 {
-              if magnitude < 20 {
-                if magnitude < 19 {
-                  power = 1.0e18
-                } else {
-                  power = 1.0e19
-                }
-              } else {
-                power = 1.0e20
-              }
-            } else {
-              if magnitude < 22 {
-                power = 1.0e21
-              } else {
-                power = 1.0e22
-              }
-            }
-          }
         }
+        if scale < 0 {
+          return Ok(value / power)
+        }
+        return Ok(value * power)
       }
     }
-    if scale < 0 {
-      return Ok(value / power)
-    }
-    return Ok(value * power)
   }
   return parseSlow(text, start, negative, exponent)
 }
