@@ -100,6 +100,18 @@ allow = ["console"]
 entry = "fail_int_parse_radix.main"
 allow = ["console"]
 
+[run.fail_shift_count_left]
+entry = "fail_shift_count_left.main"
+allow = ["console"]
+
+[run.fail_shift_count_right]
+entry = "fail_shift_count_right.main"
+allow = ["console"]
+
+[run.fail_shift_count_right_logical]
+entry = "fail_shift_count_right_logical.main"
+allow = ["console"]
+
 [run.fail_nested_divide_by_zero]
 entry = "fail_nested_divide_by_zero.main"
 allow = ["console"]
@@ -374,6 +386,14 @@ allow = ["console"]
 
 [run.values_int]
 entry = "values_int.main"
+allow = ["console"]
+
+[run.values_int_bits]
+entry = "values_int_bits.main"
+allow = ["console"]
+
+[run.values_int_bits_native]
+entry = "values_int_bits_native.main"
 allow = ["console"]
 
 [run.values_int_parse]

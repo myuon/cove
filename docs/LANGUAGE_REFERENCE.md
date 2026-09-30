@@ -333,6 +333,17 @@ remainder by zero. `Float` arithmetic is IEEE 754 and traps on nothing:
 `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `NaN`, and a comparison against `NaN` is
 `false`. `Duration` arithmetic traps on overflow.
 
+There are no bit operators. `Int`'s bits are reached through its methods
+`bitAnd`, `bitOr`, `bitXor`, `bitNot`, `shiftLeft`, `shiftRight` and
+`shiftRightLogical` ([ADR 0074](adr/0074-an-int-also-carries-a-fixed-width-bit-pattern.md)),
+which read an `Int` as a 64-bit two's-complement word. They are not
+arithmetic and do not share its overflow rule: a left shift discards the bits
+it moves past bit 63 without trapping, whatever that does to the sign, while
+`*` by the same power of two traps. `shiftRight` copies the sign bit in and so
+rounds toward negative infinity; `shiftRightLogical` shifts zeros in. A shift
+count outside 0 to 63 stops the run with `a shift count must be between 0 and
+63, got <count>`; it is never masked.
+
 ### Assignment
 
 `place = value`, `place += value`

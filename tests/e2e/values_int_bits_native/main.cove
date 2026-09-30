@@ -1,0 +1,111 @@
+use console.println
+
+/// `Int`'s bit operations on the native tier, held to the encoded VM.
+///
+/// `tests/e2e/values_int_bits` is the semantic golden and runs on the
+/// interpreter and the VM. This is the parity case beside it: the `native`
+/// file asks the harness to run it on the native tier too and to hold that
+/// tier's output to the VM's byte for byte. A function that prints is refused
+/// by the tier and runs on the VM, so every operation here happens in a helper
+/// that prints nothing and that the tier compiles — `computed` with dynamic
+/// operands and counts, `constants` with counts written in the source, and
+/// `aliased` with one value as both operands.
+export fn main() -> Result<Unit, Error> {
+  let least = -9223372036854775807 - 1
+  let most = 9223372036854775807
+  let fives = 6148914691236517205
+  let aces = -6148914691236517206
+
+  println(
+    "adr {computed(0, 5, 3, 1)} {computed(1, 5, 3, 1)} {computed(2, 5, 3, 1)}",
+  )?
+  println("adr {computed(3, 0, 0, 1)} {computed(3, -1, 0, 1)}")?
+  println("adr {computed(4, 1, 63, 1)} {computed(4, -1, 1, 1)} {computed(5, -3, 1, 1)}")?
+  println("adr {computed(6, -1, 1, 1)} {computed(6, -1, 63, 1)}")?
+
+  println("and {computed(0, least, most, 1)} {computed(0, fives, aces, 1)}")?
+  println("or {computed(1, least, most, 1)} {computed(1, fives, aces, 1)}")?
+  println("xor {computed(2, least, -1, 1)} {computed(2, fives, aces, 1)}")?
+  println("not {computed(3, least, 0, 1)} {computed(3, fives, 0, 1)}")?
+  println("left {computed(4, most, 1, 1)} {computed(4, fives, 1, 1)} {computed(4, least, 0, 1)}")?
+  println("floor {computed(5, least, 63, 1)} {computed(5, aces, 1, 1)} {computed(5, -5, 2, 1)}")?
+  println("logical {computed(6, least, 63, 1)} {computed(6, aces, 1, 1)} {computed(6, -2, 1, 1)}")?
+
+  println(
+    "constants {constants(least, 1)} {constants(-1, 1)} {constants(fives, 1)}",
+  )?
+  println("aliased {aliased(0, 1)} {aliased(5, 1)} {aliased(63, 1)}")?
+  println("sweep {swept(-1, 1)} {swept(aces, 1)} {swept(most, 1)}")?
+  Ok(())
+}
+
+/// Operation `op` over `x` and `y`: 0 to 2 are `bitAnd`, `bitOr` and
+/// `bitXor`, 3 is `bitNot` of `x`, and 4 to 6 are the three shifts of `x` by
+/// `y`.
+///
+/// It calls itself once before it computes, which is what keeps
+/// `cove_ir::lower::inline` from expanding it into `main`: a body that makes
+/// a call is not a leaf, and an expanded operation would run on `main`'s tier
+/// rather than this one's.
+fn computed(op: Int, x: Int, y: Int, depth: Int) -> Int {
+  if depth > 0 {
+    return computed(op, x, y, depth - 1)
+  }
+  if op == 0 {
+    x.bitAnd(y)
+  } else if op == 1 {
+    x.bitOr(y)
+  } else if op == 2 {
+    x.bitXor(y)
+  } else if op == 3 {
+    x.bitNot()
+  } else if op == 4 {
+    x.shiftLeft(y)
+  } else if op == 5 {
+    x.shiftRight(y)
+  } else {
+    x.shiftRightLogical(y)
+  }
+}
+
+/// The three shifts by counts written in the source, so that the count is a
+/// constant the lowering materialises rather than a parameter.
+fn constants(x: Int, depth: Int) -> Int {
+  if depth > 0 {
+    return constants(x, depth - 1)
+  }
+  x.shiftLeft(3)
+    .bitXor(x.shiftRight(7))
+    .bitXor(x.shiftRightLogical(63))
+    .bitXor(x.shiftLeft(0))
+}
+
+/// One value as both operands: `x.shiftLeft(x)` puts one slot in both the
+/// operand and the count, and `x.bitAnd(x)` in both operands.
+fn aliased(x: Int, depth: Int) -> Int {
+  if depth > 0 {
+    return aliased(x, depth - 1)
+  }
+  var y = x
+  y = y.shiftLeft(y)
+  var z = x
+  z = z.bitAnd(z).bitXor(z.bitOr(z))
+  var w = x
+  w = w.shiftRightLogical(w).bitXor(w.shiftRight(w))
+  y.bitXor(z).bitXor(w)
+}
+
+/// Every valid count of all three shifts of `x`, folded into one word.
+fn swept(x: Int, depth: Int) -> Int {
+  if depth > 0 {
+    return swept(x, depth - 1)
+  }
+  var n = 0
+  var folded = 0
+  while n < 64 {
+    folded = folded.bitXor(x.shiftLeft(n)).bitXor(x.shiftRight(n).shiftLeft(1))
+    folded = folded.bitXor(x.shiftRightLogical(n).bitNot())
+    n = n + 1
+  }
+  folded
+}

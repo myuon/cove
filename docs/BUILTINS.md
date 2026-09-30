@@ -16,7 +16,7 @@ unless the run was granted the capability it names.
 | | |
 | --- | --- |
 | builtin types | 18 |
-| builtin methods | 102 |
+| builtin methods | 109 |
 | builtin associated functions | 13 |
 | free builtins | 7 |
 | host modules | 8 |
@@ -307,6 +307,13 @@ written as a namespace.
 | `abs() -> Int` |  |  |  | `std.int.abs` |
 | `min(other: Int) -> Int` |  |  |  | `std.int.min` |
 | `max(other: Int) -> Int` |  |  |  | `std.int.max` |
+| `bitAnd(other: Int) -> Int` |  |  |  | `machine` |
+| `bitOr(other: Int) -> Int` |  |  |  | `machine` |
+| `bitXor(other: Int) -> Int` |  |  |  | `machine` |
+| `bitNot() -> Int` |  |  |  | `machine` |
+| `shiftLeft(count: Int) -> Int` |  |  |  | `machine` |
+| `shiftRight(count: Int) -> Int` |  |  |  | `machine` |
+| `shiftRightLogical(count: Int) -> Int` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Float`

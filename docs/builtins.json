@@ -262,6 +262,13 @@
         {"name": "abs", "signature": "abs() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.abs", "host": false},
         {"name": "min", "signature": "min(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.min", "host": false},
         {"name": "max", "signature": "max(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.max", "host": false},
+        {"name": "bitAnd", "signature": "bitAnd(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "bitOr", "signature": "bitOr(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "bitXor", "signature": "bitXor(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "bitNot", "signature": "bitNot() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "shiftLeft", "signature": "shiftLeft(count: Int) -> Int", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "shiftRight", "signature": "shiftRight(count: Int) -> Int", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "shiftRightLogical", "signature": "shiftRightLogical(count: Int) -> Int", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },

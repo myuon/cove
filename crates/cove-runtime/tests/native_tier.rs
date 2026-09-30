@@ -223,6 +223,49 @@ export fn callsTruncatesByCore(x: Float, n: Int) -> Option<Int> {
   stringbuilder.truncatesByCore(x, n)
 }
 
+/// `Int`'s bit operations over counts the caller passed, so that
+/// `Inst::Bits`, `Inst::BitNot` and `Inst::Shift` run as machine code with a
+/// dynamic count in `cl`.
+///
+/// `counts(n)` is `magnitudes`' guard and is here for its reason.
+export fn bitsOf(x: Int, y: Int, count: Int, n: Int) -> Int {
+  let guard = counts(n)
+  x.bitAnd(y).bitXor(x.bitOr(y).shiftLeft(count)).bitXor(x.bitNot().shiftRight(count)).bitXor(y.shiftRightLogical(count))
+}
+
+/// A refused caller, so the bit operations are reached across the boundary.
+export fn callsBitsOf(x: Int, y: Int, count: Int, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  bitsOf(x, y, count, n)
+}
+
+/// The three shifts by counts written in the source.
+export fn shiftsByConstants(x: Int, n: Int) -> Int {
+  let guard = counts(n)
+  x.shiftLeft(1).bitXor(x.shiftRight(63)).bitXor(x.shiftRightLogical(7))
+}
+
+/// A refused caller, so the constant shifts are reached across the boundary.
+export fn callsShiftsByConstants(x: Int, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  shiftsByConstants(x, n)
+}
+
+/// One value as both operands: `y.shiftLeft(y)` puts one slot in both the
+/// operand and the count, and `x.bitAnd(x)` in both operands.
+export fn shiftsItself(x: Int, n: Int) -> Int {
+  let guard = counts(n)
+  var y = x
+  y = y.shiftLeft(y)
+  y.bitXor(x.bitAnd(x))
+}
+
+/// A refused caller, so the aliased shift is reached across the boundary.
+export fn callsShiftsItself(x: Int, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  shiftsItself(x, n)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -2600,6 +2643,122 @@ fn a_fault_in_a_library_body_under_compiled_code_is_blamed_on_its_caller() {
             [caller],
             "`{entry}`: and the refused caller is still named"
         );
+    }
+}
+
+/// `Int`'s bit operations are compiled, and answer what the VM answers — with a
+/// dynamic count, with counts written in the source, and with one value as both
+/// operand and count.
+///
+/// [ADR 0074](../../../docs/adr/0074-an-int-also-carries-a-fixed-width-bit-pattern.md)
+/// asks that tests actually enter compiled native functions for all three, and
+/// that an invalid count raise the VM's sentence there too: x86-64 masks a
+/// shift count to six bits, so a template that forgot its check would answer
+/// `1.shiftLeft(64)` as `1` and pass every valid row. The invalid rows are
+/// what fail it.
+#[test]
+fn int_bit_operations_run_as_machine_code() {
+    on_each_tier(
+        &["bitsOf", "shiftsByConstants", "shiftsItself"],
+        &["callsBitsOf", "callsShiftsByConstants", "callsShiftsItself"],
+    );
+    let crossed = |both: &Both, what: &str| {
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "{what}: the crossing into compiled code was taken: {:?}",
+            both.tiers
+        );
+        assert_eq!(
+            both.tiers.native_to_vm, 0,
+            "{what}: and nothing went back the other way: {:?}",
+            both.tiers
+        );
+    };
+
+    let fives = 0x5555_5555_5555_5555i64;
+    let aces = 0xAAAA_AAAA_AAAA_AAAA_u64 as i64;
+    for (x, y) in [
+        (0i64, 0i64),
+        (-1, 5),
+        (i64::MIN, i64::MAX),
+        (fives, aces),
+        (-3, 1),
+        (12345, -678),
+    ] {
+        for count in [0, 1, 7, 62, 63] {
+            let what = format!("bitsOf({x}, {y}, {count})");
+            let both = both(
+                "callsBitsOf",
+                vec![
+                    Value::int(x),
+                    Value::int(y),
+                    Value::int(count),
+                    Value::int(0),
+                ],
+            );
+            let (ux, uy) = (x as u64, y as u64);
+            let want = (ux & uy)
+                ^ (ux | uy).wrapping_shl(count as u32)
+                ^ ((!x) >> count) as u64
+                ^ (uy >> count);
+            assert_eq!(both.vm, Ok((want as i64).to_string()), "{what} on the VM");
+            assert_eq!(
+                both.native, both.vm,
+                "{what}: compiled code answers the same"
+            );
+            crossed(&both, &what);
+        }
+        let what = format!("shiftsByConstants({x})");
+        let both = both("callsShiftsByConstants", vec![Value::int(x), Value::int(0)]);
+        let want = (x as u64).wrapping_shl(1) ^ (x >> 63) as u64 ^ ((x as u64) >> 7);
+        assert_eq!(both.vm, Ok((want as i64).to_string()), "{what} on the VM");
+        assert_eq!(
+            both.native, both.vm,
+            "{what}: compiled code answers the same"
+        );
+        crossed(&both, &what);
+    }
+    for x in [0i64, 1, 5, 62, 63] {
+        let what = format!("shiftsItself({x})");
+        let both = both("callsShiftsItself", vec![Value::int(x), Value::int(0)]);
+        let want = ((x as u64).wrapping_shl(x as u32) ^ (x as u64)) as i64;
+        assert_eq!(both.vm, Ok(want.to_string()), "{what} on the VM");
+        assert_eq!(
+            both.native, both.vm,
+            "{what}: compiled code answers the same"
+        );
+        crossed(&both, &what);
+    }
+
+    // A count outside the word: the same sentence, raised in machine code.
+    for count in [-1i64, 64, 65, i64::MIN, i64::MAX] {
+        let what = format!("bitsOf(1, 2, {count})");
+        let both = both(
+            "callsBitsOf",
+            vec![
+                Value::int(1),
+                Value::int(2),
+                Value::int(count),
+                Value::int(0),
+            ],
+        );
+        let vm = both.vm.expect_err("the vm refuses the count");
+        let native = both.native.expect_err("and so does compiled code");
+        assert_eq!(
+            vm,
+            format!("a shift count must be between 0 and 63, got {count}"),
+            "{what}"
+        );
+        assert_eq!(native, vm, "{what}: the same sentence across the boundary");
+    }
+    for x in [-1i64, 64, i64::MIN] {
+        let both = both("callsShiftsItself", vec![Value::int(x), Value::int(0)]);
+        let vm = both.vm.expect_err("the vm refuses the count");
+        assert_eq!(
+            vm,
+            format!("a shift count must be between 0 and 63, got {x}")
+        );
+        assert_eq!(both.native.expect_err("and so does compiled code"), vm);
     }
 }
 

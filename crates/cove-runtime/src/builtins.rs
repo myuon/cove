@@ -1920,6 +1920,51 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Float(*n as f64)))
             }
+            // ADR 0074's bit operations, out of `crate::bits`, which the
+            // encoded VM's arms call too. A shift's count is checked there
+            // before anything shifts, and the refusal is blamed on this call.
+            "bitAnd" | "bitOr" | "bitXor" => {
+                let args = expect_args(name, args, 1, span)?;
+                let Value(Repr::Int(other)) = &args[0] else {
+                    return Err(type_error(
+                        &format!("Int.{name}"),
+                        "other",
+                        "Int",
+                        &args[0],
+                        span,
+                    ));
+                };
+                let op = match name {
+                    "bitAnd" => cove_ir::BitOp::And,
+                    "bitOr" => cove_ir::BitOp::Or,
+                    _ => cove_ir::BitOp::Xor,
+                };
+                Ok(Value(Repr::Int(crate::bits::bits(op, *n, *other))))
+            }
+            "bitNot" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value(Repr::Int(crate::bits::bit_not(*n))))
+            }
+            "shiftLeft" | "shiftRight" | "shiftRightLogical" => {
+                let args = expect_args(name, args, 1, span)?;
+                let Value(Repr::Int(count)) = &args[0] else {
+                    return Err(type_error(
+                        &format!("Int.{name}"),
+                        "count",
+                        "Int",
+                        &args[0],
+                        span,
+                    ));
+                };
+                let op = match name {
+                    "shiftLeft" => cove_ir::ShiftOp::Left,
+                    "shiftRight" => cove_ir::ShiftOp::Right,
+                    _ => cove_ir::ShiftOp::RightLogical,
+                };
+                crate::bits::shift(op, *n, *count)
+                    .map(|shifted| Value(Repr::Int(shifted)))
+                    .ok_or_else(|| crate::bits::shift_count(*count).at(span))
+            }
             // `min`, `max`, and `abs` used to answer here too, `(*n).min(*other)`,
             // `(*n).max(*other)`, and `n.checked_abs()`. None reaches this arm
             // any more: `Interpreter::eval_method_call` resolves them to a

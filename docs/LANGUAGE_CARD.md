@@ -159,6 +159,14 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   reads one in a radix from 2 to 36. Text that is not a number answers `Err`;
   a radix outside 2 to 36 stops the run, because it is the call that is wrong
   and not the text.
+- An `Int`'s 64 bits are reachable through seven methods: `bitAnd`, `bitOr`,
+  `bitXor`, `bitNot`, `shiftLeft`, `shiftRight` (arithmetic: the sign bit is
+  shifted in, so `(-3).shiftRight(1)` is `-2`) and `shiftRightLogical` (zeros
+  are shifted in). They read the `Int` as a two's-complement word and are not
+  arithmetic: `+`, `-` and `*` still stop the run on overflow, while a left
+  shift discards the bits it moves past bit 63 — `1.shiftLeft(63)` is the
+  least `Int` — and never stops it. A shift count must be 0 to 63; any other
+  count stops the run rather than being masked.
 - Vector assignment is O(1), and aliases share elements and length.
 - `Map` and `Set` are immutable in the MVP.
 - `map`, `filter`, `fold`, and `sorted` walk a sequence with a closure. All
