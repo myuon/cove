@@ -1,6 +1,6 @@
 # ADR 0072: `Float.parse` is Cove
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-30
 - Decides: that `Float.parse` is `std.float.parse`, a Cove body with **no
   instruction of its own** — a grammar scan, Clinger's fast path, an
@@ -11,11 +11,10 @@
   Rust's `str::parse::<f64>` gave; and that a program's own call stays an
   unexpanded Cove call. Recorded for
   [issue #432](https://github.com/myuon/cove/issues/432). **The cost below is
-  measured and not yet accepted**: myuon reviews it before this ADR is
-  accepted. Two parts of it are already decided by myuon, and are recorded as
-  such: the middle tier uses existing instructions only, and its table's
-  +1,222 words of literal heap in every program that reaches `Float.parse` are
-  accepted
+  measured and accepted by myuon** after review of #545. This includes two
+  decisions made before the measurement: the middle tier uses existing
+  instructions only, and its table's +1,222 words of literal heap in every
+  program that reaches `Float.parse` are accepted
 - Supersedes: nothing
 - Refers to, without superseding:
   [ADR 0064](0064-an-intrinsic-names-a-machine-not-a-method.md), whose
@@ -787,9 +786,9 @@ would cost about +5,000 VM instructions over #544 on 768 digits was right:
 +5,297. And the estimate that F would save about 6.0 M instructions on
 `rate-card` measured 5.84 M.
 
-**This cost is measured and is not accepted by this ADR**, with the two
-exceptions myuon has decided — no new instruction, and the table's 1,222
-words. What is asked of review is: on cq, −1.1% VM instructions and every
+**This cost is measured and accepted by myuon**, who reviewed it on #545.
+Two of its parts were decided before it was measured: no new instruction,
+and the table's 1,222 words. What review accepted was: on cq, −1.1% VM instructions and every
 wall row inside the floor (the VM rows' direction being the build's, by the
 control); per input, the classes above, and the 768-digit row's +17%.
 

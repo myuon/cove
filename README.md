@@ -727,7 +727,7 @@ program's own `toInt` is a Cove call, nine instructions on the path that
 succeeds, and `std.float`'s renderers use the instruction directly. `Intrinsic`
 is down to `Float.parse`.
 
-[ADR 0072](docs/adr/0072-float-parse-is-cove.md) (Proposed) moves
+[ADR 0072](docs/adr/0072-float-parse-is-cove.md) moves
 `Float.parse` into `std.float` with no instruction of its own: a grammar scan,
 Clinger's fast path — exact when the digits fit in 53 bits and the exponent in
 ±22, which every number cq reads does — then an Eisel–Lemire middle tier, the
