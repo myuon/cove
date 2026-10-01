@@ -1871,7 +1871,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 ///
 /// **7,535 since covefmt became `cove fmt`** (ADR 0077), a rise of 6 that is
 /// all program and no lowering, all of it in `tools/covefmt:covefmtBench`
-/// (81 to 85 in `prod`, 157 to 159 in `ret`; 34,843 to 36,620 instructions;
+/// (81 to 85 in `prod`, 157 to 159 in `ret`; 34,843 to 36,704 instructions;
 /// every other row unchanged, measured against `main` in the same session).
 /// The switch found rules the corpus had never asked covefmt for — a blank line
 /// between declarations, a body written against its braces, a comment's

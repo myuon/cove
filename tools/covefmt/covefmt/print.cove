@@ -270,7 +270,13 @@ fn emit(
               wantsASpaceBetween(source, held, after, tree.from) {
               out.push(" ")
             }
-            out.push(asWritten(source, token))
+            // A comment is written as `cove fmt` writes one, and every other
+            // token as the source spells it.
+            if token.kind == Kind.LineComment || token.kind == Kind.DocComment {
+              out.push(asWritten(source, token))
+            } else {
+              out.push(text(source, token))
+            }
           }
           return tree.from
         }
@@ -339,8 +345,14 @@ fn emit(
     // space `emit` would have put in front of its first token had it been
     // written token by token — and owed it before the width is asked, because
     // the space is on the line.
+    //
+    // Asked only behind a punctuation mark that could want one. A group
+    // against a word is a call or an index, `f(` and `v[`, which is almost
+    // every group there is, and asking the whole question of each of those
+    // was a twentieth of the corpus's time.
     let gap = if after >= 0 && after == tree.from - 1 &&
-      !isASpaceToken(held, after) &&
+      mayWantASpace(source, held, after, tree.from) &&
+      byteOfPunct(source, held, after) != 0 &&
       wantsASpaceBetween(source, held, after, tree.from) {
       1
     } else {
@@ -1388,7 +1400,35 @@ fn wantsAMissingSpace(
   at: Int,
 ) -> Bool {
   at > from && !isASpaceToken(held, at - 1) &&
+    mayWantASpace(source, held, at - 1, at) &&
     wantsASpaceBetween(source, held, at - 1, at)
+}
+
+/// A cheap first answer to [`wantsASpaceBetween`] for two tokens written
+/// together: `false` for the pairs that are most of every file and never want
+/// one — after `(`, `[` or `.`, before `)`, `]`, `,`, `.`, `:` or `?`, and a
+/// word against the `(` of its call. Only what is left is asked the whole
+/// question, which walks for ranges, generics and precedence.
+fn mayWantASpace(source: String, held: Array<Token>, l: Int, r: Int) -> Bool {
+  let a = byteOfPunct(source, held, l)
+  if a == '(' || a == '[' || a == '.' {
+    return false
+  }
+  let b = byteOfPunct(source, held, r)
+  if b == ')' || b == ']' || b == ',' || b == '.' || b == ':' || b == '?' {
+    return false
+  }
+  if b == '(' || b == '[' {
+    match held.get(l) {
+      Some(token) => {
+        if token.kind == Kind.Word {
+          return false
+        }
+      }
+      None => { }
+    }
+  }
+  true
 }
 
 /// The byte of a one-byte punctuation token at `at`, or zero.
