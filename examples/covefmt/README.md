@@ -73,8 +73,8 @@ looks like.
 
 Every `.cove` file here passes `cove fmt --check`, so every one of them is
 already what a formatter should produce, and a correct formatter reproduces
-all 248 byte for byte. That is `print(parse(source)) == source`, over two
-thirds of a megabyte of real source, and it is the **weakest** of the five
+all 384 byte for byte. That is `print(parse(source)) == source`, over nearly
+two megabytes of real source, and it is the **weakest** of the five
 checks — the one to distrust.
 
 A formatter's own output is a fixed point of anything that leaves it alone. A
@@ -99,8 +99,12 @@ those out either; `joinedUp` takes `(` and `[` and not `{`, because a brace
 would merge two statements; `spacedOut` doubles rather than squeezes, because
 doubling can never merge two tokens.
 
-All five are at **248 of 248**, and each has its own ratchet in `bench.cove`
-that may rise and never fall.
+Four of the five are at **384 of 384** and re-break is at **383**: the one
+file is `crates/cove-sema/std/float.cove`, whose parenthesised sum inside a
+broken chain covefmt breaks at a different place from `cove fmt`
+([issue #551](https://github.com/myuon/cove/issues/551)). Each has its own
+ratchet in `bench.cove` that may rise and never fall — and all four stood at
+248 while the corpus grew to 384, which is how that file got in unnoticed.
 
 **`benches/covefmtBench` asserts them**, which it did not at first, and the
 gap was the point: `cove test` sees the samples in `parsetests.cove` — a few
@@ -112,7 +116,7 @@ and back three times without anything failing.
 
 ## Over this repository
 
-248 files, 698,481 bytes, 127,720 tokens. **Every file parses, every tree
+384 files, 1,888,025 bytes, 327,591 tokens. **Every file parses, every tree
 covers its tokens, and every file round-trips.**
 
 Everything below is published against those, so both harnesses check them and
@@ -131,12 +135,15 @@ prose change is a gate nobody would keep.
 
 | | | of the pipeline |
 | --- | ---: | ---: |
-| lex | 61 ms | 10% |
-| parse | 150 ms | 25% |
-| print | 393 ms | 65% |
-| **together** | **604 ms** | |
+| lex | 155 ms | 11% |
+| parse | 337 ms | 24% |
+| print | 891 ms | 64% |
+| **together** | **1,384 ms** | |
 
-Medians of fifteen interleaved runs. Every number in this file and in the two
+Medians of fifteen interleaved runs on the encoded VM, taken 2026-10-01; the
+native tier's are in its own section below. The previous table — 604 ms over
+248 files and 698,481 bytes — is not comparable and is not a regression: the
+corpus is 2.7 times the bytes it was. Every number in this file and in the two
 sections under it comes from these five commands and nothing else:
 
 ```console
@@ -162,34 +169,37 @@ Everything below is that machine and that build, because a wall-clock number is
 neither without them: **Intel Core i7-10700K at 3.80 GHz** (8 cores, 16
 threads), macOS 26.6.2 (`x86_64-apple-darwin`), rustc 1.98.1,
 `--profile checked`, load average under 2, one heavy command at a time, clean
-tree. ADR 0029 is why none of it is gated anywhere.
+tree. The 2026-10-01 figures were taken at a load average of about 2.5, and
+their spreads are as tight as the earlier ones. ADR 0029 is why none of it is gated anywhere.
 
-### The Rust reference, and the 60 ms that was four things
+### The Rust reference, and the process that was five things
 
 `cove fmt --check` at the repository root is the same job in Rust, and the
-**68 ms** its process takes is the figure this file used to divide by. It
+**143 ms** its process takes is the figure this file used to divide by. It
 should not be, and the correction matters more than the number:
 
 | | |
 | --- | ---: |
-| process startup and argument parsing (`cove` with no work to do) | 4.6 ms |
-| `fmt_targets`' walk of the repository | 7–10 ms |
-| reading 698,481 bytes | 4–7 ms |
-| **lex, parse, format and compare** | **40.1 ms** [38.8..43.6] |
-| — of which lex | 5.6 ms |
-| — of which parse, and the numbering | 15.8 ms |
-| — of which format and compare | 18.4 ms |
-| the `SourceMap`'s second copy of every file, and three diagnostics rendered | the remainder, ~5 ms |
-| **the process** | **68 ms** |
+| process startup and argument parsing (`cove` with no work to do) | 4.7 ms |
+| `fmt_targets`' walk of the repository | 15.1 ms |
+| reading 1,888,443 bytes | 11.5 ms |
+| **lex, parse, format and compare** | **103.5 ms** [100.7..114.6] |
+| — of which lex | 14.6 ms |
+| — of which parse, and the numbering | 44.6 ms |
+| — of which format and compare | 44.1 ms |
+| the `SourceMap`'s second copy of every file, and three diagnostics rendered | the remainder, ~8 ms |
+| **the process** | **143 ms** |
 
 The three phases are differences between two whole passes — the same design
 `bench.cove` uses and for the same reason — so each carries both passes' noise
 and the split moves by a millisecond or two between sessions where `whole` does
 not. Read `whole` as the measurement and the split as its shape.
 
-The Cove bench reads all 248 files before its clock starts and is not a fresh
-process, so **604 ms against 40.1 ms is the like-for-like comparison and it is
-15.1×**. Against the 68 ms process it reads as 8.9×, and that is the Rust arm
+The Cove bench reads all 384 files before its clock starts and is not a fresh
+process, so **1,384 ms against 103.5 ms is the like-for-like comparison and it
+is 13.4×** on the encoded VM, and **477 ms against 103.5 ms is 4.6×** on the
+native tier. It was 15.1× on the 248-file corpus, when the native tier was the
+VM's speed. Against the 143 ms process they read as 9.7× and 3.3×, and that is the Rust arm
 being charged for a directory walk, a file read and an execve that the Cove arm
 does not pay. The medians are fifty-one iterations;
 `crates/cove-bench/src/bin/fmt_phases.rs` is where the four rows come from, and
@@ -204,20 +214,20 @@ One asymmetry runs the other way and is worth naming beside the ratio: this
 parser has **no expression grammar** (see "What is not here yet"), so a
 statement's own tokens are leaves where `cove_syntax` builds an `ExprKind`
 tree. covefmt is doing *less* work per file in its parse phase than the Rust
-arm and taking 9.5× as long over it.
+arm and taking 7.6× as long over it on the VM, 3.3× on the native tier.
 
-Three of the 248 are files the Rust formatter *refuses*: `fail_code_point`,
+Three of the 384 are files the Rust formatter *refuses*: `fail_code_point`,
 `fail_export_test` and `fail_reserved_annotation` under `tests/e2e`, written
 not to parse. `cove fmt` skips a file it cannot parse and leaves it alone, so
 for those three the corpus is not the formatter's output and reproducing them
-says only that the tiling holds. It is three files out of 248 and it is
+says only that the tiling holds. It is three files out of 384 and it is
 written down because the opposite mistake — reading "it skipped that" as "it
 agreed with that" — is the one this corpus makes easy.
 
 The phase shares are worth reading against the old ones. Lexing was 49% and is
-10%: `Scan.at` reads bytes rather than code points, and `lower::inline`
-expands it where it is called. Printing was 21% and is 65%, which is what
-having layout rules costs — and it is where the remaining 15.1× is.
+11%: `Scan.at` reads bytes rather than code points, and `lower::inline`
+expands it where it is called. Printing was 21% and is 64%, which is what
+having layout rules costs — and it is where most of the remaining 13.4× is.
 
 ### These numbers replace worse ones, and the correction is the point
 
@@ -297,42 +307,60 @@ code does — so a compiled function called from an encoded one is entered. The
 default does not change and a build without the feature has no
 executable-memory dependency.
 
-**On this corpus it is the encoded VM's speed, to within the noise floor.**
+**On this corpus it is 2.9 times the encoded VM's speed**, and it was not
+always: on 2026-09-16, over 248 files, it compiled 29.6% of the reachable
+functions, ran 5.3% of the instruction stream, and was the VM's speed to
+within the noise floor. What changed is mostly the subset: the refusals the
+section below ranks were lowered one family at a time, `String ==` (#508)
+among the last of them, until nothing the formatter calls is refused.
 
-| | |
-| --- | ---: |
-| reachable functions | 179 |
-| compiled | 53 (**29.6%**) |
-| refused, and run encoded | 126 |
-| machine code emitted | 56,632 bytes |
-| compilation | **0.4 ms**, once |
-| VM → VM calls | 6,144,478 |
-| VM → native calls | 1,680,390 |
-| native → VM calls | 299,857 |
-| native → native, direct | 412,242 |
-| Cove calls that used native code | **24.5%** |
-| IR instructions inside compiled code | 33.5 M of 632.3 M, **5.3%** |
-| `whole`, native against vm, paired within each of fifteen interleaved rounds | **+3 ms of 604**, 10 rounds of 15 slower |
+| | 2026-10-01, 384 files | 2026-09-16, 248 files |
+| --- | ---: | ---: |
+| reachable functions | 110 | 179 |
+| compiled | 108 (**98.2%**) | 53 (29.6%) |
+| refused, and run encoded | 2 — `covefmt.main` and `covefmt.walk` | 126 |
+| machine code emitted | 827,668 bytes | 56,632 bytes |
+| compilation | **2.2 ms**, once | 0.4 ms |
+| VM → VM calls | 501 | 6,144,478 |
+| VM → native calls | 10,003 | 1,680,390 |
+| native → VM calls | 0 | 299,857 |
+| native → native, direct | 22,261,768 | 412,242 |
+| Cove calls that used native code | **100.0%** | 24.5% |
+| instructions the encoded tier dispatched | 196,317 | — |
+| `whole`, vm | 1,384 ms | 604 ms |
+| `whole`, native | **477 ms** | 607 ms |
 
-The last row is the result and the shape of it is why it is trustworthy. The two
-arms run seconds apart in the same round, so the difference *within* a round is
-a far tighter measurement than the difference between two medians — and it is a
-coin toss, ten rounds one way and five the other on a median difference of half
-a percent. Byte-identical output on every round, all five oracle checks at 248
-of 248 on both.
+The two refused functions are the bench's own driver — the walk of the
+directory and `main` — and both are refused for `CallHost`, which is the file
+system. Neither is on a path the formatter runs, so the formatter itself is
+entirely compiled, and the 196,317 instructions the encoded tier still
+dispatches are a rounding error on the VM arm's 1,755,436,658.
 
-The one phase that is **not** a coin toss is `lex`: native is 2 ms faster there
-and it is slower in one round of fifteen. That is where the compiled
-functions are — `Scan.at` and the byte predicates around it, which are exactly
-the small scalar leaves the template compiler can take — and 3% off a phase that
-is 10% of the pipeline is 0.3% of the pipeline. Nothing else moves.
+The paired reading is the one to trust, and this time it is not a coin toss.
+Within each of fifteen interleaved rounds native is faster on every phase in
+every round: **−906 ms** on `whole` [−960..−883], −104 ms on `lex`, −189 ms on
+`parse` and −614 ms on `print`. Byte-identical output on every round, and the
+five oracle checks at 384, 384, 383, 384 and 384 on both.
+
+The phases do not move together. `lex` and `print` are 3.1× and 3.2× faster
+compiled and `parse` is 2.3×, so the native tier's split is lex 10%, parse 31%,
+print 58% — the parser is where the compiled run spends a larger share than
+the encoded one did.
 
 The memory figures are **identical** between the arms to the last word:
-4,001,253 allocations, 43,018,808 words handed out, ten collections, on both.
+8,477,680 allocations, 107,471,857 words handed out, 27 collections, on both.
 Nothing about which tier ran a function changes what it allocates, which is the
 expected reading and is worth having as a check rather than an assumption —
 `cove run --stats` prints all four, on either tier, without a profiler, because
 ADR 0055 refuses `--profile` beside `--backend native`.
+
+**The two subsections after the next paragraph are the 2026-09-16 run**, over
+248 files, when the tier covered 5.3% of the work. They have not been retaken.
+They are kept because they are why the refusals were the lever — and the
+2026-10-01 column above is what pulling it bought: a ceiling of 96.1% of calls
+read off a first-blocker count, against 100.0% measured. What the profile of a
+fully compiled run looks like is not written down yet; `scripts/covefmt-profile.sh`
+is the instrument.
 
 One column of issue #369's table is missing and cannot be filled: **copied
 words**. Nothing counts them. `Memory::copy_words` and `Memory::copy_slots` are
