@@ -1,6 +1,10 @@
 # ADR 0072: `Float.parse` is Cove
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0075](0075-float-parses-middle-tier-reads-bits.md), which writes the
+  middle tier over ADR 0074's `Int` bit operations, against this ADR's "the
+  middle tier uses existing instructions only"
 - Date: 2026-09-30
 - Decides: that `Float.parse` is `std.float.parse`, a Cove body with **no
   instruction of its own** — a grammar scan, Clinger's fast path, an
