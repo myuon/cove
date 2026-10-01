@@ -354,152 +354,102 @@ expected reading and is worth having as a check rather than an assumption —
 `cove run --stats` prints all four, on either tier, without a profiler, because
 ADR 0055 refuses `--profile` beside `--backend native`.
 
-**The two subsections after the next paragraph are the 2026-09-16 run**, over
-248 files, when the tier covered 5.3% of the work. They have not been retaken.
-They are kept because they are why the refusals were the lever — and the
-2026-10-01 column above is what pulling it bought: a ceiling of 96.1% of calls
-read off a first-blocker count, against 100.0% measured. What the profile of a
-fully compiled run looks like is not written down yet; `scripts/covefmt-profile.sh`
-is the instrument.
-
 One column of issue #369's table is missing and cannot be filled: **copied
-words**. Nothing counts them. `Memory::copy_words` and `Memory::copy_slots` are
-two of the five hottest functions in both arms, and an increment in either would
-be instrumentation on the path being measured — the count would be over a run
-that was not the run. What can be said instead is in the profile below, where
-the copies are 10% of both arms, and in ADR 0057's per-call census: 2.99
-parameter words copied per call, into frames 14.5 words wide.
+words**. Nothing counts them. `Memory::copy_words` is one of the five hottest
+functions in both arms, and an increment in it would be instrumentation on the
+path being measured — the count would be over a run that was not the run. What
+can be said instead is in the profile below, where the copies are 12.5% of the
+encoded run and 3.8% of the compiled one, and in ADR 0057's per-call census:
+2.99 parameter words copied per call, into frames 14.5 words wide.
 
-### Why 24.5% of the calls is 5.3% of the work
+### Where a fully compiled run's time goes
 
-The template compiler takes the small scalar leaves. A compiled call runs **16
-IR instructions** on average where the run's mean is 74, so a quarter of the
-calls is a twentieth of the instruction stream — and `scripts/covefmt-profile.sh`
-says what that is worth. Five sampled runs an arm, `/usr/bin/sample`, self time,
-and the reading is the **difference** between the columns:
+`scripts/covefmt-profile.sh`, five sampled runs an arm, three sessions, taken
+2026-10-01 after #551. `/usr/bin/sample` at 1 ms, self time, the whole bench
+process — the pipeline *and* the four oracle passes, which is why the times are
+the 11 s and 4 s processes and not the `whole` column. A share's bracket is the
+three sessions; the milliseconds are samples per run, so read them as
+approximate. The load average was 2.8 to 4 throughout, above the "under 2"
+this file asks for; the sessions agreeing to half a point is the evidence it
+did not move the shares.
 
-| component | vm | native | difference | over three sessions |
+| component | vm | ≈ ms a run | native | ≈ ms a run |
 | --- | ---: | ---: | ---: | ---: |
-| encoded dispatch | 53.5% | 50.4% | **−3.1** | −2.2 to −3.2 |
-| linear-memory slot access (`Memory::read`/`write`) | 11.7% | 11.4% | −0.3 | −0.2 to −0.4 |
-| runtime builtins | 11.4% | 11.7% | +0.2 | −0.1 to +0.2 |
-| slot copies: arguments, returns and `copy` | 10.5% | 10.0% | −0.5 | −0.1 to −0.9 |
-| allocation and collection | 5.5% | 6.1% | **+0.7** | +0.4 to +0.7 |
-| — of which the host allocator | 4.1% | 4.7% | **+0.6** | +0.6 to +0.8 |
-| frame growth and zeroing | 4.8% | 4.8% | −0.1 | −0.3 to +0.2 |
-| open/close/call helpers | 2.2% | 2.9% | **+0.7** | +0.3 to +1.0 |
-| **generated native code** | 0.0% | **1.1%** | **+1.1** | +1.0 to +1.1 |
-| tier lookup and transition | 0.0% | **1.1%** | **+1.1** | +1.0 to +1.1 |
-| safepoints | 0.4% | 0.5% | +0.0 | +0.0 to +0.2 |
+| encoded dispatch | **66.2%** [66.0..66.2] | 5,990 | 1.9% [1.6..2.1] | 63 |
+| **generated native code** | 0.0% | 0 | **52.2%** [52.2..52.4] | 1,732 |
+| open/close/call helpers | 2.6% [2.5..2.6] | 232 | **12.9%** [12.9..13.1] | 428 |
+| safepoints | 0.5% [0.4..0.5] | 42 | **8.9%** [8.8..9.0] | 297 |
+| allocation and collection | 3.1% [3.0..3.2] | 282 | 7.8% [7.7..8.1] | 259 |
+| — of which the host allocator | 1.7% [1.7..1.8] | 157 | 4.6% [4.5..4.8] | 152 |
+| linear-memory slot access | 10.2% [9.8..10.2] | 921 | 7.1% [6.9..7.5] | 233 |
+| slot copies: arguments, returns and `copy` | 12.5% [12.5..12.7] | 1,149 | 3.8% [3.6..3.8] | 126 |
+| frame growth and zeroing | 4.9% [4.9..5.0] | 449 | 3.8% [3.8..4.0] | 125 |
+| tier lookup and transition | 0.0% | 0 | 0.9% [0.7..0.9] | 30 |
+| unattributed | 0.2% | 16 | 0.5% | 18 |
+| **the run** | | **≈ 9,070** | | **≈ 3,310** |
 
-The last column is three independent five-run sessions and it is the honest
-noise floor: between runs a bucket's share moves by about ±0.3 percentage points
-and the 50% bucket by ±1.0, several times the square-root-of-the-count floor.
-Five components survive it — the dispatcher, allocation, the helpers, generated
-code and the tier lookup — and so does the sub-row under allocation. The other
-five do not, and are in the table because a component issue #369 names and whose
-answer is "nothing measurable" is an answer.
+Three sessions agree to within half a point on every row, so every difference
+below is larger than the noise.
 
-Read as a budget it balances, and that is the finding. The native tier **takes
-3.9 points off what the encoded tier was doing and puts 3.9 back**:
+**The generated code is half of the compiled run, and the other half is the
+runtime it calls.** On 2026-09-16 generated code was 1.1% of the run and the
+question was how to get more of the program compiled. That question is
+answered — 108 of 110 functions, and the two that are not are the bench's own
+directory walk and `main` — and the encoded dispatch left over is 63 ms, a
+third of it `__getattrlist`, the file system those two functions call. What
+the compiled run pays beside its own code is:
 
-| gone | | added | |
-| --- | ---: | --- | ---: |
-| encoded dispatch | −3.1 | generated native code | +1.1 |
-| slot copies | −0.5 | the tier lookup, at 8.5 M calls | +1.1 |
-| linear-memory slot access | −0.3 | the open/close/call helpers | +0.7 |
-| frame growth and zeroing | −0.1 | allocation and collection | +0.7 |
-| | | runtime builtins, the safepoint, the rest | +0.3 |
-| **together** | **−3.9** | **together** | **+3.9** |
+- **the call path, 14%**: `native::open`, `close` and `republish`, and the
+  tier lookup, over 22.3 million calls that are now all native → native. It
+  was 2.6% of the encoded run, where `open_frame` is the only part of it the
+  sampler can see outside the dispatcher.
+- **safepoints, 9%**: `Machine::safepoint` alone is 7.2%. The encoded figure
+  beside it is a lower bound, because the dispatcher inlines most of its
+  safepoint (see the caveats below), so the two columns do not say the native
+  safepoint is seven times dearer — they say it is now the second largest
+  thing in the run.
+- **allocation, 8%**, which is the same 260 to 280 ms on both arms. It should
+  be: the two arms make the same 8,481,918 allocations, and the compiled code
+  calls the same allocator.
+- **slot access, 7%**: `Memory::read` and the layout lookups that compiled code
+  still makes through the runtime for heap objects.
 
-The sum of the two columns is **+0.01 percentage points**, which is what the
-wall clock said from the other direction, and two instruments agreeing on zero
-by different routes is most of the reason to believe either.
-
-The added column is worth reading term by term, because three of its four large
-entries are costs a code generator cannot remove by generating better code. The
-tier lookup is a table read the `CALL` path now performs on **every** call,
-8,536,967 of them, whether or not the callee is compiled. The allocation is the
-encoded floor's owned vector, which the 299,857 native → VM calls still pay —
-[ADR 0057](../../docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md)
-priced it at about 60 ns a call, a macOS `malloc`/`free` round trip, and 299,857
-of those is 18 ms of a 4.7 s run. Only the 1.1 in generated code is work that
-*replaced* something, and it replaced 3.1.
-
-**The generated code is about three times the dispatcher, and that is the number
-to carry forward.** 1.1% of 4.73 s is 52 ms for the 33.5 M IR instructions inside
-compiled functions, which is 1.6 ns each; the encoded tier's dispatch and slot
-access together are 61.8% of the run for 598.8 M, which is 4.9 ns each. The
-second figure is approximate — it charges the dispatcher with all of its slot
-access and none of its builtins — so read it as "about 3×" and not as 3.1. It
-sits where ADR 0056's 2.44× on call-free code and ADR 0057's 1.97× on
-call-shaped code said it would, which is the cross-check that makes it worth
-quoting at all. **The tier is not slow. It covers 5.3% of the work.**
+So the lever on this workload has moved. It was the refusals, and they are
+gone; it is now the native call path and the safepoint, which together are
+roughly a quarter of the compiled run, and both are the runtime's protocol
+rather than the quality of the code the template compiler emits.
 
 Three caveats belong with the table rather than under it.
 
-**The sampler costs about 8%** of wall time — 654 ms against 604 for the bench's
-own `whole` — and it costs the same on both arms (657 against 654), so the
-shares are comparable and the times are not.
+**The sampler costs about 8% to 9%** of wall time — `whole` is 1,506 ms under
+it against 1,381 without on the VM, and 509 against 471 on the native tier —
+so the shares are comparable and the times are not.
 
 **An inlined callee is charged to its inliner.** `--profile checked` carries no
 debug info, so `Machine::safepoint` and `Memory::push_frame` are partly inside
-`encoded::dispatch`: the safepoint and frame-zeroing rows are **lower bounds**,
-and the per-call ablation tables of
+`encoded::dispatch`: on the encoded arm the safepoint and frame-zeroing rows
+are **lower bounds**, and the per-call ablation tables of
 [ADR 0057](../../docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md)
-are the instrument for those — they put the safepoint at 9.1% of the native
-*call path*, which this table cannot see and does not contradict.
+are the instrument for those. The native arm reaches the same functions from
+generated code; how much of them that code does inline is not visible from
+here, so read its rows as self time in the named function and no more.
 
-**Doubling and sampling order the terms; neither prices them.** The components
-are not strictly additive — a second instance of one runs with the first one's
-cache lines warm, and removing one changes the branch history of the next — so
-every figure here ranks a component against another and none of them is a
-subtraction that would be recovered as wall time.
+**The unwinder cannot walk out of generated code**, so a sample inside a JIT
+page has no caller and the native column is self time only. An inclusive
+attribution — which compiled function the 297 ms of safepoints were called
+from — is not available from this instrument at all.
 
-### What the refusals cost, counted
+### What the refusals cost, when there were refusals
 
-126 functions are refused, and the report ranks them by the dynamic calls each
-kept in the VM rather than by count — a hundred refused functions nothing calls
-cost a run nothing. Grouped by the first instruction or slot the lowering could
-not take:
-
-| first blocker | functions | dynamic calls | of all 8,536,967 Cove calls |
-| --- | ---: | ---: | ---: |
-| a frame slot holds a `Repr::Addr` — a `var` parameter | 32 | 3,406,192 | **39.9%** |
-| `Inst::Clear` | 48 | 2,703,465 | **31.7%** |
-| `Inst::LoadField` | 5 | 125,106 | 1.5% |
-| `Inst::Str` | 5 | 103,859 | 1.2% |
-| `Inst::Neg(Int)` | 12 | 78,059 | 0.9% |
-| `Inst::CallBuiltin` | 10 | 25,656 | 0.3% |
-| `Inst::AllocImm` | 13 | 1,998 | 0.02% |
-| `Inst::AllocBuffer` | 1 | 0 | 0.0% |
-| **together** | **126** | **6,444,335** | **75.5%** |
-
-The accounting is exact rather than approximate: 6,444,335 is VM → VM plus
-native → VM, and 2,092,632 — the other 24.5% — is VM → native plus
-native → native. The two sum to the 8,536,967 calls the run made, which is what
-says the ranking is over every call and not over a sample of them.
-
-The five refusals that block the most work are `covefmt.Parser.leaf` (1,021,045
-calls, an `Addr` slot), `covefmt.emit` (664,214, an `Addr` slot),
-`covefmt.holdsABody` (527,087, `Clear`), `covefmt.Parser.trivia` (405,911, an
-`Addr` slot) and `covefmt.wantsASpaceBetween` (394,740, `Clear`).
-
-**Two families are the whole of it.** `Repr::Addr` frame slots and `Inst::Clear`
-are 80 of the 126 refusals and 71.6% of every call the run makes; lowering both
-would take the native share of calls from 24.5% to **96.1%**. That is an upper
-bound and the reason is worth knowing: a row names a function's *first* blocker
-only, so a function refused for an `Addr` slot that also holds a `Str` does not
-compile when `Addr` slots are lowered. It is a ceiling read off a count, not a
-forecast.
-
-It is also the only lever on this workload with a ceiling worth the name, and
-the profile above is why. Every other candidate — inlining at the native target,
-initialising only the reference words of a frame, a register ABI for arguments
-and returns — improves a path that is **1% to 3% of this run**, because the tier
-covers 5.3% of the instruction stream. Making that path twice as fast is worth
-a percent. The refusals are what set the 5.3%, and they are the only thing that
-can move it.
+On 2026-09-16 126 of 179 reachable functions were refused, and ranked by the
+dynamic calls each kept in the VM, two families were the whole of it: a frame
+slot holding a `Repr::Addr` (a `var` parameter, 32 functions, 39.9% of calls)
+and `Inst::Clear` (48 functions, 31.7%). Lowering both was read as a ceiling of
+96.1% of calls, with the warning that a first-blocker count cannot forecast —
+a function refused for one thing may hold a second. Those families, and the
+`Str`, `LoadField`, `Neg(Int)`, `CallBuiltin` and `AllocImm` rows below them,
+were lowered or left the program since; the measured result is the 100.0% in the table above. The
+census itself is in the history of this file.
 
 ## What writing the parser found
 
