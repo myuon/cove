@@ -1,5 +1,17 @@
 //! Deterministic formatting of Cove source.
 //!
+//! # It is not `cove fmt`
+//!
+//! Since [ADR 0077](../../../docs/adr/0077-cove-fmt-is-covefmt.md), `cove fmt`
+//! runs `tools/covefmt`, the formatter written in Cove. This one stays, for
+//! three readers: it is the **oracle** `cove fmt` is judged against — `cargo t`
+//! asserts that covefmt answers what [`format_source`] answers on every file in
+//! the repository and on a damaged copy of each — and it is what `cove
+//! generate` formats generated source with and what the AST's `Display` uses
+//! for an expression, both inside the compiler, where starting a Cove program
+//! would be the wrong cost. A change here that the oracle does not see in
+//! covefmt is a change that makes the two disagree.
+//!
 //! The formatter prints an [`ast::SourceUnit`](crate::ast::SourceUnit) back to source text. It is
 //! deterministic and idempotent: formatting twice produces exactly what
 //! formatting once produced, and re-parsing the result produces the same tree.
@@ -49,7 +61,7 @@ const INDENT: usize = 2;
 /// The tree does not carry `//` and `/* */` comments or the blank lines
 /// between statements, so this function cannot reproduce them. Use
 /// [`format_source`] to format a unit together with the text it was parsed
-/// from, which is what `cove fmt` does.
+/// from, which is what `cove generate` does.
 pub fn format_unit(unit: &SourceUnit) -> String {
     format_source("", unit)
 }

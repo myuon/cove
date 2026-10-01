@@ -51,7 +51,8 @@ Hello, Cove!
 $ ../target/release/cove test
 ```
 
-The `cove` command also checks (`cove check`), formats (`cove fmt`), tests
+The `cove` command also checks (`cove check`), formats (`cove fmt` — itself
+written in Cove, [tools/covefmt](tools/covefmt/README.md)), tests
 (`cove test`), packages a program as a standalone executable (`cove build`),
 and records and replays the host calls a run made (`cove trace`,
 `cove replay`). `cove help` lists everything.
@@ -70,8 +71,8 @@ and records and replays the host calls a run made (`cove trace`,
   implementations and limits.
 
 [examples/](examples/README.md) holds the representative programs the
-language is measured against — a CSV query tool, a server, a formatter for
-Cove written in Cove, and others.
+language is measured against — a CSV query tool, a server, a life simulation,
+and others.
 
 ## Documentation
 

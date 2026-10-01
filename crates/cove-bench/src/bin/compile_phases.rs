@@ -44,6 +44,11 @@
 //! (`cove_ir::verify`, which `lower_entry` runs last) and the bytecode encoder
 //! (`encode_program`, which `Vm::new` runs).
 //!
+//! Last, the image [ADR 0077](../../../../docs/adr/0077-cove-fmt-is-covefmt.md)
+//! makes of pass 5's IR: how long `cove_ir::serial` takes to write it, to read
+//! it back, and to read it back into a `Vm` — the start `cove fmt` pays
+//! instead of passes 1 to 5.
+//!
 //! # Usage
 //!
 //! ```console
@@ -219,6 +224,9 @@ fn run() -> Result<(), String> {
         .sum();
     let sources = Arc::new(sources);
     let native = cove_runtime::compile_native(&ir).ok();
+    // ADR 0077's image of the same lowering: what `cove fmt` embeds and reads
+    // back instead of running passes 1 to 5.
+    let image = cove_ir::serial::encode(&ir, &sources, module, name)?;
 
     // Allocations, counted once per prefix pass: they do not vary from one
     // iteration to the next.
@@ -251,6 +259,9 @@ fn run() -> Result<(), String> {
     let mut stdlib = Vec::new();
     let mut verify = Vec::new();
     let mut encode = Vec::new();
+    let mut decoded = Vec::new();
+    let mut imaged = Vec::new();
+    let mut started_from_image = Vec::new();
     let mut cold: Option<[f64; 5]> = None;
     for iteration in 0..=iterations {
         let mut row = [0.0; 5];
@@ -307,6 +318,24 @@ fn run() -> Result<(), String> {
         let encoded = cove_ir::bytecode::encode_program(&ir);
         encode.push(ms(started.elapsed()));
         drop(encoded);
+
+        // The image: written, read back, and read back into a run.
+        let started = Instant::now();
+        let written = cove_ir::serial::encode(&ir, &sources, module, name)?;
+        imaged.push(ms(started.elapsed()));
+        drop(written);
+        let started = Instant::now();
+        let read = cove_ir::serial::decode(&image).map_err(|e| e.to_string())?;
+        decoded.push(ms(started.elapsed()));
+        drop(read);
+        let started = Instant::now();
+        let read = cove_ir::serial::decode(&image).map_err(|e| e.to_string())?;
+        let read_sources = Arc::new(read.sources);
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<String>::new())));
+        let runtime = Runtime::new(Arc::default(), read_sources, Arc::clone(&hosts));
+        let machine = Vm::new(&runtime, &hosts, &read.program);
+        started_from_image.push(ms(started.elapsed()));
+        drop(machine);
     }
 
     let column = |table: &[[f64; 5]], pick: &dyn Fn(&[f64; 5]) -> f64| {
@@ -426,6 +455,23 @@ fn run() -> Result<(), String> {
         "encode",
         quantile(encode),
         "encode_program, part of `vm setup`",
+    );
+    println!();
+    println!("ADR 0077's image of pass 5's IR, {} bytes:", image.len());
+    say(
+        "image write",
+        quantile(imaged),
+        "cove_ir::serial::encode, which `cove-cli`'s build script runs",
+    );
+    say(
+        "image read",
+        quantile(decoded),
+        "cove_ir::serial::decode, which `cove fmt` runs instead of passes 1 to 5",
+    );
+    say(
+        "image start",
+        quantile(started_from_image),
+        "decode, then `vm setup` over what it read",
     );
     Ok(())
 }

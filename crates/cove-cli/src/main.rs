@@ -28,6 +28,7 @@ use cove_syntax::ast::ItemKind;
 
 mod api;
 mod build;
+mod covefmt;
 mod debug;
 #[cfg(test)]
 mod fixture;
@@ -43,7 +44,7 @@ const USAGE: &str = "\
 cove — the Cove toolchain
 
 usage:
-  cove fmt [path] [--check] [--backend <ast|vm|native>]  format every `.cove` file in the package
+  cove fmt [path] [--check] [--backend <vm|native>]  format every `.cove` file in the package
   cove check [path] [--deny-warnings]  parse, resolve, and type-check the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
   cove build <name> [--out <path>]     package that run as a native executable
@@ -64,12 +65,15 @@ usage:
 `cove fmt` rewrites files in place and prints how many changed. `--check`
 writes nothing, prints the path of every file that would change, and exits
 non-zero when there is one, which is the form to run in CI. A file that does
-not parse is reported and never rewritten. It takes `--backend <ast|vm|native>`
-so that the flag means one thing on every command that accepts it, and says
-plainly what it does with it: `cove fmt` is Rust and runs no Cove program, so
-naming a backend changes nothing here. The Cove formatter is
-`tools/covefmt`, and the way to run *it* on a backend is
-`cove run covefmtBench --backend native` in that package.
+not parse is reported and never rewritten. The formatter is `tools/covefmt`,
+written in Cove and built into this binary as lowered IR (ADR 0077); it runs
+with no capability, and checks that what it would write means what the file
+means. If that check refuses, the file is left alone, named with the reason,
+and the command exits non-zero: that is a bug in the formatter, not in the
+file. It runs on the native tier where this host has one and on the `vm`
+otherwise; `--backend vm` or `--backend native` chooses, and `--backend ast`
+is refused, because the interpreter runs a checked program and the binary
+carries none.
 
 `--deny-warnings` fails `cove check` when the package has any warnings, as
 does setting `deny_warnings = true` in `cove.toml`'s `[check]` table; either
@@ -266,6 +270,7 @@ fn dispatch() -> ExitCode {
         }
         Err(CliError::WarningsDenied)
         | Err(CliError::Unformatted)
+        | Err(CliError::FormatterFailed)
         | Err(CliError::BreakingChange)
         | Err(CliError::TestsFailed)
         | Err(CliError::Diverged)
@@ -287,6 +292,10 @@ pub(crate) enum CliError {
     /// `cove fmt --check` found files that are not formatted. Their paths
     /// were already printed, so there is nothing left to say.
     Unformatted,
+    /// `cove fmt`'s formatter refused its own output for a file, or failed on
+    /// one. Each file and the reason were already printed, so there is nothing
+    /// left to say.
+    FormatterFailed,
     /// `cove api diff` found a breaking change. The classified changes were
     /// already printed, so there is nothing left to say.
     BreakingChange,
@@ -378,29 +387,24 @@ pub(crate) fn find_root(start: &Path) -> Option<PathBuf> {
 /// Formats every `.cove` file the user asked for, or reports the ones that
 /// are not formatted when `--check` is given.
 ///
-/// # It takes `--backend` and says what it does with it
+/// # The formatter is covefmt
 ///
-/// [Issue #369](https://github.com/myuon/cove/issues/369) names
-/// `cove fmt --backend native` beside `cove run --backend native`, on the
-/// reasonable assumption that the formatter this command runs is the Cove one.
-/// It is not: `cove fmt` is `cove_syntax::format`, written in Rust, and it runs
-/// no Cove program at all. The Cove formatter is `tools/covefmt`, and it is
-/// run the way any other Cove program is.
+/// [ADR 0077](../../../docs/adr/0077-cove-fmt-is-covefmt.md): what formats a
+/// file is `tools/covefmt`, the formatter written in Cove, carried in this
+/// binary as lowered IR and run with no capability — see [`covefmt`]. Walking
+/// the targets, reading, writing and reporting stay here, and so does deciding
+/// whether a file parses: that is still `cove_syntax`'s parser, so a broken
+/// file gets the diagnostics it always got and is never handed to covefmt.
 ///
-/// So the flag is **accepted and answered honestly**, which is the one of three
-/// options that is neither a lie nor a wart:
+/// # `--backend` chooses the tier covefmt runs on
 ///
-/// - accepting it and ignoring it would make `--backend native` a flag that
-///   silently did nothing on one command and something on another, which is the
-///   silent substitution ADR 0055 spends several paragraphs forbidding;
-/// - refusing it would make `--backend` a flag whose *set of commands* a reader
-///   has to learn, and issue #369 asked for it here;
-/// - accepting it, validating it with the same parser every other command uses,
-///   and printing one line saying where the Cove formatter is, costs a reader one
-///   sentence and tells them exactly what they wanted to know.
-///
-/// The note is printed only when a backend was named, so the ordinary
-/// `cove fmt --check` that CI runs is byte for byte what it was.
+/// Unnamed, covefmt runs on the native tier where this build and host have one
+/// and on the encoded VM otherwise. `--backend vm` and `--backend native`
+/// choose explicitly, the second answering ADR 0055's capability diagnostic
+/// where there is no tier — the same flag, parsed by the same parser, meaning
+/// the same thing it means on `cove run`. `--backend ast` is refused: the
+/// tree-walking interpreter runs a checked program, and this binary carries
+/// covefmt's lowering, not its checked program.
 fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
     let (named, args) = split_backend_if_named(args)?;
     let check = args.iter().any(|arg| arg == "--check");
@@ -430,40 +434,93 @@ fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
             )));
         }
     };
-    if let Some(backend) = named {
-        eprintln!(
-            "note: `cove fmt` is the Rust formatter and runs no Cove program, so \
-             `--backend {backend}` selects nothing here; the Cove formatter is \
-             `tools/covefmt`, run there as `cove run covefmtBench --backend {backend}`"
-        );
+    if named == Some(Backend::Ast) {
+        return Err(CliError::Message(
+            "`cove fmt` runs covefmt, which this binary carries as lowered IR (ADR 0077), and \
+             the tree-walking interpreter runs a checked program rather than a lowering; use \
+             `--backend vm` or `--backend native`, or name no backend"
+                .to_string(),
+        ));
     }
 
+    let targets = fmt_targets(path)?;
+    // Set up once and invoked once per file, and only when there is a file:
+    // a `cove fmt` over nothing reads no image.
+    let formatter = match targets.is_empty() {
+        true => None,
+        false => Some(covefmt::Covefmt::load(named).map_err(CliError::Message)?),
+    };
+    let mut session = formatter.as_ref().map(covefmt::Covefmt::session);
+    let mut format = |source: &str| -> Result<covefmt::Answer, String> {
+        let (Some(formatter), Some(session)) = (formatter.as_ref(), session.as_mut()) else {
+            unreachable!("covefmt is set up whenever there is a target");
+        };
+        session
+            .format(source)
+            .map_err(|error| render(formatter.sources(), &error.to_diagnostic()))
+    };
+    format_targets(&targets, check, &mut format)
+}
+
+/// Formats or checks `targets` with `format`, and reports what happened.
+///
+/// Apart from [`cmd_fmt`] so that a test can hand it a formatter that refuses
+/// or fails, which the real one cannot be made to do on demand. `format`
+/// answers covefmt's [`covefmt::Answer`], or a rendered runtime failure.
+fn format_targets(
+    targets: &[PathBuf],
+    check: bool,
+    format: &mut dyn FnMut(&str) -> Result<covefmt::Answer, String>,
+) -> Result<(), CliError> {
     let mut sources = SourceMap::new();
     let mut diagnostics = Vec::new();
     let mut changed: Vec<PathBuf> = Vec::new();
+    let mut failed = 0usize;
 
-    for target in fmt_targets(path)? {
-        let text = std::fs::read_to_string(&target)
+    for target in targets {
+        let text = std::fs::read_to_string(target)
             .map_err(|e| CliError::Message(format!("cannot read `{}`: {e}", target.display())))?;
-        let file = sources.add(&target, text.clone());
+        let file = sources.add(target, text.clone());
         // A file that does not parse is reported and never rewritten.
-        let unit = match cove_syntax::parse_file(&sources, file) {
-            Ok(unit) => unit,
-            Err(items) => {
-                diagnostics.extend(items);
+        if let Err(items) = cove_syntax::parse_file(&sources, file) {
+            diagnostics.extend(items);
+            continue;
+        }
+        let formatted = match format(&text) {
+            Ok(covefmt::Answer::Formatted(formatted)) => formatted,
+            // covefmt checked what it would have written and found it does
+            // not mean what the file means. Never written: it is a bug in
+            // the formatter, and it is reported as one.
+            Ok(covefmt::Answer::Refused(reason)) => {
+                eprintln!(
+                    "error: the formatter refused its own output for `{}`: {reason}\n  \
+                     the file was left as it was; this is a bug in the formatter \
+                     (tools/covefmt), not in the file",
+                    target.display()
+                );
+                failed += 1;
+                continue;
+            }
+            Err(rendered) => {
+                eprint!("{rendered}");
+                eprintln!(
+                    "error: the formatter failed on `{}`, which was left as it was; this is a \
+                     bug in the formatter (tools/covefmt), not in the file",
+                    target.display()
+                );
+                failed += 1;
                 continue;
             }
         };
-        let formatted = cove_syntax::format::format_source(&text, &unit);
         if formatted == text {
             continue;
         }
         if !check {
-            std::fs::write(&target, &formatted).map_err(|e| {
+            std::fs::write(target, &formatted).map_err(|e| {
                 CliError::Message(format!("cannot write `{}`: {e}", target.display()))
             })?;
         }
-        changed.push(target);
+        changed.push(target.clone());
     }
 
     // A file that does not parse cannot be formatted, and saying whether
@@ -479,16 +536,25 @@ fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
 
     if !check {
         println!("{}", fmt_summary(changed.len()));
-        return Ok(());
-    }
-    for path in &changed {
-        println!("{}", path.display());
-    }
-    if changed.is_empty() {
-        Ok(())
     } else {
-        Err(CliError::Unformatted)
+        for path in &changed {
+            println!("{}", path.display());
+        }
     }
+    if failed > 0 {
+        eprintln!("{}", failed_summary(failed));
+        return Err(CliError::FormatterFailed);
+    }
+    if check && !changed.is_empty() {
+        return Err(CliError::Unformatted);
+    }
+    Ok(())
+}
+
+/// The one-line note `cove fmt` prints when the formatter refused or failed on
+/// a file.
+fn failed_summary(failed: usize) -> String {
+    format!("the formatter refused or failed on {failed} file(s), which were left as they were")
 }
 
 /// The one-line summary `cove fmt` prints to stdout.
@@ -2904,6 +2970,144 @@ export fn main() -> Result<Unit, Error> {
     fn fmt_summary_counts_the_files_it_rewrote() {
         assert_eq!(fmt_summary(0), "formatted 0 file(s)");
         assert_eq!(fmt_summary(3), "formatted 3 file(s)");
+    }
+
+    /// A source that needs every kind of decision a formatter makes —
+    /// indentation, spacing, a blank line, and a call too long for one line —
+    /// and the Rust formatter's answer for it, which is what covefmt must
+    /// answer too.
+    fn needs_formatting() -> (&'static str, String) {
+        let source = "\
+use console.println
+/// Runs.
+export fn main() -> Result<Unit,Error> {
+        let total = add(first: 1000000000000, second: 2000000000000, third: 3000000000000, fourth: 4)
+    println(\"{total}\")?
+  Ok(())
+}
+fn add(first: Int, second: Int, third: Int, fourth: Int) -> Int { first+second+third+fourth }
+";
+        let mut sources = SourceMap::new();
+        let file = sources.add("needs.cove", source);
+        let unit = cove_syntax::parse_file(&sources, file).expect("it parses");
+        (source, cove_syntax::format::format_source(source, &unit))
+    }
+
+    /// The refusal path, with a formatter that refuses: covefmt's own meaning
+    /// check cannot be made to fail on demand, and a test that waited for it
+    /// to would test nothing. A refused file is left exactly as it was and
+    /// named, the files beside it are still formatted, and the command fails.
+    #[test]
+    fn fmt_leaves_a_file_the_formatter_refused_alone_and_fails() {
+        let dir = TempDir::new("fmt-refused");
+        write(dir.path(), "refused.cove", "fn  a() {}\n");
+        write(dir.path(), "fine.cove", "fn  b() {}\n");
+        let targets = vec![
+            dir.path().join("fine.cove"),
+            dir.path().join("refused.cove"),
+        ];
+
+        let mut format = |source: &str| -> Result<covefmt::Answer, String> {
+            Ok(match source.contains("a()") {
+                true => covefmt::Answer::Refused("a token went missing".to_string()),
+                false => covefmt::Answer::Formatted("fn b() {}\n".to_string()),
+            })
+        };
+        let result = format_targets(&targets, false, &mut format);
+        assert!(matches!(result, Err(CliError::FormatterFailed)));
+        assert_eq!(
+            std::fs::read_to_string(&targets[1]).unwrap(),
+            "fn  a() {}\n",
+            "a refused file is never written"
+        );
+        assert_eq!(std::fs::read_to_string(&targets[0]).unwrap(), "fn b() {}\n");
+
+        // And under `--check`, which fails for the refusal even though the
+        // file it refused is the only one that would have changed.
+        write(dir.path(), "fine.cove", "fn b() {}\n");
+        let result = format_targets(&targets, true, &mut format);
+        assert!(matches!(result, Err(CliError::FormatterFailed)));
+    }
+
+    /// The same for a formatter that fails rather than refuses — a runtime
+    /// error inside covefmt, which is a formatter bug of another kind.
+    #[test]
+    fn fmt_leaves_a_file_the_formatter_failed_on_alone_and_fails() {
+        let dir = TempDir::new("fmt-failed");
+        write(dir.path(), "a.cove", "fn  a() {}\n");
+        let targets = vec![dir.path().join("a.cove")];
+        let mut format =
+            |_: &str| -> Result<covefmt::Answer, String> { Err("error: it broke\n".to_string()) };
+        let result = format_targets(&targets, false, &mut format);
+        assert!(matches!(result, Err(CliError::FormatterFailed)));
+        assert_eq!(
+            std::fs::read_to_string(&targets[0]).unwrap(),
+            "fn  a() {}\n"
+        );
+    }
+
+    /// `--backend ast` is refused, before anything is read or written: the
+    /// interpreter runs a checked program, and the binary carries covefmt's
+    /// lowering.
+    #[test]
+    fn fmt_refuses_the_ast_backend() {
+        let dir = TempDir::new("fmt-ast");
+        write(dir.path(), "a.cove", "fn  a() {}\n");
+        let path = dir.path().join("a.cove").display().to_string();
+        let Err(CliError::Message(message)) = cmd_fmt(&["--backend".into(), "ast".into(), path])
+        else {
+            panic!("`cove fmt --backend ast` must be refused with a message");
+        };
+        assert!(message.contains("tree-walking interpreter"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.cove")).unwrap(),
+            "fn  a() {}\n"
+        );
+    }
+
+    /// Each tier covefmt can run on formats a file into the same bytes, and
+    /// those are the Rust formatter's — covefmt chosen by default, on the VM,
+    /// and on the native tier where there is one.
+    #[test]
+    fn fmt_formats_alike_on_every_tier_it_runs_on() {
+        let (source, expected) = needs_formatting();
+        assert_ne!(source, expected, "the sample needs formatting");
+        let mut runs: Vec<Vec<String>> = vec![vec![], vec!["--backend".into(), "vm".into()]];
+        if cfg!(all(feature = "template", target_arch = "x86_64", unix)) {
+            runs.push(vec!["--backend".into(), "native".into()]);
+        }
+        for flags in runs {
+            let dir = TempDir::new("fmt-tiers");
+            write(dir.path(), "a.cove", source);
+            let path = dir.path().join("a.cove");
+            let mut args = flags.clone();
+            args.push(path.display().to_string());
+            assert!(cmd_fmt(&args).is_ok(), "`cove fmt {flags:?}` succeeds");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                expected,
+                "`cove fmt {flags:?}` formats as the Rust formatter does"
+            );
+        }
+    }
+
+    /// `--backend native` where there is no tier is ADR 0055's capability
+    /// diagnostic, not a quiet run on the VM — the same answer `cove run
+    /// --backend native` gives.
+    #[cfg(not(all(feature = "template", target_arch = "x86_64", unix)))]
+    #[test]
+    fn fmt_on_the_native_backend_without_a_tier_says_so() {
+        let dir = TempDir::new("fmt-no-native");
+        write(dir.path(), "a.cove", "fn  a() {}\n");
+        let path = dir.path().join("a.cove").display().to_string();
+        let Err(CliError::Message(message)) = cmd_fmt(&["--backend".into(), "native".into(), path])
+        else {
+            panic!("`cove fmt --backend native` must be refused where there is no tier");
+        };
+        assert!(
+            message.contains("native execution is unavailable"),
+            "{message}"
+        );
     }
 
     #[test]
