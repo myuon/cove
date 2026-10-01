@@ -1847,7 +1847,12 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `closesAGenericList`, the walk that tells the `>` of `Vector.of<String>()`
 /// from a comparison, and a test of it. The survey's row for the bench holds
 /// every function of the `covefmt` module its entry is in, `test fn`s included.
-const FORWARDABLE_COPIES: usize = 7491;
+///
+/// **7,494 since covefmt's statement rule was read against `cove_syntax`'s**, a
+/// rise of 3 that is all program and no lowering, again all of it in
+/// `examples:covefmtBench`: the rule's new questions (`leavesALineOpen`,
+/// `opensWithAContinuation`, `lastTaken`) and the test that pins them.
+const FORWARDABLE_COPIES: usize = 7494;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
