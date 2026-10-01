@@ -10,10 +10,24 @@
 //! never made executable.
 //!
 //! This file is that half. It needs a code generator, so it is behind the
-//! `template` feature and is compiled by nothing a default build does — which is
-//! ADR 0055's adoption gate ("a build without the native feature has no
-//! executable-memory dependency") and the same place `cove-native`'s own suites
-//! live. `.github/workflows/ci.yml` runs it.
+//! `template` feature, which is off by default in this crate — ADR 0055's
+//! adoption gate ("a build without the native feature has no executable-memory
+//! dependency") is about the crates an embedder links — and on by default in
+//! `cove-cli` ([ADR 0076]). Cargo unifies features across a workspace build, so
+//! `cargo t` runs this file; `cargo test -p cove-runtime` alone does not.
+//!
+//! The gate is `all(feature = "template", target_arch = "x86_64", unix)` and
+//! not the feature alone: "the native tier can *run* on this host". The feature
+//! builds everywhere, but the code generator refuses any host other than a Unix
+//! x86-64 one with a capability diagnostic, so on arm64 or Windows every case
+//! here would fail at "this host compiles". ADR 0076's Decision 4 is that such a
+//! host keeps working, and `cargo t` is part of working. The same expression
+//! gates every test that compiles and enters native code: `cove-native`'s
+//! `tests/template.rs`, the native halves of `float_parse.rs`, `int_bits.rs`,
+//! `vm::differential` and `vm::exec::encoded`'s tests, and `cove-cli`'s
+//! end-to-end native comparison.
+//!
+//! [ADR 0076]: ../../../docs/adr/0076-the-native-tier-is-built-by-default.md
 //!
 //! # Every case is differential and nothing here asserts a number
 //!
@@ -23,7 +37,7 @@
 //! tier was *used*: a case whose `vm_to_native` counter did not move has compared
 //! the VM against itself and would pass whatever the code generator emitted.
 
-#![cfg(feature = "template")]
+#![cfg(all(feature = "template", target_arch = "x86_64", unix))]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

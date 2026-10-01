@@ -298,9 +298,12 @@ fn every_case_matches_its_golden_files() {
                 ));
             }
         }
-        // The native tier, for a case that asks and a binary that has one. See
-        // [`Case::asks_for_the_native_tier`].
-        if cfg!(feature = "template") && case.asks_for_the_native_tier() {
+        // The native tier, for a case that asks and a binary that has one on a
+        // host it can run on (the expression is `cove-runtime`'s
+        // `tests/native_tier.rs`'s). See [`Case::asks_for_the_native_tier`].
+        if cfg!(all(feature = "template", target_arch = "x86_64", unix))
+            && case.asks_for_the_native_tier()
+        {
             let mut native = case.run_with(&root, &["--backend", "native"]);
             native.stderr = without_native_report(&native.stderr);
             if let Some(difference) = native.differs_from(&actual) {
@@ -398,9 +401,11 @@ impl Case {
     /// and the comparison above is the interpreter's. ADR 0068's gates ask that
     /// AST, VM and native answer alike for every boxed-value operation it moves,
     /// so the cases that pin those operations opt in here. It runs only in a
-    /// build with the `template` feature — which is the step of
-    /// `.github/workflows/ci.yml` that tests `cove-cli` with it — because a
-    /// default build has no code generator to ask.
+    /// build with the `template` feature, which since ADR 0076 is the default
+    /// one — so `cargo t` runs it — because a `--no-default-features` build
+    /// has no code generator to ask; and only on a Unix x86-64 host, because
+    /// any other refuses `--backend native` with a capability diagnostic. CI runs this suite that way too, as the
+    /// check that a build without the feature retains the VM corpus.
     fn asks_for_the_native_tier(&self) -> bool {
         self.dir.join("native").exists()
     }

@@ -216,7 +216,7 @@ impl Subject {
     }
 
     /// Every input's answer from the native tier's compiled `parses`.
-    #[cfg(feature = "template")]
+    #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
     fn on_the_native_tier(&self, inputs: &[String]) -> Vec<Answer> {
         let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
         let runtime = Runtime::new(
@@ -1008,7 +1008,7 @@ fn seeded_random_inputs_agree_on_the_vm() {
 }
 
 /// The adversarial rows, on the native tier.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 #[test]
 fn every_adversarial_row_agrees_on_the_native_tier() {
     let inputs = adversarial();
@@ -1017,7 +1017,7 @@ fn every_adversarial_row_agrees_on_the_native_tier() {
 }
 
 /// The same seeded random inputs, on the native tier.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 #[test]
 fn seeded_random_inputs_agree_on_the_native_tier() {
     let inputs = random(0x5eed_f10a7, 700);
@@ -1042,7 +1042,7 @@ fn seeded_round_trips_agree_on_the_vm() {
 }
 
 /// The middle tier's rows, on the native tier.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 #[test]
 fn every_middle_tier_row_agrees_on_the_native_tier() {
     let inputs = middle_tier();
@@ -1051,7 +1051,7 @@ fn every_middle_tier_row_agrees_on_the_native_tier() {
 }
 
 /// The same round-trips, on the native tier.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 #[test]
 fn seeded_round_trips_agree_on_the_native_tier() {
     let inputs = round_trips(0x5eed_1e3f, 1_500);

@@ -226,18 +226,23 @@ sections under it comes from these five commands and nothing else:
 
 ```console
 $ cargo build --profile checked -p cove-bench
-$ cargo build --profile checked -p cove-cli --features template
+$ cargo build --profile checked -p cove-cli
 $ scripts/covefmt-tiers.sh 15             # the three arms, interleaved and checked
 $ scripts/covefmt-profile.sh 5            # where the machine time goes, per tier
 $ ./target/checked/cove-fmt-phases . 51   # the Rust arm's phases, apart
 ```
 
-The feature build goes **last**, and that is not a style preference: cargo
-replaces `target/checked/cove` with whichever feature set was last asked for, so
-an ordinary `cargo t` or `cargo clippy --workspace` in between puts the default
-build back and the native arm becomes unavailable. Both scripts ask before they
-time anything and say which command to run, because the alternative is a
-measurement that dies fourteen rounds in. CI builds it last for the same reason.
+The numbers above were taken on a `--features template` build, which this
+section used to insist went **last**: cargo replaces `target/checked/cove` with
+whichever feature set was last asked for, and an ordinary `cargo t` in between
+put the featureless default back and the native arm became unavailable. Since
+[ADR 0076](../../docs/adr/0076-the-native-tier-is-built-by-default.md) the
+default build of `cove-cli` *is* that build — the same features, so the same
+binary — and the order no longer matters. What still replaces it is a
+`--no-default-features` build, and a host the code generator cannot serve has
+no native arm at all, so both scripts still ask before they time anything and
+say which command to run, because the alternative is a measurement that dies
+fourteen rounds in.
 
 `covefmt-tiers.sh` reports min and max beside every median, separates the cold
 run from the warm ones, diffs the two Cove arms byte for byte on every round,
@@ -375,14 +380,15 @@ slice of it, and it is the section below.
 experimental native tier runs this program too:
 
 ```console
-$ cargo build --profile checked -p cove-cli --features template
+$ cargo build --profile checked -p cove-cli
 $ cd examples && ../target/checked/cove run covefmtBench --files-root .. --backend native
 ```
 
 It compiles every supported reachable function of one lowered program eagerly,
 finalizes once, and the encoded `CALL` arm consults the same table generated
 code does — so a compiled function called from an encoded one is entered. The
-default does not change and a build without the feature has no
+default *backend* does not change, and a build without the feature
+(`--no-default-features`, or any embedder of `cove-runtime`) has no
 executable-memory dependency.
 
 **On this corpus it is 2.9 times the encoded VM's speed**, and it was not

@@ -19,6 +19,7 @@
   record of a race that happened, and this ADR neither re-runs them nor
   disagrees with them. What is withdrawn is the *retention* — the standing
   obligation to keep the losing arm compiling, lowering and agreeing
+- Superseded in part by [ADR 0076](0076-the-native-tier-is-built-by-default.md): its "`template` stays a feature that is off by default", for `cove-cli` only. Everything else stands
 
 ## Context
 

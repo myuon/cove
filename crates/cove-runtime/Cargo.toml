@@ -9,11 +9,15 @@ license.workspace = true
 # `cove-native`'s feature, forwarded rather than re-decided, because ADR 0055's
 # adoption gate — "a build without the native feature has no executable-memory
 # dependency" — is a fact about the whole graph and not about one crate in it.
-# Default off, so the ordinary `cargo t` and `cargo build` of this workspace map
-# no executable page.
+# Default off, because this is the crate an embedder links and the one the
+# browser playground is built from ([ADR 0076] turns it on in `cove-cli`
+# only). Feature unification means a workspace command that includes
+# `cove-cli` builds it on; `cargo build -p cove-wasm` does not.
 #
 # `template` is the arm ADR 0056 adopted, the one `native::compile` uses, and
 # since ADR 0066 the only one there is.
+#
+# [ADR 0076]: ../../docs/adr/0076-the-native-tier-is-built-by-default.md
 [features]
 default = []
 template = ["cove-native/template"]

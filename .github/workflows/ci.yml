@@ -222,12 +222,21 @@ jobs:
       - name: cove-bench (correctness only; no threshold gate)
         run: ./target/checked/cove-bench --iterations 1
 
-  # The template compiler is optional and is absent from the default workspace
-  # build. Its lint, docs, tests and VM/native corpus comparison therefore form
-  # an independent gate. Keeping them here avoids putting their feature-specific
-  # compilation on the serial path through the default checks.
+  # The native tier against the VM on a real program, and ADR 0055's gate
+  # item 7 from the other side: a `cove` built *without* the tier.
+  #
+  # Since ADR 0076 `cove-cli` builds the template compiler by default, so the
+  # `checks` job's workspace clippy, doc and test already compile and run it —
+  # `cove-native`'s suite, `cove-runtime`'s `native_tier.rs` and every other
+  # case gated on `template` — by feature unification. This job used to repeat
+  # those three commands with `--features template` on `cove-native`, and on
+  # `cove-runtime` and `cove-cli`, because the default build reached none of
+  # it; they now ran the same tests under the same features twice, and are
+  # gone. What is left is what no workspace command does: the covefmt corpus
+  # diffed across tiers, and a build with the feature turned *off*. Both build
+  # a binary of their own, so they stay off the serial path through `checks`.
   native:
-    name: the native tier builds and agrees with the VM
+    name: the native tier agrees with the VM, and the VM stands without it
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -262,36 +271,16 @@ jobs:
           git ls-files -z | xargs -0 touch -d '2000-01-01T00:00:00Z'
           echo "the cache is this commit's Rust; cargo has nothing to rebuild"
 
-      # ADR 0056 chose the hand-written x86-64 template compiler and ADR 0066
-      # retired Cranelift, so there is one code-generator arm to check.
-      - name: cargo clippy, doc and test (the native tier)
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: |
-          cargo clippy -p cove-native --all-targets --features template --profile checked -- -D warnings
-          cargo doc -p cove-native --no-deps --features template --profile checked
-          cargo test -p cove-native --features template --profile checked
-
-      # This includes the VM/native differential suite in
-      # `crates/cove-runtime/tests/native_tier.rs`.
-      - name: cargo clippy, doc and test (the native tier's runtime and CLI)
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: |
-          cargo clippy -p cove-runtime -p cove-cli --all-targets \
-            --features template --profile checked -- -D warnings
-          cargo doc -p cove-runtime -p cove-cli --no-deps \
-            --features template --profile checked
-          cargo test -p cove-runtime -p cove-cli \
-            --features template --profile checked
-
       # Run the repository's formatter corpus on machine code and require it
       # to print exactly what the encoded VM prints. Neither stderr stream is
       # hidden, so a backend failure remains diagnosable from the CI log.
+      #
+      # A plain build, with no `--features template`: that the default `cove`
+      # has the tier is ADR 0076's decision, and this is where it is relied on.
       - name: cove run covefmtBench on the native tier, against the VM
         run: |
           set -euo pipefail
-          cargo build --profile checked -p cove-cli --features template
+          cargo build --profile checked -p cove-cli
           cd examples
           strip_timings() { grep -v '^lex\|^parse\|^print\|^whole'; }
           ../target/checked/cove run covefmtBench --files-root .. --backend vm \
@@ -300,6 +289,18 @@ jobs:
             | strip_timings > /tmp/covefmt-native.out
           diff /tmp/covefmt-vm.out /tmp/covefmt-native.out
           echo "the native tier printed what the encoded VM printed, byte for byte"
+
+      # ADR 0055's gate item 7, second half: "a build without the native
+      # feature ... retains the full VM corpus". `cove-cli` turns the feature on
+      # by default (ADR 0076), so this is the one place a `cove` without it is
+      # built at all. The end-to-end suite is the corpus that runs through the
+      # *binary* — it spawns the `cove` this command built, over every case in
+      # `tests/e2e/`, on the linear-memory backend and against the interpreter
+      # — and its native comparisons are `cfg!(feature = "template")`, so they
+      # drop out rather than fail. It replaces `target/checked/cove` with the
+      # featureless build, which is why it comes after the step above.
+      - name: cove-cli without the native feature passes the end-to-end corpus
+        run: cargo test -p cove-cli --no-default-features --profile checked --test e2e
 
   # The `#[ignore]`d cases are the full coverage/ratchet gate. In particular,
   # `vm_coverage.rs` runs every program in the repository, including benchmark
@@ -418,6 +419,24 @@ jobs:
           set -euo pipefail
           git ls-files -z | xargs -0 touch -d '2000-01-01T00:00:00Z'
           echo "the cache is this commit's Rust; cargo has nothing to rebuild"
+
+      # ADR 0055's gate item 7, first half: "a build without the native
+      # feature has no executable-memory dependency". The playground is the
+      # build that must not have one, and since ADR 0076 turned the feature on
+      # in `cove-cli` a default somewhere could pull it in. `--target all`
+      # rather than `wasm32-unknown-unknown`, because `libc` is a `cfg(unix)`
+      # dependency of `cove-native` and a wasm-only graph would omit it even
+      # if the feature were on — the check would pass on exactly the mistake it
+      # exists for. So it also refuses `cove-native` with `template` itself.
+      - name: The playground's dependency graph has no code generator and no libc
+        run: |
+          set -euo pipefail
+          tree=$(cargo tree -p cove-wasm --target all -e normal --prefix none -f '{p} {f}')
+          if printf '%s\n' "$tree" | grep -E '^libc |^cove-native .*[ ,]template(,|$)'; then
+            echo "::error::cove-wasm's graph reaches the native code generator (ADR 0055 gate item 7, ADR 0076)"
+            exit 1
+          fi
+          echo "cove-wasm's graph has no libc and no template feature"
 
       - name: Build the playground for wasm32-unknown-unknown
         run: cargo build -p cove-wasm --target wasm32-unknown-unknown --release

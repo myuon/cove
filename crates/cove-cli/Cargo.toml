@@ -8,20 +8,29 @@ license.workspace = true
 name = "cove"
 path = "src/main.rs"
 
-# The native tier of ADR 0055, off by default.
+# The native tier of ADR 0055, **on** by default.
 #
 # The code generator's feature, forwarded to `cove-runtime` and from there to
-# `cove-native`, because ADR 0055's adoption gate — "a build without the native
-# feature has no executable-memory dependency" — is a fact about the dependency
-# graph of the *binary a user runs*. Default off, so `cargo build -p cove-cli`
-# maps no executable page and `cargo tree -p cove-cli` names no JIT.
+# `cove-native`. [ADR 0076] turns it on here and only here: the `cove` binary is
+# the tool, not something anybody embeds, so `--backend native` works on a
+# supported host without a special build. The *backend* default is unchanged —
+# `cove run` is the encoded VM unless `--backend native` is given.
 #
-# `--backend native` still parses without it, and answers a capability
-# diagnostic: ADR 0055's "Selecting native execution on an unsupported target
-# produces a capability diagnostic, not an attempted fallback". A flag that
-# existed only in some builds would be a second command-line surface.
+# ADR 0055's gate item 7 — "a build without the native feature has no
+# executable-memory dependency and retains the full VM corpus" — is kept by the
+# libraries, which leave the feature off, and by `--no-default-features` here.
+# CI checks both: `cove-wasm`'s graph has no `libc`, and this crate without the
+# feature builds and passes the end-to-end corpus.
+#
+# `--backend native` parses either way, and without the feature (or on a host
+# the code generator cannot serve) answers a capability diagnostic: ADR 0055's
+# "Selecting native execution on an unsupported target produces a capability
+# diagnostic, not an attempted fallback". A flag that existed only in some
+# builds would be a second command-line surface.
+#
+# [ADR 0076]: ../../docs/adr/0076-the-native-tier-is-built-by-default.md
 [features]
-default = []
+default = ["template"]
 template = ["cove-runtime/template"]
 
 [dependencies]

@@ -228,7 +228,7 @@ impl Subject {
     }
 
     /// Every row's answer from the native tier's compiled `computed`.
-    #[cfg(feature = "template")]
+    #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
     fn on_the_native_tier(&self, rows: &[Row]) -> Vec<Answer> {
         let (hosts, runtime) = self.runtime();
         let native = cove_runtime::compile_native(&self.lowered).expect("this host compiles");
@@ -429,7 +429,7 @@ fn the_boundary_table_agrees_on_the_vm() {
 }
 
 /// The boundary table, on the native tier.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 #[test]
 fn the_boundary_table_agrees_on_the_native_tier() {
     let rows = boundary();
@@ -454,7 +454,7 @@ fn seeded_random_rows_agree_on_the_vm() {
 }
 
 /// The same rows, on the native tier.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 #[test]
 fn seeded_random_rows_agree_on_the_native_tier() {
     let rows = random(SEED, RANDOM_ROWS);

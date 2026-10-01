@@ -7319,7 +7319,7 @@ mod tests {
     /// `call`, and the `call` is what consults the table. Every case asserts that
     /// the callee was compiled and that the call crossed into it, because a case
     /// that did not would compare the VM with itself.
-    #[cfg(feature = "template")]
+    #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
     mod compiled {
         use super::*;
         use crate::native::NativeProgram;
@@ -8168,7 +8168,10 @@ mod tests {
             pair_vector: LayoutId,
             /// The element, which only the compiled cases name, in the call they
             /// build in front of `push_pair`.
-            #[cfg_attr(not(feature = "template"), allow(dead_code))]
+            #[cfg_attr(
+                not(all(feature = "template", target_arch = "x86_64", unix)),
+                allow(dead_code)
+            )]
             pair: LayoutId,
             pair_store: LayoutId,
         }
@@ -10458,7 +10461,7 @@ mod tests {
         /// case above that a program reaches through a `call` answers what the
         /// dispatch loop answers — the words, the bytes, and each refusal's
         /// sentence and span.
-        #[cfg(feature = "template")]
+        #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
         mod compiled {
             use super::super::compiled::{agree, compiled, through_a_call};
             use super::*;
@@ -10621,7 +10624,7 @@ mod tests {
         /// the same refusal in the same words at the same span, the same heap,
         /// the same fuel and the same collections. Each case is reached through a
         /// `call`, which is the crossing, and asserts it crossed.
-        #[cfg(feature = "template")]
+        #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
         mod tiered {
             use super::*;
             use crate::native::NativeProgram;

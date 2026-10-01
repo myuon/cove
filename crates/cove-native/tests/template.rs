@@ -15,8 +15,12 @@
 //! suite rather than to the emitter's own test file.
 //!
 //! [ADR 0066]: ../../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md
+//!
+//! Gated on the host as well as the feature, because `Jit::new` refuses every
+//! host that is not Unix x86-64 and the feature is on in every workspace build
+//! (ADR 0076). See `cove-runtime`'s `tests/native_tier.rs` for the expression.
 
-#![cfg(feature = "template")]
+#![cfg(all(feature = "template", target_arch = "x86_64", unix))]
 
 use cove_ir::{FunctionId, Program};
 use cove_native::template::{Compiled, Jit};
