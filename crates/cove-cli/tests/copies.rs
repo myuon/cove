@@ -1852,7 +1852,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// rise of 3 that is all program and no lowering, again all of it in
 /// `examples:covefmtBench`: the rule's new questions (`leavesALineOpen`,
 /// `opensWithAContinuation`, `lastTaken`) and the test that pins them.
-const FORWARDABLE_COPIES: usize = 7494;
+///
+/// **7,529 since covefmt checks that its output means what its input meant**,
+/// a rise of 35 that is all program and no lowering, all of it in
+/// `examples:covefmtBench` (198 to 238 in its `prod` and `ret` columns, every
+/// other row unchanged). With the check's new tests held out the corpus answers
+/// 7,515, so 21 are the check and the bench's use of it — `formatted`,
+/// `differenceIn`, `ranksOf`, `boundariesOf`, `noteRefusal` — and 14 are the
+/// tests of the check, which the bench's row counts because it holds the whole
+/// `covefmt` module.
+const FORWARDABLE_COPIES: usize = 7529;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

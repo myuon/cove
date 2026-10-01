@@ -3121,3 +3121,265 @@ fn lastSignificantIn(held: Array<Token>, from: Int, to: Int) -> Int {
   }
   from
 }
+
+// # Whether formatting kept what a program means, asked of every file covefmt
+// formats — so that covefmt does not need another formatter to judge it.
+//
+// Until this existed the only judge was agreement with `cove fmt`: the
+// corpus, and four ways of damaging it that cannot change a program's
+// meaning, each asked for the original back. That is a strong check of the
+// *layout* and it would be gone the day covefmt replaced the formatter it
+// agrees with. What it never said on its own was the weaker and more
+// important thing — that whatever covefmt wrote, right layout or wrong, is
+// the same program it was given.
+//
+// # What can change a program's meaning here
+//
+// Cove has no `;`. A statement ends at the end of its line, under the
+// continuation rules `Parser::statement` documents, so a formatter changes
+// what a program means in exactly two ways: it adds, drops or alters a token
+// that is not space, or it moves a newline so that a statement boundary
+// moves — one statement split in two, or two run into one. The check is
+// those two, and nothing else:
+//
+// 1. **The significant tokens are equal, text for text.** Everything but the
+//    runs of space, and **comments count**: a dropped comment is a formatter
+//    bug even though the compiler would never notice, and a comment run onto
+//    the line of the code after it comments that code away. The one token
+//    left out is a comma standing against a `)` or a `]`, which both
+//    formatters add when they break a group and take away when they fold it.
+// 2. **covefmt's own parser gives both the same tree**, with every node's
+//    boundaries compared by significant-token index rather than by byte
+//    offset. Re-indenting moves every byte offset in a file and no index.
+//
+// The second is only as good as covefmt's statement rule, and that is said
+// plainly rather than hoped: a newline the real language reads differently
+// from `Parser::statement` is a newline this cannot see move. The README's
+// "Meaning is checked on every file" is where the rule was checked against
+// `crates/cove-syntax`.
+//
+// # It refuses rather than emits
+//
+// [`formatted`] is what a caller formats with. When the check fails, the
+// caller gets its input back untouched and the reason beside it — never the
+// output, because an output that might mean something else is not one any
+// caller can use. A formatter that leaves a file alone is a nuisance; one
+// that changes what it does is a bug in every program it touches.
+/// What [`formatted`] answers: the text to write, and whether the formatted
+/// text was refused.
+///
+/// `text` is the input itself when `refused` holds a reason, so a caller that
+/// only writes `text` back is safe whichever happened.
+export struct Formatted {
+  text: String
+  refused: Option<String>
+}
+
+/// `source` formatted, or `source` itself when the formatted text would not
+/// mean what `source` means.
+///
+/// Takes what the caller already holds, because the caller already lexed and
+/// parsed the input to print it: the check costs a lex and a parse of the
+/// *output*, and no second pass over the input.
+///
+/// A file that comes back byte for byte is not checked at all. Identical text
+/// means the same thing by definition, and it is what an already-formatted
+/// file — every file in this repository — comes back as.
+export fn formatted(source: String, held: Lexed, tree: Tree) -> Formatted {
+  let out = print(source, held, tree)
+  if out == source {
+    return Formatted(text: out, refused: None)
+  }
+  match differenceIn(source, held.tokens, tree, out) {
+    Some(why) => Formatted(text: source, refused: Some(why))
+    None => Formatted(text: out, refused: None)
+  }
+}
+
+/// `source`, lexed, parsed and formatted through [`formatted`].
+export fn formatSource(source: String) -> Formatted {
+  let held = lex(source)
+  formatted(source, held, parseTokens(source, held.tokens))
+}
+
+/// Whether `after` means what `before` means: the same significant tokens,
+/// and the same tree over them.
+export fn meansTheSame(before: String, after: String) -> Bool {
+  firstDifference(before, after).isNone()
+}
+
+/// The first way `after` differs in meaning from `before`, or `None` when it
+/// does not.
+export fn firstDifference(before: String, after: String) -> Option<String> {
+  let held = lex(before).tokens
+  differenceIn(before, held, parseTokens(before, held), after)
+}
+
+/// [`firstDifference`], for a `before` already lexed and parsed.
+fn differenceIn(
+  before: String,
+  was: Array<Token>,
+  tree: Tree,
+  after: String,
+) -> Option<String> {
+  let now = lex(after).tokens
+  let a = ranksOf(before, was)
+  let b = ranksOf(after, now)
+  // The significant tokens of both, side by side. A token is significant
+  // where its rank and the next one differ, so the ranks are the whole of
+  // the question and no list of indices is built to ask it.
+  var i = 0
+  var j = 0
+  var n = 0
+  while true {
+    while i < was.length() && at(a, i + 1) == at(a, i) {
+      i = i + 1
+    }
+    while j < now.length() && at(b, j + 1) == at(b, j) {
+      j = j + 1
+    }
+    if i >= was.length() || j >= now.length() {
+      break
+    }
+    let x = tokenAt(was, i)
+    let y = tokenAt(now, j)
+    if !sameText(before, x, after, y) {
+      return Some("significant token {n} was `{text(before, x)}` and is `{text(after, y)}`")
+    }
+    i = i + 1
+    j = j + 1
+    n = n + 1
+  }
+  if i < was.length() {
+    let x = tokenAt(was, i)
+    return Some("significant token {n}, `{text(before, x)}`, was dropped")
+  }
+  if j < now.length() {
+    let y = tokenAt(now, j)
+    return Some("significant token {n}, `{text(after, y)}`, was added")
+  }
+  let shape = boundariesOf(tree, a)
+  let reshaped = boundariesOf(parseTokens(after, now), b)
+  var k = 0
+  while k < shape.length() && k < reshaped.length() {
+    let p = boundaryAt(shape, k)
+    let q = boundaryAt(reshaped, k)
+    if p.kind != q.kind || p.from != q.from || p.to != q.to {
+      let left = "a {nodeNamed(p.kind)} over significant tokens {p.from}..{p.to}"
+      let right = "a {nodeNamed(q.kind)} over {q.from}..{q.to}"
+      return Some("the tree differs: {left} is {right}")
+    }
+    k = k + 1
+  }
+  if shape.length() != reshaped.length() {
+    return Some("the tree differs: {shape.length()} node(s) and {reshaped.length()} node(s)")
+  }
+  None
+}
+
+/// For every token index, and one past the last, how many significant tokens
+/// stand in front of it.
+///
+/// A token is significant unless it is a run of space or a comma that stands
+/// against the bracket closing its group. The ranks are what turn a node's
+/// token range into a range that re-indenting cannot move: a run of space
+/// added, removed or split changes every token index after it and no rank.
+fn ranksOf(source: String, held: Array<Token>) -> Array<Int> {
+  var out = Vector.of<Int>()
+  var count = 0
+  var i = 0
+  while i < held.length() {
+    out.push(count)
+    let token = tokenAt(held, i)
+    if token.kind == Kind.Punct && token.to - token.from == 1 &&
+      source.byteAt(token.from) == ',' {
+      if !closesAgainstABracket(source, held, i) {
+        count = count + 1
+      }
+    } else if token.kind != Kind.Space {
+      count = count + 1
+    }
+    i = i + 1
+  }
+  out.push(count)
+  out.freeze()
+}
+
+/// Whether the `,` at `i` is followed, past nothing but space, by a `)` or a
+/// `]`: the comma a broken group ends its last member with.
+///
+/// Only space may stand between. `f(a, // why\n)` keeps its comma in the
+/// comparison, because what moved there would be a comment.
+fn closesAgainstABracket(source: String, held: Array<Token>, i: Int) -> Bool {
+  var j = i + 1
+  while j < held.length() && tokenAt(held, j).kind == Kind.Space {
+    j = j + 1
+  }
+  let c = byteOfPunct(source, held, j)
+  c == ')' || c == ']'
+}
+
+/// One node of a tree, its range measured in significant tokens.
+struct Boundary {
+  kind: Node
+  from: Int
+  to: Int
+}
+
+/// Every node of `tree` but a leaf and a node holding nothing significant, in
+/// order, each measured by `ranks`.
+///
+/// A leaf is one token, and the tokens were compared already. A node holding
+/// nothing significant is a run of space the tree had to put somewhere — the
+/// newline at the end of a file is one, and adding it is not a change of
+/// meaning.
+fn boundariesOf(tree: Tree, ranks: Array<Int>) -> Array<Boundary> {
+  var out = Vector.of<Boundary>()
+  collect(tree, ranks, var out)
+  out.freeze()
+}
+
+fn collect(tree: Tree, ranks: Array<Int>, var out: Vector<Boundary>) {
+  if tree.kind == Node.Leaf {
+    return
+  }
+  let from = at(ranks, tree.from)
+  let to = at(ranks, tree.to)
+  if to > from {
+    out.push(Boundary(kind: tree.kind, from: from, to: to))
+  }
+  for child in tree.children {
+    collect(child, ranks, var out)
+  }
+}
+
+fn boundaryAt(held: Array<Boundary>, i: Int) -> Boundary {
+  match held.get(i) {
+    Some(boundary) => boundary
+    None => Boundary(kind: Node.Error, from: -1, to: -1)
+  }
+}
+
+fn tokenAt(held: Array<Token>, i: Int) -> Token {
+  match held.get(i) {
+    Some(token) => token
+    None => Token(kind: Kind.Unknown, from: 0, to: 0)
+  }
+}
+
+/// Whether two tokens of two sources are the same text, compared byte by byte
+/// rather than by cutting both out.
+fn sameText(a: String, x: Token, b: String, y: Token) -> Bool {
+  let width = x.to - x.from
+  if y.to - y.from != width {
+    return false
+  }
+  var i = 0
+  while i < width {
+    if a.byteAt(x.from + i) != b.byteAt(y.from + i) {
+      return false
+    }
+    i = i + 1
+  }
+  true
+}

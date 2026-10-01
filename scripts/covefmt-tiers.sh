@@ -33,8 +33,8 @@
 # would hide a cost a user pays every time.
 #
 # **Every run is checked, and a check that fails stops the script.** Both Cove
-# arms print the corpus size, the five oracle scores and the formatter's own
-# verdict; this diffs the native arm's output against the VM's byte for byte on
+# arms print the corpus size, the five oracle scores, the meaning check's
+# refusals and the formatter's own verdict; this diffs the native arm's output against the VM's byte for byte on
 # every iteration and asserts the corpus facts on every one. A wall-time table
 # over a run that formatted something else is not a measurement, and a partial
 # script that leaves a plausible table behind is the failure this repository
@@ -215,6 +215,18 @@ SCORES = [384, 384, 384, 384, 384]
 scores = re.findall(r"^(\d+) of (\d+) file\(s\) ", out, re.M)
 if [(int(a), int(b)) for a, b in scores] != [(n, FILES) for n in SCORES]:
     sys.exit(f"covefmt-tiers.sh: the {arm} arm's five oracle scores are {scores}")
+# The meaning check's refusals, one count for each of the five passes. The
+# bench fails on any of them itself; asserting the line here as well means a
+# bench that stopped printing it cannot pass for one that printed zeros.
+refused = re.search(
+    r"^refused by the meaning check: (\d+) match, (\d+) re-indent, "
+    r"(\d+) re-break, (\d+) re-open, (\d+) re-space$",
+    out,
+    re.M,
+)
+if refused is None or any(int(n) for n in refused.groups()):
+    found = refused.group(0) if refused else "no refusal line"
+    sys.exit(f"covefmt-tiers.sh: the {arm} arm's meaning check: {found}")
 
 one(out, r"^lex\s+(\d+) ms", "lex")
 one(out, r"^parse\s+(\d+) ms", "parse")
