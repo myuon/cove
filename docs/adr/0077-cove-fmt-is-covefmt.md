@@ -116,8 +116,12 @@ anyone outside the binary reads.
 `cove_syntax::format` is not deleted:
 
 - it is the oracle for a test that asserts covefmt's output equals it on every
-  file in the repository and on the four damaged versions of each — the test
-  that until now was covefmt's only judge, kept as one judge of two;
+  file in the repository and on a damaged copy of each — re-indented, its
+  blank lines taken out, the space inside its braces squeezed, its ends left
+  loose — so that what was until now covefmt's only judge is kept as one judge
+  of two. `covefmtBench`'s four mutations stay judged against the files on
+  disk, which the undamaged half of this test makes the Rust formatter's fixed
+  points;
 - `cove generate` keeps using it to format generated source in-process, and
   the AST's `Display` keeps using it for expressions. Both are inside the
   compiler, where starting a Cove program would be the wrong cost, and the
@@ -125,21 +129,26 @@ anyone outside the binary reads.
 
 ### 6. The cost is accepted, and named
 
-Expected, to be replaced with measurement in this ADR's Measurement section
-before it is merged:
+Measured (see the Measurement section for how), `cove fmt --check`, medians of
+15 interleaved runs:
 
-| | Rust formatter | covefmt, native | covefmt, VM |
+| | Rust formatter (`main`) | covefmt, native | covefmt, VM |
 | --- | ---: | ---: | ---: |
-| one file | 12 ms | ~13–16 ms | ~10–13 ms + formatting |
-| whole repository, `--check` | 144 ms | ~500 ms (~3.5×) | ~1.5 s (~10×) |
+| a small file (13 lines) | 5.5 ms | 14.6 ms (2.7×) | 10.8 ms (2.0×) |
+| a large file (`print.cove`, 3,732 lines) | 14.3 ms | 61.9 ms (4.3×) | 136.7 ms (9.6×) |
+| whole repository | 148.9 ms | 684.1 ms (4.6×) | 1,686.9 ms (11.3×) |
 
-A single file — the shape an editor's format-on-save has — stays in the Rust
-formatter's class. The whole-repository check does not, because covefmt's
-formatting itself is 4.6× the Rust formatter's on the native tier. PHILOSOPHY's
+When this ADR was written the expectation was a single file at about 13–16 ms
+native and the whole repository at about 500 ms (~3.5×) native and 1.5 s VM.
+A single file — the shape an editor's format-on-save has — stays in
+milliseconds, within a factor of three of the Rust formatter on a small file.
+The whole-repository check does not stay in its class, because covefmt's
+formatting itself is several times the Rust formatter's. PHILOSOPHY's
 "Preserve the performance class" would refuse that as a matter of course;
-myuon accepted it explicitly on 2026-10-02 as a temporary cost, in absolute
-terms about a third of a second, for a formatter written in the language it
-formats. It is the next thing to work on, not a settled price.
+myuon accepted it explicitly on 2026-10-02 as a temporary cost — then expected
+at ~3.5×, about a third of a second, and measured here at 4.6×, about half a
+second more than the Rust formatter — for a formatter written in the language
+it formats. It is the next thing to work on, not a settled price.
 
 ## What this does not decide
 
@@ -186,7 +195,82 @@ give covefmt a guarantee of its own would guard nothing anyone runs.
 
 ## Measurement
 
-To be filled from the implementation: build-time cost of the build script;
-size of the embedded IR and of the binary; `cove fmt --check` on one file and
-on the repository, on both tiers, against the Rust formatter, medians of
-interleaved runs; and the time to decode the IR.
+Measured 2026-10-02 on the implementation's branch, i7-10700K (8 cores, macOS,
+x86-64, so the native tier is present), `--profile checked`, nothing else
+building. The baseline is `origin/main` at `ca92e5e` built in a worktree of its
+own. Timings are medians with `[min..max]`; arms were interleaved within each
+round, and a first round was discarded as warm-up.
+
+**`cove fmt --check`**, 15 rounds. Every arm reported the same files — none, on
+the formatted tree, exit 0 — and a copy of `examples/hello/main.cove` with its
+indentation doubled was reported by all three, exit 1.
+
+| | Rust formatter (`main`) | covefmt, native | covefmt, VM |
+| --- | ---: | ---: | ---: |
+| `examples/hello/main.cove`, 13 lines | 5.5 ms [5.1..8.3] | 14.6 ms [12.9..16.6] | 10.8 ms [10.4..12.9] |
+| `tools/covefmt/covefmt/print.cove`, 3,732 lines | 14.3 ms [14.1..18.8] | 61.9 ms [60.9..64.7] | 136.7 ms [132.6..139.9] |
+| the repository root, 384 files | 148.9 ms [146.5..154.6] | 684.1 ms [677.7..694.9] | 1,686.9 ms [1,672.2..1,715.0] |
+
+On a small file the VM is faster than the native tier: compiling covefmt's
+reached functions is a few milliseconds that one small file does not repay.
+
+**The start.** `cove-compile-phases tools/covefmt covefmt.formatSource 21`
+(extended for this ADR to time the image), 21 iterations:
+
+| | median [min..max] |
+| --- | ---: |
+| front end and lowering of covefmt, which the image replaces | 94.93 ms [91.98..100.51] |
+| `cove_ir::serial::decode` of the image | 1.67 ms [1.65..1.72] |
+| decode, then `Runtime` and `Vm::new` over it | 3.75 ms [3.72..4.85] |
+| `compile_native` and `Vm::with_native` | 5.21 ms [4.48..6.53] |
+| `cove_ir::serial::encode` (the build script's write) | 1.38 ms [1.29..1.49] |
+
+**Sizes.** The embedded image is **352,942 bytes**: 541 functions of which 120
+are lowered and 421 are stubs kept so that no function id is renumbered,
+13,143 instructions, and **192,330 bytes of covefmt's own source text**, carried
+so that a runtime error inside covefmt renders with its excerpt; the standard
+library's files are named by path and hash rather than carried, because the
+binary holds them already. The `cove` binary went from **9,504,024 to
+9,941,192 bytes** (+437,168, +4.6%).
+
+**The build.** 15 interleaved rounds of `cargo build --profile checked -p
+cove-cli` after touching a file, and 3 from an empty target directory:
+
+| | `main` | this ADR |
+| --- | ---: | ---: |
+| after touching `crates/cove-cli/src/main.rs` | 6.25 s [6.14..6.52] | 6.35 s [6.19..6.48] |
+| after touching `tools/covefmt/covefmt/print.cove` | 0.06 s (nothing to do) | 6.80 s [6.63..7.01] |
+| from an empty target directory | 36.80 s [36.67..36.93] | 38.71 s [38.56..38.95] |
+
+The build script itself, over 15 runs: checking covefmt **52.6 ms**
+[50.9..55.6], lowering it **52.7 ms** [50.4..55.5], writing the image 1.7 ms
+[1.5..2.3]. A change to covefmt therefore costs a `cove-cli` rebuild plus about
+half a second, and the build-dependencies are shared with the binary's own
+dependencies under `checked` rather than compiled twice:
+`[profile.release.build-override]` sets release's own `opt-level = 3` and sixteen codegen units,
+and `[profile.checked]` names its sixteen codegen units explicitly so that the
+two profiles compare equal. Under `dev` the build-dependencies are compiled a
+second time, optimised.
+
+**What the image does not depend on.** Nothing in `cove-diag`, `cove-schema`,
+`cove-syntax`, `cove-sema` or `cove-ir` is conditional on the target, and
+`serial`'s tests assert that, so an image the build script makes on the host is
+the image the target would have made — `cargo check -p cove-cli` for
+`aarch64-apple-darwin` and `x86_64-pc-windows-gnu` both build it.
+
+**What the switch found.** The agreement test of decision 5 passed on the
+repository from the first run, and the existing `cmd_fmt` tests did not: on
+input that still needed formatting, covefmt wrote no blank line between two
+declarations, kept blank lines at the end of a file and space at its top,
+wrote `{1}` as `{ 1\n }`, kept tokens the source ran together inside a group it
+left on one line, kept a call broken around one argument that could not fit
+either way, and kept a doc comment's missing space and a comment's trailing
+space. None of the corpus's files or `covefmtBench`'s mutations asks for any of
+those, because every file here already obeys them. covefmt now answers what the
+Rust formatter answers on each, which is why the agreement test runs on a
+damaged copy of every file as well. The rules cost `covefmtBench`'s native
+`whole` 489.5 ms [486..494] on `main` against 548.0 ms [545..567] here (8
+interleaved runs; the corpus is 0.7% larger here). One difference is known and
+left: doubling every space, string literals included, pushes some lines past
+the width, and on two of them — a call around a call around a long literal —
+covefmt breaks the outer call where the Rust formatter hugs it.
