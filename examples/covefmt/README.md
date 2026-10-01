@@ -99,12 +99,12 @@ those out either; `joinedUp` takes `(` and `[` and not `{`, because a brace
 would merge two statements; `spacedOut` doubles rather than squeezes, because
 doubling can never merge two tokens.
 
-Four of the five are at **384 of 384** and re-break is at **383**: the one
-file is `crates/cove-sema/std/float.cove`, whose parenthesised sum inside a
-broken chain covefmt breaks at a different place from `cove fmt`
-([issue #551](https://github.com/myuon/cove/issues/551)). Each has its own
-ratchet in `bench.cove` that may rise and never fall — and all four stood at
-248 while the corpus grew to 384, which is how that file got in unnoticed.
+All five are at **384 of 384**. Each has its own ratchet in `bench.cove` that
+may rise and never fall — and all four once stood at 248 while the corpus grew
+to 384, which is how one file covefmt re-broke differently from `cove fmt` got
+in unnoticed: `crates/cove-sema/std/float.cove`, where a sum of two calls was
+broken in front of a dot as though it were a chain
+([issue #551](https://github.com/myuon/cove/issues/551)).
 
 **`benches/covefmtBench` asserts them**, which it did not at first, and the
 gap was the point: `cove test` sees the samples in `parsetests.cove` — a few
@@ -340,7 +340,7 @@ The paired reading is the one to trust, and this time it is not a coin toss.
 Within each of fifteen interleaved rounds native is faster on every phase in
 every round: **−906 ms** on `whole` [−960..−883], −104 ms on `lex`, −189 ms on
 `parse` and −614 ms on `print`. Byte-identical output on every round, and the
-five oracle checks at 384, 384, 383, 384 and 384 on both.
+five oracle checks all at 384 of 384 on both.
 
 The phases do not move together. `lex` and `print` are 3.1× and 3.2× faster
 compiled and `parse` is 2.3×, so the native tier's split is lex 10%, parse 31%,

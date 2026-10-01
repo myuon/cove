@@ -637,11 +637,23 @@ test fn a_continuation_nests_inside_a_continuation() -> Result<Unit, Error> {
 /// dots and `chain` starts a line at each. `judge(a, b).detail()` at 84
 /// columns becomes the call on one line and `.detail()` on the next, where
 /// breaking the arguments would have made four lines of it.
+///
+/// **And a sum of two calls is not a chain.** Only a call reaches `call`: an
+/// expression whose top is a binary operator goes to `binary` and splits
+/// after the operator. Counting calls across the `+` found two and a dot
+/// behind the first, and the parenthesised operand of the second sample was
+/// broken as `1073741824 + core` and then `.vectorLoad(minus, place))`
+/// (#551). It is `crates/cove-sema/std/float.cove`'s, with the line break
+/// inside the `(` joined up, and the answer is the one `cove fmt` wrote there.
 test fn a_chain_breaks_before_its_dots() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f() -> Int \{", "  assertEqual(", "    judge(checking(None, Some(\"stack trace\"), None), answering(\"a stack trace\")).detail(),", "    \"the body contains `stack trace`\",", "  )?", "\}", ""])
   let want = "\n".join(["fn f() -> Int \{", "  assertEqual(", "    judge(checking(None, Some(\"stack trace\"), None), answering(\"a stack trace\"))", "      .detail(),", "    \"the body contains `stack trace`\",", "  )?", "\}", ""])
   let held = lex(flat)
   assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
+  let sum = "\n".join(["fn f() -> Int \{", "  let raised = high +", "    slope *", "      (core.vectorLoad(minus, place + 1) * 1073741824 + core.vectorLoad(minus, place))", "  raised", "\}", ""])
+  let broken = "\n".join(["fn f() -> Int \{", "  let raised = high +", "    slope *", "      (core.vectorLoad(minus, place + 1) * 1073741824 +", "        core.vectorLoad(minus, place))", "  raised", "\}", ""])
+  let heldSum = lex(sum)
+  assertEqual(print(sum, heldSum, parseTokens(sum, heldSum.tokens)), broken)?
   Ok(())
 }
 

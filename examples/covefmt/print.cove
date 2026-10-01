@@ -2426,6 +2426,14 @@ fn isAModifier(source: String, held: Array<Token>, i: Int) -> Bool {
 /// dots."* It applies when `call_count(&ops) >= 2` and `chain_break_points`
 /// found one — a field access that follows a call, which is what makes
 /// `a.b().c` a chain rather than a path.
+///
+/// And it applies to a *call*, which a member with a binary operator outside
+/// its brackets is not: `expr` sends that one to `binary`, which splits at the
+/// operator and never reaches `call`. Counted across the operator, `a.f(x) *
+/// 2 + a.f(y)` had two calls and a dot behind the first of them, and was
+/// broken in front of the second operand's `.f` instead of after the `+`
+/// (#551). An operator in the first position is a prefix and not a binary
+/// one, so `-a.f().g()` is still a chain.
 fn breaksAtItsDots(source: String, held: Array<Token>, member: Tree) -> Bool {
   var calls = 0
   var dots = 0
@@ -2439,7 +2447,9 @@ fn breaksAtItsDots(source: String, held: Array<Token>, member: Tree) -> Bool {
       dots = dots + 1
     }
   }
-  calls >= 2 && dots > 0
+  calls >= 2 && dots > 0 &&
+    lastLoosest(source, held, member.from, member.to) <=
+      nextSignificant(held, member.from, member.to)
 }
 
 /// `member` written with a line before each dot that follows a call.
