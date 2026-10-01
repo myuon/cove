@@ -51,6 +51,7 @@ pub mod lower;
 pub mod print;
 pub mod program;
 pub mod repr;
+pub mod serial;
 pub mod verify;
 
 pub use bytecode::{EncodedInst, MAX_FRAME_WORDS};

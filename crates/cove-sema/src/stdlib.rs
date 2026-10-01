@@ -131,6 +131,19 @@ static SOURCES: &[StdSource] = &[
     },
 ];
 
+/// The embedded text of the standard-library file [`attach`] adds as `path`,
+/// such as `"std/array.cove"`, or `None` for a path it does not add.
+///
+/// For `cove_ir::serial` ([ADR 0077](../../../docs/adr/0077-cove-fmt-is-covefmt.md)):
+/// an image of a lowered program names a library file by its path rather than
+/// carrying a second copy of text the binary reading it already holds here.
+pub fn text_of(path: &str) -> Option<&'static str> {
+    SOURCES
+        .iter()
+        .find(|source| source.path == path)
+        .map(|source| source.text)
+}
+
 /// Every module name the standard library declares.
 ///
 /// This is `cove_sema::package::load`'s and `Compiler::compile`'s way of
