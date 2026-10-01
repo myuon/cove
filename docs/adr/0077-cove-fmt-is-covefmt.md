@@ -148,7 +148,11 @@ formatting itself is several times the Rust formatter's. PHILOSOPHY's
 myuon accepted it explicitly on 2026-10-02 as a temporary cost — then expected
 at ~3.5×, about a third of a second, and measured here at 4.6×, about half a
 second more than the Rust formatter — for a formatter written in the language
-it formats. It is the next thing to work on, not a settled price.
+it formats. Shown the measured 4.6×, myuon accepted it the same day on the
+grounds that the whole-repository check stays under a second. That is the
+bound this ADR records: **a whole-repository `cove fmt --check` under one
+second** on the native tier. Making covefmt's formatting faster is the next
+thing to work on, not a settled price.
 
 ## What this does not decide
 
