@@ -1,6 +1,6 @@
 # ADR 0075: `Float.parse`'s middle tier reads bits
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-01
 - Decides: that `std.float.parse`'s Eisel–Lemire middle tier is written over
   [ADR 0074](0074-an-int-also-carries-a-fixed-width-bit-pattern.md)'s `Int`
