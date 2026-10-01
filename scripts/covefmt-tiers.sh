@@ -26,7 +26,7 @@
 # Interleaved, it is charged to all three, which is a smaller error and a
 # visible one: it widens every spread at once.
 #
-# **The first iteration is reported apart.** It reads 248 files off a cold
+# **The first iteration is reported apart.** It reads 384 files off a cold
 # page cache and pages in an 8 MB binary, and it is a different measurement
 # from the nine after it rather than a noisy sample of the same one. Averaging
 # it in would put a first-run cost into a steady-state median; throwing it away
@@ -200,7 +200,7 @@ def one(text, pattern, name, cast=int):
 # would be a tripwire on every prose change in the tree, which is a gate nobody
 # would keep. A 2% band is loose enough for prose and tight enough that a
 # corpus which grew or shrank enough to invalidate a timing cannot pass.
-FILES, BYTES, BAND = 248, 698481, 0.02
+FILES, BYTES, BAND = 384, 1888025, 0.02
 files, bytes_ = re.search(r"^(\d+) file\(s\), (\d+) byte\(s\)$", out, re.M).groups()
 files, bytes_ = int(files), int(bytes_)
 if files != FILES or abs(bytes_ - BYTES) > BAND * BYTES:
@@ -210,8 +210,11 @@ if files != FILES or abs(bytes_ - BYTES) > BAND * BYTES:
         "recorded facts in examples/covefmt/README.md and this script together, or "
         "explain the difference — do not average over two corpora."
     )
+# Match, re-indent, re-break, re-open, re-space. Re-break is one short:
+# issue #551, a sum covefmt breaks at a different place from `cove fmt`.
+SCORES = [384, 384, 383, 384, 384]
 scores = re.findall(r"^(\d+) of (\d+) file\(s\) ", out, re.M)
-if len(scores) != 5 or any(a != "248" or b != "248" for a, b in scores):
+if [(int(a), int(b)) for a, b in scores] != [(n, FILES) for n in SCORES]:
     sys.exit(f"covefmt-tiers.sh: the {arm} arm's five oracle scores are {scores}")
 
 one(out, r"^lex\s+(\d+) ms", "lex")
@@ -249,7 +252,7 @@ if arm == "native":
     one(err, r"\(([0-9.]+)% of Cove calls used native code\)", "native_call_share", float)
 PYTHON
 
-printf 'covefmt over 248 files, three arms, interleaved: 1 cold run and %d warm\n' "$warm"
+printf 'covefmt over 384 files, three arms, interleaved: 1 cold run and %d warm\n' "$warm"
 one_round cold 1
 for n in $(seq "$warm"); do
   one_round warm "$n"

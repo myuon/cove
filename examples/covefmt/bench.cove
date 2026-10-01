@@ -312,22 +312,27 @@ fn deindented(source: String) -> String {
 /// 0, which is the one thing a ratchet may never do. Three of the five gates
 /// asserted nothing at all from then until issue #369 came to read them.
 fn mustReIndent() -> Int {
-  248
+  384
 }
 
 /// How many of the corpus must survive being joined up and re-broken.
 ///
-/// A ratchet, and one that may rise and never fall. It is the whole corpus —
-/// the six that were left when the paragraph below was written are not left.
+/// A ratchet, and one that may rise and never fall. It is the whole corpus but
+/// one: `crates/cove-sema/std/float.cove`, whose parenthesised sum inside a
+/// broken chain covefmt breaks at a different place from `cove fmt`
+/// ([issue #551](https://github.com/myuon/cove/issues/551)). It stood at 248
+/// while the corpus grew to 384, which is how that file got in unnoticed.
+///
+/// The six that were left when the paragraph below was written are not left.
 ///
 /// What they needed was the one thing this printer could not do at all:
 /// **write a body broken**. Every rule here rewrites a run of space that is
 /// already there, and a lambda or an `if` whose body was written on one line
 /// has none to rewrite — `breaks` says a control flow body and a lambda body
 /// always break, and saying that here means putting a newline where the source
-/// has none. It says it now, which is why this is 248.
+/// has none. It says it now, which is why this reached the whole corpus.
 fn mustReBreak() -> Int {
-  248
+  383
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.
@@ -498,7 +503,7 @@ fn markBodies(held: Array<Token>, tree: Tree, var marked: Vector<Bool>) {
 /// mutations never ask for, and this was the first number that said how much of
 /// it was there. It is now the whole corpus.
 fn mustReOpen() -> Int {
-  248
+  384
 }
 
 /// `source` with the lines inside every one-statement body taken out.
@@ -570,9 +575,10 @@ fn insideALiteral(source: String) -> Vector<Bool> {
 /// A ratchet, and one that may rise and never fall. It stood at 246 while the
 /// corpus was 248 files, which is a ratchet two files behind rather than a
 /// ratchet: a gate that is satisfied by the reading before last cannot report
-/// the reading before last going away.
+/// the reading before last going away. It then stood at 248 while the corpus grew
+/// to 384, which is the same mistake 136 files wide.
 fn mustReSpace() -> Int {
-  248
+  384
 }
 
 /// `source` with every run of space inside a line doubled.

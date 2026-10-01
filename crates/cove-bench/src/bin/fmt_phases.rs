@@ -32,7 +32,7 @@
 //! to compare against the Cove arms' `whole`.
 //!
 //! One thing is deliberately **not** the same, and it is the honest asymmetry
-//! between the arms: the Cove bench reads all 248 files into memory before it
+//! between the arms: the Cove bench reads all 384 files into memory before it
 //! starts its clock, and `cove fmt --check` reads each file inside its own. So
 //! this reports the read as a phase of its own, apart from the three, and a
 //! reader comparing `whole` with `whole` can see exactly how much is not
@@ -56,9 +56,9 @@ use std::time::Instant;
 
 use cove_diag::SourceMap;
 
-/// Files the corpus holds. Asserted exactly: a phase table over 247 files is
+/// Files the corpus holds. Asserted exactly: a phase table over 383 files is
 /// not this table.
-const FILES: usize = 248;
+const FILES: usize = 384;
 
 /// Bytes it holds, and the width of the band around it that still counts as the
 /// same corpus.
@@ -70,7 +70,7 @@ const FILES: usize = 248;
 /// own. An exact assertion would be a tripwire on every prose change, which is
 /// a gate nobody would keep; 2% is loose enough for prose and tight enough that
 /// a corpus which grew enough to invalidate a timing cannot pass.
-const BYTES: (usize, f64) = (698_481, 0.02);
+const BYTES: (usize, f64) = (1_888_025, 0.02);
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
