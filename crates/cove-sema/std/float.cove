@@ -1846,7 +1846,7 @@ fn parseMiddle(
 }
 
 /// `m × 10^q` correctly rounded, or `NaN` when this cannot tell: Eisel and
-/// Lemire's truncated product, in thirty-bit limbs.
+/// Lemire's truncated product, in thirty-bit limbs, taken in two stages.
 ///
 /// `1 <= m <= 10^18` and `-342 <= q <= 308`. ADR 0072 is the argument that
 /// every answer that is not `NaN` is the right one; in brief:
@@ -1856,16 +1856,23 @@ fn parseMiddle(
 ///    `[2^89, 2^90)`, with `g = floor(q × log2(5)) - 89` computed rather than
 ///    stored. It is exact for `0 <= q <= 38` and below `5^q × 2^-g` by less
 ///    than one for every other `q`.
-/// 3. `L = w × F` exactly, in five limbs of thirty bits: every partial
-///    product and column sum is below `2^62`, so nothing traps. The value is
-///    `L × 2^(g + q - s)` when `F` is exact, and otherwise strictly between
-///    that and `(L + w) × 2^(g + q - s)`, with `w < 2^60`.
-/// 4. `N`, `L`'s top fifty-four bits, is a significand with its round bit.
-///    When `F` is exact the rounding is read off `L` itself, ties to even.
-///    Otherwise the answer is `N` rounded, unless every bit of `L` from bit
-///    60 up to the round bit is one — the only case where adding less than
-///    `2^60` could carry into `N` — and then it is `NaN`: the value might be
-///    on either side of a rounding boundary.
+/// 3. **First stage**: `L' = w × (F − f0)`, the product with `F`'s top two
+///    limbs only, `f0` its low thirty bits, and `top` its bits from 90 up.
+///    The value is `Y × 2^(g + q - s)` with `L' <= Y < L' + 2^90`, and
+///    `L' < Y` unless `F` is exact. Unless `top`'s low five bits are all ones
+///    or all noughts, adding less than `2^90` cannot carry into the
+///    significand or its round bit, nor can the value be a tie, so `top`
+///    alone decides the answer, a subnormal's included: that is all but about
+///    one input in sixteen, and it reads ten of the entry's fifteen bytes.
+/// 4. **Second stage**, for an exact `F` and for a first stage that could not
+///    tell: `L = w × F` exactly, in five limbs of thirty bits — every partial
+///    product and column sum is below `2^62`, so nothing traps — and then
+///    Lemire's test as it was: `N`, `L`'s top fifty-four bits, is a
+///    significand with its round bit. When `F` is exact the rounding is read
+///    off `L` itself, ties to even. Otherwise the answer is `N` rounded,
+///    unless every bit of `L` from bit 60 up to the round bit is one — the only
+///    case where adding less than `2^60` could carry into `N` — and then it
+///    is `NaN`: the value might be on either side of a rounding boundary.
 /// 5. A value below the least normal one is rounded once, at `2^-1074`, from
 ///    `N`'s bits, with the dropped bits joining the test for a carry.
 /// 6. An undecided `q` in `[-26, -1]` whose `5^-q` divides `m` is exactly
@@ -1875,36 +1882,47 @@ fn parseMiddle(
 /// bits above `'0'`: placed once before the run like any literal, and read a
 /// byte at a time.
 fn eiselLemire(m: Int, q: Int) -> Float {
-  // Step 1, without a count of leading zeros: six halvings of the distance.
+  // `e`, the unit of the rounded significand, is `b + 1 + g + q - s`, with
+  // `b = 90 + 5 + h` and `h` one when `top` below reaches `2^59`: `q` cancels
+  // out of it, the floor is an arithmetic shift, and the five is in the
+  // numerator. The shift `s` and `h` are taken off and added as they are
+  // found.
+  var e = (q * 217706 + 458752).shiftRight(16)
+  // Step 1, without a count of leading zeros: six halvings of the distance,
+  // the first three skipped at once for a mantissa of sixteen digits or more.
   var w = m
-  var s = 0
-  if w < 268435456 {
-    w = w * 4294967296
-    s = 32
-  }
-  if w < 17592186044416 {
-    w = w * 65536
-    s += 16
-  }
   if w < 4503599627370496 {
-    w = w * 256
-    s += 8
+    if w < 268435456 {
+      w = w * 4294967296
+      e -= 32
+    }
+    if w < 17592186044416 {
+      w = w * 65536
+      e -= 16
+    }
+    if w < 4503599627370496 {
+      w = w * 256
+      e -= 8
+    }
   }
   if w < 72057594037927936 {
     w = w * 16
-    s += 4
+    e -= 4
   }
   if w < 288230376151711744 {
     w = w * 4
-    s += 2
+    e -= 2
   }
   if w < 576460752303423488 {
     w = w * 2
-    s += 1
+    e -= 1
   }
-  let a1 = w / 1073741824
-  let a0 = w - a1 * 1073741824
-  // Step 2: `F`'s three limbs, most significant first, five bytes each; the
+  // A limb is thirty bits: a shift count and a mask, each held once.
+  let thirty = 30
+  let limb = 1073741823
+  let a1 = w.shiftRight(thirty)
+  let a0 = w.bitAnd(limb)
+  // Step 2: `F`'s two top limbs, most significant first, five bytes each; the
   // `'0'`s the five bytes carry are `818089008` altogether. Written a step a
   // line, which is how `cove fmt` and covefmt lay it out alike.
   let table = "k_ACeY8keUXA?jXUERdIQ]UIOQ:alY^ZkQOj8n_gIMNKcjEZIgh[>Ke?df2`TMRP:kK11IAi1a^]Tk8=ZAaA_VGB>:hn9jA4f=V;Om6a\\SVf<J[1hOg;n<?3\\PS_QEbFWdnm_BdgX\\[I[>lAb>];7RRaKk831E[7I<>l][Mbij3a[5i?OB[hfE?XHT^5gGSG7FfQmAa?FlcZV^6LVBZLV=S<\\0U@IX3_fe3_`kog0^TP24[dQ:EfUOjHM6d1BkHYLkD>ghnTHQ1WZ>cd:9BUg>=NYB1TbPHVEcWZPhK9c@noXN_k@QU96Ql@5>_bVKj4YnKH:KD6RKo@2hUdN2>=298;2WR1cGXbaHh9E]6iaJR@=RoM_6;[8HWma:d@k_E:g^UjNaVV^`ZUEU>be7\\S?`@JLe>ZnRORIW\\2lDQ42RE^;7K01W3U\\dZQUMTflXh10J_81e9ndn4[c61@Pjj2BLNR=Uf_gQTYTdAKQc5HOZ=j\\ni^1EbJ?f^WTaIH>XiQ[?0cdJAMm_^BBSm31HPH`Jj^UdkK\\lCa^XNlQYJ?B:Bh;H^:BV[Z3`c6\\fS77LfKX;BBFOl<2[hiD42R>6fl7k?2fg7Y53:aXT[9j2cRBLa[9n_1Fjn<A`Zg3n5lNJa\\Y]_F<eTdmWKV1N7d9;;_QO16PY?`jdhU^oEYfaH8cS]9R6_:_:dDM^;0LXKjXJmJmP\\bTfhAiALY@fHfXgo>4VFGUccU3o4c5o1U_kmO@`NDneogNao;jlg4lUj>RWj[??OLf2K5g\\I5aiF33GD3S1gEWOFnG[Sd=94KbE;1G<Vnc>HX=ZaGM>hfO`^P1nbA5M]DRW47lj82NNeFe8Y[@e9V4E1S3AFA=J32Q>_UJAkd5[eP`Sc9QkN`fJa76bhl\\_kjU;>R0^\\L?cUkmmL^N2:PjGSC`OJmLcj5R]98mL8\\WA\\d0TCM\\=]VIUKhS40P]HE7A8oonbf[e0Xh^JI5K?onOTFb@bSM0O[I1oo3^^?JO\\D@WV?BOndZIcA7gIDaOc77nQe0@5IRWdnkglLo598:3G[Ab>ZekT>fKJ<T=f6>bESJMBT2@_]@Qci?MN8RCVQJMdBZ@gSDeZZhP9a5AGde5L:35EVX<=FU]Q1;IVAkEP97XF7TYAN?ofJ:h;IRKYMcUecod0]V>?k2SdP?YXOhPLOhiliVHXCT2WfXSWg8L7oobHM3AdB\\QdjS9onnnTD6AGGZB9;lOnWG6\\SjfVbKE_Mcoa<hG\\iT@O2;;E@nmP6MX7mDVb]n:U>VL42Q4nDh?\\^fWA`3539F=j6CWjTA5l3fCk[aHWhQi=EFURIlMCFgHkE;`EF^k0KTX<U?::N\\J[jY`RMb?^Rl]6GQFTZ6ERWIe5el;n\\f]dWjkA@BGCK>nH3iAaiZ5TFm8B2]n4Sc7<2CN^F=;A\\^b\\_ho2hFIk`N67jOgkg>cVL0J\\UWYi7RmJQ@@1P@[gPb;\\[\\a9TD1hDfeHn^WfWmKmI2FJ4R_>JAR8nINGYN0Be]Q0KZ[=oemSePGS8i@QeF1OcLlbhMKk7TZQE`kh:5ocBILl^jY[=:f<WO`6od;jYd60MS_aG\\8_a>iCPS`BNEffcUMfaCdX\\\\G5kDTPNeDMXabggLgJ9]XVRYU2moUeD5@\\92`;CnC\\W_YDSBKUY^74NlDa[SY\\72O49XeV[In6LT78c6e<330F?Vd1fTMOlA?Qih=i`Q2D=TgkESJHFAGlYBi@n5j:l@nKe]UiccbVc\\FeZW1IT_H@`_@PWLS5@a_mk>Dlk4XaC[fTn;mU0m64jiNdCJ76gN^A<GV9WfQH@XhUEieOMO\\1d9^Dc6^[T9KZKcQ8V4lol=;];bU2`IJ_V<?k@MhN_>CLOaKO_Cj4USC=Pl9cfi;eTLBg\\80i;<@dWNbmSGUg:17MoE1aFO\\l=NRN@\\Z_U96f3d5XK[5dgeKNKHSTa72QegB5bbF2>\\MmHc:QZSCW_MaI;b^GOnZ5<8Q[E=_N_ImGndVO:Z6:Q;FK@L]mPh3NZCfT_612Al^Y64FDhd=jgQBfKjcGUKj71AIUIWT2hP6_ILDHbgoH0^QcX8K?cINoUo>0j:@b:R3`?f_OO1Q8\\dn]:T\\CdKGFaiJh1W<>Vk\\Ha6V?;hc0`oB@ZWNmH?bnfoam?6deAF\\^C_^T_]VALA1Bf;llEe6md_ecEAWS^l;KBH]Akc@:V1LZ[>B6nhUUH26W`ij[0kDGCG^^2XA]8IEa:9M8=jISBF8JO[=L[dJ@TOn3Me@Sc0IkH`J]WmTEBT\\_`PJ>lQi1lmJW=gk\\XPb[YSY>6HXPZmCiDO[A\\SQWnbXe\\XgYWV6g\\J1nOC37c5T1OXRc`A?3SilgkNPka[P\\ERdLhL5jF9:]fHgJkQT6S7Hk[MHQoRXe<nT5lWUC:GZOKC2P>=7KaNWlme7B7c8A`IB]fAl<Q<SDgm;6?c\\Yk=WYO\\:5lMgc`WdJ11cgW<WKUE`\\aaPQBPJ`OhY?EVKo6lDcXQLWfcS;02nh[J0bYcadPKm`3^Vf@PoD@^AXRm<4Z@SdXWTZLk1Ef?RjJFHiaMe49a[CcKY0ko7meBE<>68`BSA:niVYCM?XceN;V2^gC`CXDSS0be^OSJU8lHRI\\K`oS:7LA>KU_EP3aFW]nDYZa0_;:h4]\\AYMid5MAjmmV5i7F3eHA6dUTf^Oc[\\UbIG:\\@g^4J7`VW_>o\\mGE5iUPY\\`A[2_X<]:FSoLJ3n;2i]a7l>N\\oCPTm]cX9=IkB5h?8H^=9@R;P`J6WS9M?Lh=bEG<N@D8[kdSD6A>j\\oUdI:fja\\97eRYH?OAOMRD_3U\\iMYg9[RkZZijdO87e4Dl6KZTeXIQVj9bEJ;82U=QQ?m0DF7MHFm1W@YiSl@IKYD^L\\B14dGlkDObSYj3gFQFP^n54cgVB<BJV4eXj]VF0eOf_G1?V3c9HokQ2gdK<aSOTok_?jICUaQomlGMWmEQlOd?Vm?n]^ZalZjKWaCP\\SnI:DnKeY2Q]XHg\\moLiW1IQYU4Q?Rd6_Z4`a_j3nEYSKQ8KTUln;hTmk3lBIJRM^V6gKG6\\jM[OhURU_XUB<hH956Gf^k>kR^V`6N;FGmdJZ1U=]8>42g5nnX`ZA^Q8JAU3TgN^Bldej9JPenDN5FIg\\22TEhTQ^lbcF0:cQA]KF]Z:[oP;P=PIVhb<I4]FoH>H@hOoSOG_ZlFGW8o:SCo\\G=[U[KmPk>m<8ogM16O6Bli:2\\O;?RZ8\\3Kkf3^A[cO1[DZg4BjcTYf6`Fbf9eTeGYPMdCXLLNQf9O1FalBX\\AAacZC[fa\\NKGBgEV>@dhVdN7V2=7U:oadQ3H@bd_aH<_>gg8YD>DoQk]^?k2UdjcYAj?JJY9cic?B9PAc<IXPY^8L81SEXF?oP2Xd9ZS:1l;bKcoH3C1<5;lRK>o2`o>47aO6Nk[21WI^WPbTfkL3EBiAa@:AHo>4ZC4:WWUmT<e_?1Udge=AQNVNX1UQHoY2i@Blk`6B1ni_?SCWTG\\:l7fRNX;3L8QMMW<UTj5S96j9UDjJPO^n8VkkHX[nZ918Wj]Z`Zj>bfnD[AJaT\\R^JdI?bFlk2h_]g[J1QOS^l\\9cVjiEV@QigLZ[g<@PYSeOjE<:Yj[JOZDJ\\bghjO=DIFA7TiPgoUg970YO[eIN7hRo_ZM\\HIkcIGjdk[_[U57NPJ`?]iR:f[VNFIF8QLCYGj\\R;@2moeeDi\\Afl\\Z^43]OcBZ87FD[geIU4Xg`7DZ9;ifdQGo:iRf4TjE_L:AY]nmWkSU^8k;C<ed9N]1jLO9[9n802PUk<9<QcN2n>e01X_Io;OZ@ES]bR@2bk@NnGTdJlY?:d2oZ4V]mN1Q[cRmQ3WbBh<^J`m3H=fLYa^gV?j1M<D>AD3dn:UOchQdOIAeY4aVfWKhKE8cWc9QZn`TABfR:K0Q_kj5^l]EWT:]1`Z;jhW:UlEP^V\\96JGLcHN_KJhj@G;H0mD0>VkBAW8dLn>1<Y0B?U3K0MPb6h`_iX;I^DA`ThnXVlkh2>@iiF<^7>B`\\:f2adT;egldPk^KVaa_8]>cEl1Y:Z2PN>:jhRP;K23MDS8Ua]YSET78iB:DemGW4Q\\:m8k7V\\j3L]PeZg=\\K9iPH8TChi35RPS`n;l?5F\\KSYk[8\\]=^kBf\\GRLTIejghQ:Z7TGMK3]PQ\\bkD^ZD^^ZHjDLZ7oZ9jDijJDo8iSdYoT\\Hj8I0j>k7lPj?^k_TE?XTIDlmY8cZZ[MJSR]OZ<=cK0UEFDa<KHgT_@P8hGEEln_a7R^mRX;6M:[L>K]IKJ\\jb=h4MFCB2X_bAH9naF5T[h6SBk^e^;W>ecNkK463eEATga2S@FZAe7TbZUn5mC<4LDfBIMoE?MVVCoRa]1kOj_UAZP_hoKN8BJGiKNV58kg?BEZG0mgbF?VJUJQSMRNHVZgMi`0^a9lDk5n`EUEH<0jMLKJ9gNLJnZ^?0TRIa8F:[1`g:\\iH][0=JK]Eb=4mH7^i5`@a2X[>`F<^9YS[V:NYYK1>=glf2\\VO]6D3aaQaEl3Rg`7XGi4^=j=[K4KRf4a>kZlh\\HS8ja[SUmRZU\\6gN[k9MfLOLkE?78UFFikdR1cZ55ALMGEnD=IZR@TVFUcT];Mi@_e:d]_l?@MhNEGTkQ>`lUmYRB[BmF_4YRM;_M3jgF7\\\\Jfck4N[DDiU;YWgQSPLjc;4]3o?B0j\\nXT9OmehDo36Q9H=b];gmCFJ>ch9K^AoHNelX<0bPf;bYeWWCA]i7POTQgGZ9aQ869GIHWMZE=T[miJ7[]?^aE4jPmfV[hDcDAe>e;4TVZ`FfJ09FBRRMe]`DlLT0P;[g;;5C9<JUafPD7CJNnkCm_`_>D8I98A6^Z8m;\\k1i:OKJEHJD[<NWTi;^SY8MG@Ljoc8^7NZ<SJT]4T9__jiYFD_\\A=hE]<;[iT1elmcZ`[=T?WCL]2CL=@ULf0mCQ8ChBhC@T^d3Q<XIJGS;c<2Fm@R<_i?hN[n_o2l\\TZ_kgSfVfnKnc[g]eKjeLd@RG1O@CJdYILaJ0ZZlag4HAQc_cm`Pde[nDeNEj@[`m<Y1QSNm1Jm\\JKFV?iYYlF\\Aa]7Q2<?ch3dKLGF>8IIB_C`f4Pa9^Uhe?gc]TFQbXmL:?G2Se`XmL:?c<c<c<c<c<c<c<cP00000000000000X00000000000000b00000000000000nP0000000000000W40000000000000`e0000000000000m2@000000000000V9J000000000000_[`P00000000000kV\\X00000000000U@;i00000000000^T>g@0000000000j=BU40000000000THCW:P000000000]NHPm8000000000henY<J000000000SQ_9_`@00000000\\J:l;\\D00000000gP][>WI00000000R\\LS18WX0000000[GS[aJaR0000000f=LV]aMjP000000QhIh<Vj\\T000000ZFPF?`YG]000000dl8Kc\\c]X@00000Q5UAHD0DQ:00000YFnU^I0IYLP0000c\\^?9o@P3cX0000PCliN?RD2HA0000XHl7ecJi2nE@000bO;9c@AWC]jT000o6ml@4F18YI=000WLF]Z2]`]Ig`800aCLI4SI<h`E\\:00mXCOE\\?P6lK7<P0VQ<;USY\\4E`lOd0`9O>NlT75K=;Wa0l;g26[]8fb0NQ]@UWJID;D=R?@C54B_1@oY>9@jc4GfEFjaU?SQ[U9OeMcj\\T^oA^=3?=kiJXL[]j_69`D31JgaBSfiIJg\\<I3aaU]W<dSghbcW_ZG6oTPP0\\efoPQ[Tlh_MXX0h3D_HZ6N<6kE2b0S24mWJD2gTE59_@[bV=1@i3UMJFL;4f_?`AU7DNd`l3=eR=Qf:o<Tc@nUR0YZ`jC]^o^05>>jPdeM8hY:_YP6QbY91QJ=SI^]al457Y]XY``l@:I>K56IT92d<m;D<oR1fGom;CPX6?4X7]A9non?4Xb7beb9XULN_mbebnY_S>\\2^cVKm?Ro^D;L2G3JPP2lSKWdlW9QNJ8TD1ef9ab;`kif0Z]I2CC[n>^]:hCPeH_Bh8VVi=<>c<<QGMSc5G`WPOBOo?Y]Dl_f]laHW77o3T8Z;kdIUngHLLoJ>UJGMH__NU>ST?@b>`mD^kkF>R<MC4nbM<YjZU5i5GbCk7?R?j<Z^GGF]^hii3Jch_eim=<I:W8GDAPfkbT>@?_^XM>TZlREG]AdC[ZBTR=e[Zj]hVAHVTg=ZaC6UYHSGjgH72PR^cl7Qg\\=iU>8c8[JPk9JEgAGnQZojfA99k`jRRfo52glaj]^=FT[;T^fCUknII9`\\=enMjShOJmo_L<gAQ_2\\VKCXf_eYX2RZ:cG`28S4Kc423;d]P=\\2Z[eR_e2SnPlL8SQZ[IM]i9VOY;S:\\J5F?e9GL06cNKmGPV[cbK]C08P;1NF\\H;HGQDCh5X=aelGN>>MIYHf6bA>CKMEab4`3_3XneQhBD[>>Ul4ZdRWAM;;Lk0i7]Rj`ea5dMnD9a7IXkYM2mGAUMi<=I@3:SdCVFRoJ[_XGb1nVH\\_l;_AF[RM^RN?ngkk>[5\\FK5:;5cnUUM1:kS^0k>FkXO7^dAMZLYQ:1lZRVijQEe53ciLRKe;@WTTeY;:HKieQI?2H]^33MlnRhBi_Rbni9SdEL>;VGX;KO^S]nH]IXg?na79;e\\YMnh`353nMHkNbgceNVl3fDn4_:FNRhIK8ERIm6bmNN3[VOajJk0LHO\\f5TfP7^I1Y`SNWX3VmR44doY26F;8a2@FZU62?SBWk]jmBdKe>GRcL7AjYI\\WQRQ@n]`9TS<Yh3h\\mYU>I<;m[odF4fh=cnQoO>m6oaKV4V@PO5?[QF<Gfi?bgjXVfSVI[_MdWS_Uhb`T<P06[EAaL[OFoL]?X08F:V=cfG<WYlAa05=fWhXInOaTKF=@6QDAfbPN7mmR;`T89YFDO8UYV^MGFFU61elcMGR`J4];l>GRCL0D]JlPUhNkAmJhC0IhaUdG[CE3>Hc;h@;N_AMV8:D1nonfD>Fk5doZ<i2N_nSiAlTkY7bH3YS=o6Kc=^:SI^n4Sl1Nh2`1i]<@:]U\\k1fV3L1T4?Z6\\OT4i:7b9P]5CTXGWM67LY^[ihFXMbMQDGYCd:FgS>9BWRLd^adHVNB\\1[WAK41jNAN`5gg26Q5ae2I5efL7ERID4[W99O[YZ1TUZoY5fPkKgVT4Qm^e_SGD9:BeP=5ZM:QU^6TU^KaL8;RR>Yo9X=_:2]c:>K:adNl2A:lSI?lb1mNPcEQJ^ef7amoA>JY0:iaJSCY^MO5R1c@=X=a<8T:4ffjRP28Q8V_UFVC2BDUX2ZYJ`KN\\?gbfi^b3ECaLRFGCe_TX:nT:X]cZkm8c;Mb<W6VYLXBeN=Oo:WH`h@CcbGRe`gnmA>m6DH`^mKS=5n\\UQV;l_NMFI>0;_;gL_^kkF4[oQP>ZneDkZZj;UfoIhBE^RYUBZdG?ZGX;;MU5Y^WEQM3TmR=nDnG4jA:idDN<jaMj=leTJ^d8\\bh4^j\\H^1]QJQ:goV5jYGNiQhia9MUoOWIC]FWjST6]jO_[`WdDF8l\\M8II7[V\\aaIK[;gTJO_IVPGn=_bUnR^`SeX04>nhUgW^[JL\\c205B^V_EQZfA3gobP6WJ@K:j5QjZJogT48XJ@ndCZIE1_eM5:bPe>QHdoZB;bdFMO92R9^Q7bKGG`^2KMYUF4YI_2==\\iS2E3n[Vc`:b`Q87kbjDnFOPF6_^D]4mGdM6n3XKXKYihF<]aTH]TbRRRTHFK_i=mNhmo;;;=NL2[gQLfW=WNno0K1Q[J\\j28PaF^^`Qaj6AH8RZXm\\JJLZ>HWe^:[EBVS`PQjHoHiTf[5C`<\\XZHo??7n4EfXl?gbdo?32imUKDBUYjga7QIid>OI4[_4IU]II`HAB7?EfjeOo8_`<NEVY3;DTaKoMMf7bmP9Yo4]mboDeCY_\\h<4NeiM?_:2XT;X6?5VSSjAeNAYFWA3iKP5\\hfBef3\\A5DgbH7h73gSCTWEFZ5^n9S4JJ^4>hUF:CUFe[eQ1IUBV^[\\hN\\SfbiA_nW@JFX6VG\\R?cc5o8R@N947ncZc`_gNjZdU[E9nPeP\\keFYEQ_6:LN8QLL5IF9eM5KfQbeYcS6_[\\BdFbd:?Rd@KhKVWGQLOQ<cKPZAKA@8V\\ic\\`09Xdeb5T:`H8@Wl0;c23>Vm=LN:Dak0>obT2@\\PcU\\inI`AWgVQJKdP?T4?06;aeP9a2aXCM5B`7]nBh<=CN2HDFWL9YVkc7XD:aO<^8YV1`Z_iRI=MfoiZcoRleKgjoPeD_h5PoJV1IJlg\\QDmk3LWX_Q_a\\5WYZ=IdCaSkJ;^771T4``AH]kU8GDdLHnRnN:gL]^JM:1SO>;^5]UChj14LQlG1^YW8nXfT@Zae=^I5:0MW9R]DeNBQ9oFLPU0kjhZ2eg9LO<3X^A:iSJAaZMicORALj^c\\@f>55H@GJed9JPgE3aVF^DMASA;a9RU:Fon<lbBn2_F][>Ll_m`;ng]SK<If24;km<>nUXlAoOQaBWMN?YG7QU[?[Z=WADecS\\iIo63Vda15Z3@LX7`NgTPPnX[RB2Ai4fCB^dY>BfJfRfGF3h7JQcQgT1T;Sm;Tf9A9P=:^PnW>N??1eb]X@MJ9>A25c2bC?IbDT`[QeBW?cNh3?ni]lfJBWA3`FV43WD4^20KXRZF>7bRa95iRPRR[DkaY_:mKGGk8[;F::^4:mVI6VlmJo5fF\\bVf_oH@\\<a^gClGo@Tko>Dg?n:U8kMo4]UOPm2QnfW=U:_Jl^gI<C:NTA0nMKA[jU?OGm6=EA>4b66TWA[Vn;hEB`boCc]a66P]^fJWLo_8`i=GX8i:T1AD?ZjlS`Fa5S^VPbdYbdf\\\\LMFlZ@8oQd?R3ggST\\[dd;?JACJTRj^>kkI0W1XJd8V[YIbZj?@`b2QQ:`fS`?EXc4lnS9iMLR6F9UQOk675n;jIZWk[nigigXgM^i0eAjVnXEhES5E:W@QC<XG9=[=MkE>XRYWobLkQ60eJ:RBZd1o_4:IGQ2`]:gEPQ?eJVOf\\Y^L>bUXYSba@7dGd:3BO>bcl_MT9aMa<T772oPkkDm<=e=O]8hcW\\UM56?XY@Kd=SPaW^dFGcRcTRa@lHn1ZQKm`KPM[MU;NVa2TiNVA<BS:O?:`MC>7f?eOG;m72mlTX1Yccbg<nlHc\\Ufi128HGbP7E_PD_DWABZNM_89;;HIk9a5WE65:j;Mn>OTn6[PU;c>dG:^i3^=XFH^N`2QLmJWDia2Knj6L39d<aA9T6YQODD1Qn8Wnb^]8Cig9I1jMZanOIhJHhDk_BI55NN7?S@OS=5ESO[;K2dQ\\4WL0FZlGUnAcQZg5aC0LE[MOMf@J5RKVchA]S:KZYj@C[2PPfF8km2UDHdGec8Y3k[:lC>YO1MQWmIZMBne\\19kHjZ1l`54W^S71LJ?9dRKl6EaZ;hacPbkPeQMSmW2GKO8<OeY2idlm0bmBFj?WbcCXB<<@o\\VlXcQ_P4A;GWZWchEiP=5X5EN=QUA`fKGh@Fb6Ze`inV=42=fDLnXES=8N?`E2aCiSW9=N0=Bif=9^dKn`kPeP@WXC`L:QRnm:I2hDaRH\\S=9k]V>OYc<nmOKf0>=D_b7T@0>\\gBcPA`Yk^YMD0BH57PHF<cUE9jDP;O3<\\?=h0^ZLHiX>FcogC1F0jE3O82AlPoe7a[PTM:;M1K=dWi<g3<]TL^DAb1AagP4cohmSiiF>QV>EH60oSVNL;ei4ohmG3`W"
@@ -1917,41 +1935,56 @@ fn eiselLemire(m: Int, q: Int) -> Float {
   f1 = f1 * 64 + table.byteAt(at + 7)
   f1 = f1 * 64 + table.byteAt(at + 8)
   f1 = f1 * 64 + table.byteAt(at + 9) - 818089008
-  var f0 = table.byteAt(at + 10) * 64 + table.byteAt(at + 11)
-  f0 = f0 * 64 + table.byteAt(at + 12)
-  f0 = f0 * 64 + table.byteAt(at + 13)
-  f0 = f0 * 64 + table.byteAt(at + 14) - 818089008
-  // Step 3: `L = l4 2^120 + l3 2^90 + l2 2^60 + l1 2^30 + l0`, in
-  // `[2^148, 2^150)`.
-  let c0 = a0 * f0
-  let k0 = c0 / 1073741824
-  let l0 = c0 - k0 * 1073741824
-  let c1 = a0 * f1 + a1 * f0 + k0
-  let k1 = c1 / 1073741824
-  let l1 = c1 - k1 * 1073741824
-  let c2 = a0 * f2 + a1 * f1 + k1
-  let k2 = c2 / 1073741824
-  let l2 = c2 - k2 * 1073741824
-  let c3 = a1 * f2 + k2
-  let l4 = c3 / 1073741824
-  let l3 = c3 - l4 * 1073741824
-  // Step 4: `N = floor(L / 2^b)` in `[2^53, 2^54)`, `b` 96 or 95, whose
-  // unit is `2^(e - 1)`: `e` is the unit of the rounded significand.
-  var unit = 32
-  var b = 95
-  if l4 >= 536870912 {
-    unit = 64
-    b = 96
+  // Step 3: `L' = top 2^90 + (c2 mod 2^30) 2^60 + (c1 mod 2^30) 2^30`.
+  let c1 = a0 * f1
+  let c2 = a0 * f2 + a1 * f1 + c1.shiftRight(thirty)
+  var top = a1 * f2 + c2.shiftRight(thirty)
+  if (top + 1).bitAnd(31) > 1 {
+    // `top`'s low five bits are neither all ones nor all noughts, so the
+    // value is strictly inside `(N, N + 1)` in units of `N`'s last bit, `N`
+    // being `top` less its low `5 + h` bits: it rounds up exactly when that
+    // bit is one, and a subnormal's rounding at `2^-1074` is decided too.
+    let h = top.shiftRightLogical(59)
+    let r = h + 5
+    e += h
+    if e >= -1074 {
+      return timesPowerOfTwo((top.shiftRight(r) + 1).shiftRight(1), e)
+    }
+    let d = -1074 - e
+    if d > 54 {
+      return 0.0
+    }
+    return timesPowerOfTwo((top.shiftRight(r + d) + 1).shiftRight(1), -1074)
   }
-  var n = l4 * (1073741824 / unit) + l3 / unit
-  let rest = l3 - l3 / unit * unit
-  let g = (217706 * q + 78643200) / 65536 - 1200 - q - 89
-  var e = b + 1 + g + q - s
+  // Step 4: `L = top 2^90 + l2 2^60 + l1 2^30 + l0` exactly, in
+  // `[2^148, 2^150)`. `F`'s low limb is nought for `0 <= q <= 25`, where
+  // `5^q` has at most fifty-nine bits.
+  var f0 = 0
+  if q < 0 || q > 25 {
+    f0 = table.byteAt(at + 10) * 64 + table.byteAt(at + 11)
+    f0 = f0 * 64 + table.byteAt(at + 12)
+    f0 = f0 * 64 + table.byteAt(at + 13)
+    f0 = f0 * 64 + table.byteAt(at + 14) - 818089008
+  }
+  let d0 = a0 * f0
+  let d1 = c1.bitAnd(limb) + a1 * f0 + d0.shiftRight(thirty)
+  let d2 = c2.bitAnd(limb) + d1.shiftRight(thirty)
+  top = top + d2.shiftRight(thirty)
+  let l2 = d2.bitAnd(limb)
+  // `N = floor(L / 2^b)` in `[2^53, 2^54)`, `b` 96 or 95, whose unit is
+  // `2^(e - 1)`: `e` is the unit of the rounded significand.
+  let h = top.shiftRightLogical(59)
+  let r = h + 5
+  e += h
+  var n = top.shiftRight(r)
+  let rest = top.bitAnd(1.shiftLeft(r) - 1)
   if q >= 0 && q <= 38 {
     // `F` is exact, so `L` is the value: round it, ties to even.
-    let half = n / 2
-    if n - half * 2 == 1 {
-      if rest != 0 || l2 != 0 || l1 != 0 || l0 != 0 || half - half / 2 * 2 == 1 {
+    let half = n.shiftRight(1)
+    if n.bitAnd(1) == 1 {
+      // Every bit below the round bit, summed: nought only on a tie.
+      let below = rest + l2 + d1.bitAnd(limb) + d0.bitAnd(limb)
+      if below != 0 || half.bitAnd(1) == 1 {
         return timesPowerOfTwo(half + 1, e)
       }
     }
@@ -1959,7 +1992,7 @@ fn eiselLemire(m: Int, q: Int) -> Float {
   }
   // The value is strictly inside `(L, L + 2^60)`, and can carry into `N`
   // only when every bit of `L` from 60 to the round bit is one.
-  var ones = rest == unit - 1 && l2 == 1073741823
+  var ones = rest == 1.shiftLeft(r) - 1 && l2 == limb
   if e < -1074 {
     // Step 5: below the least normal value. Past fifty-four bits down the
     // value is below half the least subnormal.
@@ -1967,37 +2000,11 @@ fn eiselLemire(m: Int, q: Int) -> Float {
     if d > 54 {
       return 0.0
     }
-    // `2^d`, in place: a function answering it would be one more copy.
-    var p = 1
-    var left = d
-    if left >= 32 {
-      p = p * 4294967296
-      left -= 32
-    }
-    if left >= 16 {
-      p = p * 65536
-      left -= 16
-    }
-    if left >= 8 {
-      p = p * 256
-      left -= 8
-    }
-    if left >= 4 {
-      p = p * 16
-      left -= 4
-    }
-    if left >= 2 {
-      p = p * 4
-      left -= 2
-    }
-    if left >= 1 {
-      p = p * 2
-    }
-    let kept = n / p
-    if n - kept * p != p - 1 {
+    let dropped = n.bitAnd(1.shiftLeft(d) - 1)
+    if dropped != 1.shiftLeft(d) - 1 {
       ones = false
     }
-    n = kept
+    n = n.shiftRight(d)
     e = -1074
   }
   if ones {
@@ -2016,88 +2023,50 @@ fn eiselLemire(m: Int, q: Int) -> Float {
     }
     return 0.0 / 0.0
   }
-  let half = n / 2
-  return timesPowerOfTwo(half + (n - half * 2), e)
+  return timesPowerOfTwo((n + 1).shiftRight(1), e)
 }
 
 /// `significand × 2^exponent`, for a significand of at most fifty-three bits
-/// already rounded to the answer's precision and `exponent >= -1074`: a
-/// ladder of multiplications or divisions by powers of two, each exact,
-/// because every step's product is `significand × 2^j` with `j` between
-/// nought and `exponent`. It overflows only when the answer does.
+/// already rounded to the answer's precision and `exponent >= -1074`: a few
+/// multiplications or divisions by `2^248`, `2^124` and `2^62`, and then one
+/// by the power of two left, which is an `Int` shifted and converted. Each is
+/// exact, because every step's product is `significand × 2^j` with `j`
+/// between nought and `exponent`. It overflows only when the answer does.
 fn timesPowerOfTwo(significand: Int, exponent: Int) -> Float {
   var value = significand.toFloat()
   var left = exponent
-  while left >= 512 {
-    value = value * 1.3407807929942597e+154
-    left -= 512
+  if left < 0 {
+    if left < -62 {
+      while left < -248 {
+        value = value / 4.523128485832664e+74
+        left += 248
+      }
+      if left < -124 {
+        value = value / 2.1267647932558654e+37
+        left += 124
+      }
+      if left < -62 {
+        value = value / 4.611686018427388e+18
+        left += 62
+      }
+    }
+    return value / 1.shiftLeft(-left).toFloat()
   }
-  while left <= -512 {
-    value = value / 1.3407807929942597e+154
-    left += 512
+  if left > 62 {
+    while left > 248 {
+      value = value * 4.523128485832664e+74
+      left -= 248
+    }
+    if left > 124 {
+      value = value * 2.1267647932558654e+37
+      left -= 124
+    }
+    if left > 62 {
+      value = value * 4.611686018427388e+18
+      left -= 62
+    }
   }
-  if left >= 256 {
-    value = value * 1.157920892373162e+77
-    left -= 256
-  } else if left <= -256 {
-    value = value / 1.157920892373162e+77
-    left += 256
-  }
-  if left >= 128 {
-    value = value * 3.402823669209385e+38
-    left -= 128
-  } else if left <= -128 {
-    value = value / 3.402823669209385e+38
-    left += 128
-  }
-  if left >= 64 {
-    value = value * 1.8446744073709552e+19
-    left -= 64
-  } else if left <= -64 {
-    value = value / 1.8446744073709552e+19
-    left += 64
-  }
-  if left >= 32 {
-    value = value * 4294967296.0
-    left -= 32
-  } else if left <= -32 {
-    value = value / 4294967296.0
-    left += 32
-  }
-  if left >= 16 {
-    value = value * 65536.0
-    left -= 16
-  } else if left <= -16 {
-    value = value / 65536.0
-    left += 16
-  }
-  if left >= 8 {
-    value = value * 256.0
-    left -= 8
-  } else if left <= -8 {
-    value = value / 256.0
-    left += 8
-  }
-  if left >= 4 {
-    value = value * 16.0
-    left -= 4
-  } else if left <= -4 {
-    value = value / 16.0
-    left += 4
-  }
-  if left >= 2 {
-    value = value * 4.0
-    left -= 2
-  } else if left <= -2 {
-    value = value / 4.0
-    left += 2
-  }
-  if left >= 1 {
-    value = value * 2.0
-  } else if left <= -1 {
-    value = value / 2.0
-  }
-  return value
+  return value * 1.shiftLeft(left).toFloat()
 }
 
 /// The decimal [`parse`] has read and could not answer with one operation,
