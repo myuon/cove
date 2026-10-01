@@ -970,3 +970,49 @@ test fn a_call_hugs_a_last_argument_that_expands() -> Result<Unit, Error> {
   assert(print(plain, held, parseTokens(plain, held.tokens)) != plain)?
   Ok(())
 }
+
+/// **A `>` is a comparison unless it closes a generic list** (#469).
+///
+/// `a > (b)` came back as `a >(b)`: the space in front of a `(` goes when the
+/// `(` opens a call, and a call's `(` stands against its callee or against the
+/// `>` of `Vector.of<String>()` — and *every* `>` was read as the second. So
+/// `>` and nothing else, and only with the bracket on its right; `>=` is one
+/// token and never closes anything. The same reading wrote `a > [b]` as
+/// `a >[b]`, an index, and `a > -b` as `a > - b`, a subtraction from the `>`.
+///
+/// The table is the issue's, one operator at a time, and each line must come
+/// back exactly as written.
+test fn a_comparison_is_not_a_generic_list() -> Result<Unit, Error> {
+  let repro = "fn f(a: Int, b: Int) -> Bool \{\n  a > (b)\n\}\n"
+  assert(roundTrips(repro))?
+  for op in [">", "<", ">=", "<=", "==", "!=", "+", "-", "*"] {
+    let source = "fn f(a: Int, b: Int) -> Bool \{\n  let x = a {op} (b)\n  x\n\}\n"
+    if !roundTrips(source) {
+      return Err(Error(message: "`a {op} (b)` does not come back as written"))
+    }
+  }
+  for line in [
+    "(b) > a",
+    "a > [b]",
+    "a > -b",
+    "a > !b",
+    "a > (b) && c > [d]",
+    "if a > (b) \{\n    a\n  \} else \{\n    b\n  \}",
+    "f(a > (b), c < (d))",
+  ] {
+    let source = "fn f(a: Int, b: Int) -> Bool \{\n  {line}\n\}\n"
+    if !roundTrips(source) {
+      return Err(Error(message: "`{line}` does not come back as written"))
+    }
+  }
+  // And a `>` that does close a generic list still takes its `(` against it.
+  let generic = "fn f() -> Int \{\n  let v = Vector.of<String>()\n  let w = Vector.of<fn(Int, Bool) -> Option<Int>>()\n  0\n\}\n"
+  assert(roundTrips(generic))?
+  let spaced = "fn f() -> Int \{\n  let v = Vector.of<String> ()\n  0\n\}\n"
+  let held = lex(spaced)
+  assertEqual(
+    print(spaced, held, parseTokens(spaced, held.tokens)),
+    "fn f() -> Int \{\n  let v = Vector.of<String>()\n  0\n\}\n",
+  )?
+  Ok(())
+}

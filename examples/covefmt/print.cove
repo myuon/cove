@@ -1346,7 +1346,8 @@ fn isParenthesised(source: String, held: Array<Token>, tree: Tree) -> Bool {
         return false
       }
       let c = byteOfPunct(source, held, before)
-      !(c == ')' || c == ']' || c == '>')
+      !(c == ')' || c == ']' ||
+        c == '>' && closesAGenericList(source, held, before))
     }
     None => true
   }
@@ -2934,10 +2935,80 @@ fn holdsSomething(source: String, held: Array<Token>, at: Int) -> Bool {
           !isTheWord(source, token, "is") && !isTheWord(source, token, "break")
       }
       let c = byteOfPunct(source, held, at)
-      c == ')' || c == ']' || c == '>' || c == '?'
+      c == ')' || c == ']' || c == '?' ||
+        c == '>' && closesAGenericList(source, held, at)
     }
     None => false
   }
+}
+
+/// Whether the `>` at `at` closes a generic list rather than comparing.
+///
+/// `Vector.of<String>()` writes its `(` against the `>`, and `a > (b)` does
+/// not: the first `>` belongs to a type and the second is an operator with an
+/// operand on its right. Answering *every* `>` as the first wrote `a >(b)`,
+/// `a >[b]` and `a > - b` — the `(` and the `[` taken for a call and an index
+/// against the `>`, and the `-` for a subtraction from it (#469). `>=` never
+/// had the trouble, because it is one token that cannot close anything.
+///
+/// So the `>` is matched back to its `<`, and the `<` must be one
+/// [`opensAGenericList`] says opens a list — the heuristic the rest of this
+/// file already uses, rather than a second one. Between them only what a type
+/// is written with may stand: names, commas, dots, colons, `->`, and brackets
+/// that balance, and line breaks only after a `<` or a `,`. Anything else — an
+/// `=`, a `&&`, a brace, an unmatched `(` — is an expression around the `>`,
+/// and it is a comparison.
+fn closesAGenericList(source: String, held: Array<Token>, at: Int) -> Bool {
+  var open = 0
+  var depth = 0
+  var i = at
+  while i >= 0 {
+    match held.get(i) {
+      Some(token) => {
+        // A list broken one member to a line has its breaks after a `<` or
+        // a `,`, and a comparison never does: the line above it ended a
+        // statement or an operand.
+        if token.kind == Kind.Space && endsLine(source, token) {
+          let c = byteOfPunct(source, held, previousSignificant(held, i))
+          if c != ',' && c != '<' {
+            return false
+          }
+        }
+        if token.kind == Kind.Punct {
+          let c = source.byteAt(token.from)
+          let width = token.to - token.from
+          if width == 1 && (c == ')' || c == ']') {
+            depth = depth + 1
+          } else if width == 1 && (c == '(' || c == '[') {
+            if depth <= 0 {
+              return false
+            }
+            depth = depth - 1
+          } else if depth > 0 {
+            // Inside a balanced bracket of the type: `fn(Int, Bool) -> T`.
+          } else if width == 1 && c == '>' {
+            open = open + 1
+          } else if width == 1 && c == '<' {
+            if !opensAGenericList(held, i) {
+              return false
+            }
+            open = open - 1
+            if open <= 0 {
+              return true
+            }
+          } else if !(width == 1 && (c == ',' || c == '.' || c == ':') ||
+            width == 2 && c == '-') {
+            return false
+          }
+        }
+      }
+      None => {
+        return false
+      }
+    }
+    i = i - 1
+  }
+  false
 }
 
 /// Whether the token at `at` is a prefix operator — a `!`, or a `-` with

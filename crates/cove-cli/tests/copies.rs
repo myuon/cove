@@ -1841,7 +1841,13 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// each of the three `fail_shift_count_*` +18 — the standard library a program
 /// that prints carries into the survey, and nothing of the new instructions,
 /// each of which writes its answer where the surrounding form asked.
-const FORWARDABLE_COPIES: usize = 7490;
+///
+/// **7,491 since issue #469's fix**, a rise of 1 that is all program and no
+/// lowering, and all of it in `examples:covefmtBench`: covefmt's printer gained
+/// `closesAGenericList`, the walk that tells the `>` of `Vector.of<String>()`
+/// from a comparison, and a test of it. The survey's row for the bench holds
+/// every function of the `covefmt` module its entry is in, `test fn`s included.
+const FORWARDABLE_COPIES: usize = 7491;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
