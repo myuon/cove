@@ -125,7 +125,8 @@ fn std_float_parse_has_a_fast_path_that_calls_and_allocates_nothing() {
 /// slow path's 772-word buffer, and what was measured for it rests on that.
 /// So what is pinned is a property of every function of the tier, whichever
 /// of them `cove_ir::lower::inline` has left standing, and not a size: **each
-/// instruction is a scalar, a comparison, a branch, a byte read, a length, a
+/// instruction is a scalar — ADR 0074's bit operations and shifts among them —
+/// a comparison, a branch, a byte read, a length, a
 /// literal — which ADR 0045 places before the run, so loading one allocates
 /// nothing — a call of another function of the tier, or a call of the slow
 /// path whose answer is returned straight away.** The slow path is the one
@@ -180,6 +181,8 @@ fn std_float_parse_has_a_middle_tier_that_allocates_nothing() {
                 | Inst::Cmp { .. }
                 | Inst::ArithImm { .. }
                 | Inst::CmpImm { .. }
+                | Inst::Bits { .. }
+                | Inst::Shift { .. }
                 | Inst::Not { .. }
                 | Inst::Convert { .. }
                 | Inst::Jump { .. }
