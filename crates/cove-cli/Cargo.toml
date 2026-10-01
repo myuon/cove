@@ -40,3 +40,12 @@ cove-schema.workspace = true
 cove-sema.workspace = true
 cove-ir.workspace = true
 cove-runtime.workspace = true
+
+# The build script lowers `tools/covefmt` into the image `cove fmt` runs
+# (ADR 0077), with the same front end and lowering `cove run` uses. See
+# `build.rs`, and the `build-override` tables in the workspace manifest for why
+# these are compiled optimised.
+[build-dependencies]
+cove-diag.workspace = true
+cove-sema.workspace = true
+cove-ir.workspace = true

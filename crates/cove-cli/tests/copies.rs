@@ -1868,7 +1868,18 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `tools/covefmt:covefmtBench` since, with the same 34,843 instructions, 2,178
 /// copies and 81 and 157 in its `prod` and `ret` columns, and the corpus is
 /// the same 269 programs and the same totals in every column.
-const FORWARDABLE_COPIES: usize = 7529;
+///
+/// **7,535 since covefmt became `cove fmt`** (ADR 0077), a rise of 6 that is
+/// all program and no lowering, all of it in `tools/covefmt:covefmtBench`
+/// (81 to 85 in `prod`, 157 to 159 in `ret`; 34,843 to 36,704 instructions;
+/// every other row unchanged, measured against `main` in the same session).
+/// The switch found rules the corpus had never asked covefmt for — a blank line
+/// between declarations, a body written against its braces, a comment's
+/// trailing space — and the printer gained them (`ruled`, `firstBreakIn`,
+/// `followsAMember`, `asWritten`, `endsOnOneNewline`, …) and a test pinning
+/// them. The IR change in that PR is a serialization of the lowering and
+/// changes nothing it lowers.
+const FORWARDABLE_COPIES: usize = 7535;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

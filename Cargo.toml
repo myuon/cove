@@ -40,6 +40,28 @@ cove-native = { path = "crates/cove-native" }
 cove-runtime = { path = "crates/cove-runtime" }
 cove-wasm = { path = "crates/cove-wasm" }
 
+# The build script's own profile, in every profile that builds `cove`.
+#
+# `cove-cli`'s build script runs the front end and the lowering over
+# `tools/covefmt` (ADR 0077), and Cargo compiles a build script and its
+# build-dependencies at `opt-level = 0` by default, whatever the profile — so
+# without these the build would lower covefmt unoptimised, several times
+# slower, on every rebuild of `cove-cli`. `opt-level = 3` with release's
+# sixteen codegen units is release's own setting, which is what lets Cargo
+# build `cove-ir`, `cove-sema` and the rest once and hand the same artifacts to
+# the build script and to the binary, rather than compiling them twice.
+#
+# This is not the `[profile.release]` the next comment says stays absent. It
+# changes how a build *script* is compiled and nothing about the code a user's
+# release build ships, which is what that profile is the reference for.
+# `checked` and `bench-stable` inherit it.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 16
+
 # A bench-only profile, kept for reproducing the measurement below and NOT
 # recommended as the baseline for implementation comparisons. Read
 # `docs/VM_ARCHITECTURE.md`, "What `codegen-units = 1` was measured to be
@@ -103,3 +125,4 @@ codegen-units = 1
 inherits = "release"
 debug-assertions = true
 overflow-checks = true
+codegen-units = 16

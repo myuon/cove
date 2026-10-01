@@ -1,12 +1,28 @@
 # covefmt
 
-The front end of a Cove formatter, written in Cove: a lexer and a parser.
+**This is `cove fmt`.** A formatter for Cove, written in Cove: a lexer, a
+parser, a printer, and a check that what it printed means what it read.
+[ADR 0077](../../docs/adr/0077-cove-fmt-is-covefmt.md) made it the toolchain's
+formatter; `cove_syntax::format`, the Rust formatter it replaced, stays as the
+judge of it and as what `cove generate` formats with.
 
-The intent is replacement rather than a second implementation: if this reaches
-`cove fmt`'s output at an acceptable cost, the Rust formatter goes and the
-toolchain formats Cove with Cove. That is what makes it worth writing — a
-formatter that had to be kept in step with another formatter would be two
-things that can drift, and this repository does not keep two of those.
+It reaches the `cove` binary as lowered IR. `crates/cove-cli/build.rs` checks
+this package, lowers `covefmt.formatSource`, and embeds the result; `cove fmt`
+reads it back and calls `formatSource` once per file that parses, with no
+capability at all, on the native tier where the host has one. So **a change
+here is a change to `cove fmt`**, and these are the gates on it:
+
+- the build itself: a covefmt that does not check or lower fails
+  `cargo build -p cove-cli` with its diagnostics, and one that reaches a host
+  operation is refused there too;
+- `cargo t`'s oracle, `covefmt_formats_every_file_in_the_repository_as_the_rust_formatter_does`
+  in `crates/cove-cli/src/covefmt.rs`: on every `.cove` file in the repository,
+  and on a damaged copy of each, the built-in formatter answers what the Rust
+  formatter answers and refuses nothing;
+- `cove fmt --check` over the repository, which is now this formatter checking
+  itself and every other file;
+- this package's tests and its bench, below — the bench's mutations judged
+  against the files on disk, on the VM and on the native tier.
 
 It is a package of its own: `cove.toml` beside this file, and the formatter
 as the one module `covefmt` in `covefmt/`. It was a module of `examples` until
@@ -20,6 +36,19 @@ $ cd tools/covefmt
 $ ../../target/checked/cove test
 $ ../../target/checked/cove run covefmtBench --files-root ../..
 ```
+
+What the switch found is worth knowing before changing the printer: the corpus
+and the bench's mutations had never asked for a blank line between two
+declarations, the blank lines at the end of a file or the margin at its top, a
+body written against its braces (`{1}`), the space inside a group kept on one
+line that the source ran together, a call broken around one argument too long
+to fit anyway, a doc comment without its space, or a comment ending on space —
+every file here already obeys those rules, and each mutation's answer is the
+file. covefmt got every one of them wrong on its first day as `cove fmt`. The oracle's damaged copy asks for them
+now, and `what_cove_fmt_writes_whatever_the_source_had` in `parsetests.cove`
+pins each. One known difference is left: a call around a call around a string
+literal long enough to push the line past the width is broken at the outer
+call where the Rust formatter hugs it.
 
 ## The contract is that the tokens tile the source
 
@@ -108,7 +137,10 @@ nothing, because a comma-separated arm list means the same on one line.
 ## The repository is the oracle
 
 Every `.cove` file here passes `cove fmt --check`, so every one of them is
-already what a formatter should produce, and a correct formatter reproduces
+already what a formatter should produce — and since ADR 0077, when `cove fmt`
+became this formatter, `cargo t`'s oracle is what keeps that meaning "what the
+Rust formatter produces" rather than "what covefmt produces" — and a correct
+formatter reproduces
 all 384 byte for byte. That is `print(parse(source)) == source`, over nearly
 two megabytes of real source, and it is the **weakest** of the five
 checks — the one to distrust.

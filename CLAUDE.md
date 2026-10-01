@@ -60,8 +60,10 @@ because a count cannot tell a new disagreement from an old one — a change
 that teaches one family and breaks another raises the count while introducing
 a program that lowers and lies. The set has caught that twice.
 
-The second is the formatter's comment probe in
-`crates/cove-syntax/src/format.rs`, which inserts a comment at every line of
+The second is the Rust formatter's comment probe in
+`crates/cove-syntax/src/format.rs` (that formatter is no longer `cove fmt` —
+see "`cove fmt` is covefmt" below — but it is the oracle `cove fmt` is judged
+against, so its correctness still gates), which inserts a comment at every line of
 every `.cove` file and checks the formatter still emits it. It is there
 because the test beside it — comparing the comments the scanner finds in the
 input against the ones it finds in the output — is the scanner judging itself,
@@ -242,6 +244,40 @@ first file.
 It is cheap: the binary is the one the dogfood build already made, and the two
 runs are about two and five seconds. Run it after touching the code generator,
 `subset.rs`, or any instruction it lowers.
+
+### `cove fmt` is covefmt, built into the binary
+
+Since [ADR 0077](docs/adr/0077-cove-fmt-is-covefmt.md) `cove fmt` runs
+`tools/covefmt`, the formatter written in Cove, not `cove_syntax::format`.
+`crates/cove-cli/build.rs` checks `tools/covefmt`, lowers
+`covefmt.formatSource`, and embeds the result as an image
+(`cove_ir::serial`); `cove fmt` reads it back and runs it with no
+capability, on the native tier where the host has one. The Rust formatter
+stays as the oracle and as what `cove generate` uses.
+
+So **a change under `tools/covefmt/` is a change to `cove fmt`**, and it is
+gated in four places — run all four, not just the package's own tests:
+
+- **the build**: a covefmt that does not check — its tests included, since the
+  build script checks the whole package — fails `cargo build -p cove-cli`
+  with covefmt's diagnostics. A test file that does not typecheck stops every
+  `cove` build;
+- **`cargo t`'s oracle**,
+  `covefmt::tests::covefmt_formats_every_file_in_the_repository_as_the_rust_formatter_does`
+  in `crates/cove-cli/src/covefmt.rs`: covefmt's answer equals the Rust
+  formatter's on every `.cove` file and on a damaged copy of each (about 2s);
+- **`cove fmt --check`** over the repository, in the dogfood job — which is now
+  covefmt checking itself;
+- **`cove test` and `covefmtBench`** in `tools/covefmt`, the steps above.
+
+A change to `crates/cove-sema/std` or to the front end or lowering also
+re-runs the build script, because what it lowers depends on them. And a
+change to `crates/cove-ir/src` changes the image's fingerprint — a hash of
+that crate's source — which is harmless: the image is rebuilt in the same
+build. An image is readable only by the build that wrote it.
+
+When you format a file you changed, the two formatters should agree; if
+`cove fmt` and the oracle disagree on a layout, the fix goes in covefmt.
 
 ### What the gate costs, measured
 

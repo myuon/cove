@@ -62,8 +62,17 @@ id!(
     /// pair against whatever program is current, back into a `FunctionId`
     /// of *that* run) and never writes the id itself; and the wasm
     /// playground's boundary is rendered text — [`crate::print`]'s
-    /// listing — not the program that produced it. No id crosses a boundary
-    /// today because nothing here has ever needed one to.
+    /// listing — not the program that produced it.
+    ///
+    /// One artifact does carry ids: [ADR 0077]'s image, which `cove-cli`'s
+    /// build script writes with [`crate::serial`] so that `cove fmt` starts
+    /// without a front end. It is not a bare id that crosses, though, but the
+    /// whole program — every id travels with the table it indexes, stubs kept
+    /// so that none is renumbered — and the image is refused by any build but
+    /// the one that wrote it, which is the third thing to check against that
+    /// the rule above asks for.
+    ///
+    /// [ADR 0077]: ../../../docs/adr/0077-cove-fmt-is-covefmt.md
     FunctionId, "fn"
 );
 id!(

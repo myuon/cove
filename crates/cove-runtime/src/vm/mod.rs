@@ -419,6 +419,56 @@ impl<'a> Vm<'a> {
         self.ended(outcome)
     }
 
+    /// Calls `module.name` with values the host built, in a program that has
+    /// no checked program behind it.
+    ///
+    /// [`Vm::invoke`] holds the arguments to what the *checker* resolved about
+    /// the declaration, and so needs the checked program the [`Runtime`] was
+    /// built over. A program read back from an image ([ADR 0077]'s
+    /// `cove_ir::serial`, which is how `cove fmt` carries covefmt) has none:
+    /// the front end ran when the toolchain was built, and what is left is the
+    /// lowering. So this holds the call to what the lowering kept instead —
+    /// the function's arity, and each argument converted at its parameter's
+    /// layout by the same boundary every entry crosses, which refuses a value
+    /// of the wrong shape before the first instruction runs. What is lost is
+    /// only the checker's wording of the refusal, and the caller of this is
+    /// the toolchain itself, handing a `String` to a function whose signature
+    /// it built.
+    ///
+    /// A `Runtime` for such a run is built over an empty checked program;
+    /// nothing on this path reads it.
+    ///
+    /// [ADR 0077]: ../../../../docs/adr/0077-cove-fmt-is-covefmt.md
+    pub fn invoke_lowered(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let outcome = self.lowered_checked(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// The lowering's own check, and then the call.
+    fn lowered_checked(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let id = self.lookup(module, name)?;
+        let function = self.program.function(id);
+        if function.arity() as usize != args.len() {
+            return Err(RuntimeError::new(format!(
+                "`{module}.{name}` takes {} argument(s), and was given {}",
+                function.arity(),
+                args.len()
+            ))
+            .at(function.span));
+        }
+        self.enter_with(module, name, id, args)
+    }
+
     /// [`Vm::run_entry`], bounded by `budget` and by nothing else.
     ///
     /// The command-shaped way in, bounded the way [`Vm::invoke_within`]

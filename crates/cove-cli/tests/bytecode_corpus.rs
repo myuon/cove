@@ -75,7 +75,11 @@ struct Survey {
     reached: BTreeSet<u8>,
     /// How many ADR 0062 windows the encoder fused.
     windows: usize,
-    /// Every way a program failed one of the three claims, named.
+    /// How many programs were written as ADR 0077 images and read back, and
+    /// how many bytes the images came to.
+    images: usize,
+    image_bytes: usize,
+    /// Every way a program failed one of the four claims, named.
     faults: Vec<String>,
 }
 
@@ -157,8 +161,57 @@ fn survey() -> Survey {
                     .push(format!("{}: the bytes are refused: {fault}", case.name));
             }
         }
+        image_reads_back(&case.name, &program, &prepared, &mut found);
     }
     found
+}
+
+/// The fourth claim, about ADR 0077's image rather than ADR 0041's encoding:
+/// every program in the repository written by `cove_ir::serial` reads back as
+/// exactly what an image keeps, and encodes to the same bytes again.
+///
+/// covefmt is the one program an image is made of today, and its own round
+/// trip is tested beside the format. This is the rest of the corpus, because a
+/// format tested on one program is tested on the shapes that program happens
+/// to have.
+fn image_reads_back(
+    name: &str,
+    program: &cove_ir::Program,
+    prepared: &Prepared,
+    found: &mut Survey,
+) {
+    let (module, entry) = prepared.entry();
+    let bytes = match cove_ir::serial::encode(program, &prepared.sources, module, entry) {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            found
+                .faults
+                .push(format!("{name}: does not write as an image: {why}"));
+            return;
+        }
+    };
+    found.images += 1;
+    found.image_bytes += bytes.len();
+    let image = match cove_ir::serial::decode(&bytes) {
+        Ok(image) => image,
+        Err(why) => {
+            found
+                .faults
+                .push(format!("{name}: its image does not read back: {why}"));
+            return;
+        }
+    };
+    if format!("{:?}", image.program) != format!("{:?}", cove_ir::serial::kept(program)) {
+        found.faults.push(format!(
+            "{name}: its image reads back as a different program"
+        ));
+    }
+    if cove_ir::serial::encode(&image.program, &image.sources, module, entry).as_ref() != Ok(&bytes)
+    {
+        found.faults.push(format!(
+            "{name}: its image, read back, does not write the same bytes"
+        ));
+    }
 }
 
 /// One `#[test]` rather than one per claim, because the survey is what costs
@@ -171,7 +224,8 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
            {} functions, {} instructions, {} bytes encoded\n  \
            widest frame {} words, against a limit of {MAX_FRAME_WORDS}\n  \
            {} of the {} opcodes are reached
-             {} window(s) fused",
+             {} window(s) fused\n  \
+           {} image(s) written and read back, {} bytes",
         found.lowered,
         found.functions,
         found.instructions,
@@ -180,6 +234,8 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
         found.reached.len(),
         Op::all().len(),
         found.windows,
+        found.images,
+        found.image_bytes,
     );
     // And which ones it does not, by name. The count alone says that most of
     // a third of the instruction set is untested by every harness that walks
@@ -199,6 +255,10 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
          should be:\n  {}",
         found.faults.len(),
         found.faults.join("\n  ")
+    );
+    assert_eq!(
+        found.images, found.lowered,
+        "every program the compiler lowered is written as an image and read back"
     );
 
     // The frame limit's own ratchet. ADR 0041 adopts a cap no program here
