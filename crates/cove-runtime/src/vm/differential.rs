@@ -3066,7 +3066,8 @@ struct Natively {
 /// function the tier takes runs as machine code.
 ///
 /// Behind the code generator's feature, as `tests/native_tier.rs` is, so it
-/// runs in CI's second native step and in no default build.
+/// runs in any workspace build — `cove-cli` turns the feature on by default
+/// (ADR 0076) — and not in `cargo test -p cove-runtime` alone.
 #[cfg(feature = "template")]
 fn rendered_natively(source: &'static str, args: Vec<Value>) -> Natively {
     let (sources, checked) = checked(source);

@@ -48,7 +48,7 @@
 #
 # Usage, from anywhere in the repository:
 #
-#     cargo build --profile checked -p cove-cli --features template
+#     cargo build --profile checked -p cove-cli
 #     scripts/covefmt-profile.sh [rounds]
 set -euo pipefail
 
@@ -58,7 +58,7 @@ binary=$root/target/checked/cove
 
 if [[ ! -x $binary ]]; then
   echo "covefmt-profile.sh: no binary at $binary" >&2
-  echo "build one: cargo build --profile checked -p cove-cli --features template" >&2
+  echo "build one: cargo build --profile checked -p cove-cli" >&2
   exit 1
 fi
 if [[ ! -x /usr/bin/sample ]]; then
@@ -69,10 +69,9 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# `target/checked/cove` is not reliably a feature build: cargo replaces it with
-# whichever feature set was last asked for, so an ordinary `cargo t` between two
-# runs of this script puts the default build back. See the same check, and the
-# longer reason, in `covefmt-tiers.sh`.
+# The default build has the native tier (ADR 0076), but a
+# `--no-default-features` build or a host the code generator cannot serve does
+# not. See the same check, and the longer reason, in `covefmt-tiers.sh`.
 if (cd "$root/examples" && "$binary" run covefmtBench --files-root "$root" \
   --backend native --fuel 1 >/dev/null 2>"$work/probe"); then
   echo "covefmt-profile.sh: the native tier answered a run it should have run out of fuel on" >&2
@@ -81,7 +80,7 @@ fi
 if grep -q "native execution is unavailable" "$work/probe"; then
   sed 's/^/  /' "$work/probe" >&2
   echo "covefmt-profile.sh: build the binary this measurement needs:" >&2
-  echo "  cargo build --profile checked -p cove-cli --features template" >&2
+  echo "  cargo build --profile checked -p cove-cli   # with default features, on x86-64" >&2
   exit 1
 fi
 

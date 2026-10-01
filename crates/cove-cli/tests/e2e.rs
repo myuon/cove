@@ -398,9 +398,10 @@ impl Case {
     /// and the comparison above is the interpreter's. ADR 0068's gates ask that
     /// AST, VM and native answer alike for every boxed-value operation it moves,
     /// so the cases that pin those operations opt in here. It runs only in a
-    /// build with the `template` feature — which is the step of
-    /// `.github/workflows/ci.yml` that tests `cove-cli` with it — because a
-    /// default build has no code generator to ask.
+    /// build with the `template` feature, which since ADR 0076 is the default
+    /// one — so `cargo t` runs it — because a `--no-default-features` build
+    /// has no code generator to ask. CI runs this suite that way too, as the
+    /// check that a build without the feature retains the VM corpus.
     fn asks_for_the_native_tier(&self) -> bool {
         self.dir.join("native").exists()
     }

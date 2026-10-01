@@ -37,14 +37,18 @@
 //! machinery into this crate so that the edge could run the other way — is
 //! not.
 //!
-//! # One code generator, off by default
+//! # One code generator, off by default in the libraries
 //!
 //! ADR 0055's adoption gate asks that "a build without the native feature has
 //! no executable-memory dependency". That is a claim about the dependency
-//! graph, so the code generator's edge is optional and off by default; see
-//! this crate's manifest. Without it, what remains is [`mod@abi`] — the
-//! declarations the runtime side is written against — and `cargo tree` names
-//! nothing that maps an executable page.
+//! graph, so the code generator's edge is optional and off by default in this
+//! crate and in `cove-runtime`; see this crate's manifest. Without it, what
+//! remains is [`mod@abi`] — the declarations the runtime side is written
+//! against — and `cargo tree` names nothing that maps an executable page.
+//! ADR 0076 turns the feature on by default in `cove-cli` only, because the
+//! `cove` binary is the tool and not something anybody embeds; so every
+//! workspace build compiles the code generator, and CI checks that the
+//! playground's graph still has no `libc`.
 //!
 //! The `template` feature is the code generator: a hand-written x86-64
 //! template compiler. It was not chosen by argument. ADR 0055 named Cranelift,

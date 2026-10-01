@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The code generator is an optional feature, and it is off by default.
+# The code generator is an optional feature, and it is off by default *in this
+# crate*.
 #
 # ADR 0055's adoption gate asks that "a build without the native feature has
 # no executable-memory dependency". That is a fact about the *dependency
@@ -13,13 +14,20 @@ license.workspace = true
 # `.rs` file would still have built `libc` and still have linked the `mmap`
 # and `mprotect` that map an executable page.
 #
-# Default off, so the ordinary `cargo t` and the ordinary `cargo build` of
-# this workspace compile none of it. What that costs is that this crate's own
-# tests are behind the feature too, and the price is paid deliberately: the
-# ADR's requirement is about the *default* build, and a feature that is on by
-# default is not one anybody would remember to turn off. `.github/workflows/
-# ci.yml` runs the suite again with it, which is where the tests below are
-# executed.
+# Default off here and in `cove-runtime`, because those are the crates an
+# embedder and the browser playground link. [ADR 0076] turns it on by default
+# in `cove-cli` — the `cove` binary is the tool, not something embedded — and
+# Cargo's feature unification means every *workspace* command (`cargo t`,
+# `cargo clippy --workspace`) therefore builds this crate with it. A build
+# that selects only this crate, `cargo test -p cove-native`, still does not:
+# `.github/workflows/ci.yml` runs that with `--features template`, and checks
+# that `cove-wasm`'s graph has no `libc`.
+#
+# `libc` is a `cfg(unix)` dependency because `mmap` and `mprotect` are Unix
+# calls; on any other host the feature builds and `template::Jit::new` refuses
+# the host with ADR 0055's capability diagnostic, the way it refuses any
+# architecture other than x86-64. A default must not stop `cove` building
+# anywhere it built before.
 #
 # There is one arm. [ADR 0066] retires the Cranelift arm ADR 0055 named and
 # ADR 0056 kept for the comparison: the comparison has been made, it is
@@ -29,6 +37,7 @@ license.workspace = true
 # `mprotect`, which is the whole of what it needs to honour W^X.
 #
 # [ADR 0066]: ../../docs/adr/0066-a-comparison-ends-when-its-question-is-answered.md
+# [ADR 0076]: ../../docs/adr/0076-the-native-tier-is-built-by-default.md
 [features]
 default = []
 template = ["dep:libc"]
@@ -45,6 +54,10 @@ cove-ir = { workspace = true }
 # dependency" gate nothing.
 cove-schema = { workspace = true }
 
+
+# `mmap`, `mprotect` and `sysconf`, which only a Unix host has. See the note on
+# `[features]`.
+[target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]

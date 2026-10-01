@@ -10,10 +10,13 @@
 //! never made executable.
 //!
 //! This file is that half. It needs a code generator, so it is behind the
-//! `template` feature and is compiled by nothing a default build does — which is
-//! ADR 0055's adoption gate ("a build without the native feature has no
-//! executable-memory dependency") and the same place `cove-native`'s own suites
-//! live. `.github/workflows/ci.yml` runs it.
+//! `template` feature, which is off by default in this crate — ADR 0055's
+//! adoption gate ("a build without the native feature has no executable-memory
+//! dependency") is about the crates an embedder links — and on by default in
+//! `cove-cli` ([ADR 0076]). Cargo unifies features across a workspace build, so
+//! `cargo t` runs this file; `cargo test -p cove-runtime` alone does not.
+//!
+//! [ADR 0076]: ../../../docs/adr/0076-the-native-tier-is-built-by-default.md
 //!
 //! # Every case is differential and nothing here asserts a number
 //!

@@ -222,24 +222,11 @@ impl Mapping {
     /// The mapping is *not* executable when this returns; nothing may be called
     /// through it until [`Jit::finalize`] has flipped it.
     fn write(code: &[u8]) -> Option<Mapping> {
-        let page = page_size();
+        let page = pages::size();
         let len = code.len().div_ceil(page) * page;
-        // Safety: a fresh anonymous mapping of a non-zero length, and the copy
-        // is bounded by the length that was asked for.
-        let at = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if at == libc::MAP_FAILED {
-            return None;
-        }
-        let at = at.cast::<u8>();
+        let at = pages::map_writable(len)?;
+        // Safety: `at` is a fresh writable mapping of `len` bytes, and the copy
+        // is bounded by `code.len() <= len`.
         unsafe { ptr::copy_nonoverlapping(code.as_ptr(), at, code.len()) };
         Some(Mapping {
             at,
@@ -254,27 +241,89 @@ impl Mapping {
     /// `mprotect` is the whole of what is needed; there is no cache to flush by
     /// hand, and this arm runs nowhere else.
     fn make_executable(&mut self) -> Result<(), Unavailable> {
-        // Safety: `at` and `len` are what `mmap` answered, and `len` is a
-        // multiple of the page size.
-        let ok =
-            unsafe { libc::mprotect(self.at.cast(), self.len, libc::PROT_READ | libc::PROT_EXEC) };
-        if ok != 0 {
-            return Err(Unavailable(
-                "`mprotect` refused to make a mapping executable".to_string(),
-            ));
-        }
+        pages::make_executable(self.at, self.len)?;
         self.executable = true;
         Ok(())
     }
 }
 
-fn page_size() -> usize {
-    // Safety: a read of one sysconf variable, which cannot fail for
-    // `_SC_PAGESIZE`.
-    let answered = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if answered > 0 {
-        answered as usize
-    } else {
+/// The host's page mapping: `mmap`, `mprotect` and the page size.
+///
+/// Confined to Unix because that is where those three exist, and `libc` is a
+/// `cfg(unix)` dependency of this crate for the same reason: [ADR 0076] turns
+/// the feature on for the `cove` binary by default, and a default must not stop
+/// `cove` building on a host it built on before. Elsewhere [`Jit::new`] refuses
+/// the host before anything here is reached, so the other arm is never called;
+/// it answers "no mapping" rather than panicking because that is what a caller
+/// is already written to handle.
+///
+/// [ADR 0076]: ../../../../docs/adr/0076-the-native-tier-is-built-by-default.md
+#[cfg(unix)]
+mod pages {
+    use std::ptr;
+
+    use crate::Unavailable;
+
+    /// A fresh anonymous `PROT_READ | PROT_WRITE` mapping of `len` bytes.
+    pub(super) fn map_writable(len: usize) -> Option<*mut u8> {
+        // Safety: a fresh anonymous mapping of a non-zero length.
+        let at = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if at == libc::MAP_FAILED {
+            return None;
+        }
+        Some(at.cast::<u8>())
+    }
+
+    /// Flips a mapping from read-write to read-execute.
+    pub(super) fn make_executable(at: *mut u8, len: usize) -> Result<(), Unavailable> {
+        // Safety: `at` and `len` are what `mmap` answered, and `len` is a
+        // multiple of the page size.
+        let ok = unsafe { libc::mprotect(at.cast(), len, libc::PROT_READ | libc::PROT_EXEC) };
+        if ok != 0 {
+            return Err(Unavailable(
+                "`mprotect` refused to make a mapping executable".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn size() -> usize {
+        // Safety: a read of one sysconf variable, which cannot fail for
+        // `_SC_PAGESIZE`.
+        let answered = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if answered > 0 {
+            answered as usize
+        } else {
+            4096
+        }
+    }
+}
+
+/// The arm for a host without `mmap`: no mapping is ever had. See the Unix arm.
+#[cfg(not(unix))]
+mod pages {
+    use crate::Unavailable;
+
+    pub(super) fn map_writable(_len: usize) -> Option<*mut u8> {
+        None
+    }
+
+    pub(super) fn make_executable(_at: *mut u8, _len: usize) -> Result<(), Unavailable> {
+        Err(Unavailable(
+            "this host has no `mprotect` to make a mapping executable".to_string(),
+        ))
+    }
+
+    pub(super) fn size() -> usize {
         4096
     }
 }
@@ -326,12 +375,22 @@ impl Jit {
     ///
     /// Refuses every host that is not x86-64, which is ADR 0055's capability
     /// diagnostic rather than a lowering that would emit the wrong
-    /// instructions.
+    /// instructions; and, the same way, every host that is not Unix. The code
+    /// is mapped with `mmap` and `mprotect`, and what is emitted assumes the
+    /// System V calling convention, which is what `extern "C"` names on a Unix
+    /// x86-64 host and not on Windows.
     pub fn new(helpers: NativeHelpers) -> Result<Self, Unavailable> {
         if !cfg!(target_arch = "x86_64") {
             return Err(Unavailable(format!(
                 "this code generator emits x86-64 and this host is {}",
                 std::env::consts::ARCH
+            )));
+        }
+        if !cfg!(unix) {
+            return Err(Unavailable(format!(
+                "this code generator maps its code with `mmap` and calls with the System V \
+                 convention, and this host is {}",
+                std::env::consts::OS
             )));
         }
         Ok(Jit {

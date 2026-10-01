@@ -509,14 +509,16 @@ fn opcode_at(function: &cove_ir::Function, pc: u32) -> Option<String> {
 /// Native execution is not in this build.
 ///
 /// ADR 0055's adoption gate asks that "a build without the native feature has no
-/// executable-memory dependency", so the code generator is an optional feature
-/// and off by default. Selecting the native tier without it is therefore a
+/// executable-memory dependency", so the code generator is an optional feature,
+/// off by default in this crate (ADR 0076 turns it on by default only in the
+/// `cove` binary). Selecting the native tier without it is therefore a
 /// **capability diagnostic** and not a silent fallback — the same answer the
 /// x86-64-only generator gives on another architecture, and for the same reason.
 #[cfg(not(feature = "template"))]
 fn compile_with(_program: &Program, _counting: bool) -> Result<NativeProgram, Unavailable> {
     Err(Unavailable::new(
-        "this build has no native code generator; rebuild with `--features template`",
+        "this build has no native code generator: it was built without the `template` \
+         feature, which the `cove` binary turns on by default",
     ))
 }
 

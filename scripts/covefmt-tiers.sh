@@ -12,8 +12,7 @@
 #
 # Usage, from anywhere in the repository:
 #
-#     cargo build --profile checked -p cove-cli --features template
-#     cargo build --profile checked -p cove-bench
+#     cargo build --profile checked -p cove-cli -p cove-bench
 #     scripts/covefmt-tiers.sh [warm runs] [cove binary] [cove-fmt-phases binary]
 #
 # Three things about the shape are load-bearing.
@@ -61,21 +60,23 @@ phases=${3:-$root/target/checked/cove-fmt-phases}
 
 if [[ ! -x $binary ]]; then
   echo "covefmt-tiers.sh: no binary at $binary" >&2
-  echo "build one: cargo build --profile checked -p cove-cli --features template" >&2
+  echo "build one: cargo build --profile checked -p cove-cli" >&2
   exit 1
 fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# The native arm needs a binary built with the code generator's feature, and
-# `target/checked/cove` is **not** reliably that binary: cargo replaces it with
-# whichever feature set was last asked for, so an ordinary `cargo t` or
-# `cargo clippy --workspace` between two runs of this script puts the default
-# build back, and this measurement then dies fourteen rounds in with "exited 1".
-# One cheap run with a fuel limit of one asks the question before anything is
-# timed: an unavailable tier is a diagnostic on stderr, and a `native` that
-# works reaches its fuel limit instead.
+# The native arm needs a binary built with the code generator's feature. Since
+# ADR 0076 that is the default build of `cove-cli`, so an ordinary `cargo build`,
+# `cargo t` or `cargo clippy --workspace` leaves one at `target/checked/cove`.
+# It used to be a `--features template` build that the next ordinary command
+# silently replaced, and this measurement once died fourteen rounds in with
+# "exited 1" for that reason. The hazard is now only a
+# `--no-default-features` build, or a host the code generator cannot serve, so
+# the question is still asked: one cheap run with a fuel limit of one, before
+# anything is timed. An unavailable tier is a diagnostic on stderr, and a
+# `native` that works reaches its fuel limit instead.
 #
 # `--fuel 1` and not `--help`, because what has to be established is that this
 # build's `--backend native` can *compile and enter* the tier on this host, which
@@ -89,7 +90,7 @@ fi
 if grep -q "native execution is unavailable" "$work/probe"; then
   sed 's/^/  /' "$work/probe" >&2
   echo "covefmt-tiers.sh: build the binary this measurement needs:" >&2
-  echo "  cargo build --profile checked -p cove-cli --features template" >&2
+  echo "  cargo build --profile checked -p cove-cli   # with default features, on x86-64" >&2
   exit 1
 fi
 
