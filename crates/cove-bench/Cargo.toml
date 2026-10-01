@@ -23,6 +23,19 @@ path = "src/main.rs"
 name = "cove-fmt-phases"
 path = "src/bin/fmt_phases.rs"
 
+# What starting a program costs, phase by phase, for issue #556. A bin for
+# `cove-fmt-phases`'s reason: a measurement with no baseline and no gate.
+[[bin]]
+name = "cove-compile-phases"
+path = "src/bin/compile_phases.rs"
+
+# On by default, as it is on `cove-cli` (ADR 0076), so that the native column
+# of `cove-compile-phases` is the tier `cove run --backend native` builds. A
+# host the code generator refuses reports no native column.
+[features]
+default = ["template"]
+template = ["cove-runtime/template"]
+
 [dependencies]
 cove-diag.workspace = true
 cove-sema.workspace = true
