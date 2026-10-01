@@ -125,6 +125,13 @@ generator and `cargo t` runs its tests: `cove-native`'s 107-case
 native halves of `float_parse.rs` and `int_bits.rs`, and the end-to-end cases
 with a `native` file run on `--backend native` against the VM.
 
+Those tests are gated on `all(feature = "template", target_arch = "x86_64",
+unix)`, not on the feature alone — "the tier can *run* here" rather than "the
+tier is built". The feature builds everywhere and the code generator refuses
+every host but Unix x86-64, so a test gated on the feature alone would turn an
+arm64 or Windows contributor's `cargo t` red. Gate a new native test the same
+way.
+
 `cove-runtime` and `cove-native` themselves still default the feature off,
 because they are what an embedder and the browser playground link, and ADR
 0055's gate item 7 — "a build without the native feature has no

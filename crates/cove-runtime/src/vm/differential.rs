@@ -3054,7 +3054,7 @@ fn rendered_lines(source: &'static str, args: Vec<Value>, on_machine: bool) -> S
 
 /// What [`rendered_natively`] answers: the `String`, how the run's calls
 /// divided between the tiers, and every function the tier refused.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 struct Natively {
     text: String,
     tiers: crate::Tiers,
@@ -3068,7 +3068,7 @@ struct Natively {
 /// Behind the code generator's feature, as `tests/native_tier.rs` is, so it
 /// runs in any workspace build — `cove-cli` turns the feature on by default
 /// (ADR 0076) — and not in `cargo test -p cove-runtime` alone.
-#[cfg(feature = "template")]
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
 fn rendered_natively(source: &'static str, args: Vec<Value>) -> Natively {
     let (sources, checked) = checked(source);
     let program = lowered(&sources, &checked);
@@ -3261,7 +3261,7 @@ export fn rendered(xs: Array<Float>) -> String {
         }
         let chunk = chunk.to_vec();
         let count = chunk.len();
-        #[cfg(feature = "template")]
+        #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
         let natively = chunk.clone();
         let answer = on_a_deep_stack(move || {
             rendered_lines(
@@ -3289,7 +3289,7 @@ export fn rendered(xs: Array<Float>) -> String {
         // function refused, no call handed back to the VM, and a compiled
         // entry for every value — because a run that fell back would compare
         // the VM with itself and pass.
-        #[cfg(feature = "template")]
+        #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
         {
             let run = on_a_deep_stack(move || {
                 rendered_natively(
