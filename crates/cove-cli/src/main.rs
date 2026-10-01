@@ -403,15 +403,33 @@ pub(crate) fn find_root(start: &Path) -> Option<PathBuf> {
 /// `cove fmt --check` that CI runs is byte for byte what it was.
 fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
     let (named, args) = split_backend_if_named(args)?;
-    let mut check = false;
-    let mut path: Option<&Path> = None;
-    for arg in &args {
-        if arg == "--check" {
-            check = true;
-        } else {
-            path = Some(Path::new(arg.as_str()));
-        }
+    let check = args.iter().any(|arg| arg == "--check");
+    // Anything else beginning with `--` is a flag this command does not
+    // have, refused the way `cove replay` refuses one of its own: a typo is
+    // a typo whatever it happens to look like.
+    if let Some(flag) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && *arg != "--check")
+    {
+        return Err(CliError::Message(format!(
+            "unknown `cove fmt` flag `{flag}`"
+        )));
     }
+    let positional: Vec<&String> = args.iter().filter(|arg| *arg != "--check").collect();
+    // `[path]` is singular (see `USAGE` above): a second one used to be
+    // silently dropped (#448), which let `cove fmt --check a.cove b.cove`
+    // exit 0 over an unformatted `b.cove` it never opened.
+    let path: Option<&Path> = match positional.as_slice() {
+        [] => None,
+        [one] => Some(Path::new(one.as_str())),
+        [first, second, ..] => {
+            return Err(CliError::Message(format!(
+                "`cove fmt` takes one path, and `{second}` is a second one after \
+                 `{first}`; run it once per path, or name a directory to format \
+                 every `.cove` file under it"
+            )));
+        }
+    };
     if let Some(backend) = named {
         eprintln!(
             "note: `cove fmt` is the Rust formatter and runs no Cove program, so \
@@ -2753,6 +2771,63 @@ export fn main() -> Result<Unit, Error> {
         assert!(
             cmd_fmt(&["--check".into(), path]).is_ok(),
             "a formatted package passes `--check`"
+        );
+    }
+
+    /// #448: a second path used to be silently dropped, so `cove fmt --check
+    /// a.cove b.cove` rewrote or reported the last one and never opened the
+    /// other, whichever state it was in. It is refused instead, before either
+    /// file is touched.
+    #[test]
+    fn fmt_refuses_a_second_path_and_rewrites_neither_file() {
+        let one = TempDir::new("fmt-two-paths-one");
+        let two = TempDir::new("fmt-two-paths-two");
+        let unformatted = "export fn f() -> Int {1}\n";
+        write(one.path(), "a.cove", unformatted);
+        write(two.path(), "b.cove", unformatted);
+        let a = one.path().join("a.cove");
+        let b = two.path().join("b.cove");
+
+        let Err(error) = cmd_fmt(&[a.display().to_string(), b.display().to_string()]) else {
+            panic!("a second path must be refused");
+        };
+        let CliError::Message(message) = error else {
+            panic!("a second path is a usage error, not a formatting one");
+        };
+        assert!(
+            message.contains(&b.display().to_string()),
+            "the message should name the extra argument: {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            unformatted,
+            "refusing a second path must not rewrite the first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&b).unwrap(),
+            unformatted,
+            "refusing a second path must not rewrite the second either"
+        );
+    }
+
+    /// A typo in a flag (`--chek` for `--check`) must not be read as a path:
+    /// that would silently format the whole current package instead of
+    /// saying the flag is unknown.
+    #[test]
+    fn fmt_refuses_an_unknown_flag_rather_than_treating_it_as_a_path() {
+        let dir = TempDir::new("fmt-unknown-flag");
+        write(dir.path(), "cove.toml", "");
+        write(dir.path(), "app/main.cove", "export fn f() -> Int {1}\n");
+
+        let Err(error) = cmd_fmt(&["--chek".into(), dir.path().display().to_string()]) else {
+            panic!("an unknown flag must be refused rather than read as a path");
+        };
+        let CliError::Message(message) = error else {
+            panic!("an unknown flag is a usage error, not a formatting one");
+        };
+        assert!(
+            message.contains("--chek"),
+            "the message should name the flag: {message}"
         );
     }
 
