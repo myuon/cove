@@ -41,8 +41,8 @@ export fn print(source: String, held: Lexed, tree: Tree) -> String {
   // `-1` is "nothing has been written", which is what makes a blank at the
   // very top of a file fall under the same rule as a blank at the top of a
   // block: both open on nothing.
-  emit(source, held.tokens, tree, -1, 0, -1, var out)
-  let text = "".join(out.freeze())
+  emit(source, held.tokens, tree, -1, 0, -1, -1, 0, var out)
+  let text = endsOnOneNewline("".join(out.freeze()))
   // The alignment pass lexes its own output, which is the price of not
   // lining up on a `//` inside a string. It is only owed when there is a
   // trailing comment to line up, and whether there is one is already
@@ -249,13 +249,17 @@ fn emit(
   after: Int,
   depth: Int,
   reserved: Int,
+  ruledAt: Int,
+  ruledBreaks: Int,
   var out: Vector<String>,
 ) -> Int {
   if tree.children.length() == 0 {
     if tree.kind == Node.Leaf {
       match held.get(tree.from) {
         Some(token) => {
-          if token.kind == Kind.Space {
+          if token.kind == Kind.Space && tree.from == ruledAt {
+            out.push(ruled(ruledBreaks))
+          } else if token.kind == Kind.Space {
             out.push(spacing(source, token, opensBlock(source, held, after), after < 0, depth, held, tree.from))
           } else {
             // A space the source has not got. Every other rule here rewrites
@@ -266,7 +270,7 @@ fn emit(
               wantsASpaceBetween(source, held, after, tree.from) {
               out.push(" ")
             }
-            out.push(text(source, token))
+            out.push(asWritten(source, token))
           }
           return tree.from
         }
@@ -331,15 +335,38 @@ fn emit(
     } else {
       reservedFor(source, held, tree)
     }
-    let room = maxWidth() - col - rest
+    // A group written against what precedes it, `\{[1]\}`, is owed the
+    // space `emit` would have put in front of its first token had it been
+    // written token by token — and owed it before the width is asked, because
+    // the space is on the line.
+    let gap = if after >= 0 && after == tree.from - 1 &&
+      !isASpaceToken(held, after) &&
+      wantsASpaceBetween(source, held, after, tree.from) {
+      1
+    } else {
+      0
+    }
+    let room = maxWidth() - col - gap - rest
     let fits = !mustBreak(source, held, tree) &&
       flatWidth(source, held, tree) <= room
     if isBroken(source, held, tree) {
-      if fits {
+      // `arg_list` asks its lone-argument escape before it looks at how the
+      // source was written, so a call broken around one argument that will
+      // not fit on a line of its own either is joined back up: breaking it
+      // only made it longer.
+      if fits ||
+        !isAnArray(source, held, tree) &&
+          !worthBreaking(source, held, tree, depth) {
+        if gap > 0 {
+          out.push(" ")
+        }
         out.push(flattened(source, held, tree))
         return tree.to - 1
       }
     } else {
+      if gap > 0 {
+        out.push(" ")
+      }
       // Already on one line. It stays there unless it is over the limit and
       // breaking would actually buy something, and either way the answer is
       // this group's *and everything inside it*.
@@ -597,10 +624,55 @@ fn emit(
         if child.kind == Node.Body && writesBroken(source, held, child) &&
           (breaksAsABody(source, held, child, tree.from) ||
             overflows(source, held, tree.from, tree.to, began)) {
-          writeBrokenBody(source, held, child, at, var out)
+          writeBrokenBody(
+            source,
+            held,
+            child,
+            at,
+            tree.kind == Node.Impl || tree.kind == Node.Trait,
+            var out,
+          )
           last = child.to - 1
+        } else if tree.kind == Node.File && i > 0 && child.kind != Node.Trivia {
+          // A declaration after another is a blank line below it, whatever
+          // the source had: `source_unit` sets `pending_blank` before every
+          // item but the first, and before the first too when `use`s stand
+          // above it. A `use` after a `use` is the one exception, and the
+          // other way round — `lead(…, false)` lets no blank between two.
+          //
+          // The blank is the first line break of the item's leading trivia,
+          // which is the break that ends the line above: a comment standing
+          // on its own line in front of the item comes after it, and a
+          // comment trailing the previous item's line comes before it.
+          let breaks = if child.kind == Node.Use &&
+            childAt(children, i - 1).kind == Node.Use {
+            1
+          } else {
+            2
+          }
+          last = emit(
+            source,
+            held,
+            child,
+            last,
+            at,
+            reserved,
+            firstBreakIn(source, held, child),
+            breaks,
+            var out,
+          )
         } else {
-          last = emit(source, held, child, last, at, reserved, var out)
+          last = emit(
+            source,
+            held,
+            child,
+            last,
+            at,
+            reserved,
+            ruledAt,
+            ruledBreaks,
+            var out,
+          )
         }
       }
       None => { }
@@ -653,6 +725,11 @@ fn spacing(
     }
     at = at + 1
   }
+  if lastBreak < 0 && leading {
+    // Space in front of the first token of a file, on its own line: the
+    // margin. `cove fmt` writes a file's first line at indent zero.
+    return ""
+  }
   if lastBreak < 0 {
     // A run inside a line is not kept — it is decided. `cove fmt` writes
     // `f(x, y)` for `f( x , y )`, and the width of what stands either side of
@@ -668,7 +745,10 @@ fn spacing(
   // so however many an author wrote, one is what comes back. Two newlines is
   // that one blank line.
   var most = maxBreaks()
-  if opening {
+  if opening || standsAfter(held, index, Kind.DocComment) {
+    // Nothing between a doc comment and what it documents, either:
+    // `doc_comment` clears `pending_blank` once it has written the last
+    // line, so the declaration goes directly under it.
     most = 1
   }
   if leading {
@@ -719,6 +799,58 @@ fn spacing(
     out.appendSlice(source, lastBreak + 1, token.to)
   }
   out.finish()
+}
+
+/// Whether the token in front of `index` is of `kind`.
+fn standsAfter(held: Array<Token>, index: Int, kind: Kind) -> Bool {
+  match held.get(index - 1) {
+    Some(token) => token.kind == kind
+    None => false
+  }
+}
+
+/// A token as `cove fmt` writes it: its own text, but for a comment.
+///
+/// A comment's text is the author's, all but the space it ends on — `Comment`
+/// keeps each line `trim_end`ed — and a doc comment's is written back as
+/// `doc_comment` writes it: `///`, a space, and the text the lexer read, which
+/// is what followed `///` less one space and less the space it ended on. So
+/// `///x` is `/// x`, and a `///` with nothing after it is `///`.
+fn asWritten(source: String, token: Token) -> String {
+  if token.kind == Kind.DocComment {
+    var from = token.from + 3
+    if from < token.to && source.byteAt(from) == ' ' {
+      from = from + 1
+    }
+    let to = endOfText(source, from, token.to)
+    if to == from {
+      return "///"
+    }
+    return match source.sliceBytes(from, to) {
+      Ok(line) => "/// {line}"
+      Err(_) => text(source, token)
+    }
+  }
+  if token.kind == Kind.LineComment {
+    let to = endOfText(source, token.from, token.to)
+    if to < token.to {
+      return match source.sliceBytes(token.from, to) {
+        Ok(line) => line
+        Err(_) => text(source, token)
+      }
+    }
+  }
+  text(source, token)
+}
+
+/// One past the last byte of `[from, to)` that is not a space or a tab.
+fn endOfText(source: String, from: Int, to: Int) -> Int {
+  var at = to
+  while at > from &&
+    (source.byteAt(at - 1) == ' ' || source.byteAt(at - 1) == '\t') {
+    at = at - 1
+  }
+  at
 }
 
 /// How many newlines a run of space may keep: one to end the line, and one
@@ -830,6 +962,9 @@ fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
           // question here.
           width = width + 1
         } else {
+          if wantsAMissingSpace(source, held, tree.from, at) {
+            width = width + 1
+          }
           width = width + tokenWidth(source, token)
         }
       }
@@ -1128,6 +1263,9 @@ fn flattened(source: String, held: Array<Token>, tree: Tree) -> String {
             out.append(" ")
           }
         } else if !isATrailingComma(source, held, at, tree.to) {
+          if wantsAMissingSpace(source, held, tree.from, at) {
+            out.append(" ")
+          }
           // The token's own bytes, copied straight out of the source. A
           // `text()` here would cut a `String` out first and drop it as soon
           // as it had been copied a second time.
@@ -1232,6 +1370,25 @@ fn restOfLine(source: String, held: Array<Token>, at: Int) -> Int {
 /// kept whatever the source had, so `f(a,  b)` flattened to `f(a,  b)`.
 fn wantsASpace(source: String, held: Array<Token>, at: Int) -> Bool {
   wantsASpaceBetween(source, held, at - 1, at + 1)
+}
+
+/// Whether the token at `at`, written against the one before it with no run
+/// of space between, wants a space there anyway — the space the source has
+/// not got, which `emit` puts in where it writes token by token and this puts
+/// in where a group is written whole. `from` is where the run being written
+/// begins; nothing is put in front of its first token.
+///
+/// Without it a group kept on one line kept every pair the source ran
+/// together: `inflight.spawn \{await run(c)\}` stayed as it was where
+/// `cove fmt` writes `\{ await run(c) \}`.
+fn wantsAMissingSpace(
+  source: String,
+  held: Array<Token>,
+  from: Int,
+  at: Int,
+) -> Bool {
+  at > from && !isASpaceToken(held, at - 1) &&
+    wantsASpaceBetween(source, held, at - 1, at)
 }
 
 /// The byte of a one-byte punctuation token at `at`, or zero.
@@ -1444,6 +1601,8 @@ fn writeBroken(
         last,
         depth + 1,
         noReservation(),
+        -1,
+        0,
         var out,
       )
       out.push(",")
@@ -1696,7 +1855,17 @@ fn writeHug(
   // last argument with `self.expr(…, indent)`, at the call's own depth, which
   // is the depth this was handed.
   if isAClosure(member) {
-    emit(source, held, member, member.from, depth, noReservation(), var out)
+    emit(
+      source,
+      held,
+      member,
+      member.from,
+      depth,
+      noReservation(),
+      -1,
+      0,
+      var out,
+    )
     return
   }
   for child in member.children {
@@ -2290,6 +2459,7 @@ fn writeBrokenBody(
   held: Array<Token>,
   body: Tree,
   depth: Int,
+  members: Bool,
   var out: Vector<String>,
 ) {
   let children = body.children
@@ -2316,8 +2486,38 @@ fn writeBrokenBody(
         trimTrailing(var out)
         out.push("\n")
         out.push(indentOf(depth))
+        // The line is begun, so nothing may be written in front of the brace
+        // — `-1` is what says nothing stands beside it.
+        last = -1
       }
-      last = emit(source, held, child, last, depth, asksTheLine(), var out)
+      last = emit(
+        source,
+        held,
+        child,
+        last,
+        depth,
+        asksTheLine(),
+        -1,
+        0,
+        var out,
+      )
+    } else if i == 1 && child.kind == Node.Stmt {
+      // A statement written against its opening brace, `\{1\}`: there is no
+      // run of space to turn into the line the statement needs, so the line
+      // is made here, and nothing is written in front of the statement.
+      trimTrailing(var out)
+      out.push("\n")
+      out.push(indentOf(at))
+      last = emit(source, held, child, -1, at, asksTheLine(), -1, 0, var out)
+    } else if members && breaksLine(source, held, child) &&
+      followsAMember(source, held, children, i) &&
+      aMemberFollows(source, held, children, i) {
+      // Between two methods of an `impl` or a `trait`, a blank line whatever
+      // the source had: `impl_block` and `trait_decl` set `pending_blank`
+      // before every member but the first.
+      trimTrailing(var out)
+      out.push("\n\n")
+      out.push(indentOf(at))
     } else if isARunOfSpace(held, child) && !breaksLine(source, held, child) {
       // A gap that is not a line becomes one. The runs that already hold a
       // newline go through `spacing` as they always did, which is what keeps
@@ -2326,9 +2526,117 @@ fn writeBrokenBody(
       out.push("\n")
       out.push(indentOf(at))
     } else {
-      last = emit(source, held, child, last, at, asksTheLine(), var out)
+      last = emit(source, held, child, last, at, asksTheLine(), -1, 0, var out)
     }
     i = i + 1
+  }
+}
+
+/// Whether the run of space at `i` is the first line break after a member of
+/// a declaring body: what stands between it and the member before it is at
+/// most the rest of that member's line — a space and a trailing comment.
+fn followsAMember(
+  source: String,
+  held: Array<Token>,
+  children: Array<Tree>,
+  i: Int,
+) -> Bool {
+  var j = i - 1
+  while j >= 0 {
+    let child = childAt(children, j)
+    if child.kind == Node.Stmt {
+      return true
+    }
+    if breaksLine(source, held, child) || !isATriviaLeaf(held, child) {
+      return false
+    }
+    j = j - 1
+  }
+  false
+}
+
+/// Whether a member of the body follows the run of space at `i`, with only
+/// trivia between — rather than the closing brace.
+fn aMemberFollows(
+  source: String,
+  held: Array<Token>,
+  children: Array<Tree>,
+  i: Int,
+) -> Bool {
+  var j = i + 1
+  while j < children.length() {
+    let child = childAt(children, j)
+    if child.kind == Node.Stmt {
+      return true
+    }
+    if !isATriviaLeaf(held, child) {
+      return false
+    }
+    j = j + 1
+  }
+  false
+}
+
+/// Whether `child` is one token of space or comment.
+fn isATriviaLeaf(held: Array<Token>, child: Tree) -> Bool {
+  if child.to - child.from != 1 {
+    return false
+  }
+  match held.get(child.from) {
+    Some(token) => isTriviaKind(token.kind)
+    None => false
+  }
+}
+
+/// The first run of space holding a line break among `item`'s leading
+/// trivia, or `-1` when its trivia holds none.
+fn firstBreakIn(source: String, held: Array<Token>, item: Tree) -> Int {
+  for child in item.children {
+    if breaksLine(source, held, child) {
+      return child.from
+    }
+    if !isATriviaLeaf(held, child) {
+      return -1
+    }
+  }
+  -1
+}
+
+/// A run of space between two declarations, ruled by where it stands rather
+/// than by what it held: `breaks` newlines, and no indentation, because a
+/// declaration of a file is at the margin.
+fn ruled(breaks: Int) -> String {
+  if breaks == 1 {
+    "\n"
+  } else {
+    "\n\n"
+  }
+}
+
+/// `text` ending on exactly one newline, or empty when it holds nothing.
+///
+/// `Out::finish` drops every blank line at the end and ends each line it
+/// keeps on a newline, so a file ends on one however many it was written
+/// with — or on none, in which case it gains one.
+fn endsOnOneNewline(text: String) -> String {
+  let n = text.byteLength()
+  var to = n
+  while to > 0 &&
+    (text.byteAt(to - 1) == '\n' || text.byteAt(to - 1) == ' ' ||
+      text.byteAt(to - 1) == '\t' || text.byteAt(to - 1) == '\r') {
+    to = to - 1
+  }
+  if to == 0 {
+    return ""
+  }
+  // The common case, a file that already ends on one, is answered without a
+  // copy.
+  if to == n - 1 && text.byteAt(to) == '\n' {
+    return text
+  }
+  match text.sliceBytes(0, to) {
+    Ok(kept) => "{kept}\n"
+    Err(_) => text
   }
 }
 
@@ -2480,7 +2788,17 @@ fn writeChain(
       out.push("\n")
       out.push(indentOf(level))
     }
-    last = emit(source, held, child, last, level, noReservation(), var out)
+    last = emit(
+      source,
+      held,
+      child,
+      last,
+      level,
+      noReservation(),
+      -1,
+      0,
+      var out,
+    )
     if child.kind == Node.Group && byteOfPunct(source, held, child.from) == '(' {
       afterACall = true
     }
@@ -2865,6 +3183,12 @@ fn wantsASpaceBetween(
   if a == '.' || b == '.' {
     return false
   }
+  // A variadic parameter's `...` is written against its type: `items:
+  // String...`. It is one token of three bytes, so the `.` above does not
+  // see it.
+  if b == 0 && isVariadicDots(source, held, r) {
+    return false
+  }
   if isARange(source, held, l) || isARange(source, held, r) {
     return false
   }
@@ -3052,6 +3376,17 @@ fn isASpaceToken(held: Array<Token>, at: Int) -> Bool {
 }
 
 /// Whether `token` is exactly `word`.
+/// Whether the token at `at` is the `...` of a variadic parameter.
+fn isVariadicDots(source: String, held: Array<Token>, at: Int) -> Bool {
+  match held.get(at) {
+    Some(token) => {
+      token.kind == Kind.Punct && token.to - token.from == 3 &&
+        isTheWord(source, token, "...")
+    }
+    None => false
+  }
+}
+
 fn isTheWord(source: String, token: Token, word: String) -> Bool {
   match source.sliceBytes(token.from, token.to) {
     Ok(text) => text == word
@@ -3075,6 +3410,9 @@ fn decided(source: String, held: Array<Token>, from: Int, to: Int) -> String {
             out.push(" ")
           }
         } else {
+          if wantsAMissingSpace(source, held, from, at) {
+            out.push(" ")
+          }
           out.push(text(source, token))
         }
       }
@@ -3243,7 +3581,7 @@ fn differenceIn(
     }
     let x = tokenAt(was, i)
     let y = tokenAt(now, j)
-    if !sameText(before, x, after, y) {
+    if !sameText(before, x, after, y) && !sameComment(before, x, after, y) {
       return Some("significant token {n} was `{text(before, x)}` and is `{text(after, y)}`")
     }
     i = i + 1
@@ -3369,6 +3707,15 @@ fn tokenAt(held: Array<Token>, i: Int) -> Token {
 
 /// Whether two tokens of two sources are the same text, compared byte by byte
 /// rather than by cutting both out.
+/// Whether two comments say the same thing: the same kind, and the same text
+/// once each is written the way [`asWritten`] writes it — which differs from
+/// the source only in the space a comment ends on and the one space after a
+/// `///`, neither of which is part of what it says.
+fn sameComment(a: String, x: Token, b: String, y: Token) -> Bool {
+  x.kind == y.kind && (x.kind == Kind.LineComment || x.kind == Kind.DocComment) &&
+    asWritten(a, x) == asWritten(b, y)
+}
+
 fn sameText(a: String, x: Token, b: String, y: Token) -> Bool {
   let width = x.to - x.from
   if y.to - y.from != width {

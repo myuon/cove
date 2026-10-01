@@ -276,8 +276,17 @@ test fn blank_lines_collapse_to_one() -> Result<Unit, Error> {
   assertEqual(print(many, held, parseTokens(many, held.tokens)), "{a}\n\n{b}\n")?
   // One blank line is already one, and stays.
   assert(roundTrips("{a}\n\n{b}\n"))?
-  // No blank line stays none: the rule is a ceiling, not a floor.
-  assert(roundTrips("{a}\n{b}\n"))?
+  // Between two declarations it is a floor as well: `source_unit` puts a
+  // blank line in front of every item but the first, so none becomes one.
+  let joined = "{a}\n{b}\n"
+  let heldJoined = lex(joined)
+  assertEqual(
+    print(joined, heldJoined, parseTokens(joined, heldJoined.tokens)),
+    "{a}\n\n{b}\n",
+  )?
+  // Between two statements no blank line stays none: there the rule is a
+  // ceiling, not a floor.
+  assert(roundTrips("fn f() \{\n  1\n  2\n\}\n"))?
   // Inside a body too, and the indentation after the last newline is kept —
   // what the rule takes out is newlines, not the line they leave behind.
   let inside = "fn f() \{\n  1\n\n\n  2\n\}\n"
@@ -1254,5 +1263,59 @@ test fn a_statement_ends_where_cove_syntax_ends_it() -> Result<Unit, Error> {
   assertEqual(statementCount("fn f() \{\n  a /* gone\n  */ b\n\}\n"), 2)?
   assertEqual(statementCount("fn f() \{\n  a + /* gone\n  */ b\n\}\n"), 1)?
   assertEqual(statementCount("fn f() \{\n  a /* kept */ + b\n\}\n"), 1)?
+  Ok(())
+}
+
+/// What `cove fmt` writes whatever the source had — the rules the corpus
+/// cannot ask for, because every file in it already obeys them.
+///
+/// covefmt became `cove fmt` (ADR 0077), and the first thing that showed was
+/// that the corpus and its five mutations had never asked for these: each
+/// mutation damages a formatted file in a way whose repair is the file, and
+/// none of them takes out a blank line between two declarations, writes a
+/// body against its braces, or leaves space at the end of a comment. Each
+/// expectation here is what `cove_syntax::format` answers for the same input.
+test fn what_cove_fmt_writes_whatever_the_source_had() -> Result<Unit, Error> {
+  let f = "fn f() -> Int \{\n  1\n\}\n"
+  // A blank line under the `use`s and between declarations; none between two
+  // `use`s.
+  assertEqual(
+    formatSource("use a.b\n\nuse c.d\n{f}fn g() \{\n  2\n\}\n").text,
+    "use a.b\nuse c.d\n\n{f}\nfn g() \{\n  2\n\}\n",
+  )?
+  // A blank line between two methods of an `impl`.
+  assertEqual(
+    formatSource(
+      "impl A \{\n  fn a() \{\n    1\n  \}\n  fn b() \{\n    2\n  \}\n\}\n",
+    ).text,
+    "impl A \{\n  fn a() \{\n    1\n  \}\n\n  fn b() \{\n    2\n  \}\n\}\n",
+  )?
+  // A body written against its braces is broken all the same.
+  assertEqual(
+    formatSource("fn f() -> Int \{1\}\n").text,
+    "fn f() -> Int \{\n  1\n\}\n",
+  )?
+  // One newline at the end of the file, and none of the margin at its top.
+  assertEqual(formatSource("  {f}\n\n\n").text, f)?
+  assertEqual(formatSource("fn f() -> Int \{\n  1\n\}").text, f)?
+  // A doc comment is `///`, a space and its text, directly above what it
+  // documents; no comment ends on space.
+  assertEqual(formatSource("///x   \n\n{f}").text, "/// x\n{f}")?
+  assertEqual(
+    formatSource("fn f() -> Int \{\n  1 // one   \n\}\n").text,
+    "fn f() -> Int \{\n  1 // one\n\}\n",
+  )?
+  // The space inside a body that keeps its line.
+  assertEqual(
+    formatSource("fn f() \{\n  run(g \{h()\})\n\}\n").text,
+    "fn f() \{\n  run(g \{ h() \})\n\}\n",
+  )?
+  // A call broken around one argument that would not fit on a line of its
+  // own either is joined back up: breaking it only made it longer.
+  let long = "\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\""
+  assertEqual(
+    formatSource("fn f() \{\n  lines.push(\n    {long},\n  )\n\}\n").text,
+    "fn f() \{\n  lines.push({long})\n\}\n",
+  )?
   Ok(())
 }
