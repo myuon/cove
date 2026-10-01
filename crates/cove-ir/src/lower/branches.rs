@@ -4,7 +4,7 @@
 //! decides this. A comparison in this instruction set answers a `Bool` into a
 //! slot, and almost every comparison a program writes is the condition of an
 //! `if` or a `while` — so the slot is read once, by the `branch-false` on the
-//! very next line, and never again. `examples/covefmt` spends 26.4% of its
+//! very next line, and never again. `tools/covefmt` spends 26.4% of its
 //! executed instructions in `branch-false` alone, and 18.8% of the whole run
 //! is the second half of a pair like that.
 //!

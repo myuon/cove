@@ -1914,7 +1914,7 @@ fn build(items: Array<Int>) -> Result<Array<Int>, Error> {
     ///
     /// This was refused, and the refusal cost the one pattern the language
     /// has for building a sequence: fill a `Vector` through a call, then
-    /// `freeze` it. `examples/covefmt` wrote `"".join(out.toArray())` at nine
+    /// `freeze` it. `tools/covefmt` wrote `"".join(out.toArray())` at nine
     /// sites because of it, and `toArray` copies the whole store where
     /// `freeze` re-labels it in place.
     #[test]

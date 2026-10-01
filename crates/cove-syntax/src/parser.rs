@@ -3916,9 +3916,12 @@ mod tests {
 
     #[test]
     fn every_example_program_parses() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        // `tools/` holds the programs that grew out of `examples/` into
+        // packages of their own, covefmt first; they are parsed here too.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut files = Vec::new();
-        collect_cove_files(&root, &mut files);
+        collect_cove_files(&root.join("examples"), &mut files);
+        collect_cove_files(&root.join("tools"), &mut files);
         files.sort();
         assert!(
             files.len() >= 7,
@@ -3928,7 +3931,7 @@ mod tests {
         for path in files {
             let relative = path
                 .strip_prefix(&root)
-                .expect("a path under examples")
+                .expect("a path under the repository")
                 .to_string_lossy()
                 .replace('\\', "/");
             let text = std::fs::read_to_string(&path).expect("readable example");

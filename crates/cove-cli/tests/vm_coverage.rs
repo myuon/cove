@@ -702,6 +702,7 @@ fn discover() -> Vec<Case> {
     let mut roots = vec![root.join("tests/e2e")];
     roots.extend(support::nested_packages(&root.join("tests/e2e")));
     roots.push(root.join("examples"));
+    roots.extend(support::nested_packages(&root.join("tools")));
     roots.push(root.join("benches"));
 
     roots

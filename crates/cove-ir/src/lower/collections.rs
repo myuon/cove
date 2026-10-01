@@ -343,7 +343,7 @@ impl Body<'_> {
     /// intrinsic that is the same [`Inst::Len`], so this lowering does not name
     /// it. `get` stays: written in Cove it is a range decision and an `Option`
     /// around a load, more than a thin wrapper, and it did not expand at every
-    /// call site `examples/covefmt` makes.
+    /// call site `tools/covefmt` makes.
     ///
     /// `isEmpty` used to answer here too, the same `length() == 0` every
     /// other sequence still answers with. It is not reached from here any

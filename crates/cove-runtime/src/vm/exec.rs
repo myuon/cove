@@ -488,7 +488,7 @@ pub(crate) struct Machine<'a> {
     /// It is an *offset* rather than a parallel counter for one measured
     /// reason: the dispatch loop must keep exactly the one increment and the
     /// one comparison it already had. Maintaining a second counter beside
-    /// `instructions` in the loop cost 3% on `examples/covefmt` — 4.05s
+    /// `instructions` in the loop cost 3% on `tools/covefmt` — 4.05s
     /// against 3.93s, interleaved, four runs an arm twice — which is the same
     /// order as the 2.4% `docs/VM_ARCHITECTURE.md` measured for a second
     /// per-instruction branch. Keeping it here means the loop is untouched
@@ -651,7 +651,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// Two chases became one index, which measured about 2.5 ns each — 10 ns
     /// of a 98 ns `String.codePointAtByte`, a builtin the lexer in
-    /// `examples/covefmt` calls once per byte it reads.
+    /// `tools/covefmt` calls once per byte it reads.
     ///
     /// Built once, before the first instruction, because a [`Program`]'s
     /// layouts are fixed by then: there is no invalidation to get wrong and
@@ -2219,7 +2219,7 @@ impl<'a> Machine<'a> {
     /// arms. So `==` and `!=` paid for it exactly as `<` did, and on a real
     /// program they are nearly all of it.
     ///
-    /// `examples/covefmt` made 414,837 of those comparisons in one run over
+    /// `tools/covefmt` made 414,837 of those comparisons in one run over
     /// this repository's 272 `.cove` files — 829,674 vectors and 12,393,739
     /// bytes lifted out of the heap, 99.7% of both figures for the whole run.
     /// `Inst::OrderStr` and the native tier's `OrderStrFn` were already on the

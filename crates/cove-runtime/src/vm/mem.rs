@@ -1866,7 +1866,7 @@ impl Memory {
             // The common width by a long way — every scalar, every reference,
             // every address — and `copy_within` is a range, a bounds check
             // and a `memmove` where this is a load and a store. Leaving it
-            // out measured **6.14 s against 5.98** on `examples/covefmt`,
+            // out measured **6.14 s against 5.98** on `tools/covefmt`,
             // which is the whole of what the two entry points above buy.
             self.stack.words[d] = self.stack.words[s];
             return;

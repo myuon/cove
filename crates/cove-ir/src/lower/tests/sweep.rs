@@ -5,7 +5,7 @@
 //! cases here are the two halves of that: the one it must sweep — a function
 //! every call site of which was expanded, which is issue #440 and what
 //! `std.string.length` and `std.string.endsWith` each turned out to be on
-//! `examples/covefmt` — and the several it must not.
+//! `tools/covefmt` — and the several it must not.
 //!
 //! The ones it must not are the point. A function reached only as a *value*
 //! is named by no call site, so a sweep that counted `Inst::Call` alone would
@@ -61,7 +61,7 @@ fn emitted(program: &Program) -> usize {
 /// that nothing calls it — the slice that decided to lower it was closed
 /// before the expansion ran and nothing asked again. It was emitted anyway,
 /// encoded anyway, and compiled by the native tier anyway: on
-/// `examples/covefmt` that was 1,856 bytes of machine code for
+/// `tools/covefmt` that was 1,856 bytes of machine code for
 /// `std.string.endsWith`, the entire machine-code delta of the change that
 /// moved it into Cove.
 #[test]
@@ -91,14 +91,14 @@ fn a_function_expanded_at_its_only_call_site_is_not_emitted() {
 ///
 /// `String.length` is a thin standard-library wrapper, expanded wherever it
 /// is called (ADR 0058), and a program with one site therefore has no call to
-/// it left. #438 measured exactly this on `examples/covefmt`: emitted 214 →
+/// it left. #438 measured exactly this on `tools/covefmt`: emitted 214 →
 /// 215 functions, compiled 208 → 209, zero calls and no profile row.
 #[test]
 fn a_standard_library_body_every_site_expanded_is_not_emitted() {
     // Inside a loop, which is what makes the site a hot one: `length` is a
     // `while` over the bytes and is past the cold limit, so a call written
     // once keeps its call. That is issue #440's own point — the condition is
-    // a property of the program, not of the function — and `examples/covefmt`
+    // a property of the program, not of the function — and `tools/covefmt`
     // is the program where both of its sites are hot.
     let source = "fn main(s: String) -> Int {\n\
                   \x20 var total = 0\n\

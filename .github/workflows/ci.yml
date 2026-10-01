@@ -184,6 +184,21 @@ jobs:
           ../target/checked/cove generate --check --backend ast
           ../target/checked/cove test --backend ast
 
+      # covefmt is a package of its own (issue 556), so the `examples` steps
+      # above no longer reach it. The same checks, on both backends; it
+      # generates nothing, so there is no `generate --check` to run.
+      - name: cove check (tools/covefmt)
+        working-directory: tools/covefmt
+        run: ../../target/checked/cove check
+
+      - name: cove test (tools/covefmt)
+        working-directory: tools/covefmt
+        run: ../../target/checked/cove test
+
+      - name: cove test on the interpreter (tools/covefmt)
+        working-directory: tools/covefmt
+        run: ../../target/checked/cove test --backend ast
+
       # ADR 0012's performance-gate harness. Wall-clock numbers are too
       # noisy on a shared runner for a threshold to mean anything, so this
       # runs the harness for correctness only: every benchmark executes,
@@ -281,11 +296,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --profile checked -p cove-cli
-          cd examples
+          cd tools/covefmt
           strip_timings() { grep -v '^lex\|^parse\|^print\|^whole'; }
-          ../target/checked/cove run covefmtBench --files-root .. --backend vm \
+          ../../target/checked/cove run covefmtBench --files-root ../.. --backend vm \
             | strip_timings > /tmp/covefmt-vm.out
-          ../target/checked/cove run covefmtBench --files-root .. --backend native \
+          ../../target/checked/cove run covefmtBench --files-root ../.. --backend native \
             | strip_timings > /tmp/covefmt-native.out
           diff /tmp/covefmt-vm.out /tmp/covefmt-native.out
           echo "the native tier printed what the encoded VM printed, byte for byte"

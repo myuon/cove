@@ -191,7 +191,7 @@ fn skip_interpolation(bytes: &[u8], from: usize) -> usize {
 /// the form exists reads that `"` as opening a string. The phantom string then
 /// runs to the next `"` anywhere later in the file and every comment it covers
 /// is never seen — which is [issue 402], where one comment vanished from
-/// `examples/covefmt/lex.cove` and the 117 lines after it went with it.
+/// `tools/covefmt/covefmt/lex.cove` and the 117 lines after it went with it.
 ///
 /// [issue 402]: https://github.com/myuon/cove/issues/402
 fn skip_code_point(bytes: &[u8], start: usize) -> usize {

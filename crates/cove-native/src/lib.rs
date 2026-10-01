@@ -84,7 +84,7 @@
 //! - [`Inst::Trap`](cove_ir::Inst::Trap).
 //!
 //! And then, for the second raced slice, exactly what
-//! `examples/covefmt`'s `wantsASpaceBetween` and `byteOfPunct` need and not one
+//! `tools/covefmt`'s `wantsASpaceBetween` and `byteOfPunct` need and not one
 //! instruction more — which was settled by lowering the two and reading the
 //! listing, not by guessing:
 //!
