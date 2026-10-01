@@ -210,9 +210,8 @@ if files != FILES or abs(bytes_ - BYTES) > BAND * BYTES:
         "recorded facts in examples/covefmt/README.md and this script together, or "
         "explain the difference — do not average over two corpora."
     )
-# Match, re-indent, re-break, re-open, re-space. Re-break is one short:
-# issue #551, a sum covefmt breaks at a different place from `cove fmt`.
-SCORES = [384, 384, 383, 384, 384]
+# Match, re-indent, re-break, re-open, re-space.
+SCORES = [384, 384, 384, 384, 384]
 scores = re.findall(r"^(\d+) of (\d+) file\(s\) ", out, re.M)
 if [(int(a), int(b)) for a, b in scores] != [(n, FILES) for n in SCORES]:
     sys.exit(f"covefmt-tiers.sh: the {arm} arm's five oracle scores are {scores}")

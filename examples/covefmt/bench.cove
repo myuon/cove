@@ -317,11 +317,11 @@ fn mustReIndent() -> Int {
 
 /// How many of the corpus must survive being joined up and re-broken.
 ///
-/// A ratchet, and one that may rise and never fall. It is the whole corpus but
-/// one: `crates/cove-sema/std/float.cove`, whose parenthesised sum inside a
-/// broken chain covefmt breaks at a different place from `cove fmt`
-/// ([issue #551](https://github.com/myuon/cove/issues/551)). It stood at 248
-/// while the corpus grew to 384, which is how that file got in unnoticed.
+/// A ratchet, and one that may rise and never fall. It is the whole corpus. It
+/// once stood at 248 while the corpus grew to 384, which is how a file covefmt
+/// re-broke differently from `cove fmt` got in unnoticed: a sum of two calls,
+/// broken in front of a dot as though it were a chain
+/// ([issue #551](https://github.com/myuon/cove/issues/551)).
 ///
 /// The six that were left when the paragraph below was written are not left.
 ///
@@ -332,7 +332,7 @@ fn mustReIndent() -> Int {
 /// always break, and saying that here means putting a newline where the source
 /// has none. It says it now, which is why this reached the whole corpus.
 fn mustReBreak() -> Int {
-  383
+  384
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.
