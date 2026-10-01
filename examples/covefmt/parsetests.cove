@@ -14,31 +14,6 @@ fn items(source: String) -> String {
   " ".join(parts.freeze())
 }
 
-/// What a node kind is called, so a failure names what it saw.
-fn nodeNamed(kind: Node) -> String {
-  match kind {
-    Node.File => "file"
-    Node.Use => "use"
-    Node.Fn => "fn"
-    Node.Struct => "struct"
-    Node.Enum => "enum"
-    Node.Impl => "impl"
-    Node.Trait => "trait"
-    Node.TypeAlias => "type"
-    Node.Name => "name"
-    Node.Generics => "generics"
-    Node.Params => "params"
-    Node.Returns => "returns"
-    Node.Body => "body"
-    Node.Stmt => "stmt"
-    Node.Group => "group"
-    Node.Member => "member"
-    Node.Trivia => "trivia"
-    Node.Leaf => "leaf"
-    Node.Error => "error"
-  }
-}
-
 /// The kinds of one item's children.
 fn parts(source: String) -> String {
   let tree = parse(source)
@@ -968,5 +943,316 @@ test fn a_call_hugs_a_last_argument_that_expands() -> Result<Unit, Error> {
   let plain = "\n".join(["fn f() -> Int \{", "  someFunction(aLongArgument, anotherLongArgument, aThirdOne, andYetMoreHereTools)", "\}", ""])
   let held = lex(plain)
   assert(print(plain, held, parseTokens(plain, held.tokens)) != plain)?
+  Ok(())
+}
+
+/// **A `>` is a comparison unless it closes a generic list** (#469).
+///
+/// `a > (b)` came back as `a >(b)`: the space in front of a `(` goes when the
+/// `(` opens a call, and a call's `(` stands against its callee or against the
+/// `>` of `Vector.of<String>()` — and *every* `>` was read as the second. So
+/// `>` and nothing else, and only with the bracket on its right; `>=` is one
+/// token and never closes anything. The same reading wrote `a > [b]` as
+/// `a >[b]`, an index, and `a > -b` as `a > - b`, a subtraction from the `>`.
+///
+/// The table is the issue's, one operator at a time, and each line must come
+/// back exactly as written.
+test fn a_comparison_is_not_a_generic_list() -> Result<Unit, Error> {
+  let repro = "fn f(a: Int, b: Int) -> Bool \{\n  a > (b)\n\}\n"
+  assert(roundTrips(repro))?
+  for op in [">", "<", ">=", "<=", "==", "!=", "+", "-", "*"] {
+    let source = "fn f(a: Int, b: Int) -> Bool \{\n  let x = a {op} (b)\n  x\n\}\n"
+    if !roundTrips(source) {
+      return Err(Error(message: "`a {op} (b)` does not come back as written"))
+    }
+  }
+  for line in [
+    "(b) > a",
+    "a > [b]",
+    "a > -b",
+    "a > !b",
+    "a > (b) && c > [d]",
+    "if a > (b) \{\n    a\n  \} else \{\n    b\n  \}",
+    "f(a > (b), c < (d))",
+  ] {
+    let source = "fn f(a: Int, b: Int) -> Bool \{\n  {line}\n\}\n"
+    if !roundTrips(source) {
+      return Err(Error(message: "`{line}` does not come back as written"))
+    }
+  }
+  // And a `>` that does close a generic list still takes its `(` against it.
+  let generic = "fn f() -> Int \{\n  let v = Vector.of<String>()\n  let w = Vector.of<fn(Int, Bool) -> Option<Int>>()\n  0\n\}\n"
+  assert(roundTrips(generic))?
+  let spaced = "fn f() -> Int \{\n  let v = Vector.of<String> ()\n  0\n\}\n"
+  let held = lex(spaced)
+  assertEqual(
+    print(spaced, held, parseTokens(spaced, held.tokens)),
+    "fn f() -> Int \{\n  let v = Vector.of<String>()\n  0\n\}\n",
+  )?
+  Ok(())
+}
+
+// What the meaning check rejects and what it lets through, asked of the check
+// itself rather than of the formatter.
+//
+// A check that only ever sees correct output proves nothing about itself: a
+// `meansTheSame` that answered `true` would pass every corpus run there is.
+// So every pair here is written by hand, and the pairs it must reject are the
+// ways a formatter could actually go wrong — each one is a single edit a
+// layout rule could plausibly make.
+
+/// A function around `lines`, one to a line, so a pair differs only where it
+/// says it does.
+fn body(lines: Array<String>) -> String {
+  "fn f(a: Int, b: Int, c: Int) -> Int \{\n{"\n".join(lines)}\n\}\n"
+}
+
+/// `firstDifference(before, after)`, which must be a difference and must name
+/// what it is about: `token` for the first half of the check and `tree` for
+/// the second, so a pair cannot pass by tripping the wrong one.
+fn rejects(
+  before: String,
+  after: String,
+  about: String,
+) -> Result<Unit, Error> {
+  match firstDifference(before, after) {
+    Some(why) => {
+      if !why.contains(about) {
+        return Err(
+          Error(message: "rejected, but for `{why}` and not `{about}`"),
+        )
+      }
+      Ok(())
+    }
+    None => Err(Error(message: "accepted `{after}` as meaning `{before}`"))
+  }
+}
+
+/// `before` and `after` mean the same, and the check says so.
+fn accepts(before: String, after: String) -> Result<Unit, Error> {
+  match firstDifference(before, after) {
+    Some(why) => Err(Error(message: "rejected `{after}`: {why}"))
+    None => Ok(())
+  }
+}
+
+/// A dropped bracket is a dropped token, whatever it meant — the shape #469
+/// was first reported as.
+test fn the_check_rejects_a_dropped_paren() -> Result<Unit, Error> {
+  rejects(body(["  a > (b)"]), body(["  a > b"]), "token")?
+  rejects(body(["  a > (b)"]), body(["  a > (b"]), "token")?
+  Ok(())
+}
+
+/// `>` and `>=` are both one token and differ only in their text.
+test fn the_check_rejects_a_changed_operator() -> Result<Unit, Error> {
+  rejects(body(["  a > b"]), body(["  a >= b"]), "token")?
+  Ok(())
+}
+
+/// **A comment is significant.** The compiler would never notice one going,
+/// and that is exactly why a formatter must not be trusted to keep them
+/// unchecked.
+test fn the_check_rejects_a_dropped_comment() -> Result<Unit, Error> {
+  rejects(body(["  // why", "  a"]), body(["  a"]), "token")?
+  rejects(body(["  a // why"]), body(["  a"]), "token")?
+  rejects(body(["  f(a /* first */, b)"]), body(["  f(a, b)"]), "token")?
+  Ok(())
+}
+
+/// Two statements run onto one line are one statement, and the tokens alone
+/// cannot tell: they are the same tokens.
+test fn the_check_rejects_two_statements_joined() -> Result<Unit, Error> {
+  rejects(body(["  let x = a", "  x"]), body(["  let x = a x"]), "tree")?
+  Ok(())
+}
+
+/// `a` then `+ b` is two statements, and `a + b` on one line is one — the
+/// operator is on the wrong side of the newline to carry it on.
+test fn the_check_rejects_a_statement_split_after_an_operand(
+) -> Result<Unit, Error> {
+  rejects(body(["  a + b"]), body(["  a", "    + b"]), "tree")?
+  Ok(())
+}
+
+/// A newline inside a `(` ends nothing; the same newline moved out past the
+/// `)` ends the statement, and the `- c` behind it is a second one.
+test fn the_check_rejects_a_newline_moved_out_of_a_group(
+) -> Result<Unit, Error> {
+  rejects(body(["  (a", "    - b) - c"]), body(["  (a - b)", "  - c"]), "tree")?
+  Ok(())
+}
+
+/// The same tokens in another order are another program.
+test fn the_check_rejects_a_reordered_token() -> Result<Unit, Error> {
+  rejects(body(["  a - b"]), body(["  b - a"]), "token")?
+  Ok(())
+}
+
+/// A statement moved out of the block it was in keeps every token and every
+/// statement boundary but one — the brace's.
+test fn the_check_rejects_a_statement_moved_across_a_brace(
+) -> Result<Unit, Error> {
+  rejects(
+    body(["  if a > b \{", "    c", "  \}", "  a"]),
+    body(["  if a > b \{", "    c", "    a", "  \}"]),
+    "token",
+  )?
+  Ok(())
+}
+
+/// Re-indenting moves every byte offset in a file and no token index.
+test fn the_check_accepts_reindentation() -> Result<Unit, Error> {
+  accepts(body(["a + b"]), body(["  a + b"]))?
+  accepts(
+    body(["  if a > b \{", "c", "  \}"]),
+    body(["  if a > b \{", "    c", "  \}"]),
+  )?
+  Ok(())
+}
+
+/// An operator at the end of a line carries the statement on, so breaking
+/// after one changes nothing.
+test fn the_check_accepts_a_break_after_an_operator() -> Result<Unit, Error> {
+  accepts(body(["  a + b"]), body(["  a +", "    b"]))?
+  accepts(body(["  a && b || c"]), body(["  a && b ||", "    c"]))?
+  Ok(())
+}
+
+/// A break inside a `(` ends nothing — and the comma a broken group ends its
+/// last member with is the one token the check does not count, because both
+/// formatters add it when they break a group and drop it when they fold one.
+test fn the_check_accepts_a_break_inside_a_group() -> Result<Unit, Error> {
+  accepts(body(["  f(a, b)"]), body(["  f(", "    a,", "    b,", "  )"]))?
+  accepts(
+    body(["  f(a, [b, c])"]),
+    body(["  f(a, [", "    b,", "    c,", "  ])"]),
+  )?
+  Ok(())
+}
+
+/// Space inside a line is no token at all.
+test fn the_check_accepts_a_doubled_space() -> Result<Unit, Error> {
+  accepts(body(["  a + b"]), body(["  a  +  b"]))?
+  accepts(body(["  f(a, b)"]), body(["  f( a ,  b )"]))?
+  Ok(())
+}
+
+/// A trailing newline added at the end of a file is a run of space with
+/// nothing significant in it, and is not a node of the comparison.
+test fn the_check_accepts_a_final_newline() -> Result<Unit, Error> {
+  accepts("fn f() -> Int \{\n  1\n\}", "fn f() -> Int \{\n  1\n\}\n")?
+  Ok(())
+}
+
+/// What a caller formats with refuses rather than emits: when the check fails
+/// it hands the input back, unchanged, with the reason.
+///
+/// The printer has to be made to write something that means something else,
+/// and the honest way to do that without breaking it is to hand it a tree that
+/// has lost a node. It writes what the tree holds, so the declaration that was
+/// taken out is not in what it writes — and that is refused, and the input
+/// comes back whole.
+test fn formatting_refuses_what_the_check_rejects() -> Result<Unit, Error> {
+  let source = "fn a() -> Int \{\n  1\n\}\n\nfn b() -> Int \{\n  2\n\}\n"
+  let held = lex(source)
+  let tree = parseTokens(source, held.tokens)
+  var kept = Vector.of<Tree>()
+  for child in tree.children {
+    if child.kind != Node.Fn || kept.length() == 0 {
+      kept.push(child)
+    }
+  }
+  let damaged = nodeOf(tree.kind, tree.from, tree.to, kept.freeze())
+  assert(print(source, held, damaged) != source)?
+  let answer = formatted(source, held, damaged)
+  assert(answer.refused.isSome())?
+  assertEqual(answer.text, source)?
+  // And the same input with its own tree is formatted, not refused.
+  let flat = "fn a() -> Int \{\n1\n\}\n\nfn b() -> Int \{ 2 \}\n"
+  let fixed = formatSource(flat)
+  assert(fixed.refused.isNone())?
+  assertEqual(fixed.text, source)?
+  Ok(())
+}
+
+/// How many statements the tree of `source` holds, at every depth.
+fn statementCount(source: String) -> Int {
+  countStatements(parse(source))
+}
+
+fn countStatements(tree: Tree) -> Int {
+  var total = if tree.kind == Node.Stmt {
+    1
+  } else {
+    0
+  }
+  for child in tree.children {
+    total = total + countStatements(child)
+  }
+  total
+}
+
+/// **The statement rule is `cove_syntax`'s, and these are where it was not.**
+///
+/// The meaning check compares two trees this parser built, so it is only as
+/// good as this parser's idea of where a statement ends. That idea was read
+/// against `crates/cove-syntax/src/parser.rs` — `at_statement_break`,
+/// `ends_expression`, `at_operand` and the places that read a token across a
+/// line break by name — and each case below is one it got wrong, with the
+/// count `cove_syntax` gives.
+test fn a_statement_ends_where_cove_syntax_ends_it() -> Result<Unit, Error> {
+  // `else` on the line under the brace is the same `if`: `parse_if` eats it
+  // without asking about lines. One `if`, and the two statements inside it.
+  assertEqual(
+    statementCount(
+      "fn f() \{\n  if a \{\n    b\n  \}\n  else \{\n    c\n  \}\n\}\n",
+    ),
+    3,
+  )?
+  // So is `else` at the end of a line, with its block under it: no keyword
+  // but `self`, `break`, `continue` and `return` ends an expression.
+  assertEqual(
+    statementCount(
+      "fn f() \{\n  if a \{\n    b\n  \} else\n  \{\n    c\n  \}\n\}\n",
+    ),
+    3,
+  )?
+  // `=>` on the next line is the same arm: `parse_match` expects the arrow
+  // wherever it is. The `match`, and two arms.
+  assertEqual(
+    statementCount("fn f() \{\n  match x \{\n    Ok(v)\n      => v\n    Err(e) => 0\n  \}\n\}\n"),
+    3,
+  )?
+  // `?` cannot begin an expression, so a line beginning with one continues
+  // the line above, as a `.` does.
+  assertEqual(statementCount("fn f() \{\n  let a = g()\n    ?\n  a\n\}\n"), 2)?
+  // A keyword at the end of a line leaves it open: `is`, `in`, `await`.
+  assertEqual(
+    statementCount("fn f() \{\n  let same = a is\n    b\n  same\n\}\n"),
+    2,
+  )?
+  assertEqual(
+    statementCount("fn f() \{\n  for x in\n    xs \{\n    x\n  \}\n\}\n"),
+    2,
+  )?
+  assertEqual(
+    statementCount("fn f() \{\n  let a = await\n    g()\n  a\n\}\n"),
+    2,
+  )?
+  // But `self`, `true` and `return` complete what they end.
+  assertEqual(statementCount("fn f() \{\n  let a = self\n  -1\n\}\n"), 2)?
+  assertEqual(statementCount("fn f() \{\n  return\n  -1\n\}\n"), 2)?
+  // And a bare `return` is not continued by a `.` or a `?` either: its
+  // operand would have to begin on its own line.
+  assertEqual(statementCount("fn f() \{\n  return\n    .x\n\}\n"), 2)?
+  assertEqual(statementCount("fn f() \{\n  break\n    ?\n\}\n"), 2)?
+  assertEqual(statementCount("fn f() \{\n  return g()\n    .x\n\}\n"), 1)?
+  // A block comment that spans a line break ends the line it began on:
+  // `cove_syntax`'s lexer marks the token after it as preceded by a newline,
+  // so commenting out the tail of a line cannot join two statements.
+  assertEqual(statementCount("fn f() \{\n  a /* gone\n  */ b\n\}\n"), 2)?
+  assertEqual(statementCount("fn f() \{\n  a + /* gone\n  */ b\n\}\n"), 1)?
+  assertEqual(statementCount("fn f() \{\n  a /* kept */ + b\n\}\n"), 1)?
   Ok(())
 }

@@ -455,14 +455,40 @@ impl Parser {
     // `return` whose operand runs on — the reference's *"an operand that
     // opens on the keyword's line may run over as many further lines as it
     // needs"*.
-    !self.continues() && !self.opensWithDot()
+    //
+    // But a keyword with nothing after it on its line has no operand, and the
+    // line below cannot give it one: `at_operand` asks only whether the next
+    // token is on the keyword's line. So `return` then `.x` is a bare
+    // `return` and a second statement, however the second one begins.
+    if escaping && self.escapes(self.lastTaken()) {
+      return true
+    }
+    !self.continues() && !self.opensWithAContinuation()
   }
 
-  /// Whether the token just taken is followed by a run of space holding a
-  /// newline.
+  /// The last token taken that is not trivia, or `-1`.
+  fn lastTaken(self) -> Int {
+    var i = self.at - 1
+    while i >= 0 && isTrivia(self.tokens, i) {
+      i = i - 1
+    }
+    i
+  }
+
+  /// Whether the token just taken is followed by a line break: a run of space
+  /// holding a newline, or a block comment holding one.
+  ///
+  /// The comment is `cove_syntax`'s rule and not a nicety. Its lexer marks a
+  /// token as preceded by a newline when a `/* */` in front of it spans one,
+  /// so that commenting out the tail of a line cannot join two statements —
+  /// `a /* … newline … */ b` is two statements there, and read only by runs
+  /// of space it was one here.
   fn atLineEnd(self) -> Bool {
     match self.tokens.get(self.at) {
-      Some(token) => token.kind == Kind.Space && endsLine(self.source, token)
+      Some(token) => {
+        (token.kind == Kind.Space || token.kind == Kind.BlockComment) &&
+          endsLine(self.source, token)
+      }
       None => true
     }
   }
@@ -472,13 +498,21 @@ impl Parser {
   /// Punctuation, unless it is punctuation that completes what it follows: an
   /// operator, a comma or a colon leaves a line owing something, and a name
   /// or a literal is already a complete expression.
+  ///
+  /// And a keyword, unless it is one that completes an expression on its own.
+  /// `cove_syntax`'s `ends_expression` admits a name, a literal, `self`, and
+  /// the three that take an operand only on their own line — `break`,
+  /// `continue`, `return` — and no other keyword: `a is` then `b` is one
+  /// comparison, `for x in` then `xs \{` one loop, `\} else` then `\{` one
+  /// `if`. The lexer here does not tell a keyword from a name, so the list is
+  /// asked for at the one place it decides anything.
   fn continues(self) -> Bool {
-    var i = self.at - 1
-    while i >= 0 && isTrivia(self.tokens, i) {
-      i = i - 1
-    }
+    let i = self.lastTaken()
     match self.tokens.get(i) {
       Some(token) => {
+        if token.kind == Kind.Word {
+          return self.leavesALineOpen(i)
+        }
         if token.kind != Kind.Punct {
           return false
         }
@@ -488,10 +522,40 @@ impl Parser {
     }
   }
 
-  /// Whether the next line begins with `.`, which continues the chain above.
-  fn opensWithDot(self) -> Bool {
+  /// Whether the word at `at` is a keyword that cannot end an expression.
+  ///
+  /// Written as a chain of comparisons rather than a loop over a list, for
+  /// the reason `operatorWidth` gives: a list literal in a function is built
+  /// again on every call, and this is asked at every line that ends on a word.
+  fn leavesALineOpen(self, at: Int) -> Bool {
+    let source = self.source
+    let tokens = self.tokens
+    isWord(source, tokens, at, "if") || isWord(source, tokens, at, "else") ||
+      isWord(source, tokens, at, "match") || isWord(source, tokens, at, "while") ||
+      isWord(source, tokens, at, "for") || isWord(source, tokens, at, "in") ||
+      isWord(source, tokens, at, "is") || isWord(source, tokens, at, "let") ||
+      isWord(source, tokens, at, "var") || isWord(source, tokens, at, "fn") ||
+      isWord(source, tokens, at, "async") || isWord(source, tokens, at, "await") ||
+      isWord(source, tokens, at, "scope") || isWord(source, tokens, at, "dyn")
+  }
+
+  /// Whether the next line begins with a token that continues the line above
+  /// it whatever that line ended on.
+  ///
+  /// `.` continues a chain and `?` applies to what is above it: neither can
+  /// begin an expression, so `cove_syntax` never stops in front of one. `else`
+  /// and `=>` are read across a line break by name — `parse_if` eats the
+  /// `else` and `parse_match` expects the arrow without asking about lines —
+  /// so `\}` then `else \{` is one `if`, and a pattern then `=> value` is one
+  /// arm.
+  fn opensWithAContinuation(self) -> Bool {
     let next = self.significant(self.at)
-    self.punctByte(next) == '.'
+    let c = self.punctByte(next)
+    if c == '.' || c == '?' {
+      return true
+    }
+    isPunct(self.source, self.tokens, next, "=>") ||
+      isWord(self.source, self.tokens, next, "else")
   }
 
   /// Whether the statement beginning at `at` is a `break`, a `continue` or a

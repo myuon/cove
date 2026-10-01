@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:209f7ba058d23d4b
+hash fnv1a64:2b3e4a77511172dd
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -246,6 +246,14 @@ module covecheck
   export fn skipped(run: Run) -> Int
 
 module covefmt
+  /// What [`formatted`] answers: the text to write, and whether the formatted
+  /// text was refused.
+  ///
+  /// `text` is the input itself when `refused` holds a reason, so a caller that
+  /// only writes `text` back is safe whichever happened.
+  export struct Formatted
+    field text: String
+    field refused: Option<String>
   /// What a run of source bytes is.
   ///
   /// Enough kinds to **tile**: every byte of a file belongs to exactly one
@@ -341,6 +349,22 @@ module covefmt
   /// adjacent, beginning at its own start and ending at its own end; a node with
   /// none is one token wide.
   export fn covers(tree: Tree, from: Int, to: Int) -> Bool
+  /// The first way `after` differs in meaning from `before`, or `None` when it
+  /// does not.
+  export fn firstDifference(before: String, after: String) -> Option<String>
+  /// `source`, lexed, parsed and formatted through [`formatted`].
+  export fn formatSource(source: String) -> Formatted
+  /// `source` formatted, or `source` itself when the formatted text would not
+  /// mean what `source` means.
+  ///
+  /// Takes what the caller already holds, because the caller already lexed and
+  /// parsed the input to print it: the check costs a lex and a parse of the
+  /// *output*, and no second pass over the input.
+  ///
+  /// A file that comes back byte for byte is not checked at all. Identical text
+  /// means the same thing by definition, and it is what an already-formatted
+  /// file — every file in this repository — comes back as.
+  export fn formatted(source: String, held: Lexed, tree: Tree) -> Formatted
   /// A leaf: one token, no children.
   export fn leafAt(at: Int) -> Tree
   /// Cuts `source` into tokens that tile it, noticing on the way past whether
@@ -369,6 +393,11 @@ module covefmt
   /// --check`, which is the same work in Rust.
   export fn main() -> Result<Unit, Error>
     requires clock, console, files
+  /// Whether `after` means what `before` means: the same significant tokens,
+  /// and the same tree over them.
+  export fn meansTheSame(before: String, after: String) -> Bool
+  /// What a node kind is called, so a failure names what it saw.
+  export fn nodeNamed(kind: Node) -> String
   /// A node over `children`, which are assumed to be in order and adjacent.
   export fn nodeOf(kind: Node, from: Int, to: Int, children: Array<Tree>) -> Tree
   /// The tree of one source.

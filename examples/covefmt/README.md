@@ -47,9 +47,9 @@ line rule from cutting an expression in half.
 
 | | |
 |---|---|
-| A statement ends at the end of a line; Cove has no `;` | `atLineEnd` |
-| An operator at the end of a line carries it on: `a +` then `b` is one expression, `a` then `+ b` is two statements | `continues`, which asks about the token *before* the newline |
-| A line beginning with `.` continues the chain above it | `opensWithDot` |
+| A statement ends at the end of a line; Cove has no `;` — and a `/* */` that spans a line break ends it too | `atLineEnd` |
+| An operator at the end of a line carries it on: `a +` then `b` is one expression, `a` then `+ b` is two statements. So does a keyword other than `self`, `break`, `continue` and `return`: `a is` then `b` | `continues`, which asks about the token *before* the newline |
+| A line beginning with `.` continues the chain above it, and so does one beginning with `?`, `else` or `=>` | `opensWithAContinuation` |
 | A break inside `(` or `[` ends nothing — but a `{ }` block is not such a group, and its statements *do* end at line ends | depth counts the two brackets; a brace opens a body |
 | `break`, `continue` and `return` end at their line whatever encloses them | `escapes` |
 
@@ -68,6 +68,29 @@ written down, and every file in this repository satisfies it.
 A file that does not parse is not a failure. Tokens no rule claims become an
 `Error` node and the tree still covers them, which is what a file being typed
 looks like.
+
+### Read against the real rule
+
+The meaning check below compares two trees this parser built, so the rule was
+read against `crates/cove-syntax/src/parser.rs` — `at_statement_break`,
+`ends_expression`, `at_operand`, and the places that read a token across a line
+break by name — rather than against the reference's prose. Six divergences
+were found and fixed, each with a case in `a_statement_ends_where_cove_syntax_ends_it`:
+`else` and `=>` on the next line, `?` on the next line, a keyword at the end of
+a line (`a is` then `b`), a `/* */` spanning a line break, which the real lexer
+counts as one, and a bare `return` or `break` followed by a line beginning with
+`.` or `?`.
+
+What is left falls on the safe side of the check, with one exception that is
+safe for another reason. Where this parser ends a statement the real one
+continues — `let x` then `= 1`, `if a` then `{`, a method header broken before
+its `->`, a generic list broken without a trailing comma — a formatter that
+moved the newline would be *refused*, not believed: the check is stricter than
+the language there. The opposite direction, a statement this parser continues
+and the real one ends, is the one that could hide a change of meaning, and the
+only case of it found is match arms separated by a comma at the end of a line,
+which this parser reads as one statement. Joining or splitting those changes
+nothing, because a comma-separated arm list means the same on one line.
 
 ## The repository is the oracle
 
@@ -113,6 +136,61 @@ parsed. Every mistake this parser has made was found on the corpus and would
 have passed on the samples. The round-trip number was *printed* rather than
 checked for a while, and in one sitting it fell from the whole corpus to 244
 and back three times without anything failing.
+
+## Meaning is checked on every file
+
+Every check above is agreement with `cove fmt`, and a switch to covefmt would
+remove the formatter it agrees with. So covefmt also checks, on every file it
+formats, the thing that has to hold whatever the layout: **its output means
+what its input meant**. Cove has no `;`, so a formatter changes a program's
+meaning in exactly two ways, and `formatted` in `print.cove` asks both:
+
+1. **The significant tokens are equal, text for text** — everything but runs
+   of space. Comments count: the compiler would never notice one dropped, a
+   line run onto the end of a `//` comment is commented away, and a formatter
+   is exactly the program that must not be trusted with either. The
+   one token left out is a comma against a `)` or `]`, which both formatters
+   add when they break a group and drop when they fold it.
+2. **covefmt's own parser gives both the same tree**, every node's range
+   compared by *significant-token index* rather than by byte offset, so that
+   re-indenting moves nothing and a statement split in two, or two run into
+   one, does.
+
+When either fails, `formatted` **refuses**: the caller gets its input back
+untouched, with the reason beside it, and never the output. A formatter that
+leaves a file alone is a nuisance; one that changes what a program does is a
+bug in every program it touches. A file that comes back byte for byte is not
+checked at all, because identical text means the same thing by definition.
+
+`benches/covefmtBench` formats through it in every pass and prints one line —
+`refused by the meaning check: 0 match, 0 re-indent, 0 re-break, 0 re-open,
+0 re-space` — and fails on any count above zero. The mutations are compared
+*as mutated*: the damage is chosen not to change meaning, so the check must
+pass on it. A refused file is handed back unchanged, so it can still score as a
+match; the line beside the scores is what says it was refused.
+
+A check that only ever sees correct output proves nothing about itself, so it
+is tested on pairs it must reject — a dropped bracket, a changed operator, a
+dropped comment, two statements joined, a statement split after an operand, a
+newline moved out of a `(`, a reordered token — and on pairs it must accept.
+And the printer was broken on purpose twice, once dropping every `?` and once
+joining every line that ends on one: the bench refused 316 and 311 files a
+pass and failed, naming the token and the node.
+
+What it costs, on `whole` and the encoded VM, medians of five interleaved runs
+over the same 384 files, taken 2026-10-01:
+
+| | `whole` | |
+| --- | ---: | ---: |
+| before the check | 1,343 ms | |
+| with it, and the #469 and statement-rule fixes it landed with | 1,357 ms | +1.0% |
+| with it, and the identical-text shortcut taken out | 2,292 ms | +71% |
+
+The corpus is already formatted, so every file takes the shortcut and the check
+costs one string comparison a file. The third row is what checking a file
+that *did* change costs — a lex and a parse of the output, and a walk of both
+token lists and both trees — paid on every file at once: about 2.5 ms a file
+on the VM, which is most of what formatting it took in the first place.
 
 ## Over this repository
 
@@ -523,13 +601,20 @@ rather than of a parsed expression — `loosestIn` finds the operator a binary
 breaks at by scanning for it, `breaksAtItsDots` decides a chain from where the
 dots fall. `cove_syntax::format` dispatches on `ExprKind` and this does not.
 
-That is the open risk in replacing it, and it is worth naming plainly: a
-narrower instrument that reaches the same answers on 248 files might not reach
-them on the 249th. What is *not* missing is the layout itself — where a line
-breaks, how far it is indented, how much space goes between two tokens, when a
-body of one closes up, when a chain breaks at its dots, when a call hugs its
-last argument. Those are all here, and the section below is how they are
-checked.
+That is the open risk in replacing it, and it is worth naming plainly — but it
+is now a risk to the *layout* and not to the program. A narrower instrument that
+reaches the same answers as `cove fmt` on 384 files might break a line
+differently on the 385th; it cannot hand back something that means something
+else without being refused, because the check in "Meaning is checked on every
+file" runs on every file it formats. What is *not* missing is the layout itself
+— where a line breaks, how far it is indented, how much space goes between two
+tokens, when a body of one closes up, when a chain breaks at its dots, when a
+call hugs its last argument. Those are all here, and the section below is how
+they are checked.
+
+What the check rests on is covefmt's own statement rule, and "Read against the
+real rule" says what is left of the difference between it and
+`crates/cove-syntax`'s.
 
 This section previously said the opposite — that no layout decision was made
 at all — for long enough that a reader of it got the answer backwards. The
@@ -537,6 +622,6 @@ prose is the part that rots; the numbers below are run by `cove test`.
 
 ## Tests
 
-`cove test` runs fifty-four of them and they need no capability at all: the
+`cove test` runs seventy-four of them and they need no capability at all: the
 lexer takes a `String` and answers an `Array<Token>`, the parser answers a
 `Tree`, and the printer answers a `String`.

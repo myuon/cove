@@ -131,3 +131,28 @@ export fn size(tree: Tree) -> Int {
   }
   total
 }
+
+/// What a node kind is called, so a failure names what it saw.
+export fn nodeNamed(kind: Node) -> String {
+  match kind {
+    Node.File => "file"
+    Node.Use => "use"
+    Node.Fn => "fn"
+    Node.Struct => "struct"
+    Node.Enum => "enum"
+    Node.Impl => "impl"
+    Node.Trait => "trait"
+    Node.TypeAlias => "type"
+    Node.Name => "name"
+    Node.Generics => "generics"
+    Node.Params => "params"
+    Node.Returns => "returns"
+    Node.Body => "body"
+    Node.Stmt => "stmt"
+    Node.Group => "group"
+    Node.Member => "member"
+    Node.Trivia => "trivia"
+    Node.Leaf => "leaf"
+    Node.Error => "error"
+  }
+}

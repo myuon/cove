@@ -1841,7 +1841,27 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// each of the three `fail_shift_count_*` +18 — the standard library a program
 /// that prints carries into the survey, and nothing of the new instructions,
 /// each of which writes its answer where the surrounding form asked.
-const FORWARDABLE_COPIES: usize = 7490;
+///
+/// **7,491 since issue #469's fix**, a rise of 1 that is all program and no
+/// lowering, and all of it in `examples:covefmtBench`: covefmt's printer gained
+/// `closesAGenericList`, the walk that tells the `>` of `Vector.of<String>()`
+/// from a comparison, and a test of it. The survey's row for the bench holds
+/// every function of the `covefmt` module its entry is in, `test fn`s included.
+///
+/// **7,494 since covefmt's statement rule was read against `cove_syntax`'s**, a
+/// rise of 3 that is all program and no lowering, again all of it in
+/// `examples:covefmtBench`: the rule's new questions (`leavesALineOpen`,
+/// `opensWithAContinuation`, `lastTaken`) and the test that pins them.
+///
+/// **7,529 since covefmt checks that its output means what its input meant**,
+/// a rise of 35 that is all program and no lowering, all of it in
+/// `examples:covefmtBench` (198 to 238 in its `prod` and `ret` columns, every
+/// other row unchanged). With the check's new tests held out the corpus answers
+/// 7,515, so 21 are the check and the bench's use of it — `formatted`,
+/// `differenceIn`, `ranksOf`, `boundariesOf`, `noteRefusal` — and 14 are the
+/// tests of the check, which the bench's row counts because it holds the whole
+/// `covefmt` module.
+const FORWARDABLE_COPIES: usize = 7529;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

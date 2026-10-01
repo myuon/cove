@@ -77,8 +77,8 @@ export fn main() -> Result<Unit, Error> {
   var written = 0
   for source in sources {
     let held = lex(source)
-    written = written +
-      print(source, held, parseTokens(source, held.tokens)).byteLength()
+    let answer = formatted(source, held, parseTokens(source, held.tokens))
+    written = written + answer.text.byteLength()
   }
   let wholeTo = now()
 
@@ -99,14 +99,29 @@ export fn main() -> Result<Unit, Error> {
   // printed. It was printed, and in one sitting it fell from the whole corpus
   // to 244 and back three times without anything failing — it was caught by
   // hand each time, which is not a thing to rely on.
+  //
+  // # And whatever it wrote, it meant the same thing
+  //
+  // Every pass below goes through `formatted`, which refuses an output that
+  // does not mean what its input meant and hands the input back. A refusal is
+  // a printer bug whichever pass finds it, so each pass counts its own and
+  // the run fails on any. The four mutations are compared as *mutated*: the
+  // damage is chosen not to change meaning, so the check must pass on it.
+  var refusals = Vector.of<String>()
   var broken = 0
   var uncovered = 0
+  var refusedMatch = 0
+  var here = 0
   for source in sources {
     let held = lex(source)
     let tree = parseTokens(source, held.tokens)
-    if print(source, held, tree) != source {
+    let answer = formatted(source, held, tree)
+    if answer.text != source {
       broken = broken + 1
     }
+    refusedMatch = refusedMatch +
+      noteRefusal(answer, paths, here, "match", var refusals)
+    here = here + 1
     if !covers(tree, 0, held.tokens.length()) {
       uncovered = uncovered + 1
     }
@@ -136,12 +151,16 @@ export fn main() -> Result<Unit, Error> {
   // from is what a correct formatter must hand back. No second formatter has
   // to be run to know the answer.
   var restored = 0
+  var refusedIndent = 0
   var lost = Vector.of<String>()
   var at = 0
   for source in sources {
     let flat = deindented(source)
     let held = lex(flat)
-    if print(flat, held, parseTokens(flat, held.tokens)) == source {
+    let answer = formatted(flat, held, parseTokens(flat, held.tokens))
+    refusedIndent = refusedIndent +
+      noteRefusal(answer, paths, at, "re-indent", var refusals)
+    if answer.text == source {
       restored = restored + 1
     } else {
       match paths.get(at) {
@@ -165,12 +184,16 @@ export fn main() -> Result<Unit, Error> {
   // would have on a line of its own, and a match arm's pattern was broken as
   // though it were a call.
   var rebroken = 0
+  var refusedBreak = 0
   var unbroken = Vector.of<String>()
   var where = 0
   for source in sources {
     let joined = joinedUp(source)
     let held = lex(joined)
-    if print(joined, held, parseTokens(joined, held.tokens)) == source {
+    let answer = formatted(joined, held, parseTokens(joined, held.tokens))
+    refusedBreak = refusedBreak +
+      noteRefusal(answer, paths, where, "re-break", var refusals)
+    if answer.text == source {
       rebroken = rebroken + 1
     } else {
       match paths.get(where) {
@@ -193,12 +216,18 @@ export fn main() -> Result<Unit, Error> {
   // It is the one place this printer puts a newline where the source has
   // none, and it is the hardest of the four by a long way.
   var reopened = 0
+  var refusedOpen = 0
+  var which = 0
   for source in sources {
     let closed = closedUp(source)
     let held = lex(closed)
-    if print(closed, held, parseTokens(closed, held.tokens)) == source {
+    let answer = formatted(closed, held, parseTokens(closed, held.tokens))
+    refusedOpen = refusedOpen +
+      noteRefusal(answer, paths, which, "re-open", var refusals)
+    if answer.text == source {
       reopened = reopened + 1
     }
+    which = which + 1
   }
   println("{reopened} of {sources.length()} file(s) re-open a body")?
 
@@ -211,14 +240,29 @@ export fn main() -> Result<Unit, Error> {
   // space goes between two tokens, and for a long time the answer was that it
   // did not — 0 of 246.
   var respaced = 0
+  var refusedSpace = 0
+  var whose = 0
   for source in sources {
     let wide = spacedOut(source)
     let held = lex(wide)
-    if print(wide, held, parseTokens(wide, held.tokens)) == source {
+    let answer = formatted(wide, held, parseTokens(wide, held.tokens))
+    refusedSpace = refusedSpace +
+      noteRefusal(answer, paths, whose, "re-space", var refusals)
+    if answer.text == source {
       respaced = respaced + 1
     }
+    whose = whose + 1
   }
   println("{respaced} of {sources.length()} file(s) re-space")?
+  println("refused by the meaning check: {refusedMatch} match, {refusedIndent} re-indent, {refusedBreak} re-break, {refusedOpen} re-open, {refusedSpace} re-space")?
+  let refused = refusedMatch + refusedIndent + refusedBreak + refusedOpen +
+    refusedSpace
+  if refused > 0 {
+    let first = "; ".join(refusals.toArray())
+    return Err(Error(
+      message: "the meaning check refused {refused} output(s): {first}",
+    ))
+  }
   if respaced < mustReSpace() {
     return Err(Error(message: "{respaced} re-space, and {mustReSpace()} did"))
   }
@@ -606,4 +650,28 @@ fn spacedOut(source: String) -> String {
     }
   }
   "".join(out.freeze())
+}
+
+/// `1` and a line naming the file, the pass and the reason when `answer` was
+/// refused, `0` when it was not.
+///
+/// Only the first few reasons are kept: a printer bug that refuses every file
+/// would otherwise put the whole corpus into one error message.
+fn noteRefusal(
+  answer: Formatted,
+  paths: Vector<String>,
+  at: Int,
+  pass: String,
+  var into: Vector<String>,
+) -> Int {
+  match answer.refused {
+    Some(why) => {
+      if into.length() < 5 {
+        let path = paths.get(at).unwrapOr("?")
+        into.push("{path} ({pass}): {why}")
+      }
+      1
+    }
+    None => 0
+  }
 }
