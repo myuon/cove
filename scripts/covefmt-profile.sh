@@ -22,7 +22,9 @@
 # **It is about 10% slow.** Measured on this workload the bench's own `whole`
 # is 668 ms under the sampler against 608 ms without it, and the overhead is
 # the same on both arms (668 against 669), so it does not favour either. Read
-# the *shares*, never the times.
+# the *shares*, never the times. On 2026-10-01, with the native tier compiling
+# the whole formatter, it was 1,506 against 1,381 ms on the VM and 509 against
+# 471 on the native tier: 8% to 9% on each.
 #
 # **The noise floor is the spread between runs, not the square root of the
 # sample count.** At five runs an arm, a bucket's share moves by ±0.3
