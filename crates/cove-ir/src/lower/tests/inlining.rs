@@ -595,7 +595,7 @@ fn program_id(program: &Program, f: &Function) -> FunctionId {
 /// address and what the owner is handed to — one byte run instruction for
 /// `finish`, and for `append` and `appendByte` a call of `appendText` or
 /// `appendByteInto`, which is ADR 0062's window and is expanded in its turn —
-/// which is what `examples/covefmt` made half a million calls a run to (#378,
+/// which is what `tools/covefmt` made half a million calls a run to (#378,
 /// Phase 3 Q7). What is expanded is the body *with* its address: the owner is
 /// still read through it, so an append in the caller's frame reaches the
 /// builder the caller named.
@@ -605,7 +605,7 @@ fn program_id(program: &Program, f: &Function) -> FunctionId {
 /// range policy out of `core.bytesExtend` and into Cove, so its body is five
 /// questions and a window instead of one instruction, and a run of thirty rows
 /// is over the limit a *cold* site expands at. It is under `inline::HOT_LIMIT`,
-/// so the sites that run often — every `appendSlice` `examples/covefmt` makes —
+/// so the sites that run often — every `appendSlice` `tools/covefmt` makes —
 /// expand it, which `an_append_slice_inside_a_loop_is_expanded_as_one_window`
 /// pins and which `--boundary`'s unexpanded count is what actually measures.
 #[test]
@@ -668,7 +668,7 @@ fn a_library_method_that_takes_var_self_is_expanded() {
 /// site will take since ADR 0062 put its range policy in Cove, and the whole
 /// point of putting it there is that the copy beneath the five questions is a
 /// window a backend fuses — which is worth nothing if the method stays a call
-/// wherever it is hot. `examples/covefmt` calls it almost half a million times
+/// wherever it is hot. `tools/covefmt` calls it almost half a million times
 /// a run from inside its printer's walk, and that is this shape.
 ///
 /// Its refusals were `core.refuseByteRange`, an intrinsic, so that the body
@@ -763,7 +763,7 @@ fn an_expanded_append_slice(program: &Program, f: &Function) {
 }
 
 /// An `appendSlice` at a site that is hot but in no loop of its own caller is
-/// expanded too: `examples/covefmt`'s `spacing`, which `emit` reaches from its
+/// expanded too: `tools/covefmt`'s `spacing`, which `emit` reaches from its
 /// walk and which appends one range per call.
 ///
 /// That site is weighed against `inline::HOT_LIMIT` rather than

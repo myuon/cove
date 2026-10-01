@@ -317,7 +317,7 @@ allow = ["console", "clock"]
 # 0064 and issue #454's Step 3. **This is the first package in the series whose
 # operation a representative program runs**, so unlike `slice`, `frompoint` and
 # the six `Float` rows above it these rows are not the whole of the
-# measurement: `examples/covefmt` calls `join` 8,742 times over 1,465,687
+# measurement: `tools/covefmt` calls `join` 8,742 times over 1,465,687
 # parts, and the whole-program figures are in the commit that moved it. What
 # these rows add is the decomposition — `sixtyfour` against `two` is the slope
 # a part costs, `empty` against `one` is the fixed cost on its own, and
@@ -366,7 +366,7 @@ entry = "trimwords.wordsRows"
 allow = ["console", "clock"]
 
 # `String.toUpper` and `String.toLower`, issue #454's Step 5. Nothing in
-# `benches/` used either, and neither `examples/covefmt` nor `examples/cq`
+# `benches/` used either, and neither `tools/covefmt` nor `examples/cq`
 # calls them — 0 static sites and 0 dynamic calls on both — so this package is
 # the only place either operation is timed at all.
 #

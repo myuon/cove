@@ -15877,7 +15877,11 @@ fn run() -> Int {
     #[test]
     fn every_program_in_the_repository_checks() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut packages = vec![root.join("examples"), root.join("tests/e2e")];
+        let mut packages = vec![
+            root.join("examples"),
+            root.join("tools/covefmt"),
+            root.join("tests/e2e"),
+        ];
         let mut nested: Vec<PathBuf> = std::fs::read_dir(root.join("tests/e2e"))
             .expect("the end-to-end suite exists")
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))

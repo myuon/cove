@@ -1,0 +1,9 @@
+# covefmt, a formatter for Cove written in Cove, as a package of its own so
+# that starting it checks covefmt and the standard library and nothing else.
+#
+# The bench formats every `.cove` file under `--files-root`; run it against
+# the repository from here:
+#   cd tools/covefmt && cove run covefmtBench --files-root ../..
+[run.covefmtBench]
+entry = "covefmt.main"
+allow = ["console", "files", "clock"]

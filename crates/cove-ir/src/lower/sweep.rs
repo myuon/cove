@@ -11,7 +11,7 @@
 //! when every call site of a function is expanded, nothing names the function
 //! any more. Nothing recomputed reachability afterwards, so it stayed in the
 //! program: emitted, encoded, and compiled by the native tier. Measured twice,
-//! on `examples/covefmt` — `std.string.length` (#438) was emitted with zero
+//! on `tools/covefmt` — `std.string.length` (#438) was emitted with zero
 //! calls and no profile row, and `std.string.endsWith` (#439) cost 1,856 bytes
 //! of machine code that could not be reached (#440).
 //!

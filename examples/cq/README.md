@@ -523,7 +523,7 @@ important thing this example learned.
 
 **Superseded.** The three figures above were measured before the linear-memory
 backend and before a code point became an `Int` a `String` hands out by byte
-offset. `examples/covefmt` measured the same three on 2026-09-10 and got
+offset. `tools/covefmt` measured the same three on 2026-09-10 and got
 **0.20 µs, 0.20 µs and 0.30 µs**: reaching a character is seven times cheaper,
 the struct-field penalty is gone entirely, and calling a method on a struct
 receiver costs 1.5× rather than doubling the loop. The measurements above are

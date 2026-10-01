@@ -72,7 +72,7 @@ trap 'rm -rf "$work"' EXIT
 # The default build has the native tier (ADR 0076), but a
 # `--no-default-features` build or a host the code generator cannot serve does
 # not. See the same check, and the longer reason, in `covefmt-tiers.sh`.
-if (cd "$root/examples" && "$binary" run covefmtBench --files-root "$root" \
+if (cd "$root/tools/covefmt" && "$binary" run covefmtBench --files-root "$root" \
   --backend native --fuel 1 >/dev/null 2>"$work/probe"); then
   echo "covefmt-profile.sh: the native tier answered a run it should have run out of fuel on" >&2
   exit 1
@@ -87,7 +87,7 @@ fi
 for n in $(seq "$rounds"); do
   for arm in native vm; do
     (
-      cd "$root/examples"
+      cd "$root/tools/covefmt"
       "$binary" run covefmtBench --files-root "$root" --backend "$arm" \
         >"$work/out-$arm-$n" 2>/dev/null &
       pid=$!

@@ -68,8 +68,8 @@ not parse is reported and never rewritten. It takes `--backend <ast|vm|native>`
 so that the flag means one thing on every command that accepts it, and says
 plainly what it does with it: `cove fmt` is Rust and runs no Cove program, so
 naming a backend changes nothing here. The Cove formatter is
-`examples/covefmt`, and the way to run *it* on a backend is
-`cove run covefmtBench --backend native`.
+`tools/covefmt`, and the way to run *it* on a backend is
+`cove run covefmtBench --backend native` in that package.
 
 `--deny-warnings` fails `cove check` when the package has any warnings, as
 does setting `deny_warnings = true` in `cove.toml`'s `[check]` table; either
@@ -384,7 +384,7 @@ pub(crate) fn find_root(start: &Path) -> Option<PathBuf> {
 /// `cove fmt --backend native` beside `cove run --backend native`, on the
 /// reasonable assumption that the formatter this command runs is the Cove one.
 /// It is not: `cove fmt` is `cove_syntax::format`, written in Rust, and it runs
-/// no Cove program at all. The Cove formatter is `examples/covefmt`, and it is
+/// no Cove program at all. The Cove formatter is `tools/covefmt`, and it is
 /// run the way any other Cove program is.
 ///
 /// So the flag is **accepted and answered honestly**, which is the one of three
@@ -434,7 +434,7 @@ fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
         eprintln!(
             "note: `cove fmt` is the Rust formatter and runs no Cove program, so \
              `--backend {backend}` selects nothing here; the Cove formatter is \
-             `examples/covefmt`, run as `cove run covefmtBench --backend {backend}`"
+             `tools/covefmt`, run there as `cove run covefmtBench --backend {backend}`"
         );
     }
 

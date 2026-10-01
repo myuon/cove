@@ -193,11 +193,16 @@ $ ../target/checked/cove generate --check
 $ ../target/checked/cove test
 $ ../target/checked/cove generate --check --backend ast
 $ ../target/checked/cove test --backend ast
-$ cd .. && ./target/checked/cove-bench --iterations 1
+$ cd ../tools/covefmt
+$ ../../target/checked/cove check
+$ ../../target/checked/cove test
+$ ../../target/checked/cove test --backend ast
+$ cd ../.. && ./target/checked/cove-bench --iterations 1
 ```
 
-`cove test (examples)` is the one that matters most and the one most easily
-forgotten: it runs 223 `test fn`s in `examples/`, on the linear-memory backend
+`cove test` is the one that matters most and the one most easily forgotten:
+it runs 165 `test fn`s in `examples/` and 74 in `tools/covefmt/` — the Cove
+formatter, a package of its own since issue 556 — on the linear-memory backend
 and then on the interpreter, and it is the first place a lowering change is
 felt by a *real* program rather than by a fixture. A change to the IR has been
 merged-shaped and green on the five commands while crashing there — the
@@ -210,9 +215,9 @@ red pull request:
 
 ```console
 $ cargo build --profile checked -p cove-cli
-$ cd examples
-$ ../target/checked/cove run covefmtBench --files-root .. --backend vm
-$ ../target/checked/cove run covefmtBench --files-root .. --backend native
+$ cd tools/covefmt
+$ ../../target/checked/cove run covefmtBench --files-root ../.. --backend vm
+$ ../../target/checked/cove run covefmtBench --files-root ../.. --backend native
 ```
 
 and the two outputs, with the four timing lines stripped, have to be **equal

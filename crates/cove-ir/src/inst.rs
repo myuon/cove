@@ -1453,7 +1453,7 @@ pub enum Inst {
     /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
     /// byte buffer, the first of the four instructions that build a byte run
     /// wherever the final length is not known before the writes. A fixed run
-    /// is enough when it *is* known; it is not enough for `examples/covefmt`,
+    /// is enough when it *is* known; it is not enough for `tools/covefmt`,
     /// whose three hot joins are filled by data-dependent loops and whose
     /// largest is a `var out` parameter passed through recursive calls.
     ///

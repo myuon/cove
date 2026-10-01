@@ -3,7 +3,7 @@
 # The three formatters over one corpus: Rust, the encoded VM, and the native
 # tier — interleaved, repeated, and checked.
 #
-# `examples/covefmt/README.md` publishes what this prints, and
+# `tools/covefmt/README.md` publishes what this prints, and
 # [issue #369](https://github.com/myuon/cove/issues/369) is what asks for it:
 # "measure full covefmt ... use repeated interleaved runs, separate cold from
 # warm samples, and report median/min/max". This is that measurement written
@@ -82,7 +82,7 @@ trap 'rm -rf "$work"' EXIT
 # build's `--backend native` can *compile and enter* the tier on this host, which
 # is three separate ways to be unavailable (no feature, not x86-64, no executable
 # mapping) and none of them is visible in a usage message.
-if (cd "$root/examples" && "$binary" run covefmtBench --files-root "$root" \
+if (cd "$root/tools/covefmt" && "$binary" run covefmtBench --files-root "$root" \
   --backend native --fuel 1 >/dev/null 2>"$work/probe"); then
   echo "covefmt-tiers.sh: the native tier answered a run it should have run out of fuel on" >&2
   exit 1
@@ -153,7 +153,7 @@ one_round() {
   fi
 
   for arm in vm native; do
-    wall=$(cd "$root/examples" && python3 "$work/time.py" \
+    wall=$(cd "$root/tools/covefmt" && python3 "$work/time.py" \
       "$work/$arm.out" "$work/$arm.err" \
       "$binary" run covefmtBench --files-root "$root" --backend "$arm" --stats)
     echo "$phase $arm wall $wall" >>"$work/samples"
@@ -208,7 +208,7 @@ if files != FILES or abs(bytes_ - BYTES) > BAND * BYTES:
     sys.exit(
         f"covefmt-tiers.sh: the corpus is {files} files / {bytes_} bytes, and this "
         f"measurement is published against {FILES} files / about {BYTES}. Update the "
-        "recorded facts in examples/covefmt/README.md and this script together, or "
+        "recorded facts in tools/covefmt/README.md and this script together, or "
         "explain the difference — do not average over two corpora."
     )
 # Match, re-indent, re-break, re-open, re-space.

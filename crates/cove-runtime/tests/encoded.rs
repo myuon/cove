@@ -212,7 +212,7 @@ fn the_run_writes_the_recording_a_run_writes() {
     // the whole package. A `cove run` over a named entry that calls neither
     // pays **nothing** — the slice never reaches the functions that name the
     // literals, so they never enter `Program::strings` and `place_literals`
-    // never sees them. `examples/covefmt`'s allocation and word counters are
+    // never sees them. `tools/covefmt`'s allocation and word counters are
     // identical across the change, on 302 files of real source, and that is
     // the measurement of it rather than the claim.
     //

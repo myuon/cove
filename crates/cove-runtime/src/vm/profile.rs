@@ -42,7 +42,7 @@
 //! It is also, alone, **not enough**, and that is why the four figures
 //! beside it are here. An `intrinsic-call` that allocates a string, a `call`
 //! that pushes a frame and an `add.int` are one instruction each. Replacing
-//! a byte loop in `examples/covefmt` with one `String.contains` cut the run
+//! a byte loop in `tools/covefmt` with one `String.contains` cut the run
 //! from 751.1 M instructions to 722.1 M and made it **slower**, and nothing
 //! a count-only profile said would have shown that.
 //!

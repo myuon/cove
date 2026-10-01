@@ -8,6 +8,19 @@ toolchain formats Cove with Cove. That is what makes it worth writing — a
 formatter that had to be kept in step with another formatter would be two
 things that can drift, and this repository does not keep two of those.
 
+It is a package of its own: `cove.toml` beside this file, and the formatter
+as the one module `covefmt` in `covefmt/`. It was a module of `examples` until
+[issue 556](https://github.com/myuon/cove/issues/556) moved it here, so that
+starting it checks covefmt and the standard library and nothing else. Run its
+tests and its bench over the repository from this directory:
+
+```console
+$ cargo build --profile checked -p cove-cli
+$ cd tools/covefmt
+$ ../../target/checked/cove test
+$ ../../target/checked/cove run covefmtBench --files-root ../..
+```
+
 ## The contract is that the tokens tile the source
 
 Every byte of a file belongs to exactly one token, trivia included, so joining
@@ -381,7 +394,7 @@ experimental native tier runs this program too:
 
 ```console
 $ cargo build --profile checked -p cove-cli
-$ cd examples && ../target/checked/cove run covefmtBench --files-root .. --backend native
+$ cd tools/covefmt && ../../target/checked/cove run covefmtBench --files-root ../.. --backend native
 ```
 
 It compiles every supported reachable function of one lowered program eagerly,

@@ -1437,7 +1437,7 @@ pub struct NativeCtx {
     /// The *poll threshold*, published by the runtime and read by generated
     /// code at every backedge. A backedge used to call the helper
     /// unconditionally and the helper tested the stride inside itself; on
-    /// `examples/covefmt` that was 1,845,706 calls in the print phase alone,
+    /// `tools/covefmt` that was 1,845,706 calls in the print phase alone,
     /// ≈20 ns each, to answer "not yet" almost every time. The test moved out
     /// here so that the call happens only when the answer is "now".
     ///

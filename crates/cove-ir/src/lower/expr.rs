@@ -789,7 +789,7 @@ impl Body<'_> {
     /// `a || b || c || d` parses as `((a || b) || c) || d`, and lowering that
     /// as three nested forms made each level escape to *its own* end — which
     /// is the next level's branch, reading a word already known. An `a` that
-    /// answered `true` ran eleven instructions in `examples/covefmt`'s
+    /// answered `true` ran eleven instructions in `tools/covefmt`'s
     /// `continuesWord`, of which six were re-reading that `true`:
     ///
     /// ```text
@@ -1697,7 +1697,7 @@ impl Body<'_> {
                 // whose tail wrote the answer and whose `return` wrote a
                 // temporary had two, so neither could be renamed and both
                 // became copies at every call site. `Scan.at` in
-                // `examples/covefmt` is that shape — `return -1` and a byte —
+                // `tools/covefmt` is that shape — `return -1` and a byte —
                 // and it is read once per byte of every file.
                 let answer = self.answer;
                 let answer = self.expr_wanting(value, Some(answer));

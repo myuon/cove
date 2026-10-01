@@ -1,6 +1,6 @@
 //! Expanding a call to a small leaf function where it is made.
 //!
-//! `examples/covefmt`'s profile is what asked for this. Over half a megabyte
+//! `tools/covefmt`'s profile is what asked for this. Over half a megabyte
 //! of Cove through a lexer, a parser and a printer, **43% of every instruction
 //! executed was inside a tiny leaf function**: `Scan.at` is eight instructions
 //! and ran 3.46 million times, `utf8Width` is four and ran 1.32 million times.
@@ -52,7 +52,7 @@
 //! Such a call runs at most once per call of the body, on a path that ends the
 //! run, so expanding the body around it costs the path nothing that matters
 //! and saves the frame on every call that succeeds — which, for `appendRange`,
-//! is every call `examples/covefmt` makes, half a million a run. What it does
+//! is every call `tools/covefmt` makes, half a million a run. What it does
 //! not change is how the body is *weighed*: [`LIMIT`], [`HOT_LIMIT`] and
 //! [`LOOP_LIMIT`] count every instruction on those paths too, because an
 //! expansion copies them into every site whether they run or not.
@@ -147,7 +147,7 @@
 //! The rule is still narrow: a `var` parameter is expanded only in a
 //! standard-library leaf. [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
 //! puts a builder's append protocol in `std.stringbuilder` behind `var self`
-//! methods of one or two instructions, and `examples/covefmt` made half a
+//! methods of one or two instructions, and `tools/covefmt` made half a
 //! million calls to them a run that were a frame each around one instruction
 //! (#378, Phase 3 Q7). A program's own `var` functions stay calls until one
 //! shows the same cost; the argument above is the reason it is sound for them
@@ -191,7 +191,7 @@ use super::shapes;
 /// which is under the size at which a second copy of a body starts to cost
 /// more in instruction cache than it saves in frames. It is a number chosen
 /// against the workload that asked for the pass rather than derived, and the
-/// measurement in `examples/covefmt/README.md` is what would move it.
+/// measurement in `tools/covefmt/README.md` is what would move it.
 ///
 /// It is the limit for a *cold* site now. What a call costs is the same
 /// wherever it stands, but what expanding one costs is a copy of the body per
@@ -317,7 +317,7 @@ fn thin_calls(program: &Program, thin: &[bool]) -> usize {
 /// loop.
 ///
 /// **Rounds alone are worth nothing**, and that is worth writing down because
-/// it is the obvious half to reach for. Measured on `examples/covefmt`, with
+/// it is the obvious half to reach for. Measured on `tools/covefmt`, with
 /// [`LIMIT`] where it was, iterating changed the instruction count the run
 /// executed by *zero* — 281,263,951 either way — while adding 1,839
 /// instructions of code. Everything a second round finds has grown by exactly
@@ -331,7 +331,7 @@ const ROUNDS: usize = 8;
 /// absorbs many of them is a caller whose every call zeroes a wider frame —
 /// and `open_frame` zeroes it whether the expansion runs or not.
 ///
-/// Without this, `examples/covefmt`'s `emit` went from 66 words to 223. It is
+/// Without this, `tools/covefmt`'s `emit` went from 66 words to 223. It is
 /// the hottest function there is in that program and it recurses once per node
 /// of the tree, so what a wide budget bought in frames it was handing back in
 /// the zeroing of the one frame that is pushed most. The whole run was still
@@ -340,7 +340,7 @@ const ROUNDS: usize = 8;
 /// is not the argument for any particular one.
 ///
 /// **A hundred and sixty**, and the number is a fact about the tier that runs
-/// the code rather than about the pass. Swept on `examples/covefmt` over this
+/// the code rather than about the pass. Swept on `tools/covefmt` over this
 /// repository at `fa31182` — 248 files, 698,481 bytes — against the native
 /// tier's template arm, thirty-eight interleaved rounds after a dropped cold
 /// one, paired within each round:
@@ -434,7 +434,7 @@ const HOT_LIMIT: usize = 48;
 /// eight to twenty instructions of the eighty-six.
 ///
 /// **Ninety-six**, swept at 48 (that is, no separate limit), 64, 80, 96 and
-/// 128 over `examples/covefmt`, `examples/cq`'s two inputs, `benches/equals`,
+/// 128 over `tools/covefmt`, `examples/cq`'s two inputs, `benches/equals`,
 /// `ordering`, `admission`, `rendering` and the #514 rows, with
 /// [`answered_in_place`] and [`cleared_at_every_return`]'s graph in place at
 /// every row — so 48 is this module without the limit, not the module before
@@ -603,7 +603,7 @@ fn renamed_words(program: &Program, leaf: &Function, ordered: bool) -> u32 {
 /// # Why the loop a function holds is not the question
 ///
 /// `wantsASpaceBetween` holds no loop at all — it is a run of `if`s — and it
-/// is 2.1% of what `examples/covefmt` executes, because `emit` walks a loop
+/// is 2.1% of what `tools/covefmt` executes, because `emit` walks a loop
 /// that reaches it through `spacing`. Read one function at a time, its call to
 /// `byteOfPunct` is a call that happens once. Read through the graph, it is
 /// the 5.3% that `byteOfPunct` turned out to be.

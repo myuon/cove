@@ -1134,7 +1134,7 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
     },
     // `join` is the second binding whose body **builds** a string, and the
     // first of any of them that a shipped program runs in quantity —
-    // `examples/covefmt` calls it 8,742 times from 17 sites. What it decides
+    // `tools/covefmt` calls it 8,742 times from 17 sites. What it decides
     // is that there is one separator fewer than there are parts, which is an
     // arithmetic policy over a representation and not an operation of the
     // machine; what is under it is `std.stringbuilder` sized by that same
@@ -1239,7 +1239,7 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
     // Each is read by binary search, which is the bounded lookup of a literal
     // ADR 0045 has already placed in the heap before the run's first
     // instruction. A program that calls neither method never lowers the
-    // function that names one, so it pays nothing: `examples/covefmt`'s
+    // function that names one, so it pays nothing: `tools/covefmt`'s
     // counters are identical across the change that moved these.
     //
     // `toLower` is the one entry in this table whose answer depends on a

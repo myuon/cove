@@ -87,6 +87,7 @@ fn discover() -> Vec<Case> {
     let mut roots = vec![root.join("tests/e2e")];
     roots.extend(support::nested_packages(&root.join("tests/e2e")));
     roots.push(root.join("examples"));
+    roots.extend(support::nested_packages(&root.join("tools")));
     roots.push(root.join("benches"));
     roots
         .iter()
@@ -371,7 +372,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 ///
 /// **The third rise was the corpus, not the lowering,** and that is a fourth
 /// thing this number cannot tell apart by itself. Two programs joined the
-/// repository — `examples/covefmt/bench.cove` and `benches/builtincall` —
+/// repository — `tools/covefmt/covefmt/bench.cove` and `benches/builtincall` —
 /// and a program that is in the repository is in this survey, because "every
 /// program here" is what makes the survey worth reading. `covefmtBench`
 /// alone brought 138 of the 145: it is 4215 instructions holding 559 copies,
@@ -633,7 +634,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// **The twenty-fourth rise is the formatter building a vector only when it has
 /// something to put in it.** 2394 to 2400, and `examples:covefmtBench` is the
 /// only row that moves: 60 after a producer and 119 before a `return` become
-/// 64 and 121. `examples/covefmt`'s `emit` used to open four `Vector.of()` for
+/// 64 and 121. `tools/covefmt`'s `emit` used to open four `Vector.of()` for
 /// every node it descended into and push into 362 of them over a whole corpus
 /// (#398); it now holds two `Option<Vector<…>>` that begin at `None`, and the
 /// six small functions that read and extend them each answer through the
@@ -645,7 +646,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 ///
 /// **The twenty-fifth rise is the formatter's lexer answering one more
 /// question.** 2400 to 2405, and `examples:covefmtBench` is again the only row
-/// that moves: 64 and 121 become 67 and 123. `examples/covefmt`'s `tokens` is
+/// that moves: 64 and 121 become 67 and 123. `tools/covefmt`'s `tokens` is
 /// now `lex` and answers a `Lexed` — the runs, and whether any comment in the
 /// file is trailing — so a call that used to hand back a one-word `Array`
 /// hands back a struct built beside the `return` and read through a field at
@@ -1182,7 +1183,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// it is a thing.
 ///
 /// What the migration bought is in the pull request rather than here, and for
-/// once it is not an allocation count: `examples/covefmt` and `examples/cq`
+/// once it is not an allocation count: `tools/covefmt` and `examples/cq`
 /// call neither method — **0 static sites and 0 dynamic calls on both** — so
 /// this is the first migration of the series whose whole-program counters are
 /// identical by construction, and they were measured to be. What it bought is
@@ -1861,6 +1862,12 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `differenceIn`, `ranksOf`, `boundariesOf`, `noteRefusal` — and 14 are the
 /// tests of the check, which the bench's row counts because it holds the whole
 /// `covefmt` module.
+///
+/// **Unchanged by covefmt's move to a package of its own** (issue 556): the
+/// row the paragraphs above call `examples:covefmtBench` is
+/// `tools/covefmt:covefmtBench` since, with the same 34,843 instructions, 2,178
+/// copies and 81 and 157 in its `prod` and `ret` columns, and the corpus is
+/// the same 269 programs and the same totals in every column.
 const FORWARDABLE_COPIES: usize = 7529;
 
 #[test]

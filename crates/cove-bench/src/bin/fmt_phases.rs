@@ -1,9 +1,9 @@
-//! The Rust formatter's phases over the same corpus `examples/covefmt` walks.
+//! The Rust formatter's phases over the same corpus `tools/covefmt` walks.
 //!
 //! [Issue #369](https://github.com/myuon/cove/issues/369) asks for total wall
 //! time, lex, parse and print for **three** arms — Rust, the encoded VM and the
 //! template native tier — and the two Cove arms already report all four:
-//! `examples/covefmt/bench.cove` times its three phases by difference and
+//! `tools/covefmt/covefmt/bench.cove` times its three phases by difference and
 //! prints them. The Rust arm had no such report, and the column could not be
 //! filled from `cove fmt --check`, which is one wall-clock number over lexing,
 //! parsing, formatting and comparing together.
@@ -116,7 +116,7 @@ fn main() -> std::process::ExitCode {
         eprintln!(
             "cove-fmt-phases: the corpus under `{}` is {} files / {bytes} bytes, and this \
              measurement is published against {FILES} files / about {}. Update the recorded \
-             facts in examples/covefmt/README.md, scripts/covefmt-tiers.sh and this bin \
+             facts in tools/covefmt/README.md, scripts/covefmt-tiers.sh and this bin \
              together, or explain the difference -- do not average over two corpora.",
             root.display(),
             sources.len(),
@@ -165,7 +165,7 @@ fn main() -> std::process::ExitCode {
         // the unit, and `format_source` needs the numbering), format, compare.
         // A file that does not parse is skipped and left alone, which is what
         // the command does -- three files under `tests/e2e` are written not to
-        // parse, and `examples/covefmt/README.md` says why that matters.
+        // parse, and `tools/covefmt/README.md` says why that matters.
         printed = 0;
         unchanged = 0;
         parsed = 0;
@@ -247,11 +247,11 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// Every `.cove` file under `at`, by the same rule `examples/covefmt`'s `walk`
+/// Every `.cove` file under `at`, by the same rule `tools/covefmt`'s `walk`
 /// uses: a directory whose name holds a `.` is skipped, and so is `target`.
 ///
 /// The two walks have to agree or the arms are not over the same bytes, which
-/// `examples/covefmt/README.md` says was checked rather than assumed. The
+/// `tools/covefmt/README.md` says was checked rather than assumed. The
 /// corpus assertion in `main` is what keeps them agreeing.
 fn walk(at: &Path, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(at) else {
