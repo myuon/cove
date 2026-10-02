@@ -59,6 +59,17 @@ fn operatorWidth(c0: Int, c1: Int, c2: Int) -> Int {
   0
 }
 
+/// Whether `c` is punctuation no longer operator begins with: a bracket, a
+/// comma, a colon or a `?`.
+///
+/// They are most of the punctuation there is, and [`operatorWidth`] answers
+/// one for each of them — so the lexer asks this first, and takes those as one
+/// byte without the call and without reading the two bytes after them.
+fn beginsNoLongerOperator(c: Int) -> Bool {
+  c == '(' || c == ')' || c == ',' || c == ':' || c == '\{' || c == '\}' ||
+    c == '[' || c == ']' || c == '?'
+}
+
 /// Whether `c` is an operator or a bracket the language spells on its own:
 /// `= ! < > + - * / % ? . , : ( ) { } [ ]`.
 ///
@@ -173,7 +184,11 @@ export fn lex(source: String) -> Lexed {
         trailing = trails(source, open, afterSpace, spaceFrom, spaceTo)
       }
     } else {
-      let width = operatorWidth(c, scan.at(at + 1), scan.at(at + 2))
+      let width = if beginsNoLongerOperator(c) {
+        1
+      } else {
+        operatorWidth(c, scan.at(at + 1), scan.at(at + 2))
+      }
       if width > 0 {
         kind = Kind.Punct
         to = at + width
