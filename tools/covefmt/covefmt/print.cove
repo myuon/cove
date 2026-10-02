@@ -953,6 +953,13 @@ fn asWritten(source: String, token: Token) -> String {
     if to == from {
       return "///"
     }
+    // Written as `cove fmt` writes it already — `///`, one space, and nothing
+    // trailing — which is every doc comment of a formatted file: the answer
+    // is the token's own text, cut once rather than cut and then copied into
+    // an interpolation.
+    if from == token.from + 4 && to == token.to {
+      return text(source, token)
+    }
     return match source.sliceBytes(from, to) {
       Ok(line) => "/// {line}"
       Err(_) => text(source, token)
