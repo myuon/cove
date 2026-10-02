@@ -1071,7 +1071,7 @@ fn answers(ty: &Ty, ok: &Ty) -> bool {
 /// functions of the package, reached through
 /// [`Facts::target`](cove_sema::Facts::target) — so naming one here would
 /// point at the wrong work.
-fn receiver_name(ty: &Ty) -> Option<&'static str> {
+pub(super) fn receiver_name(ty: &Ty) -> Option<&'static str> {
     Some(match ty {
         Ty::Unit => "Unit",
         Ty::Str => "String",

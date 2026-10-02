@@ -89,17 +89,17 @@ const PIECE_ALLOWANCE: usize = 16;
 /// `crates/cove-sema/std/int.cove` writes it over ADR 0062's byte append, and
 /// says why it cannot overflow. It is not exported, because nothing but this
 /// lowering calls it.
-const INT_RENDERING: (&str, &str) = ("std.int", "renderInto");
+pub(super) const INT_RENDERING: (&str, &str) = ("std.int", "renderInto");
 
 /// The standard-library function a whole `String` is appended by.
 ///
 /// `crates/cove-sema/std/stringbuilder.cove` writes it, and
 /// `StringBuilder.append` is the same call over a builder's buffer.
-const TEXT_APPEND: (&str, &str) = ("std.stringbuilder", "appendText");
+pub(super) const TEXT_APPEND: (&str, &str) = ("std.stringbuilder", "appendText");
 
 /// The standard-library function one byte is appended by, which
 /// `StringBuilder.appendByte` also calls.
-const BYTE_APPEND: (&str, &str) = ("std.stringbuilder", "appendByteInto");
+pub(super) const BYTE_APPEND: (&str, &str) = ("std.stringbuilder", "appendByteInto");
 
 /// A string under assembly: the buffer it is appended to.
 pub(super) struct Assembly {
