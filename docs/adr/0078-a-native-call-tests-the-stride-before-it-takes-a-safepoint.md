@@ -153,16 +153,18 @@ caller that is not a call helper.
 ## Consequences
 
 Measured on x86-64 macOS, the binary of this ADR's commit against its parent,
-interleaved, in one session (the full tables, at fifteen runs an arm, are in
-the pull request that proposes this ADR):
+interleaved, fifteen runs an arm in one session, median [min..max]:
 
 | row | before | after | delta |
 | --- | ---: | ---: | ---: |
-| covefmtBench, native, wall | 4,035 ms | 3,879 ms | −3.9% |
-| covefmtBench, native, `whole` | 358 ms | 339 ms | −5.3% |
-| cq `revenue-summary` 100k, native, wall | 6,246 ms | 5,416 ms | −13.3% |
+| covefmtBench, native, wall | 4,025 [4,005..4,046] ms | 3,859 [3,838..3,884] ms | −4.1% |
+| covefmtBench, native, `whole` | 359 [356..370] ms | 338 [334..342] ms | −5.8% |
+| cq `revenue-summary` 100k, native, wall | 6,240 [6,194..6,283] ms | 5,428 [5,386..5,520] ms | −13.0% |
 
-(median of five interleaved runs; the VM executes none of this change.)
+The VM executes none of this change. cq on the VM measured +1.6% at this
+commit (nine runs an arm, ranges overlapping), inside that program's ±2.9%
+rebuild floor and the same layout sensitivity ADR 0060 recorded;
+covefmtBench on the VM did not move.
 
 In the sampled profile of cq, the `safepoints` bucket fell from **16.8%** of the
 native run to **2.4%**.
@@ -193,8 +195,9 @@ the frame. The compare costs the same on either side of the call, and on this
 side it needs no code generator change and no second helper.
 
 **Inline `open` and `close` into generated code for the common case.** That is
-where the rest of the call path's cost is — after this change `open`, `close`
-and `republish` together are still about a third of cq's native run — but the
+where the rest of the call path's cost is — after this change, and after the
+cheaper-`open` change made beside it, `open` and `close` are still
+about a quarter of cq's native run — but the
 frame stack and the word stack are Rust `Vec`s that only Rust may resize, and
 moving them under emitted code is a change to the runtime's data structures
 and to ADR 0057's protocol, not to its accounting. It is not decided here.
