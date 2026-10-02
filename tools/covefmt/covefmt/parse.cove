@@ -139,6 +139,13 @@ impl Parser {
 
   /// Takes a balanced run beginning at an opening bracket, brackets included.
   ///
+  /// This and the four rules after it end where they find their closer by
+  /// leaving the loop rather than by returning from inside it, so that the
+  /// one `nodeOf` after the loop can `freeze()` what they took. The checker
+  /// proves a `freeze` unique only outside a loop — a second turn could
+  /// consume the vector again — and `toArray()`, which a `return` inside the
+  /// loop needed, copies every child of every node a second time.
+  ///
   /// This and the rules after it read the source and the tokens into locals
   /// and ask [`byteOfPunct`] and [`endsALine`] rather than the parser's own
   /// methods. Neither field changes during a parse, and a method of `self`
@@ -171,7 +178,7 @@ impl Parser {
       if closes {
         depth = depth - 1
         if depth <= 0 {
-          return nodeOf(kind, from, self.at, held.toArray())
+          break
         }
       }
     }
@@ -211,7 +218,7 @@ impl Parser {
       if c == ')' || c == ']' {
         held.push(leafIn(self.at, self.empty))
         self.at = self.at + 1
-        return nodeOf(kind, from, self.at, held.toArray())
+        break
       }
       if c == ',' {
         // A comma of this group belongs to the group and not to the member
@@ -257,7 +264,7 @@ impl Parser {
         continue
       }
       if depth <= 0 && (c == ',' || c == ')' || c == ']') {
-        return nodeOf(Node.Member, from, self.at, held.toArray())
+        break
       }
       // A group inside a member is a group: `g(h(1))` is a call whose one
       // argument holds another, and a formatter indents the inner one from
@@ -366,7 +373,7 @@ impl Parser {
       if byteOfPunct(source, tokens, self.at) == '\}' {
         held.push(leafIn(self.at, self.empty))
         self.at = self.at + 1
-        return nodeOf(Node.Body, from, self.at, held.toArray())
+        break
       }
       let before = self.at
       held.push(self.statementOf(declaring))
@@ -437,7 +444,7 @@ impl Parser {
         // made the `c` under an `if` part of the `if`'s own statement.
         if endsALine(source, tokens, self.at) &&
           self.ends(depth, escaping, declaring) {
-          return nodeOf(Node.Stmt, from, self.at, held.toArray())
+          break
         }
         continue
       }
@@ -446,7 +453,7 @@ impl Parser {
       // it — which is what makes `fn a() -> Int \{ 1 \}` one statement and a
       // closing brace rather than a statement that ate the brace.
       if depth <= 0 && c == '\}' {
-        return nodeOf(Node.Stmt, from, self.at, held.toArray())
+        break
       }
       if c == '(' || c == '[' {
         // A group is taken whole, as its members: a statement's own tokens
@@ -460,7 +467,7 @@ impl Parser {
         held.push(self.grouped(Node.Group))
         if endsALine(source, tokens, self.at) &&
           self.ends(0, escaping, declaring) {
-          return nodeOf(Node.Stmt, from, self.at, held.toArray())
+          break
         }
         continue
       }
@@ -468,13 +475,13 @@ impl Parser {
         // A closer that closes nothing ends the statement rather than
         // running past it, for `balanced`'s reason: one typo should cost
         // one statement and not the rest of the file.
-        return nodeOf(Node.Stmt, from, self.at, held.toArray())
+        break
       }
       held.push(leafIn(self.at, self.empty))
       self.at = self.at + 1
       if endsALine(source, tokens, self.at) &&
         self.ends(depth, escaping, declaring) {
-        return nodeOf(Node.Stmt, from, self.at, held.toArray())
+        break
       }
     }
     nodeOf(Node.Stmt, from, self.at, held.freeze())
