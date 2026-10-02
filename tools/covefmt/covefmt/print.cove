@@ -237,6 +237,75 @@ fn spaces(n: Int) -> String {
   "".join(out.freeze())
 }
 
+/// The text of a one-byte punctuation token whose byte is `c`, as a literal,
+/// or `""` for a byte that is not one.
+///
+/// A literal is not allocated, and a `sliceBytes` of the source is: one
+/// string per token written, which measured about a twelfth of the whole
+/// pipeline on the native tier — and half the tokens a printer writes one at
+/// a time are a bracket, a dot, a comma or a colon. The order is how often
+/// each occurs in this repository.
+fn punctText(c: Int) -> String {
+  if c == '.' {
+    return "."
+  }
+  if c == '(' {
+    return "("
+  }
+  if c == ')' {
+    return ")"
+  }
+  if c == ',' {
+    return ","
+  }
+  if c == ':' {
+    return ":"
+  }
+  if c == '\{' {
+    return "\{"
+  }
+  if c == '\}' {
+    return "\}"
+  }
+  if c == '=' {
+    return "="
+  }
+  if c == '[' {
+    return "["
+  }
+  if c == ']' {
+    return "]"
+  }
+  if c == '<' {
+    return "<"
+  }
+  if c == '>' {
+    return ">"
+  }
+  if c == '?' {
+    return "?"
+  }
+  if c == '!' {
+    return "!"
+  }
+  if c == '+' {
+    return "+"
+  }
+  if c == '-' {
+    return "-"
+  }
+  if c == '*' {
+    return "*"
+  }
+  if c == '/' {
+    return "/"
+  }
+  if c == '%' {
+    return "%"
+  }
+  ""
+}
+
 /// Pushes the text of `tree` and everything under it.
 ///
 /// A leaf is one token's run of source. A node is its children in order — and
@@ -3987,73 +4056,4 @@ fn sameText(a: String, x: Token, b: String, y: Token) -> Bool {
     i = i + 1
   }
   true
-}
-
-/// The text of a one-byte punctuation token whose byte is `c`, as a literal,
-/// or `""` for a byte that is not one.
-///
-/// A literal is not allocated, and a `sliceBytes` of the source is: one
-/// string per token written, which measured about a twelfth of the whole
-/// pipeline on the native tier — and half the tokens a printer writes one at
-/// a time are a bracket, a dot, a comma or a colon. The order is how often
-/// each occurs in this repository.
-fn punctText(c: Int) -> String {
-  if c == '.' {
-    return "."
-  }
-  if c == '(' {
-    return "("
-  }
-  if c == ')' {
-    return ")"
-  }
-  if c == ',' {
-    return ","
-  }
-  if c == ':' {
-    return ":"
-  }
-  if c == '\{' {
-    return "\{"
-  }
-  if c == '\}' {
-    return "\}"
-  }
-  if c == '=' {
-    return "="
-  }
-  if c == '[' {
-    return "["
-  }
-  if c == ']' {
-    return "]"
-  }
-  if c == '<' {
-    return "<"
-  }
-  if c == '>' {
-    return ">"
-  }
-  if c == '?' {
-    return "?"
-  }
-  if c == '!' {
-    return "!"
-  }
-  if c == '+' {
-    return "+"
-  }
-  if c == '-' {
-    return "-"
-  }
-  if c == '*' {
-    return "*"
-  }
-  if c == '/' {
-    return "/"
-  }
-  if c == '%' {
-    return "%"
-  }
-  ""
 }
