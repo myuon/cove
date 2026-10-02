@@ -359,8 +359,11 @@ fn emit(
       0
     }
     let room = maxWidth() - col - gap - rest
+    // Bounded before it is measured: see [`bytesBetween`]. Most groups are a
+    // call of a few short arguments, and twice their bytes already fits.
     let fits = !mustBreak(source, held, tree) &&
-      flatWidth(source, held, tree) <= room
+      (2 * bytesBetween(held, tree.from, tree.to) <= room ||
+        flatWidth(source, held, tree) <= room)
     if isBroken(source, held, tree) {
       // `arg_list` asks its lone-argument escape before it looks at how the
       // source was written, so a call broken around one argument that will
@@ -414,7 +417,9 @@ fn emit(
     } else {
       0
     }
-    if flatWidth(source, held, tree) > maxWidth() - col - rest &&
+    let limit = maxWidth() - col - rest
+    if 2 * bytesBetween(held, tree.from, tree.to) > limit &&
+      flatWidth(source, held, tree) > limit &&
       breaksAtItsDots(source, held, tree) {
       writeChain(source, held, tree, depth, var out)
       return tree.to - 1
@@ -1540,7 +1545,9 @@ fn worthBreaking(
   }
   // The width it would have on a line of its own, with the comma each broken
   // member ends on. `indent + INDENT + width(&value) + 1`, in steps.
-  (depth + 1) * 2 + flatWidth(source, held, only) + 1 <= maxWidth()
+  let indent = (depth + 1) * 2 + 1
+  indent + 2 * bytesBetween(held, only.from, only.to) <= maxWidth() ||
+    indent + flatWidth(source, held, only) <= maxWidth()
 }
 
 /// Whether `tree` is an array literal rather than an argument list.
@@ -1781,7 +1788,8 @@ fn hugsItsLast(
   // below the head; one that still fits on this line would leave the call as
   // long as it already was."*
   if !mustBreak(source, held, last) &&
-    at + flatWidth(source, held, last) <= maxWidth() {
+    (at + 2 * bytesBetween(held, last.from, last.to) <= maxWidth() ||
+      at + flatWidth(source, held, last) <= maxWidth()) {
     return false
   }
   true
@@ -3176,6 +3184,33 @@ fn holdsABrokenGroup(source: String, held: Array<Token>, tree: Tree) -> Bool {
   false
 }
 
+/// How many bytes of source the tokens in `[from, to)` cover, which bounds
+/// how wide they are written flat.
+///
+/// Two lookups, because the tokens tile the source. It is an upper bound on
+/// [`overflows`]' width — a run of space counts one column or none and is
+/// at least a byte, a comment counts one and is at least two, and a token's
+/// characters are at most its bytes — and *twice* it is an upper bound on
+/// [`flatWidth`], which may also put one space the source has not got in
+/// front of each token. So a width question whose bound already answers it
+/// is answered without the walk, and the answer is the walk's: the bound
+/// only ever says "fits", never "does not".
+///
+/// A range the token array does not hold answers a number no line fits in,
+/// so the bound decides nothing there and the walk is taken.
+fn bytesBetween(held: Array<Token>, from: Int, to: Int) -> Int {
+  if to <= from {
+    return 0
+  }
+  match held.get(from) {
+    Some(first) => match held.get(to - 1) {
+      Some(last) => last.to - first.from
+      None => 1000000000
+    }
+    None => 1000000000
+  }
+}
+
 /// Whether the leaves in `[from, to)` run past the limit when written from
 /// `col`.
 ///
@@ -3191,6 +3226,13 @@ fn overflows(
   to: Int,
   col: Int,
 ) -> Bool {
+  // Every token is at least as many bytes as it is columns wide here — a run
+  // of space is one column or none, a comment one, anything else its
+  // characters — so a line whose bytes fit is a line that fits, and that is
+  // most statements in a formatted file. See [`bytesBetween`].
+  if col + bytesBetween(held, from, to) <= maxWidth() {
+    return false
+  }
   var width = col
   var at = from
   while at < to {
