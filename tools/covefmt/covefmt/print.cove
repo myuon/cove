@@ -476,6 +476,37 @@ fn emit(
   while i < count {
     match children.get(i) {
       Some(child) => {
+        // A leaf that is not a run of space is written here rather than by a
+        // call to `emit`, because nothing below decides anything about one:
+        // the depth is read only by a run of space, a continuation is a break
+        // and a break is a run of space, and the rules for bodies, groups,
+        // errors and declarations are all about nodes. So the answer is the
+        // one `emit`'s own leaf case gives — the same lines, below — without
+        // pushing `emit`'s frame, which is the widest in the program, once
+        // per token of the file.
+        if child.kind == Node.Leaf && child.children.length() == 0 {
+          match held.get(child.from) {
+            Some(token) => {
+              if token.kind != Kind.Space {
+                if last >= 0 && last == child.from - 1 &&
+                  !isASpaceToken(held, last) &&
+                  wantsASpaceBetween(source, held, last, child.from) {
+                  out.push(" ")
+                }
+                if token.kind == Kind.LineComment ||
+                  token.kind == Kind.DocComment {
+                  out.push(asWritten(source, token))
+                } else {
+                  out.push(text(source, token))
+                }
+                last = child.from
+                i = i + 1
+                continue
+              }
+            }
+            None => { }
+          }
+        }
         // The closing brace is the body's last child and belongs to the
         // depth the body opened at, not to the depth inside it.
         var at = if indents && i + 1 >= count ||
