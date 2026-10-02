@@ -180,13 +180,57 @@ fn fill<T: Copy>(state: &mut [T], slot: Slot, width: u32, value: T) {
     }
 }
 
+/// A set of frame words, one bit a word, as the rows of the analyses here and
+/// in `nulls` hold them: a merge is then a word-wide `|` or `&` over the
+/// frame rather than a loop over its words.
+pub(super) mod bits {
+    /// How many `u64`s a row of `size` frame words takes.
+    pub(in crate::lower) fn width(size: usize) -> usize {
+        size.div_ceil(64)
+    }
+
+    pub(in crate::lower) fn get(row: &[u64], word: usize) -> bool {
+        row[word / 64] & (1 << (word % 64)) != 0
+    }
+
+    pub(in crate::lower) fn put(row: &mut [u64], word: usize, value: bool) {
+        if value {
+            row[word / 64] |= 1 << (word % 64);
+        } else {
+            row[word / 64] &= !(1 << (word % 64));
+        }
+    }
+
+    /// Writes `value` over the run of `width` words beginning at `slot`,
+    /// stopping at the end of a frame of `size` words — exactly the run
+    /// [`super::fill`] writes.
+    pub(in crate::lower) fn fill(
+        row: &mut [u64],
+        size: usize,
+        slot: usize,
+        width: usize,
+        value: bool,
+    ) {
+        let last = (slot + width).min(size);
+        for word in slot.min(last)..last {
+            put(row, word, value);
+        }
+    }
+
+    /// Whether any word of `from..to` is in the set.
+    pub(in crate::lower) fn any(row: &[u64], from: usize, to: usize) -> bool {
+        (from..to).any(|word| get(row, word))
+    }
+}
+
 /// Drops every clear whose words are already null or already rooted, and
 /// every `unit` whose word is already null.
 pub(super) fn drop_clears_that_free_nothing(program: &mut Program) {
+    let bounds = Bounds::of(program);
     let dropped: Vec<Vec<bool>> = program
         .functions
         .iter()
-        .map(|function| pointless(function, program))
+        .map(|function| pointless(function, program, &bounds))
         .collect();
     let Program {
         functions, tables, ..
@@ -198,13 +242,23 @@ pub(super) fn drop_clears_that_free_nothing(program: &mut Program) {
 
 /// Which of a function's instructions are clears that free nothing, or units
 /// written over a word that is already zero.
-fn pointless(function: &Function, program: &Program) -> Vec<bool> {
+fn pointless(function: &Function, program: &Program, bounds: &Bounds) -> Vec<bool> {
     let mut dropped = vec![false; function.code.len()];
-    let Some(flow) = Flow::of(function, program) else {
+    // Only a clear or a unit is ever dropped, so a function with neither has
+    // nothing to decide and no reason to pay for the two analyses.
+    if !function
+        .code
+        .iter()
+        .any(|inst| matches!(inst, Inst::Clear { .. } | Inst::Unit { .. }))
+    {
+        return dropped;
+    }
+    let Some(flow) = Flow::of(function, program, bounds) else {
         return dropped;
     };
     let free = flow.free();
     let live = flow.live();
+    let w = bits::width(flow.size);
     for (at, inst) in function.code.iter().enumerate() {
         let (slot, width) = match *inst {
             Inst::Clear { slot, layout } => (slot, flow.width(layout)),
@@ -217,13 +271,20 @@ fn pointless(function: &Function, program: &Program) -> Vec<bool> {
         if last > flow.size {
             continue;
         }
-        let words = slot as usize..last;
-        let holds = words
-            .clone()
-            .map(|word| free[at][word])
-            .max()
-            .unwrap_or(UNKNOWN);
-        let dead = !words.into_iter().any(|word| live[at][word]);
+        let (first, last) = (slot as usize, last);
+        // The highest of the run's words, read off the two planes of
+        // `Flow::free`; an empty run is `UNKNOWN`, as the highest of nothing
+        // was before the planes.
+        let row = &free[at * 2 * w..(at + 1) * 2 * w];
+        let (raised, unknown) = row.split_at(w);
+        let holds = if first == last || bits::any(unknown, first, last) {
+            UNKNOWN
+        } else if bits::any(raised, first, last) {
+            FREE
+        } else {
+            NULL
+        };
+        let dead = !bits::any(&live[at * w..(at + 1) * w], first, last);
         // Zeroing words that are already zero changes nothing a run can see,
         // whoever reads them. Zeroing away an interned address does — the
         // word stops being null and starts being that address — so that one
@@ -233,6 +294,38 @@ fn pointless(function: &Function, program: &Program) -> Vec<bool> {
         dropped[at] = holds == NULL || (clear && holds == FREE && dead);
     }
     dropped
+}
+
+/// What every [`Flow`] of one program reads off the whole program: asked once
+/// per pass rather than once per function, because each is a walk over every
+/// layout or every function and a pass makes a `Flow` for every function.
+pub(super) struct Bounds {
+    /// The widest layout the program declares, which bounds how far past
+    /// the slot it names an address can reach. See [`Flow::of`].
+    reach: u32,
+    /// The widest answer any function in the program returns, which is what
+    /// bounds an [`Inst::CallClosure`]'s destination.
+    widest: u32,
+}
+
+impl Bounds {
+    pub(super) fn of(program: &Program) -> Bounds {
+        let width = |id: LayoutId| program.layouts.get(id.index()).map_or(1, Layout::width);
+        let reach = program
+            .layouts
+            .iter()
+            .map(Layout::width)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let widest = program
+            .functions
+            .iter()
+            .map(|target| width(target.returns))
+            .max()
+            .unwrap_or(1);
+        Bounds { reach, widest }
+    }
 }
 
 /// One function's control-flow graph, and what this pass needs to read off
@@ -245,6 +338,9 @@ pub(super) struct Flow<'p> {
     /// The frame words some [`Inst::AddrOfSlot`] of this function put within
     /// reach of an address. See the module documentation.
     pub(super) addressed: Vec<bool>,
+    /// The same words as a list, which is what a transfer walks: almost
+    /// every function takes no slot's address, and then it is empty.
+    pub(super) addressed_words: Vec<usize>,
     /// The widest answer any function in the program returns, which is what
     /// bounds an [`Inst::CallClosure`]'s destination.
     widest: u32,
@@ -252,11 +348,14 @@ pub(super) struct Flow<'p> {
 
 impl<'p> Flow<'p> {
     /// The graph for `function`, or `None` when this pass declines it.
-    pub(super) fn of(function: &'p Function, program: &'p Program) -> Option<Flow<'p>> {
+    pub(super) fn of(
+        function: &'p Function,
+        program: &'p Program,
+        bounds: &Bounds,
+    ) -> Option<Flow<'p>> {
         if function.code.is_empty() {
             return None;
         }
-        let width = |id: LayoutId| program.layouts.get(id.index()).map_or(1, Layout::width);
         let size = function.reprs.len();
         // How far past the slot it names an address can reach: a value
         // location is one of the program's layouts, and what an address
@@ -265,32 +364,23 @@ impl<'p> Flow<'p> {
         // and is the same fact `Function::refs` already rests on. So the
         // widest layout the program declares bounds every address every
         // `Inst::AddrOfPart` and every `Inst::Store` in any callee can make
-        // out of one, with no argument about which callee holds what.
-        let reach = program
-            .layouts
-            .iter()
-            .map(Layout::width)
-            .max()
-            .unwrap_or(1)
-            .max(1);
+        // out of one, with no argument about which callee holds what. That
+        // bound is the program's, and is read once: see `Bounds`.
+        let reach = bounds.reach;
         let mut addressed = vec![false; size];
         for inst in &function.code {
             if let Inst::AddrOfSlot { slot, .. } = *inst {
                 fill(&mut addressed, slot, reach, true);
             }
         }
-        let widest = program
-            .functions
-            .iter()
-            .map(|target| width(target.returns))
-            .max()
-            .unwrap_or(1);
+        let addressed_words = (0..size).filter(|&word| addressed[word]).collect();
         Some(Flow {
             program,
             function,
             size,
             addressed,
-            widest,
+            addressed_words,
+            widest: bounds.widest,
         })
     }
 
@@ -679,34 +769,48 @@ impl<'p> Flow<'p> {
     /// the higher of two, and every program counter but the entry starts at
     /// [`NULL`] and descends. A word is only ever *raised* by a merge or by
     /// an instruction that writes it, so the worklist terminates.
-    fn free(&self) -> Vec<Vec<u8>> {
+    ///
+    /// The answer is one flat table of two bit planes a counter: counter
+    /// `pc`'s row is `2 * w` words from `pc * 2 * w`, where `w` is
+    /// [`bits::width`] of the frame, and its first `w` words have a word's bit
+    /// set where it is at least [`FREE`] and the second `w` where it is
+    /// [`UNKNOWN`]. The higher of two values is then the `|` of both planes,
+    /// which is what makes a merge a word-wide operation; the fixed point is
+    /// the one a byte a word reached, and the allocation a row and a visit
+    /// that came with it was most of what the pass cost.
+    fn free(&self) -> Vec<u64> {
         let code = &self.function.code;
-        let mut into = vec![vec![NULL; self.size]; code.len()];
+        let size = self.size;
+        let w = bits::width(size);
+        let mut into = vec![0u64; code.len() * 2 * w];
 
         // The caller's writes, which happen before the first instruction.
-        let params = self.function.param_words(&self.program.layouts);
-        for word in 0..params.min(self.size as u32) {
-            into[0][word as usize] = UNKNOWN;
-        }
-        for capture in &self.function.captures {
-            fill(
-                &mut into[0],
-                capture.slot,
-                self.width(capture.layout),
-                UNKNOWN,
-            );
+        {
+            let entry = &mut into[..2 * w];
+            let params = self.function.param_words(&self.program.layouts);
+            let params = params.min(size as u32) as usize;
+            let (raised, unknown) = entry.split_at_mut(w);
+            bits::fill(raised, size, 0, params, true);
+            bits::fill(unknown, size, 0, params, true);
+            for capture in &self.function.captures {
+                let (slot, width) = (capture.slot as usize, self.width(capture.layout) as usize);
+                bits::fill(raised, size, slot, width, true);
+                bits::fill(unknown, size, slot, width, true);
+            }
         }
 
+        let mut out = vec![0u64; 2 * w];
         let mut queue: Vec<usize> = (0..code.len()).rev().collect();
         let mut queued = vec![true; code.len()];
         while let Some(pc) = queue.pop() {
             queued[pc] = false;
-            let out = self.step(pc, &into[pc]);
+            self.step(pc, &into[pc * 2 * w..(pc + 1) * 2 * w], &mut out);
             self.successors(pc, &mut |to| {
                 let mut moved = false;
-                for (word, holds) in into[to].iter_mut().enumerate() {
-                    if *holds < out[word] {
-                        *holds = out[word];
+                for (holds, &arriving) in into[to * 2 * w..(to + 1) * 2 * w].iter_mut().zip(&out) {
+                    let merged = *holds | arriving;
+                    if merged != *holds {
+                        *holds = merged;
                         moved = true;
                     }
                 }
@@ -719,9 +823,13 @@ impl<'p> Flow<'p> {
         into
     }
 
-    /// One instruction's transfer over the lattice.
-    fn step(&self, pc: usize, into: &[u8]) -> Vec<u8> {
-        let mut out = into.to_vec();
+    /// One instruction's transfer over the lattice, from `into` to `out`,
+    /// each a row of [`Flow::free`]'s two planes.
+    fn step(&self, pc: usize, into: &[u64], out: &mut [u64]) {
+        let size = self.size;
+        let w = bits::width(size);
+        out.copy_from_slice(into);
+        let (raised, unknown) = out.split_at_mut(w);
         let inst = &self.function.code[pc];
         match *inst {
             // A clear says nothing here, and that is not an oversight. What
@@ -738,77 +846,101 @@ impl<'p> Flow<'p> {
             // collector's floor before the run began, and stays there for
             // the run's whole life — see ADR 0045.
             Inst::Str { dst, .. } => {
-                if let Some(holds) = out.get_mut(dst as usize) {
-                    *holds = FREE;
+                let dst = dst as usize;
+                if dst < size {
+                    bits::put(raised, dst, true);
+                    bits::put(unknown, dst, false);
                 }
             }
             // A copy of an interned address is that address, and a copy of
             // null is null.
             Inst::Copy { dst, src, layout } => {
+                let (from_raised, from_unknown) = into.split_at(w);
                 for at in 0..self.width(layout) as usize {
                     let (dst, src) = (dst as usize + at, src as usize + at);
-                    let held = into.get(src).copied().unwrap_or(UNKNOWN);
-                    if let Some(holds) = out.get_mut(dst) {
-                        *holds = held;
+                    let (held_raised, held_unknown) = if src < size {
+                        (bits::get(from_raised, src), bits::get(from_unknown, src))
+                    } else {
+                        (true, true)
+                    };
+                    if dst < size {
+                        bits::put(raised, dst, held_raised);
+                        bits::put(unknown, dst, held_unknown);
                     }
                 }
             }
             _ => self.writes(inst, true, &mut |slot, width| {
-                fill(&mut out, slot, width, UNKNOWN);
+                bits::fill(raised, size, slot as usize, width as usize, true);
+                bits::fill(unknown, size, slot as usize, width as usize, true);
             }),
         }
         // A word an address can reach is written by instructions that do not
         // name it, from this frame or from a callee or a child thread, so it
         // is unknown wherever it is asked about.
-        for (word, holds) in out.iter_mut().enumerate() {
-            if self.addressed[word] {
-                *holds = UNKNOWN;
-            }
+        for &word in &self.addressed_words {
+            bits::put(raised, word, true);
+            bits::put(unknown, word, true);
         }
-        out
     }
 
     /// Which words may be read, before being written again, after each
-    /// instruction.
-    fn live(&self) -> Vec<Vec<bool>> {
+    /// instruction: a row of [`bits::width`] words a counter, flat.
+    fn live(&self) -> Vec<u64> {
         let code = &self.function.code;
-        let mut before: Vec<Vec<usize>> = vec![Vec::new(); code.len()];
-        for pc in 0..code.len() {
-            self.successors(pc, &mut |to| before[to].push(pc));
+        let size = self.size;
+        let w = bits::width(size);
+        let n = code.len();
+        // Each counter's predecessors, as one list cut into runs: `before`
+        // holds the predecessors of `pc` at `starts[pc]..starts[pc + 1]`.
+        let mut starts = vec![0usize; n + 1];
+        for pc in 0..n {
+            self.successors(pc, &mut |to| starts[to + 1] += 1);
         }
-        let mut out = vec![vec![false; self.size]; code.len()];
-        let mut into = vec![vec![false; self.size]; code.len()];
+        for pc in 0..n {
+            starts[pc + 1] += starts[pc];
+        }
+        let mut before = vec![0usize; starts[n]];
+        let mut next = starts.clone();
+        for pc in 0..n {
+            self.successors(pc, &mut |to| {
+                before[next[to]] = pc;
+                next[to] += 1;
+            });
+        }
+        let mut out = vec![0u64; n * w];
+        let mut into = vec![0u64; n * w];
+        let mut state = vec![0u64; w];
 
-        let mut queue: Vec<usize> = (0..code.len()).collect();
-        let mut queued = vec![true; code.len()];
+        let mut queue: Vec<usize> = (0..n).collect();
+        let mut queued = vec![true; n];
         while let Some(pc) = queue.pop() {
             queued[pc] = false;
             let inst = &code[pc];
-            let mut state = out[pc].clone();
+            state.copy_from_slice(&out[pc * w..(pc + 1) * w]);
             // Only a write this pass is *sure* of may kill a word, so the
             // narrow answer is the one liveness asks for.
             self.writes(inst, false, &mut |slot, width| {
-                fill(&mut state, slot, width, false);
+                bits::fill(&mut state, size, slot as usize, width as usize, false);
             });
             self.reads(inst, &mut |slot, width| {
-                fill(&mut state, slot, width, true);
+                bits::fill(&mut state, size, slot as usize, width as usize, true);
             });
             // The other half of the same fact: an address is read through as
             // well as written through, and by code that names no slot.
-            for (word, live) in state.iter_mut().enumerate() {
-                if self.addressed[word] {
-                    *live = true;
-                }
+            for &word in &self.addressed_words {
+                bits::put(&mut state, word, true);
             }
-            if state == into[pc] {
+            let row = &mut into[pc * w..(pc + 1) * w];
+            if *state == *row {
                 continue;
             }
-            into[pc] = state;
-            for &earlier in &before[pc] {
+            row.copy_from_slice(&state);
+            for &earlier in &before[starts[pc]..starts[pc + 1]] {
                 let mut moved = false;
-                for (word, live) in out[earlier].iter_mut().enumerate() {
-                    if !*live && into[pc][word] {
-                        *live = true;
+                for (live, &read) in out[earlier * w..(earlier + 1) * w].iter_mut().zip(&state) {
+                    let merged = *live | read;
+                    if merged != *live {
+                        *live = merged;
                         moved = true;
                     }
                 }

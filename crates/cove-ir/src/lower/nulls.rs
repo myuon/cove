@@ -73,15 +73,16 @@ use crate::inst::Inst;
 use crate::program::{Function, Program};
 
 use super::dropping;
-use super::frees::Flow;
+use super::frees::{bits, Bounds, Flow};
 
 /// Drops every clear, and every unit, whose words are null on every path
 /// into it.
 pub(super) fn drop_clears_of_null_words(program: &mut Program) {
+    let bounds = Bounds::of(program);
     let dropped: Vec<Vec<bool>> = program
         .functions
         .iter()
-        .map(|function| nulled(function, program))
+        .map(|function| nulled(function, program, &bounds))
         .collect();
     let Program {
         functions, tables, ..
@@ -93,64 +94,84 @@ pub(super) fn drop_clears_of_null_words(program: &mut Program) {
 
 /// Which of a function's clears and units write zero over words that are
 /// already zero.
-fn nulled(function: &Function, program: &Program) -> Vec<bool> {
+fn nulled(function: &Function, program: &Program, bounds: &Bounds) -> Vec<bool> {
     let mut dropped = vec![false; function.code.len()];
-    let Some(flow) = Flow::of(function, program) else {
+    // Only a clear or a unit is ever dropped, so a function with neither has
+    // nothing to decide and no reason to pay for the analysis.
+    if !function
+        .code
+        .iter()
+        .any(|inst| matches!(inst, Inst::Clear { .. } | Inst::Unit { .. }))
+    {
+        return dropped;
+    }
+    let Some(flow) = Flow::of(function, program, bounds) else {
         return dropped;
     };
     let null = known_null(&flow, function, program);
+    let size = flow.size;
+    let w = bits::width(size);
     for (at, inst) in function.code.iter().enumerate() {
         let (slot, width) = match *inst {
             Inst::Clear { slot, layout } => (slot as usize, flow.width(layout) as usize),
             Inst::Unit { dst } => (dst as usize, 1),
             _ => continue,
         };
-        if width == 0 || slot + width > flow.size {
+        if width == 0 || slot + width > size {
             continue;
         }
-        dropped[at] = null[at][slot..slot + width].iter().all(|word| *word);
+        let row = &null[at * w..(at + 1) * w];
+        dropped[at] = (slot..slot + width).all(|word| bits::get(row, word));
     }
     dropped
 }
 
-/// Whether each word is null on every path into each instruction.
+/// Whether each word is null on every path into each instruction: a row of
+/// [`bits::width`] words a counter, flat, with a word's bit set where it is
+/// known null.
 ///
 /// Every program counter but the entry starts at *null* — the top of this
 /// lattice — and is only ever lowered, by a merge or by an instruction that
 /// may write the word, so the worklist terminates. A program counter no path
 /// reaches keeps the top, which is vacuously true of it.
-fn known_null(flow: &Flow<'_>, function: &Function, program: &Program) -> Vec<Vec<bool>> {
+fn known_null(flow: &Flow<'_>, function: &Function, program: &Program) -> Vec<u64> {
     let code = &function.code;
-    let mut into = vec![vec![true; flow.size]; code.len()];
+    let size = flow.size;
+    let w = bits::width(size);
+    let mut into = vec![u64::MAX; code.len() * w];
 
     // The caller's writes, which happen before the first instruction.
-    let params = function.param_words(&program.layouts) as usize;
-    for word in into[0].iter_mut().take(params) {
-        *word = false;
-    }
-    for capture in &function.captures {
-        let from = (capture.slot as usize).min(flow.size);
-        let to = (from + flow.width(capture.layout) as usize).min(flow.size);
-        for word in &mut into[0][from..to] {
-            *word = false;
+    {
+        let entry = &mut into[..w];
+        let params = function.param_words(&program.layouts) as usize;
+        bits::fill(entry, size, 0, params, false);
+        for capture in &function.captures {
+            let from = (capture.slot as usize).min(size);
+            bits::fill(
+                entry,
+                size,
+                from,
+                flow.width(capture.layout) as usize,
+                false,
+            );
         }
-    }
-    for (word, null) in into[0].iter_mut().enumerate() {
-        if flow.addressed[word] {
-            *null = false;
+        for &word in &flow.addressed_words {
+            bits::put(entry, word, false);
         }
     }
 
+    let mut out = vec![0u64; w];
     let mut queue: Vec<usize> = (0..code.len()).rev().collect();
     let mut queued = vec![true; code.len()];
     while let Some(pc) = queue.pop() {
         queued[pc] = false;
-        let out = step(flow, &code[pc], &into[pc]);
+        step(flow, &code[pc], &into[pc * w..(pc + 1) * w], &mut out);
         flow.successors(pc, &mut |to| {
             let mut moved = false;
-            for (word, null) in into[to].iter_mut().enumerate() {
-                if *null && !out[word] {
-                    *null = false;
+            for (null, &arriving) in into[to * w..(to + 1) * w].iter_mut().zip(&out) {
+                let merged = *null & arriving;
+                if merged != *null {
+                    *null = merged;
                     moved = true;
                 }
             }
@@ -163,44 +184,35 @@ fn known_null(flow: &Flow<'_>, function: &Function, program: &Program) -> Vec<Ve
     into
 }
 
-/// Sets the run of `width` words beginning at `slot`, stopping at the end of
-/// the frame.
-fn set(slot: usize, width: usize, value: bool, out: &mut [bool]) {
-    let last = (slot + width).min(out.len());
-    for word in &mut out[slot.min(last)..last] {
-        *word = value;
-    }
-}
-
-/// One instruction's transfer: which words are null after it.
-fn step(flow: &Flow<'_>, inst: &Inst, into: &[bool]) -> Vec<bool> {
-    let mut out = into.to_vec();
+/// One instruction's transfer: which words are null after it, from `into`
+/// to `out`.
+fn step(flow: &Flow<'_>, inst: &Inst, into: &[u64], out: &mut [u64]) {
+    let size = flow.size;
+    out.copy_from_slice(into);
     match *inst {
         Inst::Clear { slot, layout } => {
-            set(slot as usize, flow.width(layout) as usize, true, &mut out)
+            bits::fill(out, size, slot as usize, flow.width(layout) as usize, true)
         }
-        Inst::Unit { dst } => set(dst as usize, 1, true, &mut out),
+        Inst::Unit { dst } => bits::fill(out, size, dst as usize, 1, true),
         // A copy of null is null; a copy of anything else is not known to be.
         Inst::Copy { dst, src, layout } => {
             for at in 0..flow.width(layout) as usize {
-                let held = into.get(src as usize + at).copied().unwrap_or(false);
-                if let Some(word) = out.get_mut(dst as usize + at) {
-                    *word = held;
+                let (dst, src) = (dst as usize + at, src as usize + at);
+                let held = src < size && bits::get(into, src);
+                if dst < size {
+                    bits::put(out, dst, held);
                 }
             }
         }
         _ => flow.writes(inst, true, &mut |slot, width| {
-            set(slot as usize, width as usize, false, &mut out)
+            bits::fill(out, size, slot as usize, width as usize, false)
         }),
     }
     // A word an address can reach is written by instructions that do not name
     // it, so it is never known to be anything.
-    for (word, null) in out.iter_mut().enumerate() {
-        if flow.addressed[word] {
-            *null = false;
-        }
+    for &word in &flow.addressed_words {
+        bits::put(out, word, false);
     }
-    out
 }
 
 #[cfg(test)]
