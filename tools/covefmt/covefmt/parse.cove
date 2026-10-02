@@ -14,6 +14,11 @@ struct Parser {
   source: String
   tokens: Array<Token>
   at: Int
+  /// The children every leaf has, which is none — one array for the whole
+  /// parse rather than an empty `[]` allocated per leaf. An `Array` cannot
+  /// change, so every leaf can hold the same one; allocating it afresh was
+  /// one allocation per token of the file, the parse phase's most frequent.
+  empty: Array<Tree>
 }
 
 /// Whether the token at `at` is the word `word`.
@@ -109,18 +114,24 @@ impl Parser {
   }
 
   /// Takes one token as a leaf.
+  ///
+  /// The rules that take leaves in a loop do not call this: a `var self`
+  /// method is a frame per call however small it is, and that was a call per
+  /// token of the file. They push [`leafIn`] and step the cursor themselves,
+  /// which is this, written where it is needed.
   fn leaf(var self) -> Tree {
     let at = self.at
     self.at = at + 1
-    leafAt(at)
+    leafIn(at, self.empty)
   }
 
   /// Takes the run of trivia at the cursor into `into`, and answers whether
   /// there was any.
   fn trivia(var self, var into: Vector<Tree>) -> Bool {
     let from = self.at
-    while !self.done() && isTrivia(self.tokens, self.at) {
-      into.push(self.leaf())
+    while isTrivia(self.tokens, self.at) {
+      into.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
     }
     self.at > from
   }
@@ -145,7 +156,8 @@ impl Parser {
       if opens {
         depth = depth + 1
       }
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
       if closes {
         depth = depth - 1
         if depth <= 0 {
@@ -175,26 +187,31 @@ impl Parser {
     if opener != '(' && opener != '[' {
       return self.balanced(kind)
     }
-    held.push(self.leaf())
+    held.push(leafIn(self.at, self.empty))
+    self.at = self.at + 1
     while !self.done() {
-      if self.trivia(var held) {
+      if isTrivia(self.tokens, self.at) {
+        self.trivia(var held)
         continue
       }
       let c = self.punctByte(self.at)
       if c == ')' || c == ']' {
-        held.push(self.leaf())
+        held.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
         return nodeOf(kind, from, self.at, held.toArray())
       }
       if c == ',' {
         // A comma of this group belongs to the group and not to the member
         // in front of it, the way a body's braces belong to the body.
-        held.push(self.leaf())
+        held.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
         continue
       }
       let before = self.at
       held.push(self.member())
       if self.at == before {
-        held.push(self.leaf())
+        held.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
       }
     }
     nodeOf(kind, from, self.at, held.freeze())
@@ -219,7 +236,8 @@ impl Parser {
         angles = angles - 1
       }
       if angles > 0 {
-        held.push(self.leaf())
+        held.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
         continue
       }
       if depth <= 0 && (c == ',' || c == ')' || c == ']') {
@@ -247,7 +265,8 @@ impl Parser {
       } else if c == ')' || c == ']' || c == '\}' {
         depth = depth - 1
       }
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
     }
     nodeOf(Node.Member, from, self.at, held.freeze())
   }
@@ -318,13 +337,16 @@ impl Parser {
     if self.punctByte(self.at) != '\{' {
       return self.balanced(Node.Body)
     }
-    held.push(self.leaf())
+    held.push(leafIn(self.at, self.empty))
+    self.at = self.at + 1
     while !self.done() {
-      if self.trivia(var held) {
+      if isTrivia(self.tokens, self.at) {
+        self.trivia(var held)
         continue
       }
       if self.punctByte(self.at) == '\}' {
-        held.push(self.leaf())
+        held.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
         return nodeOf(Node.Body, from, self.at, held.toArray())
       }
       let before = self.at
@@ -333,7 +355,8 @@ impl Parser {
       // `statement` takes at least one token — and the check is the cheap
       // way to keep that true rather than to trust it.
       if self.at == before {
-        held.push(self.leaf())
+        held.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
       }
     }
     nodeOf(Node.Body, from, self.at, held.freeze())
@@ -389,7 +412,7 @@ impl Parser {
         // ends: `if a \{ b \}` is over at the brace unless an `else` or a
         // method call follows on the same line. Reading on without asking
         // made the `c` under an `if` part of the `if`'s own statement.
-        if self.ends(depth, escaping, declaring) {
+        if self.atLineEnd() && self.ends(depth, escaping, declaring) {
           return nodeOf(Node.Stmt, from, self.at, held.toArray())
         }
         continue
@@ -412,7 +435,7 @@ impl Parser {
         // its own closing bracket: a statement that has taken a group is
         // back at its own level when it answers.
         held.push(self.grouped(Node.Group))
-        if self.ends(0, escaping, declaring) {
+        if self.atLineEnd() && self.ends(0, escaping, declaring) {
           return nodeOf(Node.Stmt, from, self.at, held.toArray())
         }
         continue
@@ -423,8 +446,9 @@ impl Parser {
         // one statement and not the rest of the file.
         return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
-      held.push(self.leaf())
-      if self.ends(depth, escaping, declaring) {
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
+      if self.atLineEnd() && self.ends(depth, escaping, declaring) {
         return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
     }
@@ -560,19 +584,14 @@ impl Parser {
 
   /// Whether the statement beginning at `at` is a `break`, a `continue` or a
   /// `return`.
+  ///
+  /// Compared in place with [`isWord`] rather than cut out with `sliceBytes`
+  /// and compared as a `String`, which allocated a string per statement and
+  /// per line end a statement was asked about.
   fn escapes(self, at: Int) -> Bool {
-    match self.tokens.get(at) {
-      Some(token) => {
-        if token.kind != Kind.Word {
-          return false
-        }
-        match self.source.sliceBytes(token.from, token.to) {
-          Ok(word) => word == "break" || word == "continue" || word == "return"
-          Err(_) => false
-        }
-      }
-      None => false
-    }
+    isWord(self.source, self.tokens, at, "break") ||
+      isWord(self.source, self.tokens, at, "continue") ||
+      isWord(self.source, self.tokens, at, "return")
   }
 
   /// Takes the rest of the line as leaves, the newline excluded.
@@ -620,7 +639,8 @@ impl Parser {
       } else if c == '\}' {
         depth = depth - 1
       }
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
     }
     nodeOf(kind, from, self.at, held.toArray())
   }

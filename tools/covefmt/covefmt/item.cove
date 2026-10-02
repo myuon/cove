@@ -18,25 +18,30 @@ impl Parser {
       isWord(self.source, self.tokens, self.at, "test") ||
       isWord(self.source, self.tokens, self.at, "async") ||
       isWord(self.source, self.tokens, self.at, "opaque") {
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
       self.trivia(var held)
     }
 
     if isWord(self.source, self.tokens, self.at, "use") {
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
       return self.toEndOfLine(Node.Use, from, var held)
     }
     if isWord(self.source, self.tokens, self.at, "type") {
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
       return self.toEndOfLine(Node.TypeAlias, from, var held)
     }
     if isWord(self.source, self.tokens, self.at, "fn") {
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
       return self.function(from, var held)
     }
     for pair in declarations() {
       if isWord(self.source, self.tokens, self.at, pair.word) {
-        held.push(self.leaf())
+        held.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
         return self.braced(pair.kind, from, var held)
       }
     }
@@ -56,7 +61,8 @@ impl Parser {
     // is leaves, because it is a type expression and this slice does not read
     // one.
     while !self.done() && !isPunct(self.source, self.tokens, self.at, "\{") {
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
     }
     if !self.done() {
       // Everything between these braces is a declaration — a field, a
@@ -82,12 +88,14 @@ impl Parser {
     if isPunct(self.source, self.tokens, self.at, "->") {
       let at = self.at
       var answer = Vector.of()
-      answer.push(self.leaf())
+      answer.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
       // A return type ends where the body begins, or at the end of the line
       // for a method a trait only declares.
       while !self.done() && !isPunct(self.source, self.tokens, self.at, "\{") &&
         !self.startsLine() {
-        answer.push(self.leaf())
+        answer.push(leafIn(self.at, self.empty))
+        self.at = self.at + 1
       }
       held.push(nodeOf(Node.Returns, at, self.at, answer.freeze()))
     }
@@ -129,7 +137,8 @@ impl Parser {
       if opens {
         depth = depth + 1
       }
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
       if closes {
         depth = depth - 1
         if depth <= 0 {
@@ -150,9 +159,11 @@ impl Parser {
 
   /// Everything up to the next declaration, as one `Error`.
   fn toNextItem(var self, from: Int, var held: Vector<Tree>) -> Tree {
-    held.push(self.leaf())
+    held.push(leafIn(self.at, self.empty))
+    self.at = self.at + 1
     while !self.done() && !self.atDeclaration() {
-      held.push(self.leaf())
+      held.push(leafIn(self.at, self.empty))
+      self.at = self.at + 1
     }
     nodeOf(Node.Error, from, self.at, held.toArray())
   }
@@ -205,7 +216,7 @@ export fn parse(source: String) -> Tree {
 /// lex and parse and print, and the numbers it reported counted two of them
 /// three times.
 export fn parseTokens(source: String, held: Array<Token>) -> Tree {
-  var parser = Parser(source: source, tokens: held, at: 0)
+  var parser = Parser(source: source, tokens: held, at: 0, empty: [])
   var items = Vector.of()
   while !parser.done() {
     items.push(parser.item())

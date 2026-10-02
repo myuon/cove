@@ -70,6 +70,12 @@ export fn leafAt(at: Int) -> Tree {
   Tree(kind: Node.Leaf, from: at, to: at + 1, children: [])
 }
 
+/// A leaf at `at` whose children are `empty`, which the caller promises is
+/// empty: the parser's one shared array, so that a leaf allocates only itself.
+export fn leafIn(at: Int, empty: Array<Tree>) -> Tree {
+  Tree(kind: Node.Leaf, from: at, to: at + 1, children: empty)
+}
+
 /// A node over `children`, which are assumed to be in order and adjacent.
 export fn nodeOf(
   kind: Node,
