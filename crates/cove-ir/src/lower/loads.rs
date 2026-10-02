@@ -364,64 +364,137 @@ impl Bits {
 // ---------------------------------------------------------------------------
 // The graph.
 
+/// One list per program counter, all in one allocation: the list for `pc` is
+/// `self[pc]`.
+///
+/// What `Vec<Vec<T>>` was here, without an allocation per counter — which,
+/// for the graph and the accesses this pass asks for every function with a
+/// load to reuse, was five per instruction.
+struct Runs<T> {
+    /// Where each counter's list begins in `items`; one more entry than
+    /// there are counters, so that the last list ends somewhere.
+    starts: Vec<usize>,
+    items: Vec<T>,
+}
+
+impl<T> Runs<T> {
+    fn with_capacity(len: usize) -> Runs<T> {
+        let mut starts = Vec::with_capacity(len + 1);
+        starts.push(0);
+        Runs {
+            starts,
+            items: Vec::new(),
+        }
+    }
+
+    /// The list the next counter is building, so far.
+    fn building(&self) -> &[T] {
+        &self.items[self.starts[self.starts.len() - 1]..]
+    }
+
+    /// Ends the list the next counter was building.
+    fn close(&mut self) {
+        self.starts.push(self.items.len());
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &[T]> + '_ {
+        (0..self.len()).map(move |at| &self[at])
+    }
+}
+
+impl<T> std::ops::Index<usize> for Runs<T> {
+    type Output = [T];
+
+    fn index(&self, at: usize) -> &[T] {
+        &self.items[self.starts[at]..self.starts[at + 1]]
+    }
+}
+
 /// Successors and predecessors of every program counter. `ENTRY` is the
 /// function's own entry, a predecessor of counter 0.
 struct Graph {
-    succs: Vec<Vec<usize>>,
-    preds: Vec<Vec<usize>>,
+    succs: Runs<usize>,
+    preds: Runs<usize>,
 }
 
 const ENTRY: usize = usize::MAX;
 
 impl Graph {
     fn of(flow: &Flow<'_>, len: usize) -> Graph {
-        let mut succs = vec![Vec::new(); len];
-        let mut preds = vec![Vec::new(); len];
-        for (pc, out) in succs.iter_mut().enumerate() {
+        let mut succs: Runs<usize> = Runs::with_capacity(len);
+        for pc in 0..len {
             flow.successors(pc, &mut |to| {
-                if to < len && !out.contains(&to) {
-                    out.push(to);
+                if to < len && !succs.building().contains(&to) {
+                    succs.items.push(to);
                 }
             });
+            succs.close();
         }
-        for (pc, out) in succs.iter().enumerate() {
-            for &to in out {
-                preds[to].push(pc);
+        // Each counter's predecessors in the order the counters that reach it
+        // come, and the entry last.
+        let mut count = vec![0usize; len];
+        for &to in &succs.items {
+            count[to] += 1;
+        }
+        if len > 0 {
+            count[0] += 1;
+        }
+        let mut starts = Vec::with_capacity(len + 1);
+        starts.push(0);
+        for held in &count {
+            starts.push(starts[starts.len() - 1] + held);
+        }
+        let mut items = vec![0usize; starts[len]];
+        let mut next = starts.clone();
+        for pc in 0..len {
+            for &to in &succs[pc] {
+                items[next[to]] = pc;
+                next[to] += 1;
             }
         }
         if len > 0 {
-            preds[0].push(ENTRY);
+            items[next[0]] = ENTRY;
         }
-        Graph { succs, preds }
+        Graph {
+            succs,
+            preds: Runs { starts, items },
+        }
     }
 }
 
 /// The frame words each instruction reads and writes, asked of [`Flow`] once.
 struct Access {
-    reads: Vec<Vec<(Slot, u32)>>,
+    reads: Runs<(Slot, u32)>,
     /// The wide answer: every word a write may reach.
-    writes: Vec<Vec<(Slot, u32)>>,
+    writes: Runs<(Slot, u32)>,
     /// The narrow answer: the words a write certainly reaches.
-    certain: Vec<Vec<(Slot, u32)>>,
+    certain: Runs<(Slot, u32)>,
 }
 
 impl Access {
     fn of(code: &[Inst], flow: &Flow<'_>) -> Access {
         let mut access = Access {
-            reads: Vec::with_capacity(code.len()),
-            writes: Vec::with_capacity(code.len()),
-            certain: Vec::with_capacity(code.len()),
+            reads: Runs::with_capacity(code.len()),
+            writes: Runs::with_capacity(code.len()),
+            certain: Runs::with_capacity(code.len()),
         };
         for inst in code {
-            let mut reads = Vec::new();
-            flow.reads(inst, &mut |slot, width| reads.push((slot, width)));
-            let mut writes = Vec::new();
-            flow.writes(inst, true, &mut |slot, width| writes.push((slot, width)));
-            let mut certain = Vec::new();
-            flow.writes(inst, false, &mut |slot, width| certain.push((slot, width)));
-            access.reads.push(reads);
-            access.writes.push(writes);
-            access.certain.push(certain);
+            flow.reads(inst, &mut |slot, width| {
+                access.reads.items.push((slot, width))
+            });
+            flow.writes(inst, true, &mut |slot, width| {
+                access.writes.items.push((slot, width))
+            });
+            flow.writes(inst, false, &mut |slot, width| {
+                access.certain.items.push((slot, width))
+            });
+            access.reads.close();
+            access.writes.close();
+            access.certain.close();
         }
         access
     }
