@@ -1319,16 +1319,16 @@ fn expand(
     called_hot: bool,
     entry: bool,
 ) {
-    let caller = program.function(id).clone();
+    let caller = program.function(id);
     // A site inside one of the caller's own loops runs once a turn, and one in
     // a caller that is itself hot runs once a call of something hot; the first
     // is weighed against `LOOP_LIMIT` and the second against `HOT_LIMIT`.
-    let inside = inside_a_loop(&caller);
-    let looping = turns_with_a_loop(&caller, &inside);
+    let inside = inside_a_loop(caller);
+    let looping = turns_with_a_loop(caller, &inside);
     // What this caller may still take on. A callee's run is appended once
     // however many sites call it, so the budget is spent per *callee* and the
     // sites after the first are free.
-    let ordered = ordered_callees(program, &caller);
+    let ordered = ordered_callees(program, caller);
     // A call an earlier expansion brought with it — one whose continuation is
     // doomed, which is the only call an expanded body can hold — stays a call.
     // That is what makes the records of this pass never nest one expansion
@@ -1391,6 +1391,9 @@ fn expand(
     if !wanted.iter().any(|held| *held) {
         return;
     }
+    // Owned only now, because most callers expand nothing and the copy of the
+    // whole function was the pass's largest single cost.
+    let caller = caller.clone();
 
     let mut reprs = caller.reprs.clone();
     let mut regions: std::collections::HashMap<u32, Region> = std::collections::HashMap::new();
