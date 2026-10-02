@@ -256,15 +256,19 @@ figures in `bench.cove`, `print.cove` and `parsetests.cove` moved it by 950
 bytes, in the very commit that recorded the new one. A gate that fired on every
 prose change is a gate nobody would keep.
 
-| | | of the pipeline |
-| --- | ---: | ---: |
-| lex | 151 ms | 10% |
-| parse | 346 ms | 23% |
-| print | 1,037 ms | 68% |
-| **together** | **1,534 ms** | |
+| | after "Making it faster" | of the pipeline | after ADR 0077 | of the pipeline |
+| --- | ---: | ---: | ---: | ---: |
+| lex | 130 ms | 11% | 151 ms | 10% |
+| parse | 288 ms | 24% | 346 ms | 23% |
+| print | 785 ms | 65% | 1,037 ms | 68% |
+| **together** | **1,205 ms** | | **1,534 ms** | |
 
-Medians of fifteen interleaved runs on the encoded VM, taken 2026-10-02 after
-ADR 0077; the native tier's are in its own section below. The table before it,
+Medians of fifteen interleaved runs on the encoded VM, both taken 2026-10-02;
+the native tier's are in its own section below. The first column is after the
+work in "Making it faster" below, over the same 384 files grown to 1,950,210
+bytes and 339,066 tokens by that work's own edits — inside the recorded band,
+so the recorded corpus stands. The second is the table ADR 0077 left. The
+table before that,
 1,384 ms on 2026-10-01, is a different printer: making covefmt `cove fmt`
 taught it the rules for input that still needs formatting (blank lines between
 declarations, `{1}`, run-together tokens), and `print` paid for them — 891 ms
@@ -331,10 +335,12 @@ and the split moves by a millisecond or two between sessions where `whole` does
 not. Read `whole` as the measurement and the split as its shape.
 
 The Cove bench reads all 384 files before its clock starts and is not a fresh
-process, so **1,534 ms against 109.0 ms is the like-for-like comparison and it
-is 14.1×** on the encoded VM, and **550 ms against 109.0 ms is 5.0×** on the
-native tier (2026-10-02). It was 13.4× and 4.6× the day before, with the printer
-ADR 0077 grew, and 15.1× on the 248-file corpus, when the native tier was the
+process, so **1,205 ms against 111 ms is the like-for-like comparison and it
+is 10.9×** on the encoded VM, and **363 ms against 111 ms is 3.3×** on the
+native tier (2026-10-02, after "Making it faster"; 111 ms is the Rust arm of the
+same `covefmt-tiers.sh` session). Earlier the same day, after ADR 0077, it was
+1,534 and 550 ms against 109.0 — 14.1× and 5.0×. It was 13.4× and 4.6× the day
+before, with the printer ADR 0077 grew, and 15.1× on the 248-file corpus, when the native tier was the
 VM's speed. Against a whole Rust process they read lower, and that is the Rust arm
 being charged for a directory walk, a file read and an execve that the Cove arm
 does not pay. The medians are fifty-one iterations;
@@ -378,6 +384,93 @@ everything the pipeline executes, which cannot be true of a phase that is 43%
 of its wall clock. `parseTokens` exists because of it — a caller that holds the
 tokens should not have to lex again — and the phases are now timed over what
 the phase before them produced.
+
+## Making it faster
+
+ADR 0077 left `cove fmt --check` over the repository at 4.6× the Rust
+formatter on the native tier and named making covefmt faster as the next thing
+to do. These are the changes that came of it, all of them to covefmt's own Cove
+and none to the runtime, each measured on its own and kept only where it
+cleared the noise; every one leaves the output identical byte for byte, which
+the bench's five oracle lines, its meaning-check line and `cargo t`'s oracle
+said on every one.
+
+| | before | after | |
+| --- | ---: | ---: | ---: |
+| pipeline, native (`whole`) | 558.5 ms [555..562] | 362.0 ms [359..367] | −35.2% |
+| pipeline, VM (`whole`) | 1,559 ms [1,550..1,625] | 1,198.5 ms [1,193..1,259] | −23.1% |
+| `cove fmt --check` of the repository, native | 689.3 ms [683.9..726.1] | 509.0 ms [502.1..511.2] | −26.1% |
+| `cove fmt --check` of the repository, VM | 1,700.0 ms [1,678.7..1,740.0] | 1,354.5 ms [1,343.7..1,378.5] | −20.3% |
+| `cove fmt --check print.cove`, native | 65.9 ms [64.4..71.0] | 51.9 ms [49.7..59.3] | −21.2% |
+| `cove fmt --check print.cove`, VM | 143.4 ms [142.5..149.3] | 117.9 ms [114.7..128.3] | −17.8% |
+
+The pipeline rows are `covefmtBench` with main's covefmt and this one run over
+the same tree, eight interleaved rounds; the `cove fmt --check` rows are the
+binary built at main against the binary built here, fifteen interleaved runs
+after a cold one, from the repository root. Medians, [min..max], 2026-10-02.
+By phase on the native tier: lex 52 → 41 ms, parse 153 → 85.5 ms, print
+353.5 → 235.5 ms.
+
+**What paid, on the native tier, was allocation and copying more than calls.**
+The VM profile ranks functions by instructions, and the native tier spends a
+third of its time in the runtime beside the generated code — the call path,
+the safepoint, the allocator and the run copies — so the VM's ranking was a
+guide to where to look and not to what would pay. The changes that moved the
+native tier most:
+
+- the parser built every leaf through a `var self` method (never expanded)
+  with a fresh empty `[]` for its children: a call and an allocation per
+  token. Leaves now share one empty array and are pushed in place (parse
+  −26%);
+- every node's children were copied once more by `toArray()`, because the
+  uniqueness checker proves a `freeze()` only outside a loop and the rules
+  returned from inside theirs. They `break` instead and freeze after the loop
+  (parse −15%);
+- `spacing` built every line break in a fresh `StringBuilder`; a decided one is
+  now one of fourteen literals (whole −4.8%);
+- a doc comment was rebuilt as `"/// {line}"` — a slice and an interpolation —
+  even when it already read exactly that (whole −3.7%);
+- a width question is answered from the bytes the tokens cover when they settle
+  it: a token is never wider than its bytes, and a flat group never wider than
+  twice them, so most `overflows` and `flatWidth` walks are not taken (whole
+  −7.3% native, −9.2% VM, the largest single change on the VM);
+- `emit` no longer recurses into itself for a leaf: its frame is the widest in
+  the program and was pushed once per token (whole −3.0%).
+
+Smaller ones, each 1% to 3% of the native pipeline: `holdsABody` not asking a leaf;
+the parse loops reading the tokens through locals rather than copying the
+parser to call a method of `self`; the operator test expanded into the lexer
+(and brackets, commas, colons and `?` not asking it at all); `isTheWord`
+comparing in place instead of allocating a slice; `flattened` copying runs of
+unchanged source rather than a token at a time, and a one-byte punctuation
+token written as a literal. The commits on this work give each one's numbers.
+
+**What did not pay**, measured and reverted: `column` reading each piece from
+its end (−0.9%, one session in two); asking the cheap first test of
+`wantsAMissingSpace`, `wantsASpace` and `isATrailingComma` before the call
+(−0.4% to −1%); skipping the continuation questions for children that are not
+runs of space (0%); writing `writeBrokenBody`'s leaves through a small
+`writeLeaf` rather than `emit` (+0.5%); inlining `trivia` at its two call
+sites (−0.3%); comparing `opensABody`'s words in place (−0.2%). Each removed
+calls; none of them removed an allocation or a copy, and a call to a small
+function costs little on the native tier now. That is the measurement this
+section would most like to be read for.
+
+**The meaning check on changed files** is untouched by all of this on the
+corpus, which takes the identical-text shortcut, but it is most of what
+formatting a changed file costs beyond the print. One change was made to it:
+its boundary walk no longer visits leaves, −10% of the check (1,394 → 1,253 ms
+over 2,304 formats of the bench's `joinedUp`, `closedUp` and `spacedOut`
+damage, native).
+
+**Levers on the runtime side**, found and not touched because they belong to
+an ADR of their own: `run-slice` (`sliceBytes`, `Vector.toArray`) is handed to
+a runtime helper whole on the native tier, and the helper copies through
+`Machine::copy_string_bytes` a word at a time via `Memory::read` and `blend`,
+and allocates under a mutex — it was the largest single runtime cost under the
+per-token `sliceBytes` the printer still makes; and the call path
+(`native::open`, `close`, `republish` and `Machine::safepoint`) is still about a
+fifth of the compiled run, as the profile below says it was before.
 
 ## Where the time actually goes
 
@@ -444,9 +537,11 @@ default *backend* does not change, and a build without the feature
 (`--no-default-features`, or any embedder of `cove-runtime`) has no
 executable-memory dependency.
 
-**On this corpus it is 2.8 times the encoded VM's speed** — 550 ms against
-1,534 on 2026-10-02, after ADR 0077, compiling 100.0% of the calls into
-1,101,498 bytes of machine code; the table below is the day before, with the
+**On this corpus it is 3.3 times the encoded VM's speed** — 363 ms against
+1,205 on 2026-10-02 after "Making it faster", compiling 128 of 130 reachable
+functions and 100.0% of the calls into 1,184,395 bytes of machine code. Earlier
+that day, after ADR 0077, it was 550 against 1,534 (2.8 times, 1,101,498 bytes);
+the table below is the day before, with the
 smaller printer, when it was 2.9 times — and it was not
 always: on 2026-09-16, over 248 files, it compiled 29.6% of the reachable
 functions, ran 5.3% of the instruction stream, and was the VM's speed to
