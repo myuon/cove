@@ -502,7 +502,12 @@ fn emit(
                   token.kind == Kind.DocComment {
                   out.push(asWritten(source, token))
                 } else {
-                  out.push(text(source, token))
+                  // `text`, written here: the call around `sliceBytes` was
+                  // one more frame per token.
+                  match source.sliceBytes(token.from, token.to) {
+                    Ok(piece) => out.push(piece)
+                    Err(_) => out.push("")
+                  }
                 }
                 last = child.from
                 i = i + 1
@@ -709,6 +714,23 @@ fn emit(
             breaks,
             var out,
           )
+        } else if child.kind == Node.Leaf && child.children.length() == 0 &&
+          isASpaceToken(held, child.from) {
+          // A run of space, written by the lines `emit`'s leaf case would
+          // run for it at the depth decided above — for the reason the other
+          // leaves are written at the top of this loop: the call pushed the
+          // widest frame in the program to write one run.
+          match held.get(child.from) {
+            Some(token) => {
+              if child.from == ruledAt {
+                out.push(ruled(ruledBreaks))
+              } else {
+                out.push(spacing(source, token, opensBlock(source, held, last), last < 0, at, held, child.from))
+              }
+              last = child.from
+            }
+            None => { }
+          }
         } else {
           last = emit(
             source,
