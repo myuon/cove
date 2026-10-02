@@ -650,7 +650,7 @@ fn resolve_module(
                     resolved.functions.insert(
                         decl.name.node.clone(),
                         FnEntry {
-                            decl: Arc::new(decl.clone()),
+                            decl: Arc::clone(decl),
                             exported: item.exported,
                             is_test: item.is_test,
                             doc: item.doc.clone(),
@@ -952,7 +952,7 @@ fn resolve_module(
                     resolved.methods.insert(
                         key,
                         FnEntry {
-                            decl: Arc::new(decl.clone()),
+                            decl: Arc::clone(decl),
                             exported: inner.exported,
                             // A method is reached through its type, never
                             // through the test runner; the parser rejects a
@@ -1771,7 +1771,7 @@ fn check_conformance(
             resolved,
             module,
             &type_name,
-            Arc::new(decl.clone()),
+            Arc::clone(decl),
             trait_exported,
             declared.doc.clone().or_else(|| inner.doc.clone()),
             None,

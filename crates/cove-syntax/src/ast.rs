@@ -52,7 +52,10 @@ pub struct Item {
 
 #[derive(Clone, Debug)]
 pub enum ItemKind {
-    Fn(FnDecl),
+    /// Shared rather than owned, because the resolver keeps every function
+    /// it resolves for as long as the program lives, and a deep copy of each
+    /// body was a measured part of every start (issue #556).
+    Fn(std::sync::Arc<FnDecl>),
     Struct(StructDecl),
     Enum(EnumDecl),
     /// `trait Display { fn describe(self) -> String }`

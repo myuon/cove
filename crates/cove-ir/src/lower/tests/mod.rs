@@ -31,6 +31,7 @@ mod control;
 mod dispatch;
 mod enums;
 mod erasure;
+mod foresee;
 mod gaps;
 mod generics;
 mod hosts;

@@ -199,15 +199,16 @@ use crate::inst::{Inst, Slot};
 use crate::program::{Function, Program};
 
 use super::dropping;
-use super::frees::Flow;
+use super::frees::{Bounds, Flow};
 
 /// Drops every clear whose words are redefined, or whose frame is popped,
 /// before anything could observe them being null.
 pub(super) fn drop_clears_before_redefinition(program: &mut Program) {
+    let bounds = Bounds::of(program);
     let dropped: Vec<Vec<bool>> = program
         .functions
         .iter()
-        .map(|function| redefined(function, program))
+        .map(|function| redefined(function, program, &bounds))
         .collect();
     let Program {
         functions, tables, ..
@@ -228,9 +229,17 @@ const WINDOW: usize = 64;
 /// The clears are decided last first, and a clear another one's window ended
 /// at is *pinned*: kept, whatever its own walk would have answered. See *A
 /// clear is an end only while it is kept*.
-fn redefined(function: &Function, program: &Program) -> Vec<bool> {
+fn redefined(function: &Function, program: &Program, bounds: &Bounds) -> Vec<bool> {
     let mut dropped = vec![false; function.code.len()];
-    let Some(flow) = Flow::of(function, program) else {
+    // Only a clear is ever dropped.
+    if !function
+        .code
+        .iter()
+        .any(|inst| matches!(inst, Inst::Clear { .. }))
+    {
+        return dropped;
+    }
+    let Some(flow) = Flow::of(function, program, bounds) else {
         return dropped;
     };
     let mut pinned = vec![false; function.code.len()];
@@ -252,10 +261,21 @@ fn redefined(function: &Function, program: &Program) -> Vec<bool> {
         if words.to > flow.size || (words.from..words.to).any(|word| flow.addressed[word]) {
             continue;
         }
+        // The live ranges of the names that share a word with the run, read
+        // once for this clear rather than once for every counter its walk
+        // visits: a body with many expansions has many locals.
+        let named: Vec<(usize, usize)> = function
+            .locals
+            .iter()
+            .chain(function.inlined.iter().flat_map(|held| &held.locals))
+            .filter(|local| words.meets(local.slot, flow.width(local.layout)))
+            .map(|local| (local.from as usize, local.to as usize))
+            .collect();
         let mut walk = Walk {
             flow: &flow,
             function,
             words,
+            named,
             state: &mut state,
             touched: Vec::new(),
             budget: WINDOW,
@@ -320,6 +340,8 @@ struct Walk<'w, 'p> {
     flow: &'w Flow<'p>,
     function: &'w Function,
     words: Words,
+    /// The live ranges of the names that share a word with [`Walk::words`].
+    named: Vec<(usize, usize)>,
     state: &'w mut [Seen],
     /// Every program counter [`Walk::state`] holds an answer for.
     touched: Vec<usize>,
@@ -396,17 +418,7 @@ impl Walk<'_, '_> {
     /// Whether a named local that shares a word with the cleared run is bound
     /// at `pc`, in this body or in one expanded into it.
     fn named_at(&self, pc: usize) -> bool {
-        let words = self.words;
-        let flow = self.flow;
-        self.function
-            .locals
-            .iter()
-            .chain(self.function.inlined.iter().flat_map(|held| &held.locals))
-            .any(|local| {
-                (local.from as usize) <= pc
-                    && pc < local.to as usize
-                    && words.meets(local.slot, flow.width(local.layout))
-            })
+        self.named.iter().any(|&(from, to)| from <= pc && pc < to)
     }
 
     /// Whether `inst`, at `pc`, writes every cleared word, without allocating

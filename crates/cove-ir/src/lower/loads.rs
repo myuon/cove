@@ -154,12 +154,15 @@ use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, Program, Table};
 use crate::repr::{RefMap, Repr};
 
-use super::frees::Flow;
+use super::frees::{Bounds, Flow};
 
 /// Reuses loaded fields across every function of `program`.
 pub(super) fn reuse_loaded_fields(program: &mut Program) {
+    // Neither bound moves while this runs: an edit appends slots to a frame
+    // and rewrites code, and adds no layout and changes no answer.
+    let bounds = Bounds::of(program);
     for index in 0..program.functions.len() {
-        let Some(plan) = plan(&program.functions[index], program) else {
+        let Some(plan) = plan(&program.functions[index], program, &bounds) else {
             continue;
         };
         let caches = plan.caches.clone();
@@ -174,7 +177,7 @@ pub(super) fn reuse_loaded_fields(program: &mut Program) {
             function.refs = RefMap::of(&function.reprs);
             plan.edit.apply(function, tables);
         }
-        let Some(edit) = clears(&program.functions[index], program, &caches) else {
+        let Some(edit) = clears(&program.functions[index], program, &bounds, &caches) else {
             continue;
         };
         let Program {
@@ -251,12 +254,6 @@ impl Bits {
         }
     }
 
-    fn minus(&mut self, other: &Bits) {
-        for (a, b) in self.0.iter_mut().zip(&other.0) {
-            *a &= !b;
-        }
-    }
-
     fn any(&self) -> bool {
         self.0.iter().any(|word| *word != 0)
     }
@@ -286,67 +283,218 @@ impl Bits {
     }
 }
 
+/// One [`Bits`] per program counter, all of one width, in one allocation.
+///
+/// A dataflow answer is a set per counter, and a `Vec<Bits>` is an
+/// allocation per counter — per answer, per function — which was most of
+/// what this pass cost. The operations are the ones `Bits` has, on a row.
+#[derive(Clone, PartialEq, Eq)]
+struct Rows {
+    /// Words per row.
+    width: usize,
+    words: Vec<u64>,
+}
+
+impl Rows {
+    fn empty(rows: usize, n: usize) -> Rows {
+        let width = n.div_ceil(64);
+        Rows {
+            width,
+            words: vec![0; rows * width],
+        }
+    }
+
+    /// Every row [`Bits::full`].
+    fn full(rows: usize, n: usize) -> Rows {
+        let one = Bits::full(n);
+        let width = one.0.len();
+        let mut words = Vec::with_capacity(rows * width);
+        for _ in 0..rows {
+            words.extend_from_slice(&one.0);
+        }
+        Rows { width, words }
+    }
+
+    fn row(&self, at: usize) -> &[u64] {
+        &self.words[at * self.width..(at + 1) * self.width]
+    }
+
+    fn row_mut(&mut self, at: usize) -> &mut [u64] {
+        &mut self.words[at * self.width..(at + 1) * self.width]
+    }
+
+    fn get(&self, at: usize, i: usize) -> bool {
+        self.words[at * self.width + i / 64] & (1 << (i % 64)) != 0
+    }
+
+    fn set(&mut self, at: usize, i: usize) {
+        self.words[at * self.width + i / 64] |= 1 << (i % 64);
+    }
+
+    fn unset(&mut self, at: usize, i: usize) {
+        self.words[at * self.width + i / 64] &= !(1 << (i % 64));
+    }
+
+    /// Row `at`, as a set of its own.
+    fn bits(&self, at: usize) -> Bits {
+        Bits(self.row(at).to_vec())
+    }
+}
+
+impl Bits {
+    fn or_row(&mut self, other: &[u64]) {
+        for (a, b) in self.0.iter_mut().zip(other) {
+            *a |= b;
+        }
+    }
+
+    fn and_row(&mut self, other: &[u64]) {
+        for (a, b) in self.0.iter_mut().zip(other) {
+            *a &= b;
+        }
+    }
+
+    fn minus_row(&mut self, other: &[u64]) {
+        for (a, b) in self.0.iter_mut().zip(other) {
+            *a &= !b;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The graph.
+
+/// One list per program counter, all in one allocation: the list for `pc` is
+/// `self[pc]`.
+///
+/// What `Vec<Vec<T>>` was here, without an allocation per counter — which,
+/// for the graph and the accesses this pass asks for every function with a
+/// load to reuse, was five per instruction.
+struct Runs<T> {
+    /// Where each counter's list begins in `items`; one more entry than
+    /// there are counters, so that the last list ends somewhere.
+    starts: Vec<usize>,
+    items: Vec<T>,
+}
+
+impl<T> Runs<T> {
+    fn with_capacity(len: usize) -> Runs<T> {
+        let mut starts = Vec::with_capacity(len + 1);
+        starts.push(0);
+        Runs {
+            starts,
+            items: Vec::new(),
+        }
+    }
+
+    /// The list the next counter is building, so far.
+    fn building(&self) -> &[T] {
+        &self.items[self.starts[self.starts.len() - 1]..]
+    }
+
+    /// Ends the list the next counter was building.
+    fn close(&mut self) {
+        self.starts.push(self.items.len());
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &[T]> + '_ {
+        (0..self.len()).map(move |at| &self[at])
+    }
+}
+
+impl<T> std::ops::Index<usize> for Runs<T> {
+    type Output = [T];
+
+    fn index(&self, at: usize) -> &[T] {
+        &self.items[self.starts[at]..self.starts[at + 1]]
+    }
+}
 
 /// Successors and predecessors of every program counter. `ENTRY` is the
 /// function's own entry, a predecessor of counter 0.
 struct Graph {
-    succs: Vec<Vec<usize>>,
-    preds: Vec<Vec<usize>>,
+    succs: Runs<usize>,
+    preds: Runs<usize>,
 }
 
 const ENTRY: usize = usize::MAX;
 
 impl Graph {
     fn of(flow: &Flow<'_>, len: usize) -> Graph {
-        let mut succs = vec![Vec::new(); len];
-        let mut preds = vec![Vec::new(); len];
-        for (pc, out) in succs.iter_mut().enumerate() {
+        let mut succs: Runs<usize> = Runs::with_capacity(len);
+        for pc in 0..len {
             flow.successors(pc, &mut |to| {
-                if to < len && !out.contains(&to) {
-                    out.push(to);
+                if to < len && !succs.building().contains(&to) {
+                    succs.items.push(to);
                 }
             });
+            succs.close();
         }
-        for (pc, out) in succs.iter().enumerate() {
-            for &to in out {
-                preds[to].push(pc);
+        // Each counter's predecessors in the order the counters that reach it
+        // come, and the entry last.
+        let mut count = vec![0usize; len];
+        for &to in &succs.items {
+            count[to] += 1;
+        }
+        if len > 0 {
+            count[0] += 1;
+        }
+        let mut starts = Vec::with_capacity(len + 1);
+        starts.push(0);
+        for held in &count {
+            starts.push(starts[starts.len() - 1] + held);
+        }
+        let mut items = vec![0usize; starts[len]];
+        let mut next = starts.clone();
+        for pc in 0..len {
+            for &to in &succs[pc] {
+                items[next[to]] = pc;
+                next[to] += 1;
             }
         }
         if len > 0 {
-            preds[0].push(ENTRY);
+            items[next[0]] = ENTRY;
         }
-        Graph { succs, preds }
+        Graph {
+            succs,
+            preds: Runs { starts, items },
+        }
     }
 }
 
 /// The frame words each instruction reads and writes, asked of [`Flow`] once.
 struct Access {
-    reads: Vec<Vec<(Slot, u32)>>,
+    reads: Runs<(Slot, u32)>,
     /// The wide answer: every word a write may reach.
-    writes: Vec<Vec<(Slot, u32)>>,
+    writes: Runs<(Slot, u32)>,
     /// The narrow answer: the words a write certainly reaches.
-    certain: Vec<Vec<(Slot, u32)>>,
+    certain: Runs<(Slot, u32)>,
 }
 
 impl Access {
     fn of(code: &[Inst], flow: &Flow<'_>) -> Access {
         let mut access = Access {
-            reads: Vec::with_capacity(code.len()),
-            writes: Vec::with_capacity(code.len()),
-            certain: Vec::with_capacity(code.len()),
+            reads: Runs::with_capacity(code.len()),
+            writes: Runs::with_capacity(code.len()),
+            certain: Runs::with_capacity(code.len()),
         };
         for inst in code {
-            let mut reads = Vec::new();
-            flow.reads(inst, &mut |slot, width| reads.push((slot, width)));
-            let mut writes = Vec::new();
-            flow.writes(inst, true, &mut |slot, width| writes.push((slot, width)));
-            let mut certain = Vec::new();
-            flow.writes(inst, false, &mut |slot, width| certain.push((slot, width)));
-            access.reads.push(reads);
-            access.writes.push(writes);
-            access.certain.push(certain);
+            flow.reads(inst, &mut |slot, width| {
+                access.reads.items.push((slot, width))
+            });
+            flow.writes(inst, true, &mut |slot, width| {
+                access.writes.items.push((slot, width))
+            });
+            flow.writes(inst, false, &mut |slot, width| {
+                access.certain.items.push((slot, width))
+            });
+            access.reads.close();
+            access.writes.close();
+            access.certain.close();
         }
         access
     }
@@ -645,12 +793,11 @@ fn slot_layouts(function: &Function, program: &Program, flow: &Flow<'_>) -> Vec<
 // Planning.
 
 /// The kills of every key at every counter, over `code`.
-fn kills(code: &[Inst], access: &Access, keys: &[Key], classes: &[Class]) -> Vec<Bits> {
+fn kills(code: &[Inst], access: &Access, keys: &[Key], classes: &[Class]) -> Rows {
     let n = keys.len();
-    code.iter()
-        .enumerate()
-        .map(|(pc, inst)| {
-            let mut killed = Bits::empty(n);
+    let mut killed = Rows::empty(code.len(), n);
+    for (pc, inst) in code.iter().enumerate() {
+        {
             let written = &access.writes[pc];
             let effect = effect(inst);
             for (at, key) in keys.iter().enumerate() {
@@ -672,12 +819,12 @@ fn kills(code: &[Inst], access: &Access, keys: &[Key], classes: &[Class]) -> Vec
                         Effect::Everything => true,
                     };
                 if kill {
-                    killed.set(at);
+                    killed.set(pc, at);
                 }
             }
-            killed
-        })
-        .collect()
+        }
+    }
+    killed
 }
 
 /// Whether a local of `function`, or of a body expanded into it, names
@@ -777,7 +924,7 @@ fn reaching(
     access: &Access,
     slots: &[Slot],
     loads: &[Vec<usize>],
-) -> (Vec<Bits>, Vec<usize>) {
+) -> (Rows, Vec<usize>) {
     let n = graph.succs.len();
     let mut base = Vec::with_capacity(slots.len());
     let mut count = 0;
@@ -806,24 +953,24 @@ fn reaching(
     for (at, held) in loads.iter().enumerate() {
         entry.set(base[at] + held.len());
     }
-    let mut into = vec![Bits::empty(count); n];
-    let mut out = vec![Bits::empty(count); n];
+    let mut into = Rows::empty(n, count);
+    let mut out = Rows::empty(n, count);
     let mut arriving = Bits::empty(count);
     let mut leaving = Bits::empty(count);
     let mut changed = true;
     while changed {
         changed = false;
-        for pc in 0..n {
+        for (pc, own) in own.iter().enumerate() {
             arriving.fill(false);
             for &from in &graph.preds[pc] {
                 if from == ENTRY {
                     arriving.or(&entry);
                 } else {
-                    arriving.or(&out[from]);
+                    arriving.or_row(out.row(from));
                 }
             }
             leaving.assign(&arriving);
-            for &(from, width, bit, certain) in &own[pc] {
+            for &(from, width, bit, certain) in own {
                 if certain {
                     for at in from..from + width {
                         leaving.unset(at);
@@ -831,9 +978,9 @@ fn reaching(
                 }
                 leaving.set(bit);
             }
-            if arriving != into[pc] || leaving != out[pc] {
-                into[pc].assign(&arriving);
-                out[pc].assign(&leaving);
+            if arriving.0 != into.row(pc) || leaving.0 != out.row(pc) {
+                into.row_mut(pc).copy_from_slice(&arriving.0);
+                out.row_mut(pc).copy_from_slice(&leaving.0);
                 changed = true;
             }
         }
@@ -843,27 +990,27 @@ fn reaching(
 
 /// Whether each of `slots` is null on every path into each counter, as one
 /// set a counter. None of them is written on entry.
-fn null_into(code: &[Inst], graph: &Graph, access: &Access, slots: &[Slot]) -> Vec<Bits> {
+fn null_into(code: &[Inst], graph: &Graph, access: &Access, slots: &[Slot]) -> Rows {
     let n = code.len();
     let count = slots.len();
     // What each counter leaves each slot it writes as: null, or not known.
-    let mut nulls = vec![Bits::empty(count); n];
-    let mut unknowns = vec![Bits::empty(count); n];
-    for pc in 0..n {
-        let clear = matches!(code[pc], Inst::Clear { .. } | Inst::Unit { .. });
+    let mut nulls = Rows::empty(n, count);
+    let mut unknowns = Rows::empty(n, count);
+    for (pc, inst) in code.iter().enumerate() {
+        let clear = matches!(inst, Inst::Clear { .. } | Inst::Unit { .. });
         for (at, &slot) in slots.iter().enumerate() {
             if touches(&access.writes[pc], slot) {
                 if clear {
-                    nulls[pc].set(at);
+                    nulls.set(pc, at);
                 } else {
-                    unknowns[pc].set(at);
+                    unknowns.set(pc, at);
                 }
             }
         }
     }
     let full = Bits::full(count);
-    let mut into = vec![full.clone(); n];
-    let mut out = vec![full.clone(); n];
+    let mut into = Rows::full(n, count);
+    let mut out = Rows::full(n, count);
     let mut arriving = Bits::empty(count);
     let mut leaving = Bits::empty(count);
     let mut changed = true;
@@ -873,15 +1020,15 @@ fn null_into(code: &[Inst], graph: &Graph, access: &Access, slots: &[Slot]) -> V
             arriving.assign(&full);
             for &from in &graph.preds[pc] {
                 if from != ENTRY {
-                    arriving.and(&out[from]);
+                    arriving.and_row(out.row(from));
                 }
             }
             leaving.assign(&arriving);
-            leaving.minus(&unknowns[pc]);
-            leaving.or(&nulls[pc]);
-            if arriving != into[pc] || leaving != out[pc] {
-                into[pc].assign(&arriving);
-                out[pc].assign(&leaving);
+            leaving.minus_row(unknowns.row(pc));
+            leaving.or_row(nulls.row(pc));
+            if arriving.0 != into.row(pc) || leaving.0 != out.row(pc) {
+                into.row_mut(pc).copy_from_slice(&arriving.0);
+                out.row_mut(pc).copy_from_slice(&leaving.0);
                 changed = true;
             }
         }
@@ -894,14 +1041,14 @@ fn null_into(code: &[Inst], graph: &Graph, access: &Access, slots: &[Slot]) -> V
 /// into a counter.
 fn available(
     graph: &Graph,
-    gen: &[Bits],
-    kill: &[Bits],
-    assumed: &[Bits],
+    gen: &Rows,
+    kill: &Rows,
+    assumed: Option<&Rows>,
     n_keys: usize,
-) -> (Vec<Bits>, Vec<Bits>) {
-    let n = gen.len();
-    let mut into = vec![Bits::full(n_keys); n];
-    let mut out = vec![Bits::full(n_keys); n];
+) -> (Rows, Rows) {
+    let n = graph.succs.len();
+    let mut into = Rows::full(n, n_keys);
+    let mut out = Rows::full(n, n_keys);
     let mut arriving = Bits::empty(n_keys);
     let mut leaving = Bits::empty(n_keys);
     let mut changed = true;
@@ -914,16 +1061,19 @@ fn available(
                 if from == ENTRY {
                     arriving.fill(false);
                 } else {
-                    arriving.and(&out[from]);
+                    arriving.and_row(out.row(from));
                 }
             }
-            arriving.or(&assumed[pc]);
+            // `None` assumes nothing anywhere.
+            if let Some(assumed) = assumed {
+                arriving.or_row(assumed.row(pc));
+            }
             leaving.assign(&arriving);
-            leaving.minus(&kill[pc]);
-            leaving.or(&gen[pc]);
-            if arriving != into[pc] || leaving != out[pc] {
-                into[pc].assign(&arriving);
-                out[pc].assign(&leaving);
+            leaving.minus_row(kill.row(pc));
+            leaving.or_row(gen.row(pc));
+            if arriving.0 != into.row(pc) || leaving.0 != out.row(pc) {
+                into.row_mut(pc).copy_from_slice(&arriving.0);
+                out.row_mut(pc).copy_from_slice(&leaving.0);
                 changed = true;
             }
         }
@@ -988,10 +1138,10 @@ fn cycles(graph: &Graph) -> Vec<usize> {
 
 /// Partial availability on the way into each counter: some path from a load
 /// reaches it without a kill.
-fn partially_available(graph: &Graph, gen: &[Bits], kill: &[Bits], n_keys: usize) -> Vec<Bits> {
-    let n = gen.len();
-    let mut out = vec![Bits::empty(n_keys); n];
-    let mut into = vec![Bits::empty(n_keys); n];
+fn partially_available(graph: &Graph, gen: &Rows, kill: &Rows, n_keys: usize) -> Rows {
+    let n = graph.succs.len();
+    let mut out = Rows::empty(n, n_keys);
+    let mut into = Rows::empty(n, n_keys);
     let mut arriving = Bits::empty(n_keys);
     let mut leaving = Bits::empty(n_keys);
     let mut changed = true;
@@ -1001,15 +1151,15 @@ fn partially_available(graph: &Graph, gen: &[Bits], kill: &[Bits], n_keys: usize
             arriving.fill(false);
             for &from in &graph.preds[pc] {
                 if from != ENTRY {
-                    arriving.or(&out[from]);
+                    arriving.or_row(out.row(from));
                 }
             }
             leaving.assign(&arriving);
-            leaving.minus(&kill[pc]);
-            leaving.or(&gen[pc]);
-            if arriving != into[pc] || leaving != out[pc] {
-                into[pc].assign(&arriving);
-                out[pc].assign(&leaving);
+            leaving.minus_row(kill.row(pc));
+            leaving.or_row(gen.row(pc));
+            if arriving.0 != into.row(pc) || leaving.0 != out.row(pc) {
+                into.row_mut(pc).copy_from_slice(&arriving.0);
+                out.row_mut(pc).copy_from_slice(&leaving.0);
                 changed = true;
             }
         }
@@ -1027,7 +1177,7 @@ fn owners_non_null(
     flow: &Flow<'_>,
     access: &Access,
     owners: &[Slot],
-) -> (Vec<Vec<bool>>, Vec<bool>) {
+) -> (Vec<bool>, Vec<bool>) {
     let n = code.len();
     let params = function.param_words(&program.layouts) as usize;
     let entry: Vec<bool> = owners
@@ -1041,14 +1191,22 @@ fn owners_non_null(
                 })
         })
         .collect();
-    let mut out: Vec<Vec<bool>> = vec![vec![true; owners.len()]; n];
+    // One flat table: owner `at` on the way out of `pc` is at
+    // `pc * width + at`.
+    let width = owners.len();
+    let mut out: Vec<bool> = vec![true; n * width];
+    let mut held: Vec<bool> = vec![true; width];
     let mut changed = true;
     while changed {
         changed = false;
         for pc in 0..n {
-            let mut held: Vec<bool> = vec![true; owners.len()];
+            held.fill(true);
             for &from in &graph.preds[pc] {
-                let edge = if from == ENTRY { &entry } else { &out[from] };
+                let edge = if from == ENTRY {
+                    &entry[..]
+                } else {
+                    &out[from * width..(from + 1) * width]
+                };
                 for (at, value) in held.iter_mut().enumerate() {
                     *value &= edge[at];
                 }
@@ -1071,8 +1229,9 @@ fn owners_non_null(
                     }
                 }
             }
-            if held != out[pc] {
-                out[pc] = held;
+            let row = &mut out[pc * width..(pc + 1) * width];
+            if *held != *row {
+                row.copy_from_slice(&held);
                 changed = true;
             }
         }
@@ -1080,8 +1239,8 @@ fn owners_non_null(
     (out, entry)
 }
 
-fn plan(function: &Function, program: &Program) -> Option<Plan> {
-    let flow = Flow::of(function, program)?;
+fn plan(function: &Function, program: &Program, bounds: &Bounds) -> Option<Plan> {
+    let flow = Flow::of(function, program, bounds)?;
     let code = &function.code;
     let n = code.len();
     let size = flow.size;
@@ -1154,20 +1313,17 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
 
     // Nothing can go unless some load is reached by another of its key with
     // no kill between: asked first, and cheaply, of every load.
-    let every: Vec<Bits> = (0..n)
-        .map(|pc| {
-            let mut bits = Bits::empty(n_keys);
-            if let Some((_, key)) = load[pc] {
-                bits.set(key);
-            }
-            bits
-        })
-        .collect();
+    let mut every = Rows::empty(n, n_keys);
+    for (pc, held) in load.iter().enumerate() {
+        if let Some((_, key)) = *held {
+            every.set(pc, key);
+        }
+    }
     let reached = partially_available(&graph, &every, &kill, n_keys);
     let mut hot = Bits::empty(n_keys);
-    for pc in 0..n {
-        if let Some((_, key)) = load[pc] {
-            if reached[pc].get(key) {
+    for (pc, held) in load.iter().enumerate() {
+        if let Some((_, key)) = *held {
+            if reached.get(pc, key) {
                 hot.set(key);
             }
         }
@@ -1206,23 +1362,10 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
         let defs = &loads_into[index];
         let other = defs.len();
         let from = base[index];
-        let into: Vec<Bits> = reached_by
-            .iter()
-            .map(|all| {
-                let mut bits = Bits::empty(other + 1);
-                for at in 0..=other {
-                    if all.get(from + at) {
-                        bits.set(at);
-                    }
-                }
-                bits
-            })
-            .collect();
         let is_ref = function
             .reprs
             .get(slot as usize)
             .is_some_and(|repr| repr.is_ref());
-        let null: Vec<bool> = nulls.iter().map(|held| held.get(index)).collect();
         let mut parent: Vec<usize> = (0..defs.len()).collect();
         fn find(parent: &mut [usize], at: usize) -> usize {
             let mut at = at;
@@ -1234,13 +1377,20 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
         }
         // A load into a reference slot that may still hold something would
         // leave that something rooted if it stopped writing the slot.
-        let mut bad: Vec<bool> = defs.iter().map(|&pc| is_ref && !null[pc]).collect();
+        let mut bad: Vec<bool> = defs
+            .iter()
+            .map(|&pc| is_ref && !nulls.get(pc, index))
+            .collect();
         let mut uses: Vec<(usize, usize)> = Vec::new();
-        for pc in 0..n {
-            if !touches(&access.reads[pc], slot) {
+        for (pc, read) in access.reads.iter().enumerate() {
+            if !touches(read, slot) {
                 continue;
             }
-            let arriving: Vec<usize> = into[pc].ones().collect();
+            // This slot's own run of the bits, renumbered from zero: its
+            // loads in order, then the bit for every other writer.
+            let arriving: Vec<usize> = (0..=other)
+                .filter(|&at| reached_by.get(pc, from + at))
+                .collect();
             let clean =
                 !arriving.contains(&other) && renamed_reads(&code[pc], slot, slot).is_some();
             for &def in arriving.iter().filter(|&&def| def < other) {
@@ -1353,35 +1503,28 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
             .map(|(at, pair)| (*pair, at))
             .collect();
         let count = pairs.len();
-        let gen: Vec<Bits> = (0..n)
-            .map(|pc| {
-                let mut bits = Bits::empty(count);
-                if renamed[pc] {
-                    if let Some(pair) = load[pc] {
-                        bits.set(pair_of[&pair]);
-                    }
-                }
-                bits
-            })
-            .collect();
-        let pair_kill: Vec<Bits> = (0..n)
-            .map(|pc| {
-                let mut bits = Bits::empty(count);
-                for (at, &(_, key)) in pairs.iter().enumerate() {
-                    if kill[pc].get(key) {
-                        bits.set(at);
-                    }
-                }
-                bits
-            })
-            .collect();
-        let none = vec![Bits::empty(count); n];
-        let (into, _) = available(&graph, &gen, &pair_kill, &none, count);
-        let mut failed: Vec<(Slot, usize)> = Vec::new();
+        let mut gen = Rows::empty(n, count);
         for pc in 0..n {
-            for read in &reads[pc] {
+            if renamed[pc] {
+                if let Some(pair) = load[pc] {
+                    gen.set(pc, pair_of[&pair]);
+                }
+            }
+        }
+        let mut pair_kill = Rows::empty(n, count);
+        for pc in 0..n {
+            for (at, &(_, key)) in pairs.iter().enumerate() {
+                if kill.get(pc, key) {
+                    pair_kill.set(pc, at);
+                }
+            }
+        }
+        let (into, _) = available(&graph, &gen, &pair_kill, None, count);
+        let mut failed: Vec<(Slot, usize)> = Vec::new();
+        for (pc, held) in reads.iter().enumerate() {
+            for read in held {
                 match pair_of.get(read) {
-                    Some(&at) if into[pc].get(at) => {}
+                    Some(&at) if into.get(pc, at) => {}
                     _ => failed.push(*read),
                 }
             }
@@ -1402,52 +1545,44 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
     }
 
     // The analysis over the renamed loads.
-    let gen: Vec<Bits> = (0..n)
-        .map(|pc| {
-            let mut bits = Bits::empty(n_keys);
-            if renamed[pc] {
-                if let Some((_, key)) = load[pc] {
-                    bits.set(key);
-                }
+    let mut gen = Rows::empty(n, n_keys);
+    for pc in 0..n {
+        if renamed[pc] {
+            if let Some((_, key)) = load[pc] {
+                gen.set(pc, key);
             }
-            bits
-        })
-        .collect();
-    let used: Vec<Bits> = (0..n)
-        .map(|pc| {
-            let mut bits = gen[pc].clone();
-            if pinned[pc] {
-                bits = Bits::empty(n_keys);
-            }
-            bits
-        })
-        .collect();
+        }
+    }
+    let mut used = gen.clone();
+    for (pc, pinned) in pinned.iter().enumerate() {
+        if *pinned {
+            used.row_mut(pc).fill(0);
+        }
+    }
     let pav_in = partially_available(&graph, &gen, &kill, n_keys);
     // Partial anticipation, backward.
-    let mut pant_in = vec![Bits::empty(n_keys); n];
+    let mut pant_in = Rows::empty(n, n_keys);
+    let mut leaving = Bits::empty(n_keys);
     let mut changed = true;
     while changed {
         changed = false;
         for pc in (0..n).rev() {
-            let mut leaving = Bits::empty(n_keys);
+            leaving.fill(false);
             for &to in &graph.succs[pc] {
-                leaving.or(&pant_in[to]);
+                leaving.or_row(pant_in.row(to));
             }
-            leaving.minus(&kill[pc]);
-            leaving.or(&used[pc]);
-            if leaving != pant_in[pc] {
-                pant_in[pc] = leaving;
+            leaving.minus_row(kill.row(pc));
+            leaving.or_row(used.row(pc));
+            if leaving.0 != pant_in.row(pc) {
+                pant_in.row_mut(pc).copy_from_slice(&leaving.0);
                 changed = true;
             }
         }
     }
-    let mut region: Vec<Bits> = (0..n)
-        .map(|pc| {
-            let mut bits = pav_in[pc].clone();
-            bits.and(&pant_in[pc]);
-            bits
-        })
-        .collect();
+    let mut region = pav_in;
+    for (held, &anticipated) in region.words.iter_mut().zip(&pant_in.words) {
+        *held &= anticipated;
+    }
 
     // A call, and anything else that may do anything, is a barrier for the
     // insertion inside a loop that makes one: a key a call took away on the
@@ -1456,16 +1591,13 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
     // next turn may as well call again before it reads — which nothing here
     // can count — so the load stays where the program made it. On the way
     // into such a loop, the edge is taken once, and the load is placed.
-    let barrier: Vec<Bits> = code
-        .iter()
-        .map(|inst| {
-            if matches!(effect(inst), Effect::Everything) {
-                Bits::full(n_keys)
-            } else {
-                Bits::empty(n_keys)
-            }
-        })
-        .collect();
+    let mut barrier = Rows::empty(n, n_keys);
+    let full = Bits::full(n_keys);
+    for (pc, inst) in code.iter().enumerate() {
+        if matches!(effect(inst), Effect::Everything) {
+            barrier.row_mut(pc).copy_from_slice(&full.0);
+        }
+    }
     let after_call = partially_available(&graph, &barrier, &gen, n_keys);
     let cycle = cycles(&graph);
     // Which components hold a barrier. A component's index is below `n`.
@@ -1479,7 +1611,7 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
         if from == ENTRY || cycle[from] != cycle[to] || !calling[cycle[from]] {
             return false;
         }
-        barrier[from].get(key) || (after_call[from].get(key) && !gen[from].get(key))
+        barrier.get(from, key) || (after_call.get(from, key) && !gen.get(from, key))
     };
 
     let owners: Vec<Slot> = keys.iter().map(|key| key.owner).collect();
@@ -1495,7 +1627,7 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
         let present = if from == ENTRY {
             entry_non_null[key]
         } else {
-            non_null[from][key]
+            non_null[from * keys.len() + key]
         };
         word.is_some() && word == repr && present
     };
@@ -1503,17 +1635,17 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
     // Insert on every edge into the region that does not carry the key, and
     // take out of the region what cannot be inserted safely: to a fixpoint.
     let (inserted, into) = loop {
-        let (into, out) = available(&graph, &gen, &kill, &region, n_keys);
+        let (into, out) = available(&graph, &gen, &kill, Some(&region), n_keys);
         let mut inserted: HashMap<(usize, usize), Bits> = HashMap::new();
         let mut unsafe_at: Vec<(usize, usize)> = Vec::new();
-        for (pc, wanted) in region.iter().enumerate() {
-            if !wanted.any() {
+        for pc in 0..n {
+            if region.row(pc).iter().all(|word| *word == 0) {
                 continue;
             }
             for &from in &graph.preds[pc] {
-                let mut missing = wanted.clone();
+                let mut missing = region.bits(pc);
                 if from != ENTRY {
-                    missing.minus(&out[from]);
+                    missing.minus_row(out.row(from));
                 }
                 for key in missing.ones().collect::<Vec<_>>() {
                     if safe(key, from) && !lost_to_a_call(key, from, pc) {
@@ -1531,7 +1663,7 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
             break (inserted, into);
         }
         for (pc, key) in unsafe_at {
-            region[pc].unset(key);
+            region.unset(pc, key);
         }
     };
 
@@ -1541,7 +1673,7 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
     let mut worth = Bits::empty(n_keys);
     for pc in 0..n {
         if let (true, false, Some((_, key))) = (renamed[pc], pinned[pc], load[pc]) {
-            if into[pc].get(key) {
+            if into.get(pc, key) {
                 dropped[pc] = true;
                 worth.set(key);
             }
@@ -1651,8 +1783,13 @@ fn plan(function: &Function, program: &Program) -> Option<Plan> {
 // ---------------------------------------------------------------------------
 // Clearing a reference cache slot where it goes dead.
 
-fn clears(function: &Function, program: &Program, caches: &[Cache]) -> Option<Edit> {
-    let flow = Flow::of(function, program)?;
+fn clears(
+    function: &Function,
+    program: &Program,
+    bounds: &Bounds,
+    caches: &[Cache],
+) -> Option<Edit> {
+    let flow = Flow::of(function, program, bounds)?;
     let code = &function.code;
     let n = code.len();
     let graph = Graph::of(&flow, n);
@@ -1710,7 +1847,7 @@ fn clears(function: &Function, program: &Program, caches: &[Cache]) -> Option<Ed
                 let ahead_live = graph.succs[pc].iter().any(|&to| live[to]);
                 let ahead_needed = graph.succs[pc].iter().any(|&to| needed[to]);
                 let l = read[pc] || (ahead_live && !written[pc]);
-                let k = kill[pc].get(at) || (ahead_needed && !written[pc]);
+                let k = kill.get(pc, at) || (ahead_needed && !written[pc]);
                 if l != live[pc] || k != needed[pc] {
                     live[pc] = l;
                     needed[pc] = k;
@@ -1723,9 +1860,9 @@ fn clears(function: &Function, program: &Program, caches: &[Cache]) -> Option<Ed
         let mut cleared: Vec<(usize, usize)> = Vec::new();
         // An instruction that reads the slot and may kill its key leaves the
         // value it read stale: cleared straight after.
-        for pc in 0..n {
-            if read[pc] && kill[pc].get(at) {
-                for &to in &graph.succs[pc] {
+        for (pc, succs) in graph.succs.iter().enumerate() {
+            if read[pc] && kill.get(pc, at) {
+                for &to in succs {
                     cleared.push((pc, to));
                 }
             }

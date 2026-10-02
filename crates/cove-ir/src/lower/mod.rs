@@ -72,6 +72,7 @@ mod core;
 mod dispatch;
 mod dropping;
 mod expr;
+mod foresee;
 mod frame;
 mod frees;
 mod gap;
@@ -261,25 +262,114 @@ pub(super) fn emitted(checked: &Checked, sources: &SourceMap, schemas: &HostSche
 ///
 /// The call graph is what makes that one round rather than one per level of
 /// the call tree: seeded with nothing, each round could only discover the
-/// callees of what the round before it lowered.
+/// callees of what the round before it lowered. And `foresee` is what
+/// makes it usually one round in all: it reads the calls a body makes
+/// without naming them — a method of a builtin receiver the standard library
+/// implements, an interpolation's appends — off the checked source first,
+/// and a guess it makes is checked against what the bodies named before the
+/// program leaves. See `sliced`.
 pub fn lower_roots(
     checked: &Checked,
     sources: &SourceMap,
     schemas: &HostSchemas,
     roots: &[(&str, &str)],
 ) -> Result<Program, Vec<Diagnostic>> {
+    sliced(checked, sources, schemas, roots, Guess::Foresee)
+}
+
+/// What [`sliced`] adds to the call graph's seed before the first round.
+enum Guess<'a> {
+    /// What [`foresee`] reads off the seed's bodies, and off the bodies of
+    /// whatever a round finds missing.
+    Foresee,
+    /// Nothing: the rounds alone, as this module was before `foresee`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Nothing,
+    /// [`Guess::Foresee`] and these declarations besides, by module and
+    /// name, whether or not anything calls them — which is how a test makes
+    /// a guess too wide on purpose.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Also(&'a [(&'a str, &'a str)]),
+}
+
+/// [`lower_roots`], with the guess it starts from as a parameter.
+///
+/// # Rounds, and the guess that saves them
+///
+/// The seed is the call graph's, and a round that names a declaration the
+/// slice left out records it and is lowered again with it — see
+/// [`lower_roots`]. Each round lowers the whole slice, so a program whose
+/// bodies call `std.vector.push` through `xs.push(x)` paid for its slice
+/// twice to learn that, and three times if `push` called something too.
+///
+/// [`foresee`] reads those calls off the checked bodies before the first
+/// round, and off a missing declaration's body as soon as a round finds it.
+/// What it adds is a guess, and a guess can only be *wider* than the rounds
+/// would have reached in one way: a declaration it adds that no body ever
+/// names. So once a round wants nothing, the slice is closed again from the
+/// seed through what the bodies of that round actually named
+/// ([`Wants::closed_from`]). If that is the whole slice, it is the slice the
+/// rounds alone would have reached, and the program is theirs. If it is not,
+/// the guess named something nobody calls: it is dropped, and the rounds go
+/// on from what was named, with no more guessing.
+fn sliced(
+    checked: &Checked,
+    sources: &SourceMap,
+    schemas: &HostSchemas,
+    roots: &[(&str, &str)],
+    guess: Guess<'_>,
+) -> Result<Program, Vec<Diagnostic>> {
     let mut plan = Plan::index(checked);
-    let mut reach = plan.reachable_from(checked, roots);
+    let seed = plan.reachable_from(checked, roots);
+    let (mut guessing, foreseen) = match guess {
+        Guess::Foresee => (
+            true,
+            foresee::library_calls(checked, &plan, &seed, &seed, false),
+        ),
+        Guess::Nothing => (false, HashSet::new()),
+        Guess::Also(named) => {
+            let mut found = foresee::library_calls(checked, &plan, &seed, &seed, false);
+            found.extend(
+                named
+                    .iter()
+                    .filter_map(|(module, name)| plan.resolve(checked, module, name)),
+            );
+            (true, found)
+        }
+    };
+    let mut guessed = !foreseen.is_empty();
+    let mut reach: HashSet<FunctionId> = seed.union(&foreseen).copied().collect();
     loop {
         let Lowering {
             program,
             errors,
             wanted,
         } = emit(checked, sources, schemas, &mut plan, &reach);
-        if wanted.is_empty() {
-            return finish(program, errors, Roots::Named(roots), schemas);
+        if !wanted.missing.is_empty() {
+            // What the declarations a round found missing will call in turn,
+            // which the call graph would have said had they been in the seed:
+            // guessed, and checked, the same way.
+            if guessing {
+                let more = foresee::library_calls(checked, &plan, &wanted.missing, &reach, true);
+                guessed |= !more.is_empty();
+                reach.extend(more);
+            }
+            reach.extend(wanted.missing);
+            continue;
         }
-        reach.extend(wanted);
+        if guessed {
+            guessed = false;
+            let closed = wanted.closed_from(&seed);
+            if closed.len() != reach.len() {
+                reach = closed;
+                // Fresh, so that no boundary read for a declaration the guess
+                // put in the slice is still standing.
+                plan = Plan::index(checked);
+                guessing = false;
+                continue;
+            }
+        }
+        return finish(program, errors, Roots::Named(roots), schemas);
     }
 }
 
@@ -327,11 +417,55 @@ pub fn lower_entry(
 struct Lowering {
     program: Program,
     errors: Vec<Diagnostic>,
-    /// The declarations a body named that this pass had left out.
+    /// What the bodies of this pass named, and which of those it had left
+    /// out.
+    wanted: Wants,
+}
+
+/// The declarations one pass's bodies named.
+struct Wants {
+    /// The ones this pass had left out.
     ///
     /// Empty for a whole-package lowering, because nothing is left out.
-    /// For a sliced one it is the correction: see [`lower_entry`].
-    wanted: HashSet<FunctionId>,
+    /// For a sliced one it is the correction: see [`lower_roots`].
+    missing: HashSet<FunctionId>,
+    /// Every declaration a body named, beside the declaration whose
+    /// lowering named it — a lambda's and an instantiation's names counted
+    /// as the declaration's that was being lowered when they were made.
+    /// What [`lower_roots`] checks a guess against.
+    asks: Vec<(FunctionId, FunctionId)>,
+    /// The declaration being lowered.
+    asker: FunctionId,
+}
+
+impl Wants {
+    fn new() -> Wants {
+        Wants {
+            missing: HashSet::new(),
+            asks: Vec::new(),
+            asker: FunctionId(0),
+        }
+    }
+
+    /// What `seed` reaches through the declarations bodies named: the slice
+    /// the rounds would have closed from `seed`, once every name a body in it
+    /// wrote is one this pass lowered.
+    fn closed_from(&self, seed: &HashSet<FunctionId>) -> HashSet<FunctionId> {
+        let mut named: HashMap<FunctionId, Vec<FunctionId>> = HashMap::new();
+        for &(asker, asked) in &self.asks {
+            named.entry(asker).or_default().push(asked);
+        }
+        let mut closed = seed.clone();
+        let mut pending: Vec<FunctionId> = seed.iter().copied().collect();
+        while let Some(id) = pending.pop() {
+            for &asked in named.get(&id).map(Vec::as_slice).unwrap_or_default() {
+                if closed.insert(asked) {
+                    pending.push(asked);
+                }
+            }
+        }
+        closed
+    }
 }
 
 /// Lowers `reach` and stubs the rest.
@@ -343,12 +477,13 @@ fn emit<'a>(
     reach: &HashSet<FunctionId>,
 ) -> Lowering {
     let mut errors = Vec::new();
-    let mut wanted = HashSet::new();
+    let mut wanted = Wants::new();
     let mut pool = Pool::new(schemas.clone());
     plan.boundaries(checked, reach, &mut pool, &mut errors);
     let mut functions = Vec::new();
     for id in 0..plan.decls.len() {
         functions.push(if reach.contains(&FunctionId(id as u32)) {
+            wanted.asker = FunctionId(id as u32);
             lower_function(
                 checked,
                 sources,
@@ -1487,8 +1622,8 @@ struct Body<'a> {
     pool: &'a mut Pool,
     errors: &'a mut Vec<Diagnostic>,
     /// The declarations this body named that the pass had left out of its
-    /// slice. See [`lower_entry`].
-    wanted: &'a mut HashSet<FunctionId>,
+    /// slice, and every declaration it named. See [`lower_entry`].
+    wanted: &'a mut Wants,
     /// The module the body is written in, which is what an unqualified name
     /// in it is resolved against.
     module: &'a str,
@@ -1574,7 +1709,7 @@ fn lower_function(
     id: usize,
     pool: &mut Pool,
     errors: &mut Vec<Diagnostic>,
-    wanted: &mut HashSet<FunctionId>,
+    wanted: &mut Wants,
 ) -> Function {
     let decl = &plan.decls[id];
     let Some(boundary) = &decl.boundary else {
@@ -1612,7 +1747,7 @@ fn lower_body(
     args: &[Ty],
     pool: &mut Pool,
     errors: &mut Vec<Diagnostic>,
-    wanted: &mut HashSet<FunctionId>,
+    wanted: &mut Wants,
 ) -> Function {
     let mut frame = Frame::new();
     let mut param_slots = Vec::with_capacity(boundary.params.len());
@@ -2259,10 +2394,12 @@ impl Body<'_> {
     ///
     /// A whole-package lowering never sees one, because nothing is left out.
     fn reached(&mut self, id: FunctionId) -> bool {
+        let asker = self.wanted.asker;
+        self.wanted.asks.push((asker, id));
         if self.plan.reached(id) {
             return true;
         }
-        self.wanted.insert(id);
+        self.wanted.missing.insert(id);
         false
     }
 
