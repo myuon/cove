@@ -1736,11 +1736,23 @@ impl<'a> Machine<'a> {
     /// [`Limits::max_call_depth`]: crate::budget::Limits::max_call_depth
     /// [`RunOutcome::CallDepth`]: crate::trace::RunOutcome::CallDepth
     fn admit_frame(&self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
+        self.admit_frame_with(budget, || span)
+    }
+
+    /// [`Machine::admit_frame`], with the span looked up only when the frame is
+    /// refused — for the native direct call, which admits a frame on every
+    /// compiled call and refuses almost none.
+    #[inline]
+    fn admit_frame_with(
+        &self,
+        budget: &Meter,
+        span: impl FnOnce() -> Span,
+    ) -> Result<(), RuntimeError> {
         if let Some(limit) = budget.limits().max_call_depth {
             if self.frames.len() + 1 > limit {
                 // The error names the value the limit was configured with, so
                 // it is built where that value is rather than here.
-                return Err(budget.to_runtime_error(Stopped::CallDepth).at(span));
+                return Err(budget.to_runtime_error(Stopped::CallDepth).at(span()));
             }
         }
         Ok(())

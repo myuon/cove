@@ -198,6 +198,10 @@ impl Tiered for NativeProgram {
     fn counts_helpers(&self) -> bool {
         self.counts_helpers
     }
+
+    fn table(&self) -> Option<&[Option<NativeEntry>]> {
+        Some(&self.entries)
+    }
 }
 
 impl NativeProgram {

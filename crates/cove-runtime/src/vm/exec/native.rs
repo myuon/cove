@@ -110,6 +110,22 @@ pub trait Tiered {
     fn counts_helpers(&self) -> bool {
         false
     }
+
+    /// Every entry at once, indexed by `FunctionId`, when the table is one.
+    ///
+    /// `None` by default, and then every question goes through
+    /// [`entry`](Tiered::entry). A table that *is* a slice — [`crate::NativeProgram`]
+    /// is — answers it here, and the runtime asks the slice instead of making a
+    /// virtual call per question: the direct call helper asks once per compiled
+    /// call, and on `examples/cq` that is 89 million times a run, where the
+    /// indirect call measured 2.4% of the native run.
+    ///
+    /// The answer must agree with [`entry`](Tiered::entry) for every id, and must
+    /// stay valid, unmoved and unchanged for as long as the table may be asked —
+    /// which for a table installed in a machine is until it is taken out again.
+    fn table(&self) -> Option<&[Option<Entry>]> {
+        None
+    }
 }
 
 /// Nothing is compiled.
@@ -240,6 +256,11 @@ pub(crate) struct Tiering {
     /// outlives the machine, and [`Session::call`], which takes it back before
     /// it returns.
     entries: *const dyn Tiered,
+    /// [`Tiered::table`] of `entries`, read once at installation: the start of
+    /// the slice and its length, or a null start when the table is not one.
+    ///
+    /// Raw for the reason `entries` is, and valid for exactly as long.
+    table: (*const Option<Entry>, usize),
     /// Which transitions the calls of this run took.
     counts: Tiers,
     /// Dynamic calls to each function that did **not** go native, by
@@ -295,6 +316,7 @@ impl Tiering {
     ) -> Tiering {
         Tiering {
             entries,
+            table: table_of(entries),
             counts: Tiers::default(),
             refused: vec![0; functions],
             chunks: Vec::with_capacity(chunk_capacity),
@@ -313,7 +335,26 @@ impl Tiering {
     /// As [`Tiering::new`].
     pub(crate) unsafe fn aim(&mut self, entries: *const (dyn Tiered + 'static)) {
         self.entries = entries;
+        self.table = table_of(entries);
         self.counts_helpers = (*entries).counts_helpers();
+    }
+
+    /// The compiled entry of `id`, if it has one: [`Tiered::entry`], through the
+    /// slice when the table offered one.
+    ///
+    /// # Safety
+    ///
+    /// The table installed is still alive, which is [`Tiering::new`]'s contract.
+    #[inline]
+    unsafe fn entry(&self, id: FunctionId) -> Option<Entry> {
+        let (start, len) = self.table;
+        if start.is_null() {
+            return (*self.entries).entry(id);
+        }
+        match id.index() < len {
+            true => *start.add(id.index()),
+            false => None,
+        }
     }
 
     /// Which transitions this run's calls took.
@@ -351,7 +392,7 @@ impl Tiering {
     ///
     /// The table this was aimed at is still alive.
     pub(crate) unsafe fn crossing(&mut self, callee: FunctionId) -> Option<Entry> {
-        let entry = (*self.entries).entry(callee);
+        let entry = self.entry(callee);
         match entry {
             Some(_) => self.counts.vm_to_native += 1,
             None => {
@@ -439,7 +480,7 @@ impl<'m, 'a> Bridge<'m, 'a> {
         stayed: fn(&mut Tiers),
     ) -> Option<Entry> {
         let tier = self.tier;
-        let entry = (*(*tier).entries).entry(callee);
+        let entry = (*tier).entry(callee);
         match entry {
             Some(_) => crossed(&mut (*tier).counts),
             None => {
@@ -469,6 +510,18 @@ impl<'m, 'a> Bridge<'m, 'a> {
 /// installed. Both installers say how they do it.
 pub(crate) unsafe fn erase<'x>(entries: &'x dyn Tiered) -> *const (dyn Tiered + 'static) {
     std::mem::transmute::<*const (dyn Tiered + 'x), *const (dyn Tiered + 'static)>(entries)
+}
+
+/// [`Tiered::table`] of `entries`, as [`Tiering::table`] holds it.
+///
+/// # Safety
+///
+/// `entries` is alive, which every installer guarantees.
+unsafe fn table_of(entries: *const (dyn Tiered + 'static)) -> (*const Option<Entry>, usize) {
+    match (*entries).table() {
+        Some(table) => (table.as_ptr(), table.len()),
+        None => (std::ptr::null(), 0),
+    }
 }
 
 /// Charges one dynamic call to `callee`'s refusal. See [`Tiering::refused`].
@@ -518,6 +571,11 @@ struct Destination {
 /// # Safety
 ///
 /// `ctx` and `host` are the pointers the helper was reached with.
+///
+/// Inlined for the direct call's sake: [`open`] reaches it on every compiled
+/// call, and out of line it was a fifth of what `open` cost on `examples/cq` —
+/// a call, a prologue and an epilogue around a dozen loads and stores.
+#[inline(always)]
 unsafe fn republish(ctx: *mut NativeCtx, host: *mut Bridge<'_, '_>) {
     let machine = (*host).machine;
     let tier = (*host).tier;
@@ -2467,7 +2525,7 @@ unsafe extern "C" fn open(
     // Asked without charging a transition: the mediated path below charges its
     // own, and a direct call charges `native_to_native_direct` once the frame is
     // open. Counting here as well would count a mixed call twice.
-    let Some(entry) = (*(*(*host).tier).entries).entry(id) else {
+    let Some(entry) = (*(*host).tier).entry(id) else {
         // The mediated helper, whole. A mixed call is the path it always was.
         return Opened {
             entry: None,
@@ -2491,12 +2549,14 @@ unsafe extern "C" fn open(
             base,
             "compiled code and the frame stack disagree about which frame is calling"
         );
-        let span = machine.span(caller.function, pc as usize);
         // A call is a *poll*, as a backedge is (ADR 0078, after ADR 0060): the
-        // safepoint is taken when the stride is reached and not otherwise.
+        // safepoint is taken when the stride is reached and not otherwise. The
+        // span is looked up only for a refusal that needs one.
         machine
             .safepoint_if_due(budget, caller.function, pc as usize)
-            .and_then(|()| machine.admit_frame(budget, span))
+            .and_then(|()| {
+                machine.admit_frame_with(budget, || machine.span(caller.function, pc as usize))
+            })
             .and_then(|()| {
                 let size = machine.program.function(id).frame_size();
                 // `open_frame`'s own line, and its bare error: the two refusals
