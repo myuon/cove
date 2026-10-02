@@ -3344,7 +3344,10 @@ fn wantsASpaceBetween(
   if b == '>' && closesAgainst(held, r) {
     return false
   }
-  !prefixed(source, held, l)
+  // [`prefixed`] answers `true` for a `!` and `false` for anything but a `-`
+  // before it looks any further, and `a` is already that byte: asking it
+  // here leaves the call to the one case it has to walk for.
+  a != '!' && (a != '-' || !prefixed(source, held, l))
 }
 
 /// Whether the token at `at` is `..` or `..<`.
@@ -3512,7 +3515,6 @@ fn isASpaceToken(held: Array<Token>, at: Int) -> Bool {
   }
 }
 
-/// Whether `token` is exactly `word`.
 /// Whether the token at `at` is the `...` of a variadic parameter.
 fn isVariadicDots(source: String, held: Array<Token>, at: Int) -> Bool {
   match held.get(at) {
@@ -3524,11 +3526,27 @@ fn isVariadicDots(source: String, held: Array<Token>, at: Int) -> Bool {
   }
 }
 
+/// Whether `token` is exactly `word`.
+///
+/// Compared byte for byte in place, as the parser's `isWord` does, rather than
+/// by cutting the token out with `sliceBytes` and comparing strings: that
+/// allocated a string per question, and [`holdsSomething`] asks nine of them
+/// of every word in front of a bracket. A token the lexer produced is always
+/// a range of whole characters, which is the only case in which `sliceBytes`
+/// answered at all, so the answers are the same.
 fn isTheWord(source: String, token: Token, word: String) -> Bool {
-  match source.sliceBytes(token.from, token.to) {
-    Ok(text) => text == word
-    Err(_) => false
+  let n = word.byteLength()
+  if token.to - token.from != n {
+    return false
   }
+  var i = 0
+  while i < n {
+    if source.byteAt(token.from + i) != word.byteAt(i) {
+      return false
+    }
+    i = i + 1
+  }
+  true
 }
 
 /// The tokens in `[from, to)` with the space between them decided.
