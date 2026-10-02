@@ -745,7 +745,26 @@ impl Space {
     /// there is no pair of slices to hand a `copy_within`; what a chunked
     /// store buys on this path is bounded rather than free.
     fn copy(&self, dst: u64, src: u64, words: u64) {
-        if dst < src {
+        if dst + words <= src || src + words <= dst {
+            // Disjoint, which is every copy into a freshly allocated object —
+            // a growth's live prefix, a builder's finish, a slice. Run by run,
+            // so a chunk is looked up once per chunk crossed rather than twice
+            // per word: the per-word form was 3.7% of a native `covefmt` run,
+            // nearly all of it `runs::grow` copying a vector's prefix.
+            let (mut d, mut s) = (dst - STACK_WORDS, src - STACK_WORDS);
+            let mut left = words;
+            while left > 0 {
+                let into = self.words.run(d);
+                let from = self.words.run(s);
+                let take = (into.len() as u64).min(from.len() as u64).min(left) as usize;
+                for (to, word) in into[..take].iter().zip(&from[..take]) {
+                    to.store(word.load(Ordering::Relaxed), Ordering::Relaxed);
+                }
+                d += take as u64;
+                s += take as u64;
+                left -= take as u64;
+            }
+        } else if dst < src {
             for at in 0..words {
                 self.store(dst + at, self.load(src + at));
             }
@@ -2516,6 +2535,41 @@ mod tests {
         mem.clear_words(mem.payload_addr(object, 0), words);
         assert_eq!(mem.payload(object, 0), 0);
         assert_eq!(mem.payload(object, words - 1), 0);
+    }
+
+    /// A disjoint heap-to-heap copy crosses a chunk boundary on *both* sides, at
+    /// different offsets, and every word lands.
+    ///
+    /// The disjoint copy is taken a run at a time, and a run ends at whichever
+    /// of the two chunks ends first. Two objects, each longer than a chunk and
+    /// starting at different offsets within theirs, put the source's boundary
+    /// and the destination's boundary at different points of one copy — so a
+    /// step that advanced one side by the other side's run would misplace every
+    /// word after the first boundary.
+    #[test]
+    fn a_disjoint_heap_copy_crosses_both_sides_chunk_boundaries() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let words = (CHUNK_WORDS + 100) as u32;
+        let mut mem = Memory::new(8 * CHUNK_WORDS as usize);
+        // An odd-sized object first, so the two long ones are not at the same
+        // offset within their chunks.
+        alloc(&mut mem, &table, array, 37);
+        let from = alloc(&mut mem, &table, array, words);
+        let into = alloc(&mut mem, &table, array, words + 11);
+        for at in 0..words {
+            mem.set_payload(from, at, u64::from(at) * 3 + 1);
+        }
+        mem.copy_words(mem.payload_addr(into, 5), mem.payload_addr(from, 0), words);
+        for at in 0..words {
+            assert_eq!(
+                mem.payload(into, at + 5),
+                u64::from(at) * 3 + 1,
+                "word {at}"
+            );
+        }
+        assert_eq!(mem.payload(into, 4), 0, "nothing before the run is written");
+        assert_eq!(mem.payload(into, words + 5), 0, "nor after it");
     }
 
     // `a_strings_bytes_cross_a_chunk_boundary_whole` stood here, over
