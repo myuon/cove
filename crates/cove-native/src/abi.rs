@@ -990,6 +990,14 @@ pub type GrowableFn =
 /// the frame slot the row names as `dst`, which is why generated code forgets
 /// what it knew about the frame after any call to it.
 ///
+/// A short byte slice is the same exception the short byte copy is: the
+/// template arm answers one of at most `SHORT_COPY_BYTES` from a `String` as
+/// an [`AllocFn`] call — which is the charge, the safepoint and the
+/// allocation this helper would have made, in the same order — and an emitted
+/// copy into the fresh string, handing everything else here before anything is
+/// allocated. Bytes carry no references, one chunk never polls, and a refusal
+/// of any kind is this helper's.
+///
 /// # Safety
 ///
 /// As [`AllocFn`]: this is a safepoint — and a chunk's poll may collect, with a

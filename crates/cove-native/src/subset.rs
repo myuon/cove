@@ -1468,7 +1468,10 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
         // [ADR 0058]'s run slice, the same helper with [`RunOp::SliceWords`] or
-        // [`RunOp::SliceBytes`]: an allocation and the run copy that fills it.
+        // [`RunOp::SliceBytes`]: an allocation and the run copy that fills it —
+        // but for a short byte slice, which the template arm answers as the
+        // allocation helper and an emitted copy, and hands over only when it
+        // cannot.
         // Bounded as a `run-copy` is — four one-word operands the frame has, and
         // for words an element layout the table has that fits the template arm's
         // immediate.
