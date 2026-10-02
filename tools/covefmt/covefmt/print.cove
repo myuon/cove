@@ -833,6 +833,13 @@ fn spacing(
   if breaks > most {
     breaks = most
   }
+  // A line the tree has decided, at one of the depths nearly every line is
+  // at, is a literal: no builder to allocate, fill and finish once per line
+  // of the file. It is the answer the builder below writes for the same
+  // `breaks` and `depth`.
+  if breaks > 0 && depth >= 0 && depth <= 6 {
+    return lineAt(breaks, depth)
+  }
   // Newlines, then either the indent the tree decided or the one the source
   // already had — a handful of bytes, so the capacity is the answer's own
   // size and this never grows.
@@ -869,6 +876,56 @@ fn spacing(
     out.appendSlice(source, lastBreak + 1, token.to)
   }
   out.finish()
+}
+
+/// `breaks` newlines — one or two, all [`spacing`] ever keeps — and `depth`
+/// steps of indentation, for a `depth` from zero to six, as a literal.
+fn lineAt(breaks: Int, depth: Int) -> String {
+  if breaks == 1 {
+    if depth == 0 {
+      return "\n"
+    }
+    if depth == 1 {
+      return "\n  "
+    }
+    if depth == 2 {
+      return "\n    "
+    }
+    if depth == 3 {
+      return "\n      "
+    }
+    if depth == 4 {
+      return "\n        "
+    }
+    if depth == 5 {
+      return "\n          "
+    }
+    if depth == 6 {
+      return "\n            "
+    }
+  }
+  if breaks == 2 {
+    if depth == 0 {
+      return "\n\n"
+    }
+    if depth == 1 {
+      return "\n\n  "
+    }
+    if depth == 2 {
+      return "\n\n    "
+    }
+    if depth == 3 {
+      return "\n\n      "
+    }
+    if depth == 4 {
+      return "\n\n        "
+    }
+    if depth == 5 {
+      return "\n\n          "
+    }
+  }
+  // What is left, given the two ranges above, is two newlines at depth six.
+  "\n\n            "
 }
 
 /// Whether the token in front of `index` is of `kind`.
