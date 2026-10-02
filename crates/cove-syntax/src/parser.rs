@@ -424,11 +424,21 @@ impl<'a> Parser<'a> {
         matches!(self.peek(), TokenKind::Eof)
     }
 
-    fn bump(&mut self) -> Token {
-        let token = self.tokens[self.pos].clone();
+    /// Moves past the current token.
+    ///
+    /// It answers nothing, because almost every caller has already read what
+    /// it needed with [`Parser::peek`]: handing the token back meant a copy of
+    /// every identifier's and every string's text, made to be dropped.
+    fn bump(&mut self) {
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
         }
+    }
+
+    /// Moves past the current token and answers a copy of it.
+    fn bump_token(&mut self) -> Token {
+        let token = self.tokens[self.pos].clone();
+        self.bump();
         token
     }
 
@@ -515,7 +525,7 @@ impl<'a> Parser<'a> {
 
     fn expect(&mut self, kind: &TokenKind, expected: &str) -> PResult<Token> {
         if self.at(kind) {
-            Ok(self.bump())
+            Ok(self.bump_token())
         } else {
             Err(self.unexpected(expected))
         }
@@ -523,7 +533,9 @@ impl<'a> Parser<'a> {
 
     fn expect_keyword(&mut self, keyword: Keyword, expected: &str) -> PResult<Span> {
         if self.at_keyword(keyword) {
-            Ok(self.bump().span)
+            let span = self.span();
+            self.bump();
+            Ok(span)
         } else {
             Err(self.unexpected(expected))
         }
