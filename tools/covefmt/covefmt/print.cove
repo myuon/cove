@@ -237,6 +237,74 @@ fn spaces(n: Int) -> String {
   "".join(out.freeze())
 }
 
+/// The text of a one-byte punctuation token whose byte is `c`, as a literal,
+/// or `""` for a byte that is not one.
+///
+/// A literal is not allocated, and a `sliceBytes` of the source is — one
+/// string per token written — and about half the tokens a printer writes one
+/// at a time are a bracket, a dot, a comma or a colon. The tests are roughly
+/// in the order those bytes occur in this repository, most frequent first.
+fn punctText(c: Int) -> String {
+  if c == '.' {
+    return "."
+  }
+  if c == '(' {
+    return "("
+  }
+  if c == ')' {
+    return ")"
+  }
+  if c == ',' {
+    return ","
+  }
+  if c == ':' {
+    return ":"
+  }
+  if c == '\{' {
+    return "\{"
+  }
+  if c == '\}' {
+    return "\}"
+  }
+  if c == '=' {
+    return "="
+  }
+  if c == '[' {
+    return "["
+  }
+  if c == ']' {
+    return "]"
+  }
+  if c == '<' {
+    return "<"
+  }
+  if c == '>' {
+    return ">"
+  }
+  if c == '?' {
+    return "?"
+  }
+  if c == '!' {
+    return "!"
+  }
+  if c == '+' {
+    return "+"
+  }
+  if c == '-' {
+    return "-"
+  }
+  if c == '*' {
+    return "*"
+  }
+  if c == '/' {
+    return "/"
+  }
+  if c == '%' {
+    return "%"
+  }
+  ""
+}
+
 /// Pushes the text of `tree` and everything under it.
 ///
 /// A leaf is one token's run of source. A node is its children in order — and
@@ -359,8 +427,11 @@ fn emit(
       0
     }
     let room = maxWidth() - col - gap - rest
+    // Bounded before it is measured: see [`bytesBetween`]. Most groups are a
+    // call of a few short arguments, and twice their bytes already fits.
     let fits = !mustBreak(source, held, tree) &&
-      flatWidth(source, held, tree) <= room
+      (2 * bytesBetween(held, tree.from, tree.to) <= room ||
+        flatWidth(source, held, tree) <= room)
     if isBroken(source, held, tree) {
       // `arg_list` asks its lone-argument escape before it looks at how the
       // source was written, so a call broken around one argument that will
@@ -414,7 +485,9 @@ fn emit(
     } else {
       0
     }
-    if flatWidth(source, held, tree) > maxWidth() - col - rest &&
+    let limit = maxWidth() - col - rest
+    if 2 * bytesBetween(held, tree.from, tree.to) > limit &&
+      flatWidth(source, held, tree) > limit &&
       breaksAtItsDots(source, held, tree) {
       writeChain(source, held, tree, depth, var out)
       return tree.to - 1
@@ -476,6 +549,52 @@ fn emit(
   while i < count {
     match children.get(i) {
       Some(child) => {
+        // A leaf that is not a run of space is written here rather than by a
+        // call to `emit`, because nothing below decides anything about one:
+        // the depth is read only by a run of space, a continuation is a break
+        // and a break is a run of space, and the rules for bodies, groups,
+        // errors and declarations are all about nodes. So the answer is the
+        // one `emit`'s own leaf case gives — the same lines, below — without
+        // pushing `emit`'s frame, which is the widest in the program, once
+        // per token of the file.
+        if child.kind == Node.Leaf && child.children.length() == 0 {
+          match held.get(child.from) {
+            Some(token) => {
+              if token.kind != Kind.Space {
+                if last >= 0 && last == child.from - 1 &&
+                  !isASpaceToken(held, last) &&
+                  wantsASpaceBetween(source, held, last, child.from) {
+                  out.push(" ")
+                }
+                if token.kind == Kind.LineComment ||
+                  token.kind == Kind.DocComment {
+                  out.push(asWritten(source, token))
+                } else {
+                  // `text`, written here: the call around `sliceBytes` was
+                  // one more frame per token.
+                  let mark = if token.kind == Kind.Punct &&
+                    token.to - token.from == 1 {
+                    punctText(source.byteAt(token.from))
+                  } else {
+                    ""
+                  }
+                  if mark.byteLength() > 0 {
+                    out.push(mark)
+                  } else {
+                    match source.sliceBytes(token.from, token.to) {
+                      Ok(piece) => out.push(piece)
+                      Err(_) => out.push("")
+                    }
+                  }
+                }
+                last = child.from
+                i = i + 1
+                continue
+              }
+            }
+            None => { }
+          }
+        }
         // The closing brace is the body's last child and belongs to the
         // depth the body opened at, not to the depth inside it.
         var at = if indents && i + 1 >= count ||
@@ -673,6 +792,23 @@ fn emit(
             breaks,
             var out,
           )
+        } else if child.kind == Node.Leaf && child.children.length() == 0 &&
+          isASpaceToken(held, child.from) {
+          // A run of space, written by the lines `emit`'s leaf case would
+          // run for it at the depth decided above — for the reason the other
+          // leaves are written at the top of this loop: the call pushed the
+          // widest frame in the program to write one run.
+          match held.get(child.from) {
+            Some(token) => {
+              if child.from == ruledAt {
+                out.push(ruled(ruledBreaks))
+              } else {
+                out.push(spacing(source, token, opensBlock(source, held, last), last < 0, at, held, child.from))
+              }
+              last = child.from
+            }
+            None => { }
+          }
         } else {
           last = emit(
             source,
@@ -775,6 +911,13 @@ fn spacing(
   if breaks > most {
     breaks = most
   }
+  // A line the tree has decided, at one of the depths nearly every line is
+  // at, is a literal: no builder to allocate, fill and finish once per line
+  // of the file. It is the answer the builder below writes for the same
+  // `breaks` and `depth`.
+  if breaks > 0 && depth >= 0 && depth <= 6 {
+    return lineAt(breaks, depth)
+  }
   // Newlines, then either the indent the tree decided or the one the source
   // already had — a handful of bytes, so the capacity is the answer's own
   // size and this never grows.
@@ -813,6 +956,56 @@ fn spacing(
   out.finish()
 }
 
+/// `breaks` newlines — one or two, all [`spacing`] ever keeps — and `depth`
+/// steps of indentation, for a `depth` from zero to six, as a literal.
+fn lineAt(breaks: Int, depth: Int) -> String {
+  if breaks == 1 {
+    if depth == 0 {
+      return "\n"
+    }
+    if depth == 1 {
+      return "\n  "
+    }
+    if depth == 2 {
+      return "\n    "
+    }
+    if depth == 3 {
+      return "\n      "
+    }
+    if depth == 4 {
+      return "\n        "
+    }
+    if depth == 5 {
+      return "\n          "
+    }
+    if depth == 6 {
+      return "\n            "
+    }
+  }
+  if breaks == 2 {
+    if depth == 0 {
+      return "\n\n"
+    }
+    if depth == 1 {
+      return "\n\n  "
+    }
+    if depth == 2 {
+      return "\n\n    "
+    }
+    if depth == 3 {
+      return "\n\n      "
+    }
+    if depth == 4 {
+      return "\n\n        "
+    }
+    if depth == 5 {
+      return "\n\n          "
+    }
+  }
+  // What is left, given the two ranges above, is two newlines at depth six.
+  "\n\n            "
+}
+
 /// Whether the token in front of `index` is of `kind`.
 fn standsAfter(held: Array<Token>, index: Int, kind: Kind) -> Bool {
   match held.get(index - 1) {
@@ -837,6 +1030,13 @@ fn asWritten(source: String, token: Token) -> String {
     let to = endOfText(source, from, token.to)
     if to == from {
       return "///"
+    }
+    // Written as `cove fmt` writes it already — `///`, one space, and nothing
+    // trailing — which is every doc comment of a formatted file: the answer
+    // is the token's own text, cut once rather than cut and then copied into
+    // an interpolation.
+    if from == token.from + 4 && to == token.to {
+      return text(source, token)
     }
     return match source.sliceBytes(from, to) {
       Ok(line) => "/// {line}"
@@ -1061,7 +1261,9 @@ fn holdsABody(source: String, held: Array<Token>, tree: Tree) -> Bool {
     if child.kind == Node.Body && breaksAsABody(source, held, child, tree.from) {
       return true
     }
-    if holdsABody(source, held, child) {
+    // A leaf holds nothing, so it is not asked: most children are leaves,
+    // and asking each was a call apiece to walk no children.
+    if child.children.length() > 0 && holdsABody(source, held, child) {
       return true
     }
   }
@@ -1266,28 +1468,53 @@ fn flattened(source: String, held: Array<Token>, tree: Tree) -> String {
   // the tree, which is a second pass over the whole thing to choose a number
   // that only has to be close.
   var out = StringBuilder.withCapacity(byteSpan(held, tree))
+  // The bytes from `run` to `runTo` are written exactly as the source has
+  // them and are not copied yet. A token the flat form keeps as it stands —
+  // which in a formatted file is nearly every token of a group that fits,
+  // its single spaces included — only moves `runTo`, and the run is copied
+  // in one piece where the flat form first departs from the source and at
+  // the end. The bytes are the ones a copy per token wrote, in the same
+  // order; what goes is a copy per token.
+  var run = 0
+  var runTo = 0
   var at = tree.from
   while at < tree.to {
     match held.get(at) {
       Some(token) => {
         if token.kind == Kind.Space {
           if wantsASpace(source, held, at) {
-            out.append(" ")
+            if token.to - token.from == 1 && source.byteAt(token.from) == ' ' &&
+              runTo == token.from {
+              runTo = token.to
+            } else {
+              out.appendSlice(source, run, runTo)
+              out.append(" ")
+              run = token.to
+              runTo = token.to
+            }
           }
         } else if !isATrailingComma(source, held, at, tree.to) {
           if wantsAMissingSpace(source, held, tree.from, at) {
+            out.appendSlice(source, run, runTo)
             out.append(" ")
+            run = token.from
+            runTo = token.from
           }
-          // The token's own bytes, copied straight out of the source. A
-          // `text()` here would cut a `String` out first and drop it as soon
-          // as it had been copied a second time.
-          out.appendSlice(source, token.from, token.to)
+          // The token's own bytes, straight out of the source and as part of
+          // the run. A `text()` here would cut a `String` out first and drop
+          // it as soon as it had been copied a second time.
+          if runTo != token.from {
+            out.appendSlice(source, run, runTo)
+            run = token.from
+          }
+          runTo = token.to
         }
       }
       None => { }
     }
     at = at + 1
   }
+  out.appendSlice(source, run, runTo)
   out.finish()
 }
 
@@ -1509,7 +1736,9 @@ fn worthBreaking(
   }
   // The width it would have on a line of its own, with the comma each broken
   // member ends on. `indent + INDENT + width(&value) + 1`, in steps.
-  (depth + 1) * 2 + flatWidth(source, held, only) + 1 <= maxWidth()
+  let indent = (depth + 1) * 2 + 1
+  indent + 2 * bytesBetween(held, only.from, only.to) <= maxWidth() ||
+    indent + flatWidth(source, held, only) <= maxWidth()
 }
 
 /// Whether `tree` is an array literal rather than an argument list.
@@ -1750,7 +1979,8 @@ fn hugsItsLast(
   // below the head; one that still fits on this line would leave the call as
   // long as it already was."*
   if !mustBreak(source, held, last) &&
-    at + flatWidth(source, held, last) <= maxWidth() {
+    (at + 2 * bytesBetween(held, last.from, last.to) <= maxWidth() ||
+      at + flatWidth(source, held, last) <= maxWidth()) {
     return false
   }
   true
@@ -3145,6 +3375,33 @@ fn holdsABrokenGroup(source: String, held: Array<Token>, tree: Tree) -> Bool {
   false
 }
 
+/// How many bytes of source the tokens in `[from, to)` cover, which bounds
+/// how wide they are written flat.
+///
+/// Two lookups, because the tokens tile the source. It is an upper bound on
+/// [`overflows`]' width — a run of space counts one column or none and is
+/// at least a byte, a comment counts one and is at least two, and a token's
+/// characters are at most its bytes — and *twice* it is an upper bound on
+/// [`flatWidth`], which may also put one space the source has not got in
+/// front of each token. So a width question whose bound already answers it
+/// is answered without the walk, and the answer is the walk's: the bound
+/// only ever says "fits", never "does not".
+///
+/// A range the token array does not hold answers a number no line fits in,
+/// so the bound decides nothing there and the walk is taken.
+fn bytesBetween(held: Array<Token>, from: Int, to: Int) -> Int {
+  if to <= from {
+    return 0
+  }
+  match held.get(from) {
+    Some(first) => match held.get(to - 1) {
+      Some(last) => last.to - first.from
+      None => 1000000000
+    }
+    None => 1000000000
+  }
+}
+
 /// Whether the leaves in `[from, to)` run past the limit when written from
 /// `col`.
 ///
@@ -3160,6 +3417,13 @@ fn overflows(
   to: Int,
   col: Int,
 ) -> Bool {
+  // Every token is at least as many bytes as it is columns wide here — a run
+  // of space is one column or none, a comment one, anything else its
+  // characters — so a line whose bytes fit is a line that fits, and that is
+  // most statements in a formatted file. See [`bytesBetween`].
+  if col + bytesBetween(held, from, to) <= maxWidth() {
+    return false
+  }
   var width = col
   var at = from
   while at < to {
@@ -3247,7 +3511,10 @@ fn wantsASpaceBetween(
   if b == '>' && closesAgainst(held, r) {
     return false
   }
-  !prefixed(source, held, l)
+  // [`prefixed`] answers `true` for a `!` and `false` for anything but a `-`
+  // before it looks any further, and `a` is already that byte: asking it
+  // here leaves the call to the one case it has to walk for.
+  a != '!' && (a != '-' || !prefixed(source, held, l))
 }
 
 /// Whether the token at `at` is `..` or `..<`.
@@ -3415,7 +3682,6 @@ fn isASpaceToken(held: Array<Token>, at: Int) -> Bool {
   }
 }
 
-/// Whether `token` is exactly `word`.
 /// Whether the token at `at` is the `...` of a variadic parameter.
 fn isVariadicDots(source: String, held: Array<Token>, at: Int) -> Bool {
   match held.get(at) {
@@ -3427,11 +3693,27 @@ fn isVariadicDots(source: String, held: Array<Token>, at: Int) -> Bool {
   }
 }
 
+/// Whether `token` is exactly `word`.
+///
+/// Compared byte for byte in place, as the parser's `isWord` does, rather than
+/// by cutting the token out with `sliceBytes` and comparing strings: that
+/// allocated a string per question, and [`holdsSomething`] asks nine of them
+/// of every word in front of a bracket. A token the lexer produced is always
+/// a range of whole characters, which is the only case in which `sliceBytes`
+/// answered at all, so the answers are the same.
 fn isTheWord(source: String, token: Token, word: String) -> Bool {
-  match source.sliceBytes(token.from, token.to) {
-    Ok(text) => text == word
-    Err(_) => false
+  let n = word.byteLength()
+  if token.to - token.from != n {
+    return false
   }
+  var i = 0
+  while i < n {
+    if source.byteAt(token.from + i) != word.byteAt(i) {
+      return false
+    }
+    i = i + 1
+  }
+  true
 }
 
 /// The tokens in `[from, to)` with the space between them decided.
@@ -3726,8 +4008,12 @@ fn collect(tree: Tree, ranks: Array<Int>, var out: Vector<Boundary>) {
   if to > from {
     out.push(Boundary(kind: tree.kind, from: from, to: to))
   }
+  // A leaf adds nothing, so it is not visited: most children are leaves,
+  // and visiting each was a call apiece to return at once.
   for child in tree.children {
-    collect(child, ranks, var out)
+    if child.kind != Node.Leaf {
+      collect(child, ranks, var out)
+    }
   }
 }
 

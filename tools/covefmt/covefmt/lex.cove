@@ -36,7 +36,18 @@ fn operatorWidth(c0: Int, c1: Int, c2: Int) -> Int {
   if (c0 == '-' || c0 == '=') && c1 == '>' {
     return 2
   }
-  if c1 == '=' && takesEquals(c0) {
+  // `==`, `!=`, `<=`, `>=`, and the five compound assignments: the operators
+  // an `=` may follow. Written here rather than called, so that this function
+  // calls nothing and the lowering can expand it into the lexer's loop — it
+  // runs once per punctuation byte, and as a call it was two (this and
+  // `isOperatorByte`) a hundred thousand times a pass over the repository.
+  if c1 == '=' && (c0 == '=' || c0 == '!' || c0 == '<' || c0 == '>') {
+    return 2
+  }
+  if c1 == '=' && (c0 == '+' || c0 == '-' || c0 == '*' || c0 == '/') {
+    return 2
+  }
+  if c1 == '=' && c0 == '%' {
     return 2
   }
   if c0 == '&' && c1 == '&' || c0 == '|' && c1 == '|' {
@@ -48,19 +59,31 @@ fn operatorWidth(c0: Int, c1: Int, c2: Int) -> Int {
   0
 }
 
-/// Whether `c` is an operator an `=` may follow: `==`, `!=`, `<=`, `>=`, and
-/// the five compound assignments.
-fn takesEquals(c: Int) -> Bool {
-  c == '=' || c == '!' || c == '<' || c == '>' || c == '+' || c == '-' ||
-    c == '*' || c == '/' || c == '%'
+/// Whether `c` is punctuation no longer operator begins with: a bracket, a
+/// comma, a colon or a `?`.
+///
+/// They are most of the punctuation there is, and [`operatorWidth`] answers
+/// one for each of them — so the lexer asks this first, and takes those as one
+/// byte without the call and without reading the two bytes after them.
+fn beginsNoLongerOperator(c: Int) -> Bool {
+  c == '(' || c == ')' || c == ',' || c == ':' || c == '\{' || c == '\}' ||
+    c == '[' || c == ']' || c == '?'
 }
 
-/// Whether `c` is an operator or a bracket the language spells on its own.
+/// Whether `c` is an operator or a bracket the language spells on its own:
+/// `= ! < > + - * / % ? . , : ( ) { } [ ]`.
+///
+/// Asked by ranges of the byte rather than as nineteen comparisons, which is
+/// the same set — `%` to `/` but `&` and `'`, `:` to `?` but `;`, the `!`,
+/// and the four brackets above `Z` — in a body small enough to be expanded
+/// where it is called.
 fn isOperatorByte(c: Int) -> Bool {
-  c == '=' || c == '!' || c == '<' || c == '>' || c == '+' || c == '-' ||
-    c == '*' || c == '/' || c == '%' || c == '?' || c == '.' || c == ',' ||
-    c == ':' || c == '(' || c == ')' || c == '\{' || c == '\}' || c == '[' ||
-    c == ']'
+  if c < '[' {
+    c >= '%' && c <= '/' && c != '&' && c != '\'' || c == '!' ||
+      c >= ':' && c <= '?' && c != ';'
+  } else {
+    c == '[' || c == ']' || c == '\{' || c == '\}'
+  }
 }
 
 /// What one pass over a source produces: the runs it tiles into, and the one
@@ -161,7 +184,11 @@ export fn lex(source: String) -> Lexed {
         trailing = trails(source, open, afterSpace, spaceFrom, spaceTo)
       }
     } else {
-      let width = operatorWidth(c, scan.at(at + 1), scan.at(at + 2))
+      let width = if beginsNoLongerOperator(c) {
+        1
+      } else {
+        operatorWidth(c, scan.at(at + 1), scan.at(at + 2))
+      }
       if width > 0 {
         kind = Kind.Punct
         to = at + width
