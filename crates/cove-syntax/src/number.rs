@@ -58,6 +58,9 @@ impl Numberer {
     fn item(&mut self, item: &mut Item) {
         match &mut item.kind {
             ItemKind::Fn(decl) => {
+                // Numbered straight after the parse, while the parser's is
+                // the only reference, so this never copies.
+                let decl = std::sync::Arc::make_mut(decl);
                 self.params(&mut decl.params);
                 self.block(&mut decl.body);
             }

@@ -855,7 +855,9 @@ impl Parser<'_> {
             _ => None,
         };
         let kind = match keyword {
-            Some(Keyword::Fn | Keyword::Async) => ItemKind::Fn(self.parse_fn_decl()?),
+            Some(Keyword::Fn | Keyword::Async) => {
+                ItemKind::Fn(std::sync::Arc::new(self.parse_fn_decl()?))
+            }
             Some(Keyword::Struct) => ItemKind::Struct(self.parse_struct_decl()?),
             Some(Keyword::Enum) => ItemKind::Enum(self.parse_enum_decl()?),
             Some(Keyword::Trait) => ItemKind::Trait(self.parse_trait_decl()?),
