@@ -1,6 +1,6 @@
 # ADR 0078: A native call tests the stride before it takes a safepoint
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-02
 - Supersedes:
   [ADR 0055](0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md)'s

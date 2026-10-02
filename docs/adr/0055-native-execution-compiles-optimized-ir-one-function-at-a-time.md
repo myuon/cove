@@ -26,6 +26,12 @@
   its return path, where the callee reported a slot and the runtime copied the
   answer out through an owned vector. The callee is now given the destination
   and writes it. Nothing else here is disturbed
+- Superseded in part by [ADR 0078](0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md):
+  its "Safepoints occur at least: … around allocation or runtime calls which
+  may collect", as read for a *call* from compiled code. A call is now a poll —
+  it tests the stride and takes the safepoint when it is reached, as ADR 0060
+  made a backedge. Allocation still takes a safepoint every time, and nothing
+  else here is disturbed
 
 ## Context
 
