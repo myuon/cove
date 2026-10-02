@@ -240,11 +240,10 @@ fn spaces(n: Int) -> String {
 /// The text of a one-byte punctuation token whose byte is `c`, as a literal,
 /// or `""` for a byte that is not one.
 ///
-/// A literal is not allocated, and a `sliceBytes` of the source is: one
-/// string per token written, which measured about a twelfth of the whole
-/// pipeline on the native tier — and half the tokens a printer writes one at
-/// a time are a bracket, a dot, a comma or a colon. The order is how often
-/// each occurs in this repository.
+/// A literal is not allocated, and a `sliceBytes` of the source is — one
+/// string per token written — and about half the tokens a printer writes one
+/// at a time are a bracket, a dot, a comma or a colon. The tests are roughly
+/// in the order those bytes occur in this repository, most frequent first.
 fn punctText(c: Int) -> String {
   if c == '.' {
     return "."
