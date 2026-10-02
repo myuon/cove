@@ -1,6 +1,6 @@
 # ADR 0079: A direct call opens its frame in emitted code
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-02
 - Supersedes:
   [ADR 0078](0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md)'s
