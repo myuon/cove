@@ -2020,6 +2020,132 @@ fn a_deep_native_recursion_returns_through_a_reallocation() {
     );
 }
 
+/// What one bounded native run of `callsCounts` answered, and what it spent.
+struct Bounded {
+    error: cove_runtime::RuntimeError,
+    fuel_spent: u64,
+    tiers: cove_runtime::Tiers,
+}
+
+/// Runs `callsCounts(deep)` on the native tier under `limits`, with the run's
+/// cancellation flipped first when `cancelled` says so.
+///
+/// `counts` is the case [ADR 0078] is about: a recursion with **no loop in it**,
+/// so compiled code has no backedge to poll at and the direct call is the only
+/// place its descent can be stopped. Under ADR 0060 the call took a safepoint
+/// every time; under ADR 0078 it tests the stride and takes one when the stride
+/// is reached, so a stop has to arrive within `S + T` of the work that made it
+/// true — which is what these cases assert, rather than that a stop arrives at
+/// all.
+///
+/// [ADR 0078]: ../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
+fn bounded_counts(deep: i64, limits: cove_runtime::Limits, cancelled: bool) -> Bounded {
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let cancellation = cove_runtime::Cancellation::new();
+    let mut hosts = HostRegistry::new(Grants::new(Vec::<&str>::new()));
+    hosts.set_budget(cove_runtime::Budget::with_cancellation(
+        limits,
+        cancellation.clone(),
+    ));
+    let hosts = Arc::new(hosts);
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let mut vm = Vm::with_native(&runtime, &hosts, &lowered, &native);
+    if cancelled {
+        cancellation.cancel();
+    }
+    let error = vm
+        .invoke(MODULE, "callsCounts", vec![Value::int(deep)])
+        .expect_err("the bounded run stops");
+    Bounded {
+        error,
+        fuel_spent: hosts
+            .with_budget(|budget| budget.fuel_spent())
+            .expect("the run has a budget"),
+        tiers: vm.tiers(),
+    }
+}
+
+/// **A loop-free native recursion runs out of fuel within one stride of its
+/// limit.**
+///
+/// The descent of `counts` is direct native-to-native calls and nothing else, so
+/// every poll in it is a call's. Each call is a poll ([ADR 0078]), the work
+/// between two of them is one level of the recursion, and the overspend is
+/// therefore at most `SAFEPOINT_STRIDE` plus one level — ADR 0040's `S + T`. A
+/// call that did not poll at all would run the whole descent, a million units of
+/// work, before anything noticed; a bound of `S + T` is what says it polls.
+///
+/// [ADR 0078]: ../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
+#[test]
+fn a_loop_free_native_recursion_runs_out_of_fuel_within_one_stride() {
+    const DEEP: i64 = 100_000;
+    const LIMIT: u64 = 5_000;
+    // One level of `counts` is a compare, a branch, a subtraction and the call:
+    // well inside this, and the bound is what a level costs rather than a figure
+    // anybody chose.
+    const TURN: u64 = 64;
+    let run = bounded_counts(
+        DEEP,
+        cove_runtime::Limits {
+            fuel: Some(LIMIT),
+            ..cove_runtime::Limits::default()
+        },
+        false,
+    );
+    assert!(
+        run.error.message.contains("fuel"),
+        "the run says it ran out of fuel: {}",
+        run.error.message
+    );
+    assert!(
+        run.tiers.native_to_native_direct > 0,
+        "the stop was taken inside the compiled descent: {:?}",
+        run.tiers
+    );
+    assert!(
+        run.fuel_spent >= LIMIT,
+        "nothing stops a run short of its limit: spent {}",
+        run.fuel_spent
+    );
+    assert!(
+        run.fuel_spent - LIMIT <= cove_runtime::SAFEPOINT_STRIDE + TURN,
+        "the overspend is at most one stride and one level: spent {} against {LIMIT}",
+        run.fuel_spent
+    );
+}
+
+/// **A cancelled loop-free native recursion stops within one stride.**
+///
+/// The first of ADR 0040's three steps, reached through a call's poll rather than
+/// a backedge's. The flag is set before the run begins, so the first safepoint
+/// the descent takes is the one that stops it, and that is at most a stride and a
+/// level into the run.
+#[test]
+fn a_cancelled_loop_free_native_recursion_stops_within_one_stride() {
+    const DEEP: i64 = 100_000;
+    const TURN: u64 = 64;
+    let run = bounded_counts(DEEP, cove_runtime::Limits::default(), true);
+    assert!(
+        run.error.message.contains("cancel"),
+        "the run says it was cancelled: {}",
+        run.error.message
+    );
+    assert!(
+        run.fuel_spent <= cove_runtime::SAFEPOINT_STRIDE + TURN,
+        "and it stopped at the first safepoint the descent took: spent {}",
+        run.fuel_spent
+    );
+}
+
 /// **A trap in machine code is the VM's refusal, and the sentences are read out
 /// of slots.**
 ///

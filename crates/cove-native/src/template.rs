@@ -4040,8 +4040,9 @@ impl<'a> Emit<'a> {
     ///
     /// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
     fn callee_direct(&mut self, dst: Slot, callee: u32, args: u32) {
-        // A call is a safepoint, whichever way it is made: the unpaid work is
-        // published and the accumulator cleared, and `open` charges it.
+        // A call is a poll, whichever way it is made (ADR 0078): the unpaid
+        // work is published and the accumulator cleared, and `open` charges it
+        // and takes the safepoint if the stride has been reached.
         self.store(CTX, OFF_PENDING_WORK, WORK);
         self.xor_rr(WORK, WORK);
 

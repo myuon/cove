@@ -610,8 +610,8 @@ unsafe fn interpret(
                 }
                 let before: Vec<u64> = (0..watched).map(|at| word(ctx, base, *dst + at)).collect();
 
-                // A call is a safepoint, so the unpaid work goes over with it and
-                // the helper charges it.
+                // A call is a poll (ADR 0078), so the unpaid work goes over with
+                // it and the helper charges it.
                 (*ctx).pending_work = work;
                 work = 0;
                 let outcome = if DIRECT.with(Cell::get) {

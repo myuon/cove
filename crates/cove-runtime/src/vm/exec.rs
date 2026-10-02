@@ -1256,6 +1256,47 @@ impl<'a> Machine<'a> {
         SAFEPOINT_STRIDE.saturating_sub(self.work().saturating_sub(self.charged_work))
     }
 
+    /// Whether a safepoint is due: the stride has been reached since the last
+    /// charge.
+    ///
+    /// The question a compiled backedge asks with `pending_work >= poll_at`
+    /// ([ADR 0060]) and the dispatch loop asks with its one comparison, asked
+    /// by a runtime helper that has just moved the caller's unpaid work onto
+    /// the machine. It is [`poll_budget`](Machine::poll_budget) reaching
+    /// nought, and it is written as that so the two cannot drift.
+    ///
+    /// The native call helpers ask it instead of taking a safepoint at every
+    /// call, which is [ADR 0078]: a call is a poll, as a backedge is, and the
+    /// work between two polls stays ADR 0040's `S + T`.
+    ///
+    /// [ADR 0060]: ../../../../docs/adr/0060-a-backedge-tests-the-stride-before-it-calls.md
+    /// [ADR 0078]: ../../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
+    #[inline]
+    pub(crate) fn safepoint_due(&self) -> bool {
+        self.poll_budget() == 0
+    }
+
+    /// [`Machine::safepoint`] if one is due, and nothing otherwise: a poll.
+    ///
+    /// What the two native call helpers take instead of an unconditional
+    /// safepoint. The allocating helpers still take one every time, which is
+    /// ADR 0055's "around allocation" and which ADR 0078 leaves standing. See
+    /// [`safepoint_due`](Machine::safepoint_due) and [ADR 0078].
+    ///
+    /// [ADR 0078]: ../../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
+    #[inline]
+    pub(crate) fn safepoint_if_due(
+        &mut self,
+        budget: &Meter,
+        id: FunctionId,
+        pc: usize,
+    ) -> Result<(), RuntimeError> {
+        match self.safepoint_due() {
+            true => self.safepoint(budget, id, pc),
+            false => Ok(()),
+        }
+    }
+
     /// What every collection so far has done.
     pub(crate) fn collected(&self) -> Collected {
         self.collected
@@ -1695,11 +1736,23 @@ impl<'a> Machine<'a> {
     /// [`Limits::max_call_depth`]: crate::budget::Limits::max_call_depth
     /// [`RunOutcome::CallDepth`]: crate::trace::RunOutcome::CallDepth
     fn admit_frame(&self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
+        self.admit_frame_with(budget, || span)
+    }
+
+    /// [`Machine::admit_frame`], with the span looked up only when the frame is
+    /// refused — for the native direct call, which admits a frame on every
+    /// compiled call and refuses almost none.
+    #[inline]
+    fn admit_frame_with(
+        &self,
+        budget: &Meter,
+        span: impl FnOnce() -> Span,
+    ) -> Result<(), RuntimeError> {
         if let Some(limit) = budget.limits().max_call_depth {
             if self.frames.len() + 1 > limit {
                 // The error names the value the limit was configured with, so
                 // it is built where that value is rather than here.
-                return Err(budget.to_runtime_error(Stopped::CallDepth).at(span));
+                return Err(budget.to_runtime_error(Stopped::CallDepth).at(span()));
             }
         }
         Ok(())
