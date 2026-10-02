@@ -1097,7 +1097,9 @@ fn holdsABody(source: String, held: Array<Token>, tree: Tree) -> Bool {
     if child.kind == Node.Body && breaksAsABody(source, held, child, tree.from) {
       return true
     }
-    if holdsABody(source, held, child) {
+    // A leaf holds nothing, so it is not asked: most children are leaves,
+    // and asking each was a call apiece to walk no children.
+    if child.children.length() > 0 && holdsABody(source, held, child) {
       return true
     }
   }
