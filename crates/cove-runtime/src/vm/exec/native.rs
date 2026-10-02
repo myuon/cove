@@ -186,6 +186,16 @@ pub struct Tiers {
     /// Compiled code entered a compiled callee itself: `open`, the entry, and
     /// `close`.
     pub native_to_native_direct: u64,
+    /// Of [`Tiers::native_to_native_direct`], the calls whose callee's frame
+    /// emitted code opened itself, without `open` ([ADR 0079]).
+    ///
+    /// A part of the field above and never added to it: every call counted here
+    /// is counted there too. What is left over is the calls the inline path
+    /// sent to the helper — a poll that was due, storage that had to grow, or a
+    /// cap that refused.
+    ///
+    /// [ADR 0079]: ../../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    pub native_to_native_inline: u64,
     /// Compiled code entered a compiled callee through the one mediated call
     /// helper.
     pub native_to_native_mediated: u64,
@@ -1604,6 +1614,15 @@ unsafe fn enter<const MASK: u64>(
     }
     let (mut ctx, into_index) = {
         let machine = &mut *machine;
+        // What a direct call may do without `open` and `close` (ADR 0079): the
+        // frame and word stacks are published by address, with the room a frame
+        // opened in emitted code may take. Set at every entry, because the cap
+        // is this entry's meter's.
+        let (entries, limit) = inline_admission(host, machine);
+        machine.frames.admit_inline(limit);
+        let frames = machine.frames.published();
+        let stack = machine.mem.word_stack();
+        let bulk_work = std::ptr::addr_of_mut!(machine.bulk_work);
         let ctx = NativeCtx::new(
             host.cast::<c_void>(),
             machine.mem.words_ptr(),
@@ -1614,6 +1633,7 @@ unsafe fn enter<const MASK: u64>(
         .over_payload_words(machine.fixed_payload_words_ptr())
         .over_dyn_layouts(machine.dyn_layouts_ptr())
         .over_dyn_children(machine.dyn_children_ptr())
+        .over_frames(frames, stack, bulk_work, entries)
         // What is left of the stride, not a fresh one: this call is entered
         // with whatever the encoded tier has run and not yet charged, and
         // compiled code's poll has to land where the dispatch loop's own would
@@ -1629,6 +1649,11 @@ unsafe fn enter<const MASK: u64>(
     // was emitted for exactly `Entry`'s shape.
     let outcome = entry(&mut ctx, index, into_index, into.slot);
 
+    // The direct calls this entry's code opened without `open`, which is where
+    // `open` would have counted them.
+    let counts = &mut (*(*host).tier).counts;
+    counts.native_to_native_direct += ctx.direct_calls;
+    counts.native_to_native_inline += ctx.direct_calls;
     let machine = &mut *machine;
     // Pending work is charged on every exit — a return, a raise and a stop
     // alike, which is ADR 0055's own requirement.
@@ -1659,6 +1684,41 @@ unsafe fn enter<const MASK: u64>(
             RuntimeError::new("a native safepoint stopped the run and said nothing about why")
         })),
     }
+}
+
+/// The entry table compiled code may index, and the cap on the frames it may
+/// push without a helper — [ADR 0079]'s admission, decided once per entry.
+///
+/// The cap is the meter's `max_call_depth`, which is the number
+/// `Machine::admit_frame` refuses at, so a frame emitted code pushes is one the
+/// helper would have admitted. It is **nought** — every call through `open` —
+/// in two cases, and both are about keeping a question the helper answers
+/// answerable:
+///
+/// - the installed table is not a slice covering every function, so there is
+///   nothing emitted code could index without a bounds check it does not make;
+/// - the table counts its helper calls, so a boundary report would otherwise
+///   lose every call the inline path took from `open`.
+///
+/// # Safety
+///
+/// As [`enter`].
+///
+/// [ADR 0079]: ../../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+unsafe fn inline_admission(
+    host: *mut Bridge<'_, '_>,
+    machine: &Machine<'_>,
+) -> (*const Option<Entry>, u64) {
+    let tier = &*(*host).tier;
+    let (table, len) = tier.table;
+    if table.is_null() || len < machine.program.functions.len() || tier.counts_helpers {
+        return (std::ptr::null(), 0);
+    }
+    let limit = match (*host).budget.limits().max_call_depth {
+        Some(limit) => limit as u64,
+        None => u64::MAX,
+    };
+    (table, limit)
 }
 
 /// **A VM-to-native call**: the encoded `CALL` arm's callee, entered as machine

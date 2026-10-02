@@ -33,9 +33,9 @@ use cove_ir::{
 };
 
 use crate::abi::{
-    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, DYN_ASK, DYN_COUNT_SHIFT,
-    DYN_KIND_MASK, DYN_OFFSET_SHIFT, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
-    HEAP_ORIGIN_WORDS,
+    Entry, FrameRecord, FrameStack, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp,
+    WordStack, DYN_ASK, DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_OFFSET_SHIFT, DYN_TYPE_MASK,
+    HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, byte_store, leaders, literal_offset, observation, overflow_of, reserve,
@@ -55,6 +55,35 @@ const OFF_DYN_CHILDREN: i32 = offset_of!(NativeCtx, dyn_children) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_POLL_AT: i32 = offset_of!(NativeCtx, poll_at) as i32;
+const OFF_FRAMES: i32 = offset_of!(NativeCtx, frames) as i32;
+const OFF_STACK: i32 = offset_of!(NativeCtx, stack) as i32;
+const OFF_BULK_WORK: i32 = offset_of!(NativeCtx, bulk_work) as i32;
+const OFF_ENTRIES: i32 = offset_of!(NativeCtx, entries) as i32;
+const OFF_DIRECT_CALLS: i32 = offset_of!(NativeCtx, direct_calls) as i32;
+
+// What a direct call that opens its callee's frame itself ([ADR 0079]) reads
+// and writes in the runtime's two stacks, from the declarations in `abi`.
+//
+// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+const FS_RECORDS: i32 = offset_of!(FrameStack, records) as i32;
+const FS_LEN: i32 = offset_of!(FrameStack, len) as i32;
+const FS_ROOM: i32 = offset_of!(FrameStack, room) as i32;
+const WS_LEN: i32 = offset_of!(WordStack, len) as i32;
+const WS_ROOM: i32 = offset_of!(WordStack, room) as i32;
+const FR_BASE: i32 = offset_of!(FrameRecord, base) as i32;
+const FR_FUNCTION: i32 = offset_of!(FrameRecord, function) as i32;
+const FR_PC: i32 = offset_of!(FrameRecord, pc) as i32;
+const FR_DST: i32 = offset_of!(FrameRecord, dst) as i32;
+const FRAME_RECORD_BYTES: i32 = std::mem::size_of::<FrameRecord>() as i32;
+// The record's address is `records + len * 24`, formed as `len * 3 * 8` by two
+// `lea`s; and a fresh record's `function` and `pc` are one 64-bit store. Both
+// are facts about the layout, held here so that a change to it fails the build.
+const _: () = assert!(FRAME_RECORD_BYTES == 24);
+const _: () = assert!(FR_PC == FR_FUNCTION + 4);
+
+/// The most sixteen-byte stores [`Emit::open_inline`] unrolls to zero a fresh
+/// frame; a wider frame is zeroed by a loop of four a turn.
+const UNROLLED_ZERO_PAIRS: u32 = 16;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_MESSAGE: i32 = offset_of!(NativeCtx, raise_message) as i32;
 const OFF_RAISE_RULE: i32 = offset_of!(NativeCtx, raise_rule) as i32;
@@ -351,6 +380,13 @@ pub struct Jit {
     ///
     /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
     direct: bool,
+    /// Whether a direct call opens and closes its callee's frame in emitted code
+    /// when the frame fits ([ADR 0079]), rather than through `open` and `close`
+    /// every time. Only meaningful with [`Jit::direct`]; see
+    /// [`Jit::opening_frames_inline`].
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    inline_frames: bool,
 }
 
 /// The helper addresses, as the numbers a `movabs` carries.
@@ -412,6 +448,7 @@ impl Jit {
             code: Vec::new(),
             finalized: false,
             direct: false,
+            inline_frames: false,
         })
     }
 
@@ -429,6 +466,24 @@ impl Jit {
         self
     }
 
+    /// The same code generator, opening a direct call's frame **in emitted
+    /// code** when nothing is due and the frame fits ([ADR 0079]).
+    ///
+    /// Implies [`Jit::calling_directly`]. The code it emits reads the runtime's
+    /// frame and word stacks through [`NativeCtx::frames`],
+    /// [`NativeCtx::stack`], [`NativeCtx::bulk_work`] and
+    /// [`NativeCtx::entries`] without testing them, so it may only be entered
+    /// with a context whose caller published all four — the runtime does, at
+    /// every entry; a test double that builds a bare [`NativeCtx::new`] must
+    /// not ask for this.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    pub fn opening_frames_inline(mut self) -> Self {
+        self.direct = true;
+        self.inline_frames = true;
+        self
+    }
+
     /// Compiles `program`'s function `id`, or answers `None` if any part of it
     /// is outside the subset — or if a mapping could not be had.
     pub fn compile(&mut self, program: &Program, id: FunctionId) -> Option<Compiled> {
@@ -436,7 +491,14 @@ impl Jit {
         if !supported(program, function) {
             return None;
         }
-        let (code, windows) = Emit::new(program, function, &self.helpers, self.direct).run();
+        let (code, windows) = Emit::new(
+            program,
+            function,
+            &self.helpers,
+            self.direct,
+            self.inline_frames,
+        )
+        .run();
         let mapping = Mapping::write(&code)?;
         self.code.push(mapping);
         self.finalized = false;
@@ -518,6 +580,9 @@ struct Emit<'a> {
     dynamic: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
     direct: bool,
+    /// Whether a direct call opens its frame itself when it can. See
+    /// [`Jit::inline_frames`].
+    inline_frames: bool,
     /// Which IR instruction is being emitted.
     ///
     /// Only a raise reads it — [`NativeCtx::raise_pc`] is how the runtime finds
@@ -557,7 +622,13 @@ struct Emit<'a> {
 }
 
 impl<'a> Emit<'a> {
-    fn new(program: &'a Program, function: &'a Function, helpers: &Helpers, direct: bool) -> Self {
+    fn new(
+        program: &'a Program,
+        function: &'a Function,
+        helpers: &Helpers,
+        direct: bool,
+        inline_frames: bool,
+    ) -> Self {
         let blocks = leaders(program, function);
         let windows = windows(program, function, &blocks);
         Emit {
@@ -575,6 +646,7 @@ impl<'a> Emit<'a> {
             order_str: helpers.order_str,
             dynamic: helpers.dynamic,
             direct,
+            inline_frames,
             pc: 0,
             code: Vec::new(),
             fixups: Vec::new(),
@@ -4040,6 +4112,33 @@ impl<'a> Emit<'a> {
     ///
     /// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
     fn callee_direct(&mut self, dst: Slot, callee: u32, args: u32) {
+        let target = self.program.function(FunctionId(callee));
+        let widths: Vec<u32> = target
+            .params
+            .iter()
+            .map(|layout| self.program.layout(*layout).width())
+            .collect();
+        let slots: Vec<Slot> = self
+            .program
+            .arg_list(ArgsId(args))
+            .iter()
+            .map(|arg| arg.slot)
+            .collect();
+        let frame_size = target.frame_size();
+        let param_words: u32 = widths.iter().sum();
+
+        let slow = self.label();
+        let opened = self.label();
+        let finished = self.label();
+        let joined = self.label();
+        // The entry is read at `entries + callee * 8`, a `disp32`.
+        let inline = self.inline_frames && callee < (i32::MAX as u32) / 8;
+        if inline {
+            self.open_inline(callee, dst, frame_size, param_words, slow);
+            self.jmp(Target::Label(opened));
+        }
+
+        self.bind(slow);
         // A call is a poll, whichever way it is made (ADR 0078): the unpaid
         // work is published and the accumulator cleared, and `open` charges it
         // and takes the safepoint if the stride has been reached.
@@ -4056,29 +4155,20 @@ impl<'a> Emit<'a> {
         self.mov_imm64(RAX, self.open as i64);
         self.call(RAX);
 
-        let finished = self.label();
-        let joined = self.label();
         self.test_rr(RAX, RAX);
         self.jcc(CC_E, Target::Label(finished));
 
         // The frame `open` made, kept where the entry call cannot clobber it.
         self.mov_rr(HEAP_SPARE, RDX);
+
+        // Both ways in meet here: the callee's entry in `rax`, its frame's word
+        // index in `r15`, and the frame open and zero but for what the
+        // arguments are about to overwrite.
+        self.bind(opened);
         // `push_frame` is a `Vec::resize`, so the pointer derived before the
         // hand-over is not to be used after it.
         self.frame_live = false;
 
-        let target = self.program.function(FunctionId(callee));
-        let widths: Vec<u32> = target
-            .params
-            .iter()
-            .map(|layout| self.program.layout(*layout).width())
-            .collect();
-        let slots: Vec<Slot> = self
-            .program
-            .arg_list(ArgsId(args))
-            .iter()
-            .map(|arg| arg.slot)
-            .collect();
         if widths.iter().any(|width| *width > 0) {
             // `rdi` is the callee frame's first word. `RDI` is caller-saved and
             // holds nothing between instructions, and nothing below calls
@@ -4112,6 +4202,18 @@ impl<'a> Emit<'a> {
         self.mov_imm32(RCX, dst as i32);
         self.call(RAX);
 
+        if inline {
+            // A return is closed here, whichever way the frame was opened;
+            // anything else leaves its frames standing for the error's call
+            // chain, and `close` is what builds the error.
+            let raised = self.label();
+            self.test_rr32(RAX, RAX);
+            self.jcc(CC_NE, Target::Label(raised));
+            self.close_inline();
+            self.jmp(Target::Label(joined));
+            self.bind(raised);
+        }
+
         // `close(ctx, outcome, callee)`, which answers the outcome it was given.
         self.mov_rr(RDI, CTX);
         self.mov_rr32(RSI, RAX);
@@ -4132,6 +4234,163 @@ impl<'a> Emit<'a> {
         self.leave_answered();
         self.bind(on);
         self.frame_live = false;
+    }
+
+    /// [`OpenFn`](crate::abi::OpenFn)'s common case, in emitted code: [ADR
+    /// 0079].
+    ///
+    /// Four tests, each a compare against a number the runtime published, and
+    /// any one of them failing jumps to `slow` — the `open` call, which handles
+    /// that case exactly as it did before:
+    ///
+    /// ```text
+    /// cmp r13, [ctx.poll_at]          ; jae slow   a poll is due (ADR 0078)
+    /// rax = ctx.entries[callee]       ; jz  slow   no compiled entry: mediated
+    /// frames.len  <  frames.room      ; jae slow   storage full, or max_call_depth
+    /// stack.len + size <= stack.room  ; ja  slow   storage full, or the segment
+    /// ```
+    ///
+    /// Past them nothing can fail and nothing moves: the word stack's top is
+    /// raised by the frame, the callee's record is written over spare storage —
+    /// its base, its function, a zero `pc` and its destination — the caller's
+    /// record is told it resumes at the next instruction, the caller's unpaid
+    /// work is charged into the machine's bulk total and taken off the
+    /// threshold, and the words of the frame the arguments will not overwrite
+    /// are zeroed. That is `open`'s common path field for field; what it leaves
+    /// out is the growth, the refusals and the safepoint, which are exactly
+    /// what the four tests send to `open`.
+    ///
+    /// Leaves the entry in `rax` and the frame's word index in [`HEAP_SPARE`],
+    /// which is what the `open` path leaves too.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    fn open_inline(
+        &mut self,
+        callee: u32,
+        dst: Slot,
+        frame_size: u32,
+        param_words: u32,
+        slow: usize,
+    ) {
+        // 1. Nothing is due: `open` would have taken no safepoint.
+        self.cmp_r_mem(WORK, CTX, OFF_POLL_AT);
+        self.jcc(CC_AE, Target::Label(slow));
+        // 2. The callee has machine code.
+        self.load(RAX, CTX, OFF_ENTRIES);
+        self.load(RAX, RAX, (callee * 8) as i32);
+        self.test_rr(RAX, RAX);
+        self.jcc(CC_E, Target::Label(slow));
+        // 3. A record fits: `rcx` is the frame stack and `rdx` its length.
+        self.load(RCX, CTX, OFF_FRAMES);
+        self.load(RDX, RCX, FS_LEN);
+        self.cmp_r_mem(RDX, RCX, FS_ROOM);
+        self.jcc(CC_AE, Target::Label(slow));
+        // 4. The words fit: `rsi` is the word stack, `r15` the frame's index and
+        //    `rdi` the top once the frame is on it.
+        self.load(RSI, CTX, OFF_STACK);
+        self.load(HEAP_SPARE, RSI, WS_LEN);
+        self.lea_disp(RDI, HEAP_SPARE, frame_size as i32);
+        self.cmp_r_mem(RDI, RSI, WS_ROOM);
+        self.jcc(CC_A, Target::Label(slow));
+
+        // The frame's words.
+        self.store(RSI, WS_LEN, RDI);
+        // `r8` = &records[len], the callee's record.
+        self.load(R8, RCX, FS_RECORDS);
+        self.lea_sib(R9, RDX, RDX, 1, 0);
+        self.lea_sib(R8, R8, R9, 3, 0);
+        // The caller, records[len - 1], resumes at the instruction after the
+        // call — `open`'s `suspended_at_the_call`.
+        self.store_imm32(R8, FR_PC - FRAME_RECORD_BYTES, self.pc as i32 + 1);
+        // The callee's record: its base as a linear address, its function and a
+        // zero pc in one store, and its destination.
+        self.load(R9, CTX, OFF_STACK_ORIGIN);
+        self.add_rr(R9, HEAP_SPARE);
+        self.store(R8, FR_BASE, R9);
+        self.store_imm32_q(R8, FR_FUNCTION, callee as i32);
+        self.store_imm32(R8, FR_DST, dst as i32);
+        self.add_imm32(RDX, 1);
+        self.store(RCX, FS_LEN, RDX);
+        // The charge `open` makes, and the threshold `republish` would publish
+        // after it: what is left of the stride is smaller by exactly this, and
+        // test 1 says it does not underflow.
+        self.load(R9, CTX, OFF_BULK_WORK);
+        self.add_mem_r(R9, 0, WORK);
+        self.sub_mem_r(CTX, OFF_POLL_AT, WORK);
+        self.xor_rr(WORK, WORK);
+        self.add_mem_imm32(CTX, OFF_DIRECT_CALLS, 1);
+        // The zero fill `push_frame` makes, over the words the arguments will
+        // not overwrite: a reference slot the callee has not reached yet must
+        // read as null to the collector.
+        if frame_size > param_words {
+            let zeroes = frame_size - param_words;
+            self.load(R9, CTX, OFF_WORDS);
+            self.lea_sib(R9, R9, HEAP_SPARE, 3, (param_words * 8) as i32);
+            // Sixteen bytes a store, out of `xmm0`, which is scratch: `bzero`'s
+            // width without its call. A frame is a few dozen words, so the
+            // fill was most of what `push_frame` cost, and eight bytes a
+            // store would give a good part of the saving back.
+            self.pxor_xmm0();
+            let pairs = zeroes / 2;
+            let mut at = 0;
+            if pairs <= UNROLLED_ZERO_PAIRS {
+                for _ in 0..pairs {
+                    self.movdqu_store_xmm0(R9, at);
+                    at += 16;
+                }
+            } else {
+                // Four stores a turn, and what is left over after the loop.
+                self.mov_imm32(RCX, (pairs / 4) as i32);
+                let again = self.label();
+                self.bind(again);
+                for k in 0..4 {
+                    self.movdqu_store_xmm0(R9, k * 16);
+                }
+                self.add_imm32(R9, 64);
+                self.add_imm32(RCX, -1);
+                self.jcc(CC_NE, Target::Label(again));
+                for _ in 0..pairs % 4 {
+                    self.movdqu_store_xmm0(R9, at);
+                    at += 16;
+                }
+            }
+            if zeroes % 2 == 1 {
+                self.xor_rr(RDX, RDX);
+                self.store(R9, at, RDX);
+            }
+        }
+    }
+
+    /// [`CloseFn`](crate::abi::CloseFn) on a return, in emitted code: [ADR
+    /// 0079].
+    ///
+    /// The callee's unpaid work is charged and taken off the threshold —
+    /// saturating, because unlike the caller's at the open nothing kept it
+    /// below what was left — and its frame comes off both stacks: one record,
+    /// and the words down to its base, which is in [`HEAP_SPARE`] still because
+    /// that register is callee-saved. `eax` is the outcome, nought, and stays so.
+    ///
+    /// It closes a frame `open` opened as readily as one [`Emit::open_inline`]
+    /// did: both left the same record on top and the same base in `r15`.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    fn close_inline(&mut self) {
+        self.load(RDX, CTX, OFF_PENDING_WORK);
+        self.xor_rr(RCX, RCX);
+        self.store(CTX, OFF_PENDING_WORK, RCX);
+        self.load(RCX, CTX, OFF_BULK_WORK);
+        self.add_mem_r(RCX, 0, RDX);
+        let kept = self.label();
+        self.load(RCX, CTX, OFF_POLL_AT);
+        self.sub_rr(RCX, RDX);
+        self.jcc(CC_AE, Target::Label(kept));
+        self.xor_rr(RCX, RCX);
+        self.bind(kept);
+        self.store(CTX, OFF_POLL_AT, RCX);
+        self.load(RCX, CTX, OFF_FRAMES);
+        self.add_mem_imm32(RCX, FS_LEN, -1);
+        self.load(RCX, CTX, OFF_STACK);
+        self.store(RCX, WS_LEN, HEAP_SPARE);
     }
 
     /// `encoded.rs`'s `RETURN` arm, whole: the answer's words into the
@@ -4359,6 +4618,73 @@ impl<'a> Emit<'a> {
         self.rex(true, src, base);
         self.byte(0x89);
         self.modrm_mem(src, base, disp);
+    }
+
+    /// `mov qword [base + disp], imm32`, sign-extended to the whole word.
+    fn store_imm32_q(&mut self, base: u8, disp: i32, value: i32) {
+        self.rex(true, 0, base);
+        self.byte(0xc7);
+        self.modrm_mem(0, base, disp);
+        self.code.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// `pxor xmm0, xmm0`
+    fn pxor_xmm0(&mut self) {
+        for byte in [0x66, 0x0f, 0xef, 0xc0] {
+            self.byte(byte);
+        }
+    }
+
+    /// `movdqu [base + disp], xmm0`: sixteen bytes, unaligned.
+    fn movdqu_store_xmm0(&mut self, base: u8, disp: i32) {
+        self.byte(0xf3);
+        self.rex(false, 0, base);
+        self.byte(0x0f);
+        self.byte(0x7f);
+        self.modrm_mem(0, base, disp);
+    }
+
+    /// `add qword [base + disp], r64`
+    fn add_mem_r(&mut self, base: u8, disp: i32, src: u8) {
+        self.rex(true, src, base);
+        self.byte(0x01);
+        self.modrm_mem(src, base, disp);
+    }
+
+    /// `sub qword [base + disp], r64`
+    fn sub_mem_r(&mut self, base: u8, disp: i32, src: u8) {
+        self.rex(true, src, base);
+        self.byte(0x29);
+        self.modrm_mem(src, base, disp);
+    }
+
+    /// `add qword [base + disp], imm32`, sign-extended.
+    fn add_mem_imm32(&mut self, base: u8, disp: i32, value: i32) {
+        self.rex(true, 0, base);
+        self.byte(0x81);
+        self.modrm_mem(0, base, disp);
+        self.code.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// `lea r64, [base + disp]`
+    fn lea_disp(&mut self, dst: u8, base: u8, disp: i32) {
+        self.rex(true, dst, base);
+        self.byte(0x8d);
+        self.modrm_mem(dst, base, disp);
+    }
+
+    /// `lea r64, [base + index * (1 << scale) + disp]`, the one encoding here
+    /// with a SIB byte — so it writes its own `REX`, with the `X` bit the
+    /// shared [`Emit::rex`] never sets.
+    fn lea_sib(&mut self, dst: u8, base: u8, index: u8, scale: u8, disp: i32) {
+        debug_assert!(index != 4, "`rsp` cannot be an index");
+        debug_assert!(scale <= 3);
+        self.byte(0x48 | (dst & 8) >> 1 | (index & 8) >> 2 | (base & 8) >> 3);
+        self.byte(0x8d);
+        // mod = 10 (disp32), rm = 100 (a SIB byte follows).
+        self.byte(0x84 | (dst & 7) << 3);
+        self.byte(scale << 6 | (index & 7) << 3 | (base & 7));
+        self.code.extend_from_slice(&disp.to_le_bytes());
     }
 
     /// `mov dword [base + disp], imm32`, for the `u32` fields of the context.

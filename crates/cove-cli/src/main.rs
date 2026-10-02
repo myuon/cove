@@ -1758,6 +1758,15 @@ impl Coverage {
             "native -> native direct",
             thousands(tiers.native_to_native_direct)
         );
+        // ADR 0079: how many of those opened their frame without a helper.
+        // Printed only when it happened, for the mediated row's reason below.
+        if tiers.native_to_native_inline != 0 {
+            eprintln!(
+                "  {:<26} {:>14}",
+                "  of which opened inline",
+                thousands(tiers.native_to_native_inline)
+            );
+        }
         // Printed only when it happened. A zero here is the expected reading —
         // the tier emits direct calls — and a row of zeroes invites a reader to
         // stop noticing the row that is not.

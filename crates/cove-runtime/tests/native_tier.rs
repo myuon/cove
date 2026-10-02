@@ -297,6 +297,64 @@ export fn callsCounts(n: Int) -> Int {
   counts(n)
 }
 
+/// ADR 0079: a compiled recursion every frame of which holds a reference of its
+/// own across the call below it, and allocates before making it — so a
+/// collection runs with many compiled frames standing, most of them opened by
+/// emitted code. Element 1 less `n` is one per level and the bottom answers three,
+/// so `keepsAcrossFrames(n)` is `n + 3` exactly when every array survived.
+export fn keepsAcrossFrames(n: Int) -> Int {
+  let mine = [n, n + 1, n + 2]
+  if n <= 0 {
+    mine.length()
+  } else {
+    let below = keepsAcrossFrames(n - 1)
+    match mine.get(1) {
+      Some(v) => below + v - n,
+      None => below + 1000
+    }
+  }
+}
+
+export fn callsKeepsAcrossFrames(n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  keepsAcrossFrames(n)
+}
+
+/// ADR 0079: a division at the bottom of a direct chain `n` compiled frames
+/// deep, so a raise leaves through frames emitted code opened.
+export fn dividesDeep(a: Int, b: Int, n: Int) -> Int {
+  if n <= 0 {
+    a / b
+  } else {
+    dividesDeep(a, b, n - 1) + counts(0)
+  }
+}
+
+export fn callsDividesDeep(a: Int, b: Int, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  dividesDeep(a, b, n)
+}
+
+/// ADR 0079: a recursion that goes back through the VM every fourth level, so
+/// frames emitted code opened and frames the dispatch loop opened alternate on
+/// one stack. `alternates(n)` is `n`.
+export fn alternates(n: Int) -> Int {
+  if n <= 0 {
+    0
+  } else if n % 4 == 0 {
+    throughTheVm(n - 1) + 1
+  } else {
+    alternates(n - 1) + 1
+  }
+}
+
+/// Refused, so that each call to it is a native-to-VM call and its own call is a
+/// VM-to-native one.
+export fn throughTheVm(n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  alternates(n)
+}
+
 /// Two words inline, so that a place can name the second of them.
 export struct Point {
   x: Int
@@ -2111,6 +2169,13 @@ fn a_loop_free_native_recursion_runs_out_of_fuel_within_one_stride() {
         "the stop was taken inside the compiled descent: {:?}",
         run.tiers
     );
+    // ADR 0079: the descent's polls were the inline path's compare, which sends
+    // a call to `open` only once the stride is reached.
+    assert!(
+        run.tiers.native_to_native_inline > 0,
+        "and the descent's frames were opened in emitted code: {:?}",
+        run.tiers
+    );
     assert!(
         run.fuel_spent >= LIMIT,
         "nothing stops a run short of its limit: spent {}",
@@ -2144,6 +2209,234 @@ fn a_cancelled_loop_free_native_recursion_stops_within_one_stride() {
         "and it stopped at the first safepoint the descent took: spent {}",
         run.fuel_spent
     );
+}
+
+// --- ADR 0079: a direct call opens its frame in emitted code -----------------
+//
+// The cases below are about the inline path specifically, and each one asserts
+// `Tiers::native_to_native_inline` moved: a case that passed with every frame
+// opened by `open` would be testing the helper the earlier cases already test.
+
+/// **Frames emitted code opened, and frames `open` opened because the storage
+/// had to grow, on one stack, answered through.**
+///
+/// Five thousand levels of `counts` is about thirty thousand words of stack and
+/// five thousand frame records, so both kinds of storage grow — in a new block
+/// every time, which is what `Memory::grow_stack` and `Frames::grow` promise —
+/// while the destinations of every level below are pending. A growth is the one
+/// thing emitted code does not do: the frame that needs one goes to `open`, and
+/// every frame after it until the room is used up again is opened inline. So
+/// the run has both, and the counters say so.
+#[test]
+fn frames_opened_inline_and_by_open_return_through_a_growth() {
+    const DEEP: i64 = 5_000;
+    let both = both("callsCounts", vec![Value::int(DEEP)]);
+    assert_eq!(both.vm, Ok(DEEP.to_string()));
+    assert_eq!(
+        both.native, both.vm,
+        "every level returned into the one below"
+    );
+    let tiers = both.tiers;
+    assert!(
+        tiers.native_to_native_direct >= DEEP as u64,
+        "every level was a direct call: {tiers:?}"
+    );
+    assert!(
+        tiers.native_to_native_inline > DEEP as u64 / 2,
+        "most of them opened their frame in emitted code: {tiers:?}"
+    );
+    assert!(
+        tiers.native_to_native_inline < tiers.native_to_native_direct,
+        "and some went to `open` — the growths, and the polls that were due: {tiers:?}"
+    );
+}
+
+/// **A collection with many frames opened inline keeps every reference they
+/// hold.**
+///
+/// Every level of `keepsAcrossFrames` allocates an array and reads it back after
+/// the level below returns, so a collection that runs inside a deep level — the
+/// heap is one chunk, so one does — has to find each of the arrays above it
+/// through a frame record emitted code wrote: its function, which names the
+/// reference map, and its base, which says where the slots are. A record with
+/// either wrong is an array swept from under a live frame, and an answer that is
+/// not `n + 3`.
+#[test]
+fn a_collection_under_frames_opened_inline_keeps_what_they_hold() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const DEEP: i64 = 600;
+    on_each_tier(&["keepsAcrossFrames"], &["callsKeepsAcrossFrames"]);
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let mut session = vm
+        .native_session(MODULE, "callsKeepsAcrossFrames", vec![Value::int(DEEP)])
+        .expect("the session opens");
+    let words = session.arguments().to_vec();
+    let expected = session
+        .call(&cove_runtime::NothingCompiled, &words)
+        .expect("the vm answers");
+    assert_eq!(expected, vec![DEEP as u64 + 3], "the fixture answers n + 3");
+
+    let before = session.collections();
+    let mut calls = 0;
+    while session.collections() < before + 3 && calls < 1_000 {
+        let answered = session
+            .call(&native, &words)
+            .expect("the native tier answers");
+        assert_eq!(answered, expected, "call {calls} answered wrongly");
+        calls += 1;
+    }
+    assert!(
+        session.collections() >= before + 3,
+        "only {} collection(s) ran in {calls} call(s), so this case proved little",
+        session.collections() - before
+    );
+    let tiers = session.tiers();
+    assert!(
+        tiers.native_to_native_inline >= calls * (DEEP as u64 / 2),
+        "the frames standing were mostly opened inline: {tiers:?} over {calls} call(s)"
+    );
+}
+
+/// **A raise several frames below, through frames opened inline, is the VM's
+/// error with the VM's blame.**
+///
+/// `dividesDeep` divides by zero forty compiled frames down. The frames between
+/// were opened by emitted code, which wrote each caller's resume point as `open`
+/// would have — the instruction after the call — and a raise leaves them standing
+/// for the error to be read out of, so the message, the primary span and the
+/// chain all have to be the encoded tier's. Then the same entry is called again
+/// on the same machine with a divisor that works, which is only right if the
+/// frames the raise left were cleared before the next call was built on them.
+#[test]
+fn a_raise_below_frames_opened_inline_is_the_vm_s_error() {
+    on_each_tier(&["dividesDeep"], &["callsDividesDeep"]);
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let args = |b: i64| vec![Value::int(7), Value::int(b), Value::int(40)];
+    let blame = |answer: Result<Value, cove_runtime::RuntimeError>| {
+        let error = answer.expect_err("a zero divisor is refused");
+        (
+            error.message.clone(),
+            error.span,
+            error.library_sites().to_vec(),
+            error.chain().to_vec(),
+        )
+    };
+    let vm = blame(Vm::new(&runtime, &hosts, &lowered).invoke(MODULE, "callsDividesDeep", args(0)));
+    assert!(vm.0.contains("zero"), "the VM says what happened: {}", vm.0);
+    assert!(vm.1.is_some(), "and where");
+
+    let mut with = Vm::with_native(&runtime, &hosts, &lowered, &native);
+    let compiled = blame(with.invoke(MODULE, "callsDividesDeep", args(0)));
+    assert_eq!(compiled, vm, "the same message, span and chain");
+    let tiers = with.tiers();
+    assert!(
+        tiers.native_to_native_inline >= 30,
+        "the frames the raise left through were opened inline: {tiers:?}"
+    );
+    let again = with
+        .invoke(MODULE, "callsDividesDeep", args(7))
+        .expect("a divisor that works");
+    assert_eq!(
+        again.to_string(),
+        "1",
+        "and the machine is whole afterwards"
+    );
+}
+
+/// **Frames opened inline and frames the dispatch loop opened alternate on one
+/// stack.**
+///
+/// Every fourth level of `alternates` goes through a refused function, so the
+/// stack is compiled, compiled, compiled, encoded, compiled, … for a thousand
+/// levels: each encoded frame is pushed by the `CALL` arm, each compiled one
+/// above it is entered by `from_encoded`, and the compiled ones above *that* are
+/// opened by emitted code reading the frame and word stacks the VM just pushed
+/// onto. The storage grows under both tiers in the course of it.
+#[test]
+fn frames_opened_inline_interleave_with_encoded_frames() {
+    on_each_tier(&["alternates"], &["throughTheVm"]);
+    const DEEP: i64 = 1_000;
+    let both = both("throughTheVm", vec![Value::int(DEEP)]);
+    assert_eq!(both.vm, Ok(DEEP.to_string()));
+    assert_eq!(both.native, both.vm);
+    let tiers = both.tiers;
+    assert!(
+        tiers.native_to_vm >= DEEP as u64 / 4 - 1 && tiers.vm_to_native >= DEEP as u64 / 4,
+        "the recursion crossed the boundary both ways every fourth level: {tiers:?}"
+    );
+    assert!(
+        tiers.native_to_native_inline >= DEEP as u64 / 2,
+        "and the levels between were opened inline: {tiers:?}"
+    );
+}
+
+/// **The embedder's call depth is enforced on frames emitted code opens.**
+///
+/// The inline path pushes a record only while the frame stack is below its
+/// published room, and the runtime caps that room at `max_call_depth` — so the
+/// frame that would pass the limit is the one sent to `open`, which refuses it
+/// with the VM's sentence. A cap left at the storage would let a runaway
+/// recursion through the limit until the storage next grew.
+#[test]
+fn a_call_depth_limit_holds_for_frames_opened_inline() {
+    const LIMIT: usize = 200;
+    let limits = cove_runtime::Limits {
+        max_call_depth: Some(LIMIT),
+        ..cove_runtime::Limits::default()
+    };
+    let run = bounded_counts(100_000, limits.clone(), false);
+    assert!(
+        run.error.message.contains(&LIMIT.to_string()),
+        "the native refusal names the limit: {}",
+        run.error.message
+    );
+    assert!(
+        run.tiers.native_to_native_inline > 0,
+        "frames below the limit were opened inline: {:?}",
+        run.tiers
+    );
+    // The VM's sentence, from a run of the same entry with no tier installed.
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let mut hosts = HostRegistry::new(Grants::new(Vec::<&str>::new()));
+    hosts.set_budget(cove_runtime::Budget::new(limits));
+    let hosts = Arc::new(hosts);
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let vm = Vm::new(&runtime, &hosts, &lowered)
+        .invoke(MODULE, "callsCounts", vec![Value::int(100_000)])
+        .expect_err("the VM refuses past the limit too");
+    assert_eq!(run.error.message, vm.message, "the same sentence");
 }
 
 /// **A trap in machine code is the VM's refusal, and the sentences are read out
@@ -5046,7 +5339,25 @@ fn the_boundary_report_counts_each_quantity_apart() {
     // per turn for `std.float.parse`, which compiles and is called from the
     // refused, encoded frame.
     assert_eq!(tiers.vm_to_native, 2 + n, "{tiers:?}");
-    assert_eq!(uncounted.tiers, Some(tiers));
+    // The one field the two tables may differ in: a counting table is compiled
+    // without inline frames (ADR 0079), so that every direct call reaches the
+    // `open` it counts, and the production one opens what it can itself.
+    assert_eq!(
+        tiers.native_to_native_inline, 0,
+        "a counting table sends every direct call through `open`: {tiers:?}"
+    );
+    let production = uncounted.tiers.expect("a native tier was installed");
+    assert!(
+        production.native_to_native_inline <= production.native_to_native_direct,
+        "{production:?}"
+    );
+    assert_eq!(
+        cove_runtime::Tiers {
+            native_to_native_inline: 0,
+            ..production
+        },
+        tiers
+    );
 
     // Native-to-runtime calls: counted with the counting table, and said to be
     // uncounted with the production one rather than printed as zeroes.

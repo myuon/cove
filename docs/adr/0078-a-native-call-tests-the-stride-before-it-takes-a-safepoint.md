@@ -23,6 +23,12 @@
   [ADR 0057](0057-a-native-call-returns-into-the-destination-its-caller-named.md)'s
   return path, which was and remains free of safepoints
 - Decides: what a compiled call asks of the runtime's accounting, and when
+- Superseded in part by [ADR 0079](0079-a-direct-call-opens-its-frame-in-emitted-code.md):
+  its "No emitted code changes. The compare is in Rust because the helper is
+  already running and already holds the two numbers it compares", for a
+  *direct* native-to-native call, whose poll now runs in emitted code ahead of
+  `open`. The mediated `call` and `open` itself poll as written here, and
+  nothing else here is disturbed
 
 ## Context
 

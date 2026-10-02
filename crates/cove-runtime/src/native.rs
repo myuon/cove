@@ -311,7 +311,15 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
     };
     // Direct native-to-native calls are on, which is PR #368 and what issue #369
     // says to measure: "Direct native-to-native calls from PR #368 are enabled."
-    let mut jit = cove_native::template::Jit::new(helpers)?.calling_directly();
+    //
+    // And a direct call opens its frame in emitted code when it fits (ADR 0079)
+    // — except in a table that counts its helper calls, whose whole point is to
+    // see every call reach `open`.
+    let jit = cove_native::template::Jit::new(helpers)?;
+    let mut jit = match counting {
+        false => jit.opening_frames_inline(),
+        true => jit.calling_directly(),
+    };
     let mut entries = vec![None; program.functions.len()];
     let mut refusals = Vec::new();
     let mut done = Vec::new();

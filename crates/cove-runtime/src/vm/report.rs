@@ -710,6 +710,9 @@ fn since(now: Tiers, then: Tiers) -> Tiers {
         native_to_native_direct: now
             .native_to_native_direct
             .saturating_sub(then.native_to_native_direct),
+        native_to_native_inline: now
+            .native_to_native_inline
+            .saturating_sub(then.native_to_native_inline),
         native_to_native_mediated: now
             .native_to_native_mediated
             .saturating_sub(then.native_to_native_mediated),
