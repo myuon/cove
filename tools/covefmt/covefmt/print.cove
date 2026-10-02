@@ -3940,8 +3940,12 @@ fn collect(tree: Tree, ranks: Array<Int>, var out: Vector<Boundary>) {
   if to > from {
     out.push(Boundary(kind: tree.kind, from: from, to: to))
   }
+  // A leaf adds nothing, so it is not visited: most children are leaves,
+  // and visiting each was a call apiece to return at once.
   for child in tree.children {
-    collect(child, ranks, var out)
+    if child.kind != Node.Leaf {
+      collect(child, ranks, var out)
+    }
   }
 }
 
