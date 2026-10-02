@@ -678,10 +678,30 @@ fn cmd_check(args: &[String]) -> Result<(), CliError> {
     // the program: it is the checker naming something it deliberately did
     // not prove, and no strictness setting can make it prove one.
     let deny_warnings = deny_warnings_flag || package.config.check.deny_warnings;
+    leak_on_exit((sources, package, program));
     if deny_warnings && warnings > 0 {
         return Err(CliError::WarningsDenied);
     }
     Ok(())
+}
+
+/// Lets `value` go without dropping it, because the process is about to exit
+/// and exiting returns all of it at once.
+///
+/// What a command checked — the sources, the parsed package and the checked
+/// program — and what it lowered are hundreds of thousands of allocations,
+/// and freeing them one at a time on the way out was a measured part of every
+/// start: 2.8 ms of a hello-sized `cove run` and 13 ms of covefmt checked
+/// inside `examples` (issue #556's profile). Exit hands the pages back in one
+/// step, so dropping them first buys nothing.
+///
+/// **Only memory may go this way.** Nothing passed here may own a file, a
+/// buffered writer, a child process, a trace sink or anything else whose drop
+/// does something a person could see; those are dropped as they always were.
+/// The values this is used on are trees of strings, vectors and maps, and
+/// none of their types has a `Drop` of its own beyond freeing.
+pub(crate) fn leak_on_exit<T>(value: T) {
+    std::mem::forget(value);
 }
 
 /// The one-line summary `cove check` prints to stdout.
@@ -1160,15 +1180,20 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
 
     let program = Arc::new(program);
     let sources = Arc::new(sources);
-    match execute_entry(&package, &program, &sources, run, module, entry, flags) {
+    let result = match execute_entry(&package, &program, &sources, run, module, entry, flags) {
         Ok(value) => report_exit(value),
         Err(ExecuteError::Setup(message)) => Err(CliError::Message(message)),
-        Err(ExecuteError::NotLowered(items)) => Err(CliError::Diagnostics { items, sources }),
+        Err(ExecuteError::NotLowered(items)) => Err(CliError::Diagnostics {
+            items,
+            sources: Arc::clone(&sources),
+        }),
         Err(ExecuteError::Runtime(error)) => Err(CliError::Diagnostics {
             items: vec![runtime_failure(&program, module, entry, &error)],
-            sources,
+            sources: Arc::clone(&sources),
         }),
-    }
+    };
+    leak_on_exit((package, program, sources));
+    result
 }
 
 /// The diagnostic a run's failure is reported as, with what a
@@ -1531,6 +1556,13 @@ pub(crate) fn execute_entry(
         print_stats(runtime.hosts(), &wait_total, &memory);
     }
 
+    // The runtime goes as it always did — it holds the hosts, and a host may
+    // hold a file or a trace being written — and the lowered program, which
+    // is only memory, is left for exit. See `leak_on_exit`.
+    drop(runtime);
+    if let Some(lowered) = lowered {
+        leak_on_exit(lowered);
+    }
     outcome.map_err(ExecuteError::Runtime)
 }
 

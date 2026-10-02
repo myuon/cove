@@ -141,6 +141,9 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
         "{}",
         summary(selected.len(), all.len(), selected.len() - failed, failed)
     );
+    drop(selected);
+    drop(all);
+    crate::leak_on_exit((sources, package, program));
     if failed > 0 {
         return Err(CliError::TestsFailed);
     }
