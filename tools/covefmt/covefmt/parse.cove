@@ -128,8 +128,9 @@ impl Parser {
   /// Takes the run of trivia at the cursor into `into`, and answers whether
   /// there was any.
   fn trivia(var self, var into: Vector<Tree>) -> Bool {
+    let tokens = self.tokens
     let from = self.at
-    while isTrivia(self.tokens, self.at) {
+    while isTrivia(tokens, self.at) {
       into.push(leafIn(self.at, self.empty))
       self.at = self.at + 1
     }
@@ -137,6 +138,12 @@ impl Parser {
   }
 
   /// Takes a balanced run beginning at an opening bracket, brackets included.
+  ///
+  /// This and the rules after it read the source and the tokens into locals
+  /// and ask [`byteOfPunct`] and [`endsALine`] rather than the parser's own
+  /// methods. Neither field changes during a parse, and a method of `self`
+  /// called from a `var self` method copies the whole `Parser` once per call
+  /// to make it — which these loops did twice a token.
   ///
   /// Depth is counted over `{`, `[` and `(` together rather than per kind,
   /// which is what a lexer's output supports: a `}` that closes nothing ends
@@ -146,11 +153,14 @@ impl Parser {
   /// Everything inside is leaves. A `Node.Body` is taken by [`Parser::body`]
   /// instead, which reads the same run as statements.
   fn balanced(var self, kind: Node) -> Tree {
+    let source = self.source
+    let tokens = self.tokens
+    let count = tokens.length()
     let from = self.at
     var held = Vector.of()
     var depth = 0
-    while !self.done() {
-      let c = self.punctByte(self.at)
+    while self.at < count {
+      let c = byteOfPunct(source, tokens, self.at)
       let opens = c == '\{' || c == '[' || c == '('
       let closes = c == '\}' || c == ']' || c == ')'
       if opens {
@@ -181,20 +191,23 @@ impl Parser {
   /// that belong to a group inside this one — `f(g(a, b), c)` has three —
   /// and a member that ends at the closing bracket has no comma at all.
   fn grouped(var self, kind: Node) -> Tree {
+    let source = self.source
+    let tokens = self.tokens
+    let count = tokens.length()
     let from = self.at
     var held = Vector.of()
-    let opener = self.punctByte(self.at)
+    let opener = byteOfPunct(source, tokens, self.at)
     if opener != '(' && opener != '[' {
       return self.balanced(kind)
     }
     held.push(leafIn(self.at, self.empty))
     self.at = self.at + 1
-    while !self.done() {
-      if isTrivia(self.tokens, self.at) {
+    while self.at < count {
+      if isTrivia(tokens, self.at) {
         self.trivia(var held)
         continue
       }
-      let c = self.punctByte(self.at)
+      let c = byteOfPunct(source, tokens, self.at)
       if c == ')' || c == ']' {
         held.push(leafIn(self.at, self.empty))
         self.at = self.at + 1
@@ -220,6 +233,9 @@ impl Parser {
   /// One member of a group, ending at a comma of the group's own depth or at
   /// the bracket that closes it.
   fn member(var self) -> Tree {
+    let source = self.source
+    let tokens = self.tokens
+    let count = tokens.length()
     let from = self.at
     var held = Vector.of()
     var depth = 0
@@ -228,9 +244,9 @@ impl Parser {
     // members and not three, and split into three it came back as
     // `Result<T,\n  E>,` — valid, and not what anybody wrote.
     var angles = 0
-    while !self.done() {
-      let c = self.punctByte(self.at)
-      if c == '<' && self.opensGenerics(self.at) {
+    while self.at < count {
+      let c = byteOfPunct(source, tokens, self.at)
+      if c == '<' && opensAGenericList(tokens, self.at) {
         angles = angles + 1
       } else if c == '>' && angles > 0 {
         angles = angles - 1
@@ -332,19 +348,22 @@ impl Parser {
   /// `if steps(a) >\n  steps(b) {`, which is the same ambiguity from the
   /// other side. This is the version that has no other side.
   fn bodyOf(var self, declaring: Bool) -> Tree {
+    let source = self.source
+    let tokens = self.tokens
+    let count = tokens.length()
     let from = self.at
     var held = Vector.of()
-    if self.punctByte(self.at) != '\{' {
+    if byteOfPunct(source, tokens, self.at) != '\{' {
       return self.balanced(Node.Body)
     }
     held.push(leafIn(self.at, self.empty))
     self.at = self.at + 1
-    while !self.done() {
-      if isTrivia(self.tokens, self.at) {
+    while self.at < count {
+      if isTrivia(tokens, self.at) {
         self.trivia(var held)
         continue
       }
-      if self.punctByte(self.at) == '\}' {
+      if byteOfPunct(source, tokens, self.at) == '\}' {
         held.push(leafIn(self.at, self.empty))
         self.at = self.at + 1
         return nodeOf(Node.Body, from, self.at, held.toArray())
@@ -398,26 +417,30 @@ impl Parser {
   /// same for both: a brace still opens a body, a bracket is still taken
   /// whole as a group, and an unmatched closer still stops at itself.
   fn statementOf(var self, declaring: Bool) -> Tree {
+    let source = self.source
+    let tokens = self.tokens
+    let count = tokens.length()
     let from = self.at
     var held = Vector.of()
     let escaping = self.escapes(self.at)
     var depth = 0
-    while !self.done() {
+    while self.at < count {
+      let c = byteOfPunct(source, tokens, self.at)
       // A brace at the top of a statement opens a body, which holds
       // statements of its own. Inside a group it is a leaf like any other:
       // `fn() { ... }` written as an argument is one argument.
-      if depth <= 0 && self.punctByte(self.at) == '\{' {
+      if depth <= 0 && c == '\{' {
         held.push(self.body())
         // And then ask, because a block is where a statement most often
         // ends: `if a \{ b \}` is over at the brace unless an `else` or a
         // method call follows on the same line. Reading on without asking
         // made the `c` under an `if` part of the `if`'s own statement.
-        if self.atLineEnd() && self.ends(depth, escaping, declaring) {
+        if endsALine(source, tokens, self.at) &&
+          self.ends(depth, escaping, declaring) {
           return nodeOf(Node.Stmt, from, self.at, held.toArray())
         }
         continue
       }
-      let c = self.punctByte(self.at)
       // The brace that closes the body this statement is in. It belongs to
       // the body and not to the statement, so the statement ends in front of
       // it — which is what makes `fn a() -> Int \{ 1 \}` one statement and a
@@ -435,7 +458,8 @@ impl Parser {
         // its own closing bracket: a statement that has taken a group is
         // back at its own level when it answers.
         held.push(self.grouped(Node.Group))
-        if self.atLineEnd() && self.ends(0, escaping, declaring) {
+        if endsALine(source, tokens, self.at) &&
+          self.ends(0, escaping, declaring) {
           return nodeOf(Node.Stmt, from, self.at, held.toArray())
         }
         continue
@@ -448,7 +472,8 @@ impl Parser {
       }
       held.push(leafIn(self.at, self.empty))
       self.at = self.at + 1
-      if self.atLineEnd() && self.ends(depth, escaping, declaring) {
+      if endsALine(source, tokens, self.at) &&
+        self.ends(depth, escaping, declaring) {
         return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
     }
@@ -508,13 +533,7 @@ impl Parser {
   /// `a /* … newline … */ b` is two statements there, and read only by runs
   /// of space it was one here.
   fn atLineEnd(self) -> Bool {
-    match self.tokens.get(self.at) {
-      Some(token) => {
-        (token.kind == Kind.Space || token.kind == Kind.BlockComment) &&
-          endsLine(self.source, token)
-      }
-      None => true
-    }
+    endsALine(self.source, self.tokens, self.at)
   }
 
   /// Whether the last token taken leaves the line unfinished.
@@ -657,6 +676,21 @@ impl Parser {
 ///
 /// Every comparison here is against ASCII, where a byte and a code point are
 /// the same number.
+/// [`Parser::atLineEnd`] asked of a position rather than of a parser.
+///
+/// The parser's loops ask it once a token, and a method of `self` called
+/// from a `var self` method copies the whole `Parser` to make the call; a
+/// function of the two fields it reads copies nothing.
+fn endsALine(source: String, tokens: Array<Token>, at: Int) -> Bool {
+  match tokens.get(at) {
+    Some(token) => {
+      (token.kind == Kind.Space || token.kind == Kind.BlockComment) &&
+        endsLine(source, token)
+    }
+    None => true
+  }
+}
+
 fn endsLine(source: String, token: Token) -> Bool {
   var i = token.from
   while i < token.to {
