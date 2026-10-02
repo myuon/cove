@@ -81,6 +81,12 @@ impl Scan {
   /// `String.byteAt` is an instruction where `codePointAtByte` is a builtin
   /// call answering an `Option`, and this is the hottest call in the lexer:
   /// `benches/scanshape` puts the same scan at 35 ns a byte against 119.
+  ///
+  /// The three loops that run over the most bytes — [`Scan::space`],
+  /// [`Scan::word`] and [`Scan::line`], a comment being most of the bytes of
+  /// a documented file — do not ask it. Each puts the bound in its own `while`
+  /// and reads the byte directly, which is the same answer without the `-1`
+  /// to make and then test: 9 instructions a byte of comment became 5.
   fn at(self, at: Int) -> Int {
     if at >= self.size {
       return -1
@@ -91,7 +97,7 @@ impl Scan {
   /// The end of the run of spaces beginning at `from`.
   fn space(self, from: Int) -> Int {
     var at = from
-    while isSpace(self.at(at)) {
+    while at < self.size && isSpace(self.source.byteAt(at)) {
       at = at + 1
     }
     at
@@ -100,7 +106,7 @@ impl Scan {
   /// The end of the word beginning at `from`.
   fn word(self, from: Int) -> Int {
     var at = from
-    while continuesWord(self.at(at)) {
+    while at < self.size && continuesWord(self.source.byteAt(at)) {
       at = at + 1
     }
     at
@@ -194,11 +200,7 @@ impl Scan {
   /// the newline is space, and space is a token of its own.
   fn line(self, from: Int) -> Int {
     var at = from
-    while true {
-      let c = self.at(at)
-      if c < 0 || c == '\n' {
-        return at
-      }
+    while at < self.size && self.source.byteAt(at) != '\n' {
       at = at + 1
     }
     at
