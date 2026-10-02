@@ -522,10 +522,14 @@ pub type SafepointFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, work: 
 /// eight frames down leaves through one `ret` per frame and no unwinding.
 ///
 /// The helper is handed the unpaid work in [`NativeCtx::pending_work`] rather
-/// than as a seventh argument, and it charges and clears it: a call may
-/// allocate and an allocation may collect, so ADR 0055's "around allocation or
-/// runtime calls which may collect" makes this a safepoint whether or not the
-/// callee reaches one of its own.
+/// than as a seventh argument, and it charges and clears it. A call is then a
+/// **poll** ([ADR 0078], which supersedes the reading of ADR 0055's "around
+/// allocation or runtime calls which may collect" that made every call a
+/// safepoint): the helper takes [ADR 0040]'s safepoint when the stride has been
+/// reached and not otherwise, exactly as a backedge does under ADR 0060.
+///
+/// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0078]: ../../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
 ///
 /// # Safety
 ///
@@ -578,9 +582,10 @@ pub struct Opened {
 ///
 /// What this does, and what it leaves to emitted code:
 ///
-/// - it charges the unpaid work in [`NativeCtx::pending_work`] and takes
-///   [ADR 0040]'s safepoint, exactly as [`CallFn`] does and in the same order.
-///   A direct call is a safepoint for the same reason a mediated one is;
+/// - it charges the unpaid work in [`NativeCtx::pending_work`] and polls, as
+///   [`CallFn`] does: [ADR 0040]'s safepoint is taken, in its order, when the
+///   stride has been reached ([ADR 0078]). A direct call polls for the same
+///   reason a mediated one does;
 /// - it admits the frame against the embedder's call-depth limit and pushes it,
 ///   so a runaway recursion is refused by the same two checks — the configured
 ///   limit and the stack segment's own bound — as before;
@@ -604,6 +609,7 @@ pub struct Opened {
 /// does.
 ///
 /// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0078]: ../../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
 pub type OpenFn = unsafe extern "C" fn(
     ctx: *mut NativeCtx,
     base: u64,

@@ -1243,8 +1243,12 @@ unsafe extern "C" fn run_copy(
 /// emitted code. What happens here is exactly `encoded.rs`'s `CALL` arm and its
 /// `RETURN`, split at the point the two tiers differ:
 ///
-/// 1. the unpaid work is charged, because a call may allocate and an allocation
-///    may collect — so this is a safepoint whether the callee reaches one or not;
+/// 1. the unpaid work is charged and the stride is tested — a call is a *poll*
+///    ([ADR 0078]), which takes [ADR 0040]'s safepoint when the stride has been
+///    reached, as a compiled backedge does under ADR 0060. It used to be an
+///    unconditional safepoint, on the argument that a callee may allocate; the
+///    callee's allocations go through helpers that sync for themselves, and the
+///    bound ADR 0040 states is kept by the test rather than by the call;
 /// 2. `open_frame` opens the callee's frame and copies its arguments, which is
 ///    the *same function* the dispatch loop calls;
 /// 3. the callee runs on whichever tier it is on;
@@ -1261,6 +1265,9 @@ unsafe extern "C" fn run_copy(
 ///
 /// As [`safepoint`]. `base`, `callee`, `args` and `dst` were checked by
 /// `cove_native`'s subset predicate before a byte of code was emitted.
+///
+/// [ADR 0040]: ../../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0078]: ../../../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
 unsafe extern "C" fn call(
     ctx: *mut NativeCtx,
     base: u64,
@@ -1316,9 +1323,9 @@ unsafe fn call_body<const MASK: u64>(
     let budget = (*host).budget;
     let callee = FunctionId(callee);
 
-    // A call is a safepoint. The work went into `pending_work` before the
+    // A call is a poll (ADR 0078). The work went into `pending_work` before the
     // hand-over and is charged here, so nothing is counted twice and nothing is
-    // dropped if the safepoint stops the run.
+    // dropped if the safepoint the poll takes stops the run.
     let work = (*ctx).pending_work;
     (*ctx).pending_work = 0;
 
@@ -1364,8 +1371,11 @@ unsafe fn call_body<const MASK: u64>(
         if MASK & ablate::AGAIN_SAFEPOINT != 0 {
             again_safepoint(machine, budget, caller.function, pc as usize);
         }
+        // A poll rather than an unconditional safepoint: ADR 0078. The callee
+        // allocates through helpers that sync for themselves, so nothing about
+        // a collection depends on this call having been one.
         machine
-            .safepoint(budget, caller.function, pc as usize)
+            .safepoint_if_due(budget, caller.function, pc as usize)
             .and_then(|()| {
                 super::encoded::open_frame(
                     machine,
@@ -2403,13 +2413,18 @@ unsafe extern "C" fn call_ablated<const MASK: u64>(
 ///
 /// Issue #365's decomposition measured the tier hop at 1.3% of the native arm and
 /// the *safepoint* at 9.1%, so a direct call that dropped the poll would be a
-/// speedup that was really a missing check. This takes it, in
+/// speedup that was really a missing check. This keeps the poll, in
 /// [ADR 0040]'s order, with the same charge, at the same point in the call:
 ///
 /// 1. the unpaid work goes from [`NativeCtx::pending_work`] into `bulk_work`;
 /// 2. the frame's program counter is synchronised, so a collection walks a
 ///    current frame;
-/// 3. cancellation, then fuel and the deadline, then the collector rendezvous;
+/// 3. the stride is tested, and when it has been reached — and only then — the
+///    safepoint is taken: cancellation, then fuel and the deadline, then the
+///    collector rendezvous. That is [ADR 0078], which makes a call a poll as
+///    ADR 0060 made a backedge one. Before it every call took the safepoint,
+///    and on `examples/cq` that was 16.8% of the native run spent being told
+///    nothing was due;
 /// 4. `admit_frame` against the embedder's `max_call_depth`, and `push_frame`,
 ///    whose `Overflow` is the stack segment's own bound. **Both** of the two
 ///    checks a runaway recursion is refused by are still here and still in that
@@ -2435,6 +2450,7 @@ unsafe extern "C" fn call_ablated<const MASK: u64>(
 ///
 /// [ADR 0040]: ../../../../../docs/adr/0040-a-bound-outlives-its-backend.md
 /// [ADR 0055]: ../../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+/// [ADR 0078]: ../../../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
 unsafe extern "C" fn open(
     ctx: *mut NativeCtx,
     base: u64,
@@ -2476,8 +2492,10 @@ unsafe extern "C" fn open(
             "compiled code and the frame stack disagree about which frame is calling"
         );
         let span = machine.span(caller.function, pc as usize);
+        // A call is a *poll*, as a backedge is (ADR 0078, after ADR 0060): the
+        // safepoint is taken when the stride is reached and not otherwise.
         machine
-            .safepoint(budget, caller.function, pc as usize)
+            .safepoint_if_due(budget, caller.function, pc as usize)
             .and_then(|()| machine.admit_frame(budget, span))
             .and_then(|()| {
                 let size = machine.program.function(id).frame_size();

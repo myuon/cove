@@ -115,9 +115,9 @@ pub struct Called {
     pub dst: u32,
     /// The unpaid work the caller published before handing over.
     ///
-    /// A call is a safepoint — a callee may allocate and an allocation may
-    /// collect — so the work goes over with it, and this is what says the arm
-    /// published it rather than dropping it.
+    /// A call is a poll (ADR 0078) — the helper charges the work and takes a
+    /// safepoint if the stride is reached — so the work goes over with it, and
+    /// this is what says the arm published it rather than dropping it.
     pub work: u64,
 }
 
