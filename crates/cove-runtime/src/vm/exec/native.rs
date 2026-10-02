@@ -575,7 +575,11 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
     }
 }
 
-/// The allocation helper: one `Inst::Alloc`, handed over whole.
+/// The allocation helper: one `Inst::Alloc`, handed over whole — or the
+/// `String` a short byte `Inst::RunSlice` fills, which the template arm
+/// allocates here and copies into itself (`cove_native`'s `RunCopyFn`, "The run
+/// slice is this helper too"), so that the charge, the safepoint and the
+/// allocation are the ones [`run_copy`] would have made.
 ///
 /// See [`cove_native::AllocFn`] for the signature and for why the answer is an
 /// address or a zero. What happens here is `encoded.rs`'s

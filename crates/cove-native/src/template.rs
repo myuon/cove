@@ -147,7 +147,9 @@ const ROUND_EXPONENT: i32 = 0x433;
 const TRUNCATE_LEAST: i64 = 0xc3e0_0000_0000_0000_u64 as i64;
 
 /// The longest byte [`Inst::RunCopy`] the template arm copies in emitted code
-/// (`Emit::short_copy_bytes`) rather than handing to the run-copy helper.
+/// (`Emit::short_copy_bytes`) rather than handing to the run-copy helper — and
+/// the longest byte [`Inst::RunSlice`] it answers as an allocation and an
+/// emitted copy (`Emit::short_slice_bytes`).
 ///
 /// Far below one of the helper's chunks (`BULK_CHUNK_BYTES`, 8 KiB), which is
 /// what lets the fast path skip the helper's safepoint: a copy this short is
@@ -1172,7 +1174,9 @@ impl<'a> Emit<'a> {
                 Storage::Words(elem) => self.run_copy(args.0, RunOp::CopyWords, elem.0),
             },
             // ADR 0058's `run-slice`: the same helper, which allocates the run
-            // and writes it into the row's `dst` before it copies into it.
+            // and writes it into the row's `dst` before it copies into it — but
+            // for a short byte slice, which [`Emit::short_slice_bytes`] answers
+            // as the allocation helper and an emitted copy.
             Inst::RunSlice { args, storage } => match storage {
                 Storage::PackedBytes => self.run_copy(args.0, RunOp::SliceBytes, 0),
                 Storage::Words(elem) => self.run_copy(args.0, RunOp::SliceWords, elem.0),
@@ -2333,10 +2337,14 @@ impl<'a> Emit<'a> {
     ///
     /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
     fn run_copy(&mut self, args: u32, kind: RunOp, elem: u32) {
-        if kind == RunOp::CopyBytes {
+        if kind == RunOp::CopyBytes || kind == RunOp::SliceBytes {
             let cold = self.label();
             let done = self.label();
-            self.short_copy_bytes(args, cold);
+            if kind == RunOp::CopyBytes {
+                self.short_copy_bytes(args, cold);
+            } else {
+                self.short_slice_bytes(args, cold);
+            }
             self.jmp(Target::Label(done));
             self.bind(cold);
             self.run_copy_call(args, kind, elem);
@@ -2466,6 +2474,146 @@ impl<'a> Emit<'a> {
         self.add_imm32(COUNT, -1);
         self.jcc(CC_NE, Target::Label(bytes));
         self.bind(end);
+    }
+
+    /// A byte [`Inst::RunSlice`](cove_ir::Inst::RunSlice) of at most
+    /// [`SHORT_COPY_BYTES`] — `std.string.sliceBytes`, which is what a
+    /// formatter's printer does once a token — answered as the allocation
+    /// helper and an emitted copy, and a jump to `cold` for anything else
+    /// **before anything has been allocated, written or charged**, so that
+    /// the run-copy helper behind `cold` sees exactly what it always saw.
+    ///
+    /// # What it answers, and what goes to the helper
+    ///
+    /// Everything `encoded::run_slice_bytes` refuses goes to `cold`, which
+    /// refuses it in the runtime's own words: a source below the heap (null
+    /// included), a source that is not
+    /// [`Program::str_layout`](cove_ir::Program::str_layout), and a range past
+    /// its end — a negative offset or count read as an unsigned number too
+    /// large to pass. So does a count above the threshold, and a source range
+    /// whose words straddle two heap chunks.
+    ///
+    /// # Why it is the same run, step for step
+    ///
+    /// The run-copy helper, given a slice that passes those checks, does three
+    /// things: it charges the unpaid work and takes a safepoint, it allocates
+    /// a `String` of `count` bytes through `Machine::allocate`, and it copies
+    /// in one chunk, charging `words_of_bytes(count)`. The allocation helper
+    /// ([`crate::abi::AllocFn`]) is the first two exactly — the same charge,
+    /// the same safepoint, the same `Machine::allocate` with the same layout
+    /// and length, and the same "this run has no memory left" at the same
+    /// instruction's span — and the copy is [`Emit::short_copy_bytes`]'
+    /// argument again: one chunk never polls, so the words go into [`WORK`]
+    /// for the next poll, as every other unit of compiled work does.
+    ///
+    /// Two things make the copy sound after a call that may have collected.
+    /// The source is in a frame slot, which is a root, and the collector does
+    /// not move objects, so its address — re-read from the slot, because the
+    /// call clobbered every scratch register — names the same bytes. And the
+    /// fresh string is reachable from nothing until it is written into `dst`,
+    /// but nothing between the allocation and that write can collect.
+    ///
+    /// # The copy
+    ///
+    /// The source range lies in one heap chunk, which the check established,
+    /// so its bytes are read through one machine address. The fresh string's
+    /// payload need not — the allocator may hand out a block that crosses a
+    /// chunk — so each destination word's address is formed on its own with
+    /// [`Emit::heap_ptr`], and each is written whole: eight bytes at a time
+    /// while eight remain, and the last few gathered into a register,
+    /// highest first, with zeroes above them. Those zeroes are what was there:
+    /// a fresh payload is zeroed, and the helper's copy keeps the bytes past
+    /// the range as it found them. No source byte past `from + count` is read.
+    ///
+    /// `dst` is written last, because it may be the same slot as `src`,
+    /// `from` or `count` — `s = s.sliceBytes(…)` — and the copy reads all
+    /// three after the call.
+    fn short_slice_bytes(&mut self, args: u32, cold: usize) {
+        let row = self.program.arg_list(ArgsId(args));
+        let (dst, src, from, count) = (row[0].slot, row[1].slot, row[2].slot, row[3].slot);
+        const SRC: u8 = R8;
+        const OUT: u8 = R9;
+        const COUNT: u8 = R10;
+        const FRESH: u8 = R11;
+        let str_layout = self.program.str_layout.0;
+
+        // The checks, in `short_copy_bytes`' terms, with nothing written.
+        self.mov_imm64(RCX, HEAP_ORIGIN_WORDS as i64);
+        self.load_slot(SRC, src);
+        self.cmp_rr(SRC, RCX);
+        self.jcc(CC_B, Target::Label(cold));
+        self.load_slot(COUNT, count);
+        self.cmp_imm32(COUNT, SHORT_COPY_BYTES as i32);
+        self.jcc(CC_A, Target::Label(cold));
+        self.run_end(SRC, from, &[str_layout], COUNT, cold);
+
+        // `Emit::allocate`'s hand-over, with the count as the length.
+        self.store(CTX, OFF_PENDING_WORK, WORK);
+        self.xor_rr(WORK, WORK);
+        self.load_slot(RCX, count);
+        self.mov_rr(RDI, CTX);
+        self.mov_imm32(RSI, self.pc as i32);
+        self.mov_imm32(RDX, str_layout as i32);
+        self.mov_imm64(RAX, self.alloc as i64);
+        self.call(RAX);
+        self.frame_live = false;
+        self.test_rr(RAX, RAX);
+        self.raise_unless(CC_NE, Raise::Called);
+        self.mov_rr(FRESH, RAX);
+
+        // The operands again, from their slots: the source's first byte as a
+        // machine address, and the count.
+        self.load_slot(COUNT, count);
+        self.load_slot(RAX, src);
+        self.heap_ptr(RAX);
+        self.load_slot(SRC, from);
+        self.add_rr(SRC, HEAP_TABLE);
+        self.add_imm32(SRC, 8);
+
+        // A slice of nothing charges nothing, as `run_slice_bytes` copies
+        // nothing; otherwise `words_of_bytes(count)` goes into the unpaid work.
+        let end = self.label();
+        self.test_rr(COUNT, COUNT);
+        self.jcc(CC_E, Target::Label(end));
+        self.mov_rr(RAX, COUNT);
+        self.add_imm32(RAX, 7);
+        self.shr_imm8(RAX, 3);
+        self.add_rr(WORK, RAX);
+
+        // `OUT` walks the fresh string's payload words as linear addresses.
+        self.mov_rr(OUT, FRESH);
+        let words = self.label();
+        let tail = self.label();
+        let gather = self.label();
+        self.bind(words);
+        self.cmp_imm32(COUNT, 8);
+        self.jcc(CC_B, Target::Label(tail));
+        self.add_imm32(OUT, 1);
+        self.load(RAX, SRC, 0);
+        self.heap_ptr(OUT);
+        self.store(HEAP_TABLE, 0, RAX);
+        self.add_imm32(SRC, 8);
+        self.add_imm32(COUNT, -8);
+        self.jmp(Target::Label(words));
+        self.bind(tail);
+        self.test_rr(COUNT, COUNT);
+        self.jcc(CC_E, Target::Label(end));
+        // The last `COUNT` bytes, highest first, into the low end of `RAX`.
+        self.xor_rr(RAX, RAX);
+        self.bind(gather);
+        self.add_imm32(COUNT, -1);
+        self.mov_rr(RCX, SRC);
+        self.add_rr(RCX, COUNT);
+        self.load8(RCX, RCX, 0);
+        self.shl_imm8(RAX, 8);
+        self.or_rr(RAX, RCX);
+        self.test_rr(COUNT, COUNT);
+        self.jcc(CC_NE, Target::Label(gather));
+        self.add_imm32(OUT, 1);
+        self.heap_ptr(OUT);
+        self.store(HEAP_TABLE, 0, RAX);
+        self.bind(end);
+        self.store_slot(dst, FRESH);
     }
 
     /// One end of [`Emit::short_copy_bytes`]: the object at the heap address in

@@ -2980,6 +2980,15 @@ impl<'a> Machine<'a> {
     }
 
     /// Eight bytes a turn, from the front.
+    ///
+    /// Through the two objects' heap words directly when both ranges lie in
+    /// the heap chunk their header is in — [`copy_payload_bytes`], which is
+    /// nearly every copy, since a chunk is 64 KiB — and through
+    /// [`Machine::bytes_word`] and [`Machine::blend`] a word at a time
+    /// otherwise. The two write the same bytes; what the first saves is a
+    /// region decode and a chunk lookup for every word read and written,
+    /// which were most of a short copy's cost (the native tier's string
+    /// slices, measured on covefmt).
     fn copy_bytes_ascending(
         &mut self,
         dst: u64,
@@ -2988,6 +2997,18 @@ impl<'a> Machine<'a> {
         src_at: usize,
         len: usize,
     ) {
+        if len == 0 {
+            return;
+        }
+        let (_, heap) = self.mem.stack_and_heap();
+        if let (Some(from), Some(into)) = (heap.run_at(src), heap.run_at(dst)) {
+            // The header is word 0 and payload word `i` is word `1 + i`, so
+            // the last word either range touches is `1 + (at + len - 1) / 8`.
+            if from.len() > 1 + (src_at + len - 1) / 8 && into.len() > 1 + (dst_at + len - 1) / 8 {
+                copy_payload_bytes(into, dst_at, from, src_at, len);
+                return;
+            }
+        }
         let src_len = self.mem.object_len(src) as usize;
         let mut done = 0;
         while done < len {
@@ -4098,6 +4119,58 @@ impl<'a> Machine<'a> {
     /// *around*.
     pub(crate) fn new_object(&mut self, layout: LayoutId, len: u32) -> Result<u64, RuntimeError> {
         self.allocate(layout, len as i64)
+    }
+}
+
+/// [`Machine::copy_string_bytes`]' ascending copy over two objects' words in
+/// hand: `len` bytes from byte `src_at` of the payload of `src` to byte
+/// `dst_at` of the payload of `dst`, where each slice begins at its object's
+/// header, so payload word `i` is element `1 + i`.
+///
+/// One store per destination word the range touches, and no load of it unless
+/// the range covers only part of it — whose other bytes are kept, as
+/// [`Machine::blend`] keeps them. Each destination word's bytes are gathered
+/// from at most two source words, and no source word is read past the one
+/// holding byte `src_at + len - 1`, so neither slice is indexed past the word
+/// its range ends in: that, and that `len` is not nought, is what the caller
+/// guarantees.
+///
+/// `src` and `dst` may be one object provided `dst_at <= src_at`, which is
+/// the only overlap [`Machine::copy_string_bytes`] sends this way: every
+/// source byte a destination word needs is at or after the bytes that word
+/// receives, so it is read before anything writes over it.
+fn copy_payload_bytes(
+    dst: &[std::sync::atomic::AtomicU64],
+    dst_at: usize,
+    src: &[std::sync::atomic::AtomicU64],
+    src_at: usize,
+    len: usize,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    debug_assert!(len > 0);
+    let end = dst_at + len;
+    let delta = src_at.wrapping_sub(dst_at);
+    let mut at = dst_at;
+    while at < end {
+        let word = at / 8;
+        let offset = at % 8;
+        let take = (8 - offset).min(end - at);
+        // `take` source bytes from `at + delta`, least significant first.
+        let from = at.wrapping_add(delta);
+        let shift = (from % 8) * 8;
+        let mut bits = src[1 + from / 8].load(Relaxed) >> shift;
+        if shift != 0 && from % 8 + take > 8 {
+            bits |= src[2 + from / 8].load(Relaxed) << (64 - shift);
+        }
+        let slot = &dst[1 + word];
+        if take == 8 {
+            slot.store(bits, Relaxed);
+        } else {
+            let mask = ((1u64 << (take * 8)) - 1) << (offset * 8);
+            let held = slot.load(Relaxed);
+            slot.store((held & !mask) | ((bits << (offset * 8)) & mask), Relaxed);
+        }
+        at += take;
     }
 }
 
@@ -10242,6 +10315,85 @@ pub(crate) mod tests {
         // A corpus that silently emptied would pass every assertion above.
         assert_eq!(checked, (corpus.len() + 1).pow(2));
         assert!(checked > 2000, "{checked} pairs is not a corpus");
+    }
+
+    /// **A byte copy between strings writes exactly the bytes a byte-at-a-time
+    /// copy would, and no others** — at every alignment of either end, every
+    /// length up to three words and a little past, within one object in both
+    /// directions, and for objects that straddle a heap chunk, which take the
+    /// word-at-a-time path rather than [`copy_payload_bytes`].
+    ///
+    /// The oracle is a `Vec<u8>` the machine never touched, copied with
+    /// `copy_within` or a slice copy: the same answer computed by Rust.
+    #[test]
+    fn a_string_byte_copy_answers_what_a_byte_copy_answers() {
+        let mut build = Build::default();
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 16);
+        const SIZE: usize = 40;
+        let source: Vec<u8> = (0..SIZE as u8).map(|i| 0x80 | i).collect();
+        let target: Vec<u8> = (0..SIZE as u8).map(|i| i + 1).collect();
+
+        let check = |machine: &mut Machine<'_>, src: u64, dst: u64, label: &str| {
+            let mut cases = 0;
+            for len in 0..=26usize {
+                for src_at in 0..=SIZE - len {
+                    for dst_at in 0..=SIZE - len {
+                        machine.write_bytes(src, &source);
+                        machine.write_bytes(dst, &target);
+                        machine.copy_string_bytes(dst, dst_at, src, src_at, len);
+                        let mut want = target.clone();
+                        want[dst_at..dst_at + len].copy_from_slice(&source[src_at..src_at + len]);
+                        assert_eq!(
+                            machine.string_bytes(dst),
+                            want,
+                            "{label}: {len} byte(s) from {src_at} to {dst_at}"
+                        );
+                        assert_eq!(machine.string_bytes(src), source, "{label}: the source");
+                        cases += 1;
+                    }
+                }
+            }
+            assert!(cases > 10_000, "{cases} cases is not a sweep");
+        };
+
+        let src = string_of(&mut machine, &source);
+        let dst = string_of(&mut machine, &target);
+        check(&mut machine, src, dst, "two objects");
+
+        // One object, both directions: `memmove`, not `memcpy`.
+        let one = string_of(&mut machine, &source);
+        for len in 0..=26usize {
+            for src_at in 0..=SIZE - len {
+                for dst_at in 0..=SIZE - len {
+                    machine.write_bytes(one, &source);
+                    machine.copy_string_bytes(one, dst_at, one, src_at, len);
+                    let mut want = source.clone();
+                    want.copy_within(src_at..src_at + len, dst_at);
+                    assert_eq!(
+                        machine.string_bytes(one),
+                        want,
+                        "one object: {len} byte(s) from {src_at} to {dst_at}"
+                    );
+                }
+            }
+        }
+
+        // Two objects that straddle a chunk boundary, so the slices in hand
+        // end inside them and the copy goes the word-at-a-time way.
+        let chunk = cove_native::HEAP_CHUNK_WORDS;
+        let mut crossing = || loop {
+            let probe = string_of(&mut machine, &[0; 8]);
+            if (probe + 2) % chunk >= chunk - 3 {
+                let addr = string_of(&mut machine, &source);
+                assert!(addr / chunk != (addr + SIZE as u64 / 8) / chunk);
+                break addr;
+            }
+        };
+        let (src, dst) = (crossing(), crossing());
+        check(&mut machine, src, dst, "objects across a chunk boundary");
     }
 
     // A section here held the scratch pool to its bound: a buffer at the

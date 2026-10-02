@@ -941,6 +941,60 @@ export fn callsCopiesShort(text: String, limit: Int) -> String {
   copiesShort(text, limit)
 }
 
+/// `sliceBytes`, or nothing where it refuses.
+fn piece(text: String, from: Int, to: Int) -> String {
+  match text.sliceBytes(from, to) {
+    Ok(held) => held
+    Err(_) => \"?\"
+  }
+}
+
+/// Every short byte slice the template arm answers as an allocation and an
+/// emitted copy, and the first one it does not, each on a line of its own.
+///
+/// For every count from nought to one past `limit`: a slice from each offset
+/// inside two words, a slice that ends where the string does, and a slice
+/// written back over the variable it was taken from, which may put the
+/// answer in the very slot the source was read from.
+export fn slicesShort(text: String, limit: Int) -> String {
+  var all = StringBuilder.withCapacity(64 + counts(0))
+  let length = text.byteLength()
+  var count = 0
+  while count <= limit + 1 {
+    var from = 0
+    while from < 16 {
+      all.append(piece(text, from, from + count))
+      all.appendByte(124)
+      var same = text
+      same = piece(same, from, from + count)
+      all.append(same)
+      all.appendByte(10)
+      from = from + 1
+    }
+    all.append(piece(text, length - count, length))
+    all.appendByte(10)
+    count = count + 1
+  }
+  all.finish()
+}
+
+/// A refused caller, so every slice above is a compiled frame's.
+export fn callsSlicesShort(text: String, limit: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  slicesShort(text, limit)
+}
+
+/// One `sliceBytes`, answered whole, so a refusal's sentence is compared too.
+export fn slicesAt(text: String, from: Int, to: Int) -> Result<String, Error> {
+  text.sliceBytes(from + counts(0), to)
+}
+
+/// A refused caller, so the slice is a compiled frame's.
+export fn callsSlicesAt(text: String, from: Int, to: Int) -> Result<String, Error> {
+  let nothing = Shared(0).lock(fn(v) { v })
+  slicesAt(text, from, to)
+}
+
 /// A byte range of a string appended, in a compiled frame.
 ///
 /// ADR 0062 put `appendSlice`'s range policy in Cove, so what a compiled frame
@@ -3569,6 +3623,104 @@ fn a_short_byte_copy_in_compiled_code_is_the_helper_s() {
         "the copies happened in machine code: {:?}",
         both.tiers
     );
+}
+
+/// **A short byte slice in compiled code is the helper's slice, bit for bit.**
+///
+/// The template arm answers a byte run slice of at most `SHORT_COPY_BYTES` as
+/// the allocation helper and an emitted copy, and hands the rest to the
+/// run-copy helper; the encoded tier runs `encoded::run_slice_bytes` for all of
+/// them. So this is the one against the other over every length to one past
+/// the threshold, from every offset in two words, at the end of the source,
+/// and into the slot it was read from — and both against the answer Rust
+/// writes, so a VM that agreed with a wrong native slice would not pass.
+#[test]
+fn a_short_byte_slice_in_compiled_code_is_the_helper_s() {
+    on_each_tier(&["slicesShort"], &["callsSlicesShort"]);
+    let limit = cove_native::template::SHORT_COPY_BYTES as usize;
+    let text: String = (0..limit + 40)
+        .map(|at| char::from(b'A' + (at % 57) as u8))
+        .collect();
+    let mut expected = String::new();
+    for count in 0..=limit + 1 {
+        for from in 0..16 {
+            let piece = &text[from..from + count];
+            expected.push_str(&format!("{piece}|{piece}\n"));
+        }
+        expected.push_str(&text[text.len() - count..]);
+        expected.push('\n');
+    }
+    let both = both(
+        "callsSlicesShort",
+        vec![Value::string(text.as_str()), Value::int(limit as i64)],
+    );
+    assert_eq!(both.vm, Ok(expected), "the encoded tier's slices");
+    assert_eq!(both.native, both.vm, "and a compiled frame's");
+    assert!(
+        both.tiers.vm_to_native >= 1,
+        "the slices happened in machine code: {:?}",
+        both.tiers
+    );
+}
+
+/// **A slice's edges are the VM's on both tiers**: the empty slice of the
+/// empty string and of a long one, multi-byte characters cut at their
+/// boundaries — which the emitted copy answers — and inside one, which
+/// `sliceBytes` refuses in Cove before any slice is taken, with the VM's own
+/// sentence.
+#[test]
+fn a_byte_slice_s_edges_and_refusals_are_the_vm_s_on_both_tiers() {
+    on_each_tier(&["slicesAt"], &["callsSlicesAt"]);
+    // `é` is two bytes and `日` three, so the boundaries in the first are 0, 1,
+    // 3, 4, 5 and 6.
+    let long = "é".repeat(40);
+    let cases: Vec<(&str, i64, i64)> = vec![
+        ("", 0, 0),
+        ("héllo", 0, 0),
+        ("héllo", 6, 6),
+        ("héllo", 1, 3),
+        ("héllo", 0, 6),
+        ("héllo", 2, 4),
+        ("héllo", 1, 2),
+        ("héllo", 3, 7),
+        ("héllo", 4, 2),
+        ("héllo", -1, 2),
+        ("日本語のテキスト", 3, 9),
+        ("日本語のテキスト", 3, 10),
+        (long.as_str(), 2, 66),
+        (long.as_str(), 2, 68),
+        (long.as_str(), 1, 9),
+    ];
+    for (text, from, to) in cases {
+        let both = both(
+            "callsSlicesAt",
+            vec![Value::string(text), Value::int(from), Value::int(to)],
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "the two tiers slice {text:?} from {from} to {to} alike"
+        );
+        let bytes = text.as_bytes();
+        if let Some(want) = usize::try_from(from)
+            .ok()
+            .zip(usize::try_from(to).ok())
+            .filter(|(f, t)| f <= t && *t <= bytes.len())
+            .and_then(|(f, t)| std::str::from_utf8(&bytes[f..t]).ok())
+        {
+            assert_eq!(
+                both.vm,
+                Ok(format!("Ok({want})")),
+                "{text:?} from {from} to {to}"
+            );
+        } else {
+            let said = both.vm.as_ref().expect("a refusal is an `Err` value");
+            assert!(
+                said.starts_with("Err("),
+                "{text:?} from {from} to {to}: {said}"
+            );
+        }
+        assert!(both.tiers.vm_to_native >= 1, "{:?}", both.tiers);
+    }
 }
 
 /// A finish of a run that is not valid UTF-8 raises the VM's own sentence.
