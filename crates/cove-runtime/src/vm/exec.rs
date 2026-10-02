@@ -84,6 +84,7 @@ use crate::value::Value;
 /// out of the machine's memory and the layout table, both of them private.
 pub(crate) mod dynamic;
 pub(crate) mod encoded;
+mod frames;
 pub(crate) mod native;
 /// The growable-run core a `ByteBuffer` and a `Vector` share. A child for
 /// `encoded`'s reason: growth allocates, and allocation is the machine's.
@@ -119,16 +120,34 @@ pub const SAFEPOINT_STRIDE: u64 = 1024;
 /// machine is borrowed mutably can take them rather than hold the borrow. The
 /// native call helper is that reader: it has to open a frame with the caller's
 /// base, and `open_frame` takes `&mut Machine`.
+///
+/// `#[repr(C)]`, in the order `cove_native::FrameRecord` declares, because a
+/// direct native call writes one of these itself ([ADR 0079]); `frames.rs`
+/// asserts the two layouts are the same.
+///
+/// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct Frame {
-    function: FunctionId,
     /// The linear address of slot 0.
     base: u64,
+    function: FunctionId,
     /// Where this frame resumes: the instruction after the call it is
     /// suspended at, or the one about to run.
     pc: u32,
     /// The slot of the *caller's* frame this call's answer is written to.
     dst: Slot,
+}
+
+impl Frame {
+    /// What spare frame storage holds: never read as a frame, because it is
+    /// above the top.
+    const EMPTY: Frame = Frame {
+        base: 0,
+        function: FunctionId(0),
+        pc: 0,
+        dst: 0,
+    };
 }
 
 /// What one task is holding, read where the collector asks rather than
@@ -320,7 +339,7 @@ pub(crate) struct Machine<'a> {
     /// registry that answers nothing.
     hosts: Option<&'a HostRegistry>,
     mem: Memory,
-    frames: Vec<Frame>,
+    frames: frames::Frames,
     /// The heap address of each [`StrId`], or the refusal
     /// [`Machine::place_literals`] met trying to build one — held exactly as
     /// [`Machine::encoded`] holds its own, because both are prepared once,
@@ -776,7 +795,7 @@ impl<'a> Machine<'a> {
             runtime,
             hosts,
             mem: Memory::new(heap_words),
-            frames: Vec::new(),
+            frames: frames::Frames::new(),
             // Overwritten below, once the machine that places them exists.
             literal_addrs: Ok(Arc::from([])),
             resources: Arc::new(Mutex::new(Vec::new())),
@@ -860,7 +879,7 @@ impl<'a> Machine<'a> {
             runtime,
             hosts,
             mem,
-            frames: Vec::new(),
+            frames: frames::Frames::new(),
             literal_addrs: Ok(literal_addrs),
             resources,
             temps: Vec::new(),

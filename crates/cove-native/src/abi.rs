@@ -619,6 +619,87 @@ pub type OpenFn = unsafe extern "C" fn(
     dst: u32,
 ) -> Opened;
 
+/// One entry of the runtime's stack of frames, as compiled code writes it.
+///
+/// [ADR 0079]: a direct call whose frame fits opens it in emitted code, so the
+/// record that makes the callee's reference slots walkable is written by
+/// machine code rather than by `Vec::push`. The runtime's own frame type is
+/// declared with this layout and asserts so at compile time; this declaration is
+/// the contract, and the offsets the code generator stores at are read from it
+/// with [`std::mem::offset_of`].
+///
+/// `function` and `pc` are adjacent on purpose: a fresh frame's two are written
+/// with one 64-bit store, the callee's id in the low half and a zero `pc` in
+/// the high one.
+///
+/// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameRecord {
+    /// The linear address of slot 0 — the segment origin plus the frame's word
+    /// index.
+    pub base: u64,
+    /// The function the frame is running, as a `FunctionId`'s number.
+    pub function: u32,
+    /// Where the frame resumes: the instruction after the call it is suspended
+    /// at, or nought for a frame not yet entered.
+    pub pc: u32,
+    /// The slot of the *caller's* frame the answer is written to.
+    pub dst: u32,
+}
+
+/// The runtime's stack of frames, as much of it as compiled code may change.
+///
+/// The authoritative length and storage of the frames a task holds, published
+/// to compiled code by address in [`NativeCtx::frames`]. Rust pushes and pops
+/// through the same three fields, so there is one stack and not a copy that has
+/// to be reconciled.
+///
+/// **`room` is the whole of the inline path's admission.** Emitted code may push
+/// a record exactly when `len < room`, and the runtime keeps `room` at most the
+/// records `records` has storage for and at most the embedder's
+/// `max_call_depth` — so a push that would reallocate the storage, or one the
+/// configured limit would refuse, is a push emitted code does not make: it calls
+/// [`OpenFn`], which grows the storage or raises the refusal as before. A
+/// `room` of nought sends every call to the helper, which is how the runtime
+/// keeps the inline path off for a run that counts its helper calls or whose
+/// entry table is not a slice.
+#[repr(C)]
+#[derive(Debug)]
+pub struct FrameStack {
+    /// Record 0. Moves when the runtime grows the storage, which only Rust
+    /// does, so emitted code re-reads it at every call rather than caching it.
+    pub records: *mut FrameRecord,
+    /// How many records are live.
+    pub len: u64,
+    /// The length below which emitted code may push one more record.
+    pub room: u64,
+}
+
+// Safety: the pointer names storage owned by whoever owns the `FrameStack`,
+// and moves with it between threads; nothing else holds it.
+unsafe impl Send for FrameStack {}
+
+/// The top of a task's word stack, as compiled code may move it.
+///
+/// The authoritative count of words in use, published to compiled code by
+/// address in [`NativeCtx::stack`]. The words themselves are
+/// [`NativeCtx::words`].
+///
+/// `room` is [`FrameStack::room`]'s rule for words: emitted code opens a frame
+/// of `size` words exactly when `len + size <= room`, and the runtime keeps
+/// `room` at most the words it has storage for and below the task's segment
+/// bound. A frame that would grow the storage — and move it — or overflow the
+/// segment is opened by [`OpenFn`] instead.
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct WordStack {
+    /// The word index of the first word not in any frame.
+    pub len: u64,
+    /// The `len` a frame may reach without the runtime.
+    pub room: u64,
+}
+
 /// What finishes a call generated code made itself.
 ///
 /// The other half of [`OpenFn`], and it is a helper rather than emitted code for
@@ -1432,6 +1513,29 @@ pub struct NativeCtx {
     /// `words` unstable, and the segment's place in the index space is not that
     /// `Vec`.
     pub stack_origin: u64,
+    /// The task's stack of frames, for a direct call that opens its callee's
+    /// frame in emitted code ([ADR 0079]).
+    ///
+    /// Null in a fresh context, and a context built by [`NativeCtx::new`] alone
+    /// must not run code compiled with inline frames: that code reads through
+    /// this without testing it. The runtime publishes it once per entry, with
+    /// [`NativeCtx::over_frames`], and it does not move while the entry runs.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    pub frames: *mut FrameStack,
+    /// The top of the task's word stack. See [`NativeCtx::frames`].
+    pub stack: *mut WordStack,
+    /// The machine's bulk work total — what [`NativeCtx::pending_work`] is
+    /// charged *into* — for a direct call that charges its caller's work
+    /// without a helper. See [`NativeCtx::frames`].
+    pub bulk_work: *mut u64,
+    /// The runtime's entry table, one [`Option<Entry>`] per function and indexed
+    /// by its number, which is the question `OpenFn` asks first. See
+    /// [`NativeCtx::frames`].
+    pub entries: *const Option<Entry>,
+    /// Direct calls this context's code opened without a helper, which the
+    /// runtime adds to its transition counts when the entry returns.
+    pub direct_calls: u64,
     /// IR instructions executed since the last safepoint and not yet charged.
     ///
     /// Written on every exit — a return, a raise and a stop alike — which is
@@ -1557,6 +1661,11 @@ impl NativeCtx {
             dyn_layouts: std::ptr::null(),
             dyn_children: std::ptr::null(),
             stack_origin,
+            frames: std::ptr::null_mut(),
+            stack: std::ptr::null_mut(),
+            bulk_work: std::ptr::null_mut(),
+            entries: std::ptr::null(),
+            direct_calls: 0,
             pending_work: 0,
             // "Poll at every backedge", which is what compiled code did before
             // the threshold existed. See [`NativeCtx::poll_at`]: a caller that
@@ -1628,6 +1737,28 @@ impl NativeCtx {
     /// wants it.
     pub fn polling_at(mut self, poll_at: u64) -> Self {
         self.poll_at = poll_at;
+        self
+    }
+
+    /// The same context, over the runtime state a direct call opens and closes
+    /// a frame in without a helper ([ADR 0079]).
+    ///
+    /// See [`NativeCtx::frames`]. All four must stay valid and unmoved for as
+    /// long as the code runs; the storage `frames.records` names may move, which
+    /// is why it is read through `frames` rather than published here.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    pub fn over_frames(
+        mut self,
+        frames: *mut FrameStack,
+        stack: *mut WordStack,
+        bulk_work: *mut u64,
+        entries: *const Option<Entry>,
+    ) -> Self {
+        self.frames = frames;
+        self.stack = stack;
+        self.bulk_work = bulk_work;
+        self.entries = entries;
         self
     }
 

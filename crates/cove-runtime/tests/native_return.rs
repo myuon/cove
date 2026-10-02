@@ -1896,6 +1896,7 @@ fn took_all(before: cove_runtime::Tiers, after: cove_runtime::Tiers) -> cove_run
         vm_to_native: after.vm_to_native - before.vm_to_native,
         native_to_vm: after.native_to_vm - before.native_to_vm,
         native_to_native_direct: after.native_to_native_direct - before.native_to_native_direct,
+        native_to_native_inline: after.native_to_native_inline - before.native_to_native_inline,
         native_to_native_mediated: after.native_to_native_mediated
             - before.native_to_native_mediated,
         host_to_native: after.host_to_native - before.host_to_native,

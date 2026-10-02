@@ -138,6 +138,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 use cove_ir::{Layout, LayoutId, Repr, Shape, SHARED_VALUE};
+use cove_native::WordStack;
 
 /// The words one task's stack segment reserves.
 ///
@@ -153,6 +154,10 @@ use cove_ir::{Layout, LayoutId, Repr, Shape, SHARED_VALUE};
 /// task that never nests deeply never pays for it, so the cost of reserving
 /// one per task is a range of the index space and nothing else.
 pub(crate) const SEGMENT_WORDS: u64 = 1 << 20;
+
+/// The fewest words a task's stack storage is grown to, so that a short run
+/// allocates it once rather than at every frame of its first few calls.
+const MIN_STACK_ROOM: usize = 256;
 
 /// How many stack segments the address space reserves, and so how many tasks
 /// of one run may be executing at once.
@@ -1527,8 +1532,18 @@ fn is_marked(marks: &[u64], addr: u64) -> bool {
 struct Stack {
     /// The first address of this task's segment.
     origin: u64,
-    /// The committed words, from `origin` up.
+    /// The committed words, from `origin` up: every one initialised, and the
+    /// first `top.len` of them in some frame.
+    ///
+    /// Its length is the room the segment has storage for, not the words in
+    /// use — that is `top.len`, which compiled code moves too ([ADR 0079]), and
+    /// a `Vec`'s own length is the one thing code outside Rust cannot change.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
     words: Vec<u64>,
+    /// How many words are in use, and how far a frame opened without the
+    /// runtime may take that. See [`cove_native::WordStack`].
+    top: WordStack,
 }
 
 impl Stack {
@@ -1581,6 +1596,7 @@ impl Memory {
             stack: Stack {
                 origin: segment_origin(at),
                 words: Vec::new(),
+                top: WordStack::default(),
             },
             space,
             at,
@@ -1599,6 +1615,7 @@ impl Memory {
             stack: Stack {
                 origin: segment_origin(at),
                 words: Vec::new(),
+                top: WordStack::default(),
             },
             space: Arc::clone(&self.space),
             at,
@@ -1781,7 +1798,7 @@ impl Memory {
     pub(crate) fn holds(&self, addr: u64, words: u32) -> bool {
         let end = addr + words as u64;
         if is_stack(addr) {
-            addr >= self.stack.origin && end <= self.stack.origin + self.stack.words.len() as u64
+            addr >= self.stack.origin && end <= self.stack.origin + self.stack.top.len
         } else {
             end <= self.space.bump.load(Ordering::Relaxed)
         }
@@ -1799,12 +1816,46 @@ impl Memory {
     /// address there would retain an object — or, worse, name a word that is no
     /// longer an object header.
     pub(crate) fn push_frame(&mut self, size: u32) -> Result<u64, Overflow> {
-        let used = self.stack.words.len() as u64;
-        if used + size as u64 >= SEGMENT_WORDS {
+        let used = self.stack.top.len;
+        let end = used + size as u64;
+        if end >= SEGMENT_WORDS {
             return Err(Overflow);
         }
-        self.stack.words.resize(used as usize + size as usize, 0);
+        if end as usize > self.stack.words.len() {
+            self.grow_stack(end as usize);
+        }
+        self.stack.words[used as usize..end as usize].fill(0);
+        self.stack.top.len = end;
         Ok(self.stack.origin + used)
+    }
+
+    /// More storage for the stack, in a *new* allocation, with the words in use
+    /// copied across.
+    ///
+    /// Always a new block rather than `Vec::resize`, for two reasons. The words
+    /// above the top need no copy, so only `top.len` of them are moved. And an
+    /// allocator that extends a block in place makes whether the stack *moved*
+    /// under a live native frame its choice — glibc's and macOS's differ — where
+    /// a test that needs the move has to be able to construct it. Doubling, so
+    /// the copies are amortised as `Vec`'s own growth is; never past the
+    /// segment, which `push_frame` has already refused.
+    ///
+    /// Moving the words is why compiled code re-reads `NativeCtx::words` after a
+    /// helper and why every frame is named by an index (ADR 0057); the room
+    /// published beside them is why a frame opened *without* a helper never
+    /// moves them (ADR 0079).
+    #[cold]
+    #[inline(never)]
+    fn grow_stack(&mut self, needed: usize) {
+        let used = self.stack.top.len as usize;
+        let room = needed
+            .max(self.stack.words.len() * 2)
+            .max(MIN_STACK_ROOM)
+            .min(SEGMENT_WORDS as usize);
+        let mut words = vec![0; room];
+        words[..used].copy_from_slice(&self.stack.words[..used]);
+        self.stack.words = words;
+        self.stack.top.room = (room as u64).min(SEGMENT_WORDS - 1);
     }
 
     /// Drops every frame at or above `base`.
@@ -1813,8 +1864,10 @@ impl Memory {
     /// zeroes them on the way back up. Doing it once, on the path that is about
     /// to write them anyway, is one pass rather than two.
     pub(crate) fn pop_frame(&mut self, base: u64) {
-        let at = self.stack.at(base);
-        self.stack.words.truncate(at);
+        let at = self.stack.at(base) as u64;
+        if at < self.stack.top.len {
+            self.stack.top.len = at;
+        }
     }
 
     /// Drops every frame this segment holds.
@@ -1826,7 +1879,7 @@ impl Memory {
     /// nothing unwound them. The next top-level call on the same machine must
     /// not be built on top of them.
     pub(crate) fn reset_stack(&mut self) {
-        self.stack.words.clear();
+        self.stack.top.len = 0;
     }
 
     /// The word at `slot` of the frame based at `base`.
@@ -1950,7 +2003,18 @@ impl Memory {
     /// already has, which is a question about the allocator that no timing of
     /// `push_frame` can separate out.
     pub(crate) fn stack_capacity(&self) -> usize {
-        self.stack.words.capacity()
+        self.stack.words.len()
+    }
+
+    /// Where compiled code finds the top of this task's stack, for
+    /// `cove_native::NativeCtx::stack` ([ADR 0079]).
+    ///
+    /// Valid for as long as the memory does not move, which for a machine's
+    /// memory is the whole of a native entry.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    pub(crate) fn word_stack(&mut self) -> *mut WordStack {
+        &mut self.stack.top
     }
 
     /// How many chunks this run's heap could ever hold.
@@ -1979,7 +2043,7 @@ impl Memory {
     /// shrinks with the frames pushed and popped over it.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn stack_words(&self) -> u64 {
-        self.stack.words.len() as u64
+        self.stack.top.len
     }
 
     // --- the heap region ----------------------------------------------------
@@ -2063,7 +2127,8 @@ impl Memory {
     /// [`Space::run_at`].
     #[inline(always)]
     pub(crate) fn stack_and_heap(&mut self) -> (&mut [u64], &Space) {
-        (&mut self.stack.words, &self.space)
+        let used = self.stack.top.len as usize;
+        (&mut self.stack.words[..used], &self.space)
     }
 
     /// Writes payload word `at` of the object whose header is at `addr`.
@@ -2356,6 +2421,51 @@ mod tests {
         assert_eq!(base, 0);
         assert_eq!(mem.push_frame(2), Err(Overflow));
         assert_eq!(mem.push_frame(1).unwrap(), SEGMENT_WORDS - 2);
+    }
+
+    /// ADR 0079's room: what compiled code may push to without the runtime is
+    /// never more than the storage holds, never reaches the segment's bound,
+    /// and every growth *moves* the words — constructed here rather than left to
+    /// the allocator, which on one platform extends a block in place and on
+    /// another does not.
+    #[test]
+    fn the_published_room_is_storage_and_a_growth_moves_it() {
+        let mut mem = Memory::new(16);
+        let room = |mem: &mut Memory| unsafe { (*mem.word_stack()).room };
+        assert_eq!(room(&mut mem), 0, "no storage, no room");
+        let first = mem.push_frame(3).unwrap();
+        mem.set_slot(first, 2, 77);
+        let held = mem.words_ptr();
+        assert_eq!(room(&mut mem), MIN_STACK_ROOM as u64);
+        assert_eq!(mem.stack_capacity(), MIN_STACK_ROOM);
+        // Up to the room, nothing moves.
+        mem.push_frame(MIN_STACK_ROOM as u32 - 3).unwrap();
+        assert_eq!(
+            mem.words_ptr(),
+            held,
+            "a frame inside the room moves nothing"
+        );
+        // One word past it, the storage is a new block, and the words in use
+        // came with it.
+        mem.push_frame(1).unwrap();
+        assert_ne!(mem.words_ptr(), held, "a growth is a new block, always");
+        assert_eq!(mem.slot(first, 2), 77);
+        assert_eq!(room(&mut mem), mem.stack_capacity() as u64);
+        // And at the segment, the room stops one short of the bound
+        // `push_frame` refuses at.
+        mem.reset_stack();
+        mem.push_frame(SEGMENT_WORDS as u32 - 2).unwrap();
+        mem.push_frame(1).unwrap();
+        assert_eq!(
+            mem.stack_capacity() as u64,
+            SEGMENT_WORDS,
+            "never past the segment"
+        );
+        assert_eq!(room(&mut mem), SEGMENT_WORDS - 1);
+        unsafe {
+            assert_eq!((*mem.word_stack()).len, SEGMENT_WORDS - 1);
+        }
+        assert_eq!(mem.push_frame(1), Err(Overflow), "and the room is full");
     }
 
     /// A second task's frames are in a segment of its own, and the two ranges

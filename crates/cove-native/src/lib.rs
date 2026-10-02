@@ -139,10 +139,11 @@
 pub mod abi;
 
 pub use abi::{
-    AllocFn, CallFn, CloseFn, DynamicFn, Entry, GrowableFn, GrowableOp, NativeCtx, NativeHelpers,
-    OpenFn, Opened, OrderStrFn, Outcome, Raise, RunCopyFn, RunOp, SafepointFn, DYN_ASK,
-    DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_NAME_SHIFT, DYN_OFFSET_SHIFT, DYN_SETTLE, DYN_TYPE_MASK,
-    HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    AllocFn, CallFn, CloseFn, DynamicFn, Entry, FrameRecord, FrameStack, GrowableFn, GrowableOp,
+    NativeCtx, NativeHelpers, OpenFn, Opened, OrderStrFn, Outcome, Raise, RunCopyFn, RunOp,
+    SafepointFn, WordStack, DYN_ASK, DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_NAME_SHIFT,
+    DYN_OFFSET_SHIFT, DYN_SETTLE, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
+    HEAP_ORIGIN_WORDS,
 };
 
 /// Native execution is not available here.
