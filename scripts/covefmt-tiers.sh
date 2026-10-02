@@ -53,10 +53,14 @@ set -euo pipefail
 warm=${1:-9}
 root=$(cd "$(dirname "$0")/.." && pwd)
 binary=${2:-$root/target/checked/cove}
-# The Rust arm's phase table. Optional: without it the Rust column holds only
-# the process wall time, which is the one figure `cove fmt --check` reports on
-# its own. Build it with `cargo build --profile checked -p cove-bench`.
+# The Rust arm's phase table, and since ADR 0077 the whole of the Rust arm:
+# without it the Rust column is empty. Build it with
+# `cargo build --profile checked -p cove-bench`.
 phases=${3:-$root/target/checked/cove-fmt-phases}
+if [[ ! -x $phases ]]; then
+  echo "covefmt-tiers.sh: no cove-fmt-phases at $phases, so the Rust column will be empty" >&2
+  echo "build it: cargo build --profile checked -p cove-bench" >&2
+fi
 
 if [[ ! -x $binary ]]; then
   echo "covefmt-tiers.sh: no binary at $binary" >&2
@@ -136,17 +140,15 @@ strip_timings() { grep -v '^lex\|^parse\|^print\|^whole'; }
 one_round() {
   local phase=$1 n=$2
 
-  # Rust. `cove fmt --check` at the repository root is lex, parse, format
-  # *and* compare, over the same files the Cove walk reaches — both skip
-  # `target` and any directory whose name holds a dot.
-  local wall arm
-  wall=$(cd "$root" && python3 "$work/time.py" /dev/null /dev/null \
-    "$binary" fmt --check)
-  echo "$phase rust wall $wall" >>"$work/samples"
-
-  # The Rust arm's three phases, which `cove fmt --check` does not separate.
+  # Rust. Since ADR 0077 `cove fmt` *is* covefmt, so there is no Rust
+  # `cove fmt` process left to time, and timing `cove fmt --check` here would
+  # file covefmt's wall time under "rust". The Rust arm is `cove_syntax::format`
+  # as `cove-fmt-phases` runs it: lex, parse, format and compare over the same
+  # files the Cove walk reaches, without the walk or the read.
+  #
   # One iteration here rather than nine inside the bin, so that the Rust
-  # phases are interleaved with the Cove arms exactly as the wall times are.
+  # phases are interleaved with the Cove arms.
+  local wall arm
   if [[ -x $phases ]]; then
     "$phases" "$root" 1 >"$work/phases.out"
     PHASE=$phase python3 "$work/phases.py" "$work/phases.out" >>"$work/samples"
@@ -201,7 +203,7 @@ def one(text, pattern, name, cast=int):
 # would be a tripwire on every prose change in the tree, which is a gate nobody
 # would keep. A 2% band is loose enough for prose and tight enough that a
 # corpus which grew or shrank enough to invalidate a timing cannot pass.
-FILES, BYTES, BAND = 384, 1888025, 0.02
+FILES, BYTES, BAND = 384, 1935342, 0.02
 files, bytes_ = re.search(r"^(\d+) file\(s\), (\d+) byte\(s\)$", out, re.M).groups()
 files, bytes_ = int(files), int(bytes_)
 if files != FILES or abs(bytes_ - BYTES) > BAND * BYTES:

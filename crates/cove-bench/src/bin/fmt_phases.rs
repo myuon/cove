@@ -70,7 +70,7 @@ const FILES: usize = 384;
 /// own. An exact assertion would be a tripwire on every prose change, which is
 /// a gate nobody would keep; 2% is loose enough for prose and tight enough that
 /// a corpus which grew enough to invalidate a timing cannot pass.
-const BYTES: (usize, f64) = (1_888_025, 0.02);
+const BYTES: (usize, f64) = (1_935_342, 0.02);
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

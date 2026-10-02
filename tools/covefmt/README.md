@@ -239,7 +239,7 @@ on the VM, which is most of what formatting it took in the first place.
 
 ## Over this repository
 
-384 files, 1,888,025 bytes, 327,591 tokens. **Every file parses, every tree
+384 files, 1,935,342 bytes, 336,399 tokens. **Every file parses, every tree
 covers its tokens, and every file round-trips.**
 
 Everything below is published against those, so both harnesses check them and
@@ -258,15 +258,19 @@ prose change is a gate nobody would keep.
 
 | | | of the pipeline |
 | --- | ---: | ---: |
-| lex | 155 ms | 11% |
-| parse | 337 ms | 24% |
-| print | 891 ms | 64% |
-| **together** | **1,384 ms** | |
+| lex | 151 ms | 10% |
+| parse | 346 ms | 23% |
+| print | 1,037 ms | 68% |
+| **together** | **1,534 ms** | |
 
-Medians of fifteen interleaved runs on the encoded VM, taken 2026-10-01; the
-native tier's are in its own section below. The previous table — 604 ms over
-248 files and 698,481 bytes — is not comparable and is not a regression: the
-corpus is 2.7 times the bytes it was. Every number in this file and in the two
+Medians of fifteen interleaved runs on the encoded VM, taken 2026-10-02 after
+ADR 0077; the native tier's are in its own section below. The table before it,
+1,384 ms on 2026-10-01, is a different printer: making covefmt `cove fmt`
+taught it the rules for input that still needs formatting (blank lines between
+declarations, `{1}`, run-together tokens), and `print` paid for them — 891 ms
+to 1,037 ms on the VM, a corpus 2.5% larger. The one before that — 604 ms over
+248 files and 698,481 bytes — is not comparable at all: the corpus was a
+third of the bytes. Every number in this file and in the two
 sections under it comes from these five commands and nothing else:
 
 ```console
@@ -302,19 +306,22 @@ their spreads are as tight as the earlier ones. ADR 0029 is why none of it is ga
 
 ### The Rust reference, and the process that was five things
 
-`cove fmt --check` at the repository root is the same job in Rust, and the
-**143 ms** its process takes is the figure this file used to divide by. It
-should not be, and the correction matters more than the number:
+Until ADR 0077, `cove fmt --check` at the repository root was the same job in
+Rust, and the **143 ms** its process took on 2026-10-01 was the figure this
+file used to divide by. Since ADR 0077 `cove fmt` is covefmt, so there is no
+Rust process left to time; `cove_syntax::format` survives as the oracle, and
+`cove-fmt-phases` runs it the way the rows below do. The process row is the
+2026-10-01 one, and the reason it was never the right divisor is unchanged:
 
 | | |
 | --- | ---: |
 | process startup and argument parsing (`cove` with no work to do) | 4.7 ms |
-| `fmt_targets`' walk of the repository | 15.1 ms |
-| reading 1,888,443 bytes | 11.5 ms |
-| **lex, parse, format and compare** | **103.5 ms** [100.7..114.6] |
-| — of which lex | 14.6 ms |
-| — of which parse, and the numbering | 44.6 ms |
-| — of which format and compare | 44.1 ms |
+| `fmt_targets`' walk of the repository | 14.9 ms |
+| reading 1,935,342 bytes | 10.0 ms |
+| **lex, parse, format and compare** | **109.0 ms** [105.0..112.9] |
+| — of which lex | 15.3 ms |
+| — of which parse, and the numbering | 46.0 ms |
+| — of which format and compare | 47.6 ms |
 | the `SourceMap`'s second copy of every file, and three diagnostics rendered | the remainder, ~8 ms |
 | **the process** | **143 ms** |
 
@@ -324,10 +331,11 @@ and the split moves by a millisecond or two between sessions where `whole` does
 not. Read `whole` as the measurement and the split as its shape.
 
 The Cove bench reads all 384 files before its clock starts and is not a fresh
-process, so **1,384 ms against 103.5 ms is the like-for-like comparison and it
-is 13.4×** on the encoded VM, and **477 ms against 103.5 ms is 4.6×** on the
-native tier. It was 15.1× on the 248-file corpus, when the native tier was the
-VM's speed. Against the 143 ms process they read as 9.7× and 3.3×, and that is the Rust arm
+process, so **1,534 ms against 109.0 ms is the like-for-like comparison and it
+is 14.1×** on the encoded VM, and **550 ms against 109.0 ms is 5.0×** on the
+native tier (2026-10-02). It was 13.4× and 4.6× the day before, with the printer
+ADR 0077 grew, and 15.1× on the 248-file corpus, when the native tier was the
+VM's speed. Against a whole Rust process they read lower, and that is the Rust arm
 being charged for a directory walk, a file read and an execve that the Cove arm
 does not pay. The medians are fifty-one iterations;
 `crates/cove-bench/src/bin/fmt_phases.rs` is where the four rows come from, and
@@ -342,7 +350,7 @@ One asymmetry runs the other way and is worth naming beside the ratio: this
 parser has **no expression grammar** (see "What is not here yet"), so a
 statement's own tokens are leaves where `cove_syntax` builds an `ExprKind`
 tree. covefmt is doing *less* work per file in its parse phase than the Rust
-arm and taking 7.6× as long over it on the VM, 3.3× on the native tier.
+arm and taking 7.5× as long over it on the VM, 3.3× on the native tier.
 
 Three of the 384 are files the Rust formatter *refuses*: `fail_code_point`,
 `fail_export_test` and `fail_reserved_annotation` under `tests/e2e`, written
@@ -436,7 +444,10 @@ default *backend* does not change, and a build without the feature
 (`--no-default-features`, or any embedder of `cove-runtime`) has no
 executable-memory dependency.
 
-**On this corpus it is 2.9 times the encoded VM's speed**, and it was not
+**On this corpus it is 2.8 times the encoded VM's speed** — 550 ms against
+1,534 on 2026-10-02, after ADR 0077, compiling 100.0% of the calls into
+1,101,498 bytes of machine code; the table below is the day before, with the
+smaller printer, when it was 2.9 times — and it was not
 always: on 2026-09-16, over 248 files, it compiled 29.6% of the reachable
 functions, ran 5.3% of the instruction stream, and was the VM's speed to
 within the noise floor. What changed is mostly the subset: the refusals the
