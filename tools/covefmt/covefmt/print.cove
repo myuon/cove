@@ -504,9 +504,19 @@ fn emit(
                 } else {
                   // `text`, written here: the call around `sliceBytes` was
                   // one more frame per token.
-                  match source.sliceBytes(token.from, token.to) {
-                    Ok(piece) => out.push(piece)
-                    Err(_) => out.push("")
+                  let mark = if token.kind == Kind.Punct &&
+                    token.to - token.from == 1 {
+                    punctText(source.byteAt(token.from))
+                  } else {
+                    ""
+                  }
+                  if mark.byteLength() > 0 {
+                    out.push(mark)
+                  } else {
+                    match source.sliceBytes(token.from, token.to) {
+                      Ok(piece) => out.push(piece)
+                      Err(_) => out.push("")
+                    }
                   }
                 }
                 last = child.from
@@ -1390,28 +1400,53 @@ fn flattened(source: String, held: Array<Token>, tree: Tree) -> String {
   // the tree, which is a second pass over the whole thing to choose a number
   // that only has to be close.
   var out = StringBuilder.withCapacity(byteSpan(held, tree))
+  // The bytes from `run` to `runTo` are written exactly as the source has
+  // them and are not copied yet. A token the flat form keeps as it stands —
+  // which in a formatted file is nearly every token of a group that fits,
+  // its single spaces included — only moves `runTo`, and the run is copied
+  // in one piece where the flat form first departs from the source and at
+  // the end. The bytes are the ones a copy per token wrote, in the same
+  // order; what goes is a copy per token.
+  var run = 0
+  var runTo = 0
   var at = tree.from
   while at < tree.to {
     match held.get(at) {
       Some(token) => {
         if token.kind == Kind.Space {
           if wantsASpace(source, held, at) {
-            out.append(" ")
+            if token.to - token.from == 1 && source.byteAt(token.from) == ' ' &&
+              runTo == token.from {
+              runTo = token.to
+            } else {
+              out.appendSlice(source, run, runTo)
+              out.append(" ")
+              run = token.to
+              runTo = token.to
+            }
           }
         } else if !isATrailingComma(source, held, at, tree.to) {
           if wantsAMissingSpace(source, held, tree.from, at) {
+            out.appendSlice(source, run, runTo)
             out.append(" ")
+            run = token.from
+            runTo = token.from
           }
-          // The token's own bytes, copied straight out of the source. A
-          // `text()` here would cut a `String` out first and drop it as soon
-          // as it had been copied a second time.
-          out.appendSlice(source, token.from, token.to)
+          // The token's own bytes, straight out of the source and as part of
+          // the run. A `text()` here would cut a `String` out first and drop
+          // it as soon as it had been copied a second time.
+          if runTo != token.from {
+            out.appendSlice(source, run, runTo)
+            run = token.from
+          }
+          runTo = token.to
         }
       }
       None => { }
     }
     at = at + 1
   }
+  out.appendSlice(source, run, runTo)
   out.finish()
 }
 
@@ -3948,4 +3983,73 @@ fn sameText(a: String, x: Token, b: String, y: Token) -> Bool {
     i = i + 1
   }
   true
+}
+
+/// The text of a one-byte punctuation token whose byte is `c`, as a literal,
+/// or `""` for a byte that is not one.
+///
+/// A literal is not allocated, and a `sliceBytes` of the source is: one
+/// string per token written, which measured about a twelfth of the whole
+/// pipeline on the native tier — and half the tokens a printer writes one at
+/// a time are a bracket, a dot, a comma or a colon. The order is how often
+/// each occurs in this repository.
+fn punctText(c: Int) -> String {
+  if c == '.' {
+    return "."
+  }
+  if c == '(' {
+    return "("
+  }
+  if c == ')' {
+    return ")"
+  }
+  if c == ',' {
+    return ","
+  }
+  if c == ':' {
+    return ":"
+  }
+  if c == '\{' {
+    return "\{"
+  }
+  if c == '\}' {
+    return "\}"
+  }
+  if c == '=' {
+    return "="
+  }
+  if c == '[' {
+    return "["
+  }
+  if c == ']' {
+    return "]"
+  }
+  if c == '<' {
+    return "<"
+  }
+  if c == '>' {
+    return ">"
+  }
+  if c == '?' {
+    return "?"
+  }
+  if c == '!' {
+    return "!"
+  }
+  if c == '+' {
+    return "+"
+  }
+  if c == '-' {
+    return "-"
+  }
+  if c == '*' {
+    return "*"
+  }
+  if c == '/' {
+    return "/"
+  }
+  if c == '%' {
+    return "%"
+  }
+  ""
 }
