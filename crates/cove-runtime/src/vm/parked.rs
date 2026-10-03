@@ -21,7 +21,7 @@ use std::sync::Arc;
 use cove_ir::Program;
 
 use super::{PreparedProgram, Vm, DEFAULT_HEAP_WORDS};
-use crate::budget::Budget;
+use crate::budget::{Budget, Meter};
 use crate::error::RuntimeError;
 use crate::host::HostRegistry;
 use crate::runtime::Runtime;
@@ -180,6 +180,14 @@ impl OwnedVm {
         self.vm.instructions()
     }
 
+    /// [`Vm::meter`]: this run's accounting, or the last one's.
+    ///
+    /// The run's own, however many other runs share its registry: a budget
+    /// travels with the run that was given it (issue #577).
+    pub fn meter(&self) -> &Meter {
+        self.vm.meter()
+    }
+
     /// [`Vm::heap_words`].
     pub fn heap_words(&self) -> u64 {
         self.vm.heap_words()
@@ -262,5 +270,11 @@ impl ParkedVm {
     /// [`Vm::instructions`], up to the call it is parked at.
     pub fn instructions(&self) -> u64 {
         self.vm.instructions()
+    }
+
+    /// [`Vm::meter`]: the parked run's accounting, up to the call it is
+    /// parked at.
+    pub fn meter(&self) -> &Meter {
+        self.vm.meter()
     }
 }

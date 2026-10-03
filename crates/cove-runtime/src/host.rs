@@ -655,9 +655,14 @@ pub struct HostRegistry {
     grants: Grants,
     grant_source: GrantSource,
     trace: Arc<dyn TraceSink>,
-    /// The run's budget, shared by every task: ADR 0008 draws a task's fuel
-    /// from the run's budget rather than giving each task one of its own, so
-    /// there is still exactly one authoritative count of what the run spent.
+    /// The budget [`HostRegistry::set_budget`] arranged, which a backend
+    /// built over this registry takes as its run's when it is built.
+    ///
+    /// Only that: a run's budget is the run's and travels with it, and a host
+    /// call is charged to the budget of the run that made it, not to this.
+    /// The registry is shared by every run over it at once, and when an
+    /// invocation's budget was installed here instead, concurrent runs
+    /// charged and replaced one another's (issue #577).
     budget: Mutex<Option<Budget>>,
     irreversible_writes: AtomicU64,
 }
@@ -828,44 +833,14 @@ impl HostRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(budget);
     }
 
-    /// Installs `budget` for the run that is about to start, and starts its
-    /// deadline clock here.
+    /// Runs `f` against the budget [`HostRegistry::set_budget`] installed, if
+    /// the host installed one.
     ///
-    /// This is what makes a limit bound *one* invocation rather than the whole
-    /// life of a registry, which is issue #152. A `Budget` has to live where
-    /// every thread of a run can reach it — ADR 0008 draws a task's fuel from
-    /// the run's budget, and a task thread reaches this registry through the
-    /// `Arc<Runtime>` it holds — so it stays here; what changes is when it is
-    /// put here. [`HostRegistry::set_budget`] arranges a registry before
-    /// anything runs, and this replaces that arrangement for the duration of
-    /// one run and leaves what the run spent behind it, which is the same
-    /// state `cove run` reads its `--stats` out of.
-    ///
-    /// It takes `&self` where `set_budget` takes `&mut self`, and it is
-    /// `pub(crate)` because of it. ADR 0024 states each stop as a bound that
-    /// holds over a run, and a budget that could be swapped while the run it
-    /// bounds is executing would make every one of those bounds a claim about
-    /// a thing that had changed underneath it. So the only doors to this are
-    /// [`Vm::invoke_within`](crate::Vm::invoke_within) and its three
-    /// siblings, each of which takes `&mut self` on the backend: a backend
-    /// running an invocation is mutably borrowed for its whole duration, so a
-    /// second invocation on it cannot begin, and the shape rather than a rule
-    /// in a comment is what prevents the swap.
-    pub(crate) fn begin_run(&self, mut budget: Budget) {
-        budget.restart();
-        *self
-            .budget
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(budget);
-    }
-
-    /// Runs `f` against the run's budget, if the host installed one.
-    ///
-    /// This is how a caller reads the counters after a run, how a host call
-    /// and a `spawn` are charged, and how a budget is looked at by anything
-    /// that has no [`Meter`] of its own. Every thread of a run reaches the one
-    /// budget through here, so the lock is held for the charge and nothing
-    /// else.
+    /// This is how a caller reads the counters after a run that was bounded
+    /// that way — `cove run --stats` — and what a direct
+    /// [`HostRegistry::call`] is charged to. A run bounded by
+    /// [`Vm::invoke_within`](crate::Vm::invoke_within) holds its own budget
+    /// and is read through [`Vm::meter`](crate::Vm::meter) instead.
     ///
     /// It is *not* how a safepoint charges. That used to be exactly what this
     /// was for, and issue #182 measured the mutex at 36% of `benches/call`
@@ -1033,7 +1008,26 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
-        self.module_call(module, op, args, back, false)
+        let installed = self.budget_meter();
+        self.module_call(module, op, args, back, false, installed.as_ref())
+            .map(Dispatched::answered)
+    }
+
+    /// [`HostRegistry::call_with`], charged to `budget` — the run's own —
+    /// rather than to whatever [`HostRegistry::set_budget`] installed.
+    ///
+    /// This is how a backend dispatches: the budget belongs to the run
+    /// (issue #577), so the registry, which many runs share at once, holds
+    /// none of it for them.
+    pub(crate) fn call_within(
+        &self,
+        module: &str,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+        budget: Option<&Meter>,
+    ) -> Result<Value, RuntimeError> {
+        self.module_call(module, op, args, back, false, budget)
             .map(Dispatched::answered)
     }
 
@@ -1050,8 +1044,9 @@ impl HostRegistry {
         op: &str,
         args: Vec<Value>,
         back: &mut dyn Reentry,
+        budget: &Meter,
     ) -> Result<Dispatched, RuntimeError> {
-        self.module_call(module, op, args, back, true)
+        self.module_call(module, op, args, back, true, Some(budget))
     }
 
     /// The module's operation, called the way `parkable` says.
@@ -1062,6 +1057,7 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
         parkable: bool,
+        budget: Option<&Meter>,
     ) -> Result<Dispatched, RuntimeError> {
         let task = back.task();
         let Some(entry) = self
@@ -1093,7 +1089,7 @@ impl HostRegistry {
             owner: format!("host module `{module}`"),
             known: schema.operations.iter().map(|e| e.name).collect(),
         };
-        self.dispatch(task, &callee, declared, capability, args, |args| {
+        self.dispatch(task, &callee, declared, capability, budget, args, |args| {
             if parkable {
                 entry.call_parkable(op, args, back)
             } else {
@@ -1117,7 +1113,22 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
-        self.resource_call(handle, op, args, back, false)
+        let installed = self.budget_meter();
+        self.resource_call(handle, op, args, back, false, installed.as_ref())
+            .map(Dispatched::answered)
+    }
+
+    /// [`HostRegistry::call_resource`], charged to the run's own `budget`,
+    /// for the reason [`HostRegistry::call_within`] gives.
+    pub(crate) fn call_resource_within(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+        budget: Option<&Meter>,
+    ) -> Result<Value, RuntimeError> {
+        self.resource_call(handle, op, args, back, false, budget)
             .map(Dispatched::answered)
     }
 
@@ -1130,8 +1141,9 @@ impl HostRegistry {
         op: &str,
         args: Vec<Value>,
         back: &mut dyn Reentry,
+        budget: &Meter,
     ) -> Result<Dispatched, RuntimeError> {
-        self.resource_call(handle, op, args, back, true)
+        self.resource_call(handle, op, args, back, true, Some(budget))
     }
 
     /// The handle's operation, called the way `parkable` says.
@@ -1142,6 +1154,7 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
         parkable: bool,
+        budget: Option<&Meter>,
     ) -> Result<Dispatched, RuntimeError> {
         let task = back.task();
         let qualified = handle.qualified_type();
@@ -1185,7 +1198,7 @@ impl HostRegistry {
             owner: format!("`{qualified}`"),
             known: resource.operations.iter().map(|e| e.name).collect(),
         };
-        self.dispatch(task, &callee, declared, capability, args, |args| {
+        self.dispatch(task, &callee, declared, capability, budget, args, |args| {
             if parkable {
                 entry.call_resource_parkable(handle, op, args, back)
             } else {
@@ -1208,12 +1221,14 @@ impl HostRegistry {
     /// out — is [`HostRegistry::settle`]'s, run on the answer when it comes.
     /// It is the same code a ready answer runs, so a parked call is traced
     /// and checked exactly as a call that waited would have been.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch(
         &self,
         task: u64,
         callee: &Callee,
         declared: Option<OperationSchema>,
         capability: Capability,
+        budget: Option<&Meter>,
         args: Vec<Value>,
         invoke: impl FnOnce(Vec<Value>) -> HostAnswer,
     ) -> Result<Dispatched, RuntimeError> {
@@ -1308,7 +1323,7 @@ impl HostRegistry {
             .with_outcome(RunOutcome::HostBoundary));
         }
 
-        if let Some(Err(error)) = self.with_budget(|budget| {
+        if let Some(Err(error)) = budget.map(|budget| {
             budget
                 .charge_host_call()
                 .map_err(|stopped| budget.to_runtime_error(stopped))

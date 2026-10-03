@@ -31,9 +31,9 @@ use std::time::Duration;
 
 use cove_diag::Span;
 
-use crate::budget::Cancellation;
+use crate::budget::{Cancellation, Meter};
 use crate::error::RuntimeError;
-use crate::host::{HostRegistry, ResourceHandle};
+use crate::host::ResourceHandle;
 use crate::runtime::Runtime;
 use crate::shared::SharedCell;
 use crate::trace::TraceEvent;
@@ -331,8 +331,13 @@ pub(crate) trait Tasking {
     /// the thread it starts.
     fn runtime(&self) -> &Runtime;
 
-    /// The host boundary, which owns the run's budget.
-    fn hosts(&self) -> &HostRegistry;
+    /// The run's budget, which a `spawn` charges and hands the thread it
+    /// starts, or `None` for a run with no budget.
+    ///
+    /// The run's and not the registry's: a registry is shared by every run
+    /// over it at once, so the budget is carried by the evaluator (issue
+    /// #577).
+    fn budget(&self) -> Option<&Meter>;
 
     /// Records `wait` against every timing context this body is inside.
     ///
@@ -371,7 +376,9 @@ pub(crate) fn spawn_into<H: Tasking>(
     scope: &Rc<TaskScope>,
     body: Value,
     span: Span,
-    run: impl FnOnce(Runtime, u64, Cancellation, Transfer, Span) -> TaskOutcome + Send + 'static,
+    run: impl FnOnce(Runtime, Option<Meter>, u64, Cancellation, Transfer, Span) -> TaskOutcome
+        + Send
+        + 'static,
 ) -> Result<Value, RuntimeError> {
     if scope.is_closed() {
         return Err(scope_already_left(&scope.name, span));
@@ -407,13 +414,14 @@ pub(crate) fn spawn_into<H: Tasking>(
     // here the way an exhausted fuel budget stops one, rather than made to
     // wait for a sibling to end, because waiting would be a scheduling
     // policy and ADR 0008 has none.
-    if let Some(Err(error)) = host.hosts().with_budget(|budget| {
+    if let Some(Err(error)) = host.budget().map(|budget| {
         budget
             .charge_task()
             .map_err(|stopped| budget.to_runtime_error(stopped))
     }) {
         return Err(error.at(span));
     }
+    let budget = host.budget().cloned();
 
     let runtime = host.runtime().clone();
     let id = runtime.next_task_id();
@@ -435,11 +443,13 @@ pub(crate) fn spawn_into<H: Tasking>(
         // `MAX_CALL_DEPTH` stops it, which ends the process and takes every
         // sibling task with it.
         .stack_size(crate::interp::STACK_SIZE)
-        .spawn(move || run(runtime, id, flag, body, span))
+        .spawn(move || run(runtime, budget, id, flag, body, span))
         .map_err(|e| {
             // A task the machine refused is not a task the run holds, so the
             // place charged for it above goes back.
-            host.hosts().with_budget(|budget| budget.release_task());
+            if let Some(budget) = host.budget() {
+                budget.release_task();
+            }
             RuntimeError::new(format!("this task could not be given a thread: {e}")).at(span)
         })?;
 
@@ -473,7 +483,9 @@ pub(crate) fn join<H: Tasking>(host: &mut H, task: &Rc<Task>) {
     // concurrency limit goes back. Releasing it on the task's own thread
     // instead would make what a `spawn` is refused for depend on how quickly
     // a sibling happened to finish.
-    host.hosts().with_budget(|budget| budget.release_task());
+    if let Some(budget) = host.budget() {
+        budget.release_task();
+    }
     host.charge_wait(started.elapsed());
     if matches!(&*task.state.borrow(), TaskState::Cancelled) {
         host.runtime()

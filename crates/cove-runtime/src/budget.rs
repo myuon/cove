@@ -185,11 +185,22 @@ struct Accounting {
 /// # What is still the mutex's
 ///
 /// [`crate::host::HostRegistry::with_budget`] still exists and still locks. It
-/// is how a budget is installed, how `cove run --stats` reads what a run
-/// spent, and how the charges that are not per-instruction are made — a host
-/// call, a spawn, a task that ended. Every one of those is bounded by
-/// something far more expensive than a lock, and moving them would have been
-/// churn without a number behind it.
+/// is how a budget installed by `set_budget` is read back — how `cove run
+/// --stats` reads what a run spent. It used to be how the charges that are
+/// not per-instruction were made as well — a host call, a spawn, a task that
+/// ended — and they are this type's now, for a reason that is not speed.
+///
+/// # A meter is the run's, not the registry's
+///
+/// A registry is shared by every run over it, at once and from many threads
+/// (an [`OwnedVm`](crate::OwnedVm)'s registry is an `Arc`). When the budget
+/// of an invocation was installed *in* the registry, it was one slot every
+/// concurrent run charged its host calls to and replaced on entry, and runs
+/// were stopped for each other's calls: issue #577 measured 997 of 10,000
+/// concurrent requests refused for a host-call limit none of them had
+/// reached. So the meter is carried by the run — the backend holds it, every
+/// task thread is handed a clone, and a host call is charged to the meter
+/// of the run that made it.
 ///
 /// # Taking one, and restarts
 ///
@@ -197,12 +208,12 @@ struct Accounting {
 /// "whatever budget the registry holds now". `Budget::restart` gives its
 /// budget fresh accounting, so a `Meter` taken before a restart charges the
 /// run that ended. Both backends therefore take theirs where a run begins:
-/// `Vm::new` and `Interpreter::new` take one, and `invoke_within` and
-/// `run_entry_within` take another immediately after installing the budget
-/// they were handed. A registry's budget cannot be replaced by any other
-/// route — `set_budget` needs `&mut HostRegistry` and a backend holds the
-/// registry by shared reference for as long as it exists — so those are all
-/// the places a stale one could come from.
+/// `Vm::new` and `Interpreter::new` take the one `set_budget` installed, if
+/// any, and `invoke_within` and `run_entry_within` take the one of the budget
+/// they were handed, after restarting it. A registry's budget cannot be
+/// replaced by any other route — `set_budget` needs `&mut HostRegistry` and
+/// a backend holds the registry by shared reference for as long as it
+/// exists — so those are all the places a stale one could come from.
 #[derive(Clone, Debug)]
 pub struct Meter {
     state: Arc<Accounting>,
@@ -346,6 +357,98 @@ impl Meter {
         self.state.fuel_spent.load(Ordering::Relaxed)
     }
 
+    /// Charges one host call against the run, failing before the call is
+    /// dispatched if the run was cancelled, if its deadline has passed, or if
+    /// the call would exceed `max_host_calls`.
+    ///
+    /// A host call is a control point exactly as a safepoint is. ADR 0003
+    /// puts the controls at "loop back edges, calls, and `await`", and a run
+    /// whose work is waiting on a host reaches none of the other three: a
+    /// deadline checked only in Cove code would not bound a program that
+    /// spends its time inside calls. The clock is read on every call rather
+    /// than every `DEADLINE_CHECK_INTERVAL`th, because a host call already
+    /// costs far more than reading it does.
+    pub fn charge_host_call(&self) -> Result<(), Stopped> {
+        let state = &self.state;
+        if state.cancellation.is_cancelled() {
+            return Err(Stopped::Cancelled);
+        }
+        if let Some(deadline) = state.limits.deadline {
+            if state.started_at.elapsed() >= deadline {
+                return Err(Stopped::Deadline);
+            }
+        }
+        let made = state
+            .host_calls
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if let Some(limit) = state.limits.max_host_calls {
+            if made > limit {
+                return Err(Stopped::HostCalls);
+            }
+        }
+        Ok(())
+    }
+
+    /// Charges one task against the concurrency limit, refusing it before it
+    /// is given a thread if the run already holds as many tasks as it may.
+    ///
+    /// Every other limit stops a run for work it has already done. This one
+    /// refuses work that has not started, because a thread is taken rather
+    /// than spent: by the time a safepoint could observe it, the resource is
+    /// already held. A refusal stops the run the way exhausted fuel does; a
+    /// `spawn` that waited for a sibling to finish would be a scheduler, and
+    /// ADR 0008 deliberately has no scheduling policy.
+    ///
+    /// The check and the taking are one step, so two `spawn`s racing for the
+    /// last place cannot both be told there is one. That used to be the
+    /// registry's mutex; it is this compare-and-swap now, which holds however
+    /// this is reached.
+    pub fn charge_task(&self) -> Result<(), Stopped> {
+        let live = &self.state.live_tasks;
+        match self.state.limits.max_tasks {
+            Some(limit) => live
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                    (live < limit).then(|| live + 1)
+                })
+                .map(|_| ())
+                .map_err(|_| Stopped::Concurrency),
+            None => {
+                live.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+    }
+
+    /// Forgets a task whose end has been observed, so its place is free
+    /// again.
+    ///
+    /// A task ends by finishing, by failing, by being cancelled, or by
+    /// breaking an invariant in its own thread, and all four reach the caller
+    /// as a join. Releasing anywhere else would make this a limit on how many
+    /// tasks a run may spawn in total rather than on how many it may hold at
+    /// once.
+    pub fn release_task(&self) {
+        let _ = self
+            .state
+            .live_tasks
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                Some(live.saturating_sub(1))
+            });
+    }
+
+    /// How many spawned tasks are alive right now: what the concurrency
+    /// limit bounds, and what a stop reports.
+    pub fn live_tasks(&self) -> u64 {
+        self.state.live_tasks.load(Ordering::Relaxed)
+    }
+
+    /// Total host calls charged so far, including any that were then
+    /// rejected for exceeding the limit, for reporting.
+    pub fn host_calls(&self) -> u64 {
+        self.state.host_calls.load(Ordering::Relaxed)
+    }
+
     /// Wall-clock time elapsed since the run started.
     pub fn elapsed(&self) -> Duration {
         self.state.started_at.elapsed()
@@ -423,8 +526,8 @@ impl Budget {
     /// is built, and a budget built to bound an invocation that has not begun
     /// would spend its deadline waiting for its turn. The deadline runs from
     /// the invocation, so this is called as the invocation is entered and
-    /// nowhere else — [`crate::host::HostRegistry::begin_run`] is the only
-    /// caller.
+    /// nowhere else — `invoke_within` and its siblings, on both backends, are
+    /// the only callers.
     ///
     /// The [`Cancellation`] is *not* reset, and that is not an oversight. A
     /// flag somebody raised stays raised: the handle is shared, whoever
@@ -436,8 +539,8 @@ impl Budget {
     /// because zeroing counters a running task might still be charging is a
     /// race with no answer — while a [`Meter`] handed out for the previous run
     /// keeps charging the run it belongs to, which is the only thing it could
-    /// truthfully do. `begin_run` is the only caller and it holds the budget
-    /// alone at that moment, so nothing is charging this one either way; what
+    /// truthfully do. Every caller holds the budget alone at that moment —
+    /// it was handed over by value — so nothing is charging this one either way; what
     /// the shape buys is that a mistake about that would be a stale number in
     /// a finished run's report rather than a torn one in a live run's limit.
     pub(crate) fn restart(&mut self) {
@@ -471,89 +574,27 @@ impl Budget {
         self.meter.spend(fuel);
     }
 
-    /// Charges one host call against the budget, failing before the call is
-    /// dispatched if the run was cancelled, if its deadline has passed, or if
-    /// the call would exceed `max_host_calls`.
-    ///
-    /// A host call is a control point exactly as a safepoint is. ADR 0003
-    /// puts the controls at "loop back edges, calls, and `await`", and a run
-    /// whose work is waiting on a host reaches none of the other three: a
-    /// deadline checked only in Cove code would not bound a program that
-    /// spends its time inside calls. The clock is read on every call rather
-    /// than every `DEADLINE_CHECK_INTERVAL`th, because a host call already
-    /// costs far more than reading it does.
+    /// Charges one host call against the budget. [`Meter::charge_host_call`]
+    /// is the whole of it.
     pub fn charge_host_call(&self) -> Result<(), Stopped> {
-        let state = &self.meter.state;
-        if state.cancellation.is_cancelled() {
-            return Err(Stopped::Cancelled);
-        }
-        if let Some(deadline) = state.limits.deadline {
-            if state.started_at.elapsed() >= deadline {
-                return Err(Stopped::Deadline);
-            }
-        }
-        let made = state
-            .host_calls
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        if let Some(limit) = state.limits.max_host_calls {
-            if made > limit {
-                return Err(Stopped::HostCalls);
-            }
-        }
-        Ok(())
+        self.meter.charge_host_call()
     }
 
-    /// Charges one task against the concurrency limit, refusing it before it
-    /// is given a thread if the run already holds as many tasks as it may.
-    ///
-    /// Every other limit stops a run for work it has already done. This one
-    /// refuses work that has not started, because a thread is taken rather
-    /// than spent: by the time a safepoint could observe it, the resource is
-    /// already held. A refusal stops the run the way exhausted fuel does; a
-    /// `spawn` that waited for a sibling to finish would be a scheduler, and
-    /// ADR 0008 deliberately has no scheduling policy.
-    ///
-    /// The check and the taking are one step, so two `spawn`s racing for the
-    /// last place cannot both be told there is one. That used to be the
-    /// registry's mutex; it is this compare-and-swap now, which holds however
-    /// this is reached.
+    /// Charges one task against the concurrency limit.
+    /// [`Meter::charge_task`] is the whole of it.
     pub fn charge_task(&self) -> Result<(), Stopped> {
-        let live = &self.meter.state.live_tasks;
-        match self.meter.state.limits.max_tasks {
-            Some(limit) => live
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
-                    (live < limit).then(|| live + 1)
-                })
-                .map(|_| ())
-                .map_err(|_| Stopped::Concurrency),
-            None => {
-                live.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        }
+        self.meter.charge_task()
     }
 
-    /// Forgets a task whose end has been observed, so its place is free
-    /// again.
-    ///
-    /// A task ends by finishing, by failing, by being cancelled, or by
-    /// breaking an invariant in its own thread, and all four reach the caller
-    /// as a join. Releasing anywhere else would make this a limit on how many
-    /// tasks a run may spawn in total rather than on how many it may hold at
-    /// once.
+    /// Forgets a task whose end has been observed. [`Meter::release_task`]
+    /// is the whole of it.
     pub fn release_task(&self) {
-        let _ = self.meter.state.live_tasks.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |live| Some(live.saturating_sub(1)),
-        );
+        self.meter.release_task();
     }
 
-    /// How many spawned tasks are alive right now: what the concurrency
-    /// limit bounds, and what a stop reports.
+    /// How many spawned tasks are alive right now.
     pub fn live_tasks(&self) -> u64 {
-        self.meter.state.live_tasks.load(Ordering::Relaxed)
+        self.meter.live_tasks()
     }
 
     /// Total fuel spent so far, for reporting.
@@ -564,7 +605,7 @@ impl Budget {
     /// Total host calls charged so far, including any that were then
     /// rejected for exceeding the limit, for reporting.
     pub fn host_calls(&self) -> u64 {
-        self.meter.state.host_calls.load(Ordering::Relaxed)
+        self.meter.host_calls()
     }
 
     /// Wall-clock time elapsed since the budget was created.

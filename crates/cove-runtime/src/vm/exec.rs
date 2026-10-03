@@ -294,6 +294,14 @@ struct Child {
     /// What the words inside that object are.
     layout: LayoutId,
     state: ChildState,
+    /// The run's accounting this task holds a place under the concurrency
+    /// limit in, until its end has been observed — `None` for a handle that
+    /// never had a thread, and once the place has gone back.
+    ///
+    /// Kept on the task rather than looked up at the join, because the
+    /// budget is the run's and not the registry's (issue #577): the place
+    /// goes back to exactly the accounting the `spawn` charged.
+    place: Option<Meter>,
 }
 
 impl Child {
@@ -2150,7 +2158,7 @@ impl<'a> Machine<'a> {
         let answer = if self.parking && self.quiescent() {
             let dispatched = {
                 let mut back = Back::parked(self, budget, span, threads, running);
-                hosts.call_parkable(&op.module, &op.operation, values, &mut back)
+                hosts.call_parkable(&op.module, &op.operation, values, &mut back, budget)
             };
             match dispatched {
                 Ok(Dispatched::Answered(value)) => Ok(value),
@@ -2168,7 +2176,7 @@ impl<'a> Machine<'a> {
             // moment Cove runs again the snapshot stops being true, so the
             // park is dropped for exactly as long as the callback runs.
             let mut back = Back::parked(self, budget, span, threads, running);
-            hosts.call_with(&op.module, &op.operation, values, &mut back)
+            hosts.call_within(&op.module, &op.operation, values, &mut back, Some(budget))
         };
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
@@ -2397,7 +2405,7 @@ impl<'a> Machine<'a> {
         let answer = if self.parking && self.quiescent() {
             let dispatched = {
                 let mut back = Back::parked(self, budget, span, threads, running);
-                hosts.call_resource_parkable(&handle, &op.operation, values, &mut back)
+                hosts.call_resource_parkable(&handle, &op.operation, values, &mut back, budget)
             };
             match dispatched {
                 Ok(Dispatched::Answered(value)) => Ok(value),
@@ -2408,7 +2416,7 @@ impl<'a> Machine<'a> {
             }
         } else {
             let mut back = Back::parked(self, budget, span, threads, running);
-            hosts.call_resource(&handle, &op.operation, values, &mut back)
+            hosts.call_resource_within(&handle, &op.operation, values, &mut back, Some(budget))
         };
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
@@ -3776,14 +3784,11 @@ impl<'a> Machine<'a> {
 
         // Charged before this task is given an id, an event or a thread: a
         // thread that has started is a resource already taken, which no later
-        // safepoint could refuse.
-        if let Some(hosts) = self.hosts {
-            if let Some(Err(error)) = hosts.with_budget(|held| {
-                held.charge_task()
-                    .map_err(|stopped| held.to_runtime_error(stopped))
-            }) {
-                return Err(error.at(span));
-            }
+        // safepoint could refuse. Charged to the run's own budget, which the
+        // child is handed too, so the place goes back to the accounting it
+        // was taken from at the join (issue #577).
+        if let Err(stopped) = budget.charge_task() {
+            return Err(budget.to_runtime_error(stopped).at(span));
         }
 
         match self.launch(at, object, answer, budget, span, threads, running) {
@@ -3791,9 +3796,7 @@ impl<'a> Machine<'a> {
             Err(error) => {
                 // A task the machine refused is not a task the run holds, so
                 // the place charged for it above goes back.
-                if let Some(hosts) = self.hosts {
-                    hosts.with_budget(|held| held.release_task());
-                }
+                budget.release_task();
                 Err(error)
             }
         }
@@ -3914,6 +3917,7 @@ impl<'a> Machine<'a> {
             answer: home,
             layout: answer,
             state: ChildState::Running,
+            place: Some(budget.clone()),
         });
         running.push(Some(handle));
         self.scopes[at].tasks.push(index);
@@ -3975,6 +3979,7 @@ impl<'a> Machine<'a> {
             answer: home,
             layout: answer,
             state: ChildState::Settled,
+            place: None,
         });
         // The two lists are one list at two indices, so a task with no thread
         // still takes its place in both.
@@ -4064,8 +4069,8 @@ impl<'a> Machine<'a> {
         // longer anything's to keep: the captures it held were copied into
         // the child's frame before its first instruction.
         self.children[at].closure = 0;
-        if let Some(hosts) = self.hosts {
-            hosts.with_budget(|held| held.release_task());
+        if let Some(place) = self.children[at].place.take() {
+            place.release_task();
         }
         if matches!(self.children[at].state, ChildState::Cancelled) {
             if let Some(runtime) = self.runtime {

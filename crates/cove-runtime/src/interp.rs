@@ -552,8 +552,8 @@ impl Tasking for Interpreter<'_> {
         self.runtime
     }
 
-    fn hosts(&self) -> &HostRegistry {
-        self.hosts
+    fn budget(&self) -> Option<&Meter> {
+        self.budget.as_ref()
     }
 
     fn charge_wait(&mut self, wait: Duration) {
@@ -695,9 +695,8 @@ impl<'a> Interpreter<'a> {
     /// sound to bind it this early because a budget cannot be installed once
     /// an interpreter exists: `HostRegistry::set_budget` needs
     /// `&mut HostRegistry` and this borrows the registry shared for `'a`. The
-    /// one other way a budget is installed is `HostRegistry::begin_run`,
-    /// which is reached only through [`Interpreter::invoke_within`] and its
-    /// siblings, each of which rebinds.
+    /// other way a run is given a budget is [`Interpreter::invoke_within`] and
+    /// its sibling, each of which binds the one it was handed.
     pub fn new(runtime: &'a Runtime) -> Self {
         let mut interpreter = Interpreter {
             program: runtime.program(),
@@ -728,16 +727,38 @@ impl<'a> Interpreter<'a> {
     ///
     /// Called where a run begins and nowhere else, for the reason
     /// [`crate::budget::Meter`] gives: a `Meter` names the accounting of the
-    /// run it was taken from, and `HostRegistry::begin_run` gives the budget
-    /// it installs fresh accounting. So [`Interpreter::new`] takes one, and
-    /// the two ways in that install a budget of their own take another
-    /// straight after installing it.
+    /// run it was taken from. So [`Interpreter::new`] takes the registry's,
+    /// and the two ways in that bring a budget of their own bind that one
+    /// instead.
     fn bind_budget(&mut self) {
-        self.budget = self.hosts.budget_meter();
+        self.use_budget(self.hosts.budget_meter());
+    }
+
+    /// Makes `budget` the one this interpreter's safepoints, host calls and
+    /// spawns charge, together with the call-depth limit that comes off it.
+    fn use_budget(&mut self, budget: Option<Meter>) {
+        self.budget = budget;
         self.call_depth_limit = self
             .budget
             .as_ref()
             .and_then(|budget| budget.limits().max_call_depth);
+    }
+
+    /// Makes `budget` this run's, with its deadline clock starting now —
+    /// held by the interpreter, not installed in the registry, which every
+    /// run over it shares (issue #577).
+    fn begin_run(&mut self, mut budget: Budget) {
+        budget.restart();
+        self.use_budget(Some(budget.meter()));
+    }
+
+    /// The accounting of this run — or of the last one, once it has
+    /// answered — or `None` for a run with no budget.
+    ///
+    /// [`Vm::meter`](crate::Vm::meter)'s counterpart: where an embedder reads
+    /// what an [`Interpreter::invoke_within`] spent.
+    pub fn meter(&self) -> Option<&Meter> {
+        self.budget.as_ref()
     }
 
     /// What this run's heaps have done so far: allocation, collections, live
@@ -840,8 +861,18 @@ impl<'a> Interpreter<'a> {
 
     /// An interpreter for the body of the spawned task `id`, which stops when
     /// `cancellation` is raised.
-    fn for_task(runtime: &'a Runtime, id: u64, cancellation: Cancellation) -> Self {
+    ///
+    /// `budget` is the run's, handed over by the `spawn`: ADR 0008 draws a
+    /// task's fuel from the run's budget, and the run's budget is the one
+    /// its entry was given, not whatever the registry holds (issue #577).
+    fn for_task(
+        runtime: &'a Runtime,
+        budget: Option<Meter>,
+        id: u64,
+        cancellation: Cancellation,
+    ) -> Self {
         let mut interpreter = Interpreter::new(runtime);
+        interpreter.use_budget(budget);
         interpreter.cancellation = Some(cancellation);
         interpreter.task_stack.push(id);
         interpreter
@@ -979,15 +1010,15 @@ impl<'a> Interpreter<'a> {
     /// is 168 allocations of table-building against a request's own 237, and
     /// is the thing compiling once was for not doing.
     ///
-    /// A budget belongs to an invocation. It still *lives* on the registry,
-    /// because ADR 0008 draws a spawned task's fuel from the run's budget and
-    /// a task thread reaches the budget through the `Arc<Runtime>` it carries;
-    /// a task's charges are still the invocation's. What this changes is when
-    /// it is put there and how long it stands: `budget` is installed as this
-    /// call is entered, bounds everything the invocation and its tasks do, and
-    /// is left behind afterwards holding what the invocation spent — the same
-    /// state a finished `cove run` leaves and reads its `--stats` out of. The
-    /// next `invoke_within` replaces it.
+    /// A budget belongs to an invocation, and it lives with the invocation:
+    /// this interpreter holds it, and a `spawn` hands it to the task thread
+    /// it starts, so ADR 0008's rule that a task's fuel is drawn from the
+    /// run's budget still holds. It used to be installed in the registry for
+    /// the length of the call, which made it one slot every run over that
+    /// registry shared — issue #577. `budget` bounds everything the
+    /// invocation and its tasks do, and is left behind afterwards, readable
+    /// through [`Interpreter::meter`], holding what the invocation spent.
+    /// The next `invoke_within` replaces it.
     ///
     /// **The deadline runs from here**, not from wherever `budget` was built.
     /// A budget built to bound an invocation that has not begun would
@@ -1024,8 +1055,7 @@ impl<'a> Interpreter<'a> {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         crate::invoke::check(self.program, module, name, &args)?;
-        self.hosts().begin_run(budget);
-        self.bind_budget();
+        self.begin_run(budget);
         let outcome = self.enter_with(module, name, args);
         self.ended(outcome)
     }
@@ -1042,8 +1072,7 @@ impl<'a> Interpreter<'a> {
         name: &str,
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
-        self.hosts().begin_run(budget);
-        self.bind_budget();
+        self.begin_run(budget);
         let outcome = self.enter(module, name, args);
         self.ended(outcome)
     }
@@ -1492,8 +1521,9 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, RuntimeError> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
+        let budget = self.budget.clone();
         let started = Instant::now();
-        let result = hosts.call_with(
+        let result = hosts.call_within(
             module,
             op,
             values,
@@ -1501,6 +1531,7 @@ impl<'a> Interpreter<'a> {
                 interpreter: self,
                 span,
             },
+            budget.as_ref(),
         );
         self.charge_wait(started.elapsed());
         result.map_err(|e| e.at(span))
@@ -1517,8 +1548,9 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, RuntimeError> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
+        let budget = self.budget.clone();
         let started = Instant::now();
-        let result = hosts.call_resource(
+        let result = hosts.call_resource_within(
             handle,
             op,
             values,
@@ -1526,6 +1558,7 @@ impl<'a> Interpreter<'a> {
                 interpreter: self,
                 span,
             },
+            budget.as_ref(),
         );
         self.charge_wait(started.elapsed());
         result.map_err(|e| e.at(span))
@@ -4406,12 +4439,13 @@ fn mention_pattern(pattern: &Pattern, out: &mut BTreeSet<String>) {
 /// here rather than handing the value to a thread that cannot own it.
 fn run_task(
     runtime: Runtime,
+    budget: Option<Meter>,
     id: u64,
     cancellation: Cancellation,
     body: Transfer,
     span: Span,
 ) -> TaskOutcome {
-    let mut interpreter = Interpreter::for_task(&runtime, id, cancellation.clone());
+    let mut interpreter = Interpreter::for_task(&runtime, budget, id, cancellation.clone());
     interpreter.timings.push(Timing::start());
     let result = interpreter.call_value_slots(body.into_value(), Vec::new(), span);
     let timing = interpreter
