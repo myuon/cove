@@ -1,0 +1,27 @@
+use edge
+
+/// Greets whoever `?name=` names, and reaches nothing outside the run.
+///
+/// `/spin` never answers on its own: it loops until the fuel the host grants
+/// each request runs out, which is what a tenant's bug looks like to every
+/// other tenant on the server — one failed request, and nothing else.
+export fn handle(request: edge.Request) -> edge.Response {
+  if request.path == "/spin" {
+    return spin()
+  }
+  let name = request.query.get("name").unwrapOr("world")
+  edge.Response(
+    status: 200,
+    contentType: "text/plain",
+    body: "Hello, {name}! ({request.method} {request.path})\n",
+  )
+}
+
+/// Counts for as long as the host lets it.
+fn spin() -> edge.Response {
+  var turns = 0
+  while turns >= 0 {
+    turns += 1
+  }
+  edge.Response(status: 200, contentType: "text/plain", body: "{turns}\n")
+}

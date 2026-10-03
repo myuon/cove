@@ -1,0 +1,24 @@
+use edge
+use upstream
+
+/// Asks several upstream services in turn and combines their answers.
+///
+/// Each `upstream.get` is slow, and the host answers it pending: the run
+/// parks at the call, the worker thread that ran it goes on to other
+/// requests, and the run resumes on whichever worker is free when the answer
+/// arrives. Nothing here says so, and nothing here could — the same source
+/// blocks at each call under a host that answers at once.
+///
+/// `?services=a,b,c` chooses the services; the default asks three.
+export fn handle(request: edge.Request) -> edge.Response {
+  let wanted = request.query.get("services").unwrapOr("weather,stocks,news")
+  var lines = Vector.of()
+  for service in wanted.split(",") {
+    match upstream.get(service) {
+      Ok(answer) => lines.push("{service}: {answer}")
+      Err(error) => lines.push("{service}: unavailable ({error.message})")
+    }
+  }
+  let page = "\n".join(lines.freeze())
+  edge.Response(status: 200, contentType: "text/plain", body: "{page}\n")
+}

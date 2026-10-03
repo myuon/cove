@@ -1,0 +1,31 @@
+# The tenants `examples/edge/host` deploys, one `[run.<tenant>]` table each.
+#
+# A package of its own, so that `examples/`'s `cove check` and API snapshot do
+# not take these modules in: they name host modules (`edge`, `kv`, `upstream`,
+# `log`) that only the edge server registers. The tables reuse the format
+# `cove run` reads — `entry`, `allow`, `fuel`, `deadline`, `max_host_calls` —
+# because what an edge server grants a tenant is what `cove run` grants a
+# program. `cove run` itself cannot start them: each entry takes an
+# `edge.Request`, which only the server can supply.
+#
+# The table's name is the tenant's, and it routes: `/hello/...` reaches
+# `hello.handle`.
+
+[run.hello]
+entry = "hello.handle"
+allow = []
+fuel = 2000000
+
+[run.counter]
+entry = "counter.handle"
+allow = ["kv", "log"]
+
+[run.aggregate]
+entry = "aggregate.handle"
+allow = ["upstream"]
+deadline = "5s"
+
+# Over-reaching on purpose: its entry requires `upstream` as well.
+[run.greedy]
+entry = "greedy.handle"
+allow = ["kv"]

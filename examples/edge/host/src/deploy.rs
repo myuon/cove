@@ -1,0 +1,422 @@
+//! Deploying a tenant: compile once, check its authority, prepare once.
+//!
+//! Every tenant is compiled as a package of its own — its one module and the
+//! standard library — so a tenant cannot `use` another tenant's code, and
+//! what the checker derives about its entry is about its code alone. What is
+//! paid here is paid once per tenant for the life of the server: parsing,
+//! checking, lowering, and [`PreparedProgram::new`]'s encoding and
+//! verification. A request pays for an [`OwnedVm`] and nothing above it.
+//!
+//! The capability check is the one thing a deploy can refuse for. The checker
+//! derives, per function, the capabilities its call graph requires
+//! (`FnEntry::required_capabilities`), and `cove.toml`'s `allow` is what this
+//! server grants. A tenant whose entry requires more than it was granted is
+//! not deployed, and the server says which capability and why, before any
+//! request reaches it. The runtime would refuse the call anyway — the grant
+//! is enforced at the boundary — but a refusal at deploy is a refusal that
+//! does not wait for the one request that takes the rare branch.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use cove_diag::{render, Diagnostic, Severity, SourceMap};
+use cove_runtime::{Grants, HostRegistry, Limits, OwnedVm, PreparedProgram, Runtime, Value};
+use cove_sema::package::{Module, Package, Unit};
+use cove_sema::resolve::Program;
+use cove_sema::{Compiler, Config, HostSchemas, RunConfig};
+
+use crate::hosts::{Edge, Kv, Latency, Log, Upstream, EDGE, SCHEMAS};
+
+/// How the server is asked to deploy its tenants.
+#[derive(Clone, Debug)]
+pub struct DeployOptions {
+    /// The directory holding `cove.toml` and one directory per tenant.
+    pub tenants: PathBuf,
+    /// How long the simulated `upstream` takes.
+    pub latency: Latency,
+    /// Whether `log.info` prints nothing.
+    pub quiet: bool,
+    /// Whether `upstream.get` blocks its worker instead of parking the run.
+    pub blocking_upstream: bool,
+}
+
+/// What a request's run is bounded by when `cove.toml` says nothing.
+///
+/// Fuel because a tenant is somebody else's code and can loop; a deadline
+/// because a parked run is still a run, and one whose upstream never answers
+/// should not hold its socket forever.
+pub fn default_limits() -> Limits {
+    Limits {
+        fuel: Some(50_000_000),
+        deadline: Some(Duration::from_secs(10)),
+        max_host_calls: Some(1_000),
+        ..Limits::default()
+    }
+}
+
+/// One tenant, deployed or refused.
+pub struct Tenant {
+    /// The name that routes to it: `/hello/...` reaches `hello`.
+    pub name: String,
+    /// `module.function`, from `cove.toml`'s `entry`.
+    pub entry: String,
+    /// What `cove.toml` grants.
+    pub granted: BTreeSet<String>,
+    /// What the checker derived the entry requires, when it checked.
+    pub required: BTreeSet<String>,
+    /// Whether `required` is a lower bound: the entry makes a call the call
+    /// graph cannot follow.
+    pub open: bool,
+    /// What every request's run is bounded by.
+    pub limits: Limits,
+    /// Running, or why not.
+    pub state: State,
+}
+
+/// Whether a tenant serves.
+pub enum State {
+    /// Compiled, checked, granted, and prepared.
+    Deployed(Box<Deployed>),
+    /// Not deployed, and the reason, which the server prints at startup and
+    /// answers every request to the tenant with.
+    Refused(String),
+}
+
+/// Everything a request's isolate is built from, shared by all of them.
+pub struct Deployed {
+    pub module: String,
+    pub function: String,
+    /// The checked program and its sources, shared by every run.
+    pub program: Arc<Program>,
+    pub sources: Arc<SourceMap>,
+    /// The lowered program, encoded and verified once (#570).
+    pub prepared: PreparedProgram,
+    /// The tenant's `kv` store, which outlives every run.
+    pub kv: Arc<Mutex<HashMap<String, String>>>,
+    /// What `cove.toml` grants, which every run's registry is built with.
+    pub grants: Vec<String>,
+    pub tenant: String,
+    pub latency: Latency,
+    pub quiet: bool,
+    pub blocking_upstream: bool,
+    /// What deploying cost, once.
+    pub cost: DeployCost,
+}
+
+/// What deploying one tenant cost.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeployCost {
+    /// Reading, parsing and checking the tenant and the standard library.
+    pub check: Duration,
+    /// Lowering the entry, and [`PreparedProgram::new`].
+    pub prepare: Duration,
+    /// How many functions the entry reached.
+    pub functions: usize,
+    /// Building one isolate — its host registry, its `Runtime` and its
+    /// [`OwnedVm`] — over the prepared program, which is what every request
+    /// pays. The mean of a hundred.
+    pub isolate: Duration,
+}
+
+impl Deployed {
+    /// A fresh isolate: a run of the tenant's prepared program, with its own
+    /// heap and stack and nothing of any other run's.
+    ///
+    /// Its own [`HostRegistry`] too, and that is not for isolation's sake
+    /// but for the budget's. A per-invocation budget
+    /// ([`OwnedVm::invoke_within_parkable`]) is installed *in the registry*
+    /// (`HostRegistry::begin_run`), which holds one budget at a time, and a
+    /// host call is charged to whichever budget the registry holds when it is
+    /// made. Two runs sharing a registry therefore share — and overwrite —
+    /// one budget: under load, `max_host_calls` was summed across every
+    /// request in flight and a tenant making three calls a request was
+    /// stopped at "host-call limit of 1000 exceeded". A registry per run is
+    /// four boxed hosts and an `Arc`; what is shared is behind them (the
+    /// `kv` store) or above them (the program, the prepared encoding).
+    pub fn isolate(&self) -> OwnedVm {
+        let mut hosts = HostRegistry::new(Grants::new(self.grants.iter().cloned()));
+        hosts.register(Box::new(Edge));
+        hosts.register(Box::new(Kv {
+            store: Arc::clone(&self.kv),
+        }));
+        hosts.register(Box::new(Log {
+            tenant: self.tenant.clone(),
+            quiet: self.quiet,
+        }));
+        hosts.register(Box::new(Upstream {
+            latency: self.latency,
+            blocking: self.blocking_upstream,
+        }));
+        let hosts = Arc::new(hosts);
+        let runtime = Arc::new(Runtime::new(
+            Arc::clone(&self.program),
+            Arc::clone(&self.sources),
+            Arc::clone(&hosts),
+        ));
+        OwnedVm::new(runtime, hosts, self.prepared.clone())
+    }
+}
+
+impl Tenant {
+    /// The one-line account the server prints at startup.
+    pub fn describe(&self) -> String {
+        let list = |set: &BTreeSet<String>| {
+            if set.is_empty() {
+                "-".to_string()
+            } else {
+                set.iter().cloned().collect::<Vec<_>>().join(", ")
+            }
+        };
+        let open = if self.open { " (lower bound)" } else { "" };
+        let verdict = match &self.state {
+            State::Deployed(deployed) => {
+                let unused: Vec<_> = self.granted.difference(&self.required).cloned().collect();
+                let unused = if unused.is_empty() || self.open {
+                    String::new()
+                } else {
+                    format!("; granted but unused: {}", unused.join(", "))
+                };
+                format!(
+                    "deployed: {} fn, checked in {:.1} ms, prepared in {:.1} ms, isolate {:.0} us{unused}",
+                    deployed.cost.functions,
+                    deployed.cost.check.as_secs_f64() * 1e3,
+                    deployed.cost.prepare.as_secs_f64() * 1e3,
+                    deployed.cost.isolate.as_secs_f64() * 1e6,
+                )
+            }
+            State::Refused(why) => format!("REFUSED: {why}"),
+        };
+        format!(
+            "{:<10} requires [{}]{open}  granted [{}]  {verdict}",
+            self.name,
+            list(&self.required),
+            list(&self.granted)
+        )
+    }
+
+    /// The deployed half, if there is one.
+    pub fn deployed(&self) -> Option<&Deployed> {
+        match &self.state {
+            State::Deployed(deployed) => Some(deployed),
+            State::Refused(_) => None,
+        }
+    }
+}
+
+/// Deploys every tenant `cove.toml` names, refusing the ones that do not
+/// compile or that require more than they are granted.
+///
+/// A refusal is per tenant: the others deploy. The error is only for a
+/// `cove.toml` that cannot be read at all.
+pub fn deploy_all(options: &DeployOptions) -> Result<Vec<Tenant>, String> {
+    let manifest = options.tenants.join("cove.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("cannot read `{}`: {e}", manifest.display()))?;
+    let config: Config =
+        cove_sema::config::parse(&text).map_err(|e| format!("`{}`: {e}", manifest.display()))?;
+    Ok(config
+        .runs
+        .iter()
+        .map(|(name, run)| deploy(options, name, run))
+        .collect())
+}
+
+/// Deploys one tenant.
+fn deploy(options: &DeployOptions, name: &str, run: &RunConfig) -> Tenant {
+    let defaults = default_limits();
+    let mut tenant = Tenant {
+        name: name.to_string(),
+        entry: run.entry.clone(),
+        // `edge` is granted to every tenant, because the checker charges
+        // building an `edge.Response` to the `edge` capability as though it
+        // were a call: `cove_sema::resolve::call_capability` reads any
+        // `module.Name(...)` on a host module as an operation, and a name the
+        // schema declares no operation for falls back to the module's
+        // capability. `edge` has no operations, so granting it grants nothing
+        // a run could use.
+        granted: run
+            .allow
+            .iter()
+            .cloned()
+            .chain([EDGE.capability.to_string()])
+            .collect(),
+        required: BTreeSet::new(),
+        open: false,
+        limits: Limits {
+            fuel: run.fuel.or(defaults.fuel),
+            deadline: run.deadline.or(defaults.deadline),
+            max_host_calls: run.max_host_calls.or(defaults.max_host_calls),
+            max_tasks: run.max_tasks.or(Some(8)),
+            ..defaults
+        },
+        state: State::Refused(String::new()),
+    };
+    tenant.state = match prepare(options, &mut tenant) {
+        Ok(deployed) => State::Deployed(Box::new(deployed)),
+        Err(why) => State::Refused(why),
+    };
+    tenant
+}
+
+/// Compiles, checks the grant, lowers and prepares; or says why not.
+fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, String> {
+    let Some((module, function)) = tenant.entry.split_once('.') else {
+        return Err(format!("entry `{}` is not `module.function`", tenant.entry));
+    };
+    let schemas = HostSchemas::only(SCHEMAS);
+
+    let started = Instant::now();
+    let (sources, package) = load(&options.tenants, module)?;
+    let checked = Compiler::new()
+        .with_schemas(schemas.clone())
+        .compile(&package)
+        .map_err(|items| format!("does not check:\n{}", report(&sources, &items)))?;
+    let check = started.elapsed();
+    let warnings: Vec<&Diagnostic> = checked
+        .notices
+        .iter()
+        .filter(|item| item.severity == Severity::Warning)
+        .collect();
+    if !warnings.is_empty() {
+        let owned: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
+        return Err(format!(
+            "checks with warnings:\n{}",
+            report(&sources, &owned)
+        ));
+    }
+
+    let Some(entry) = checked.lookup_fn(module, function) else {
+        return Err(format!("`{}` declares no `{function}`", module));
+    };
+    tenant.required = entry
+        .required_capabilities
+        .iter()
+        .map(|capability| capability.as_str().to_string())
+        .collect();
+    tenant.open = entry.is_capability_open();
+    let missing: Vec<String> = tenant
+        .required
+        .difference(&tenant.granted)
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "`{}` requires {}, which cove.toml does not grant",
+            tenant.entry,
+            missing
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+    }
+
+    let started = Instant::now();
+    let lowered = cove_ir::lower_entry(&checked, &sources, &schemas, module, function)
+        .map_err(|items| format!("does not lower:\n{}", report(&sources, &items)))?;
+    let functions = lowered.functions.len();
+    let prepared = PreparedProgram::new(Arc::new(lowered));
+    let prepare = started.elapsed();
+
+    let mut deployed = Deployed {
+        module: module.to_string(),
+        function: function.to_string(),
+        program: Arc::new(checked),
+        sources: Arc::new(sources),
+        prepared,
+        kv: Arc::new(Mutex::new(HashMap::new())),
+        grants: tenant.granted.iter().cloned().collect(),
+        tenant: tenant.name.clone(),
+        latency: options.latency,
+        quiet: options.quiet,
+        blocking_upstream: options.blocking_upstream,
+        cost: DeployCost {
+            check,
+            prepare,
+            functions,
+            isolate: Duration::ZERO,
+        },
+    };
+    let started = Instant::now();
+    for _ in 0..100 {
+        drop(deployed.isolate());
+    }
+    deployed.cost.isolate = started.elapsed() / 100;
+    Ok(deployed)
+}
+
+/// The tenant's module and the standard library, as a package of their own.
+///
+/// The module is the `.cove` files directly in `tenants/<module>/`; nothing
+/// beside it is read, so no tenant's package holds another's code.
+fn load(root: &Path, module: &str) -> Result<(SourceMap, Package), String> {
+    let dir = root.join(module);
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("cove"))
+        .collect();
+    paths.sort();
+    if paths.is_empty() {
+        return Err(format!("`{}` holds no `.cove` file", dir.display()));
+    }
+    let mut sources = SourceMap::new();
+    let mut units = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+        // Named relative to the tenants directory, so that a runtime error
+        // a response carries points at `hello/hello.cove:23` rather than at
+        // wherever the server happens to be checked out.
+        let shown = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        let file = sources.add(shown, &text);
+        let ast = cove_syntax::parse_file(&sources, file)
+            .map_err(|items| format!("does not parse:\n{}", report(&sources, &items)))?;
+        units.push(Unit { file, path, ast });
+    }
+    let mut modules = BTreeMap::from([(
+        module.to_string(),
+        Module {
+            name: module.to_string(),
+            dir,
+            units,
+        },
+    )]);
+    cove_sema::stdlib::install(&mut sources, &mut modules)
+        .map_err(|items| report(&sources, &items))?;
+    let package = Package {
+        root: root.to_path_buf(),
+        config: Config::default(),
+        modules,
+    };
+    Ok((sources, package))
+}
+
+/// Diagnostics, rendered the way `cove check` renders them.
+fn report(sources: &SourceMap, items: &[Diagnostic]) -> String {
+    items.iter().map(|item| render(sources, item)).collect()
+}
+
+/// The `edge.Request` a tenant's `handle` is invoked with.
+pub fn request_value(method: &str, path: &str, query: &[(String, String)], body: &str) -> Value {
+    use cove_runtime::value::MapKey;
+    Value::structure(
+        "edge.Request",
+        vec![
+            ("method", Value::string(method)),
+            ("path", Value::string(path)),
+            (
+                "query",
+                Value::map(
+                    query
+                        .iter()
+                        .map(|(k, v)| (MapKey::Str(k.clone()), Value::string(v.as_str()))),
+                ),
+            ),
+            ("body", Value::string(body)),
+        ],
+    )
+}
