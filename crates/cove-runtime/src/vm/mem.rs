@@ -196,6 +196,9 @@ const MAX_HEAP_WORDS: u64 = u32::MAX as u64;
 /// by every task at once. A chunk is committed by the allocator, under the
 /// allocator's own lock, and never replaced — so a word read is two indexings
 /// and an atomic load, and never a lock.
+///
+/// Every chunk but the first: that one holds [`FIRST_CHUNK_WORDS`], so that a
+/// run that allocates little is not charged sixty-four kibibytes for it.
 const CHUNK_SHIFT: u32 = 13;
 const CHUNK_WORDS: u64 = 1 << CHUNK_SHIFT;
 const CHUNK_MASK: u64 = CHUNK_WORDS - 1;
@@ -319,6 +322,62 @@ pub(crate) struct Collected {
 
 // --- the heap's backing store -----------------------------------------------
 
+/// The words the heap's first chunk holds.
+///
+/// Five hundred and twelve, four kibibytes, against a full chunk's sixty-four.
+/// A run that allocates little is the common case for an embedder that keeps
+/// many runs — an isolate per request, a decision per rule — and a full first
+/// chunk was most of what such a run cost: `rules.decideSample` places every
+/// literal and runs to completion in 360 heap words, and paid 65,536 bytes for
+/// them.
+///
+/// The first object the first chunk cannot hold whole is placed at the start of
+/// the second chunk instead, and the offsets it jumps — from where the bump
+/// pointer was to [`CHUNK_WORDS`] — are a **hole**: the allocator never hands
+/// out an offset in it, and nothing reads one. See `Alloc::hole`. That is
+/// what keeps every address computation unchanged — a heap word is still
+/// `chunks[index >> CHUNK_SHIFT][index & CHUNK_MASK]`, in this module and in
+/// compiled code, every chunk but the first still holds exactly
+/// [`CHUNK_WORDS`], and an object may still cross from any chunk after the
+/// first into the next. Only three cold places know the hole is there: the
+/// bump path of [`Space::alloc`], which makes it; [`Space::sweep`], which steps
+/// over it; and [`occupied`], which leaves it out of every count of the heap's
+/// size, the budget's included.
+///
+/// So the budget means what it did — a run may occupy as many words as before,
+/// and the largest object it can be given is as large — and the hole's only
+/// cost is the part of the first chunk it leaves unused, at most
+/// [`FIRST_CHUNK_WORDS`] words, in a run that has outgrown the first chunk and
+/// is about to commit sixty-four kibibytes anyway.
+const FIRST_CHUNK_WORDS: u64 = 1 << 9;
+
+const _: () = assert!(FIRST_CHUNK_WORDS <= CHUNK_WORDS);
+
+/// How many heap words the offsets below `end` occupy, where the hole begins at
+/// `hole`: every one of them, less the hole once `end` is past it.
+///
+/// `end` is never inside the hole, because the bump pointer jumps it, and
+/// before the jump `hole` is [`FIRST_CHUNK_WORDS`], which `end` cannot pass,
+/// so this is a subtraction or nothing.
+#[inline]
+fn occupied(end: u64, hole: u64) -> u64 {
+    if end > hole {
+        end - (CHUNK_WORDS - hole)
+    } else {
+        end
+    }
+}
+
+/// How many words chunk `at` holds once it is committed.
+#[inline(always)]
+fn chunk_len(at: usize) -> usize {
+    if at == 0 {
+        FIRST_CHUNK_WORDS as usize
+    } else {
+        CHUNK_WORDS as usize
+    }
+}
+
 /// The heap region's words, as a spine of chunks created on demand.
 ///
 /// A `Vec<u64>` cannot be this store, and the reason is not performance: the
@@ -326,6 +385,15 @@ pub(crate) struct Collected {
 /// `Vec` moves the words a reader is holding a reference into. A fixed spine
 /// of `OnceLock` chunks needs no `&mut` to commit one and never moves a word
 /// that exists, so growth and concurrent reads are not in each other's way.
+///
+/// The spine is sized to the whole budget when the run starts, so it is paid
+/// by every run however little it allocates: 513 entries of twenty-four bytes
+/// for the default budget, 12,312 bytes, which is now the largest single thing
+/// a run that allocates little holds. An entry of one `AtomicPtr`, with a
+/// chunk's length derived from its index, was built and measured as the way to
+/// make it 4,104: it cost `cove-bench`'s `chars` +3.0% and `arrayget` +2.5%,
+/// against +0.1% and +0.6% for this layout with the same short first chunk,
+/// so the entries stay as they are.
 ///
 /// The words are [`AtomicU64`] for the reason a shared store has to be: two
 /// tasks writing two different objects is an ordinary thing for a program to
@@ -336,38 +404,51 @@ pub(crate) struct Collected {
 /// way the language lets a value be reached from two tasks at all.
 struct Words {
     /// One entry per chunk of the run's heap budget, sized once and never
-    /// resized. An entry is empty until the allocator commits it.
+    /// resized. An entry is empty until the allocator commits it, and holds
+    /// [`chunk_len`] of its index words from then on.
     chunks: Box<[OnceLock<Box<[AtomicU64]>>]>,
 }
 
 impl Words {
     /// A store that can hold `capacity` heap words, none of them committed.
+    ///
+    /// `capacity` counts words, not offsets: a store with room for more than
+    /// the first chunk has a spine with room for the largest hole as well,
+    /// which is the whole of the first chunk's range.
     fn new(capacity: u64) -> Words {
-        let chunks = capacity.div_ceil(CHUNK_WORDS) as usize;
+        let offsets = if capacity > FIRST_CHUNK_WORDS {
+            capacity + CHUNK_WORDS
+        } else {
+            capacity
+        };
+        let chunks = offsets.div_ceil(CHUNK_WORDS) as usize;
         Words {
             chunks: (0..chunks).map(|_| OnceLock::new()).collect(),
         }
     }
 
+    /// The words of chunk `at`, which must be committed.
+    #[inline(always)]
+    fn chunk(&self, at: usize) -> &[AtomicU64] {
+        self.chunks[at]
+            .get()
+            .expect("a committed heap word is in a chunk that exists")
+    }
+
     /// The word at heap offset `index`, which must be committed.
     #[inline]
     fn at(&self, index: u64) -> &AtomicU64 {
-        let chunk = self.chunks[(index >> CHUNK_SHIFT) as usize]
-            .get()
-            .expect("a committed heap word is in a chunk that exists");
-        &chunk[(index & CHUNK_MASK) as usize]
+        &self.chunk((index >> CHUNK_SHIFT) as usize)[(index & CHUNK_MASK) as usize]
     }
 
     /// The rest of the chunk `index` falls in, and where in it `index` is.
     ///
     /// What a run of words is copied through: a run that crosses a chunk
-    /// boundary is a few slices rather than a lookup per word.
+    /// boundary is a few slices rather than a lookup per word. In the first
+    /// chunk the rest ends at [`FIRST_CHUNK_WORDS`], which no object crosses.
     #[inline]
     fn run(&self, index: u64) -> &[AtomicU64] {
-        let chunk = self.chunks[(index >> CHUNK_SHIFT) as usize]
-            .get()
-            .expect("a committed heap word is in a chunk that exists");
-        &chunk[(index & CHUNK_MASK) as usize..]
+        &self.chunk((index >> CHUNK_SHIFT) as usize)[(index & CHUNK_MASK) as usize..]
     }
 
     /// How many chunks this store could ever hold.
@@ -384,9 +465,10 @@ impl Words {
     /// The committed chunks are a *prefix*: [`commit`](Words::commit) runs from
     /// the bump pointer upward and the free list hands back words inside chunks
     /// that already exist, so a chunk is committed only after every chunk below
-    /// it is. That is what makes this incremental — it resumes at `into.len()`
-    /// and stops at the first chunk that is not there — and what makes stopping
-    /// correct rather than a guess.
+    /// it is — the jump over the hole keeps that, by committing the first
+    /// chunk if nothing had yet. That is what makes this incremental — it
+    /// resumes at `into.len()` and stops at the first chunk that is not there
+    /// — and what makes stopping correct rather than a guess.
     ///
     /// The pointers are `*mut u64` rather than `*mut AtomicU64`, and that is the
     /// whole of what compiled code is told about the heap. An `AtomicU64` has the
@@ -394,7 +476,9 @@ impl Words {
     /// plain load or store on every target Cove's native tier runs on; the
     /// ordering that makes one task's writes visible to another is the
     /// release/acquire pair on a cell's lock word, as it already was. See
-    /// [`Words`]'s own note.
+    /// [`Words`]'s own note. The first chunk's pointer reaches only
+    /// [`FIRST_CHUNK_WORDS`] words, and compiled code reads only words of
+    /// objects, none of which is in the hole.
     fn bases(&self, into: &mut Vec<*mut u64>) {
         while into.len() < self.chunks.len() {
             match self.chunks[into.len()].get() {
@@ -413,14 +497,14 @@ impl Words {
             return;
         }
         for at in (from >> CHUNK_SHIFT)..=((to - 1) >> CHUNK_SHIFT) {
-            self.chunks[at as usize].get_or_init(chunk);
+            self.chunks[at as usize].get_or_init(|| chunk(chunk_len(at as usize)));
         }
     }
 }
 
-/// One committed chunk, zeroed.
-fn chunk() -> Box<[AtomicU64]> {
-    (0..CHUNK_WORDS).map(|_| AtomicU64::new(0)).collect()
+/// One committed chunk of `words` words, zeroed.
+fn chunk(words: usize) -> Box<[AtomicU64]> {
+    (0..words).map(|_| AtomicU64::new(0)).collect()
 }
 
 // --- the allocator ----------------------------------------------------------
@@ -429,8 +513,18 @@ fn chunk() -> Box<[AtomicU64]> {
 struct Alloc {
     /// The first heap offset no object occupies.
     bump: u64,
-    /// The first address the heap may not reach.
-    limit: u64,
+    /// The most heap words the bump pointer may occupy, as [`occupied`]
+    /// counts them: the run's budget, with the hole not charged to it.
+    budget: u64,
+    /// The heap offset the hole begins at: [`FIRST_CHUNK_WORDS`] until the
+    /// first object the first chunk cannot hold, and the bump pointer as that
+    /// object found it from then on. The hole runs from here to
+    /// [`CHUNK_WORDS`]; see [`FIRST_CHUNK_WORDS`].
+    ///
+    /// Set once, by the jump that makes the hole. Before it, no offset at or
+    /// above this exists to be counted, which is what lets [`occupied`] read
+    /// it unconditionally.
+    hole: u64,
     /// Free blocks, by address. Rebuilt by every sweep, consumed by
     /// [`Space::alloc`].
     free: Vec<u64>,
@@ -597,7 +691,8 @@ impl Space {
             static_end: AtomicU64::new(STACK_WORDS),
             alloc: Mutex::new(Alloc {
                 bump: 0,
-                limit: STACK_WORDS + budget,
+                budget,
+                hole: FIRST_CHUNK_WORDS,
                 free: Vec::new(),
                 marks: Vec::new(),
                 allocated_words: 0,
@@ -832,14 +927,27 @@ impl Space {
                 addr
             }
             None => {
-                let addr = STACK_WORDS + alloc.bump;
-                if addr + words > alloc.limit {
+                // An object the first chunk cannot hold whole goes to the start
+                // of the second, over the hole. See `FIRST_CHUNK_WORDS`.
+                let jump =
+                    alloc.bump <= FIRST_CHUNK_WORDS && alloc.bump + words > FIRST_CHUNK_WORDS;
+                let at = if jump { CHUNK_WORDS } else { alloc.bump };
+                // The hole begins where the first chunk's objects end, so
+                // jumping it costs the budget nothing.
+                let hole = if jump { alloc.bump } else { alloc.hole };
+                if occupied(at + words, hole) > alloc.budget {
                     return None;
                 }
-                self.words.commit(alloc.bump, alloc.bump + words);
-                alloc.bump += words;
+                if jump {
+                    // The first chunk, if nothing had committed it, so that the
+                    // committed chunks stay a prefix. See `Words::bases`.
+                    self.words.commit(0, 1);
+                    alloc.hole = hole;
+                }
+                self.words.commit(at, at + words);
+                alloc.bump = at + words;
                 self.bump.store(STACK_WORDS + alloc.bump, Ordering::Relaxed);
-                addr
+                STACK_WORDS + at
             }
         };
         self.store(addr, header(layout, len));
@@ -1239,10 +1347,20 @@ impl Space {
         // static region is what makes it a floor; leaving it out of the count
         // would make `freed + live` stop meaning what was occupied when the
         // collection began, which is the relation `HeapSummary` reports.
-        let mut live = static_end - STACK_WORDS;
+        let mut live = occupied(static_end - STACK_WORDS, alloc.hole);
         let mut addr = static_end;
         let end = STACK_WORDS + alloc.bump;
         while addr < end {
+            if addr == STACK_WORDS + alloc.hole {
+                // The hole: no word is there to walk, and a free run may not
+                // reach across it, or the block it became would hand out
+                // offsets nothing backs. See `FIRST_CHUNK_WORDS`.
+                if let Some(start) = run.take() {
+                    self.close_free_run(alloc, start, addr);
+                }
+                addr = STACK_WORDS + CHUNK_WORDS;
+                continue;
+            }
             let words = self.object_words(layouts, addr);
             if is_marked(&alloc.marks, addr) {
                 live += words;
@@ -1372,9 +1490,13 @@ impl Space {
 
     // --- reporting ----------------------------------------------------------
 
-    /// Words the heap region currently occupies, free blocks included.
+    /// Words the heap region currently occupies, free blocks included and the
+    /// hole not.
     fn heap_words(&self) -> u64 {
-        self.bump.load(Ordering::Relaxed) - STACK_WORDS
+        // Under the lock rather than from `Space::bump`, because the answer
+        // is two numbers the jump over the hole changes together.
+        let alloc = self.allocator();
+        occupied(alloc.bump, alloc.hole)
     }
 
     /// Words handed out over the whole run, reuse counted each time.
@@ -2680,6 +2802,66 @@ mod tests {
         }
         assert_eq!(mem.payload(into, 4), 0, "nothing before the run is written");
         assert_eq!(mem.payload(into, words + 5), 0, "nor after it");
+    }
+
+    /// An object the short first chunk cannot hold whole is placed at the
+    /// start of the second, and the offsets it jumps cost the budget nothing.
+    ///
+    /// The budget is exactly what the three objects need, so a hole charged to
+    /// it — or a first chunk's unused tail charged to it — refuses the last.
+    #[test]
+    fn the_first_object_past_the_first_chunk_jumps_the_hole() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let small = (FIRST_CHUNK_WORDS / 2 - 2) as u32;
+        let large = FIRST_CHUNK_WORDS as u32;
+        let budget = 2 * (1 + small) + (1 + large);
+        let mut mem = Memory::new(budget as usize);
+        let first = alloc(&mut mem, &table, array, small);
+        let second = alloc(&mut mem, &table, array, small);
+        assert_eq!(first, STACK_WORDS);
+        assert_eq!(second, STACK_WORDS + 1 + small as u64);
+        // `first` and `second` leave the first chunk two words short of this.
+        let third = alloc(&mut mem, &table, array, large);
+        assert_eq!(
+            third,
+            STACK_WORDS + CHUNK_WORDS,
+            "the second chunk's first word"
+        );
+        assert_eq!(mem.heap_words(), budget as u64, "the hole is not counted");
+        assert_eq!(mem.alloc(array, 0, 0), None, "and the budget is spent");
+
+        mem.set_payload(third, large - 1, 7);
+        assert_eq!(mem.payload(third, large - 1), 7);
+    }
+
+    /// A sweep steps over the hole: it reclaims on both sides of it, and the
+    /// free run below it ends where the hole begins rather than reaching
+    /// across it.
+    #[test]
+    fn a_sweep_steps_over_the_hole() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let mut mem = Memory::new(4 * CHUNK_WORDS as usize);
+        let low = alloc(&mut mem, &table, array, 10);
+        let kept = alloc(&mut mem, &table, array, 10);
+        let below = alloc(&mut mem, &table, array, 10);
+        let high = alloc(&mut mem, &table, array, FIRST_CHUNK_WORDS as u32);
+        let above = alloc(&mut mem, &table, array, 10);
+        assert_eq!(high, STACK_WORDS + CHUNK_WORDS);
+
+        let done = mem.collect(table.layouts(), &Held(vec![kept, above]));
+        assert_eq!(done.live_words, 22);
+        assert_eq!(done.freed_words, 11 + 11 + 1 + FIRST_CHUNK_WORDS);
+        assert_eq!(done.live_words + done.freed_words, mem.heap_words());
+        assert_eq!(mem.free_blocks(), vec![low, below, high]);
+        // The run below the hole ends at it.
+        assert_eq!(mem.object_len(below), 10);
+
+        // And the reclaimed words are handed out again on both sides.
+        assert_eq!(alloc(&mut mem, &table, array, 10), low);
+        assert_eq!(alloc(&mut mem, &table, array, 10), below);
+        assert_eq!(alloc(&mut mem, &table, array, 10), high);
     }
 
     // `a_strings_bytes_cross_a_chunk_boundary_whole` stood here, over

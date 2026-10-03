@@ -1381,8 +1381,11 @@ pub struct NativeCtx {
     /// The heap's answer to [`NativeCtx::words`], and it is a table rather than
     /// a pointer for the reason the module documentation gives: the heap is a
     /// spine of separately allocated chunks, so there is no one pointer that
-    /// reaches every heap word. `HEAP_CHUNK_WORDS` words per entry, and only
-    /// the committed prefix is present — an entry is never null.
+    /// reaches every heap word. `HEAP_CHUNK_WORDS` words per entry but the
+    /// first, which holds fewer — the runtime never places an object in the
+    /// part of the first chunk's range it does not back, so no word compiled
+    /// code is given an address of is outside it. Only the committed prefix is
+    /// present — an entry is never null.
     ///
     /// Re-loaded wherever [`NativeCtx::words`] is, and for the same reason one
     /// step further out: a helper may have allocated, an allocation may have

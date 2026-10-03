@@ -506,12 +506,18 @@ fn attribute_vm(entry: &str) {
     drop(Vm::new(&runtime, runtime.hosts(), &lowered));
     attribute::ON.store(true, Ordering::Relaxed);
     let mut vm = Vm::new(&runtime, runtime.hosts(), &lowered);
-    println!("# Vm::new, rules.{entry}: live bytes by allocating frames");
+    println!(
+        "# Vm::new, rules.{entry}: live bytes by allocating frames ({} heap words)",
+        vm.heap_words()
+    );
     attribute::report();
     attribute::ON.store(true, Ordering::Relaxed);
     vm.run_entry(module, entry, vec![Rc::from(argument(entry))])
         .expect("runs");
-    println!("# first invocation, rules.{entry}: live bytes by allocating frames");
+    println!(
+        "# first invocation, rules.{entry}: live bytes by allocating frames ({} heap words)",
+        vm.heap_words()
+    );
     attribute::report();
     std::mem::forget(vm);
 }
