@@ -9,8 +9,9 @@
 //! the predecessor still held these names; it is gone, and this module and
 //! `cove-ir` have taken them.
 //!
-//! Two things leave this module: [`Vm`], the type an embedder holds, and
-//! [`exec::SAFEPOINT_STRIDE`], a number a test asserts a bound against.
+//! Three things leave this module: [`Vm`], the type an embedder holds,
+//! [`PreparedProgram`], the part of one that a program's every run can share,
+//! and [`exec::SAFEPOINT_STRIDE`], a number a test asserts a bound against.
 //! Nothing else does, because what a caller can name is the whole of what
 //! this boundary decides. A word, a layout, a [`mem::Memory`] and a
 //! [`exec::Machine`] are the representation, and a representation that leaves
@@ -90,6 +91,7 @@
 //! than annotated, which is what removing the broad allow was for.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use cove_diag::Span;
 use cove_ir::{Function, FunctionId, Program};
@@ -136,6 +138,52 @@ mod sequences;
 /// fact.
 const DEFAULT_HEAP_WORDS: usize = 1 << 22;
 
+/// A lowered program, encoded and verified once, for any number of [`Vm`]s
+/// to run.
+///
+/// Everything a run needs that is a function of the program alone: the
+/// fixed-width instructions [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
+/// decides — or the refusal a program with none is answered with — and the
+/// tables derived from its layouts. [`Vm::new`] builds these for every run;
+/// [`Vm::with_prepared`] takes them from here, so an embedder that holds one
+/// program and many runs of it (an isolate per request, a decision per
+/// invocation) pays for the encoding and the verification once and keeps one
+/// copy of the result in memory.
+///
+/// It owns the program rather than being handed it again by each `Vm`,
+/// because the dispatch loop trusts an encoding's operands *because* they
+/// were verified against one program: a preparation that could be paired
+/// with another would be an unchecked read waiting for a caller to make it.
+/// It owns it rather than borrowing it so that it can be kept where the
+/// program is kept — beside it in a struct, which a borrow could not be.
+///
+/// Cheap to clone and `Send + Sync`: what it holds is immutable once built
+/// and behind `Arc`s, the same `Arc`s a run already shares with its own
+/// spawned tasks, so one preparation can serve runs on many threads.
+#[derive(Clone)]
+pub struct PreparedProgram {
+    program: Arc<Program>,
+    prepared: exec::Prepared,
+}
+
+impl PreparedProgram {
+    /// `program`, encoded, verified, and its layout tables built.
+    ///
+    /// Infallible, for [`Vm::new`]'s reason: a program with no encoding is
+    /// held here as the refusal, and each run built from this answers its
+    /// first [`Vm::run_entry`] or [`Vm::invoke`] with it, before a frame is
+    /// pushed.
+    pub fn new(program: Arc<Program>) -> PreparedProgram {
+        let prepared = exec::Prepared::of(&program);
+        PreparedProgram { program, prepared }
+    }
+
+    /// The program this prepared.
+    pub fn program(&self) -> &Arc<Program> {
+        &self.program
+    }
+}
+
 /// One run of a lowered program.
 ///
 /// This is the type above the machine: it holds the program, the memory the
@@ -164,26 +212,6 @@ pub struct Vm<'a> {
 }
 
 impl<'a> Vm<'a> {
-    /// A run of `program`, over `runtime`'s checked program and `hosts`.
-    ///
-    /// `program` is **encoded and verified here**, once, into the fixed-width
-    /// form [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
-    /// decides and issue #245's Phase 5 made the only one a run executes.
-    /// There is no second representation to choose and no flag that selects
-    /// one: `Inst` is what the lowering produced and what a listing and the
-    /// debugger show, and what runs is sixteen bytes per instruction whose
-    /// operands were checked before the first of them ran.
-    ///
-    /// This stays infallible, and what that costs is stated where it is
-    /// paid. A program with no encoding — one whose frame is wider than a
-    /// sixteen-bit slot names, which `cove_ir::lower` already refuses with a
-    /// diagnostic — is refused by [`Vm::run_entry`] and [`Vm::invoke`]
-    /// before a frame is pushed, rather than by this constructor. The
-    /// alternative was a `Result` at every call site for a failure the
-    /// compiler in front of it has already made impossible.
-    ///
-    /// The heap budget is this module's `DEFAULT_HEAP_WORDS`. [`Vm::with_heap_words`]
-    /// is the constructor for a caller that needs a different one.
     /// Turns on or off, for every run in this process, the audit of the names
     /// a rendering of an erased value reads: every box made is walked, and
     /// every nominal layout in it whose names `cove_ir`'s lowering did not
@@ -205,6 +233,32 @@ impl<'a> Vm<'a> {
         exec::dynamic::unplaced_names()
     }
 
+    /// A run of `program`, over `runtime`'s checked program and `hosts`.
+    ///
+    /// `program` is **encoded and verified here**, into the fixed-width
+    /// form [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
+    /// decides and issue #245's Phase 5 made the only one a run executes.
+    /// There is no second representation to choose and no flag that selects
+    /// one: `Inst` is what the lowering produced and what a listing and the
+    /// debugger show, and what runs is sixteen bytes per instruction whose
+    /// operands were checked before the first of them ran.
+    ///
+    /// This stays infallible, and what that costs is stated where it is
+    /// paid. A program with no encoding — one whose frame is wider than a
+    /// sixteen-bit slot names, which `cove_ir::lower` already refuses with a
+    /// diagnostic — is refused by [`Vm::run_entry`] and [`Vm::invoke`]
+    /// before a frame is pushed, rather than by this constructor. The
+    /// alternative was a `Result` at every call site for a failure the
+    /// compiler in front of it has already made impossible.
+    ///
+    /// The heap budget is this module's `DEFAULT_HEAP_WORDS`. [`Vm::with_heap_words`]
+    /// is the constructor for a caller that needs a different one.
+    ///
+    /// That work is a function of `program` alone, and this constructor
+    /// does it again for every `Vm`. A caller that builds more than one run
+    /// over the same program should prepare it once, with
+    /// [`PreparedProgram::new`], and build each run with
+    /// [`Vm::with_prepared`], which does none of it.
     pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Program) -> Vm<'a> {
         Vm::with_heap_words(runtime, hosts, program, DEFAULT_HEAP_WORDS)
     }
@@ -234,11 +288,61 @@ impl<'a> Vm<'a> {
         program: &'a Program,
         heap_words: usize,
     ) -> Vm<'a> {
+        Vm::assemble(
+            runtime,
+            hosts,
+            program,
+            &exec::Prepared::of(program),
+            heap_words,
+        )
+    }
+
+    /// A run of the program `prepared` holds, sharing its encoding and its
+    /// tables with every other run built from it.
+    ///
+    /// [`Vm::new`] with the program-wide work already done: what this
+    /// constructor pays is the run's own — its heap, its stack, its literals —
+    /// and a clone of each `Arc` the preparation holds. It cannot be handed a
+    /// preparation of a different program, because a [`PreparedProgram`]
+    /// carries the program it prepared and this takes it from there.
+    ///
+    /// A program that does not encode is refused exactly as [`Vm::new`]
+    /// refuses it: by [`Vm::run_entry`] and [`Vm::invoke`], before a frame is
+    /// pushed. The refusal was found once, by [`PreparedProgram::new`], and
+    /// every run built from it answers with the same one.
+    pub fn with_prepared(
+        runtime: &'a Runtime,
+        hosts: &'a HostRegistry,
+        prepared: &'a PreparedProgram,
+    ) -> Vm<'a> {
+        Vm::assemble(
+            runtime,
+            hosts,
+            &prepared.program,
+            &prepared.prepared,
+            DEFAULT_HEAP_WORDS,
+        )
+    }
+
+    /// The one place a `Vm` is put together: [`Vm::with_heap_words`] reaches
+    /// it with a preparation of its own and [`Vm::with_prepared`] with a
+    /// shared one.
+    ///
+    /// `prepared` must be [`exec::Prepared::of`] `program`, which both callers
+    /// guarantee by construction — the first has just built it, the second
+    /// takes both out of one [`PreparedProgram`]. Not public for that reason.
+    fn assemble(
+        runtime: &'a Runtime,
+        hosts: &'a HostRegistry,
+        program: &'a Program,
+        prepared: &exec::Prepared,
+        heap_words: usize,
+    ) -> Vm<'a> {
         Vm {
             runtime,
             hosts,
             program,
-            machine: Machine::for_run(program, heap_words, Some(hosts), Some(runtime)),
+            machine: Machine::for_run(program, prepared, heap_words, Some(hosts), Some(runtime)),
             budget: meter_of(hosts),
         }
     }
