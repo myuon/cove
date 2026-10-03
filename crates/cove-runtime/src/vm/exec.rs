@@ -637,8 +637,8 @@ pub(crate) struct Machine<'a> {
     /// none.
     ///
     /// Issue #245's Phase 5. There is one execution form and this is it: the
-    /// program is encoded and verified once, when the machine is built, and
-    /// from then on the loop reads operands out of sixteen bytes without
+    /// program is encoded and verified once, by [`Prepared::of`], before any
+    /// machine over it is built, and from then on the loop reads operands out of sixteen bytes without
     /// asking whether they are in range. [`cove_ir::Inst`] is what the
     /// *lowering* produces and what a listing and the debugger show; nothing
     /// below
@@ -656,6 +656,9 @@ pub(crate) struct Machine<'a> {
     /// An `Arc` because a run's tasks share one: [`Machine::for_task`] is
     /// handed the parent's rather than encoding again, which is what makes
     /// one spawn cost a pointer instead of a second pass over the program.
+    /// And since [`Prepared`], so do the runs: every machine built from one
+    /// preparation holds the same encoding, and so does a refused program's
+    /// every machine hold the same refusal.
     encoded: Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError>,
     // `answered` and `cases` stood here: the checked half of an intrinsic
     // arm's read-before-write contract, and a memo of the case index each
@@ -749,6 +752,65 @@ pub(crate) struct Machine<'a> {
     pub(crate) counting: Option<Box<Counting>>,
 }
 
+/// Everything a machine needs that is a function of its [`Program`] alone:
+/// the encoded and verified instructions, or the refusal, and the four tables
+/// derived from the layouts.
+///
+/// Built once per program by [`Prepared::of`] and cloned into every machine
+/// over it, which is a clone of five `Arc`s. That was already how a run's
+/// spawned tasks shared them ([`Machine::for_task`]); this is the same sharing
+/// one level up, across runs. It is what `crate::PreparedProgram` holds for
+/// an embedder that builds many `Vm`s over one program: measured on
+/// `examples/rules`, encoding and verifying were about three quarters of what
+/// building a machine cost, and the encoding about a third of what a machine
+/// retained, and none of it depended on anything but the program.
+///
+/// Nothing here is mutable after it is built, which is what makes sharing it
+/// across runs no different from sharing it across tasks: a run that reads it
+/// cannot tell whether another run, on another thread, is reading it too.
+#[derive(Clone)]
+pub(crate) struct Prepared {
+    /// See [`Machine::encoded`].
+    encoded: Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError>,
+    /// See [`Machine::widths`].
+    widths: Arc<[u32]>,
+    /// See [`Machine::word_runs`].
+    word_runs: Arc<[Option<WordRun>]>,
+    /// See [`Machine::fixed_payload_words`].
+    fixed_payload_words: Arc<[u32]>,
+    /// See [`Machine::reflection`].
+    reflection: Arc<dynamic::Tables>,
+}
+
+impl Prepared {
+    /// `program` encoded, verified, and its layout tables built.
+    ///
+    /// Infallible for [`Machine::for_run`]'s reason: a program that does not
+    /// encode is held here as the refusal, and every machine built from this
+    /// preparation raises it before a frame is pushed.
+    pub(crate) fn of(program: &Program) -> Prepared {
+        Prepared {
+            // Encoded and verified here, once per program — not once per
+            // machine — because nothing it reads is a machine's, and because
+            // a refusal found here is one a machine raises before it runs
+            // anything. See [`Machine::encoded`].
+            encoded: encoded::prepare(program),
+            widths: program
+                .layouts
+                .iter()
+                .map(|layout| layout.width())
+                .collect(),
+            word_runs: word_runs(program),
+            fixed_payload_words: program
+                .layouts
+                .iter()
+                .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
+                .collect(),
+            reflection: dynamic::tables(program),
+        }
+    }
+}
+
 impl<'a> Machine<'a> {
     /// A machine with no host boundary, for a program that calls none.
     ///
@@ -771,7 +833,7 @@ impl<'a> Machine<'a> {
         heap_words: usize,
         hosts: Option<&'a HostRegistry>,
     ) -> Machine<'a> {
-        Machine::for_run(program, heap_words, hosts, None)
+        Machine::for_run(program, &Prepared::of(program), heap_words, hosts, None)
     }
 
     /// The entry task of one run.
@@ -784,8 +846,15 @@ impl<'a> Machine<'a> {
     /// constructor stays infallible, and [`Machine::run`] and
     /// [`Machine::enter_closure`] are what turn either into a refusal,
     /// before a frame exists.
+    ///
+    /// `prepared` must be [`Prepared::of`] *this* `program`: the dispatch loop
+    /// trusts the encoding's operands because they were verified against it.
+    /// The one caller outside this file is `Vm`, which either has just built
+    /// the preparation or takes both from a `crate::PreparedProgram`, which
+    /// owns the program it prepared.
     pub(crate) fn for_run(
         program: &'a Program,
+        prepared: &Prepared,
         heap_words: usize,
         hosts: Option<&'a HostRegistry>,
         runtime: Option<&'a Runtime>,
@@ -817,23 +886,16 @@ impl<'a> Machine<'a> {
             assertion_failure: None,
             debugger: None,
             next_check: SAFEPOINT_STRIDE,
-            // Encoded and verified here, once, for every machine — because
-            // this is where a run's program arrives and because a refusal
-            // that happened later would happen after a frame was pushed. See
-            // the field.
-            encoded: encoded::prepare(program),
-            widths: program
-                .layouts
-                .iter()
-                .map(|layout| layout.width())
-                .collect(),
-            word_runs: word_runs(program),
-            fixed_payload_words: program
-                .layouts
-                .iter()
-                .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
-                .collect(),
-            reflection: dynamic::tables(program),
+            // The preparation's, not this machine's own: encoded and
+            // verified once per program by [`Prepared::of`], before this
+            // constructor was called, so a refusal is in hand before any
+            // frame could be pushed. See the field.
+            encoded: prepared.encoded.clone(),
+            // The preparation's, for the reason `encoded` is.
+            widths: Arc::clone(&prepared.widths),
+            word_runs: Arc::clone(&prepared.word_runs),
+            fixed_payload_words: Arc::clone(&prepared.fixed_payload_words),
+            reflection: Arc::clone(&prepared.reflection),
             tier: None,
             counting: None,
         };

@@ -48,7 +48,9 @@ use cove_ir::bytecode::Op;
 use cove_ir::{CmpOp, Compare};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::trace::{TraceEvent, TraceSink};
-use cove_runtime::{Budget, Grants, HostRegistry, Limits, Runtime, RuntimeError, Value, Vm};
+use cove_runtime::{
+    Budget, Grants, HostRegistry, Limits, PreparedProgram, Runtime, RuntimeError, Value, Vm,
+};
 use cove_sema::package::{Module, Package, Unit};
 use cove_sema::Compiler;
 
@@ -786,6 +788,79 @@ fn a_walk_collected_in_the_middle_leaves_nothing_reachable_once_it_returns() {
              {dropped} word(s) live without the trees, {kept} with one"
         );
     }
+}
+
+// --------------------------------------------- one preparation, many runs
+
+/// Runs built from one [`PreparedProgram`] answer what a run built alone does,
+/// on this thread and on others at once.
+///
+/// What is shared is the encoding and the layout tables; what is not is
+/// everything a run writes — its heap, its stack, and the literals placed in
+/// that heap. The program has a string literal for that reason: each run has
+/// to have placed it in its own heap, and a run that had been handed another
+/// run's addresses would read a heap that is not there. Two runs sequentially
+/// and four concurrently, each asserting what the oracle answers and the same
+/// instruction count a [`Vm::new`] run executes, so a sharing that leaked any
+/// state from one run into the next would move one or the other.
+#[test]
+fn runs_of_one_prepared_program_answer_what_a_run_alone_does() {
+    let source = "\
+export fn main() -> Result<Unit, Error> {
+  var words = Vector.of()
+  var i = 0
+  while i < 16 {
+    words.push(\"shared\")
+    i += 1
+  }
+  let lengths = words.map(fn(w) { w.length() })
+  var total = 0
+  var at = 0
+  while at < lengths.length() {
+    total += lengths.get(at).unwrapOr(0)
+    at += 1
+  }
+  assertEqual(total, 96)?
+  Ok(())
+}
+";
+    let alone = run(source);
+    assert_eq!(described(&alone.answer), described(&on_the_oracle(source)));
+    assert_eq!(described(&alone.answer), "Ok(Ok(()))");
+
+    let (sources, checked) = check(source);
+    let lowered = cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+        .expect("the fixture lowers");
+    let prepared = PreparedProgram::new(Arc::new(lowered));
+    let one_run = || {
+        let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+        let runtime = Runtime::new(
+            Arc::clone(&checked),
+            Arc::clone(&sources),
+            Arc::clone(&hosts),
+        );
+        let mut vm = Vm::with_prepared(&runtime, &hosts, &prepared);
+        let answer = vm.run_entry("m", "main", Vec::new());
+        (described(&answer), vm.instructions())
+    };
+    let expected = (described(&alone.answer), alone.instructions);
+    for _ in 0..2 {
+        assert_eq!(one_run(), expected);
+    }
+    std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..4).map(|_| scope.spawn(one_run)).collect();
+        for handle in runs {
+            assert_eq!(handle.join().expect("the run finishes"), expected);
+        }
+    });
+}
+
+/// A preparation can be handed to another thread and shared between several,
+/// which is what an embedder serving runs on a pool needs of it.
+#[test]
+fn a_prepared_program_crosses_threads() {
+    fn shared<T: Send + Sync + Clone>() {}
+    shared::<PreparedProgram>();
 }
 
 // ------------------------------------------------------------------ the harness

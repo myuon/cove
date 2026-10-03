@@ -9,6 +9,10 @@ name = "cove-rules-measure"
 path = "src/main.rs"
 
 [[bin]]
+name = "cove-rules-isolates"
+path = "src/bin/isolates.rs"
+
+[[bin]]
 name = "cove-rules-check"
 path = "src/bin/check.rs"
 

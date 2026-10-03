@@ -58,9 +58,12 @@
 //! and constants at construction time and built a table of each, so
 //! [`RulePackage::serve`] had a cost of its own worth reporting beside the
 //! other two. `cove-ir` computes every layout once, while lowering, and
-//! [`cove_runtime::Vm::new`] reads none of that back out of the program — it
-//! allocates the heap region and a table sized to the program's string count,
-//! neither of which grows with how much the program declares. What
+//! what is left of building a `Vm` that depends on the program — encoding and
+//! verifying it, and the tables its layouts give — is done once per lowering,
+//! into the [`cove_runtime::PreparedProgram`] a [`Lowering`] holds, and shared
+//! by every `Vm` [`RulePackage::serve`] builds from it. What is left for
+//! `serve` is the run's own state: the heap region and the literals placed in
+//! it, neither of which grows with how much the program declares. What
 //! `RulePackage::serve` costs is still reported, because a reader should not
 //! have to take "now cheap" on faith, but it is no longer a pass over the
 //! program the way the other two are.
@@ -76,8 +79,8 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::value::MapKey;
 use cove_runtime::{
     Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
-    OperationSchema, RecordedValue, Runtime, RuntimeError, TraceEvent, TraceSink, TypeSchema,
-    Value, Vm,
+    OperationSchema, PreparedProgram, RecordedValue, Runtime, RuntimeError, TraceEvent, TraceSink,
+    TypeSchema, Value, Vm,
 };
 use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program;
@@ -844,10 +847,16 @@ impl RulePackage {
         })?;
         let lower = started.elapsed();
 
+        let started = Instant::now();
+        let functions = program.functions.len();
+        let prepared = PreparedProgram::new(Arc::new(program));
+        let prepare = started.elapsed();
+
         Ok(Lowering {
-            functions: program.functions.len(),
-            ir: Arc::new(program),
+            prepared,
+            functions,
             lower,
+            prepare,
         })
     }
 
@@ -857,10 +866,11 @@ impl RulePackage {
     /// `body` makes, which is what compile-once/invoke-many means on this
     /// API. `cove-rules-measure` reports what building it costs separately
     /// from an invocation's, though for `Vm` that cost is no longer a pass
-    /// over the program: `cove_ir::lower_entry` computed every layout while
-    /// [`RulePackage::lower`] ran, so [`cove_runtime::Vm::new`] allocates the
-    /// heap region and a table sized to the program's string count and reads
-    /// nothing else back out of the lowered program. The predecessor backend
+    /// over the program: `cove_ir::lower_entry` computed every layout, and
+    /// [`RulePackage::lower`] encoded and verified the program into the
+    /// [`Lowering`]'s [`PreparedProgram`], so [`cove_runtime::Vm::with_prepared`]
+    /// allocates the heap region, places the program's literals in it, and
+    /// reads nothing else back out of the lowered program. The predecessor backend
     /// read the program's struct shapes, enum shapes and constants at this
     /// point and built a table of each, which is what made building *it* a
     /// cost worth reporting in the first place.
@@ -883,9 +893,11 @@ impl RulePackage {
         );
         let started = Instant::now();
         let backend = match lowering {
-            Some(lowering) => {
-                Backend::Vm(Box::new(Vm::new(&runtime, runtime.hosts(), &lowering.ir)))
-            }
+            Some(lowering) => Backend::Vm(Box::new(Vm::with_prepared(
+                &runtime,
+                runtime.hosts(),
+                &lowering.prepared,
+            ))),
             None => Backend::Ast(Box::new(Interpreter::new(&runtime))),
         };
         let mut session = Session {
@@ -944,7 +956,9 @@ fn report(sources: &SourceMap, items: &[cove_diag::Diagnostic]) -> String {
 
 /// What lowering one entry cost, and what it produced.
 pub struct Lowering {
-    ir: Arc<cove_ir::Program>,
+    /// The lowered program, encoded and verified once for every `Vm`
+    /// [`RulePackage::serve`] builds over it.
+    prepared: PreparedProgram,
     /// How many functions the entry reached.
     pub functions: usize,
     /// Lowering itself, verification included.
@@ -954,6 +968,10 @@ pub struct Lowering {
     /// `cove_ir::lower_entry` verifies as it lowers rather than after, so
     /// there is one duration rather than two.
     pub lower: Duration,
+    /// Encoding and verifying the lowered program for the VM, and building
+    /// its layout tables: [`cove_runtime::PreparedProgram::new`]. Paid here,
+    /// once per lowering, rather than by every `Vm` built from it.
+    pub prepare: Duration,
 }
 
 /// Which backend a session runs on.

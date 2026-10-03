@@ -475,8 +475,9 @@ pub(crate) fn implemented(op: Op) -> bool {
 /// facts the loop then trusts, and asking whether an opcode is implemented
 /// before knowing it is a real opcode would be asking about a byte.
 ///
-/// Called once per machine, from `Machine::for_run`, and its answer is kept
-/// there. Every refusal is raised before a run pushes a frame, so a program
+/// Called once per program, from `Prepared::of`, and its answer is shared by
+/// every machine built from that preparation — the tasks of one run and, for
+/// an embedder holding a `crate::PreparedProgram`, every run. Every refusal is raised before a run pushes a frame, so a program
 /// this machine cannot execute has no observable effect at all rather than
 /// stopping partway through one.
 pub(crate) fn prepare(program: &Program) -> Result<Arc<Encoded>, RuntimeError> {
