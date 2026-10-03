@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 use cove_diag::{render, Diagnostic, Severity, SourceMap};
 use cove_runtime::{Grants, HostRegistry, Limits, OwnedVm, PreparedProgram, Runtime, Value};
 use cove_sema::package::{Module, Package, Unit};
-use cove_sema::resolve::Program;
 use cove_sema::{Compiler, Config, HostSchemas, RunConfig};
 
 use crate::hosts::{Edge, Kv, Latency, Log, Upstream, SCHEMAS};
@@ -88,19 +87,19 @@ pub enum State {
 pub struct Deployed {
     pub module: String,
     pub function: String,
-    /// The checked program and its sources, shared by every run.
-    pub program: Arc<Program>,
+    /// The sources, for rendering a runtime error a response carries.
     pub sources: Arc<SourceMap>,
+    /// The tenant's host registry — its grants, and the four hosts with the
+    /// `kv` store behind them — built once and shared by every run.
+    ///
+    /// One registry for every request in flight, which a per-run budget makes
+    /// sound: a run's budget travels with the run and a host call is charged
+    /// to the run that made it, never to the registry (issue #577).
+    pub hosts: Arc<HostRegistry>,
+    /// The run-wide state over the checked program, shared by every run.
+    pub runtime: Arc<Runtime>,
     /// The lowered program, encoded and verified once (#570).
     pub prepared: PreparedProgram,
-    /// The tenant's `kv` store, which outlives every run.
-    pub kv: Arc<Mutex<HashMap<String, String>>>,
-    /// What `cove.toml` grants, which every run's registry is built with.
-    pub grants: Vec<String>,
-    pub tenant: String,
-    pub latency: Latency,
-    pub quiet: bool,
-    pub blocking_upstream: bool,
     /// What deploying cost, once.
     pub cost: DeployCost,
 }
@@ -114,48 +113,27 @@ pub struct DeployCost {
     pub prepare: Duration,
     /// How many functions the entry reached.
     pub functions: usize,
-    /// Building one isolate — its host registry, its `Runtime` and its
-    /// [`OwnedVm`] — over the prepared program, which is what every request
+    /// Building one isolate — its [`OwnedVm`], over the tenant's shared
+    /// registry, `Runtime` and prepared program — which is what every request
     /// pays. The mean of a hundred.
     pub isolate: Duration,
 }
 
 impl Deployed {
     /// A fresh isolate: a run of the tenant's prepared program, with its own
-    /// heap and stack and nothing of any other run's.
+    /// heap, stack and budget and nothing of any other run's.
     ///
-    /// Its own [`HostRegistry`] too, and that is not for isolation's sake
-    /// but for the budget's. A per-invocation budget
-    /// ([`OwnedVm::invoke_within_parkable`]) is installed *in the registry*
-    /// (`HostRegistry::begin_run`), which holds one budget at a time, and a
-    /// host call is charged to whichever budget the registry holds when it is
-    /// made. Two runs sharing a registry therefore share — and overwrite —
-    /// one budget: under load, `max_host_calls` was summed across every
-    /// request in flight and a tenant making three calls a request was
-    /// stopped at "host-call limit of 1000 exceeded". A registry per run is
-    /// four boxed hosts and an `Arc`; what is shared is behind them (the
-    /// `kv` store) or above them (the program, the prepared encoding).
+    /// The registry and the `Runtime` are the tenant's, shared with every
+    /// other request in flight. They used to be built per isolate, because a
+    /// per-invocation budget was installed in the registry and concurrent
+    /// runs charged one another's host calls to it (issue #577); a budget is
+    /// the run's now, so what an isolate costs is the `OwnedVm` alone.
     pub fn isolate(&self) -> OwnedVm {
-        let mut hosts = HostRegistry::new(Grants::new(self.grants.iter().cloned()));
-        hosts.register(Box::new(Edge));
-        hosts.register(Box::new(Kv {
-            store: Arc::clone(&self.kv),
-        }));
-        hosts.register(Box::new(Log {
-            tenant: self.tenant.clone(),
-            quiet: self.quiet,
-        }));
-        hosts.register(Box::new(Upstream {
-            latency: self.latency,
-            blocking: self.blocking_upstream,
-        }));
-        let hosts = Arc::new(hosts);
-        let runtime = Arc::new(Runtime::new(
-            Arc::clone(&self.program),
-            Arc::clone(&self.sources),
-            Arc::clone(&hosts),
-        ));
-        OwnedVm::new(runtime, hosts, self.prepared.clone())
+        OwnedVm::new(
+            Arc::clone(&self.runtime),
+            Arc::clone(&self.hosts),
+            self.prepared.clone(),
+        )
     }
 }
 
@@ -311,18 +289,34 @@ fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, Str
     let prepared = PreparedProgram::new(Arc::new(lowered));
     let prepare = started.elapsed();
 
+    let mut hosts = HostRegistry::new(Grants::new(tenant.granted.iter().cloned()));
+    hosts.register(Box::new(Edge));
+    hosts.register(Box::new(Kv {
+        store: Arc::new(Mutex::new(HashMap::new())),
+    }));
+    hosts.register(Box::new(Log {
+        tenant: tenant.name.clone(),
+        quiet: options.quiet,
+    }));
+    hosts.register(Box::new(Upstream {
+        latency: options.latency,
+        blocking: options.blocking_upstream,
+    }));
+    let hosts = Arc::new(hosts);
+    let sources = Arc::new(sources);
+    let runtime = Arc::new(Runtime::new(
+        Arc::new(checked),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    ));
+
     let mut deployed = Deployed {
         module: module.to_string(),
         function: function.to_string(),
-        program: Arc::new(checked),
-        sources: Arc::new(sources),
+        sources,
+        hosts,
+        runtime,
         prepared,
-        kv: Arc::new(Mutex::new(HashMap::new())),
-        grants: tenant.granted.iter().cloned().collect(),
-        tenant: tenant.name.clone(),
-        latency: options.latency,
-        quiet: options.quiet,
-        blocking_upstream: options.blocking_upstream,
         cost: DeployCost {
             check,
             prepare,
