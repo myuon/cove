@@ -3761,6 +3761,16 @@ fn propagate_capabilities(
 /// If `callee` is a call to a host module (`console.println(...)`) or an
 /// unqualified host item (`println(...)`), the capability it requires.
 ///
+/// Initializing a type the module declares — `http.Route(method: ..., ...)`
+/// — is not a call into the host and requires nothing: the runtime builds the
+/// struct itself and never asks the boundary, exactly as it builds a Cove
+/// struct, and naming one of the module's enum cases (`http.Method.Get`)
+/// already required nothing. Charging the initializer to the module's
+/// capability would report a function that only builds a value as reaching
+/// outside the run, and a host whose module declares types and no
+/// operations — a request and a response handed across an entry — would
+/// have to grant a capability that authorizes nothing to every program.
+///
 /// The capability is the one the *operation's* schema declares, not the
 /// module's, because that is the rule `HostRegistry::call_with` and
 /// `call_resource` enforce at the boundary: they read
@@ -3789,21 +3799,29 @@ fn call_capability(
         ExprKind::Ident(name) => (host_items.get(name)?.clone(), name.clone()),
         _ => return None,
     };
-    Some(operation_capability(&module, &operation, schemas))
+    operation_capability(&module, &operation, schemas)
 }
 
 /// The capability a call to `module`'s `operation` requires, matching the
 /// rule the Host API boundary enforces: the operation's own capability when
 /// its schema declares one, the module's otherwise, and the module's name
-/// when no schema describes the module at all.
-fn operation_capability(module: &str, operation: &str, schemas: &HostSchemas) -> Capability {
-    match schemas.module(module) {
+/// when no schema describes the module at all. A name the schema declares as
+/// a plain-data type is an initializer rather than an operation and requires
+/// none — the same precedence the interpreter gives it, which asks for the
+/// declared type before it asks the boundary.
+fn operation_capability(
+    module: &str,
+    operation: &str,
+    schemas: &HostSchemas,
+) -> Option<Capability> {
+    Some(match schemas.module(module) {
+        Some(schema) if schema.declared_type(operation).is_some() => return None,
         Some(schema) => match schema.operation(operation) {
             Some(op) => Capability::new(op.capability),
             None => Capability::new(schema.capability),
         },
         None => Capability::new(module),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -3812,7 +3830,7 @@ mod tests {
     use crate::config::Config;
     use crate::package::{Module, Unit};
     use cove_diag::SourceMap;
-    use cove_schema::{Effect, HostType, ModuleSchema, OperationSchema};
+    use cove_schema::{Effect, FieldSchema, HostType, ModuleSchema, OperationSchema, TypeSchema};
     use std::path::PathBuf;
 
     /// Builds a single module out of inline source texts, one per unit,
@@ -5497,6 +5515,62 @@ export struct Booking {
         assert!(!main
             .required_capabilities
             .contains(&Capability::new("payroll")));
+    }
+
+    /// A module that declares a type and no operation, the shape of an
+    /// embedder's request-and-response contract.
+    const ENVELOPE: ModuleSchema = ModuleSchema {
+        name: "envelope",
+        capability: "envelope",
+        operations: &[],
+        types: &[TypeSchema {
+            name: "Letter",
+            cases: &[],
+            fields: &[FieldSchema {
+                name: "body",
+                ty: HostType::String,
+            }],
+        }],
+        resources: &[],
+    };
+
+    #[test]
+    fn initializing_a_host_declared_type_requires_no_capability() {
+        let schemas = HostSchemas::new().with(ENVELOPE);
+        let program = resolve_ok_with(
+            &[(
+                "app",
+                "use envelope\n\n/// Builds a letter and reaches nothing outside the run.\n\
+                 export fn write() -> envelope.Letter {\n  envelope.Letter(body: \"hi\")\n}\n",
+            )],
+            &schemas,
+        );
+        let write = &program.modules["app"].functions["write"];
+        assert!(
+            write.required_capabilities.is_empty(),
+            "{:?}",
+            write.required_capabilities
+        );
+    }
+
+    #[test]
+    fn initializing_a_shipped_host_type_requires_no_capability() {
+        let program = resolve_ok_with(
+            &[(
+                "app",
+                "use http\n\n/// Builds a route without serving it.\n\
+                 export fn route() -> http.Route {\n  \
+                 http.Route(method: http.Method.Get, path: \"/\", handler: route)\n}\n\n\
+                 /// Serves; this is the call that reaches the host.\n\
+                 export fn serve() {\n  http.handle([route()])\n}\n",
+            )],
+            &HostSchemas::new(),
+        );
+        let app = &program.modules["app"];
+        assert!(app.functions["route"].required_capabilities.is_empty());
+        assert!(app.functions["serve"]
+            .required_capabilities
+            .contains(&Capability::new("http")));
     }
 
     #[test]

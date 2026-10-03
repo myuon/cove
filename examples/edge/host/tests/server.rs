@@ -55,10 +55,11 @@ fn each_tenant_answers_and_the_over_reaching_one_is_refused() {
     };
     let set =
         |names: &[&str]| -> BTreeSet<String> { names.iter().map(|n| n.to_string()).collect() };
-    assert_eq!(tenant("hello").required, set(&["edge"]));
-    assert_eq!(tenant("counter").required, set(&["edge", "kv", "log"]));
-    assert_eq!(tenant("aggregate").required, set(&["edge", "upstream"]));
-    assert_eq!(tenant("greedy").required, set(&["edge", "kv", "upstream"]));
+    assert_eq!(tenant("hello").required, set(&[]));
+    assert_eq!(tenant("counter").required, set(&["kv", "log"]));
+    assert_eq!(tenant("aggregate").required, set(&["upstream"]));
+    assert_eq!(tenant("greedy").required, set(&["kv", "upstream"]));
+    assert_eq!(tenant("hello").granted, set(&[]));
     for name in ["hello", "counter", "aggregate"] {
         assert!(
             matches!(tenant(name).state, State::Deployed(_)),

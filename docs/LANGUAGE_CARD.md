@@ -265,7 +265,10 @@ only when their intent is not clear from code.
 
 Cove code has no ambient I/O authority when embedded. File, network, clock,
 process, database, and similar operations are typed Host APIs. The compiler
-reports which capabilities each function requires from its call graph.
+reports which capabilities each function requires from its call graph. Only
+an operation is a call into the host: initializing a type a Host API module
+declares, such as `http.Route(...)`, or naming one of its cases requires
+nothing, because the run builds that value itself.
 
 That report is a **lower bound**. It is the whole list only for a function
 whose calls the compiler can all follow, and even then it can still name a
