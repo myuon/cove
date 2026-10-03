@@ -121,10 +121,13 @@ mod differential;
 mod erasure;
 pub(crate) mod exec;
 pub(crate) mod mem;
+mod parked;
 pub mod profile;
 pub(crate) mod render;
 pub(crate) mod report;
 mod sequences;
+
+pub use parked::{OwnedVm, ParkedVm, Step};
 
 /// The words a run's heap region may grow to, for every [`Vm`] [`Vm::new`]
 /// builds. [`Vm::with_heap_words`] is the one way to build a run over a
@@ -209,6 +212,27 @@ pub struct Vm<'a> {
     /// registry with no budget installed answers `None`, which has always
     /// meant no limit; a meter over default [`Limits`] is that, written down.
     budget: Meter,
+    /// The entry a run parked at a host call is inside, while it is.
+    ///
+    /// What [`Vm::enter_with`] would have done after the run answered needs
+    /// the entry's name, its declared result and the clock it started, and
+    /// a parked run has left that function: so they wait here, and
+    /// [`Vm::resume`] finishes the entry with them. `None` whenever the run
+    /// is not parked, which for a `Vm` that is not inside an [`OwnedVm`] is
+    /// always.
+    parked: Option<Entered>,
+}
+
+/// An entry that has begun and not yet left: what [`Vm::left`] needs to say so.
+struct Entered {
+    module: String,
+    function: String,
+    returns: cove_ir::LayoutId,
+    span: Span,
+    timing: Timing,
+    /// The machine's host wait when the entry began, so that the exit reports
+    /// this entry's share of it.
+    waited: std::time::Duration,
 }
 
 impl<'a> Vm<'a> {
@@ -344,6 +368,7 @@ impl<'a> Vm<'a> {
             program,
             machine: Machine::for_run(program, prepared, heap_words, Some(hosts), Some(runtime)),
             budget: meter_of(hosts),
+            parked: None,
         }
     }
 
@@ -802,7 +827,6 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         let function = self.program.function(id);
         let span = function.span;
-        let returns = function.returns;
 
         self.runtime.trace(TraceEvent::EntryEnter {
             module: module.to_string(),
@@ -811,24 +835,57 @@ impl<'a> Vm<'a> {
         // Started here and not in `run_entry`, because what this measures is
         // the entry: the argument conversion is the entry's own boundary
         // crossing and the run is what follows it.
-        let timing = Timing::start();
-        let waited = self.machine.host_wait();
+        let entered = Entered {
+            module: module.to_string(),
+            function: name.to_string(),
+            returns: function.returns,
+            span,
+            timing: Timing::start(),
+            waited: self.machine.host_wait(),
+        };
 
-        let outcome = self
+        let answer = self
             .words_of(function, &args)
             .map_err(|e| e.at(span))
-            .and_then(|words| self.machine.run(id, &words, &self.budget))
-            .and_then(|answer| {
-                boundary::to_value(&self.machine, returns, &answer).map_err(|e| e.at(span))
-            });
+            .and_then(|words| self.machine.run(id, &words, &self.budget));
+        if self.machine.is_parked() {
+            // The words are not an answer, and the entry has not left: the
+            // rest of this function runs when the run does answer, from
+            // [`Vm::resume`]. The value is never read — see `Vm::parkable`.
+            debug_assert!(answer.as_ref().is_ok_and(Vec::is_empty));
+            self.parked = Some(entered);
+            return Ok(Value::unit());
+        }
+        self.left(entered, answer)
+    }
+
+    /// The answer's words as a value, and the two events an entry that has
+    /// run ends with: what [`Vm::enter_with`] does once the run answers, there
+    /// or — for a run that parked — in [`Vm::resume`].
+    fn left(
+        &mut self,
+        entered: Entered,
+        answer: Result<Vec<u64>, RuntimeError>,
+    ) -> Result<Value, RuntimeError> {
+        let Entered {
+            module,
+            function,
+            returns,
+            span,
+            timing,
+            waited,
+        } = entered;
+        let outcome = answer.and_then(|answer| {
+            boundary::to_value(&self.machine, returns, &answer).map_err(|e| e.at(span))
+        });
 
         // Both events on every path, the way the oracle writes them: an entry
         // that failed still entered and still left, and a run that failed
         // still allocated. A trace that recorded the exit only for a run that
         // answered would be a trace whose shape depended on the answer.
         self.runtime.trace(TraceEvent::EntryExit {
-            module: module.to_string(),
-            function: name.to_string(),
+            module,
+            function,
             cpu: timing
                 .elapsed()
                 .saturating_sub(self.machine.host_wait().saturating_sub(waited)),
@@ -836,6 +893,56 @@ impl<'a> Vm<'a> {
         });
         self.summarize_heap();
         outcome
+    }
+
+    /// Runs `start` — one of this type's ways in — allowing its host calls
+    /// to answer pending, and says whether the run answered or parked.
+    ///
+    /// [`OwnedVm`]'s parkable entries are this around the ordinary ones, so a
+    /// parkable run checks, converts and traces exactly as a blocking one
+    /// does. `None` is a parked run, whose entry is in `Vm::parked`; the
+    /// value `start` returned for it is the placeholder [`Vm::enter_with`]
+    /// leaves, and is dropped here unread.
+    fn parkable(
+        &mut self,
+        start: impl FnOnce(&mut Self) -> Result<Value, RuntimeError>,
+    ) -> Option<Result<Value, RuntimeError>> {
+        self.machine.allow_parking(true);
+        let outcome = start(self);
+        self.answered(outcome)
+    }
+
+    /// Resumes the run parked at a host call with the host's answer, and runs
+    /// it until it answers — `Some`, with the terminal events written — or
+    /// parks again, `None`.
+    fn resume(
+        &mut self,
+        answer: Result<Value, RuntimeError>,
+    ) -> Option<Result<Value, RuntimeError>> {
+        let words = self.machine.resume(answer, &self.budget);
+        if self.machine.is_parked() {
+            return None;
+        }
+        let entered = self
+            .parked
+            .take()
+            .expect("a parked run's entry is kept until it answers");
+        let outcome = self.left(entered, words);
+        self.answered(outcome)
+    }
+
+    /// What a parkable run comes to: `None` while it is parked, and its
+    /// outcome — with [`Vm::ended`]'s event written and parking turned off
+    /// again — once it answers.
+    fn answered(
+        &mut self,
+        outcome: Result<Value, RuntimeError>,
+    ) -> Option<Result<Value, RuntimeError>> {
+        if self.machine.is_parked() {
+            return None;
+        }
+        self.machine.allow_parking(false);
+        Some(self.ended(outcome))
     }
 
     /// What this run's memory did, recorded once as the run ends.

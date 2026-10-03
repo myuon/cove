@@ -96,7 +96,20 @@ use crate::error::RuntimeError;
 /// `None` is not a failure. It is the ordinary answer, and it means the callee
 /// runs on the encoded VM, which is a complete execution path and not a
 /// fallback.
-pub trait Tiered {
+///
+/// # `Send + Sync`
+///
+/// A table is read, never written, once it is installed: [`Tiered::entry`] and
+/// [`Tiered::table`] take `&self`, and what they answer — an entry point and a
+/// slice of them — is a function pointer into pages that are executable and no
+/// longer writable by then. So reading one from two threads, or from a thread
+/// other than the one that built it, reads the same immutable bytes, and the
+/// bounds say so where a run can check them.
+/// [ADR 0080](../../../../docs/adr/0080-a-host-call-may-answer-pending.md) is
+/// why they are asked for: a [`crate::Vm`] that holds a table is `Send` only if
+/// what it points at may be reached from the thread it is moved to. Letting a
+/// *spawned task* run compiled code needs the same bound and is not done here.
+pub trait Tiered: Send + Sync {
     /// The compiled entry point of `id`, if it has one.
     fn entry(&self, id: FunctionId) -> Option<Entry>;
 
@@ -311,6 +324,26 @@ pub(crate) struct Tiering {
     /// session's table is not alive after the call it was aimed for.
     counts_helpers: bool,
 }
+
+// Safety: a `Tiering` moves to another thread only inside the machine that
+// owns it, and nothing it points at is the thread's.
+//
+// - `entries` and `table` point at a `Tiered`, which is `Send + Sync` and read
+//   only through `&self`, and which its installer keeps alive and unmoved until
+//   it is taken out again — a promise about time, not about threads.
+// - `chunks` holds the addresses of this run's own heap chunks, which belong to
+//   the `Arc<Space>` the same machine's `Memory` holds. That is already `Send`,
+//   and the chunks are never unmapped while the space is alive, so the
+//   addresses are as good on the next thread as on this one.
+//
+// What *is* the thread's is a compiled frame on its native stack, and no
+// `Tiering` is moved while one is live: ADR 0080 parks a run only when no
+// compiled frame is on the stack, and a `Vm` cannot be moved while it is
+// running at all, since running borrows it.
+//
+// Not `Sync`: a `Tiering` is one machine's, written through `&mut` at every
+// call, and nothing shares one.
+unsafe impl Send for Tiering {}
 
 impl Tiering {
     /// A tier over `entries`, for a program of `functions` functions.

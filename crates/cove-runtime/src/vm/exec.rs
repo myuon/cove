@@ -43,6 +43,7 @@
 //! buffer, no spill area and no fallback path, which is what ADR 0034 asks
 //! for and what the predecessor could not say.
 
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
 use std::time::Duration;
@@ -54,7 +55,7 @@ use cove_ir::{
 
 use crate::budget::{Cancellation, Meter, Stopped};
 use crate::error::RuntimeError;
-use crate::host::{HostRegistry, Reentry, ResourceHandle};
+use crate::host::{Dispatched, HostRegistry, PendingCall, Reentry, ResourceHandle};
 use crate::interp::stopped_here;
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
@@ -302,6 +303,29 @@ impl Child {
     }
 }
 
+/// Where a parked run stands: at one host call, waiting for its answer.
+///
+/// The frames say the rest. [`cove_ir::Inst::CallHost`] and
+/// [`cove_ir::Inst::CallResource`] sync the program counter before they call,
+/// so the top frame already names the call, and resuming is the second half
+/// of the instruction — the answer converted and written at the destination
+/// the instruction names — followed by
+/// the loop from the next one. Nothing here is a `Value` or a borrow, so a
+/// machine holding one is as `Send` as a machine holding none.
+pub(crate) struct Suspended {
+    /// The registry's half: what it does to the answer when it comes.
+    call: PendingCall,
+    /// What the host wants the embedder to see, until the embedder takes it.
+    request: Option<Box<dyn Any + Send>>,
+    /// The layout the operation declares it answers, which the answer is
+    /// converted at.
+    result: LayoutId,
+    /// The call, for an error the answer is refused with.
+    span: Span,
+    /// When the host was called, which is when this machine began to wait.
+    since: Instant,
+}
+
 /// One task scope this machine has entered.
 ///
 /// The scope owns every task spawned into it, which is what lets leaving it
@@ -464,9 +488,45 @@ pub(crate) struct Machine<'a> {
     /// this is bounded exactly as the oracle bounds it, by
     /// [`crate::interp::MAX_REENTRY_DEPTH`], and for the same reason.
     reentry_depth: usize,
+    /// How many [`Machine::drive_from`] turns of the dispatch loop are running
+    /// on this thread, each with a Rust caller below it that is not the run.
+    ///
+    /// That caller is compiled code calling an uncompiled function, or a
+    /// [`native::Session`]'s own frame, and either is a frame on this thread's
+    /// native stack that a run cannot be moved away from. So this is the "no
+    /// live compiled frame" half of [`Machine::quiescent`], and it is counted
+    /// here rather than asked of the tier because a compiled frame below the
+    /// loop is exactly a `drive_from` below it: compiled code reaches the
+    /// encoded tier no other way.
+    nested: u32,
+    /// Whether a host call this run makes may answer *pending* and park it —
+    /// [ADR 0080](../../../../docs/adr/0080-a-host-call-may-answer-pending.md).
+    ///
+    /// Set by [`crate::OwnedVm`]'s parkable entries for the length of one run,
+    /// and by nothing else: a run that was not started by one has a caller
+    /// that waits for an answer and could do nothing with a parked machine,
+    /// so for it every host call is the blocking one, as it always was. A
+    /// spawned task's machine never has it, which is half of why a task with
+    /// children cannot park — the other half is [`Machine::quiescent`].
+    parking: bool,
+    /// The host call this run is parked at, while it is.
+    ///
+    /// Written by [`Machine::suspend`] as the dispatch loop unwinds and taken
+    /// by [`Machine::resume`]; `None` at every other moment. Boxed because
+    /// a machine that never parks — every machine but the few a scheduler
+    /// drives — should not carry it inline.
+    suspended: Option<Box<Suspended>>,
     /// Which task this machine is running, for a trace and for the way back
     /// a host is offered.
     task: u64,
+    /// This task's identity in a `Shared` cell's state word, taken once when
+    /// the machine is built and kept for as long as it is.
+    ///
+    /// The task's and not the thread's, since [ADR 0080](../../../../docs/adr/0080-a-host-call-may-answer-pending.md):
+    /// a run parked at a host call may be resumed on another thread, and
+    /// another run may be resumed on this one. [`cell::new_tag`] says why it
+    /// is not [`Machine::task`].
+    cell_tag: u64,
     /// Where the next task id comes from when there is no [`Runtime`] to ask.
     ///
     /// Only a test reaches it. A run draws ids from one counter for the whole
@@ -874,7 +934,11 @@ impl<'a> Machine<'a> {
             cancellation: None,
             stops: Vec::new(),
             reentry_depth: 0,
+            nested: 0,
+            parking: false,
+            suspended: None,
             task: ENTRY_TASK,
+            cell_tag: cell::new_tag(),
             next_task: 1,
             instructions: 0,
             charged_work: 0,
@@ -950,7 +1014,11 @@ impl<'a> Machine<'a> {
             cancellation: Some(cancellation),
             stops: Vec::new(),
             reentry_depth: 0,
+            nested: 0,
+            parking: false,
+            suspended: None,
             task,
+            cell_tag: cell::new_tag(),
             next_task: 1,
             instructions: 0,
             charged_work: 0,
@@ -1531,13 +1599,31 @@ impl<'a> Machine<'a> {
         budget: &Meter,
         floor: usize,
     ) -> Result<Vec<u64>, RuntimeError> {
-        std::thread::scope(|threads| {
-            let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
+        self.nested += 1;
+        let answer = std::thread::scope(|threads| {
+            let mut running = self.no_handles();
             let answer = encoded::dispatch(self, code, budget, threads, &mut running, floor);
             let answer = answer.map_err(|error| self.attach_call_chain(error));
             self.stop_all(&mut running);
             answer
-        })
+        });
+        self.nested -= 1;
+        answer
+    }
+
+    /// A join-handle list for a fresh thread scope: one empty place per task
+    /// this machine has already spawned, so that a task spawned in the new
+    /// scope lands at the index [`Machine::children`] gives it.
+    ///
+    /// Empty for a machine that has spawned nothing, which is nearly every
+    /// one. A machine that has is one whose earlier tasks were all joined —
+    /// a run that answered left every scope it opened, and a parked run is
+    /// [`Machine::quiescent`] — so no handle is being dropped here: there is
+    /// none left to drop.
+    fn no_handles<'s>(&self) -> Vec<Option<ScopedJoinHandle<'s, Outcome>>> {
+        std::iter::repeat_with(|| None)
+            .take(self.children.len())
+            .collect()
     }
 
     #[inline(never)]
@@ -1547,8 +1633,13 @@ impl<'a> Machine<'a> {
         budget: &Meter,
     ) -> Result<Vec<u64>, RuntimeError> {
         std::thread::scope(|threads| {
-            let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
-            let answer = encoded::dispatch(self, code, budget, threads, &mut running, 0);
+            let mut running = self.no_handles();
+            let mut answer = encoded::dispatch(self, code, budget, threads, &mut running, 0);
+            // A run that parked left through the failure exit with a marker;
+            // it has not failed, and nothing below has anything to do for it.
+            if self.suspended.is_some() {
+                answer = Ok(Vec::new());
+            }
             // The frames are not unwound on this path — see the module-level
             // note beside `Machine::frames` — so they are still exactly what
             // was live when the error was raised. This is the one place that
@@ -2008,6 +2099,12 @@ impl<'a> Machine<'a> {
     /// the boundary by `charge_host_call`, which is where it is read on every
     /// backend.
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// A host that answered [`crate::host::HostAnswer::Pending`] leaves this
+    /// machine parked at the call, and the answer is then [`Machine::suspend`]'s
+    /// marker error, which the loop leaves through its ordinary failure exit
+    /// and [`Machine::drive`] recognises. Only a run that can park is ever
+    /// asked for one.
     fn call_host<'s>(
         &mut self,
         base: u64,
@@ -2048,7 +2145,21 @@ impl<'a> Machine<'a> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         self.charge_at_host_boundary(budget, span)?;
         let started = Instant::now();
-        let answer = {
+        // The one question ADR 0080 adds to a host call, asked here and not in
+        // the loop: a run nobody can resume never offers the host the choice.
+        let answer = if self.parking && self.quiescent() {
+            let dispatched = {
+                let mut back = Back::parked(self, budget, span, threads, running);
+                hosts.call_parkable(&op.module, &op.operation, values, &mut back)
+            };
+            match dispatched {
+                Ok(Dispatched::Answered(value)) => Ok(value),
+                Ok(Dispatched::Pending(call, request)) => {
+                    return Err(self.suspend(call, request, op.result, span, started));
+                }
+                Err(error) => Err(error),
+            }
+        } else {
             // A task inside a host call is not running Cove and its frames do
             // not change, so the snapshot it leaves stays true for the whole
             // call — and a collection that waited for it instead would be
@@ -2063,6 +2174,156 @@ impl<'a> Machine<'a> {
         let answer = answer.map_err(|error| error.at(span))?;
         let result = op.result;
         boundary::from_value(self, result, &answer).map_err(|error| error.at(span))
+    }
+
+    /// Whether this run may be parked here and moved to another thread: the
+    /// condition [ADR 0080](../../../../docs/adr/0080-a-host-call-may-answer-pending.md)
+    /// puts on a pending answer.
+    ///
+    /// Four things a thread owns, and none of them may be live. A host running
+    /// a Cove callback is a Rust frame below this one ([`Machine::reentry_depth`]);
+    /// compiled code, or a session's caller, is another ([`Machine::nested`]);
+    /// a held `Shared` cell is a lock region the lowering will leave only by
+    /// running on; and a running spawned task is a thread inside this run's
+    /// thread scope, which ends when the loop unwinds. Each of those would be
+    /// cut off by unwinding to the embedder, so where any is live the host is
+    /// called the blocking way and the run waits on this thread, as before.
+    fn quiescent(&self) -> bool {
+        self.reentry_depth == 0
+            && self.nested == 0
+            && self.held.is_empty()
+            && !self.anything_running()
+    }
+
+    /// Parks this run at the host call it is making, which the host answered
+    /// `Pending`.
+    ///
+    /// What is kept is what the second half of the call needs: the
+    /// registry's pending call, the declared result, the span and the slot.
+    /// The frames keep the rest — the call synced the program counter before
+    /// it was made — and [`Machine::resume`] picks it up there.
+    ///
+    /// The run was quiescent when the host was offered the choice, and a host
+    /// cannot undo that before it answers: a callback it ran has returned,
+    /// and a callback leaves every scope and cell region it entered. It is
+    /// asked again anyway, because unwinding a run that was not would cancel
+    /// a task or abandon a lock region that the program wrote nothing to
+    /// end — and a refusal is a better answer to that than either.
+    fn suspend(
+        &mut self,
+        call: PendingCall,
+        request: Box<dyn Any + Send>,
+        result: LayoutId,
+        span: Span,
+        since: Instant,
+    ) -> RuntimeError {
+        if !self.quiescent() {
+            return task::broken_invariant(
+                "a host call that answered pending where this run could not park",
+            )
+            .at(span);
+        }
+        self.suspended = Some(Box::new(Suspended {
+            call,
+            request: Some(request),
+            result,
+            span,
+            since,
+        }));
+        // Never seen: `Machine::drive` reads `suspended` before the answer.
+        // An error rather than a third kind of answer because the loop already
+        // has a way out for one, and a park is rare enough to take it — a new
+        // arm in the loop for it measured 1–2.5% on rows that make no host
+        // call at all.
+        RuntimeError::new("parked at a host call")
+    }
+
+    /// Lets the host calls of the next run on this machine answer pending, or
+    /// stops them: [`crate::OwnedVm`]'s parkable entries turn it on for one run
+    /// and off when it answers.
+    pub(crate) fn allow_parking(&mut self, on: bool) {
+        self.parking = on;
+    }
+
+    /// Whether the run has parked at a host call and is waiting for
+    /// [`Machine::resume`].
+    pub(crate) fn is_parked(&self) -> bool {
+        self.suspended.is_some()
+    }
+
+    /// The request the host handed back with its pending answer, while the
+    /// embedder has not taken it.
+    pub(crate) fn request(&self) -> Option<&(dyn Any + Send)> {
+        self.suspended.as_ref()?.request.as_deref()
+    }
+
+    /// Takes the request out, leaving `None` in its place.
+    pub(crate) fn take_request(&mut self) -> Option<Box<dyn Any + Send>> {
+        self.suspended.as_mut()?.request.take()
+    }
+
+    /// Resumes a parked run with its host call's answer, on whatever thread
+    /// this is, and runs it until it answers or parks again.
+    ///
+    /// The second half of the host call, in the order the first half would
+    /// have done it had the host answered at once: the time spent waiting is
+    /// the run's host wait, the registry traces the call and holds the answer
+    /// to the declared result, the answer is converted at that layout and
+    /// written at the slot, and the loop goes on from the instruction after
+    /// the call. A refused answer fails the run at the call, with the call
+    /// chain the loop would have attached, and with the fuel it had pending
+    /// spent, exactly as [`Machine::drive`] ends a run that raised.
+    ///
+    /// # Panics
+    ///
+    /// If the run is not parked. [`crate::ParkedVm`] is the only caller, and
+    /// it exists only while one is.
+    pub(crate) fn resume(
+        &mut self,
+        answer: Result<Value, RuntimeError>,
+        budget: &Meter,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let suspended = self
+            .suspended
+            .take()
+            .expect("a run is resumed only while it is parked");
+        let Suspended {
+            call,
+            result,
+            span,
+            since,
+            ..
+        } = *suspended;
+        self.host_wait += since.elapsed();
+        let hosts = self
+            .hosts
+            .expect("a run that parked at a host call has a host boundary");
+        let written = hosts
+            .settle(call, answer)
+            .and_then(|value| boundary::from_value(self, result, &value))
+            .map_err(|error| error.at(span));
+        let words = match written.and_then(|words| self.code().map(|code| (words, code))) {
+            Ok(words) => words,
+            Err(error) => {
+                let error = self.attach_call_chain(error);
+                self.spend_pending_fuel(budget);
+                return Err(error);
+            }
+        };
+        let (words, code) = words;
+        let frame = self
+            .frames
+            .last_mut()
+            .expect("a parked run is parked in a frame");
+        // The destination is the instruction's own, read where the loop reads
+        // it, so that nothing about a park has to be carried out of the loop.
+        let dst = code.function(frame.function)[frame.pc as usize].a() as Slot;
+        frame.pc += 1;
+        let base = frame.base;
+        for (at, word) in words.iter().enumerate() {
+            self.mem.set_slot(base, dst + at as Slot, *word);
+        }
+        self.drive(&code, budget)
     }
 
     /// The same, addressed to the resource the [`Repr::Host`] word in
@@ -2132,7 +2393,20 @@ impl<'a> Machine<'a> {
         // [`Machine::call_host`] and in the same order.
         self.charge_at_host_boundary(budget, span)?;
         let started = Instant::now();
-        let answer = {
+        // And it may pend under the same condition, asked in the same place.
+        let answer = if self.parking && self.quiescent() {
+            let dispatched = {
+                let mut back = Back::parked(self, budget, span, threads, running);
+                hosts.call_resource_parkable(&handle, &op.operation, values, &mut back)
+            };
+            match dispatched {
+                Ok(Dispatched::Answered(value)) => Ok(value),
+                Ok(Dispatched::Pending(call, request)) => {
+                    return Err(self.suspend(call, request, op.result, span, started));
+                }
+                Err(error) => Err(error),
+            }
+        } else {
             let mut back = Back::parked(self, budget, span, threads, running);
             hosts.call_resource(&handle, &op.operation, values, &mut back)
         };
@@ -3948,7 +4222,7 @@ impl<'a> Machine<'a> {
     fn give_cells_back(&mut self, mark: usize) {
         while self.held.len() > mark {
             let addr = self.held.pop().expect("the length is above the mark");
-            cell::unlock(&self.mem, addr);
+            cell::unlock(&self.mem, addr, self.cell_tag);
         }
     }
 

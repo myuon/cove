@@ -3986,7 +3986,7 @@ pub(super) fn dispatch<'s, 'a>(
                 machine.sync(pc - 1);
                 let taken = {
                     let live = Live(machine);
-                    cell::lock(&machine.mem, addr, &live)
+                    cell::lock(&machine.mem, addr, machine.cell_tag, &live)
                 };
                 match taken {
                     Ok(()) => machine.held.push(addr),
@@ -3998,7 +3998,7 @@ pub(super) fn dispatch<'s, 'a>(
                 if addr == 0 {
                     fail!(null_object());
                 }
-                cell::unlock(&machine.mem, addr);
+                cell::unlock(&machine.mem, addr, machine.cell_tag);
                 debug_assert_eq!(
                     machine.held.last().copied(),
                     Some(addr),

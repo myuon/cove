@@ -57,8 +57,8 @@ pub use error::RuntimeError;
 pub use files::Files;
 pub use heap::{Collection, HeapStats};
 pub use host::{
-    shipped_schema, Console, Documents, Env, GrantSource, Grants, HostApi, HostRegistry, NoReentry,
-    Reentry, ResourceHandle,
+    shipped_schema, Console, Documents, Env, GrantSource, Grants, HostAnswer, HostApi,
+    HostRegistry, NoReentry, Reentry, ResourceHandle,
 };
 pub use http::{Http, ScriptedRequest, Served};
 pub use interp::{on_cove_stack, STACK_SIZE};
@@ -104,4 +104,4 @@ pub use vm::profile::{Cost, Profiler};
 pub use vm::report::{
     BoundaryReport, Decline, Emitted, HelperCalls, LibraryCalls, Outcome, Windows,
 };
-pub use vm::{PreparedProgram, Vm};
+pub use vm::{OwnedVm, ParkedVm, PreparedProgram, Step, Vm};
