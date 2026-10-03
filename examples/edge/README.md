@@ -291,6 +291,13 @@ The most useful output of this demo. Ordered by how much each cost.
    settled"), which says nothing about the real reason (the entry takes an
    `edge.Request` only the server can supply). The server is the only full
    checker of its tenants.
+   One more thing came out of that blindness, and it is fixed on this branch:
+   without the schema, `match upstream.get(service) { Ok(answer) => … }`
+   bound `answer` as a `Recovery` unknown — "an error was already reported" —
+   in a package that reported none, and `crates/cove-sema/tests/settled.rs`'s
+   corpus invariant failed on `aggregate.cove`. `variant_pattern`
+   (`crates/cove-sema/src/typeck.rs`) now binds what `Ty::abstain` carries,
+   the same `DynamicBoundary` a field read on that value already gets.
 4. **`[run.<name>]` is the only grant table, so it was borrowed.**
    `tenants/cove.toml` reuses it because `cove_sema::config::parse` is public
    and `RunConfig` already carries `allow`, `fuel`, `deadline` and
