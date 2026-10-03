@@ -6219,8 +6219,13 @@ impl<'a> Checker<'a> {
         };
 
         let Some(types) = payload_types else {
+            // The payload of a value nothing describes is as undescribed as
+            // the value: a case matched out of a host no schema names is the
+            // same dynamic boundary, which `abstain` carries. Anything else
+            // that lands here is a mistake reported above, or a `Never`.
+            let inner = scrutinee.abstain();
             for sub in payload {
-                self.pattern(sub, &Ty::recovery());
+                self.pattern(sub, &inner);
             }
             return;
         };
