@@ -133,6 +133,17 @@
 //! as correct after a collection as before it, and the collector never sees
 //! that it exists. Keeping the base object alive for the address's live range
 //! is the lowering's job, not this module's.
+//!
+//! # When a run collects
+//!
+//! When it has allocated its allowance since the last collection — twice what
+//! that collection found alive, and never less than a chunk — or when an
+//! allocation does not fit the budget, whichever comes first. See [`pace`] and
+//! [ADR 0081](../../../../docs/adr/0081-a-run-collects-when-it-has-allocated-its-allowance.md),
+//! which replaced "only when the budget is full": a run invoked again and
+//! again kept every chunk it had ever filled with garbage. The chunks a run has
+//! committed stay committed — compiled code holds their addresses — so pacing
+//! bounds how far a heap grows, not how far it shrinks.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
@@ -525,9 +536,9 @@ struct Alloc {
     /// above this exists to be counted, which is what lets [`occupied`] read
     /// it unconditionally.
     hole: u64,
-    /// Free blocks, by address. Rebuilt by every sweep, consumed by
+    /// Free blocks, by size. Rebuilt by every sweep, consumed by
     /// [`Space::alloc`].
-    free: Vec<u64>,
+    free: FreeLists,
     /// One mark bit per heap word, live only for the duration of a collection.
     ///
     /// Beside the heap rather than in the header because of how differently
@@ -545,6 +556,153 @@ struct Alloc {
     /// *often* or allocates *large*, and one number cannot say which.
     allocations: u64,
     collections: u64,
+    /// Words handed out since the last collection, or since the static
+    /// region was sealed if there has been none. See [`pace`].
+    since: u64,
+    /// How many words [`Space::alloc`] with `paced` set hands out before it
+    /// asks for a collection: [`pace`] of what the last collection found
+    /// alive, or of the static region when there has been none.
+    allowance: u64,
+}
+
+// --- free blocks --------------------------------------------------------------
+
+/// The largest free block that has a size class of its own.
+const EXACT_WORDS: u64 = 64;
+
+/// How many size classes there are: one per size up to [`EXACT_WORDS`], and one
+/// per power of two above it, up to the largest block a header can describe.
+const CLASSES: usize = EXACT_WORDS as usize + 27;
+
+/// The class a free block of `words` words is kept in.
+fn class_of(words: u64) -> usize {
+    debug_assert!(words >= 1);
+    if words <= EXACT_WORDS {
+        (words - 1) as usize
+    } else {
+        // 65..=127 is class 64, 128..=255 class 65, and so on.
+        EXACT_WORDS as usize + (63 - words.leading_zeros() as usize) - 6
+    }
+}
+
+/// The lowest class every block of which holds `words` words: the exact class
+/// up to [`EXACT_WORDS`], and above it the first power of two at least `words`.
+fn fitting_class(words: u64) -> usize {
+    if words <= EXACT_WORDS {
+        (words.max(1) - 1) as usize
+    } else {
+        let ceil_log2 = 64 - (words - 1).leading_zeros() as usize;
+        EXACT_WORDS as usize + ceil_log2 - 6
+    }
+}
+
+/// The free blocks the last sweep left.
+///
+/// A sweep leaves them in one list in address order, and allocation walks it
+/// the way first fit over an address-ordered list always did: requests are cut
+/// from the front of the current block — the **cursor** — while they fit, and
+/// when one does not, the walk moves on to the next block. What is new is what
+/// happens to a block the walk passes because the request in hand did not fit
+/// it: it is not left behind to be passed again by every later request, which
+/// is what made the old list linear per allocation and a run quadratic in its
+/// survivors. It moves to a list **by size** — one per exact size up to
+/// [`EXACT_WORDS`] and one per power of two above it, with a bit per list that
+/// says it is not empty — and is found there, in one mask and one pop, by the
+/// first request it fits once the walk is over. So every block is passed at most
+/// once per collection, and every allocation costs a constant number of list
+/// operations whatever the number of blocks. [ADR 0081] measured the list it
+/// replaces at thirty-five times a run's wall clock after a single collection
+/// at the budget, and a hundred times once collections ran on pace.
+///
+/// The walk is kept rather than going to the size lists directly because of
+/// what a sweep of a mostly-garbage heap leaves: a few long runs, from which
+/// first fit cuts object after object in address order. A size-first policy
+/// takes the smallest block that fits instead, and hops about the heap doing
+/// it; measured, that was 3% to 5% on the `benches/` rows that allocate the
+/// most, and the walk, with only the cursor inline, took most of it back.
+///
+/// The lists are threaded through the free blocks themselves: a block's first
+/// payload word is the address of the next block in its list, and `0`, which
+/// is never a heap address, ends one. So what this costs a run is a few words
+/// and the size lists' heads, and those only once a request has passed a
+/// block — a list of addresses per class would have been kilobytes per run,
+/// which for a resident isolate is a few per cent of all it holds. A one-word
+/// block has no payload word to thread through and is on no list; the next
+/// sweep coalesces it with whatever dies beside it.
+///
+/// The one block the size lists skip is one in the request's own power-of-two
+/// class that is big enough, which a class does not know without reading it. A
+/// run takes it only when the alternative is refusing: see
+/// [`Space::scan_free`].
+///
+/// [ADR 0081]: ../../../../docs/adr/0081-a-run-collects-when-it-has-allocated-its-allowance.md
+#[derive(Default)]
+struct FreeLists {
+    /// The block requests are being cut from, on no list.
+    cursor: Option<u64>,
+    /// The first block the walk has not reached, in address order, or `0`.
+    ordered: u64,
+    /// The last block the sweep appended to `ordered`, or `0`.
+    ordered_tail: u64,
+    /// The first block of each size class's list; `None` until the walk first
+    /// passes a block, so that a run that never collects pays for none of
+    /// them.
+    heads: Option<Box<[u64; CLASSES]>>,
+    /// Bit `c` is set when class `c`'s list is not empty.
+    nonempty: u128,
+}
+
+impl FreeLists {
+    /// Forgets every block, keeping the heads' storage for the next sweep.
+    fn clear(&mut self) {
+        if let Some(heads) = &mut self.heads {
+            heads.fill(0);
+        }
+        self.nonempty = 0;
+        self.cursor = None;
+        self.ordered = 0;
+        self.ordered_tail = 0;
+    }
+}
+
+// --- pacing -------------------------------------------------------------------
+
+/// The fewest words a run allocates between two collections: one full chunk.
+///
+/// A run used to collect only when an allocation did not fit its budget, so a
+/// run that was invoked again and again — a resident isolate, a rule evaluated
+/// once a request — committed chunk after chunk of garbage until it had the
+/// whole thirty-two mebibytes, whatever it kept alive. [ADR 0081] paces it
+/// instead: once a run has allocated [`pace`] of what the last collection found
+/// alive, the next allocation collects first. So a run's heap is about its
+/// live set and its allowance, and no longer about how long it has run.
+///
+/// One chunk because the heap is committed a chunk at a time. Past the short
+/// first chunk the next commitment is a whole one, so a smaller minimum saves
+/// no memory for any run that outgrows the first chunk — measured: at 256
+/// words `rules.decideSample` still commits its second chunk and collects
+/// 444 times in a thousand invocations rather than 14, for 9% on each one —
+/// and a larger one is memory a resident run holds for nothing: at 65,536
+/// words it holds 558 KB where this holds 95 KB.
+///
+/// [ADR 0081]: ../../../../docs/adr/0081-a-run-collects-when-it-has-allocated-its-allowance.md
+const PACE_MIN_WORDS: u64 = CHUNK_WORDS;
+
+/// How many words a run allocates between two collections for every word the
+/// first of them found alive, once that is more than [`PACE_MIN_WORDS`].
+///
+/// What a collection costs grows with what is alive, and what pays for it is
+/// what was allocated since the last: at two, a run that keeps everything it
+/// allocates marks each surviving word about twice over its whole life and
+/// peaks at three times what it keeps. On two programs written to keep
+/// everything, one cost 24% on each against no pacing at all, two 15% and
+/// 18%; see ADR 0081.
+const PACE_GROWTH: u64 = 2;
+
+/// How many words a run may allocate after a collection that found `live`
+/// words alive before it is asked to collect again.
+fn pace(live: u64) -> u64 {
+    PACE_MIN_WORDS.max(live.saturating_mul(PACE_GROWTH))
 }
 
 // --- stopping the world -----------------------------------------------------
@@ -693,11 +851,13 @@ impl Space {
                 bump: 0,
                 budget,
                 hole: FIRST_CHUNK_WORDS,
-                free: Vec::new(),
+                free: FreeLists::default(),
                 marks: Vec::new(),
                 allocated_words: 0,
                 allocations: 0,
                 collections: 0,
+                since: 0,
+                allowance: pace(0),
             }),
             stw: Mutex::new(Stw {
                 parties: Vec::new(),
@@ -912,11 +1072,19 @@ impl Space {
     /// header and the table, and a disagreement makes the heap unwalkable.
     ///
     /// Answers `None` when the object fits neither a free block nor the
-    /// remaining budget. That is not an error — the caller collects and asks
-    /// again, and a second `None` is the one that ends the run.
-    fn alloc(&self, layout: LayoutId, len: u32, payload_words: u32) -> Option<u64> {
+    /// remaining budget, and — when `paced` — also when the run has allocated
+    /// its allowance since the last collection (see [`pace`]). That is not an
+    /// error — the caller collects and asks again, unpaced, and a second
+    /// `None` is the one that ends the run. The retry is unpaced because
+    /// another task may allocate between the collection and the retry, and
+    /// pacing is about when to collect, never about whether a run may have
+    /// the words its budget allows.
+    fn alloc(&self, layout: LayoutId, len: u32, payload_words: u32, paced: bool) -> Option<u64> {
         let words = 1 + payload_words as u64;
         let mut alloc = self.allocator();
+        if paced && alloc.since >= alloc.allowance {
+            return None;
+        }
         let addr = match self.take_free(&mut alloc, words) {
             Some(addr) => {
                 // A reclaimed block still holds the dead object's words, and a
@@ -936,23 +1104,28 @@ impl Space {
                 // jumping it costs the budget nothing.
                 let hole = if jump { alloc.bump } else { alloc.hole };
                 if occupied(at + words, hole) > alloc.budget {
-                    return None;
+                    let addr = self.scan_free(&mut alloc, words)?;
+                    self.fill(addr, words);
+                    addr
+                } else {
+                    if jump {
+                        // The first chunk, if nothing had committed it, so that
+                        // the committed chunks stay a prefix. See
+                        // `Words::bases`.
+                        self.words.commit(0, 1);
+                        alloc.hole = hole;
+                    }
+                    self.words.commit(at, at + words);
+                    alloc.bump = at + words;
+                    self.bump.store(STACK_WORDS + alloc.bump, Ordering::Relaxed);
+                    STACK_WORDS + at
                 }
-                if jump {
-                    // The first chunk, if nothing had committed it, so that the
-                    // committed chunks stay a prefix. See `Words::bases`.
-                    self.words.commit(0, 1);
-                    alloc.hole = hole;
-                }
-                self.words.commit(at, at + words);
-                alloc.bump = at + words;
-                self.bump.store(STACK_WORDS + alloc.bump, Ordering::Relaxed);
-                STACK_WORDS + at
             }
         };
         self.store(addr, header(layout, len));
         alloc.allocated_words += words;
         alloc.allocations += 1;
+        alloc.since += words;
         Some(addr)
     }
 
@@ -967,41 +1140,174 @@ impl Space {
     /// afterwards — this run's own and any task it spawns — is created only
     /// once this call has returned, which already orders the store before
     /// the read on every target this runs on.
+    ///
+    /// It also starts the run's first allowance (see [`pace`]): the literals
+    /// are alive for the whole run, so they are what the first collection would
+    /// have found alive, and the words they took are not ones the run
+    /// allocated.
     fn seal_static(&self) {
+        let mut alloc = self.allocator();
         self.static_end
-            .store(self.bump.load(Ordering::Relaxed), Ordering::Relaxed);
+            .store(STACK_WORDS + alloc.bump, Ordering::Relaxed);
+        alloc.since = 0;
+        alloc.allowance = pace(occupied(alloc.bump, alloc.hole));
     }
 
-    /// The first free block of at least `words` words, split to size.
+    /// A free block of at least `words` words, split to size.
     ///
-    /// First fit over a list the sweeper leaves in address order. It is the
-    /// simplest thing that makes "collect and retry" mean something, and ADR
-    /// 0034 leaves the final allocator undecided, so nothing is committed by
-    /// choosing it. A remainder always becomes a free block of its own, however
-    /// small: the smallest one is a header and no payload, which is one word.
+    /// The cursor if the request fits it, then the next block in address order
+    /// that it fits, then the size lists; see [`FreeLists`]. ADR 0034 leaves
+    /// the final allocator undecided, so nothing is committed by choosing it. A
+    /// remainder always becomes a free block of its own, however small: the
+    /// smallest one is a header and no payload, which is one word.
+    ///
+    /// Inline, and only the cursor: that is the request almost every
+    /// allocation after a collection is, and the rest is out of line so that
+    /// it costs the path that does not need it nothing.
+    #[inline]
     fn take_free(&self, alloc: &mut Alloc, words: u64) -> Option<u64> {
-        let mut at = 0;
-        while at < alloc.free.len() {
-            let addr = alloc.free[at];
-            let have = self.block_words(addr);
+        if let Some(at) = alloc.free.cursor {
+            let have = self.block_words(at);
             if have >= words {
-                if have == words {
-                    // `remove` rather than `swap_remove`: the list is in
-                    // address order and first fit over an address-ordered
-                    // list is what keeps small survivors from stranding the
-                    // low end of the heap. A swap would trade that for a
-                    // shift over a list the next sweep rebuilds anyway.
-                    alloc.free.remove(at);
-                } else {
-                    let rest = addr + words;
-                    self.store(rest, header(LayoutId::FREE, (have - words - 1) as u32));
-                    alloc.free[at] = rest;
-                }
-                return Some(addr);
+                alloc.free.cursor = None;
+                self.cut(alloc, at, have, words);
+                return Some(at);
             }
-            at += 1;
+        } else if alloc.free.ordered == 0 && alloc.free.nonempty == 0 {
+            return None;
         }
-        None
+        self.take_free_walking(alloc, words)
+    }
+
+    /// [`Space::take_free`] when the cursor does not hold the request: the
+    /// walk, and then the size lists.
+    #[inline(never)]
+    fn take_free_walking(&self, alloc: &mut Alloc, words: u64) -> Option<u64> {
+        if let Some(at) = alloc.free.cursor.take() {
+            let have = self.block_words(at);
+            self.push_free(alloc, at, have);
+        }
+        while alloc.free.ordered != 0 {
+            let at = alloc.free.ordered;
+            alloc.free.ordered = self.load(at + 1);
+            let have = self.block_words(at);
+            if have >= words {
+                self.cut(alloc, at, have, words);
+                return Some(at);
+            }
+            self.push_free(alloc, at, have);
+        }
+        let addr = self.pop_free(alloc, words)?;
+        self.split(alloc, addr, words);
+        Some(addr)
+    }
+
+    /// Hands out the first `words` words of the free block at `addr`, which
+    /// is on no list, and makes what is left of it the cursor. The cursor is
+    /// empty whenever this is called.
+    fn split(&self, alloc: &mut Alloc, addr: u64, words: u64) {
+        let have = self.block_words(addr);
+        self.cut(alloc, addr, have, words);
+    }
+
+    /// [`Space::split`], for a caller that has already read the block's size.
+    #[inline]
+    fn cut(&self, alloc: &mut Alloc, addr: u64, have: u64, words: u64) {
+        debug_assert!(have >= words && alloc.free.cursor.is_none());
+        if have > words {
+            let rest = addr + words;
+            self.store(rest, header(LayoutId::FREE, (have - words - 1) as u32));
+            alloc.free.cursor = Some(rest);
+        }
+    }
+
+    /// Appends the free block at `addr`, of `words` words, to the end of the
+    /// address-ordered list a sweep builds. See [`FreeLists`].
+    fn append_free(&self, alloc: &mut Alloc, addr: u64, words: u64) {
+        if words < 2 {
+            return;
+        }
+        self.store(addr + 1, 0);
+        match alloc.free.ordered_tail {
+            0 => alloc.free.ordered = addr,
+            tail => self.store(tail + 1, addr),
+        }
+        alloc.free.ordered_tail = addr;
+    }
+
+    /// Puts the free block at `addr`, of `words` words, at the head of its
+    /// size class's list. See [`FreeLists`].
+    fn push_free(&self, alloc: &mut Alloc, addr: u64, words: u64) {
+        if words < 2 {
+            return;
+        }
+        let heads = alloc
+            .free
+            .heads
+            .get_or_insert_with(|| Box::new([0; CLASSES]));
+        let class = class_of(words);
+        self.store(addr + 1, heads[class]);
+        heads[class] = addr;
+        alloc.free.nonempty |= 1 << class;
+    }
+
+    /// Takes the first block of the lowest non-empty size class every block
+    /// of which holds `words` words.
+    fn pop_free(&self, alloc: &mut Alloc, words: u64) -> Option<u64> {
+        let from = fitting_class(words);
+        if from >= CLASSES {
+            return None;
+        }
+        let candidates = alloc.free.nonempty & !((1u128 << from) - 1);
+        if candidates == 0 {
+            return None;
+        }
+        let class = candidates.trailing_zeros() as usize;
+        let heads = alloc.free.heads.as_mut().expect("a set bit names a list");
+        let addr = heads[class];
+        heads[class] = self.load(addr + 1);
+        if heads[class] == 0 {
+            alloc.free.nonempty &= !(1 << class);
+        }
+        Some(addr)
+    }
+
+    /// A block of `words` words from the one class [`FreeLists::pop`] does
+    /// not look in — the request's own power of two, whose blocks may or may
+    /// not be big enough — read block by block.
+    ///
+    /// The last thing a run tries before refusing an allocation, so that a
+    /// run may still occupy every word of its budget: without it a request
+    /// could be refused beside a free block that fitted it. Linear, and so
+    /// only here, where the alternative is the end of the run — and by then
+    /// [`Space::take_free`] has walked the address-ordered list to its end,
+    /// and put the cursor back on one, so every free block is in a size list.
+    #[cold]
+    fn scan_free(&self, alloc: &mut Alloc, words: u64) -> Option<u64> {
+        if words <= EXACT_WORDS {
+            return None;
+        }
+        let class = class_of(words);
+        let heads = alloc.free.heads.as_mut()?;
+        let (mut before, mut at) = (0, heads[class]);
+        while at != 0 && self.block_words(at) < words {
+            before = at;
+            at = self.load(at + 1);
+        }
+        if at == 0 {
+            return None;
+        }
+        let next = self.load(at + 1);
+        if before == 0 {
+            heads[class] = next;
+        } else {
+            self.store(before + 1, next);
+        }
+        if heads[class] == 0 {
+            alloc.free.nonempty &= !(1 << class);
+        }
+        self.split(alloc, at, words);
+        Some(at)
     }
 
     /// The layout of the object whose header is at `addr`.
@@ -1163,6 +1469,8 @@ impl Space {
 
         let (freed_words, live_words) = self.sweep(alloc, layouts);
         alloc.collections += 1;
+        alloc.since = 0;
+        alloc.allowance = pace(live_words);
         Collected {
             freed_words,
             live_words,
@@ -1333,7 +1641,7 @@ impl Space {
     ///
     /// The bump pointer never retreats, even when the last block is free. One
     /// reclamation mechanism is easier to reason about than two, and a trailing
-    /// free block is reused by the same first fit as any other.
+    /// free block is reused like any other.
     fn sweep(&self, alloc: &mut Alloc, layouts: &[Layout]) -> (u64, u64) {
         alloc.free.clear();
         let mut freed = 0;
@@ -1384,7 +1692,7 @@ impl Space {
     /// Writes `[start, end)` as one free block and records it.
     fn close_free_run(&self, alloc: &mut Alloc, start: u64, end: u64) {
         self.store(start, header(LayoutId::FREE, (end - start - 1) as u32));
-        alloc.free.push(start);
+        self.append_free(alloc, start, end - start);
     }
 
     // --- safepoints and waiting -------------------------------------------
@@ -2175,9 +2483,22 @@ impl Memory {
     /// See [`Space::alloc`]: `len` is the header's length field,
     /// `payload_words` is what [`Layout::payload_words`] answers for the two,
     /// and `None` is an invitation to collect and ask again rather than an
-    /// error.
+    /// error. Held to the budget alone: what places the literals, before
+    /// anything may be collected, and what retries after a collection.
     pub(crate) fn alloc(&mut self, layout: LayoutId, len: u32, payload_words: u32) -> Option<u64> {
-        self.space.alloc(layout, len, payload_words)
+        self.space.alloc(layout, len, payload_words, false)
+    }
+
+    /// [`Memory::alloc`], which also answers `None` when the run has allocated
+    /// its allowance since the last collection: see [`pace`]. What an
+    /// allocating instruction asks first, on either tier.
+    pub(crate) fn alloc_paced(
+        &mut self,
+        layout: LayoutId,
+        len: u32,
+        payload_words: u32,
+    ) -> Option<u64> {
+        self.space.alloc(layout, len, payload_words, true)
     }
 
     /// Raises this run's immortal floor to whatever has been allocated so
@@ -2384,7 +2705,22 @@ impl Memory {
 impl Memory {
     /// The free blocks the last sweep left, in address order.
     fn free_blocks(&self) -> Vec<u64> {
-        self.space.allocator().free.clone()
+        let alloc = self.space.allocator();
+        let mut all: Vec<u64> = alloc.free.cursor.into_iter().collect();
+        let heads = alloc
+            .free
+            .heads
+            .as_deref()
+            .map_or(&[][..], |heads| &heads[..]);
+        for &head in heads.iter().chain([&alloc.free.ordered]) {
+            let mut at = head;
+            while at != 0 {
+                all.push(at);
+                at = self.space.load(at + 1);
+            }
+        }
+        all.sort_unstable();
+        all
     }
 
     /// How many words the free block at `addr` occupies, header included.
@@ -2917,6 +3253,60 @@ mod tests {
         assert_eq!(mem.alloc(LayoutId(1), 0, 0), Some(STACK_WORDS + 3));
         assert_eq!(mem.alloc(LayoutId(1), 0, 0), None);
         assert_eq!(mem.heap_words(), 4);
+    }
+
+    /// A paced allocation asks for a collection once the run has allocated its
+    /// allowance since the last one, and the allowance a collection leaves is
+    /// [`pace`] of what it found alive. An unpaced one — the literals' placement,
+    /// and the retry after a collection — answers by the budget alone.
+    #[test]
+    fn a_paced_allocation_asks_for_a_collection_once_its_allowance_is_spent() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let mut mem = Memory::new(1 << 20);
+        // A literal's worth of static words, which do not count against the
+        // first allowance: it begins at the seal.
+        alloc(&mut mem, &table, array, 99);
+        mem.seal_static();
+        let block = (PACE_MIN_WORDS / 8 - 1) as u32;
+        let paced = |mem: &mut Memory| mem.alloc_paced(array, block, block);
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(paced(&mut mem).expect("within the allowance"));
+        }
+        assert_eq!(paced(&mut mem), None, "the allowance is spent");
+        assert!(
+            mem.alloc(array, block, block).is_some(),
+            "an unpaced allocation is held to the budget alone"
+        );
+        let heap = mem.heap_words();
+
+        // One block survives: the allowance is the minimum again, and the
+        // blocks the collection freed are what the next ones are given.
+        let done = mem.collect(table.layouts(), &Held(vec![held[0]]));
+        assert_eq!(done.live_words, 100 + PACE_MIN_WORDS / 8);
+        for _ in 0..8 {
+            paced(&mut mem).expect("within the new allowance");
+        }
+        assert_eq!(paced(&mut mem), None);
+        assert_eq!(mem.heap_words(), heap, "the freed blocks were reused");
+
+        // Twenty blocks survive, which is more than half the minimum: the
+        // allowance grows with what is alive, so a growing heap is not collected at every
+        // step of its growth.
+        let survivors: Vec<u64> = (0..20)
+            .map(|_| mem.alloc(array, block, block).expect("within the budget"))
+            .collect();
+        let done = mem.collect(table.layouts(), &Held(survivors));
+        assert_eq!(done.live_words, 100 + 20 * PACE_MIN_WORDS / 8);
+        assert_eq!(pace(done.live_words), PACE_GROWTH * done.live_words);
+        let mut given = 0;
+        while paced(&mut mem).is_some() {
+            given += 1;
+        }
+        // Twice twenty blocks and the static words: the forty-first block is
+        // the one that crosses it.
+        assert_eq!(given, 41, "the allowance is twice what was alive");
     }
 
     #[test]

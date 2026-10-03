@@ -2310,6 +2310,60 @@ fn a_collection_under_frames_opened_inline_keeps_what_they_hold() {
     );
 }
 
+/// **Under the default budget, compiled code is paced like the VM is**
+/// ([ADR 0081](../../../docs/adr/0081-a-run-collects-when-it-has-allocated-its-allowance.md)).
+///
+/// The case above forces its collections with a one-chunk heap. This one runs
+/// the same compiled recursion over the default thirty-two mebibytes, where a
+/// run used to collect only once the budget was full: a thousand calls of 2,400
+/// words each would never have reached it. A collection now runs once a run has
+/// allocated its allowance, from the allocating helper compiled code calls — so
+/// it runs with hundreds of compiled frames standing, every one of them has to
+/// keep its array, and the heap stays a few chunks however many calls there are.
+#[test]
+fn compiled_code_collects_on_pace_under_the_default_budget() {
+    const DEEP: i64 = 600;
+    on_each_tier(&["keepsAcrossFrames"], &["callsKeepsAcrossFrames"]);
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let mut vm = Vm::new(&runtime, &hosts, &lowered);
+    let mut session = vm
+        .native_session(MODULE, "callsKeepsAcrossFrames", vec![Value::int(DEEP)])
+        .expect("the session opens");
+    let words = session.arguments().to_vec();
+    let expected = vec![DEEP as u64 + 3];
+
+    let before = session.collections();
+    for call in 0..1_000 {
+        let answered = session
+            .call(&native, &words)
+            .expect("the native tier answers");
+        assert_eq!(answered, expected, "call {call} answered wrongly");
+    }
+    assert!(
+        session.collections() >= before + 100,
+        "a thousand calls of 2,400 words each collected only {} time(s)",
+        session.collections() - before
+    );
+    drop(session);
+    assert!(
+        vm.heap_words() <= 4 * 8192,
+        "two million words allocated left {} heap words standing",
+        vm.heap_words()
+    );
+}
+
 /// **A raise several frames below, through frames opened inline, is the VM's
 /// error with the VM's blame.**
 ///
