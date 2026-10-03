@@ -1970,7 +1970,7 @@ impl<'a> Machine<'a> {
             .layout(layout)
             .try_payload_words(len, &self.program.layouts)
             .ok_or_else(exhausted)?;
-        if let Some(addr) = self.mem.alloc(layout, len, words) {
+        if let Some(addr) = self.mem.alloc_paced(layout, len, words) {
             return Ok(addr);
         }
         self.collect();
@@ -10790,12 +10790,18 @@ pub(crate) mod tests {
         }
 
         // Two objects that straddle a chunk boundary, so the slices in hand
-        // end inside them and the copy goes the word-at-a-time way.
+        // end inside them and the copy goes the word-at-a-time way. Every
+        // probe is held as a root: the probes are how the bump pointer is
+        // walked up to a boundary, and a run collects once it has allocated
+        // its allowance (ADR 0081), after which unrooted probes would be
+        // handed out again below it, forever.
         let chunk = cove_native::HEAP_CHUNK_WORDS;
         let mut crossing = || loop {
             let probe = string_of(&mut machine, &[0; 8]);
+            machine.push_temp(probe);
             if (probe + 2) % chunk >= chunk - 3 {
                 let addr = string_of(&mut machine, &source);
+                machine.push_temp(addr);
                 assert!(addr / chunk != (addr + SIZE as u64 / 8) / chunk);
                 break addr;
             }

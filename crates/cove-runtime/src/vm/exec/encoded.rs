@@ -4440,10 +4440,16 @@ mod tests {
     /// `0x00`, a lone `0x80` and an `0xff` — the byte patterns a valid
     /// `String`'s payload is full of *inside* its characters, and the ones an
     /// implementation that quietly decoded would answer differently for.
+    ///
+    /// The run is held as a root for the rest of the machine's life, as a
+    /// frame slot would hold it: a run collects once it has allocated its
+    /// allowance (ADR 0081), so a haystack nothing held would be swept by the
+    /// needle's allocation and handed back out as the needle.
     fn run_of(machine: &mut Machine<'_>, bytes: &[u8]) -> u64 {
         let addr = machine
             .new_string_of(bytes.len() as i64)
             .expect("the heap has room");
+        machine.push_temp(addr);
         for (at, chunk) in bytes.chunks(8).enumerate() {
             let mut word = [0u8; 8];
             word[..chunk.len()].copy_from_slice(chunk);

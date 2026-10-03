@@ -863,6 +863,134 @@ fn a_prepared_program_crosses_threads() {
     shared::<PreparedProgram>();
 }
 
+// ------------------------------------------------- a run that is kept resident
+
+/// What a resident run is invoked with: a little garbage and a small answer,
+/// the shape of a rule evaluated once per request.
+const RESIDENT: &str = "\
+export fn decide(n: Int) -> Int {
+  var items: Vector<Int> = Vector.of()
+  var at = 0
+  while at < n {
+    items.push(at)
+    at = at + 1
+  }
+  items.length()
+}
+
+fn churn(rounds: Int) -> Int {
+  var total = 0
+  var at = 0
+  while at < rounds {
+    var items: Vector<Int> = Vector.of()
+    items.push(at)
+    items.push(at + 1)
+    total = total + items.length()
+    at = at + 1
+  }
+  total
+}
+
+export fn tasks() -> Result<Unit, Error> {
+  var kept: Vector<Int> = Vector.of()
+  var at = 0
+  while at < 100 {
+    kept.push(at)
+    at = at + 1
+  }
+  let total = scope tasks {
+    let a = tasks.spawn { churn(20000) }
+    let b = tasks.spawn { churn(20000) }
+    let c = tasks.spawn { churn(20000) }
+    a.await() + b.await() + c.await()
+  }
+  assertEqual(total, 120000)?
+  var sum = 0
+  at = 0
+  while at < kept.length() {
+    sum = sum + kept.get(at).unwrapOr(0)
+    at = at + 1
+  }
+  assertEqual(sum, 4950)
+}
+";
+
+/// A run invoked thousands of times keeps a heap the size of its allowance,
+/// not of everything it has ever allocated (issue #572,
+/// [ADR 0081](../../../docs/adr/0081-a-run-collects-when-it-has-allocated-its-allowance.md)).
+///
+/// Five thousand invocations of over a hundred words each are well over half a
+/// million words, which used to stand in the heap until the thirty-two
+/// mebibyte budget was full: a run collected only when it had to. Now it
+/// collects each time it has allocated its allowance, so the heap is the first
+/// chunk and one or two more, whatever the count.
+#[test]
+fn a_resident_run_keeps_a_heap_its_allowance_bounds() {
+    let (sources, checked) = check(RESIDENT);
+    let lowered = cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+        .expect("the fixture lowers");
+    let prepared = PreparedProgram::new(Arc::new(lowered));
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&checked),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let mut vm = Vm::with_prepared(&runtime, &hosts, &prepared);
+    for invocation in 0..5_000 {
+        let answer = vm.invoke("m", "decide", vec![Value::int(40)]);
+        assert_eq!(described(&answer), "Ok(40)", "invocation {invocation}");
+    }
+    assert!(
+        vm.allocated_words() > 500_000,
+        "the fixture allocated only {} words, which proves little",
+        vm.allocated_words()
+    );
+    assert!(vm.collections() > 10, "{} collection(s)", vm.collections());
+    assert!(
+        vm.heap_words() <= 4 * 8192,
+        "{} words allocated left {} heap words standing",
+        vm.allocated_words(),
+        vm.heap_words()
+    );
+}
+
+/// Tasks that allocate at once collect on pace together: a collection asked
+/// for by one stops the others, and what any of them holds survives it.
+///
+/// Three tasks churn sixty thousand short-lived vectors between them under the
+/// default budget, which used to run no collection at all, while the entry
+/// holds a vector across the whole scope and reads it afterwards. Which task
+/// collected is not observable from here — [`Vm::collections`] counts the
+/// entry's — so what is asserted is the consequence: the tasks allocated far
+/// more words than the heap holds.
+#[test]
+fn tasks_that_allocate_at_once_collect_on_pace_together() {
+    let (sources, checked) = check(RESIDENT);
+    let lowered = cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+        .expect("the fixture lowers");
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&checked),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let mut vm = Vm::new(&runtime, &hosts, &lowered);
+    let answer = vm.run_entry("m", "tasks", Vec::new());
+    assert_eq!(described(&answer), "Ok(Ok(()))");
+    assert!(
+        vm.allocated_words() > 500_000,
+        "the tasks allocated only {} words, which proves little",
+        vm.allocated_words()
+    );
+    assert!(
+        vm.heap_words() <= 8 * 8192,
+        "{} words allocated left {} heap words standing",
+        vm.allocated_words(),
+        vm.heap_words()
+    );
+}
+
 // ------------------------------------------------------------------ the harness
 
 struct Ran {

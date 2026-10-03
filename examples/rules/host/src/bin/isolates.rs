@@ -27,6 +27,15 @@
 //!   shared), build a `Runtime` and a `Vm`.
 //! - `heap8k`: `shared`, but every VM built with `Vm::with_heap_words(.., 8192)`,
 //!   as a control on what the heap budget's spine costs.
+//!
+//! `cove-rules-isolates resident` is a second driver, for
+//! [issue #572](https://github.com/myuon/cove/issues/572): what a *resident*
+//! isolate costs once it has been used, rather than once it has been built.
+//! One configuration is `cove-rules-isolates resident <entry> <n> <k>`: `n`
+//! `prepared` VMs, all kept alive, each invoked `k` times round-robin; it
+//! reports the bytes retained and the RSS per VM, the heap words each has
+//! committed, and how many collections they ran. `resident <n> <k,k,..>`
+//! runs both entries at every `k` in a fresh process each.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
@@ -492,6 +501,78 @@ fn one(mode: &str, entry: &str, n: usize) {
     std::mem::forget(vms);
 }
 
+// ------------------------------------------------------------ resident VMs
+
+/// `n` prepared VMs, all resident, each invoked `k` times: what a resident
+/// isolate costs once it has been *used*. See issue #572.
+fn resident(entry: &str, n: usize, k: usize) {
+    let module = "rules";
+    let (checked, sources) = load();
+    let lowered = lower(&checked, &sources, module, entry);
+    let image = cove_ir::serial::encode(&lowered, &sources, module, entry)
+        .unwrap_or_else(|_| panic!("the image encodes"));
+    let decoded = cove_ir::serial::decode(&image).expect("the image reads back");
+    let hosts = Arc::new(HostRegistry::new(Grants::default()));
+    let runtime: &'static Runtime = Box::leak(Box::new(Runtime::new(
+        Arc::default(),
+        Arc::new(decoded.sources),
+        hosts,
+    )));
+    let prepared: &'static PreparedProgram =
+        Box::leak(Box::new(PreparedProgram::new(Arc::new(decoded.program))));
+    // A warm-up, so that process-wide one-time state is not charged.
+    {
+        let mut vm = Vm::with_prepared(runtime, runtime.hosts(), prepared);
+        vm.run_entry(module, entry, vec![Rc::from(argument(entry))])
+            .expect("the invocation succeeds");
+    }
+
+    // Before the baseline, and written, so that what is reported is the
+    // VMs' alone: a `Duration` per invocation is sixteen bytes, which at fifty
+    // thousand invocations would read as a leak, by the allocator's count and
+    // by RSS alike.
+    let mut times = vec![Duration::ZERO; n * k];
+    let rss_before = rss_kib();
+    let base = mark();
+    let mut vms: Vec<Vm<'static>> = (0..n)
+        .map(|_| Vm::with_prepared(runtime, runtime.hosts(), prepared))
+        .collect();
+    let started = Instant::now();
+    for turn in 0..k {
+        for (at, vm) in vms.iter_mut().enumerate() {
+            let began = Instant::now();
+            vm.run_entry(module, entry, vec![Rc::from(argument(entry))])
+                .expect("the invocation succeeds");
+            times[turn * n + at] = began.elapsed();
+        }
+    }
+    let wall = started.elapsed();
+    let (_, retained) = base.since();
+    let rss_after = rss_kib();
+    let heap: Vec<u64> = vms.iter().map(|vm| vm.heap_words()).collect();
+    let collections: u64 = vms.iter().map(|vm| vm.collections()).sum();
+    let live: Vec<u64> = vms.iter().filter_map(|vm| vm.live_words()).collect();
+    println!(
+        "resident rules.{entry:<12} n={n:<5} k={k:<5} {:>9.0} B retained/vm {:>9.0} B rss/vm  \
+         heap words/vm mean {:>8.0} max {:>8}  collections {:>6} ({:.2}/vm)  \
+         live words/vm {}  invoke {}  (wall {:.1} s)",
+        retained as f64 / n as f64,
+        (rss_after as f64 - rss_before as f64) * 1024.0 / n as f64,
+        heap.iter().sum::<u64>() as f64 / n as f64,
+        heap.iter().max().copied().unwrap_or(0),
+        collections,
+        collections as f64 / n as f64,
+        if live.is_empty() {
+            "-".to_string()
+        } else {
+            format!("{:.0}", live.iter().sum::<u64>() as f64 / live.len() as f64)
+        },
+        summary(&mut times),
+        wall.as_secs_f64()
+    );
+    std::mem::forget(vms);
+}
+
 // --------------------------------------------------------------- the driver
 
 /// Which code the retained bytes of one `Vm::new`, and of its first
@@ -524,6 +605,30 @@ fn attribute_vm(entry: &str) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 5 && args[1] == "resident" {
+        let (entry, n, k) = (
+            args[2].clone(),
+            args[3].parse().expect("n"),
+            args[4].parse().expect("k"),
+        );
+        cove_runtime::on_cove_stack(move || resident(&entry, n, k)).expect("a thread");
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("resident") {
+        let me = std::env::current_exe().expect("this binary");
+        let n = args.get(2).map_or("1000".to_string(), Clone::clone);
+        let ks = args.get(3).map_or("1,10,100,1000", String::as_str);
+        for entry in ["floor", "decideSample"] {
+            for k in ks.split(',') {
+                let status = std::process::Command::new(&me)
+                    .args(["resident", entry, &n, k])
+                    .status()
+                    .expect("runs");
+                assert!(status.success(), "resident {entry} {n} {k} failed");
+            }
+        }
+        return;
+    }
     if args.len() == 3 && args[1] == "attribute" {
         let entry = args[2].clone();
         cove_runtime::on_cove_stack(move || attribute_vm(&entry)).expect("a thread");
