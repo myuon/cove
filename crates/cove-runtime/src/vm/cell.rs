@@ -85,7 +85,6 @@
 //! forms the address of the value word and this reads the lock word, and the
 //! two are the same object.
 
-use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::vm::mem::{Memory, Roots};
@@ -114,33 +113,33 @@ const UNLOCKED: u64 = 0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Reentrant;
 
-/// The next tag to hand a thread.
+/// The next tag to hand a task.
 ///
 /// Starts at one, so that zero can mean "no task holds this cell" in the same
 /// word. That is the same reason a `Repr::Host` word is one past its index:
 /// a zeroed word has to mean nothing rather than mean the first of something.
 static NEXT_TAG: AtomicU64 = AtomicU64::new(1);
 
-thread_local! {
-    /// This thread's tag, taken on first use.
-    static TAG: Cell<u64> = const { Cell::new(0) };
-}
-
-/// This task's identity in a cell's state word.
+/// A fresh identity for one task's place in a cell's state word.
 ///
-/// A tag rather than a thread id because the word has to be comparable to
-/// zero and to another task's tag and to nothing else; what it is beyond that
-/// is not a question anything asks. It is taken lazily, so a run that never
-/// reaches a `Shared` never takes one.
-pub(crate) fn tag() -> u64 {
-    TAG.with(|held| {
-        let mut tag = held.get();
-        if tag == 0 {
-            tag = NEXT_TAG.fetch_add(1, Ordering::Relaxed);
-            held.set(tag);
-        }
-        tag
-    })
+/// **A task's, not a thread's.** This was a thread-local once, which was the
+/// same thing for as long as a task could never change threads: ADR 0008 runs
+/// each spawned task on a thread of its own, and the entry ran on whichever
+/// thread called it and stayed there. [ADR 0080](../../../../docs/adr/0080-a-host-call-may-answer-pending.md)
+/// ends the second half — a run parked at a host call is resumed on whatever
+/// thread an embedder's scheduler has free — and two runs parked on one worker
+/// would then have shared one identity, while one run resumed elsewhere would
+/// have changed its own. So each [`crate::vm::exec::Machine`] takes one tag when
+/// it is built and keeps it, and that is the task's identity in every cell it
+/// takes, on whichever thread it is running.
+///
+/// Not the trace's task id, though a machine is one task and has one of those
+/// too: that number is unique within one [`crate::Runtime`], and a machine with
+/// no runtime draws it from a counter of its own, so two tasks of one heap
+/// could share it. This counter is the process's, and a tag is never handed out
+/// twice.
+pub(crate) fn new_tag() -> u64 {
+    NEXT_TAG.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The address of `cell`'s state word.
@@ -171,7 +170,7 @@ pub(crate) fn holder(mem: &Memory, cell: u64) -> u64 {
     mem.read(state(mem, cell))
 }
 
-/// Takes `cell`, blocking until it is free.
+/// Takes `cell` for the task whose tag is `mine`, blocking until it is free.
 ///
 /// `roots` is what this task is holding, published for as long as it waits —
 /// see the module docs. It is asked for only on the path that blocks, so an
@@ -180,9 +179,8 @@ pub(crate) fn holder(mem: &Memory, cell: u64) -> u64 {
 /// Answers [`Reentrant`] for a task that already holds this cell. That is
 /// ADR 0008's rule about `lock` being the whole of the access, read the only
 /// way a word can be asked it: the state word already names the holder.
-pub(crate) fn lock(mem: &Memory, cell: u64, roots: &dyn Roots) -> Result<(), Reentrant> {
+pub(crate) fn lock(mem: &Memory, cell: u64, mine: u64, roots: &dyn Roots) -> Result<(), Reentrant> {
     let word = state(mem, cell);
-    let mine = tag();
     loop {
         match mem.acquire_word(word, UNLOCKED, mine) {
             Ok(()) => return Ok(()),
@@ -195,17 +193,17 @@ pub(crate) fn lock(mem: &Memory, cell: u64, roots: &dyn Roots) -> Result<(), Ree
     }
 }
 
-/// Gives `cell` back, publishing every write made while it was held.
+/// Gives `cell` back from the task whose tag is `mine`, publishing every write made while it was held.
 ///
 /// The caller must be the holder. Both ways out of a lock body reach here —
 /// the one that finished and the one that failed — because a cell a failing
 /// task never gave back is a cell no task can ever take, and a Cove error is
 /// an ordinary answer rather than an abandonment.
-pub(crate) fn unlock(mem: &Memory, cell: u64) {
+pub(crate) fn unlock(mem: &Memory, cell: u64, mine: u64) {
     let word = state(mem, cell);
     debug_assert_eq!(
         mem.read(word),
-        tag(),
+        mine,
         "a cell is given back by the task that took it"
     );
     mem.release_word(word, UNLOCKED);
@@ -267,17 +265,18 @@ mod tests {
 
     #[test]
     fn a_cell_is_taken_and_given_back() {
+        let me = new_tag();
         let mut mem = Memory::new(64);
         let it = cell(&mut mem, 7);
         assert_eq!(holder(&mem, it), 0);
 
-        lock(&mem, it, &NoRoots).unwrap();
-        assert_eq!(holder(&mem, it), tag());
+        lock(&mem, it, me, &NoRoots).unwrap();
+        assert_eq!(holder(&mem, it), me);
         // The value is aliased rather than copied: the closure would be
         // handed this address and write through it.
         let place = value(&mem, it);
         mem.write(place, 9);
-        unlock(&mem, it);
+        unlock(&mem, it, me);
 
         assert_eq!(holder(&mem, it), 0);
         assert_eq!(mem.payload(it, VALUE), 9);
@@ -286,11 +285,12 @@ mod tests {
     /// `lock` inside `lock` on the same cell is refused, not waited for.
     #[test]
     fn a_task_cannot_take_a_cell_it_is_already_inside() {
+        let me = new_tag();
         let mut mem = Memory::new(64);
         let it = cell(&mut mem, 0);
-        lock(&mem, it, &NoRoots).unwrap();
-        assert_eq!(lock(&mem, it, &NoRoots), Err(Reentrant));
-        unlock(&mem, it);
+        lock(&mem, it, me, &NoRoots).unwrap();
+        assert_eq!(lock(&mem, it, me, &NoRoots), Err(Reentrant));
+        unlock(&mem, it, me);
         // And the refusal did not take the cell or leave it taken.
         assert_eq!(holder(&mem, it), 0);
     }
@@ -299,15 +299,49 @@ mod tests {
     /// per task.
     #[test]
     fn two_cells_nest() {
+        let me = new_tag();
         let mut mem = Memory::new(64);
         let outer = cell(&mut mem, 1);
         let inner = cell(&mut mem, 2);
-        lock(&mem, outer, &NoRoots).unwrap();
-        lock(&mem, inner, &NoRoots).unwrap();
-        assert_eq!(holder(&mem, outer), tag());
-        assert_eq!(holder(&mem, inner), tag());
-        unlock(&mem, inner);
-        unlock(&mem, outer);
+        lock(&mem, outer, me, &NoRoots).unwrap();
+        lock(&mem, inner, me, &NoRoots).unwrap();
+        assert_eq!(holder(&mem, outer), me);
+        assert_eq!(holder(&mem, inner), me);
+        unlock(&mem, inner, me);
+        unlock(&mem, outer, me);
+    }
+
+    /// Two tasks on **one thread** are two holders, and one task is the same
+    /// holder on any thread.
+    ///
+    /// The case a thread-local tag answered wrongly: an embedder's scheduler
+    /// runs many parked runs on one worker, and resumes a run on whichever
+    /// worker is free. A tag that was the thread's would let the second task
+    /// here walk into a cell the first is inside, and would make the first a
+    /// stranger to its own cell once it had moved.
+    #[test]
+    fn a_holder_is_a_task_rather_than_a_thread() {
+        let mut mem = Memory::new(64);
+        let it = cell(&mut mem, 0);
+        let (one, other) = (new_tag(), new_tag());
+        assert_ne!(one, other);
+
+        lock(&mem, it, one, &NoRoots).unwrap();
+        // The same thread, a different task: not a reentry. It would wait, so
+        // this only asks the word what it would be waiting for.
+        assert_eq!(holder(&mem, it), one);
+        assert_ne!(holder(&mem, it), other);
+        // The same task from another thread is still the holder, and still
+        // refused a second entry rather than left to wait for itself; and it
+        // gives the cell back from there.
+        let mem = std::thread::spawn(move || {
+            assert_eq!(lock(&mem, it, one, &NoRoots), Err(Reentrant));
+            unlock(&mem, it, one);
+            mem
+        })
+        .join()
+        .unwrap();
+        assert_eq!(holder(&mem, it), 0);
     }
 
     /// The whole of what `Shared` is for: two tasks, one cell, one heap.
@@ -318,6 +352,7 @@ mod tests {
     /// this is the mutual exclusion *and* the publication, measured together.
     #[test]
     fn two_tasks_take_turns_over_one_cell() {
+        let me = new_tag();
         const EACH: u64 = 20_000;
         let mut first = Memory::new(1 << 12);
         let second = first.for_task().unwrap();
@@ -328,22 +363,24 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(move || {
                 let mut mem = second;
+                // The other task, and so a tag of its own.
+                let me = new_tag();
                 gate.wait();
                 for _ in 0..EACH {
-                    lock(&mem, it, &NoRoots).unwrap();
+                    lock(&mem, it, me, &NoRoots).unwrap();
                     let place = value(&mem, it);
                     let was = mem.read(place);
                     mem.write(place, was + 1);
-                    unlock(&mem, it);
+                    unlock(&mem, it, me);
                 }
             });
             start.wait();
             for _ in 0..EACH {
-                lock(&first, it, &NoRoots).unwrap();
+                lock(&first, it, me, &NoRoots).unwrap();
                 let place = value(&first, it);
                 let was = first.read(place);
                 first.write(place, was + 1);
-                unlock(&first, it);
+                unlock(&first, it, me);
             }
         });
 
@@ -359,6 +396,7 @@ mod tests {
     /// task that collects, so the wait cannot end until the collection does.
     #[test]
     fn a_collection_runs_while_a_task_waits_for_a_cell() {
+        let me = new_tag();
         let layouts = table();
         let mut first = Memory::new(1 << 12);
         let mut second = first.for_task().unwrap();
@@ -370,14 +408,16 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(move || {
                 let mut mem = second;
+                // The other task, and so a tag of its own.
+                let me = new_tag();
                 gate.wait();
-                lock(&mem, it, &Held(vec![theirs, it])).unwrap();
+                lock(&mem, it, me, &Held(vec![theirs, it])).unwrap();
                 let place = value(&mem, it);
                 mem.write(place, 1);
-                unlock(&mem, it);
+                unlock(&mem, it, me);
             });
 
-            lock(&first, it, &NoRoots).unwrap();
+            lock(&first, it, me, &NoRoots).unwrap();
             taken.wait();
             // The other task is on its way into a wait it cannot leave until
             // this one gives the cell back. A collection here has to finish
@@ -386,7 +426,7 @@ mod tests {
             let lost = cell(&mut first, 0);
             first.collect(&layouts, &Held(vec![it]));
             assert_eq!(first.object_layout(lost), FREE);
-            unlock(&first, it);
+            unlock(&first, it, me);
         });
 
         // The waiter's own cell was published as a root for the whole wait and
@@ -459,6 +499,7 @@ mod tests {
     /// word alone.
     #[test]
     fn a_cell_publishes_what_the_holder_wrote_through_it() {
+        let me = new_tag();
         const TURNS: u64 = 5_000;
         let mut first = Memory::new(1 << 16);
         let second = first.for_task().unwrap();
@@ -469,9 +510,11 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(move || {
                 let mut mem = second;
+                // The other task, and so a tag of its own.
+                let me = new_tag();
                 gate.wait();
                 for turn in 1..=TURNS {
-                    lock(&mem, it, &NoRoots).unwrap();
+                    lock(&mem, it, me, &NoRoots).unwrap();
                     // A fresh object whose words say which turn wrote them,
                     // then its address into the cell.
                     let object = mem.alloc(INT, 0, 4).expect("the fixture has room");
@@ -480,13 +523,13 @@ mod tests {
                     }
                     let place = value(&mem, it);
                     mem.write(place, object);
-                    unlock(&mem, it);
+                    unlock(&mem, it, me);
                 }
             });
             start.wait();
             let mut seen = 0;
             while seen < TURNS {
-                lock(&first, it, &NoRoots).unwrap();
+                lock(&first, it, me, &NoRoots).unwrap();
                 let object = first.read(value(&first, it));
                 if object != 0 {
                     let turn = first.payload(object, 0);
@@ -499,7 +542,7 @@ mod tests {
                         );
                     }
                 }
-                unlock(&first, it);
+                unlock(&first, it, me);
             }
         });
     }

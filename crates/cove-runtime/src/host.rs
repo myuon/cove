@@ -214,6 +214,73 @@ pub trait HostApi: Send + Sync {
             handle.qualified_type()
         )))
     }
+
+    /// Invokes one operation, which may answer that its answer is not ready
+    /// yet.
+    ///
+    /// [ADR 0080](../../../docs/adr/0080-a-host-call-may-answer-pending.md)'s
+    /// contract, and the whole of what a host opts into by overriding it. The
+    /// default is [`HostApi::call_with`], answered at once, so a host that never
+    /// heard of this behaves exactly as it always has.
+    ///
+    /// **The boundary calls this instead of `call_with` exactly when the run
+    /// can park**: it was started by [`OwnedVm::invoke_parkable`](crate::OwnedVm::invoke_parkable)
+    /// or [`OwnedVm::run_entry_parkable`](crate::OwnedVm::run_entry_parkable),
+    /// and nothing of it but this one call is on the stack — no host is
+    /// running a Cove callback below it, no spawned task is running, no
+    /// `Shared` cell is held, and no compiled frame is live. Everywhere else
+    /// the boundary calls `call_with`, so a host that pends must still answer
+    /// `call_with` the ordinary way, by waiting. That is how a program never
+    /// fails because of where it happened to make the call: where parking is
+    /// impossible, the call blocks, as every host call did before.
+    ///
+    /// [`HostAnswer::Pending`] carries whatever the host wants the embedder to
+    /// see — a request id, the URL it started fetching, a future's key. The
+    /// runtime does not read it. The run is handed back as a
+    /// [`ParkedVm`](crate::ParkedVm) holding it, and the embedder resumes the
+    /// run with the answer, on any thread, when it has one. Everything the
+    /// boundary does after a host answers — the trace event, the check
+    /// against the declared result — happens then, to that answer.
+    ///
+    /// `back` is the loan [`HostApi::call_with`] describes, and it ends when
+    /// this returns, pending or not: a host that answers `Pending` has
+    /// already finished with the run, and keeps nothing of it.
+    fn call_parkable(&self, op: &str, args: Vec<Value>, back: &mut dyn Reentry) -> HostAnswer {
+        HostAnswer::Ready(self.call_with(op, args, back))
+    }
+
+    /// [`HostApi::call_parkable`] for an operation on a handle this module
+    /// issued, under the same contract. The default is
+    /// [`HostApi::call_resource`], answered at once.
+    fn call_resource_parkable(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> HostAnswer {
+        HostAnswer::Ready(self.call_resource(handle, op, args, back))
+    }
+}
+
+/// What a host answers when the run that called it can wait.
+///
+/// [`HostApi::call_parkable`]'s answer. Two cases and no third, because a host
+/// either has the value or does not: there is no "partly", and a host that
+/// wants to report progress does it with another call.
+pub enum HostAnswer {
+    /// The answer, now — what [`HostApi::call_with`] would have returned.
+    Ready(Result<Value, RuntimeError>),
+    /// Not yet. The run parks at the call and is handed to the embedder with
+    /// this request, and the answer arrives later through
+    /// [`ParkedVm::resume`](crate::ParkedVm::resume).
+    ///
+    /// `Send` and nothing else, because it is the host's message to the
+    /// embedder and the two of them agree on what it is; the runtime moves it
+    /// and never reads it. It is not a [`Value`], which is `Rc`-based and so
+    /// belongs to the thread that built it — and the request exists to be
+    /// handed to another one.
+    Pending(Box<dyn std::any::Any + Send>),
 }
 
 /// How a host runs a Cove callback it was handed.
@@ -635,11 +702,62 @@ impl Callee {
 
     /// The declared signature, qualified the way this callee is named.
     fn signature(&self, schema: &OperationSchema) -> String {
-        match self.op.rsplit_once('.') {
-            Some((resource, _)) => format!("{resource}.{}", schema.signature()),
-            None => schema.signature(),
+        signature_of(&self.op, schema)
+    }
+}
+
+/// The declared signature of the operation a trace names `op`, qualified the
+/// way that name is: `query(...)` for a module's, `Connection.query(...)` for
+/// a handle's.
+fn signature_of(op: &str, schema: &OperationSchema) -> String {
+    match op.rsplit_once('.') {
+        Some((resource, _)) => format!("{resource}.{}", schema.signature()),
+        None => schema.signature(),
+    }
+}
+
+/// What a dispatch came to: the host's answer, or a call waiting for one.
+pub(crate) enum Dispatched {
+    /// The host answered, and the answer passed the check on the way out.
+    Answered(Value),
+    /// The host answered [`HostAnswer::Pending`], with this request. The call
+    /// is waiting for [`HostRegistry::settle`].
+    Pending(PendingCall, Box<dyn std::any::Any + Send>),
+}
+
+impl Dispatched {
+    /// The answer of a dispatch that was not allowed to pend.
+    ///
+    /// [`HostRegistry::call_with`] and [`HostRegistry::call_resource`] call
+    /// `call_with` and `call_resource`, which answer a `Result` and nothing
+    /// else, so there is no way for one of them to reach the other case.
+    fn answered(self) -> Value {
+        match self {
+            Dispatched::Answered(value) => value,
+            Dispatched::Pending(..) => {
+                unreachable!("a dispatch that was not allowed to pend answered pending")
+            }
         }
     }
+}
+
+/// A host call that has been dispatched and not yet answered: what
+/// [`HostRegistry::settle`] needs to do the rest of the boundary's work, and
+/// nothing a thread owns.
+///
+/// It is `Send` by construction rather than by assertion — names as
+/// `String`s, the arguments as the trace already records them, and the
+/// schema, which is `'static` — because it waits inside a
+/// [`ParkedVm`](crate::ParkedVm), and a parked run is resumed wherever its
+/// embedder has a thread free.
+pub(crate) struct PendingCall {
+    task: u64,
+    module: String,
+    op: String,
+    capability: Capability,
+    schema: OperationSchema,
+    recorded_args: Vec<RecordedValue>,
+    started: Instant,
 }
 
 impl HostRegistry {
@@ -915,6 +1033,36 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
+        self.module_call(module, op, args, back, false)
+            .map(Dispatched::answered)
+    }
+
+    /// [`HostRegistry::call_with`], through [`HostApi::call_parkable`]: the
+    /// same gate, and a host that may answer that its answer is not ready.
+    ///
+    /// For a run that can park, and only for one — the machine asks itself
+    /// that before it calls this. A [`Dispatched::Pending`] has passed every
+    /// check a call passes before the host is reached and has been charged,
+    /// and is waiting for [`HostRegistry::settle`] to do what happens after.
+    pub(crate) fn call_parkable(
+        &self,
+        module: &str,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Dispatched, RuntimeError> {
+        self.module_call(module, op, args, back, true)
+    }
+
+    /// The module's operation, called the way `parkable` says.
+    fn module_call(
+        &self,
+        module: &str,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+        parkable: bool,
+    ) -> Result<Dispatched, RuntimeError> {
         let task = back.task();
         let Some(entry) = self
             .modules
@@ -946,7 +1094,11 @@ impl HostRegistry {
             known: schema.operations.iter().map(|e| e.name).collect(),
         };
         self.dispatch(task, &callee, declared, capability, args, |args| {
-            entry.call_with(op, args, back)
+            if parkable {
+                entry.call_parkable(op, args, back)
+            } else {
+                HostAnswer::Ready(entry.call_with(op, args, back))
+            }
         })
     }
 
@@ -965,6 +1117,32 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
+        self.resource_call(handle, op, args, back, false)
+            .map(Dispatched::answered)
+    }
+
+    /// [`HostRegistry::call_resource`], through
+    /// [`HostApi::call_resource_parkable`], for the run
+    /// [`HostRegistry::call_parkable`] is for.
+    pub(crate) fn call_resource_parkable(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Dispatched, RuntimeError> {
+        self.resource_call(handle, op, args, back, true)
+    }
+
+    /// The handle's operation, called the way `parkable` says.
+    fn resource_call(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+        parkable: bool,
+    ) -> Result<Dispatched, RuntimeError> {
         let task = back.task();
         let qualified = handle.qualified_type();
         let Some(entry) = self
@@ -1008,7 +1186,11 @@ impl HostRegistry {
             known: resource.operations.iter().map(|e| e.name).collect(),
         };
         self.dispatch(task, &callee, declared, capability, args, |args| {
-            entry.call_resource(handle, op, args, back)
+            if parkable {
+                entry.call_resource_parkable(handle, op, args, back)
+            } else {
+                HostAnswer::Ready(entry.call_resource(handle, op, args, back))
+            }
         })
     }
 
@@ -1020,6 +1202,12 @@ impl HostRegistry {
     /// Both schema checks read one declaration from both sides: the
     /// arguments must be what `params` says before the host is reached, and
     /// the result must be what `result` says before it is handed on.
+    ///
+    /// A host that answers [`HostAnswer::Pending`] stops this halfway, after
+    /// the dispatch: what is left — the trace event and the check on the way
+    /// out — is [`HostRegistry::settle`]'s, run on the answer when it comes.
+    /// It is the same code a ready answer runs, so a parked call is traced
+    /// and checked exactly as a call that waited would have been.
     fn dispatch(
         &self,
         task: u64,
@@ -1027,8 +1215,8 @@ impl HostRegistry {
         declared: Option<OperationSchema>,
         capability: Capability,
         args: Vec<Value>,
-        invoke: impl FnOnce(Vec<Value>) -> Result<Value, RuntimeError>,
-    ) -> Result<Value, RuntimeError> {
+        invoke: impl FnOnce(Vec<Value>) -> HostAnswer,
+    ) -> Result<Dispatched, RuntimeError> {
         let shown = callee.shown();
         let refused = |args: Vec<RecordedValue>| TraceEvent::HostCall {
             task,
@@ -1138,8 +1326,80 @@ impl HostRegistry {
         // rather than reconstructed afterwards.
         let recorded_args = self.record_call(callee, &args);
         let started = Instant::now();
-        let result = invoke(args);
+        let result = match invoke(args) {
+            HostAnswer::Ready(result) => result,
+            HostAnswer::Pending(request) => {
+                // Everything the rest of this function reads, in a form that
+                // can wait on another thread: the callee's names and not the
+                // callee, whose receiver is a `Value`.
+                let call = PendingCall {
+                    task,
+                    module: callee.module.clone(),
+                    op: callee.op.clone(),
+                    capability,
+                    schema,
+                    recorded_args,
+                    started,
+                };
+                return Ok(Dispatched::Pending(call, request));
+            }
+        };
         let wait = started.elapsed();
+        self.finish(
+            task,
+            &callee.module,
+            &callee.op,
+            &capability,
+            &schema,
+            recorded_args,
+            wait,
+            result,
+        )
+        .map(Dispatched::Answered)
+    }
+
+    /// What happens to a pending call's answer when it arrives: everything
+    /// [`HostRegistry::dispatch`] does after the host answers, done now.
+    ///
+    /// The trace event is written here and not when the call was made, so it
+    /// carries the outcome — which is what makes it replayable — and a `wait`
+    /// that runs from the dispatch to this moment, which is how long the
+    /// program waited for its answer however much of that it spent parked.
+    /// The run was quiescent while it was parked, so no other event of the
+    /// run can have been written in between: the tape reads exactly as a
+    /// call that blocked would have left it.
+    pub(crate) fn settle(
+        &self,
+        call: PendingCall,
+        answer: Result<Value, RuntimeError>,
+    ) -> Result<Value, RuntimeError> {
+        let wait = call.started.elapsed();
+        self.finish(
+            call.task,
+            &call.module,
+            &call.op,
+            &call.capability,
+            &call.schema,
+            call.recorded_args,
+            wait,
+            answer,
+        )
+    }
+
+    /// The trace event and the check on the way out, for a host's answer
+    /// however it arrived.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        task: u64,
+        module: &str,
+        op: &str,
+        capability: &Capability,
+        schema: &OperationSchema,
+        recorded_args: Vec<RecordedValue>,
+        wait: std::time::Duration,
+        result: Result<Value, RuntimeError>,
+    ) -> Result<Value, RuntimeError> {
         // The schema decides whether the result is written down. An operation
         // that is not recordable has its call recorded and its result left
         // out: replaying `process.exit` by handing back a value would keep
@@ -1155,8 +1415,8 @@ impl HostRegistry {
             };
             self.trace.record(TraceEvent::HostCall {
                 task,
-                module: callee.module.clone(),
-                op: callee.op.clone(),
+                module: module.to_string(),
+                op: op.to_string(),
                 capability: capability.to_string(),
                 wait,
                 granted: true,
@@ -1177,12 +1437,12 @@ impl HostRegistry {
         // one inside a Cove `Result`, not this one.
         if let Ok(value) = &result {
             if let Err(mismatch) = schema.result.admits(value) {
+                let shown = format!("{module}.{op}");
                 return Err(RuntimeError::new(mismatch.describe(&shown, Part::Result))
                     .with_rule(HOST_KEEPS_ITS_SCHEMA)
                     .with_help(format!(
-                        "the Host API schema declares `{}.{}`",
-                        callee.module,
-                        callee.signature(&schema)
+                        "the Host API schema declares `{module}.{}`",
+                        signature_of(op, schema)
                     ))
                     .with_outcome(RunOutcome::HostBoundary));
             }

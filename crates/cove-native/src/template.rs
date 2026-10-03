@@ -247,6 +247,20 @@ struct Mapping {
     executable: bool,
 }
 
+// Safety: a `Mapping` owns its pages outright — `at` came from a fresh
+// anonymous mapping no other value names — and nothing about a page belongs to
+// the thread that mapped it. Every write into one goes through `&mut self`
+// (`Mapping::write`, `make_executable`, both reached only through `&mut Jit`),
+// and from `Jit::finalize` on the pages are read-execute and nobody writes them
+// at all. So moving one to another thread moves the only writer, and sharing
+// one shares bytes that no longer change: [ADR 0080]'s `Send + Sync` on
+// `cove_runtime::Tiered`, which a table holding a `Jit` has to satisfy, is
+// these two lines.
+//
+// [ADR 0080]: ../../../../docs/adr/0080-a-host-call-may-answer-pending.md
+unsafe impl Send for Mapping {}
+unsafe impl Sync for Mapping {}
+
 impl Mapping {
     /// Maps `code` writable and copies it in.
     ///

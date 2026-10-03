@@ -13,6 +13,10 @@ name = "cove-rules-isolates"
 path = "src/bin/isolates.rs"
 
 [[bin]]
+name = "cove-rules-parked"
+path = "src/bin/parked.rs"
+
+[[bin]]
 name = "cove-rules-check"
 path = "src/bin/check.rs"
 
