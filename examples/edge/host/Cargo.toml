@@ -1,0 +1,29 @@
+[package]
+name = "cove-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# `cargo run -p cove-edge` starts the server rather than asking which binary.
+default-run = "cove-edge"
+
+[[bin]]
+name = "cove-edge"
+path = "src/main.rs"
+
+[[bin]]
+name = "cove-edge-load"
+path = "src/bin/load.rs"
+
+[dependencies]
+cove-diag.workspace = true
+cove-ir.workspace = true
+cove-runtime.workspace = true
+cove-schema.workspace = true
+cove-sema.workspace = true
+cove-syntax.workspace = true
+
+# `setrlimit`, so that ten thousand sockets fit under the open-file limit
+# without a `ulimit -n` first, and `getrusage` for peak RSS. Already in the
+# lock file through `cove-native`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

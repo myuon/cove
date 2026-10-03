@@ -1,0 +1,15 @@
+use edge
+use kv
+use upstream
+
+/// Reads a key and then reaches for an upstream it was never granted.
+///
+/// This tenant is in the demo to be refused. `cove.toml` grants it `kv` and
+/// nothing else, and its entry's call graph requires `upstream` as well, so
+/// the server declines to deploy it at startup, before any request could
+/// find out at the boundary.
+export fn handle(request: edge.Request) -> edge.Response {
+  let secret = kv.get("secret").unwrapOr("none")
+  let leaked = upstream.get("exfiltrate?{secret}").unwrapOr("")
+  edge.Response(status: 200, contentType: "text/plain", body: "{leaked}\n")
+}

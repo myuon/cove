@@ -805,3 +805,21 @@ fn a_host_no_schema_describes_is_the_one_thing_left_unsettled() {
                   console.println(\"{reading.value}\")?\n  Ok(())\n}\n";
     settles(&format!("use console\n{source}")).expect("an unschema'd host still checks");
 }
+
+/// A case matched out of such a host's answer binds the same boundary, not a
+/// recovery from an error nobody reported.
+///
+/// `Ok(reading)` against a value no schema describes has no payload type to
+/// give `reading`, and it used to be given `Recovery` — "a mistake was already
+/// reported" — in a package that reported none. `examples/edge`'s `aggregate`
+/// tenant was the first program in the corpus to match on an undescribed
+/// host's `Result`, and this invariant is what noticed.
+#[test]
+fn a_case_matched_out_of_an_undescribed_host_value_is_still_the_boundary() {
+    let source =
+        "use console\nuse sensors\n\n/// Entry.\nexport fn main() -> Result<Unit, Error> {\n  \
+                  match sensors.read() {\n    \
+                  Ok(reading) => console.println(\"{reading}\")?\n    \
+                  Err(error) => console.println(error.message)?\n  }\n  Ok(())\n}\n";
+    settles(source).expect("a payload of an unschema'd host's value is the boundary");
+}

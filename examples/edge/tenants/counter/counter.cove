@@ -1,0 +1,21 @@
+use edge
+use kv
+use log
+
+/// Counts the visits to each path, in this tenant's own key-value store.
+///
+/// The store is the host's and outlives every run: each request is a fresh
+/// isolate, so a count that survives from one request to the next has to
+/// live behind a capability rather than in a variable.
+export fn handle(request: edge.Request) -> edge.Response {
+  let key = "visits:{request.path}"
+  let seen = Int.parse(kv.get(key).unwrapOr("0")).unwrapOr(0)
+  let now = seen + 1
+  kv.put(key, "{now}")
+  log.info("{request.method} {request.path} -> {now}")
+  edge.Response(
+    status: 200,
+    contentType: "text/plain",
+    body: "{request.path} has been visited {now} time(s)\n",
+  )
+}

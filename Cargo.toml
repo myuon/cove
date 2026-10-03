@@ -22,6 +22,12 @@ members = [
   # which is what keeps an example of the embedding API from rotting against
   # the API it is an example of.
   "examples/rules/host",
+  # A multi-tenant HTTP server whose tenants are Cove programs run as
+  # isolates, parked at slow host calls (ADR 0080) and resumed on a fixed
+  # pool of workers. A member for the rules host's reason: `cargo t` runs the
+  # test that starts it, which keeps a demo of `OwnedVm`, `ParkedVm` and
+  # `PreparedProgram` building against the API it demonstrates.
+  "examples/edge/host",
 ]
 
 [workspace.package]
