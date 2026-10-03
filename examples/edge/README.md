@@ -308,12 +308,20 @@ The most useful output of this demo. Ordered by how much each cost.
    `max_host_calls` — exactly a tenant's grant. But `[run]` means "`cove run`
    can start this", and neither `cove check` nor anything else notices that
    `hello.handle(request: edge.Request)` is not a runnable entry.
-5. **Each tenant re-checks the standard library.** A ten-line handler reaches
-   218–221 functions, and deploying it costs 14–17 ms of checking, almost all
-   of it the standard library `cove_sema::stdlib::install` attaches to every
-   package (`crates/cove-sema/src/stdlib.rs:231`). Fine for four tenants; a
-   thousand would be fifteen seconds of startup spent checking the same
-   library a thousand times. There is no way to check it once and share it.
+5. **Each tenant re-checks the standard library** — a third of it fixed
+   since. A ten-line handler reaches 218–221 functions, and deploying it cost
+   14–17 ms of checking, all of it the standard library
+   `cove_sema::stdlib::install` attaches to every package: deploying `hello`
+   100 times in one process, by difference of prefix passes, was parse 5.6 ms,
+   resolve 2.6, type-check 5.8, lower 0.8 and prepare under 0.3 — 15.0 ms,
+   and the tenant's own share of the front end too small to measure. The
+   parse is now done once per process (`stdlib::attach` keeps it), which
+   makes the same deploy 9.1 ms: parse 0.3, resolve 2.9, type-check 5.1,
+   lower 0.8. A thousand tenants would be about nine seconds rather than
+   fifteen. The resolve and the type-check still run per tenant, because
+   both run over the whole package at once; sharing them is
+   [issue 569](https://github.com/myuon/cove/issues/569)'s separate
+   compilation of the standard library.
 6. **Composing a one-module package by hand is copied code.**
    `host/src/deploy.rs`'s `load` is the same walk as
    `examples/rules/host/src/lib.rs:913` (`collect`), for the same reason: an

@@ -150,6 +150,17 @@ impl SourceMap {
     pub fn files(&self) -> impl Iterator<Item = &SourceFile> {
         self.files.iter()
     }
+
+    /// How many files have been added, which is also the [`FileId`] the next
+    /// one will be given.
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Whether no file has been added yet.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
 }
 
 /// How seriously a diagnostic should be taken.
