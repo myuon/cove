@@ -56,10 +56,11 @@ use cove_syntax::ast::{
 
 use crate::capability::{Capability, OpenCall};
 use crate::facts::Facts;
+use crate::library::Link;
 use crate::package::Package;
 
 /// A declaration that belongs to a module, with the facts derived from it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FnEntry {
     pub decl: Arc<FnDecl>,
     pub exported: bool,
@@ -134,7 +135,7 @@ impl FnEntry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StructEntry {
     pub decl: Arc<StructDecl>,
     pub exported: bool,
@@ -150,7 +151,7 @@ pub struct StructEntry {
     pub doc: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct EnumEntry {
     pub decl: Arc<EnumDecl>,
     pub exported: bool,
@@ -158,7 +159,7 @@ pub struct EnumEntry {
 }
 
 /// A trait a module declares.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TraitEntry {
     pub decl: Arc<TraitDecl>,
     pub exported: bool,
@@ -195,7 +196,7 @@ pub struct Conformance {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AliasEntry {
     pub decl: Arc<TypeAlias>,
     pub exported: bool,
@@ -203,7 +204,7 @@ pub struct AliasEntry {
 }
 
 /// Everything one module declares.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ResolvedModule {
     pub name: String,
     /// Free functions, keyed by name.
@@ -526,6 +527,67 @@ pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
 /// a package module, a `use` of it is not warned about, and a call into it
 /// requires the capability its own table declares.
 pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program, Vec<Diagnostic>> {
+    resolve_linked(package, schemas, &mut Link::Whole)
+}
+
+/// What resolving the standard library's modules produced before the
+/// package-wide passes, for [`crate::library`] to put in place of resolving
+/// them again.
+#[derive(Default)]
+pub(crate) struct LibraryResolution {
+    modules: BTreeMap<String, LibraryModule>,
+    /// Every field name the library's walks asked [`OpaqueFields`] about,
+    /// with the two answers they got.
+    opaque: Vec<(String, bool, bool)>,
+}
+
+/// One library module as [`resolve_module`] left it.
+struct LibraryModule {
+    module: ResolvedModule,
+    calls: BTreeMap<Node, Vec<CallShape>>,
+    edges: Vec<ImportEdge>,
+}
+
+impl LibraryResolution {
+    /// Every field name the library's walks asked about, with the answers
+    /// they got.
+    #[cfg(test)]
+    pub(crate) fn opaque(&self) -> &[(String, bool, bool)] {
+        &self.opaque
+    }
+
+    /// Asks each field name once: several modules ask about the same one.
+    pub(crate) fn settle(&mut self) {
+        self.opaque.sort();
+        self.opaque.dedup();
+    }
+
+    /// Whether the module named `name` was gathered.
+    pub(crate) fn holds(&self, name: &str) -> bool {
+        self.modules.contains_key(name)
+    }
+
+    /// Whether no gathered module names a host module, which is what makes
+    /// what it resolved to independent of the schemas it was resolved with.
+    pub(crate) fn names_no_host(&self) -> bool {
+        self.modules.values().all(|library| {
+            library.module.host_uses.is_empty() && library.module.host_items.is_empty()
+        })
+    }
+}
+
+/// [`resolve_with`], with the standard library's modules either taken from a
+/// unit checked earlier or kept for the compilations after this one; see
+/// [`crate::library`].
+///
+/// A unit is put aside, and every module resolved in place, when the package
+/// answers a field name the library's walks asked about differently from the
+/// package the unit was gathered from.
+pub(crate) fn resolve_linked(
+    package: &Package,
+    schemas: &HostSchemas,
+    link: &mut Link,
+) -> Result<Program, Vec<Diagnostic>> {
     let mut program = Program::default();
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -537,6 +599,12 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
         .collect();
 
     let opaque_fields = OpaqueFields::of(package);
+    if link
+        .unit()
+        .is_some_and(|unit| !opaque_fields.answers(&unit.resolution.opaque))
+    {
+        *link = Link::Whole;
+    }
 
     let mut call_sites: BTreeMap<Node, Vec<CallShape>> = BTreeMap::new();
     let mut edges: Vec<ImportEdge> = Vec::new();
@@ -549,6 +617,19 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
     // enough to test.
     let mut warned_hosts: BTreeSet<String> = BTreeSet::new();
     for (name, module) in &package.modules {
+        if let Some(library) = link
+            .unit()
+            .and_then(|unit| unit.resolution.modules.get(name))
+        {
+            edges.extend(library.edges.iter().cloned());
+            program.modules.insert(name.clone(), library.module.clone());
+            continue;
+        }
+        let capturing = link.capture().is_some() && crate::stdlib::is_library_module(name);
+        let reported = (errors.len(), warnings.len());
+        if capturing {
+            opaque_fields.start_asking();
+        }
         let uses = resolve_uses(
             name,
             module,
@@ -558,6 +639,7 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
             &mut warnings,
             &mut warned_hosts,
         );
+        let module_edges = capturing.then(|| uses.edges.clone());
         edges.extend(uses.edges.iter().cloned());
         let (resolved, calls) = resolve_module(
             name,
@@ -569,19 +651,48 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
             &mut errors,
             &mut warnings,
         );
-        for (key, shapes) in calls {
-            call_sites.insert((name.clone(), key), shapes);
+        let calls: BTreeMap<Node, Vec<CallShape>> = calls
+            .into_iter()
+            .map(|(key, shapes)| ((name.clone(), key), shapes))
+            .collect();
+        if let Some(capture) = link.capture().filter(|_| capturing) {
+            capture.spoiled |= reported != (errors.len(), warnings.len());
+            capture.resolution.opaque.extend(opaque_fields.asked());
+            capture.resolution.modules.insert(
+                name.clone(),
+                LibraryModule {
+                    module: resolved.clone(),
+                    calls: calls.clone(),
+                    edges: module_edges.unwrap_or_default(),
+                },
+            );
         }
+        call_sites.extend(calls);
         program.modules.insert(name.clone(), resolved);
     }
 
     check_import_cycles(&edges, &mut errors);
     check_method_collisions(&program, &mut errors);
-    let (call_graph, unresolved) = package_call_graph(&program, &call_sites);
+    let library_calls = link
+        .unit()
+        .into_iter()
+        .flat_map(|unit| unit.resolution.modules.values())
+        .flat_map(|library| library.calls.iter());
+    let (call_graph, unresolved) =
+        package_call_graph(&program, call_sites.iter().chain(library_calls));
     merge_open_calls(&mut program, &unresolved);
     propagate_capabilities(&mut program, &call_graph);
     program.call_graph = call_graph;
-    check_bodies(&program, schemas, &mut errors, &mut warnings);
+    let linked = |name: &str| {
+        link.unit()
+            .is_some_and(|unit| unit.resolution.modules.contains_key(name))
+    };
+    let reporting = check_bodies(&program, schemas, &linked, &mut errors, &mut warnings);
+    if let Some(capture) = link.capture() {
+        capture.spoiled |= reporting
+            .iter()
+            .any(|name| crate::stdlib::is_library_module(name));
+    }
 
     if errors.is_empty() {
         program.notices = warnings;
@@ -2012,6 +2123,16 @@ struct OpaqueFields {
     /// `entries: Array<dyn Summary>`: reading one holds an ordinary
     /// container, and what comes out of it is opaque.
     containers: BTreeSet<String>,
+    /// Every name asked about while this is `Some`.
+    ///
+    /// This set is the package's, so what a body's walk derives depends on
+    /// field names declared in modules the body cannot see. That is the one
+    /// way the code of a package reaches into the resolution of the standard
+    /// library's modules, and [`crate::library`] reuses that resolution only
+    /// for a package that answers every name asked here the same way: the
+    /// walk branches on nothing else that a package supplies, so the same
+    /// answers make the same walk.
+    asked: std::cell::RefCell<Option<BTreeSet<String>>>,
 }
 
 impl OpaqueFields {
@@ -2048,6 +2169,55 @@ impl OpaqueFields {
             }
         }
         fields
+    }
+
+    /// Whether reading a field named `name` holds an opaque value itself.
+    fn holds_opaque(&self, name: &str) -> bool {
+        self.ask(name);
+        self.direct.contains(name)
+    }
+
+    /// Whether reading a field named `name` holds a container of opaque
+    /// values.
+    fn holds_container(&self, name: &str) -> bool {
+        self.ask(name);
+        self.containers.contains(name)
+    }
+
+    fn ask(&self, name: &str) {
+        if let Some(asked) = self.asked.borrow_mut().as_mut() {
+            if !asked.contains(name) {
+                asked.insert(name.to_string());
+            }
+        }
+    }
+
+    /// Starts keeping every name asked about, for [`OpaqueFields::asked`].
+    fn start_asking(&self) {
+        *self.asked.borrow_mut() = Some(BTreeSet::new());
+    }
+
+    /// Every name asked about since [`OpaqueFields::start_asking`], with the
+    /// two answers this set gave, and stops keeping them.
+    fn asked(&self) -> Vec<(String, bool, bool)> {
+        self.asked
+            .borrow_mut()
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| {
+                let direct = self.direct.contains(&name);
+                let container = self.containers.contains(&name);
+                (name, direct, container)
+            })
+            .collect()
+    }
+
+    /// Whether this set answers each of `asked` as it is recorded there.
+    pub(crate) fn answers(&self, asked: &[(String, bool, bool)]) -> bool {
+        asked.iter().all(|(name, direct, container)| {
+            self.direct.contains(name) == *direct && self.containers.contains(name) == *container
+        })
     }
 }
 
@@ -2205,7 +2375,7 @@ fn value_is_opaque(expr: &Expr, walk: &BodyWalk) -> bool {
     match &expr.kind {
         ExprKind::Ident(name) => walk.is_opaque(name),
         ExprKind::Field { base, name } => {
-            walk.opaque_fields.direct.contains(name.node.as_str()) || value_is_opaque(base, walk)
+            walk.opaque_fields.holds_opaque(name.node.as_str()) || value_is_opaque(base, walk)
         }
         _ => mentions_opaque(expr, walk),
     }
@@ -2216,7 +2386,7 @@ fn value_is_opaque(expr: &Expr, walk: &BodyWalk) -> bool {
 fn holds_opaque_container(expr: &Expr, walk: &BodyWalk) -> bool {
     match &expr.kind {
         ExprKind::Ident(name) => walk.is_container(name),
-        ExprKind::Field { name, .. } => walk.opaque_fields.containers.contains(name.node.as_str()),
+        ExprKind::Field { name, .. } => walk.opaque_fields.holds_container(name.node.as_str()),
         _ => false,
     }
 }
@@ -2259,8 +2429,8 @@ fn mentions_opaque(expr: &Expr, walk: &BodyWalk) -> bool {
     match &expr.kind {
         ExprKind::Ident(name) => walk.is_opaque(name) || walk.is_container(name),
         ExprKind::Field { base, name } => {
-            walk.opaque_fields.direct.contains(name.node.as_str())
-                || walk.opaque_fields.containers.contains(name.node.as_str())
+            walk.opaque_fields.holds_opaque(name.node.as_str())
+                || walk.opaque_fields.holds_container(name.node.as_str())
                 || mentions_opaque(base, walk)
         }
         ExprKind::Call {
@@ -2334,13 +2504,21 @@ type EnumsInScope<'a> = BTreeMap<&'a str, &'a EnumEntry>;
 /// This reuses [`walk_block`] rather than a second traversal: the only
 /// difference from the walk [`analyze_body`] already did is that `enums` is
 /// filled in this time, so [`check_match_arms`] actually runs.
-fn check_bodies(
-    program: &Program,
+fn check_bodies<'p>(
+    program: &'p Program,
     schemas: &HostSchemas,
+    linked: &dyn Fn(&str) -> bool,
     errors: &mut Vec<Diagnostic>,
     warnings: &mut Vec<Diagnostic>,
-) {
+) -> BTreeSet<&'p str> {
+    let mut reporting = BTreeSet::new();
     for resolved in program.modules.values() {
+        // A module taken from a library unit was walked when the unit was
+        // gathered, and reported nothing.
+        if linked(&resolved.name) {
+            continue;
+        }
+        let reported = (errors.len(), warnings.len());
         let enums = enums_in_scope(program, resolved);
         for entry in resolved.functions.values() {
             check_body(
@@ -2375,7 +2553,11 @@ fn check_bodies(
                 }
             }
         }
+        if reported != (errors.len(), warnings.len()) {
+            reporting.insert(resolved.name.as_str());
+        }
     }
+    reporting
 }
 
 /// Every enum `resolved` can name, whether it declares it or imported it.
@@ -3404,9 +3586,9 @@ pub enum CallPrecision {
 /// before the fixed point runs, so a lower bound and the reason it is one
 /// travel together.
 #[allow(clippy::type_complexity)]
-fn package_call_graph(
+fn package_call_graph<'c>(
     program: &Program,
-    call_sites: &BTreeMap<Node, Vec<CallShape>>,
+    call_sites: impl IntoIterator<Item = (&'c Node, &'c Vec<CallShape>)>,
 ) -> (
     BTreeMap<Node, BTreeMap<Node, CallPrecision>>,
     BTreeMap<Node, BTreeSet<OpenCall>>,

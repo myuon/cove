@@ -447,6 +447,7 @@ use cove_syntax::ast::{
 };
 
 use crate::facts::{Facts, MethodTarget, Signature};
+use crate::library::Link;
 use crate::package::Package;
 use crate::resolve::{Conformance, Program, ResolvedModule, TraitEntry};
 
@@ -743,26 +744,111 @@ pub fn check_facts(
     program: &Program,
     schemas: &HostSchemas,
 ) -> (Vec<Diagnostic>, Facts) {
+    check_linked(package, program, schemas, &mut Link::Whole)
+}
+
+/// What checking one of the standard library's modules settled, for
+/// [`crate::library`] to put in place of checking it again: what it offers
+/// the modules that import it, its signatures, and its facts.
+pub(crate) struct LibraryCheck {
+    env: ImportEnv,
+    functions: BTreeMap<String, FnSig>,
+    facts: Facts,
+}
+
+/// The signatures a module's checker resolved, beside the module, for the
+/// passes that run after every module is checked.
+struct Checked<'c> {
+    functions: &'c BTreeMap<String, FnSig>,
+    module: &'c ResolvedModule,
+}
+
+/// [`check_facts`], with the standard library's modules either taken from a
+/// unit checked earlier or kept for the compilations after this one; see
+/// [`crate::library`].
+///
+/// A library module's checker reads only its own module, the modules it
+/// imports, and `schemas` through the host modules it names — of which it
+/// names none — so what it settles is the same in every package.
+pub(crate) fn check_linked(
+    package: &Package,
+    program: &Program,
+    schemas: &HostSchemas,
+    link: &mut Link,
+) -> (Vec<Diagnostic>, Facts) {
     let mut diagnostics = Vec::new();
-    let mut envs: BTreeMap<&str, ImportEnv> = BTreeMap::new();
-    let mut checked: BTreeMap<&str, Checker> = BTreeMap::new();
+    let unit = match link {
+        Link::Library(unit) => Some(Arc::clone(unit)),
+        _ => None,
+    };
+    let library = |name: &str| unit.as_ref().and_then(|unit| unit.check.get(name));
+    let mut envs: BTreeMap<&str, std::borrow::Cow<'_, ImportEnv>> = BTreeMap::new();
+    let mut checkers: BTreeMap<&str, Checker> = BTreeMap::new();
     for name in import_order(program) {
+        if let Some(checked) = library(name) {
+            envs.insert(name, std::borrow::Cow::Borrowed(&checked.env));
+            continue;
+        }
         let module = &program.modules[name];
         let mut checker = Checker::new(module, program, schemas);
         checker.import(&envs);
         checker.prepare();
-        envs.insert(name, checker.export_env());
+        envs.insert(name, std::borrow::Cow::Owned(checker.export_env()));
         checker.check_bodies();
+        if let Some(capture) = link.capture() {
+            if crate::stdlib::is_library_module(name) {
+                capture.spoiled |= !checker.diagnostics.is_empty();
+                capture.check.insert(
+                    name.to_string(),
+                    LibraryCheck {
+                        env: envs[name].clone().into_owned(),
+                        functions: checker.functions.clone(),
+                        facts: checker.facts.clone(),
+                    },
+                );
+            }
+        }
         diagnostics.append(&mut checker.diagnostics);
-        checked.insert(name, checker);
+        checkers.insert(name, checker);
+    }
+    let mut checked: BTreeMap<&str, Checked> = checkers
+        .iter()
+        .map(|(name, checker)| {
+            (
+                *name,
+                Checked {
+                    functions: &checker.functions,
+                    module: checker.module,
+                },
+            )
+        })
+        .collect();
+    if let Some(unit) = &unit {
+        for (name, library) in &unit.check {
+            if let Some(module) = program.modules.get(name) {
+                checked.insert(
+                    name.as_str(),
+                    Checked {
+                        functions: &library.functions,
+                        module,
+                    },
+                );
+            }
+        }
     }
     check_entries(package, &checked, &mut diagnostics);
     check_tests(program, &checked, &mut diagnostics);
+    drop(checked);
     // Each module is checked by a checker of its own, so the facts arrive in
     // as many tables as there are modules. A file belongs to one module, so
     // gathering them into one table keyed by file loses nothing.
     let mut facts = Facts::default();
-    for (_, checker) in checked {
+    if let Some(unit) = &unit {
+        for library in unit.check.values() {
+            facts.merge_shared(&library.facts);
+        }
+    }
+    for (_, checker) in checkers {
         facts.merge(checker.facts);
     }
     // The uniqueness proof `freeze()` needs runs last and only over a program
@@ -786,7 +872,7 @@ pub fn check_facts(
 /// that is required.
 fn check_tests(
     program: &Program,
-    checked: &BTreeMap<&str, Checker<'_>>,
+    checked: &BTreeMap<&str, Checked<'_>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let required = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Error));
@@ -2646,7 +2732,7 @@ impl<'a> Checker<'a> {
     /// must still have fields and methods, even when this module never
     /// names it. What a `use` decides is which of them this module can
     /// *write*, which is [`Checker::key`]'s business, not this one's.
-    fn import(&mut self, envs: &BTreeMap<&str, ImportEnv>) {
+    fn import(&mut self, envs: &BTreeMap<&str, std::borrow::Cow<'_, ImportEnv>>) {
         for dependency in self.module.dependencies() {
             let Some(env) = envs.get(dependency) else {
                 continue;
@@ -9242,7 +9328,7 @@ impl<'a> Checker<'a> {
 /// value the host can report.
 fn check_entries(
     package: &Package,
-    checked: &BTreeMap<&str, Checker<'_>>,
+    checked: &BTreeMap<&str, Checked<'_>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for run in package.config.runs.values() {

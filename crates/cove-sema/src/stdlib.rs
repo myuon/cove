@@ -28,10 +28,15 @@
 //! of the text and the [`FileId`](cove_diag::FileId) its spans carry and
 //! nothing else, so a copy is the tree a fresh parse would have built. That
 //! is why the key is the starting id: the trees cannot be moved to other ids
-//! without rewriting every span in them. Resolving and checking the library — the next 8 ms —
-//! is still done per package, because both run over the whole package at
-//! once; caching them is [issue 569](https://github.com/myuon/cove/issues/569)'s
-//! separate compilation, not a cache in this function.
+//! without rewriting every span in them.
+//!
+//! Resolving and checking the library — the next 8 ms — is not a cache in
+//! this function either. Both run over the whole package at once, so what is
+//! kept of them is the library's per-module share, by `Compiler::compile`,
+//! and a package links against it: see `crate::library` and
+//! [ADR 0083](../../../docs/adr/0083-the-standard-library-is-checked-once-per-process.md).
+//! It recognises the library a package holds by the function bodies this
+//! function shares, which is one more reason a copy here must share them.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

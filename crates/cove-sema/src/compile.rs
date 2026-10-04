@@ -103,7 +103,7 @@ use cove_schema::{HostSchemas, ModuleSchema};
 
 use crate::package::Package;
 use crate::resolve::Program;
-use crate::{resolve, typeck};
+use crate::{library, resolve, typeck};
 
 /// A checking pipeline, and the Host API schemas it reads.
 ///
@@ -201,8 +201,23 @@ impl Compiler {
         if let Some(diagnostic) = missing_stdlib_diagnostic(package) {
             return Err(vec![diagnostic]);
         }
-        let mut program = self.resolve(package)?;
-        let (diagnostics, facts) = typeck::check_facts(package, &program, &self.schemas);
+        // The standard library's modules are resolved and checked once per
+        // process and linked into every package after that; see
+        // `crate::library`.
+        self.compile_linked(package, library::link(package, &self.schemas))
+    }
+
+    /// [`Compiler::compile`] past its one check, treating the standard
+    /// library's modules as `link` says.
+    pub(crate) fn compile_linked(
+        &self,
+        package: &Package,
+        mut link: library::Link,
+    ) -> Result<Program, Vec<Diagnostic>> {
+        let mut program = resolve::resolve_linked(package, &self.schemas, &mut link)?;
+        let (diagnostics, facts) =
+            typeck::check_linked(package, &program, &self.schemas, &mut link);
+        library::keep(link);
         let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) = diagnostics
             .into_iter()
             .partition(|d| d.severity == cove_diag::Severity::Error);
