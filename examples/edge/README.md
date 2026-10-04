@@ -62,7 +62,7 @@ other three start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
 | --- | --- | --- |
 | [`hello`](tenants/hello/hello.cove) | — | pure; `/hello/spin` loops until the tenant's `fuel = 2000000` stops it |
 | [`counter`](tenants/counter/counter.cove) | `kv`, `log` | state that outlives the isolate lives behind a capability, per tenant |
-| [`aggregate`](tenants/aggregate/aggregate.cove) | `upstream` | three slow calls in a row; the run parks at each |
+| [`aggregate`](tenants/aggregate/aggregate.cove) | `upstream` | three slow calls in a row; the run parks at each; `max_host_calls = 8` per request, however many are in flight |
 | [`greedy`](tenants/greedy/greedy.cove) | `kv` | over-reaches for `upstream` and is not deployed |
 
 The contract is a host module, [`edge`](host/src/hosts.rs), whose schema
@@ -255,24 +255,27 @@ after 30 s and counts it, rather than hanging.
 
 The most useful output of this demo. Ordered by how much each cost.
 
-1. **A per-invocation budget is per *registry*, not per run, and concurrent
-   runs share the registry.** `OwnedVm::invoke_within_parkable(budget, …)`
-   installs `budget` with `HostRegistry::begin_run`
-   (`crates/cove-runtime/src/host.rs:854`), which replaces the registry's one
-   budget slot; a host call is charged to whatever budget the registry holds
-   when it is made (`host.rs:1309–1313`); and `Vm::checked_within` takes the
-   run's fuel meter in a second lock acquisition after installing it
-   (`crates/cove-runtime/src/vm/mod.rs:646–647`), so another run's
-   `begin_run` can land between the two. `OwnedVm`'s own documentation invites
-   the sharing ("the same `Arc`s many runs can share",
-   `crates/cove-runtime/src/vm/parked.rs:37`). Observed: with one registry per
-   tenant, 997 of 10,000 concurrent `aggregate` requests — three host calls
-   each — failed with `execution stopped: host-call limit of 1000 exceeded`.
-   The workaround is in `Deployed::isolate` (`host/src/deploy.rs`): a registry
-   and a `Runtime` per isolate, which costs nothing measurable (the isolate is
-   still 3 µs) but is not something an embedder would guess. This is the one
-   item here that is a bug rather than friction: under ADR 0080's intended use
-   the limits of one run are silently another's.
+1. **A per-invocation budget was per *registry*, not per run, and concurrent
+   runs share the registry — fixed ([issue
+   #577](https://github.com/myuon/cove/issues/577)).**
+   `OwnedVm::invoke_within_parkable(budget, …)` used to install `budget` in
+   the registry's one budget slot (`HostRegistry::begin_run`), and a host call
+   was charged to whatever budget the registry held when it was made.
+   Observed: with one registry per tenant, 997 of 10,000 concurrent
+   `aggregate` requests — three host calls each — failed with `execution
+   stopped: host-call limit of 1000 exceeded`. The budget is the run's now:
+   the `Vm` holds it, a spawned task is handed it, and a host call is charged
+   to the budget of the run that made it, so `begin_run` is gone and
+   `OwnedVm::meter` reads what one run spent. The workaround — a registry and
+   a `Runtime` per isolate — is gone with it: each tenant has one registry
+   and one `Runtime`, built at deploy and shared by every request in flight
+   (`Deployed`, `host/src/deploy.rs`), and an isolate is the `OwnedVm` alone
+   (2–3 µs at deploy, against 3 µs with its own registry). `aggregate` now
+   carries `max_host_calls = 8`, which a thousand requests parked at once over
+   that one registry each have to themselves: 20,000 requests at 1,000 in
+   flight all answered 200, and
+   `more_runs_wait_on_the_upstream_than_there_are_workers` (twenty parked at
+   once, two calls each) would fail on the shared slot.
 2. **Building a host-declared struct required the module's capability** —
    fixed since. `edge.Response(status: …)` was read as a call into `edge`
    (`call_capability` in `crates/cove-sema/src/resolve.rs`), and a name the

@@ -203,7 +203,6 @@ impl PreparedProgram {
 /// the first instruction runs. Everything below the two is one path.
 pub struct Vm<'a> {
     runtime: &'a Runtime,
-    hosts: &'a HostRegistry,
     program: &'a Program,
     machine: Machine<'a>,
     /// The run's accounting, in the handle a safepoint charges through.
@@ -211,6 +210,12 @@ pub struct Vm<'a> {
     /// Taken once, where the run begins, for the reason [`Meter`] gives. A
     /// registry with no budget installed answers `None`, which has always
     /// meant no limit; a meter over default [`Limits`] is that, written down.
+    ///
+    /// It is the *run's*, not the registry's: [`Vm::invoke_within`] and its
+    /// siblings replace it with the budget they were handed, and every host
+    /// call, `spawn` and safepoint of the run — its tasks' included — is
+    /// charged here. The registry is shared by every run over it at once
+    /// (issue #577), so it holds no run's budget.
     budget: Meter,
     /// The entry a run parked at a host call is inside, while it is.
     ///
@@ -364,7 +369,6 @@ impl<'a> Vm<'a> {
     ) -> Vm<'a> {
         Vm {
             runtime,
-            hosts,
             program,
             machine: Machine::for_run(program, prepared, heap_words, Some(hosts), Some(runtime)),
             budget: meter_of(hosts),
@@ -612,8 +616,7 @@ impl<'a> Vm<'a> {
         name: &str,
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
-        self.hosts.begin_run(budget);
-        self.bind_budget();
+        self.bind_budget(budget);
         let outcome = self.enter(module, name, args);
         self.ended(outcome)
     }
@@ -643,20 +646,32 @@ impl<'a> Vm<'a> {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         crate::invoke::check(self.runtime.program(), module, name, &args)?;
-        self.hosts.begin_run(budget);
-        self.bind_budget();
+        self.bind_budget(budget);
         let id = self.lowered(module, name)?;
         self.enter_with(module, name, id, args)
     }
 
-    /// Re-reads the meter after the registry was given a new budget.
+    /// Makes `budget` this run's, with its deadline clock starting now.
     ///
-    /// The handle is taken once where a run begins, so installing a budget
-    /// for one invocation has to be followed by taking the handle again;
-    /// otherwise the safepoints would go on charging the budget the session
-    /// was built over.
-    fn bind_budget(&mut self) {
-        self.budget = meter_of(self.hosts);
+    /// The budget is held here, by the run, and not installed in the
+    /// registry: a registry is shared by every run over it, and a budget
+    /// installed there was one slot every concurrent run charged and
+    /// replaced (issue #577). [`Budget::restart`] is why the deadline runs
+    /// from the invocation rather than from wherever `budget` was built.
+    fn bind_budget(&mut self, mut budget: Budget) {
+        budget.restart();
+        self.budget = budget.meter();
+    }
+
+    /// The accounting of this run — or of the last one, once it has
+    /// answered: what it spent in fuel and host calls, and how long it took.
+    ///
+    /// This is where an embedder reads what an [`Vm::invoke_within`] spent.
+    /// A backend built over a registry with a budget installed by
+    /// [`HostRegistry::set_budget`] charges that budget, so there this and
+    /// [`HostRegistry::with_budget`] read the same counters.
+    pub fn meter(&self) -> &Meter {
+        &self.budget
     }
 
     /// A native-tier session over `module.name`, with `args` converted once.

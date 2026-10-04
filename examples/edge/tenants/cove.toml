@@ -24,6 +24,10 @@ allow = ["kv", "log"]
 entry = "aggregate.handle"
 allow = ["upstream"]
 deadline = "5s"
+# Per request, however many requests are in flight over the tenant's one host
+# registry: a run's budget is the run's (issue #577), so a thousand parked
+# requests do not share these eight calls.
+max_host_calls = 8
 
 # Over-reaching on purpose: its entry requires `upstream` as well.
 [run.greedy]

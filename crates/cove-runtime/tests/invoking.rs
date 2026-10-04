@@ -900,9 +900,7 @@ fn a_long_lived_session_answers_and_costs_the_same_across_thousands_of_invocatio
             .unwrap_or_else(|e| panic!("iteration {i}: {}", e.message))
             .as_int()
             .expect("`churn` declares -> Int");
-        let this_fuel = hosts
-            .with_budget(|b| b.fuel_spent())
-            .expect("invoke_within installed a budget for this call");
+        let this_fuel = vm.meter().fuel_spent();
 
         match answer {
             None => answer = Some(this_answer),

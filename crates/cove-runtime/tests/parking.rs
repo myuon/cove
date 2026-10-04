@@ -680,3 +680,214 @@ fn an_answered_machine_runs_again_and_a_dropped_one_is_gone() {
         Some("43")
     );
 }
+
+// ------------------------------------------------- a budget is the run's (#577)
+
+/// A budget bounding at most `host_calls` host calls and `fuel` fuel.
+fn bounded(host_calls: u64, fuel: u64) -> cove_runtime::Budget {
+    cove_runtime::Budget::new(cove_runtime::Limits {
+        fuel: Some(fuel),
+        max_host_calls: Some(host_calls),
+        ..cove_runtime::Limits::default()
+    })
+}
+
+/// What `main` spends, blocking, alone: the figures every concurrent run of it
+/// has to be charged exactly, whatever else is running over the registry.
+fn spent_alone(world: &World) -> (u64, u64) {
+    let mut vm = world.vm();
+    let answer = vm.invoke_within(bounded(7, u64::MAX), "app", "main", Vec::new());
+    assert!(answer.is_ok(), "{}", shown(answer));
+    (vm.meter().host_calls(), vm.meter().fuel_spent())
+}
+
+/// Issue #577: many runs over one registry at once, on threads of their own,
+/// each with a budget of its own — and each charged its own calls and fuel
+/// and nothing of anybody else's.
+///
+/// `main` makes seven host calls. The runs given a limit of seven must all
+/// answer, which they did not when a budget was installed in the registry:
+/// every run's calls went to whichever budget was installed last. The runs
+/// given six must all stop at the seventh call, with the error a lone run
+/// stops with — a budget that was somebody else's would have let some of
+/// them through.
+#[test]
+fn concurrent_runs_over_one_registry_are_charged_to_their_own_budgets() {
+    let world = Arc::new(world());
+    let (calls, fuel) = spent_alone(&world);
+    assert_eq!(calls, 7);
+    let workers: Vec<_> = (0..8)
+        .map(|worker| {
+            let world = Arc::clone(&world);
+            std::thread::spawn(move || {
+                let limit = if worker % 2 == 0 { 7 } else { 6 };
+                let mut vm = world.vm();
+                for _ in 0..200 {
+                    let answer =
+                        vm.invoke_within(bounded(limit, fuel * 2), "app", "main", Vec::new());
+                    if limit == 7 {
+                        assert!(answer.is_ok(), "a run within its limit: {}", shown(answer));
+                        assert_eq!(vm.meter().fuel_spent(), fuel, "its own fuel, exactly");
+                    } else {
+                        assert_eq!(
+                            shown(answer),
+                            "error: execution stopped: host-call limit of 6 exceeded"
+                        );
+                    }
+                    assert_eq!(vm.meter().host_calls(), 7, "its own calls, exactly");
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().expect("every run was charged its own calls");
+    }
+    assert!(
+        world.hosts.with_budget(|_| ()).is_none(),
+        "the registry was given no run's budget"
+    );
+}
+
+/// The same, for parked runs: eight runs parked at once over one registry,
+/// resumed in turn, each on a thread of its own. Round-robin is the order that
+/// a budget installed in the registry got most wrong — every resume charged
+/// the budget of the run that began last — and here every run is charged its
+/// own seven calls and its own limit stops it.
+#[test]
+fn parked_runs_resumed_in_turn_are_charged_to_their_own_budgets() {
+    let world = world();
+    let (_, fuel) = spent_alone(&world);
+    let limit = |run: usize| if run == 3 { 6 } else { 7 };
+    let mut parked: Vec<Option<ParkedVm>> = (0..8)
+        .map(|run| {
+            match world.vm().invoke_within_parkable(
+                bounded(limit(run), fuel * 2),
+                "app",
+                "main",
+                Vec::new(),
+            ) {
+                Step::Parked(parked) => Some(parked),
+                Step::Answered(_, answer) => panic!("the first get parks: {}", shown(answer)),
+            }
+        })
+        .collect();
+    let mut answers: Vec<Option<(String, u64, u64)>> = (0..8).map(|_| None).collect();
+    while parked.iter().any(Option::is_some) {
+        for run in 0..parked.len() {
+            let Some(mut next) = parked[run].take() else {
+                continue;
+            };
+            let request = next
+                .take_request()
+                .expect("a parked run carries its request")
+                .downcast::<Request>()
+                .expect("the request is the host's own type");
+            let answer = Transfer::Int(reply(&request));
+            let step = std::thread::spawn(move || match next.resume(Ok(answer)) {
+                Step::Answered(vm, answer) => Ok((
+                    shown(answer),
+                    vm.meter().host_calls(),
+                    vm.meter().fuel_spent(),
+                )),
+                Step::Parked(parked) => Err(Box::new(parked)),
+            })
+            .join()
+            .unwrap();
+            match step {
+                Ok(finished) => answers[run] = Some(finished),
+                Err(again) => parked[run] = Some(*again),
+            }
+        }
+    }
+    let (expected, _) = world.blocking("main");
+    for (run, answer) in answers.into_iter().enumerate() {
+        let (answer, calls, spent) = answer.expect("every run answered");
+        assert_eq!(calls, 7, "run {run}: its own calls, exactly");
+        if limit(run) == 7 {
+            assert_eq!(answer, expected, "run {run}");
+            assert_eq!(spent, fuel, "run {run}: its own fuel, exactly");
+        } else {
+            assert_eq!(
+                answer, "error: execution stopped: host-call limit of 6 exceeded",
+                "run {run}"
+            );
+        }
+    }
+}
+
+/// A spawned task is charged to the budget of the run that spawned it — its
+/// place under the concurrency limit, and its fuel — which is the run's own
+/// and not the registry's.
+#[test]
+fn a_spawned_task_is_charged_to_its_run_s_budget() {
+    let world = world();
+    let tasks = |max_tasks| {
+        cove_runtime::Budget::new(cove_runtime::Limits {
+            max_tasks: Some(max_tasks),
+            ..cove_runtime::Limits::default()
+        })
+    };
+    let mut vm = world.vm();
+    let answer = vm.invoke_within(tasks(1), "app", "withChild", Vec::new());
+    assert_eq!(shown(answer), "57");
+    assert_eq!(
+        vm.meter().live_tasks(),
+        0,
+        "each place went back at its join"
+    );
+    assert_eq!(vm.meter().host_calls(), 2);
+    let with_tasks = vm.meter().fuel_spent();
+
+    let answer = vm.invoke_within(tasks(0), "app", "withChild", Vec::new());
+    assert!(
+        shown(answer).starts_with("error: execution stopped: concurrency limit of 0 task(s)"),
+        "the run's own limit refused the spawn"
+    );
+    let refused = vm.meter().fuel_spent();
+    assert!(
+        refused < with_tasks,
+        "the children's fuel was the run's: {refused} refused against {with_tasks} run"
+    );
+    assert!(world.hosts.with_budget(|_| ()).is_none());
+}
+
+/// The tree-walking interpreter's budget is its run's as well: interpreters
+/// over one `Runtime` on threads of their own, each stopped by its own limit
+/// and charged its own calls.
+#[test]
+fn concurrent_interpreters_over_one_registry_are_charged_to_their_own_budgets() {
+    let world = Arc::new(world());
+    let workers: Vec<_> = (0..4)
+        .map(|worker| {
+            let world = Arc::clone(&world);
+            std::thread::Builder::new()
+                .stack_size(cove_runtime::STACK_SIZE)
+                .spawn(move || {
+                    let limit = if worker % 2 == 0 { 7 } else { 6 };
+                    let mut interpreter = cove_runtime::interp::Interpreter::new(&world.runtime);
+                    for _ in 0..100 {
+                        let answer = interpreter.invoke_within(
+                            bounded(limit, u64::MAX),
+                            "app",
+                            "main",
+                            Vec::new(),
+                        );
+                        if limit == 7 {
+                            assert!(answer.is_ok(), "a run within its limit: {}", shown(answer));
+                        } else {
+                            assert_eq!(
+                                shown(answer),
+                                "error: execution stopped: host-call limit of 6 exceeded"
+                            );
+                        }
+                        let meter = interpreter.meter().expect("the run was given a budget");
+                        assert_eq!(meter.host_calls(), 7, "its own calls, exactly");
+                    }
+                })
+                .unwrap()
+        })
+        .collect();
+    for worker in workers {
+        worker.join().expect("every run was charged its own calls");
+    }
+}
