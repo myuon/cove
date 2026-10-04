@@ -28,6 +28,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +38,8 @@ EDGE = os.path.join(ROOT, "target", "release", "cove-edge")
 GO = os.path.join(HERE, "go", "edge-go")
 RESULTS = os.path.join(HERE, "results")
 PORT = {"cove": 8787, "cove-native": 8787, "go": 8788}
+# `--port N` moves every server to N (one runs at a time), so that a sweep can
+# keep clear of anything else on the machine that uses the defaults.
 
 # What each scenario asks for: a `cove-edge-load` target (a path, or a mix).
 SCENARIOS = {
@@ -87,8 +90,22 @@ def capacities():
     return found
 
 
+def port_answers(port):
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1).read()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
 def start(server, latency=None):
     port = PORT[server]
+    # Refuse rather than measure somebody else's server: a port that already
+    # answers is not ours.
+    if port_answers(port):
+        raise SystemExit(f"port {port} already answers; another server is using it")
     if server in ("cove", "cove-native"):
         cmd = [EDGE, "--quiet", "--port", str(port), "--workers", "4"]
         if server == "cove-native":
@@ -101,11 +118,6 @@ def start(server, latency=None):
         if latency:
             cmd += ["-latency", latency]
         env = dict(os.environ, GOMAXPROCS="4")
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/_stats", timeout=0.5).read()
-        raise SystemExit(f"port {port} is already answered by another process")
-    except OSError:
-        pass
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     atexit.register(lambda: proc.poll() is None and proc.kill())
     deadline = time.time() + 30
@@ -179,6 +191,7 @@ def run_load(server, args, sample_rss_of=None):
         raise SystemExit(f"cove-edge-load failed: {' '.join(cmd)}")
     with open(out) as f:
         summary = json.load(f)
+    os.remove(out)
     if proc:
         summary["server_cpu_s"] = cpu_seconds(proc.pid) - cpu_before
         summary["rss_before_kib"] = rss_before
@@ -321,8 +334,13 @@ def main():
         p.add_argument("--inflight", type=int, nargs="*", default=[1000, 10000])
         p.add_argument("--servers", nargs="*", default=["cove", "go"], choices=list(PORT))
         p.add_argument("--results", default=RESULTS, help="the directory the *.jsonl go to")
+        p.add_argument("--port", type=int, default=None, help="every server on this port")
     args = parser.parse_args()
     RESULTS = os.path.abspath(args.results)
+    os.makedirs(RESULTS, exist_ok=True)
+    if args.port:
+        for server in PORT:
+            PORT[server] = args.port
     for binary in [LOAD, EDGE, GO]:
         if not os.path.exists(binary):
             raise SystemExit(f"missing {binary}; see README.md, Reproducing")

@@ -947,7 +947,7 @@ the VM frames they already are, and is re-entered where it stood on whichever
 worker continues it. Nothing above changes: the same monitor, the same queue,
 the same `yields` in `/_stats`. `crunch` runs about 3.2× faster, so at this
 section's 330 req/s the pool is rarely full and `hello`'s p99 is 3 ms with or
-without a slice; at three times the rate it is 42 ms unsliced and 14 ms with
+without a slice; at three times the rate it is 47 ms unsliced and 13.5 ms with
 the 2 ms slice. The numbers, against Go, are in
 [`compare/README.md`](compare/README.md#the-native-backend-adr-0085). The
 default stays `vm`, because the default build has no code generator.
