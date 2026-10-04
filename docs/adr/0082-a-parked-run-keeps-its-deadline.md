@@ -1,6 +1,6 @@
 # ADR 0082: A parked run keeps its deadline
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Refers to:
   [ADR 0080](0080-a-host-call-may-answer-pending.md), whose "What this does

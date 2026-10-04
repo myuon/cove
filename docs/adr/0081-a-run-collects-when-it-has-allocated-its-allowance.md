@@ -1,6 +1,6 @@
 # ADR 0081: A run collects when it has allocated its allowance
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 - Issue: [#572](https://github.com/myuon/cove/issues/572)
 - Refers to:

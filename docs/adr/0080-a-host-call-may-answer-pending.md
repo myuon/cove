@@ -1,6 +1,6 @@
 # ADR 0080: A host call may answer pending
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-03
 - Issue: [#571](https://github.com/myuon/cove/issues/571)
 - Refers to:
