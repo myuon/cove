@@ -10,7 +10,8 @@ use cove_edge::http::get;
 use cove_edge::json::{self, Json};
 use cove_edge::picture::{self, Began};
 use cove_edge::{
-    DeployOptions, Discipline, Isolates, KeepAlive, Latency, Recording, Server, ServerOptions,
+    Backend, DeployOptions, Discipline, Isolates, KeepAlive, Latency, Recording, Server,
+    ServerOptions,
 };
 
 fn start(timeline: Option<Recording>) -> Server {
@@ -43,6 +44,7 @@ fn start_with(
             },
             quiet: true,
             blocking_upstream: false,
+            backend: Backend::Vm,
         },
     })
     .expect("the server starts")

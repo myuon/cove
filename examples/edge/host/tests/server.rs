@@ -11,10 +11,14 @@ use std::time::{Duration, Instant};
 
 use cove_edge::http::get;
 use cove_edge::{
-    DeployOptions, Discipline, Isolates, KeepAlive, Latency, Server, ServerOptions, State,
+    Backend, DeployOptions, Discipline, Isolates, KeepAlive, Latency, Server, ServerOptions, State,
 };
 
 fn start(latency_ms: u64, workers: usize, isolates: Isolates) -> Server {
+    start_on(latency_ms, workers, isolates, Backend::Vm)
+}
+
+fn start_on(latency_ms: u64, workers: usize, isolates: Isolates, backend: Backend) -> Server {
     Server::start(ServerOptions {
         listen: "127.0.0.1:0".to_string(),
         workers,
@@ -32,6 +36,7 @@ fn start(latency_ms: u64, workers: usize, isolates: Isolates) -> Server {
             },
             quiet: true,
             blocking_upstream: false,
+            backend,
         },
     })
     .expect("the server starts")
@@ -184,4 +189,31 @@ fn a_parked_run_past_its_tenant_s_deadline_is_answered_504() {
     // The tenant is not hurt by it: the next request is answered.
     let (status, body) = get(server.addr, "/aggregate/?services=weather").unwrap();
     assert_eq!(status, 200, "{body}");
+}
+
+/// On the native backend (ADR 0085) a long `crunch` on the only worker is
+/// sliced inside its compiled loop while `hello` waits, and both answer what
+/// they answer on the VM. Nothing is timed: that the run yielded is read from
+/// `/_stats`, and the monitor asks only while `hello` is queued behind it.
+#[cfg(all(target_arch = "x86_64", unix))]
+#[test]
+fn a_native_isolate_is_sliced_inside_compiled_code() {
+    let server = start_on(1, 1, Isolates::PerRequest, Backend::Native);
+    let crunch = {
+        let addr = server.addr;
+        std::thread::spawn(move || get(addr, "/crunch/?n=200000").unwrap())
+    };
+    // Queue `hello` behind it until the monitor has asked it to yield: a
+    // request sent before `crunch` reached the worker would not wait.
+    while stat(&server, "yields") == 0 && !crunch.is_finished() {
+        assert_eq!(
+            get(server.addr, "/hello/?name=Native").unwrap(),
+            (200, "Hello, Native! (GET /)\n".to_string())
+        );
+    }
+    let (status, body) = crunch.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "17984 primes up to 200000, the largest 199999\n");
+    assert!(stat(&server, "yields") > 0, "crunch was sliced");
+    assert_eq!(stat(&server, "errors"), 0);
 }
