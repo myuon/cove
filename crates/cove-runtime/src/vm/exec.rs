@@ -44,6 +44,7 @@
 //! for and what the predecessor could not say.
 
 use std::any::Any;
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
 use std::time::Duration;
@@ -524,6 +525,32 @@ pub(crate) struct Machine<'a> {
     /// a machine that never parks — every machine but the few a scheduler
     /// drives — should not carry it inline.
     suspended: Option<Box<Suspended>>,
+    /// The flag an embedder raises to ask this run to give its thread up at
+    /// its next safepoint —
+    /// [ADR 0084](../../../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md).
+    ///
+    /// Installed by [`crate::OwnedVm`], once, and read only where the loop
+    /// has already decided a safepoint is due: one load per
+    /// [`SAFEPOINT_STRIDE`] instructions, and none on the path an
+    /// instruction takes. `None` for every other machine, a spawned task's
+    /// included, which is half of why a task never yields — the other half is
+    /// [`Machine::parking`].
+    yield_request: Option<Arc<AtomicBool>>,
+    /// When the run gave its thread up at a safepoint, while it is yielded.
+    ///
+    /// Written by [`Machine::offer_yield`] as the loop unwinds and taken by
+    /// [`Machine::resume_yielded`]. A yield has nothing else to keep: the
+    /// frames are the continuation, and the instruction the loop was about to
+    /// run is the one it runs on resuming.
+    yielded: Option<Instant>,
+    /// How long this run has spent yielded: neither its own work nor a host's,
+    /// so an entry's `cpu` leaves it out as it leaves out host wait.
+    descheduled: Duration,
+    /// Safepoints at which a yield was asked for and this run could not give
+    /// its thread up — inside a callback, beside a running task, below a
+    /// compiled frame, or under a debugger. The request stays raised, and
+    /// the run yields at the first safepoint where it can.
+    yields_declined: u64,
     /// Which task this machine is running, for a trace and for the way back
     /// a host is offered.
     task: u64,
@@ -945,6 +972,10 @@ impl<'a> Machine<'a> {
             nested: 0,
             parking: false,
             suspended: None,
+            yield_request: None,
+            yielded: None,
+            descheduled: Duration::ZERO,
+            yields_declined: 0,
             task: ENTRY_TASK,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1025,6 +1056,10 @@ impl<'a> Machine<'a> {
             nested: 0,
             parking: false,
             suspended: None,
+            yield_request: None,
+            yielded: None,
+            descheduled: Duration::ZERO,
+            yields_declined: 0,
             task,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1643,6 +1678,16 @@ impl<'a> Machine<'a> {
         std::thread::scope(|threads| {
             let mut running = self.no_handles();
             let mut answer = encoded::dispatch(self, code, budget, threads, &mut running, 0);
+            // A run that yielded left through the failure exit too, and has
+            // even less to do: it was quiescent, so nothing is running and no
+            // callback is below it, and what it has dispatched and not paid
+            // for stays pending — the safepoint it yielded at has not run
+            // yet, and runs when it resumes, so the run is charged in the
+            // strides an uninterrupted one is. A cell it holds stays held: the
+            // lock word names the task, not this thread (ADR 0084 §3).
+            if self.yielded.is_some() {
+                return Ok(Vec::new());
+            }
             // A run that parked left through the failure exit with a marker;
             // it has not failed, and nothing below has anything to do for it.
             if self.suspended.is_some() {
@@ -2253,12 +2298,6 @@ impl<'a> Machine<'a> {
         self.parking = on;
     }
 
-    /// Whether the run has parked at a host call and is waiting for
-    /// [`Machine::resume`].
-    pub(crate) fn is_parked(&self) -> bool {
-        self.suspended.is_some()
-    }
-
     /// The request the host handed back with its pending answer, while the
     /// embedder has not taken it.
     pub(crate) fn request(&self) -> Option<&(dyn Any + Send)> {
@@ -2268,6 +2307,150 @@ impl<'a> Machine<'a> {
     /// Takes the request out, leaving `None` in its place.
     pub(crate) fn take_request(&mut self) -> Option<Box<dyn Any + Send>> {
         self.suspended.as_mut()?.request.take()
+    }
+
+    /// Gives this machine the flag an embedder raises to ask it to yield.
+    pub(crate) fn install_yield_request(&mut self, flag: Arc<AtomicBool>) {
+        self.yield_request = Some(flag);
+    }
+
+    /// The flag [`Machine::install_yield_request`] installed, if one was.
+    pub(crate) fn yield_flag(&self) -> Option<&Arc<AtomicBool>> {
+        self.yield_request.as_ref()
+    }
+
+    /// Lowers the yield flag, if there is one: a request is for the run as it
+    /// is running now, and a run that has answered, parked or yielded has
+    /// given its thread up already.
+    pub(crate) fn clear_yield_request(&self) {
+        if let Some(flag) = &self.yield_request {
+            flag.store(false, atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Whether the embedder has asked this run to yield, read where a
+    /// safepoint is already due: a parkable run only, since no other has a
+    /// caller that could do anything with a yielded machine.
+    #[inline]
+    pub(super) fn yield_requested(&self) -> bool {
+        self.parking
+            && self
+                .yield_request
+                .as_ref()
+                .is_some_and(|flag| flag.load(atomic::Ordering::Relaxed))
+    }
+
+    /// Whether this run may give its thread up here: [`Machine::quiescent`]
+    /// less its `Shared` cell clause, and with no debugger installed.
+    ///
+    /// A held cell does not pin a run to its thread — its lock word holds the
+    /// task's tag since ADR 0080 §6 — and nothing else can be waiting for it,
+    /// because a cell is an object in this run's heap and no other task of
+    /// the run is running. So a long `lock` region is sliced like any other
+    /// code, rather than being the one place a run cannot be pre-empted
+    /// ([ADR 0084](../../../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md) §3).
+    /// A debugger is excluded because it was asked about the instruction the
+    /// loop stands at already, and resuming would ask it again.
+    fn yieldable(&self) -> bool {
+        self.reentry_depth == 0
+            && self.nested == 0
+            && self.debugger.is_none()
+            && !self.anything_running()
+    }
+
+    /// Gives the thread up at the safepoint the dispatch loop stands at, if
+    /// this run can: the request is honoured and lowered, and the marker the
+    /// loop leaves by is answered. Where it cannot, the request is left
+    /// raised for the next safepoint and this counts the refusal.
+    ///
+    /// Called with the frame synced to `pc` and the instruction at `pc`
+    /// already counted — the loop counts before it asks. The count is taken
+    /// back, so that the machine stands *before* that instruction and the
+    /// loop, entered again at the frame's `pc`, counts it once. Nothing else
+    /// moved: the safepoint's charge, cancellation check and collector poll
+    /// have not happened, and `next_check` still says one is due, so the
+    /// first thing a resumed run does is take the very safepoint it yielded
+    /// at. That is what makes the instruction count, the fuel charged at each
+    /// stride and the collections a yielded run makes the uninterrupted
+    /// run's.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn offer_yield(&mut self) -> Result<(), RuntimeError> {
+        if !self.yieldable() {
+            self.yields_declined += 1;
+            return Ok(());
+        }
+        self.clear_yield_request();
+        self.instructions -= 1;
+        self.yielded = Some(Instant::now());
+        // Never seen: `Machine::drive` reads `yielded` before the answer, as
+        // it reads `suspended` for a park, and for the same measured reason.
+        Err(RuntimeError::new("yielded at a safepoint"))
+    }
+
+    /// Whether the run gave its thread up at a safepoint and is waiting for
+    /// [`Machine::resume_yielded`].
+    pub(crate) fn is_yielded(&self) -> bool {
+        self.yielded.is_some()
+    }
+
+    /// Whether the run is waiting for the embedder either way: parked at a
+    /// host call, or yielded at a safepoint.
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspended.is_some() || self.yielded.is_some()
+    }
+
+    /// How long this run has spent yielded.
+    pub(crate) fn descheduled(&self) -> Duration {
+        self.descheduled
+    }
+
+    /// Safepoints at which a requested yield was declined.
+    pub(crate) fn yields_declined(&self) -> u64 {
+        self.yields_declined
+    }
+
+    /// Takes the yield back: the time it lasted is put down as descheduled.
+    fn unyield(&mut self) {
+        let since = self
+            .yielded
+            .take()
+            .expect("a run is resumed from a yield only while it is yielded");
+        self.descheduled += since.elapsed();
+    }
+
+    /// Runs a yielded run on from the safepoint it yielded at, on whatever
+    /// thread this is, until it answers, parks or yields again.
+    ///
+    /// # Panics
+    ///
+    /// If the run is not yielded. [`crate::YieldedVm`] is the only caller.
+    pub(crate) fn resume_yielded(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
+        self.unyield();
+        let code = self.code()?;
+        self.drive(&code, budget)
+    }
+
+    /// Ends a yielded run with `stopped`, as the safepoint it yielded at
+    /// would have ended it had the stop been seen there: the budget's error
+    /// at that instruction, with the call chain under it, its cells given
+    /// back and its pending fuel spent — [`Machine::drive`]'s way out for an
+    /// error, which is the way that safepoint's error would have left by.
+    pub(crate) fn stop_yielded(
+        &mut self,
+        stopped: Stopped,
+        budget: &Meter,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        self.unyield();
+        // The count `offer_yield` took back: the stopped safepoint is reached
+        // with the instruction after it counted, and charges it.
+        self.instructions += 1;
+        let frame = self.frames.last().expect("a yielded run is in a frame");
+        let span = self.span(frame.function, frame.pc as usize);
+        let error = self.attach_call_chain(budget.to_runtime_error(stopped).at(span));
+        self.give_cells_back(0);
+        self.spend_pending_fuel(budget);
+        Err(error)
     }
 
     /// Resumes a parked run with its host call's answer, on whatever thread

@@ -400,6 +400,7 @@ fn resume_elsewhere(mut parked: ParkedVm) -> (Result<Finished, ParkedVm>, Thread
         let outcome = match parked.resume(Ok(answer)) {
             Step::Answered(vm, answer) => Ok((shown(answer), vm.instructions())),
             Step::Parked(parked) => Err(parked),
+            Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
         };
         (outcome, std::thread::current().id())
     })
@@ -416,6 +417,7 @@ fn parked_run(world: &World, name: &str) -> (Finished, usize, usize) {
     let mut next = match world.vm().invoke_parkable("app", name, Vec::new()) {
         Step::Answered(vm, answer) => return ((shown(answer), vm.instructions()), 0, 0),
         Step::Parked(parked) => parked,
+        Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
     };
     loop {
         parks += 1;
@@ -628,6 +630,7 @@ fn an_answer_of_the_wrong_type_is_refused_at_the_call() {
                 .map(|v| v.to_string())
                 .map_err(|e| (e.message, e.rule.map(String::from))),
             Step::Parked(_) => panic!("a refused answer ends the run"),
+            Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
         },
     )
     .join()
@@ -651,6 +654,7 @@ fn a_failed_answer_fails_the_run() {
             assert!(error.span.is_some(), "blamed on the call");
         }
         Step::Parked(_) => panic!("a failed answer ends the run"),
+        Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
     }
 }
 
@@ -767,6 +771,7 @@ fn parked_runs_resumed_in_turn_are_charged_to_their_own_budgets() {
                 Vec::new(),
             ) {
                 Step::Parked(parked) => Some(parked),
+                Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
                 Step::Answered(_, answer) => panic!("the first get parks: {}", shown(answer)),
             }
         })
@@ -790,6 +795,7 @@ fn parked_runs_resumed_in_turn_are_charged_to_their_own_budgets() {
                     vm.meter().fuel_spent(),
                 )),
                 Step::Parked(parked) => Err(Box::new(parked)),
+                Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
             })
             .join()
             .unwrap();
@@ -916,6 +922,7 @@ fn parked_within(world: &World, budget: cove_runtime::Budget) -> ParkedVm {
         .invoke_within_parkable(budget, "app", "main", Vec::new())
     {
         Step::Parked(parked) => parked,
+        Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
         Step::Answered(_, answer) => panic!("the first get parks: {}", shown(answer)),
     }
 }

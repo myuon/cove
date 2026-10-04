@@ -726,6 +726,7 @@ impl Shared {
                     }
                 }
             }
+            Step::Yielded(_) => unreachable!("this server never asks a run to yield"),
         }
     }
 

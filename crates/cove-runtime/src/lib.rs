@@ -104,4 +104,4 @@ pub use vm::profile::{Cost, Profiler};
 pub use vm::report::{
     BoundaryReport, Decline, Emitted, HelperCalls, LibraryCalls, Outcome, Windows,
 };
-pub use vm::{OwnedVm, ParkedVm, PreparedProgram, Step, Vm};
+pub use vm::{OwnedVm, ParkedVm, PreparedProgram, Step, Vm, YieldRequest, YieldedVm};

@@ -257,7 +257,7 @@ fn main() {
                 parked,
                 since: Instant::now(),
             }),
-            Step::Answered(..) => panic!("the first call parks"),
+            Step::Answered(..) | Step::Yielded(_) => panic!("the first call parks"),
         }
     }
     let held = live() - before;
@@ -317,6 +317,7 @@ fn main() {
                             }
                             finished.fetch_add(1, Ordering::Relaxed);
                         }
+                        Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
                     }
                 }
                 resumes.lock().unwrap().extend(mine);
