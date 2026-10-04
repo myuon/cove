@@ -1,0 +1,35 @@
+use edge
+
+/// `crunch` asked with the query `pairs`, as the server hands it over.
+fn asking(pairs: Map<String, String>) -> edge.Response {
+  handle(edge.Request(method: "GET", path: "/", query: pairs, body: ""))
+}
+
+/// `crunch` asked for `?n=`.
+fn upTo(n: String) -> edge.Response {
+  asking(Map.of(MapEntry(key: "n", value: n)))
+}
+
+/// The counts are the known values of the prime-counting function.
+test fn countsThePrimesUpToN() -> Result<Unit, Error> {
+  assertEqual(upTo("2").body, "1 primes up to 2, the largest 2\n")?
+  assertEqual(upTo("100").body, "25 primes up to 100, the largest 97\n")?
+  assertEqual(upTo("10000").body, "1229 primes up to 10000, the largest 9973\n")?
+  Ok(())
+}
+
+/// With no `?n=`, it counts to 20000.
+test fn countsToTwentyThousandByDefault() -> Result<Unit, Error> {
+  let answer = asking(Map.of())
+  assertEqual(answer.status, 200)?
+  assertEqual(answer.body, "2262 primes up to 20000, the largest 19997\n")?
+  Ok(())
+}
+
+/// A size that is not a number, or is out of range, is the client's error.
+test fn aSizeOutOfRangeIsRefused() -> Result<Unit, Error> {
+  assertEqual(upTo("lots").status, 400)?
+  assertEqual(upTo("1").status, 400)?
+  assertEqual(upTo("200001").status, 400)?
+  Ok(())
+}
