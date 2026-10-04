@@ -19,9 +19,16 @@ while [ "$r" -le "$rounds" ]; do
     name=${spec%%=*}; bin=${spec#*=}
     for plan in 50:500:64 10000:30000:4000; do
       rate=${plan%%:*}; rest=${plan#*:}; requests=${rest%%:*}; conc=${rest#*:}
+      if curl -s -o /dev/null http://127.0.0.1:8799/_stats; then
+        echo "timer_runs.sh: port 8799 is already answered by another process" >&2
+        exit 1
+      fi
       "$bin" --quiet --port 8799 --workers 4 --timeline "$tmp/t.json" > /dev/null 2>&1 &
       pid=$!
-      until curl -s -o /dev/null http://127.0.0.1:8799/_stats; do sleep 0.1; done
+      until curl -s -o /dev/null http://127.0.0.1:8799/_stats; do
+        kill -0 "$pid" 2>/dev/null || { echo "timer_runs.sh: $bin exited" >&2; exit 1; }
+        sleep 0.1
+      done
       curl -s -o /dev/null http://127.0.0.1:8799/aggregate/
       curl -s -o /dev/null "http://127.0.0.1:8799/_timeline?reset"
       before=$(sysctl -n vm.loadavg | awk '{print $2}')
