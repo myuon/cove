@@ -29,6 +29,17 @@ deadline = "5s"
 # requests do not share these eight calls.
 max_host_calls = 8
 
+# The same code as `aggregate`, under a tenant's tighter deadline: a deadline
+# is policy, and this one is the server's to enforce. A run parked at an
+# upstream that has not answered when its deadline passes is cancelled and
+# answered 504 (ADR 0082) — `?services=weather,hang` asks one that answers
+# after an hour.
+[run.impatient]
+entry = "aggregate.handle"
+allow = ["upstream"]
+deadline = "300ms"
+max_host_calls = 8
+
 # Over-reaching on purpose: its entry requires `upstream` as well.
 [run.greedy]
 entry = "greedy.handle"

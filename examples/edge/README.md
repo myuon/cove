@@ -35,6 +35,7 @@ cove-edge: deploying tenants from …/examples/edge/tenants
   counter    requires [kv, log]  granted [kv, log]  deployed: 218 fn, checked in 16.0 ms, prepared in 1.2 ms, isolate 3 us
   greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
   hello      requires [-]  granted [-]  deployed: 220 fn, checked in 13.9 ms, prepared in 0.9 ms, isolate 3 us
+  impatient  requires [upstream]  granted [upstream]  deployed: 221 fn, checked in 11.9 ms, prepared in 2.0 ms, isolate 2 us
 
 listening on http://127.0.0.1:8787 — 4 worker thread(s), a fresh isolate per request, upstream latency 20..100 ms (parked), open-file limit 1048576
 
@@ -51,7 +52,7 @@ and nothing else. `hello` requires nothing: building an `edge.Response`
 initializes a type the `edge` schema declares, which is not a call into the
 host (see [what was awkward](#what-was-awkward) item 2). `greedy` asks
 for `upstream` without being granted it, so it is refused **at deploy** and the
-other three start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
+other four start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
 `--pool N` (resident isolates instead of fresh ones), `--blocking-upstream`
 (the control: `upstream.get` sleeps on the worker instead of parking),
 `--quiet` (no `log.info` lines).
@@ -63,6 +64,7 @@ other three start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
 | [`hello`](tenants/hello/hello.cove) | — | pure; `/hello/spin` loops until the tenant's `fuel = 2000000` stops it |
 | [`counter`](tenants/counter/counter.cove) | `kv`, `log` | state that outlives the isolate lives behind a capability, per tenant |
 | [`aggregate`](tenants/aggregate/aggregate.cove) | `upstream` | three slow calls in a row; the run parks at each; `max_host_calls = 8` per request, however many are in flight |
+| `impatient` | `upstream` | `aggregate`'s code under `deadline = "300ms"`: a request parked at an upstream that has not answered by then is cancelled and answered 504 |
 | [`greedy`](tenants/greedy/greedy.cove) | `kv` | over-reaches for `upstream` and is not deployed |
 
 The contract is a host module, [`edge`](host/src/hosts.rs), whose schema
@@ -133,6 +135,31 @@ fail-db: unavailable (`fail-db` is down)
 news: parked isolates resume on any thread [45 ms]
 ```
 
+`impatient` is the same code under `deadline = "300ms"`, and the `hang`
+service answers after an hour. The run parks at `hang` and its deadline keeps
+running; the timer wakes at the deadline rather than the answer, cancels the
+parked run (`ParkedVm::cancel`, [ADR
+0082](../../docs/adr/0082-a-parked-run-keeps-its-deadline.md)), and the
+request is answered 504 with the runtime's own stop — the same error a running
+run past its deadline reports — instead of holding its socket for an hour:
+
+```console
+$ curl -i 'http://localhost:8787/impatient/?services=weather,hang'
+HTTP/1.1 504 Gateway Timeout
+Content-Type: text/plain
+Content-Length: 306
+Connection: close
+
+error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+```
+
+`/_stats` counts these as `timeouts`.
+
 The refused tenant, and one that does not exist:
 
 ```console
@@ -167,6 +194,7 @@ $ curl -s http://localhost:8787/_stats
   "parked": 0,
   "parked_peak": 1000,
   "parks": 30006,
+  "timeouts": 0,
   "queue_peak": 53,
   "live_isolates": 0,
   "pooled_isolates": 0,
@@ -337,13 +365,18 @@ The most useful output of this demo. Ordered by how much each cost.
    Cove — only to call `Transfer::of` on it (`host/src/server.rs`, in
    `run_timer`), because `Transfer` has no constructors for `Ok`/`Err` and its
    `Enum` case would mean guessing the builtin's type name.
-8. **A parked run's deadline does not fire while it is parked.** `Limits`'
-   deadline bounds the run "parked time included" (`OwnedVm::invoke_within_parkable`'s
-   documentation), but nothing wakes a parked run to stop it: the deadline is
-   noticed at the next safepoint after a resume. An upstream that never
-   answers holds the run, and its socket, until the embedder gives up on it
-   itself; this server's simulated upstream always answers, so it does not
-   implement that.
+8. **A parked run's deadline did not fire while it was parked — fixed
+   ([ADR 0082](../../docs/adr/0082-a-parked-run-keeps-its-deadline.md)).**
+   `Limits`' deadline bounds the run "parked time included", but nothing woke
+   a parked run to stop it, there was no way to end one but dropping it, and
+   a run resumed past its deadline went on until its next safepoint read the
+   clock. Now `ParkedVm::time_left` says what the deadline leaves,
+   `ParkedVm::cancel` ends the run with the budget's own stop and a trace
+   that says so, and `resume` past the deadline fails at once. The runtime
+   still wakes nothing: the timer thread here holds every parked run until
+   the earlier of its answer and its deadline (`Timed::wake`,
+   `host/src/server.rs`), and a run whose deadline came first is cancelled
+   and answered 504 — see `impatient` above.
 9. **Small things in the language.** `"\n".join(lines) + "\n"` is refused
    (`+` is not defined for `String`) and wants a `let` and an interpolation;
    `kv.get` then `kv.put` is a lost update under concurrency, which is the
@@ -364,4 +397,6 @@ deploy.
 - A real outbound fetch: `upstream` is a timer heap that answers after the
   chosen latency. Swapping it for an I/O thread doing real requests changes
   `run_timer` and nothing else.
-- Timeouts for parked runs (item 8).
+- Telling the upstream a timed-out request's call is no longer wanted: the
+  timer drops it, and a real upstream would want its request aborted, which
+  is between the host and the embedder (ADR 0082 leaves it there).

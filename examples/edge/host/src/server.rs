@@ -17,6 +17,12 @@
 //! threads: the pool is `--workers` threads however many requests are
 //! waiting.
 //!
+//! The timer also holds each parked run's deadline. A run's deadline is
+//! wall-clock and keeps running while it is parked, and the runtime does not
+//! wake a parked run by itself (ADR 0082), so the timer wakes at the earlier
+//! of the answer's due time and the deadline, and a run whose deadline came
+//! first is cancelled — `ParkedVm::cancel` — and answered 504.
+//!
 //! None of this is the runtime's. ADR 0080 gives a run that can be parked
 //! and resumed anywhere; when and where is this file's policy.
 
@@ -29,10 +35,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use cove_diag::render;
+use cove_runtime::trace::RunOutcome;
 use cove_runtime::{Budget, OwnedVm, ParkedVm, RuntimeError, Step, Transfer, Value};
 
 use crate::deploy::{deploy_all, request_value, DeployOptions, Deployed, State, Tenant};
-use crate::hosts::{upstream_answer, UpstreamCall};
+use crate::hosts::{upstream_answer, upstream_latency, UpstreamCall};
 use crate::http::{read_request, Request, Response};
 use crate::os;
 
@@ -161,17 +168,32 @@ enum Job {
 
 struct Resume {
     parked: ParkedVm,
-    answer: Result<Transfer, RuntimeError>,
+    /// The host call's answer, or `None` for a run whose deadline came
+    /// before its answer did, which is cancelled instead.
+    answer: Option<Result<Transfer, RuntimeError>>,
     flight: Flight,
 }
 
 /// A parked run waiting on the simulated upstream.
 struct Timed {
     due: Instant,
+    /// When the run's deadline passes, read off the run as it parked.
+    deadline: Option<Instant>,
     service: String,
     latency: Duration,
     parked: ParkedVm,
     flight: Flight,
+}
+
+impl Timed {
+    /// When the timer has to look at this run again: its answer, or its
+    /// deadline if that comes first.
+    fn wake(&self) -> Instant {
+        match self.deadline {
+            Some(deadline) => deadline.min(self.due),
+            None => self.due,
+        }
+    }
 }
 
 struct Shared {
@@ -220,7 +242,13 @@ impl Shared {
                         flight,
                     } = *resume;
                     self.stats.parked.fetch_sub(1, Ordering::Relaxed);
-                    let step = parked.resume(answer);
+                    let step = match answer {
+                        Some(answer) => parked.resume(answer),
+                        None => {
+                            let (vm, error) = parked.cancel();
+                            Step::Answered(vm, Err(error))
+                        }
+                    };
                     self.settle(step, flight);
                 }
             }
@@ -308,12 +336,21 @@ impl Shared {
             Step::Answered(vm, outcome) => {
                 let tenant = &self.tenants[flight.tenant];
                 let deployed = tenant.deployed().expect("only a deployed tenant runs");
+                // A run stopped by its deadline is the gateway's timeout, not
+                // the tenant's bug: 504, with the runtime's own diagnostic.
+                let status = match &outcome {
+                    Err(error) if error.outcome == RunOutcome::Deadline => {
+                        self.stats.timeouts.fetch_add(1, Ordering::Relaxed);
+                        504
+                    }
+                    _ => 500,
+                };
                 let response = match outcome {
                     Ok(value) => response_of(&value),
                     Err(error) => Err(render(&deployed.sources, &error.to_diagnostic())),
                 };
                 let failed = response.is_err();
-                let response = response.unwrap_or_else(|why| Response::text(500, why));
+                let response = response.unwrap_or_else(|why| Response::text(status, why));
                 self.stats.heap_bytes.record(vm.heap_words() * 8);
                 if let Isolates::Pooled(cap) = self.options.isolates {
                     let mut pool = self.pools[flight.tenant].lock().unwrap();
@@ -335,9 +372,12 @@ impl Shared {
                 match request.map(|r| r.downcast::<UpstreamCall>()) {
                     Some(Ok(call)) => {
                         let seed = self.calls.fetch_add(1, Ordering::Relaxed);
-                        let latency = self.options.deploy.latency.pick(seed);
+                        let latency = upstream_latency(&call.service)
+                            .unwrap_or_else(|| self.options.deploy.latency.pick(seed));
+                        let now = Instant::now();
                         let timed = Timed {
-                            due: Instant::now() + latency,
+                            due: now + latency,
+                            deadline: parked.time_left().map(|left| now + left),
                             service: call.service,
                             latency,
                             parked,
@@ -353,7 +393,7 @@ impl Shared {
                         ));
                         self.push(Job::Resume(Box::new(Resume {
                             parked,
-                            answer,
+                            answer: Some(answer),
                             flight,
                         })));
                     }
@@ -378,7 +418,7 @@ impl Shared {
             match received {
                 Ok(first) => {
                     for item in std::iter::once(first).chain(timed.try_iter()) {
-                        due.push(Reverse((item.due, next)));
+                        due.push(Reverse((item.wake(), next)));
                         waiting.insert(next, item);
                         next += 1;
                     }
@@ -402,6 +442,16 @@ impl Shared {
             {
                 let mut queue = self.queue.lock().unwrap();
                 for item in ready {
+                    // Woken by its deadline rather than its answer: the run
+                    // is cancelled on a worker, and the answer never comes.
+                    if item.deadline.is_some_and(|deadline| deadline <= now) {
+                        queue.push_back(Job::Resume(Box::new(Resume {
+                            parked: item.parked,
+                            answer: None,
+                            flight: item.flight,
+                        })));
+                        continue;
+                    }
                     // The answer is built here, as a `Value` and then a
                     // `Transfer`, because the parked run is resumed on some
                     // other thread and a `Value` cannot go there.
@@ -409,9 +459,9 @@ impl Shared {
                         Ok(text) => Value::ok(Value::string(text)),
                         Err(message) => Value::err(Value::error(message)),
                     };
-                    let answer = Transfer::of(&value).map_err(|unsafe_value| {
+                    let answer = Some(Transfer::of(&value).map_err(|unsafe_value| {
                         RuntimeError::new(format!("{} is not task-safe", unsafe_value.type_name))
-                    });
+                    }));
                     queue.push_back(Job::Resume(Box::new(Resume {
                         parked: item.parked,
                         answer,
@@ -469,7 +519,7 @@ impl Shared {
             "{{\n  \"uptime_s\": {:.1},\n  \"workers\": {},\n  \"isolates\": \"{}\",\n  \
              \"served\": {},\n  \"errors\": {},\n  \"in_flight\": {in_flight},\n  \
              \"in_flight_peak\": {},\n  \"parked\": {},\n  \"parked_peak\": {},\n  \
-             \"parks\": {},\n  \"queue_peak\": {},\n  \"live_isolates\": {},\n  \
+             \"parks\": {},\n  \"timeouts\": {},\n  \"queue_peak\": {},\n  \"live_isolates\": {},\n  \
              \"pooled_isolates\": {pooled},\n  \"isolate_heap_bytes\": {{\"mean\": {heap_mean}, \"max\": {heap_max}}},\n  \
              \"latency_ms\": {{\"p50\": {:.2}, \"p99\": {:.2}, \"max\": {:.2}, \"samples\": {samples}}},\n  \
              \"rss_kib\": {},\n  \"peak_rss_kib\": {},\n  \"tenants\": {{\n{}\n  }}\n}}\n",
@@ -482,6 +532,7 @@ impl Shared {
             stats.parked.load(Ordering::Relaxed),
             stats.parked_peak.load(Ordering::Relaxed),
             stats.parks.load(Ordering::Relaxed),
+            stats.timeouts.load(Ordering::Relaxed),
             stats.queue_peak.load(Ordering::Relaxed),
             in_flight + pooled as i64,
             p50.as_secs_f64() * 1e3,
@@ -527,6 +578,8 @@ struct Stats {
     parked: AtomicI64,
     parked_peak: AtomicI64,
     parks: AtomicU64,
+    /// Requests whose run was stopped by its deadline and answered 504.
+    timeouts: AtomicU64,
     queue_peak: AtomicI64,
     /// Served and failed, per tenant.
     per_tenant: Vec<(AtomicU64, AtomicU64)>,
@@ -547,6 +600,7 @@ impl Stats {
             parked: AtomicI64::new(0),
             parked_peak: AtomicI64::new(0),
             parks: AtomicU64::new(0),
+            timeouts: AtomicU64::new(0),
             queue_peak: AtomicI64::new(0),
             per_tenant: tenants
                 .iter()

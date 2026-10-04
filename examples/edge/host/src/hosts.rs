@@ -263,6 +263,13 @@ pub fn upstream_answer(service: &str, latency: Duration) -> Result<String, Strin
     Ok(format!("{body} [{} ms]", latency.as_millis()))
 }
 
+/// A service whose latency is its own rather than the server's `--latency`:
+/// `hang` answers after an hour, which is an upstream that never answers as
+/// far as any request can tell. It is what a tenant's deadline is for.
+pub fn upstream_latency(service: &str) -> Option<Duration> {
+    (service == "hang").then(|| Duration::from_secs(3600))
+}
+
 /// Blocking calls made, which seeds each one's latency.
 static CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -287,7 +294,10 @@ impl HostApi for Upstream {
     /// asleep for the whole of the latency.
     fn call(&self, _op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let service = args[0].as_str().expect("checked by the boundary");
-        let latency = self.latency.pick(CALLS.fetch_add(1, Ordering::Relaxed));
+        // `hang` sleeps its hour here too: a host that blocks its worker
+        // cannot be timed out, which is the control's point.
+        let latency = upstream_latency(service)
+            .unwrap_or_else(|| self.latency.pick(CALLS.fetch_add(1, Ordering::Relaxed)));
         std::thread::sleep(latency);
         Ok(match upstream_answer(service, latency) {
             Ok(text) => Value::ok(Value::string(text)),
