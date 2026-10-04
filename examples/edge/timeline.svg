@@ -1,0 +1,1942 @@
+<svg class="edge-timeline" xmlns="http://www.w3.org/2000/svg" width="1240" height="1574" viewBox="0 0 1240 1574" role="img" aria-label="Request timeline: 313 requests on 4 workers">
+<style>
+:root, svg.edge-timeline { --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --grid:#e7e6e1; --wait:#a9a8a2; --critical:#e34948; --other:#8a8984; --c0:#2a78d6; --c1:#eb6834; --c2:#1baf7a; --c3:#eda100; --c4:#e87ba4; }
+@media (prefers-color-scheme: dark) { :root, svg.edge-timeline { --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --grid:#33332f; --wait:#6f6e68; --critical:#e34948; --other:#8a8984; --c0:#3987e5; --c1:#d95926; --c2:#199e70; --c3:#c98500; --c4:#d55181; } }
+.t0 { fill: var(--c0); } .l0 { stroke: var(--c0); }
+.t1 { fill: var(--c1); } .l1 { stroke: var(--c1); }
+.t2 { fill: var(--c2); } .l2 { stroke: var(--c2); }
+.t3 { fill: var(--c3); } .l3 { stroke: var(--c3); }
+.t4 { fill: var(--c4); } .l4 { stroke: var(--c4); }
+.tx { fill: var(--other); } .lx { stroke: var(--other); }
+svg.edge-timeline text { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; fill: var(--ink2); font-size: 11px; }
+svg.edge-timeline .ink { fill: var(--ink); }
+svg.edge-timeline .head { fill: var(--ink); font-size: 13px; font-weight: 600; }
+svg.edge-timeline .title { fill: var(--ink); font-size: 16px; font-weight: 600; }
+svg.edge-timeline .tick { font-variant-numeric: tabular-nums; }
+svg.edge-timeline .grid { stroke: var(--grid); stroke-width: 1; }
+svg.edge-timeline .wait { stroke: var(--wait); stroke-width: 1; }
+svg.edge-timeline .bg { fill: var(--surface); }
+svg.edge-timeline .moved { fill: var(--ink); stroke: var(--surface); stroke-width: 1; }
+svg.edge-timeline .crit { fill: var(--critical); font-weight: 700; }
+svg.edge-timeline .critline { stroke: var(--critical); stroke-width: 2; stroke-linecap: round; }
+svg.edge-timeline .hover { fill: var(--ink); opacity: 0.06; }
+</style>
+<rect class="bg" x="0" y="0" width="1240" height="1574"/>
+<text class="title" x="92" y="26">cove-edge: where each request ran, parked and resumed</text>
+<text class="ink" x="92" y="48">313 requests · 4 workers · 28 parked at most at once · 134 of 182 resumes on a different worker (74%) · 13 timeouts · latency p50 0.1 ms, p99 342.0 ms</text>
+<rect class="t0" x="92.0" y="64.0" width="12" height="12" rx="2"/><text class="ink" x="109.0" y="74.0">hello</text>
+<rect class="t1" x="157.0" y="64.0" width="12" height="12" rx="2"/><text class="ink" x="174.0" y="74.0">counter</text>
+<rect class="t2" x="236.0" y="64.0" width="12" height="12" rx="2"/><text class="ink" x="253.0" y="74.0">aggregate</text>
+<rect class="t3" x="329.0" y="64.0" width="12" height="12" rx="2"/><text class="ink" x="346.0" y="74.0">proxy</text>
+<rect class="t4" x="394.0" y="64.0" width="12" height="12" rx="2"/><text class="ink" x="411.0" y="74.0">impatient</text>
+<g transform="translate(499.0,74.0)"><line class="wait" x1="0" y1="-4" x2="16" y2="-4" stroke-width="1"/><text class="ink" x="21" y="0">waiting for a worker</text></g>
+<g transform="translate(657.0,74.0)"><line style="stroke: var(--ink2)" x1="0" y1="-4" x2="16" y2="-4" stroke-width="2"/><text class="ink" x="21" y="0">parked (tenant colour)</text></g>
+<g transform="translate(827.4,74.0)"><path class="moved" d="M8,-8.5 L12.5,-4 L8,0.5 L3.5,-4 Z"/><text class="ink" x="21" y="0">resumed on another worker</text></g>
+<g transform="translate(1016.4,74.0)"><path class="critline" d="M4,-8 L12,0 M4,0 L12,-8"/><text class="ink" x="21" y="0">504 timeout</text></g>
+<line class="grid" x1="92.0" y1="122.0" x2="92.0" y2="1544.0"/>
+<text class="tick" x="92.0" y="254.0" text-anchor="middle">0</text>
+<line class="grid" x1="274.7" y1="122.0" x2="274.7" y2="1544.0"/>
+<text class="tick" x="274.7" y="254.0" text-anchor="middle">200</text>
+<line class="grid" x1="457.4" y1="122.0" x2="457.4" y2="1544.0"/>
+<text class="tick" x="457.4" y="254.0" text-anchor="middle">400</text>
+<line class="grid" x1="640.0" y1="122.0" x2="640.0" y2="1544.0"/>
+<text class="tick" x="640.0" y="254.0" text-anchor="middle">600</text>
+<line class="grid" x1="822.7" y1="122.0" x2="822.7" y2="1544.0"/>
+<text class="tick" x="822.7" y="254.0" text-anchor="middle">800</text>
+<line class="grid" x1="1005.4" y1="122.0" x2="1005.4" y2="1544.0"/>
+<text class="tick" x="1005.4" y="254.0" text-anchor="middle">1000</text>
+<text class="tick" x="84.0" y="254.0" text-anchor="end">ms</text>
+<text class="head" x="92" y="118.0">Worker threads: a bar wherever one is running a tenant's isolate</text>
+<text x="84.0" y="143.0" text-anchor="end">worker 0</text>
+<line class="grid" x1="92" y1="150.0" x2="1170" y2="150.0"/>
+<rect class="t0" x="96.81" y="129.0" width="1.50" height="18.0"/>
+<rect class="t3" x="105.92" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="110.41" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="120.25" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="128.98" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="138.09" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="147.20" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="153.88" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="162.88" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="172.13" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="176.35" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="183.64" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="190.45" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="196.98" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="204.18" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="206.47" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="215.53" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="218.12" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="227.22" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="236.21" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="245.06" y="129.0" width="1.20" height="18.0"/>
+<rect class="t3" x="248.26" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="256.51" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="261.82" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="261.84" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="266.25" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="274.18" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="279.53" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="284.22" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="293.12" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="298.28" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="299.84" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="309.27" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="316.56" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="318.84" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="327.84" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="336.69" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="338.69" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="338.71" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="343.21" y="129.0" width="1.00" height="18.0"/>
+<rect class="t4" x="345.97" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="350.09" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="357.99" y="129.0" width="1.50" height="18.0"/>
+<rect class="t3" x="361.81" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="369.25" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="373.27" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="383.06" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="386.89" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="386.90" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="391.07" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="400.44" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="407.73" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="412.36" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="416.78" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="426.02" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="430.09" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="432.57" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="437.34" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="444.47" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="453.57" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="455.98" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="460.19" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="467.10" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="472.06" y="129.0" width="1.50" height="18.0"/>
+<rect class="t3" x="477.91" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="478.09" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="485.39" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="494.34" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="503.70" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="507.86" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="507.89" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="510.07" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="520.22" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="526.05" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="530.48" y="129.0" width="1.29" height="18.0"/>
+<rect class="t4" x="533.77" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="540.43" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="541.87" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="549.06" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="559.10" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="567.67" y="129.0" width="1.00" height="18.0"/>
+<rect class="t4" x="568.96" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="568.98" y="129.0" width="1.49" height="18.0"/>
+<rect class="t0" x="572.47" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="578.74" y="129.0" width="1.50" height="18.0"/>
+<rect class="t3" x="583.43" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="585.52" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="594.39" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="603.65" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="606.65" y="129.0" width="1.00" height="18.0"/>
+<rect class="t4" x="609.46" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="615.34" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="618.15" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="622.42" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="629.12" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="635.53" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="644.19" y="129.0" width="1.00" height="18.0"/>
+<rect class="t4" x="646.89" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="654.46" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="657.36" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="662.50" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="670.27" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="674.83" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="676.64" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="685.94" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="694.99" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="695.06" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="698.00" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="702.90" y="129.0" width="1.30" height="18.0"/>
+<rect class="t0" x="706.20" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="713.77" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="717.86" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="722.29" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="731.56" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="741.27" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="746.20" y="129.0" width="1.00" height="18.0"/>
+<rect class="t1" x="747.53" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="750.36" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="751.86" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="757.12" y="129.0" width="1.00" height="18.0"/>
+<rect class="t0" x="757.20" y="129.0" width="1.50" height="18.0"/>
+<rect class="t0" x="764.14" y="129.0" width="1.50" height="18.0"/>
+<rect class="t1" x="770.63" y="129.0" width="1.50" height="18.0"/>
+<rect class="t2" x="876.48" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="876.53" y="129.0" width="1.00" height="18.0"/>
+<rect class="t2" x="876.54" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="934.68" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="973.17" y="129.0" width="1.50" height="18.0"/>
+<rect class="t4" x="1169.92" y="129.0" width="1.50" height="18.0"/>
+<text x="84.0" y="169.0" text-anchor="end">worker 1</text>
+<line class="grid" x1="92" y1="176.0" x2="1170" y2="176.0"/>
+<rect class="t0" x="92.04" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="101.19" y="155.0" width="1.50" height="18.0"/>
+<rect class="t3" x="106.14" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="114.97" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="124.10" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="133.28" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="142.93" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="152.45" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="153.88" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="161.08" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="170.37" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="174.61" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="181.14" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="188.21" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="195.03" y="155.0" width="1.50" height="18.0"/>
+<rect class="t3" x="204.15" y="155.0" width="1.00" height="18.0"/>
+<rect class="t3" x="204.33" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="213.13" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="218.01" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="224.97" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="233.55" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="243.32" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="243.38" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="248.09" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="249.82" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="259.11" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="261.82" y="155.0" width="1.00" height="18.0"/>
+<rect class="t0" x="261.85" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="270.10" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="275.46" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="281.91" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="289.30" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="293.17" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="299.79" y="155.0" width="1.00" height="18.0"/>
+<rect class="t0" x="302.26" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="311.50" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="316.56" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="320.50" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="329.54" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="338.65" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="338.69" y="155.0" width="1.11" height="18.0"/>
+<rect class="t0" x="341.79" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="345.42" y="155.0" width="1.00" height="18.0"/>
+<rect class="t0" x="347.72" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="355.05" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="361.75" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="366.57" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="370.63" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="380.24" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="386.89" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="386.90" y="155.0" width="1.00" height="18.0"/>
+<rect class="t0" x="388.88" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="398.70" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="407.68" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="409.53" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="415.59" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="423.20" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="428.02" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="432.57" y="155.0" width="1.00" height="18.0"/>
+<rect class="t0" x="434.52" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="442.09" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="448.88" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="453.62" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="456.00" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="462.89" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="467.10" y="155.0" width="1.00" height="18.0"/>
+<rect class="t0" x="468.78" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="476.79" y="155.0" width="1.00" height="18.0"/>
+<rect class="t3" x="478.16" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="487.12" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="496.75" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="506.46" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="507.88" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="517.41" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="525.99" y="155.0" width="1.36" height="18.0"/>
+<rect class="t0" x="529.36" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="533.45" y="155.0" width="1.00" height="18.0"/>
+<rect class="t0" x="535.39" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="541.87" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="547.55" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="555.60" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="564.88" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="568.94" y="155.0" width="1.00" height="18.0"/>
+<rect class="t4" x="568.97" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="573.89" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="578.88" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="583.47" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="587.72" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="596.80" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="605.82" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="606.66" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="610.86" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="616.87" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="622.42" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="631.44" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="638.94" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="644.19" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="646.89" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="654.49" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="658.37" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="663.66" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="672.65" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="681.74" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="690.26" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="695.06" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="697.15" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="702.90" y="155.0" width="1.00" height="18.0"/>
+<rect class="t1" x="702.95" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="707.53" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="716.19" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="721.50" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="729.22" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="738.46" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="746.20" y="155.0" width="1.50" height="18.0"/>
+<rect class="t3" x="750.32" y="155.0" width="1.00" height="18.0"/>
+<rect class="t3" x="750.50" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="754.76" y="155.0" width="1.50" height="18.0"/>
+<rect class="t1" x="758.76" y="155.0" width="1.50" height="18.0"/>
+<rect class="t0" x="766.11" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="772.74" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="782.45" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="876.48" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="876.51" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="876.51" y="155.0" width="1.00" height="18.0"/>
+<rect class="t2" x="876.54" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="934.68" y="155.0" width="1.50" height="18.0"/>
+<rect class="t4" x="973.16" y="155.0" width="1.50" height="18.0"/>
+<rect class="t2" x="1169.92" y="155.0" width="1.50" height="18.0"/>
+<text x="84.0" y="195.0" text-anchor="end">worker 2</text>
+<line class="grid" x1="92" y1="202.0" x2="1170" y2="202.0"/>
+<rect class="t1" x="94.60" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="103.73" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="108.14" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="117.50" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="126.59" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="136.33" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="144.56" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="153.85" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="158.39" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="168.44" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="172.67" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="179.45" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="186.39" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="193.14" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="202.20" y="181.0" width="1.00" height="18.0"/>
+<rect class="t0" x="204.28" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="211.39" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="218.01" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="222.18" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="231.63" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="240.37" y="181.0" width="1.02" height="18.0"/>
+<rect class="t2" x="243.39" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="248.20" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="252.31" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="261.82" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="261.84" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="269.04" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="275.37" y="181.0" width="1.50" height="18.0"/>
+<rect class="t3" x="281.77" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="286.09" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="293.17" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="299.84" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="307.92" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="316.52" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="316.56" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="323.26" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="331.88" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="338.69" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="338.70" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="343.21" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="345.97" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="350.08" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="360.08" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="363.61" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="370.59" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="376.07" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="384.46" y="181.0" width="1.00" height="18.0"/>
+<rect class="t0" x="387.01" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="393.68" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="403.59" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="407.74" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="415.14" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="419.00" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="427.68" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="432.52" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="437.30" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="442.15" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="451.66" y="181.0" width="1.00" height="18.0"/>
+<rect class="t4" x="453.62" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="457.38" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="464.73" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="467.11" y="181.0" width="1.00" height="18.0"/>
+<rect class="t3" x="467.33" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="473.53" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="477.96" y="181.0" width="1.00" height="18.0"/>
+<rect class="t0" x="480.63" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="490.60" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="498.49" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="507.82" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="507.87" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="507.89" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="507.90" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="515.41" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="523.92" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="526.05" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="533.45" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="537.39" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="541.87" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="551.72" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="560.13" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="568.94" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="568.95" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="568.96" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="568.97" y="181.0" width="1.00" height="18.0"/>
+<rect class="t0" x="569.26" y="181.0" width="1.50" height="18.0"/>
+<rect class="t3" x="578.70" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="580.91" y="181.0" width="1.00" height="18.0"/>
+<rect class="t3" x="583.62" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="592.81" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="601.52" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="606.65" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="612.67" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="619.54" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="622.43" y="181.0" width="1.00" height="18.0"/>
+<rect class="t1" x="625.16" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="631.48" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="640.33" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="644.61" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="651.68" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="656.79" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="662.50" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="667.86" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="674.83" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="678.79" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="688.69" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="695.06" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="702.89" y="181.0" width="1.00" height="18.0"/>
+<rect class="t4" x="702.95" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="704.33" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="708.96" y="181.0" width="1.50" height="18.0"/>
+<rect class="t3" x="717.82" y="181.0" width="1.00" height="18.0"/>
+<rect class="t3" x="718.05" y="181.0" width="1.50" height="18.0"/>
+<rect class="t0" x="727.63" y="181.0" width="1.50" height="18.0"/>
+<rect class="t1" x="736.24" y="181.0" width="1.50" height="18.0"/>
+<rect class="t3" x="746.16" y="181.0" width="1.00" height="18.0"/>
+<rect class="t0" x="746.33" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="750.36" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="751.83" y="181.0" width="1.00" height="18.0"/>
+<rect class="t0" x="754.81" y="181.0" width="1.50" height="18.0"/>
+<rect class="t4" x="761.38" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="766.44" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="772.81" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="782.33" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="876.48" y="181.0" width="1.00" height="18.0"/>
+<rect class="t4" x="876.54" y="181.0" width="1.50" height="18.0"/>
+<rect class="t2" x="934.68" y="181.0" width="1.00" height="18.0"/>
+<rect class="t2" x="934.73" y="181.0" width="1.50" height="18.0"/>
+<text x="84.0" y="221.0" text-anchor="end">worker 3</text>
+<line class="grid" x1="92" y1="228.0" x2="1170" y2="228.0"/>
+<rect class="t1" x="99.21" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="106.06" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="113.09" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="121.90" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="130.84" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="140.13" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="150.12" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="156.65" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="165.40" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="172.18" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="176.50" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="183.68" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="193.02" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="199.43" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="204.19" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="208.81" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="218.00" y="207.0" width="1.00" height="18.0"/>
+<rect class="t0" x="220.16" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="229.89" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="239.01" y="207.0" width="1.50" height="18.0"/>
+<rect class="t3" x="248.05" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="248.26" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="255.17" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="261.82" y="207.0" width="1.00" height="18.0"/>
+<rect class="t0" x="263.72" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="272.82" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="277.77" y="207.0" width="1.50" height="18.0"/>
+<rect class="t3" x="281.96" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="290.65" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="295.37" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="305.14" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="313.88" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="316.56" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="325.36" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="335.34" y="207.0" width="1.35" height="18.0"/>
+<rect class="t2" x="338.69" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="343.18" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="345.97" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="353.07" y="207.0" width="1.50" height="18.0"/>
+<rect class="t3" x="361.55" y="207.0" width="1.00" height="18.0"/>
+<rect class="t0" x="363.67" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="370.63" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="377.53" y="207.0" width="1.50" height="18.0"/>
+<rect class="t3" x="386.83" y="207.0" width="1.00" height="18.0"/>
+<rect class="t3" x="387.06" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="396.01" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="404.98" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="407.74" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="415.19" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="421.04" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="427.73" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="432.57" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="437.34" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="439.69" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="446.39" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="453.62" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="460.15" y="207.0" width="1.50" height="18.0"/>
+<rect class="t3" x="467.04" y="207.0" width="1.00" height="18.0"/>
+<rect class="t0" x="467.25" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="472.35" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="477.96" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="483.03" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="492.03" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="500.81" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="507.86" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="507.88" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="507.90" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="512.60" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="521.60" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="526.05" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="532.90" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="534.25" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="541.82" y="207.0" width="1.09" height="18.0"/>
+<rect class="t0" x="544.91" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="553.20" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="563.46" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="568.94" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="568.96" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="568.98" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="577.29" y="207.0" width="1.00" height="18.0"/>
+<rect class="t3" x="578.92" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="583.57" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="589.98" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="599.54" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="606.65" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="614.46" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="616.87" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="622.35" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="626.54" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="634.21" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="643.08" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="646.85" y="207.0" width="1.00" height="18.0"/>
+<rect class="t0" x="649.27" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="654.55" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="661.40" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="665.20" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="674.78" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="684.56" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="693.35" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="695.06" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="699.35" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="702.90" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="705.82" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="711.27" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="717.86" y="207.0" width="1.00" height="18.0"/>
+<rect class="t0" x="717.99" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="724.85" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="733.88" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="742.81" y="207.0" width="1.39" height="18.0"/>
+<rect class="t2" x="746.20" y="207.0" width="1.00" height="18.0"/>
+<rect class="t3" x="746.38" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="750.45" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="751.83" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="754.76" y="207.0" width="1.00" height="18.0"/>
+<rect class="t4" x="757.13" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="761.41" y="207.0" width="1.50" height="18.0"/>
+<rect class="t0" x="769.28" y="207.0" width="1.50" height="18.0"/>
+<rect class="t1" x="774.72" y="207.0" width="1.04" height="18.0"/>
+<rect class="t2" x="777.76" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="876.48" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="876.52" y="207.0" width="1.50" height="18.0"/>
+<rect class="t4" x="934.68" y="207.0" width="1.00" height="18.0"/>
+<rect class="t2" x="934.73" y="207.0" width="1.50" height="18.0"/>
+<rect class="t2" x="973.16" y="207.0" width="1.50" height="18.0"/>
+<text class="head" x="92" y="272.0">Requests, in arrival order: bar = running, thin line = parked, grey = waiting for a worker</text>
+<line class="wait" x1="92.02" y1="284.00" x2="92.04" y2="284.00" stroke-width="1"/>
+<rect class="t0" x="92.04" y="282.50" width="1.50" height="3.0"/>
+<line class="wait" x1="94.58" y1="288.00" x2="94.60" y2="288.00" stroke-width="1"/>
+<rect class="t1" x="94.60" y="286.50" width="1.50" height="3.0"/>
+<line class="wait" x1="96.79" y1="292.00" x2="96.81" y2="292.00" stroke-width="1"/>
+<rect class="t0" x="96.81" y="290.50" width="1.50" height="3.0"/>
+<line class="wait" x1="99.19" y1="296.00" x2="99.21" y2="296.00" stroke-width="1"/>
+<rect class="t1" x="99.21" y="294.50" width="1.50" height="3.0"/>
+<line class="wait" x1="101.18" y1="300.00" x2="101.19" y2="300.00" stroke-width="1"/>
+<line class="l2" x1="101.22" y1="300.00" x2="172.18" y2="300.00" stroke-width="1"/>
+<line class="wait" x1="172.18" y1="300.00" x2="172.18" y2="300.00" stroke-width="1"/>
+<line class="l2" x1="172.20" y1="300.00" x2="261.81" y2="300.00" stroke-width="1"/>
+<line class="wait" x1="261.81" y1="300.00" x2="261.84" y2="300.00" stroke-width="1"/>
+<line class="l2" x1="261.85" y1="300.00" x2="338.68" y2="300.00" stroke-width="1"/>
+<line class="wait" x1="338.68" y1="300.00" x2="338.69" y2="300.00" stroke-width="1"/>
+<rect class="t2" x="101.19" y="298.50" width="1.50" height="3.0"/>
+<rect class="t2" x="172.18" y="298.50" width="1.50" height="3.0"/>
+<rect class="t2" x="261.84" y="298.50" width="1.50" height="3.0"/>
+<rect class="t2" x="338.69" y="298.50" width="1.50" height="3.0"/>
+<path class="moved" d="M172.18,297.50 L174.68,300.00 L172.18,302.50 L169.68,300.00 Z"/>
+<path class="moved" d="M261.84,297.50 L264.34,300.00 L261.84,302.50 L259.34,300.00 Z"/>
+<path class="moved" d="M338.69,297.50 L341.19,300.00 L338.69,302.50 L336.19,300.00 Z"/>
+<text x="344.7" y="304.0">aggregate</text>
+<line class="wait" x1="103.71" y1="304.00" x2="103.73" y2="304.00" stroke-width="1"/>
+<rect class="t0" x="103.73" y="302.50" width="1.50" height="3.0"/>
+<line class="wait" x1="105.90" y1="308.00" x2="105.92" y2="308.00" stroke-width="1"/>
+<line class="l3" x1="105.96" y1="308.00" x2="106.13" y2="308.00" stroke-width="1"/>
+<line class="wait" x1="106.13" y1="308.00" x2="106.14" y2="308.00" stroke-width="1"/>
+<rect class="t3" x="105.92" y="306.50" width="1.50" height="3.0"/>
+<rect class="t3" x="106.14" y="306.50" width="1.50" height="3.0"/>
+<path class="moved" d="M106.14,305.50 L108.64,308.00 L106.14,310.50 L103.64,308.00 Z"/>
+<line class="wait" x1="106.04" y1="312.00" x2="106.06" y2="312.00" stroke-width="1"/>
+<rect class="t0" x="106.06" y="310.50" width="1.50" height="3.0"/>
+<line class="wait" x1="108.13" y1="316.00" x2="108.14" y2="316.00" stroke-width="1"/>
+<line class="l2" x1="108.16" y1="316.00" x2="153.87" y2="316.00" stroke-width="1"/>
+<line class="wait" x1="153.87" y1="316.00" x2="153.88" y2="316.00" stroke-width="1"/>
+<line class="l2" x1="153.89" y1="316.00" x2="204.18" y2="316.00" stroke-width="1"/>
+<line class="wait" x1="204.18" y1="316.00" x2="204.18" y2="316.00" stroke-width="1"/>
+<line class="l2" x1="204.19" y1="316.00" x2="243.36" y2="316.00" stroke-width="1"/>
+<line class="wait" x1="243.36" y1="316.00" x2="243.39" y2="316.00" stroke-width="1"/>
+<rect class="t2" x="108.14" y="314.50" width="1.50" height="3.0"/>
+<rect class="t2" x="153.88" y="314.50" width="1.50" height="3.0"/>
+<rect class="t2" x="204.18" y="314.50" width="1.50" height="3.0"/>
+<rect class="t2" x="243.39" y="314.50" width="1.50" height="3.0"/>
+<path class="moved" d="M153.88,313.50 L156.38,316.00 L153.88,318.50 L151.38,316.00 Z"/>
+<path class="moved" d="M204.18,313.50 L206.68,316.00 L204.18,318.50 L201.68,316.00 Z"/>
+<path class="moved" d="M243.39,313.50 L245.89,316.00 L243.39,318.50 L240.89,316.00 Z"/>
+<line class="wait" x1="110.40" y1="320.00" x2="110.41" y2="320.00" stroke-width="1"/>
+<rect class="t0" x="110.41" y="318.50" width="1.50" height="3.0"/>
+<line class="wait" x1="113.04" y1="324.00" x2="113.09" y2="324.00" stroke-width="1"/>
+<rect class="t0" x="113.09" y="322.50" width="1.50" height="3.0"/>
+<line class="wait" x1="114.95" y1="328.00" x2="114.97" y2="328.00" stroke-width="1"/>
+<rect class="t1" x="114.97" y="326.50" width="1.50" height="3.0"/>
+<line class="wait" x1="117.49" y1="332.00" x2="117.50" y2="332.00" stroke-width="1"/>
+<rect class="t0" x="117.50" y="330.50" width="1.50" height="3.0"/>
+<line class="wait" x1="120.21" y1="336.00" x2="120.25" y2="336.00" stroke-width="1"/>
+<rect class="t0" x="120.25" y="334.50" width="1.50" height="3.0"/>
+<line class="wait" x1="121.88" y1="340.00" x2="121.90" y2="340.00" stroke-width="1"/>
+<line class="l4" x1="121.96" y1="340.00" x2="153.87" y2="340.00" stroke-width="1"/>
+<line class="wait" x1="153.87" y1="340.00" x2="153.88" y2="340.00" stroke-width="1"/>
+<line class="l4" x1="153.90" y1="340.00" x2="176.33" y2="340.00" stroke-width="1"/>
+<line class="wait" x1="176.33" y1="340.00" x2="176.35" y2="340.00" stroke-width="1"/>
+<rect class="t4" x="121.90" y="338.50" width="1.50" height="3.0"/>
+<rect class="t4" x="153.88" y="338.50" width="1.50" height="3.0"/>
+<rect class="t4" x="176.35" y="338.50" width="1.50" height="3.0"/>
+<path class="moved" d="M153.88,337.50 L156.38,340.00 L153.88,342.50 L151.38,340.00 Z"/>
+<text x="182.4" y="344.0">impatient</text>
+<line class="wait" x1="124.09" y1="344.00" x2="124.10" y2="344.00" stroke-width="1"/>
+<rect class="t0" x="124.10" y="342.50" width="1.50" height="3.0"/>
+<line class="wait" x1="126.58" y1="348.00" x2="126.59" y2="348.00" stroke-width="1"/>
+<rect class="t0" x="126.59" y="346.50" width="1.50" height="3.0"/>
+<line class="wait" x1="128.96" y1="352.00" x2="128.98" y2="352.00" stroke-width="1"/>
+<line class="l4" x1="129.00" y1="352.00" x2="204.18" y2="352.00" stroke-width="1"/>
+<line class="wait" x1="204.18" y1="352.00" x2="204.19" y2="352.00" stroke-width="1"/>
+<line class="l4" x1="204.20" y1="352.00" x2="407.73" y2="352.00" stroke-width="1"/>
+<line class="wait" x1="407.73" y1="352.00" x2="407.74" y2="352.00" stroke-width="1"/>
+<rect class="t4" x="128.98" y="350.50" width="1.50" height="3.0"/>
+<rect class="t4" x="204.19" y="350.50" width="1.50" height="3.0"/>
+<rect class="t4" x="407.74" y="350.50" width="1.50" height="3.0"/>
+<path class="moved" d="M204.19,349.50 L206.69,352.00 L204.19,354.50 L201.69,352.00 Z"/>
+<path class="critline" d="M405.27,349.50 L410.27,354.50 M405.27,354.50 L410.27,349.50"/>
+<text class="ink" font-weight="600" x="414.8" y="356.0">504</text>
+<line class="wait" x1="130.82" y1="356.00" x2="130.84" y2="356.00" stroke-width="1"/>
+<line class="l2" x1="130.86" y1="356.00" x2="172.66" y2="356.00" stroke-width="1"/>
+<line class="wait" x1="172.66" y1="356.00" x2="172.67" y2="356.00" stroke-width="1"/>
+<line class="l2" x1="172.68" y1="356.00" x2="217.96" y2="356.00" stroke-width="1"/>
+<line class="wait" x1="217.96" y1="356.00" x2="218.01" y2="356.00" stroke-width="1"/>
+<line class="l2" x1="218.07" y1="356.00" x2="316.55" y2="356.00" stroke-width="1"/>
+<line class="wait" x1="316.55" y1="356.00" x2="316.56" y2="356.00" stroke-width="1"/>
+<rect class="t2" x="130.84" y="354.50" width="1.50" height="3.0"/>
+<rect class="t2" x="172.67" y="354.50" width="1.50" height="3.0"/>
+<rect class="t2" x="218.01" y="354.50" width="1.50" height="3.0"/>
+<rect class="t2" x="316.56" y="354.50" width="1.50" height="3.0"/>
+<path class="moved" d="M172.67,353.50 L175.17,356.00 L172.67,358.50 L170.17,356.00 Z"/>
+<path class="moved" d="M218.01,353.50 L220.51,356.00 L218.01,358.50 L215.51,356.00 Z"/>
+<path class="moved" d="M316.56,353.50 L319.06,356.00 L316.56,358.50 L314.06,356.00 Z"/>
+<line class="wait" x1="133.27" y1="360.00" x2="133.28" y2="360.00" stroke-width="1"/>
+<line class="l2" x1="133.30" y1="360.00" x2="192.99" y2="360.00" stroke-width="1"/>
+<line class="wait" x1="192.99" y1="360.00" x2="193.02" y2="360.00" stroke-width="1"/>
+<line class="l2" x1="193.07" y1="360.00" x2="261.80" y2="360.00" stroke-width="1"/>
+<line class="wait" x1="261.80" y1="360.00" x2="261.82" y2="360.00" stroke-width="1"/>
+<line class="l2" x1="261.83" y1="360.00" x2="338.68" y2="360.00" stroke-width="1"/>
+<line class="wait" x1="338.68" y1="360.00" x2="338.69" y2="360.00" stroke-width="1"/>
+<rect class="t2" x="133.28" y="358.50" width="1.50" height="3.0"/>
+<rect class="t2" x="193.02" y="358.50" width="1.50" height="3.0"/>
+<rect class="t2" x="261.82" y="358.50" width="1.50" height="3.0"/>
+<rect class="t2" x="338.69" y="358.50" width="1.50" height="3.0"/>
+<path class="moved" d="M193.02,357.50 L195.52,360.00 L193.02,362.50 L190.52,360.00 Z"/>
+<path class="moved" d="M261.82,357.50 L264.32,360.00 L261.82,362.50 L259.32,360.00 Z"/>
+<path class="moved" d="M338.69,357.50 L341.19,360.00 L338.69,362.50 L336.19,360.00 Z"/>
+<line class="wait" x1="136.32" y1="364.00" x2="136.33" y2="364.00" stroke-width="1"/>
+<rect class="t0" x="136.33" y="362.50" width="1.50" height="3.0"/>
+<line class="wait" x1="138.08" y1="368.00" x2="138.09" y2="368.00" stroke-width="1"/>
+<rect class="t0" x="138.09" y="366.50" width="1.50" height="3.0"/>
+<line class="wait" x1="140.12" y1="372.00" x2="140.13" y2="372.00" stroke-width="1"/>
+<rect class="t0" x="140.13" y="370.50" width="1.50" height="3.0"/>
+<line class="wait" x1="142.92" y1="376.00" x2="142.93" y2="376.00" stroke-width="1"/>
+<rect class="t0" x="142.93" y="374.50" width="1.50" height="3.0"/>
+<line class="wait" x1="144.54" y1="380.00" x2="144.56" y2="380.00" stroke-width="1"/>
+<rect class="t1" x="144.56" y="378.50" width="1.50" height="3.0"/>
+<line class="wait" x1="147.19" y1="384.00" x2="147.20" y2="384.00" stroke-width="1"/>
+<rect class="t0" x="147.20" y="382.50" width="1.50" height="3.0"/>
+<line class="wait" x1="150.11" y1="388.00" x2="150.12" y2="388.00" stroke-width="1"/>
+<rect class="t0" x="150.12" y="386.50" width="1.50" height="3.0"/>
+<line class="wait" x1="152.44" y1="392.00" x2="152.45" y2="392.00" stroke-width="1"/>
+<rect class="t0" x="152.45" y="390.50" width="1.50" height="3.0"/>
+<line class="wait" x1="153.83" y1="396.00" x2="153.85" y2="396.00" stroke-width="1"/>
+<line class="l2" x1="153.86" y1="396.00" x2="217.95" y2="396.00" stroke-width="1"/>
+<line class="wait" x1="217.95" y1="396.00" x2="218.00" y2="396.00" stroke-width="1"/>
+<line class="l2" x1="218.04" y1="396.00" x2="261.81" y2="396.00" stroke-width="1"/>
+<line class="wait" x1="261.81" y1="396.00" x2="261.84" y2="396.00" stroke-width="1"/>
+<line class="l2" x1="261.84" y1="396.00" x2="338.68" y2="396.00" stroke-width="1"/>
+<line class="wait" x1="338.68" y1="396.00" x2="338.69" y2="396.00" stroke-width="1"/>
+<rect class="t2" x="153.85" y="394.50" width="1.50" height="3.0"/>
+<rect class="t2" x="218.00" y="394.50" width="1.50" height="3.0"/>
+<rect class="t2" x="261.84" y="394.50" width="1.50" height="3.0"/>
+<rect class="t2" x="338.69" y="394.50" width="1.50" height="3.0"/>
+<path class="moved" d="M218.00,393.50 L220.50,396.00 L218.00,398.50 L215.50,396.00 Z"/>
+<path class="moved" d="M261.84,393.50 L264.34,396.00 L261.84,398.50 L259.34,396.00 Z"/>
+<path class="moved" d="M338.69,393.50 L341.19,396.00 L338.69,398.50 L336.19,396.00 Z"/>
+<line class="wait" x1="156.64" y1="400.00" x2="156.65" y2="400.00" stroke-width="1"/>
+<line class="l4" x1="156.68" y1="400.00" x2="183.68" y2="400.00" stroke-width="1"/>
+<line class="wait" x1="183.68" y1="400.00" x2="183.68" y2="400.00" stroke-width="1"/>
+<line class="l4" x1="183.69" y1="400.00" x2="432.56" y2="400.00" stroke-width="1"/>
+<line class="wait" x1="432.56" y1="400.00" x2="432.57" y2="400.00" stroke-width="1"/>
+<rect class="t4" x="156.65" y="398.50" width="1.50" height="3.0"/>
+<rect class="t4" x="183.68" y="398.50" width="1.50" height="3.0"/>
+<rect class="t4" x="432.57" y="398.50" width="1.50" height="3.0"/>
+<path class="critline" d="M430.09,397.50 L435.09,402.50 M430.09,402.50 L435.09,397.50"/>
+<text class="ink" font-weight="600" x="439.6" y="404.0">504</text>
+<line class="wait" x1="158.38" y1="404.00" x2="158.39" y2="404.00" stroke-width="1"/>
+<rect class="t0" x="158.39" y="402.50" width="1.50" height="3.0"/>
+<line class="wait" x1="160.98" y1="408.00" x2="161.08" y2="408.00" stroke-width="1"/>
+<rect class="t0" x="161.08" y="406.50" width="1.50" height="3.0"/>
+<line class="wait" x1="162.86" y1="412.00" x2="162.88" y2="412.00" stroke-width="1"/>
+<line class="l2" x1="162.91" y1="412.00" x2="261.81" y2="412.00" stroke-width="1"/>
+<line class="wait" x1="261.81" y1="412.00" x2="261.82" y2="412.00" stroke-width="1"/>
+<line class="l2" x1="261.84" y1="412.00" x2="293.17" y2="412.00" stroke-width="1"/>
+<line class="wait" x1="293.17" y1="412.00" x2="293.17" y2="412.00" stroke-width="1"/>
+<line class="l2" x1="293.18" y1="412.00" x2="338.68" y2="412.00" stroke-width="1"/>
+<line class="wait" x1="338.68" y1="412.00" x2="338.70" y2="412.00" stroke-width="1"/>
+<rect class="t2" x="162.88" y="410.50" width="1.50" height="3.0"/>
+<rect class="t2" x="261.82" y="410.50" width="1.50" height="3.0"/>
+<rect class="t2" x="293.17" y="410.50" width="1.50" height="3.0"/>
+<rect class="t2" x="338.70" y="410.50" width="1.50" height="3.0"/>
+<path class="moved" d="M293.17,409.50 L295.67,412.00 L293.17,414.50 L290.67,412.00 Z"/>
+<path class="moved" d="M338.70,409.50 L341.20,412.00 L338.70,414.50 L336.20,412.00 Z"/>
+<line class="wait" x1="165.39" y1="416.00" x2="165.40" y2="416.00" stroke-width="1"/>
+<rect class="t0" x="165.40" y="414.50" width="1.50" height="3.0"/>
+<line class="wait" x1="168.39" y1="420.00" x2="168.44" y2="420.00" stroke-width="1"/>
+<rect class="t0" x="168.44" y="418.50" width="1.50" height="3.0"/>
+<line class="wait" x1="170.32" y1="424.00" x2="170.37" y2="424.00" stroke-width="1"/>
+<line class="l2" x1="170.41" y1="424.00" x2="243.37" y2="424.00" stroke-width="1"/>
+<line class="wait" x1="243.37" y1="424.00" x2="243.38" y2="424.00" stroke-width="1"/>
+<line class="l2" x1="243.39" y1="424.00" x2="274.18" y2="424.00" stroke-width="1"/>
+<line class="wait" x1="274.18" y1="424.00" x2="274.18" y2="424.00" stroke-width="1"/>
+<line class="l2" x1="274.19" y1="424.00" x2="338.68" y2="424.00" stroke-width="1"/>
+<line class="wait" x1="338.68" y1="424.00" x2="338.71" y2="424.00" stroke-width="1"/>
+<rect class="t2" x="170.37" y="422.50" width="1.50" height="3.0"/>
+<rect class="t2" x="243.38" y="422.50" width="1.50" height="3.0"/>
+<rect class="t2" x="274.18" y="422.50" width="1.50" height="3.0"/>
+<rect class="t2" x="338.71" y="422.50" width="1.50" height="3.0"/>
+<path class="moved" d="M274.18,421.50 L276.68,424.00 L274.18,426.50 L271.68,424.00 Z"/>
+<line class="wait" x1="172.12" y1="428.00" x2="172.13" y2="428.00" stroke-width="1"/>
+<line class="l4" x1="172.17" y1="428.00" x2="248.25" y2="428.00" stroke-width="1"/>
+<line class="wait" x1="248.25" y1="428.00" x2="248.26" y2="428.00" stroke-width="1"/>
+<line class="l4" x1="248.27" y1="428.00" x2="453.61" y2="428.00" stroke-width="1"/>
+<line class="wait" x1="453.61" y1="428.00" x2="453.62" y2="428.00" stroke-width="1"/>
+<rect class="t4" x="172.13" y="426.50" width="1.50" height="3.0"/>
+<rect class="t4" x="248.26" y="426.50" width="1.50" height="3.0"/>
+<rect class="t4" x="453.62" y="426.50" width="1.50" height="3.0"/>
+<path class="moved" d="M248.26,425.50 L250.76,428.00 L248.26,430.50 L245.76,428.00 Z"/>
+<path class="critline" d="M451.13,425.50 L456.13,430.50 M451.13,430.50 L456.13,425.50"/>
+<text class="ink" font-weight="600" x="460.6" y="432.0">504</text>
+<line class="wait" x1="174.60" y1="432.00" x2="174.61" y2="432.00" stroke-width="1"/>
+<line class="l2" x1="174.64" y1="432.00" x2="248.08" y2="432.00" stroke-width="1"/>
+<line class="wait" x1="248.08" y1="432.00" x2="248.09" y2="432.00" stroke-width="1"/>
+<line class="l2" x1="248.09" y1="432.00" x2="275.37" y2="432.00" stroke-width="1"/>
+<line class="wait" x1="275.37" y1="432.00" x2="275.37" y2="432.00" stroke-width="1"/>
+<line class="l2" x1="275.38" y1="432.00" x2="363.60" y2="432.00" stroke-width="1"/>
+<line class="wait" x1="363.60" y1="432.00" x2="363.61" y2="432.00" stroke-width="1"/>
+<rect class="t2" x="174.61" y="430.50" width="1.50" height="3.0"/>
+<rect class="t2" x="248.09" y="430.50" width="1.50" height="3.0"/>
+<rect class="t2" x="275.37" y="430.50" width="1.50" height="3.0"/>
+<rect class="t2" x="363.61" y="430.50" width="1.50" height="3.0"/>
+<path class="moved" d="M275.37,429.50 L277.87,432.00 L275.37,434.50 L272.87,432.00 Z"/>
+<line class="wait" x1="176.49" y1="436.00" x2="176.50" y2="436.00" stroke-width="1"/>
+<line class="l2" x1="176.52" y1="436.00" x2="217.96" y2="436.00" stroke-width="1"/>
+<line class="wait" x1="217.96" y1="436.00" x2="218.01" y2="436.00" stroke-width="1"/>
+<line class="l2" x1="218.04" y1="436.00" x2="261.81" y2="436.00" stroke-width="1"/>
+<line class="wait" x1="261.81" y1="436.00" x2="261.82" y2="436.00" stroke-width="1"/>
+<line class="l2" x1="261.84" y1="436.00" x2="299.83" y2="436.00" stroke-width="1"/>
+<line class="wait" x1="299.83" y1="436.00" x2="299.84" y2="436.00" stroke-width="1"/>
+<rect class="t2" x="176.50" y="434.50" width="1.50" height="3.0"/>
+<rect class="t2" x="218.01" y="434.50" width="1.50" height="3.0"/>
+<rect class="t2" x="261.82" y="434.50" width="1.50" height="3.0"/>
+<rect class="t2" x="299.84" y="434.50" width="1.50" height="3.0"/>
+<path class="moved" d="M218.01,433.50 L220.51,436.00 L218.01,438.50 L215.51,436.00 Z"/>
+<path class="moved" d="M261.82,433.50 L264.32,436.00 L261.82,438.50 L259.32,436.00 Z"/>
+<path class="moved" d="M299.84,433.50 L302.34,436.00 L299.84,438.50 L297.34,436.00 Z"/>
+<line class="wait" x1="179.43" y1="440.00" x2="179.45" y2="440.00" stroke-width="1"/>
+<rect class="t0" x="179.45" y="438.50" width="1.50" height="3.0"/>
+<line class="wait" x1="181.13" y1="444.00" x2="181.14" y2="444.00" stroke-width="1"/>
+<rect class="t0" x="181.14" y="442.50" width="1.50" height="3.0"/>
+<line class="wait" x1="183.63" y1="448.00" x2="183.64" y2="448.00" stroke-width="1"/>
+<line class="l4" x1="183.67" y1="448.00" x2="261.81" y2="448.00" stroke-width="1"/>
+<line class="wait" x1="261.81" y1="448.00" x2="261.82" y2="448.00" stroke-width="1"/>
+<line class="l4" x1="261.84" y1="448.00" x2="345.96" y2="448.00" stroke-width="1"/>
+<line class="wait" x1="345.96" y1="448.00" x2="345.97" y2="448.00" stroke-width="1"/>
+<rect class="t4" x="183.64" y="446.50" width="1.50" height="3.0"/>
+<rect class="t4" x="261.82" y="446.50" width="1.50" height="3.0"/>
+<rect class="t4" x="345.97" y="446.50" width="1.50" height="3.0"/>
+<path class="moved" d="M261.82,445.50 L264.32,448.00 L261.82,450.50 L259.32,448.00 Z"/>
+<line class="wait" x1="186.37" y1="452.00" x2="186.39" y2="452.00" stroke-width="1"/>
+<rect class="t0" x="186.39" y="450.50" width="1.50" height="3.0"/>
+<line class="wait" x1="188.20" y1="456.00" x2="188.21" y2="456.00" stroke-width="1"/>
+<rect class="t0" x="188.21" y="454.50" width="1.50" height="3.0"/>
+<line class="wait" x1="190.43" y1="460.00" x2="190.45" y2="460.00" stroke-width="1"/>
+<rect class="t1" x="190.45" y="458.50" width="1.50" height="3.0"/>
+<line class="wait" x1="193.13" y1="464.00" x2="193.14" y2="464.00" stroke-width="1"/>
+<rect class="t0" x="193.14" y="462.50" width="1.50" height="3.0"/>
+<line class="wait" x1="195.01" y1="468.00" x2="195.03" y2="468.00" stroke-width="1"/>
+<rect class="t0" x="195.03" y="466.50" width="1.50" height="3.0"/>
+<line class="wait" x1="196.97" y1="472.00" x2="196.98" y2="472.00" stroke-width="1"/>
+<rect class="t0" x="196.98" y="470.50" width="1.50" height="3.0"/>
+<line class="wait" x1="199.37" y1="476.00" x2="199.43" y2="476.00" stroke-width="1"/>
+<rect class="t1" x="199.43" y="474.50" width="1.50" height="3.0"/>
+<line class="wait" x1="202.18" y1="480.00" x2="202.20" y2="480.00" stroke-width="1"/>
+<rect class="t1" x="202.20" y="478.50" width="1.50" height="3.0"/>
+<line class="wait" x1="204.14" y1="484.00" x2="204.15" y2="484.00" stroke-width="1"/>
+<line class="l3" x1="204.17" y1="484.00" x2="204.33" y2="484.00" stroke-width="1"/>
+<line class="wait" x1="204.33" y1="484.00" x2="204.33" y2="484.00" stroke-width="1"/>
+<rect class="t3" x="204.15" y="482.50" width="1.50" height="3.0"/>
+<rect class="t3" x="204.33" y="482.50" width="1.50" height="3.0"/>
+<line class="wait" x1="204.27" y1="488.00" x2="204.28" y2="488.00" stroke-width="1"/>
+<rect class="t0" x="204.28" y="486.50" width="1.50" height="3.0"/>
+<line class="wait" x1="206.46" y1="492.00" x2="206.47" y2="492.00" stroke-width="1"/>
+<rect class="t0" x="206.47" y="490.50" width="1.50" height="3.0"/>
+<line class="wait" x1="208.77" y1="496.00" x2="208.81" y2="496.00" stroke-width="1"/>
+<rect class="t0" x="208.81" y="494.50" width="1.50" height="3.0"/>
+<line class="wait" x1="211.38" y1="500.00" x2="211.39" y2="500.00" stroke-width="1"/>
+<rect class="t0" x="211.39" y="498.50" width="1.50" height="3.0"/>
+<line class="wait" x1="213.11" y1="504.00" x2="213.13" y2="504.00" stroke-width="1"/>
+<rect class="t0" x="213.13" y="502.50" width="1.50" height="3.0"/>
+<line class="wait" x1="215.48" y1="508.00" x2="215.53" y2="508.00" stroke-width="1"/>
+<rect class="t0" x="215.53" y="506.50" width="1.50" height="3.0"/>
+<line class="wait" x1="218.11" y1="512.00" x2="218.12" y2="512.00" stroke-width="1"/>
+<rect class="t0" x="218.12" y="510.50" width="1.50" height="3.0"/>
+<line class="wait" x1="220.14" y1="516.00" x2="220.16" y2="516.00" stroke-width="1"/>
+<rect class="t0" x="220.16" y="514.50" width="1.50" height="3.0"/>
+<line class="wait" x1="222.16" y1="520.00" x2="222.18" y2="520.00" stroke-width="1"/>
+<rect class="t0" x="222.18" y="518.50" width="1.50" height="3.0"/>
+<line class="wait" x1="224.95" y1="524.00" x2="224.97" y2="524.00" stroke-width="1"/>
+<rect class="t0" x="224.97" y="522.50" width="1.50" height="3.0"/>
+<line class="wait" x1="227.20" y1="528.00" x2="227.22" y2="528.00" stroke-width="1"/>
+<line class="l2" x1="227.25" y1="528.00" x2="293.17" y2="528.00" stroke-width="1"/>
+<line class="wait" x1="293.17" y1="528.00" x2="293.17" y2="528.00" stroke-width="1"/>
+<line class="l2" x1="293.19" y1="528.00" x2="345.96" y2="528.00" stroke-width="1"/>
+<line class="wait" x1="345.96" y1="528.00" x2="345.97" y2="528.00" stroke-width="1"/>
+<line class="l2" x1="345.98" y1="528.00" x2="407.73" y2="528.00" stroke-width="1"/>
+<line class="wait" x1="407.73" y1="528.00" x2="407.74" y2="528.00" stroke-width="1"/>
+<rect class="t2" x="227.22" y="526.50" width="1.50" height="3.0"/>
+<rect class="t2" x="293.17" y="526.50" width="1.50" height="3.0"/>
+<rect class="t2" x="345.97" y="526.50" width="1.50" height="3.0"/>
+<rect class="t2" x="407.74" y="526.50" width="1.50" height="3.0"/>
+<path class="moved" d="M293.17,525.50 L295.67,528.00 L293.17,530.50 L290.67,528.00 Z"/>
+<line class="wait" x1="229.83" y1="532.00" x2="229.89" y2="532.00" stroke-width="1"/>
+<rect class="t1" x="229.89" y="530.50" width="1.50" height="3.0"/>
+<line class="wait" x1="231.60" y1="536.00" x2="231.63" y2="536.00" stroke-width="1"/>
+<line class="l2" x1="231.68" y1="536.00" x2="316.55" y2="536.00" stroke-width="1"/>
+<line class="wait" x1="316.55" y1="536.00" x2="316.56" y2="536.00" stroke-width="1"/>
+<line class="l2" x1="316.57" y1="536.00" x2="386.88" y2="536.00" stroke-width="1"/>
+<line class="wait" x1="386.88" y1="536.00" x2="386.89" y2="536.00" stroke-width="1"/>
+<line class="l2" x1="386.90" y1="536.00" x2="460.19" y2="536.00" stroke-width="1"/>
+<line class="wait" x1="460.19" y1="536.00" x2="460.19" y2="536.00" stroke-width="1"/>
+<rect class="t2" x="231.63" y="534.50" width="1.50" height="3.0"/>
+<rect class="t2" x="316.56" y="534.50" width="1.50" height="3.0"/>
+<rect class="t2" x="386.89" y="534.50" width="1.50" height="3.0"/>
+<rect class="t2" x="460.19" y="534.50" width="1.50" height="3.0"/>
+<path class="moved" d="M316.56,533.50 L319.06,536.00 L316.56,538.50 L314.06,536.00 Z"/>
+<path class="moved" d="M460.19,533.50 L462.69,536.00 L460.19,538.50 L457.69,536.00 Z"/>
+<line class="wait" x1="233.53" y1="540.00" x2="233.55" y2="540.00" stroke-width="1"/>
+<rect class="t1" x="233.55" y="538.50" width="1.50" height="3.0"/>
+<line class="wait" x1="236.20" y1="544.00" x2="236.21" y2="544.00" stroke-width="1"/>
+<rect class="t0" x="236.21" y="542.50" width="1.50" height="3.0"/>
+<line class="wait" x1="238.99" y1="548.00" x2="239.01" y2="548.00" stroke-width="1"/>
+<rect class="t0" x="239.01" y="546.50" width="1.50" height="3.0"/>
+<line class="wait" x1="240.36" y1="552.00" x2="240.37" y2="552.00" stroke-width="1"/>
+<rect class="t0" x="240.37" y="550.50" width="1.50" height="3.0"/>
+<line class="wait" x1="243.31" y1="556.00" x2="243.32" y2="556.00" stroke-width="1"/>
+<line class="l2" x1="243.35" y1="556.00" x2="338.67" y2="556.00" stroke-width="1"/>
+<line class="wait" x1="338.67" y1="556.00" x2="338.69" y2="556.00" stroke-width="1"/>
+<line class="l2" x1="338.69" y1="556.00" x2="407.72" y2="556.00" stroke-width="1"/>
+<line class="wait" x1="407.72" y1="556.00" x2="407.73" y2="556.00" stroke-width="1"/>
+<line class="l2" x1="407.74" y1="556.00" x2="507.83" y2="556.00" stroke-width="1"/>
+<line class="wait" x1="507.83" y1="556.00" x2="507.86" y2="556.00" stroke-width="1"/>
+<rect class="t2" x="243.32" y="554.50" width="1.50" height="3.0"/>
+<rect class="t2" x="338.69" y="554.50" width="1.50" height="3.0"/>
+<rect class="t2" x="407.73" y="554.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.86" y="554.50" width="1.50" height="3.0"/>
+<path class="moved" d="M338.69,553.50 L341.19,556.00 L338.69,558.50 L336.19,556.00 Z"/>
+<path class="moved" d="M407.73,553.50 L410.23,556.00 L407.73,558.50 L405.23,556.00 Z"/>
+<line class="wait" x1="245.04" y1="560.00" x2="245.06" y2="560.00" stroke-width="1"/>
+<rect class="t0" x="245.06" y="558.50" width="1.50" height="3.0"/>
+<line class="wait" x1="248.02" y1="564.00" x2="248.05" y2="564.00" stroke-width="1"/>
+<line class="l3" x1="248.07" y1="564.00" x2="248.25" y2="564.00" stroke-width="1"/>
+<line class="wait" x1="248.25" y1="564.00" x2="248.26" y2="564.00" stroke-width="1"/>
+<rect class="t3" x="248.05" y="562.50" width="1.50" height="3.0"/>
+<rect class="t3" x="248.26" y="562.50" width="1.50" height="3.0"/>
+<path class="moved" d="M248.26,561.50 L250.76,564.00 L248.26,566.50 L245.76,564.00 Z"/>
+<line class="wait" x1="248.18" y1="568.00" x2="248.20" y2="568.00" stroke-width="1"/>
+<rect class="t0" x="248.20" y="566.50" width="1.50" height="3.0"/>
+<line class="wait" x1="249.80" y1="572.00" x2="249.82" y2="572.00" stroke-width="1"/>
+<line class="l2" x1="249.84" y1="572.00" x2="299.83" y2="572.00" stroke-width="1"/>
+<line class="wait" x1="299.83" y1="572.00" x2="299.84" y2="572.00" stroke-width="1"/>
+<line class="l2" x1="299.85" y1="572.00" x2="386.88" y2="572.00" stroke-width="1"/>
+<line class="wait" x1="386.88" y1="572.00" x2="386.89" y2="572.00" stroke-width="1"/>
+<line class="l2" x1="386.90" y1="572.00" x2="467.09" y2="572.00" stroke-width="1"/>
+<line class="wait" x1="467.09" y1="572.00" x2="467.10" y2="572.00" stroke-width="1"/>
+<rect class="t2" x="249.82" y="570.50" width="1.50" height="3.0"/>
+<rect class="t2" x="299.84" y="570.50" width="1.50" height="3.0"/>
+<rect class="t2" x="386.89" y="570.50" width="1.50" height="3.0"/>
+<rect class="t2" x="467.10" y="570.50" width="1.50" height="3.0"/>
+<path class="moved" d="M299.84,569.50 L302.34,572.00 L299.84,574.50 L297.34,572.00 Z"/>
+<path class="moved" d="M386.89,569.50 L389.39,572.00 L386.89,574.50 L384.39,572.00 Z"/>
+<line class="wait" x1="252.30" y1="576.00" x2="252.31" y2="576.00" stroke-width="1"/>
+<rect class="t0" x="252.31" y="574.50" width="1.50" height="3.0"/>
+<line class="wait" x1="255.15" y1="580.00" x2="255.17" y2="580.00" stroke-width="1"/>
+<rect class="t0" x="255.17" y="578.50" width="1.50" height="3.0"/>
+<line class="wait" x1="256.46" y1="584.00" x2="256.51" y2="584.00" stroke-width="1"/>
+<rect class="t1" x="256.51" y="582.50" width="1.50" height="3.0"/>
+<line class="wait" x1="259.10" y1="588.00" x2="259.11" y2="588.00" stroke-width="1"/>
+<rect class="t1" x="259.11" y="586.50" width="1.50" height="3.0"/>
+<line class="wait" x1="261.82" y1="592.00" x2="261.85" y2="592.00" stroke-width="1"/>
+<rect class="t0" x="261.85" y="590.50" width="1.50" height="3.0"/>
+<line class="wait" x1="263.70" y1="596.00" x2="263.72" y2="596.00" stroke-width="1"/>
+<rect class="t0" x="263.72" y="594.50" width="1.50" height="3.0"/>
+<line class="wait" x1="266.21" y1="600.00" x2="266.25" y2="600.00" stroke-width="1"/>
+<line class="l2" x1="266.27" y1="600.00" x2="343.20" y2="600.00" stroke-width="1"/>
+<line class="wait" x1="343.20" y1="600.00" x2="343.21" y2="600.00" stroke-width="1"/>
+<line class="l2" x1="343.22" y1="600.00" x2="386.88" y2="600.00" stroke-width="1"/>
+<line class="wait" x1="386.88" y1="600.00" x2="386.90" y2="600.00" stroke-width="1"/>
+<line class="l2" x1="386.91" y1="600.00" x2="467.10" y2="600.00" stroke-width="1"/>
+<line class="wait" x1="467.10" y1="600.00" x2="467.10" y2="600.00" stroke-width="1"/>
+<rect class="t2" x="266.25" y="598.50" width="1.50" height="3.0"/>
+<rect class="t2" x="343.21" y="598.50" width="1.50" height="3.0"/>
+<rect class="t2" x="386.90" y="598.50" width="1.50" height="3.0"/>
+<rect class="t2" x="467.10" y="598.50" width="1.50" height="3.0"/>
+<path class="moved" d="M343.21,597.50 L345.71,600.00 L343.21,602.50 L340.71,600.00 Z"/>
+<path class="moved" d="M386.90,597.50 L389.40,600.00 L386.90,602.50 L384.40,600.00 Z"/>
+<path class="moved" d="M467.10,597.50 L469.60,600.00 L467.10,602.50 L464.60,600.00 Z"/>
+<line class="wait" x1="268.98" y1="604.00" x2="269.04" y2="604.00" stroke-width="1"/>
+<rect class="t1" x="269.04" y="602.50" width="1.50" height="3.0"/>
+<line class="wait" x1="270.09" y1="608.00" x2="270.10" y2="608.00" stroke-width="1"/>
+<rect class="t0" x="270.10" y="606.50" width="1.50" height="3.0"/>
+<line class="wait" x1="272.80" y1="612.00" x2="272.82" y2="612.00" stroke-width="1"/>
+<line class="l2" x1="272.84" y1="612.00" x2="350.08" y2="612.00" stroke-width="1"/>
+<line class="wait" x1="350.08" y1="612.00" x2="350.09" y2="612.00" stroke-width="1"/>
+<line class="l2" x1="350.10" y1="612.00" x2="432.56" y2="612.00" stroke-width="1"/>
+<line class="wait" x1="432.56" y1="612.00" x2="432.57" y2="612.00" stroke-width="1"/>
+<line class="l2" x1="432.58" y1="612.00" x2="507.83" y2="612.00" stroke-width="1"/>
+<line class="wait" x1="507.83" y1="612.00" x2="507.87" y2="612.00" stroke-width="1"/>
+<rect class="t2" x="272.82" y="610.50" width="1.50" height="3.0"/>
+<rect class="t2" x="350.09" y="610.50" width="1.50" height="3.0"/>
+<rect class="t2" x="432.57" y="610.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.87" y="610.50" width="1.50" height="3.0"/>
+<path class="moved" d="M350.09,609.50 L352.59,612.00 L350.09,614.50 L347.59,612.00 Z"/>
+<path class="moved" d="M432.57,609.50 L435.07,612.00 L432.57,614.50 L430.07,612.00 Z"/>
+<path class="moved" d="M507.87,609.50 L510.37,612.00 L507.87,614.50 L505.37,612.00 Z"/>
+<line class="wait" x1="275.44" y1="616.00" x2="275.46" y2="616.00" stroke-width="1"/>
+<line class="l4" x1="275.48" y1="616.00" x2="316.55" y2="616.00" stroke-width="1"/>
+<line class="wait" x1="316.55" y1="616.00" x2="316.56" y2="616.00" stroke-width="1"/>
+<line class="l4" x1="316.57" y1="616.00" x2="568.93" y2="616.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="616.00" x2="568.96" y2="616.00" stroke-width="1"/>
+<rect class="t4" x="275.46" y="614.50" width="1.50" height="3.0"/>
+<rect class="t4" x="316.56" y="614.50" width="1.50" height="3.0"/>
+<rect class="t4" x="568.96" y="614.50" width="1.50" height="3.0"/>
+<path class="moved" d="M316.56,613.50 L319.06,616.00 L316.56,618.50 L314.06,616.00 Z"/>
+<path class="critline" d="M566.47,613.50 L571.47,618.50 M566.47,618.50 L571.47,613.50"/>
+<text class="ink" font-weight="600" x="576.0" y="620.0">504</text>
+<line class="wait" x1="277.75" y1="620.00" x2="277.77" y2="620.00" stroke-width="1"/>
+<rect class="t0" x="277.77" y="618.50" width="1.50" height="3.0"/>
+<line class="wait" x1="279.51" y1="624.00" x2="279.53" y2="624.00" stroke-width="1"/>
+<line class="l2" x1="279.54" y1="624.00" x2="316.55" y2="624.00" stroke-width="1"/>
+<line class="wait" x1="316.55" y1="624.00" x2="316.56" y2="624.00" stroke-width="1"/>
+<line class="l2" x1="316.57" y1="624.00" x2="343.21" y2="624.00" stroke-width="1"/>
+<line class="wait" x1="343.21" y1="624.00" x2="343.21" y2="624.00" stroke-width="1"/>
+<line class="l2" x1="343.22" y1="624.00" x2="432.57" y2="624.00" stroke-width="1"/>
+<line class="wait" x1="432.57" y1="624.00" x2="432.57" y2="624.00" stroke-width="1"/>
+<rect class="t2" x="279.53" y="622.50" width="1.50" height="3.0"/>
+<rect class="t2" x="316.56" y="622.50" width="1.50" height="3.0"/>
+<rect class="t2" x="343.21" y="622.50" width="1.50" height="3.0"/>
+<rect class="t2" x="432.57" y="622.50" width="1.50" height="3.0"/>
+<path class="moved" d="M316.56,621.50 L319.06,624.00 L316.56,626.50 L314.06,624.00 Z"/>
+<path class="moved" d="M343.21,621.50 L345.71,624.00 L343.21,626.50 L340.71,624.00 Z"/>
+<line class="wait" x1="281.76" y1="628.00" x2="281.77" y2="628.00" stroke-width="1"/>
+<line class="l3" x1="281.79" y1="628.00" x2="281.96" y2="628.00" stroke-width="1"/>
+<line class="wait" x1="281.96" y1="628.00" x2="281.96" y2="628.00" stroke-width="1"/>
+<rect class="t3" x="281.77" y="626.50" width="1.50" height="3.0"/>
+<rect class="t3" x="281.96" y="626.50" width="1.50" height="3.0"/>
+<path class="moved" d="M281.96,625.50 L284.46,628.00 L281.96,630.50 L279.46,628.00 Z"/>
+<line class="wait" x1="281.90" y1="632.00" x2="281.91" y2="632.00" stroke-width="1"/>
+<rect class="t0" x="281.91" y="630.50" width="1.50" height="3.0"/>
+<line class="wait" x1="284.17" y1="636.00" x2="284.22" y2="636.00" stroke-width="1"/>
+<rect class="t0" x="284.22" y="634.50" width="1.50" height="3.0"/>
+<line class="wait" x1="286.08" y1="640.00" x2="286.09" y2="640.00" stroke-width="1"/>
+<rect class="t1" x="286.09" y="638.50" width="1.50" height="3.0"/>
+<line class="wait" x1="289.27" y1="644.00" x2="289.30" y2="644.00" stroke-width="1"/>
+<rect class="t0" x="289.30" y="642.50" width="1.50" height="3.0"/>
+<line class="wait" x1="290.64" y1="648.00" x2="290.65" y2="648.00" stroke-width="1"/>
+<rect class="t0" x="290.65" y="646.50" width="1.50" height="3.0"/>
+<line class="wait" x1="293.11" y1="652.00" x2="293.12" y2="652.00" stroke-width="1"/>
+<line class="l4" x1="293.15" y1="652.00" x2="370.62" y2="652.00" stroke-width="1"/>
+<line class="wait" x1="370.62" y1="652.00" x2="370.63" y2="652.00" stroke-width="1"/>
+<line class="l4" x1="370.64" y1="652.00" x2="568.93" y2="652.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="652.00" x2="568.98" y2="652.00" stroke-width="1"/>
+<rect class="t4" x="293.12" y="650.50" width="1.50" height="3.0"/>
+<rect class="t4" x="370.63" y="650.50" width="1.50" height="3.0"/>
+<rect class="t4" x="568.98" y="650.50" width="1.50" height="3.0"/>
+<path class="moved" d="M370.63,649.50 L373.13,652.00 L370.63,654.50 L368.13,652.00 Z"/>
+<path class="critline" d="M566.50,649.50 L571.50,654.50 M566.50,654.50 L571.50,649.50"/>
+<text class="ink" font-weight="600" x="576.0" y="656.0">504</text>
+<line class="wait" x1="295.30" y1="656.00" x2="295.37" y2="656.00" stroke-width="1"/>
+<rect class="t0" x="295.37" y="654.50" width="1.50" height="3.0"/>
+<line class="wait" x1="298.25" y1="660.00" x2="298.28" y2="660.00" stroke-width="1"/>
+<rect class="t0" x="298.28" y="658.50" width="1.50" height="3.0"/>
+<line class="wait" x1="299.77" y1="664.00" x2="299.79" y2="664.00" stroke-width="1"/>
+<line class="l4" x1="299.82" y1="664.00" x2="345.96" y2="664.00" stroke-width="1"/>
+<line class="wait" x1="345.96" y1="664.00" x2="345.97" y2="664.00" stroke-width="1"/>
+<line class="l4" x1="345.98" y1="664.00" x2="437.33" y2="664.00" stroke-width="1"/>
+<line class="wait" x1="437.33" y1="664.00" x2="437.34" y2="664.00" stroke-width="1"/>
+<rect class="t4" x="299.79" y="662.50" width="1.50" height="3.0"/>
+<rect class="t4" x="345.97" y="662.50" width="1.50" height="3.0"/>
+<rect class="t4" x="437.34" y="662.50" width="1.50" height="3.0"/>
+<path class="moved" d="M345.97,661.50 L348.47,664.00 L345.97,666.50 L343.47,664.00 Z"/>
+<line class="wait" x1="302.25" y1="668.00" x2="302.26" y2="668.00" stroke-width="1"/>
+<rect class="t0" x="302.26" y="666.50" width="1.50" height="3.0"/>
+<line class="wait" x1="305.09" y1="672.00" x2="305.14" y2="672.00" stroke-width="1"/>
+<rect class="t0" x="305.14" y="670.50" width="1.50" height="3.0"/>
+<line class="wait" x1="307.88" y1="676.00" x2="307.92" y2="676.00" stroke-width="1"/>
+<rect class="t0" x="307.92" y="674.50" width="1.50" height="3.0"/>
+<line class="wait" x1="309.25" y1="680.00" x2="309.27" y2="680.00" stroke-width="1"/>
+<rect class="t1" x="309.27" y="678.50" width="1.50" height="3.0"/>
+<line class="wait" x1="311.47" y1="684.00" x2="311.50" y2="684.00" stroke-width="1"/>
+<rect class="t0" x="311.50" y="682.50" width="1.50" height="3.0"/>
+<line class="wait" x1="313.86" y1="688.00" x2="313.88" y2="688.00" stroke-width="1"/>
+<rect class="t0" x="313.88" y="686.50" width="1.50" height="3.0"/>
+<line class="wait" x1="316.51" y1="692.00" x2="316.52" y2="692.00" stroke-width="1"/>
+<line class="l2" x1="316.54" y1="692.00" x2="370.62" y2="692.00" stroke-width="1"/>
+<line class="wait" x1="370.62" y1="692.00" x2="370.63" y2="692.00" stroke-width="1"/>
+<line class="l2" x1="370.64" y1="692.00" x2="453.61" y2="692.00" stroke-width="1"/>
+<line class="wait" x1="453.61" y1="692.00" x2="453.62" y2="692.00" stroke-width="1"/>
+<line class="l2" x1="453.63" y1="692.00" x2="534.24" y2="692.00" stroke-width="1"/>
+<line class="wait" x1="534.24" y1="692.00" x2="534.25" y2="692.00" stroke-width="1"/>
+<rect class="t2" x="316.52" y="690.50" width="1.50" height="3.0"/>
+<rect class="t2" x="370.63" y="690.50" width="1.50" height="3.0"/>
+<rect class="t2" x="453.62" y="690.50" width="1.50" height="3.0"/>
+<rect class="t2" x="534.25" y="690.50" width="1.50" height="3.0"/>
+<path class="moved" d="M370.63,689.50 L373.13,692.00 L370.63,694.50 L368.13,692.00 Z"/>
+<path class="moved" d="M453.62,689.50 L456.12,692.00 L453.62,694.50 L451.12,692.00 Z"/>
+<path class="moved" d="M534.25,689.50 L536.75,692.00 L534.25,694.50 L531.75,692.00 Z"/>
+<line class="wait" x1="318.83" y1="696.00" x2="318.84" y2="696.00" stroke-width="1"/>
+<rect class="t0" x="318.84" y="694.50" width="1.50" height="3.0"/>
+<line class="wait" x1="320.49" y1="700.00" x2="320.50" y2="700.00" stroke-width="1"/>
+<rect class="t0" x="320.50" y="698.50" width="1.50" height="3.0"/>
+<line class="wait" x1="323.25" y1="704.00" x2="323.26" y2="704.00" stroke-width="1"/>
+<rect class="t0" x="323.26" y="702.50" width="1.50" height="3.0"/>
+<line class="wait" x1="325.35" y1="708.00" x2="325.36" y2="708.00" stroke-width="1"/>
+<rect class="t0" x="325.36" y="706.50" width="1.50" height="3.0"/>
+<line class="wait" x1="327.79" y1="712.00" x2="327.84" y2="712.00" stroke-width="1"/>
+<rect class="t0" x="327.84" y="710.50" width="1.50" height="3.0"/>
+<line class="wait" x1="329.52" y1="716.00" x2="329.54" y2="716.00" stroke-width="1"/>
+<rect class="t0" x="329.54" y="714.50" width="1.50" height="3.0"/>
+<line class="wait" x1="331.86" y1="720.00" x2="331.88" y2="720.00" stroke-width="1"/>
+<rect class="t0" x="331.88" y="718.50" width="1.50" height="3.0"/>
+<line class="wait" x1="335.29" y1="724.00" x2="335.34" y2="724.00" stroke-width="1"/>
+<rect class="t0" x="335.34" y="722.50" width="1.50" height="3.0"/>
+<line class="wait" x1="336.68" y1="728.00" x2="336.69" y2="728.00" stroke-width="1"/>
+<rect class="t0" x="336.69" y="726.50" width="1.50" height="3.0"/>
+<line class="wait" x1="338.60" y1="732.00" x2="338.65" y2="732.00" stroke-width="1"/>
+<line class="l2" x1="338.66" y1="732.00" x2="386.88" y2="732.00" stroke-width="1"/>
+<line class="wait" x1="386.88" y1="732.00" x2="386.90" y2="732.00" stroke-width="1"/>
+<line class="l2" x1="386.91" y1="732.00" x2="437.34" y2="732.00" stroke-width="1"/>
+<line class="wait" x1="437.34" y1="732.00" x2="437.34" y2="732.00" stroke-width="1"/>
+<line class="l2" x1="437.35" y1="732.00" x2="507.81" y2="732.00" stroke-width="1"/>
+<line class="wait" x1="507.81" y1="732.00" x2="507.86" y2="732.00" stroke-width="1"/>
+<rect class="t2" x="338.65" y="730.50" width="1.50" height="3.0"/>
+<rect class="t2" x="386.90" y="730.50" width="1.50" height="3.0"/>
+<rect class="t2" x="437.34" y="730.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.86" y="730.50" width="1.50" height="3.0"/>
+<path class="moved" d="M437.34,729.50 L439.84,732.00 L437.34,734.50 L434.84,732.00 Z"/>
+<line class="wait" x1="341.74" y1="736.00" x2="341.79" y2="736.00" stroke-width="1"/>
+<rect class="t0" x="341.79" y="734.50" width="1.50" height="3.0"/>
+<line class="wait" x1="343.17" y1="740.00" x2="343.18" y2="740.00" stroke-width="1"/>
+<line class="l2" x1="343.20" y1="740.00" x2="427.99" y2="740.00" stroke-width="1"/>
+<line class="wait" x1="427.99" y1="740.00" x2="428.02" y2="740.00" stroke-width="1"/>
+<line class="l2" x1="428.03" y1="740.00" x2="507.85" y2="740.00" stroke-width="1"/>
+<line class="wait" x1="507.85" y1="740.00" x2="507.90" y2="740.00" stroke-width="1"/>
+<line class="l2" x1="507.91" y1="740.00" x2="568.93" y2="740.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="740.00" x2="568.97" y2="740.00" stroke-width="1"/>
+<rect class="t2" x="343.18" y="738.50" width="1.50" height="3.0"/>
+<rect class="t2" x="428.02" y="738.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.90" y="738.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.97" y="738.50" width="1.50" height="3.0"/>
+<path class="moved" d="M428.02,737.50 L430.52,740.00 L428.02,742.50 L425.52,740.00 Z"/>
+<path class="moved" d="M507.90,737.50 L510.40,740.00 L507.90,742.50 L505.40,740.00 Z"/>
+<line class="wait" x1="345.39" y1="744.00" x2="345.42" y2="744.00" stroke-width="1"/>
+<line class="l2" x1="345.44" y1="744.00" x2="415.59" y2="744.00" stroke-width="1"/>
+<line class="wait" x1="415.59" y1="744.00" x2="415.59" y2="744.00" stroke-width="1"/>
+<line class="l2" x1="415.60" y1="744.00" x2="507.85" y2="744.00" stroke-width="1"/>
+<line class="wait" x1="507.85" y1="744.00" x2="507.89" y2="744.00" stroke-width="1"/>
+<line class="l2" x1="507.90" y1="744.00" x2="568.93" y2="744.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="744.00" x2="568.96" y2="744.00" stroke-width="1"/>
+<rect class="t2" x="345.42" y="742.50" width="1.50" height="3.0"/>
+<rect class="t2" x="415.59" y="742.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.89" y="742.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.96" y="742.50" width="1.50" height="3.0"/>
+<path class="moved" d="M507.89,741.50 L510.39,744.00 L507.89,746.50 L505.39,744.00 Z"/>
+<path class="moved" d="M568.96,741.50 L571.46,744.00 L568.96,746.50 L566.46,744.00 Z"/>
+<line class="wait" x1="347.70" y1="748.00" x2="347.72" y2="748.00" stroke-width="1"/>
+<rect class="t0" x="347.72" y="746.50" width="1.50" height="3.0"/>
+<line class="wait" x1="350.07" y1="752.00" x2="350.08" y2="752.00" stroke-width="1"/>
+<line class="l2" x1="350.10" y1="752.00" x2="427.72" y2="752.00" stroke-width="1"/>
+<line class="wait" x1="427.72" y1="752.00" x2="427.73" y2="752.00" stroke-width="1"/>
+<line class="l2" x1="427.74" y1="752.00" x2="467.10" y2="752.00" stroke-width="1"/>
+<line class="wait" x1="467.10" y1="752.00" x2="467.11" y2="752.00" stroke-width="1"/>
+<line class="l2" x1="467.12" y1="752.00" x2="541.86" y2="752.00" stroke-width="1"/>
+<line class="wait" x1="541.86" y1="752.00" x2="541.87" y2="752.00" stroke-width="1"/>
+<rect class="t2" x="350.08" y="750.50" width="1.50" height="3.0"/>
+<rect class="t2" x="427.73" y="750.50" width="1.50" height="3.0"/>
+<rect class="t2" x="467.11" y="750.50" width="1.50" height="3.0"/>
+<rect class="t2" x="541.87" y="750.50" width="1.50" height="3.0"/>
+<path class="moved" d="M427.73,749.50 L430.23,752.00 L427.73,754.50 L425.23,752.00 Z"/>
+<path class="moved" d="M467.11,749.50 L469.61,752.00 L467.11,754.50 L464.61,752.00 Z"/>
+<line class="wait" x1="353.04" y1="756.00" x2="353.07" y2="756.00" stroke-width="1"/>
+<rect class="t0" x="353.07" y="754.50" width="1.50" height="3.0"/>
+<line class="wait" x1="354.99" y1="760.00" x2="355.05" y2="760.00" stroke-width="1"/>
+<rect class="t0" x="355.05" y="758.50" width="1.50" height="3.0"/>
+<line class="wait" x1="357.92" y1="764.00" x2="357.99" y2="764.00" stroke-width="1"/>
+<rect class="t0" x="357.99" y="762.50" width="1.50" height="3.0"/>
+<line class="wait" x1="360.04" y1="768.00" x2="360.08" y2="768.00" stroke-width="1"/>
+<rect class="t1" x="360.08" y="766.50" width="1.50" height="3.0"/>
+<line class="wait" x1="361.50" y1="772.00" x2="361.55" y2="772.00" stroke-width="1"/>
+<line class="l3" x1="361.58" y1="772.00" x2="361.80" y2="772.00" stroke-width="1"/>
+<line class="wait" x1="361.80" y1="772.00" x2="361.81" y2="772.00" stroke-width="1"/>
+<rect class="t3" x="361.55" y="770.50" width="1.50" height="3.0"/>
+<rect class="t3" x="361.81" y="770.50" width="1.50" height="3.0"/>
+<path class="moved" d="M361.81,769.50 L364.31,772.00 L361.81,774.50 L359.31,772.00 Z"/>
+<line class="wait" x1="361.74" y1="776.00" x2="361.75" y2="776.00" stroke-width="1"/>
+<rect class="t0" x="361.75" y="774.50" width="1.50" height="3.0"/>
+<line class="wait" x1="363.66" y1="780.00" x2="363.67" y2="780.00" stroke-width="1"/>
+<rect class="t0" x="363.67" y="778.50" width="1.50" height="3.0"/>
+<line class="wait" x1="366.53" y1="784.00" x2="366.57" y2="784.00" stroke-width="1"/>
+<rect class="t1" x="366.57" y="782.50" width="1.50" height="3.0"/>
+<line class="wait" x1="369.23" y1="788.00" x2="369.25" y2="788.00" stroke-width="1"/>
+<rect class="t0" x="369.25" y="786.50" width="1.50" height="3.0"/>
+<line class="wait" x1="370.58" y1="792.00" x2="370.59" y2="792.00" stroke-width="1"/>
+<line class="l4" x1="370.61" y1="792.00" x2="442.15" y2="792.00" stroke-width="1"/>
+<line class="wait" x1="442.15" y1="792.00" x2="442.15" y2="792.00" stroke-width="1"/>
+<line class="l4" x1="442.16" y1="792.00" x2="646.88" y2="792.00" stroke-width="1"/>
+<line class="wait" x1="646.88" y1="792.00" x2="646.89" y2="792.00" stroke-width="1"/>
+<rect class="t4" x="370.59" y="790.50" width="1.50" height="3.0"/>
+<rect class="t4" x="442.15" y="790.50" width="1.50" height="3.0"/>
+<rect class="t4" x="646.89" y="790.50" width="1.50" height="3.0"/>
+<path class="critline" d="M644.40,789.50 L649.40,794.50 M644.40,794.50 L649.40,789.50"/>
+<text class="ink" font-weight="600" x="653.9" y="796.0">504</text>
+<line class="wait" x1="373.25" y1="796.00" x2="373.27" y2="796.00" stroke-width="1"/>
+<line class="l2" x1="373.32" y1="796.00" x2="415.18" y2="796.00" stroke-width="1"/>
+<line class="wait" x1="415.18" y1="796.00" x2="415.19" y2="796.00" stroke-width="1"/>
+<line class="l2" x1="415.20" y1="796.00" x2="455.98" y2="796.00" stroke-width="1"/>
+<line class="wait" x1="455.98" y1="796.00" x2="455.98" y2="796.00" stroke-width="1"/>
+<line class="l2" x1="455.99" y1="796.00" x2="507.83" y2="796.00" stroke-width="1"/>
+<line class="wait" x1="507.83" y1="796.00" x2="507.88" y2="796.00" stroke-width="1"/>
+<rect class="t2" x="373.27" y="794.50" width="1.50" height="3.0"/>
+<rect class="t2" x="415.19" y="794.50" width="1.50" height="3.0"/>
+<rect class="t2" x="455.98" y="794.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.88" y="794.50" width="1.50" height="3.0"/>
+<path class="moved" d="M415.19,793.50 L417.69,796.00 L415.19,798.50 L412.69,796.00 Z"/>
+<path class="moved" d="M455.98,793.50 L458.48,796.00 L455.98,798.50 L453.48,796.00 Z"/>
+<path class="moved" d="M507.88,793.50 L510.38,796.00 L507.88,798.50 L505.38,796.00 Z"/>
+<line class="wait" x1="376.05" y1="800.00" x2="376.07" y2="800.00" stroke-width="1"/>
+<rect class="t0" x="376.07" y="798.50" width="1.50" height="3.0"/>
+<line class="wait" x1="377.51" y1="804.00" x2="377.53" y2="804.00" stroke-width="1"/>
+<rect class="t0" x="377.53" y="802.50" width="1.50" height="3.0"/>
+<line class="wait" x1="380.23" y1="808.00" x2="380.24" y2="808.00" stroke-width="1"/>
+<rect class="t1" x="380.24" y="806.50" width="1.50" height="3.0"/>
+<line class="wait" x1="383.05" y1="812.00" x2="383.06" y2="812.00" stroke-width="1"/>
+<rect class="t0" x="383.06" y="810.50" width="1.50" height="3.0"/>
+<line class="wait" x1="384.41" y1="816.00" x2="384.46" y2="816.00" stroke-width="1"/>
+<rect class="t0" x="384.46" y="814.50" width="1.50" height="3.0"/>
+<line class="wait" x1="386.80" y1="820.00" x2="386.83" y2="820.00" stroke-width="1"/>
+<line class="l3" x1="386.87" y1="820.00" x2="387.06" y2="820.00" stroke-width="1"/>
+<line class="wait" x1="387.06" y1="820.00" x2="387.06" y2="820.00" stroke-width="1"/>
+<rect class="t3" x="386.83" y="818.50" width="1.50" height="3.0"/>
+<rect class="t3" x="387.06" y="818.50" width="1.50" height="3.0"/>
+<line class="wait" x1="386.99" y1="824.00" x2="387.01" y2="824.00" stroke-width="1"/>
+<rect class="t0" x="387.01" y="822.50" width="1.50" height="3.0"/>
+<line class="wait" x1="388.86" y1="828.00" x2="388.88" y2="828.00" stroke-width="1"/>
+<rect class="t0" x="388.88" y="826.50" width="1.50" height="3.0"/>
+<line class="wait" x1="391.06" y1="832.00" x2="391.07" y2="832.00" stroke-width="1"/>
+<rect class="t1" x="391.07" y="830.50" width="1.50" height="3.0"/>
+<line class="wait" x1="393.64" y1="836.00" x2="393.68" y2="836.00" stroke-width="1"/>
+<rect class="t1" x="393.68" y="834.50" width="1.50" height="3.0"/>
+<line class="wait" x1="395.98" y1="840.00" x2="396.01" y2="840.00" stroke-width="1"/>
+<rect class="t1" x="396.01" y="838.50" width="1.50" height="3.0"/>
+<line class="wait" x1="398.69" y1="844.00" x2="398.70" y2="844.00" stroke-width="1"/>
+<rect class="t0" x="398.70" y="842.50" width="1.50" height="3.0"/>
+<line class="wait" x1="400.39" y1="848.00" x2="400.44" y2="848.00" stroke-width="1"/>
+<rect class="t0" x="400.44" y="846.50" width="1.50" height="3.0"/>
+<line class="wait" x1="403.55" y1="852.00" x2="403.59" y2="852.00" stroke-width="1"/>
+<rect class="t0" x="403.59" y="850.50" width="1.50" height="3.0"/>
+<line class="wait" x1="404.93" y1="856.00" x2="404.98" y2="856.00" stroke-width="1"/>
+<rect class="t0" x="404.98" y="854.50" width="1.50" height="3.0"/>
+<line class="wait" x1="407.66" y1="860.00" x2="407.68" y2="860.00" stroke-width="1"/>
+<line class="l2" x1="407.71" y1="860.00" x2="477.95" y2="860.00" stroke-width="1"/>
+<line class="wait" x1="477.95" y1="860.00" x2="477.96" y2="860.00" stroke-width="1"/>
+<line class="l2" x1="477.97" y1="860.00" x2="568.93" y2="860.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="860.00" x2="568.95" y2="860.00" stroke-width="1"/>
+<line class="l2" x1="568.96" y1="860.00" x2="622.41" y2="860.00" stroke-width="1"/>
+<line class="wait" x1="622.41" y1="860.00" x2="622.42" y2="860.00" stroke-width="1"/>
+<rect class="t2" x="407.68" y="858.50" width="1.50" height="3.0"/>
+<rect class="t2" x="477.96" y="858.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.95" y="858.50" width="1.50" height="3.0"/>
+<rect class="t2" x="622.42" y="858.50" width="1.50" height="3.0"/>
+<path class="moved" d="M477.96,857.50 L480.46,860.00 L477.96,862.50 L475.46,860.00 Z"/>
+<path class="moved" d="M622.42,857.50 L624.92,860.00 L622.42,862.50 L619.92,860.00 Z"/>
+<line class="wait" x1="409.51" y1="864.00" x2="409.53" y2="864.00" stroke-width="1"/>
+<line class="l2" x1="409.54" y1="864.00" x2="477.95" y2="864.00" stroke-width="1"/>
+<line class="wait" x1="477.95" y1="864.00" x2="477.96" y2="864.00" stroke-width="1"/>
+<line class="l2" x1="477.97" y1="864.00" x2="533.44" y2="864.00" stroke-width="1"/>
+<line class="wait" x1="533.44" y1="864.00" x2="533.45" y2="864.00" stroke-width="1"/>
+<line class="l2" x1="533.46" y1="864.00" x2="583.46" y2="864.00" stroke-width="1"/>
+<line class="wait" x1="583.46" y1="864.00" x2="583.47" y2="864.00" stroke-width="1"/>
+<rect class="t2" x="409.53" y="862.50" width="1.50" height="3.0"/>
+<rect class="t2" x="477.96" y="862.50" width="1.50" height="3.0"/>
+<rect class="t2" x="533.45" y="862.50" width="1.50" height="3.0"/>
+<rect class="t2" x="583.47" y="862.50" width="1.50" height="3.0"/>
+<path class="moved" d="M477.96,861.50 L480.46,864.00 L477.96,866.50 L475.46,864.00 Z"/>
+<path class="moved" d="M533.45,861.50 L535.95,864.00 L533.45,866.50 L530.95,864.00 Z"/>
+<path class="moved" d="M583.47,861.50 L585.97,864.00 L583.47,866.50 L580.97,864.00 Z"/>
+<line class="wait" x1="412.34" y1="868.00" x2="412.36" y2="868.00" stroke-width="1"/>
+<rect class="t0" x="412.36" y="866.50" width="1.50" height="3.0"/>
+<line class="wait" x1="415.12" y1="872.00" x2="415.14" y2="872.00" stroke-width="1"/>
+<line class="l4" x1="415.17" y1="872.00" x2="472.33" y2="872.00" stroke-width="1"/>
+<line class="wait" x1="472.33" y1="872.00" x2="472.35" y2="872.00" stroke-width="1"/>
+<line class="l4" x1="472.38" y1="872.00" x2="695.05" y2="872.00" stroke-width="1"/>
+<line class="wait" x1="695.05" y1="872.00" x2="695.06" y2="872.00" stroke-width="1"/>
+<rect class="t4" x="415.14" y="870.50" width="1.50" height="3.0"/>
+<rect class="t4" x="472.35" y="870.50" width="1.50" height="3.0"/>
+<rect class="t4" x="695.06" y="870.50" width="1.50" height="3.0"/>
+<path class="moved" d="M472.35,869.50 L474.85,872.00 L472.35,874.50 L469.85,872.00 Z"/>
+<path class="critline" d="M692.57,869.50 L697.57,874.50 M692.57,874.50 L697.57,869.50"/>
+<text class="ink" font-weight="600" x="702.1" y="876.0">504</text>
+<line class="wait" x1="416.71" y1="876.00" x2="416.78" y2="876.00" stroke-width="1"/>
+<rect class="t0" x="416.78" y="874.50" width="1.50" height="3.0"/>
+<line class="wait" x1="418.92" y1="880.00" x2="419.00" y2="880.00" stroke-width="1"/>
+<rect class="t0" x="419.00" y="878.50" width="1.50" height="3.0"/>
+<line class="wait" x1="420.99" y1="884.00" x2="421.04" y2="884.00" stroke-width="1"/>
+<line class="l2" x1="421.07" y1="884.00" x2="507.83" y2="884.00" stroke-width="1"/>
+<line class="wait" x1="507.83" y1="884.00" x2="507.88" y2="884.00" stroke-width="1"/>
+<line class="l2" x1="507.89" y1="884.00" x2="568.93" y2="884.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="884.00" x2="568.96" y2="884.00" stroke-width="1"/>
+<line class="l2" x1="568.96" y1="884.00" x2="631.47" y2="884.00" stroke-width="1"/>
+<line class="wait" x1="631.47" y1="884.00" x2="631.48" y2="884.00" stroke-width="1"/>
+<rect class="t2" x="421.04" y="882.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.88" y="882.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.96" y="882.50" width="1.50" height="3.0"/>
+<rect class="t2" x="631.48" y="882.50" width="1.50" height="3.0"/>
+<path class="moved" d="M568.96,881.50 L571.46,884.00 L568.96,886.50 L566.46,884.00 Z"/>
+<line class="wait" x1="423.16" y1="888.00" x2="423.20" y2="888.00" stroke-width="1"/>
+<rect class="t0" x="423.20" y="886.50" width="1.50" height="3.0"/>
+<line class="wait" x1="426.00" y1="892.00" x2="426.02" y2="892.00" stroke-width="1"/>
+<rect class="t1" x="426.02" y="890.50" width="1.50" height="3.0"/>
+<line class="wait" x1="427.66" y1="896.00" x2="427.68" y2="896.00" stroke-width="1"/>
+<line class="l4" x1="427.71" y1="896.00" x2="453.61" y2="896.00" stroke-width="1"/>
+<line class="wait" x1="453.61" y1="896.00" x2="453.62" y2="896.00" stroke-width="1"/>
+<line class="l4" x1="453.63" y1="896.00" x2="702.85" y2="896.00" stroke-width="1"/>
+<line class="wait" x1="702.85" y1="896.00" x2="702.90" y2="896.00" stroke-width="1"/>
+<rect class="t4" x="427.68" y="894.50" width="1.50" height="3.0"/>
+<rect class="t4" x="453.62" y="894.50" width="1.50" height="3.0"/>
+<rect class="t4" x="702.90" y="894.50" width="1.50" height="3.0"/>
+<path class="critline" d="M700.44,893.50 L705.44,898.50 M700.44,898.50 L705.44,893.50"/>
+<text class="ink" font-weight="600" x="709.9" y="900.0">504</text>
+<line class="wait" x1="430.04" y1="900.00" x2="430.09" y2="900.00" stroke-width="1"/>
+<rect class="t1" x="430.09" y="898.50" width="1.50" height="3.0"/>
+<line class="wait" x1="432.49" y1="904.00" x2="432.52" y2="904.00" stroke-width="1"/>
+<line class="l4" x1="432.55" y1="904.00" x2="507.85" y2="904.00" stroke-width="1"/>
+<line class="wait" x1="507.85" y1="904.00" x2="507.90" y2="904.00" stroke-width="1"/>
+<line class="l4" x1="507.90" y1="904.00" x2="707.50" y2="904.00" stroke-width="1"/>
+<line class="wait" x1="707.50" y1="904.00" x2="707.53" y2="904.00" stroke-width="1"/>
+<rect class="t4" x="432.52" y="902.50" width="1.50" height="3.0"/>
+<rect class="t4" x="507.90" y="902.50" width="1.50" height="3.0"/>
+<rect class="t4" x="707.53" y="902.50" width="1.50" height="3.0"/>
+<path class="moved" d="M507.90,901.50 L510.40,904.00 L507.90,906.50 L505.40,904.00 Z"/>
+<path class="critline" d="M705.05,901.50 L710.05,906.50 M705.05,906.50 L710.05,901.50"/>
+<line class="wait" x1="434.51" y1="908.00" x2="434.52" y2="908.00" stroke-width="1"/>
+<rect class="t0" x="434.52" y="906.50" width="1.50" height="3.0"/>
+<line class="wait" x1="437.29" y1="912.00" x2="437.30" y2="912.00" stroke-width="1"/>
+<line class="l2" x1="437.32" y1="912.00" x2="526.04" y2="912.00" stroke-width="1"/>
+<line class="wait" x1="526.04" y1="912.00" x2="526.05" y2="912.00" stroke-width="1"/>
+<line class="l2" x1="526.06" y1="912.00" x2="568.92" y2="912.00" stroke-width="1"/>
+<line class="wait" x1="568.92" y1="912.00" x2="568.94" y2="912.00" stroke-width="1"/>
+<line class="l2" x1="568.95" y1="912.00" x2="622.42" y2="912.00" stroke-width="1"/>
+<line class="wait" x1="622.42" y1="912.00" x2="622.42" y2="912.00" stroke-width="1"/>
+<rect class="t2" x="437.30" y="910.50" width="1.50" height="3.0"/>
+<rect class="t2" x="526.05" y="910.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.94" y="910.50" width="1.50" height="3.0"/>
+<rect class="t2" x="622.42" y="910.50" width="1.50" height="3.0"/>
+<path class="moved" d="M526.05,909.50 L528.55,912.00 L526.05,914.50 L523.55,912.00 Z"/>
+<path class="moved" d="M568.94,909.50 L571.44,912.00 L568.94,914.50 L566.44,912.00 Z"/>
+<path class="moved" d="M622.42,909.50 L624.92,912.00 L622.42,914.50 L619.92,912.00 Z"/>
+<line class="wait" x1="439.68" y1="916.00" x2="439.69" y2="916.00" stroke-width="1"/>
+<line class="l2" x1="439.73" y1="916.00" x2="526.04" y2="916.00" stroke-width="1"/>
+<line class="wait" x1="526.04" y1="916.00" x2="526.05" y2="916.00" stroke-width="1"/>
+<line class="l2" x1="526.06" y1="916.00" x2="616.84" y2="916.00" stroke-width="1"/>
+<line class="wait" x1="616.84" y1="916.00" x2="616.87" y2="916.00" stroke-width="1"/>
+<line class="l2" x1="616.90" y1="916.00" x2="702.85" y2="916.00" stroke-width="1"/>
+<line class="wait" x1="702.85" y1="916.00" x2="702.90" y2="916.00" stroke-width="1"/>
+<rect class="t2" x="439.69" y="914.50" width="1.50" height="3.0"/>
+<rect class="t2" x="526.05" y="914.50" width="1.50" height="3.0"/>
+<rect class="t2" x="616.87" y="914.50" width="1.50" height="3.0"/>
+<rect class="t2" x="702.90" y="914.50" width="1.50" height="3.0"/>
+<path class="moved" d="M526.05,913.50 L528.55,916.00 L526.05,918.50 L523.55,916.00 Z"/>
+<path class="moved" d="M616.87,913.50 L619.37,916.00 L616.87,918.50 L614.37,916.00 Z"/>
+<path class="moved" d="M702.90,913.50 L705.40,916.00 L702.90,918.50 L700.40,916.00 Z"/>
+<line class="wait" x1="442.08" y1="920.00" x2="442.09" y2="920.00" stroke-width="1"/>
+<line class="l2" x1="442.13" y1="920.00" x2="526.04" y2="920.00" stroke-width="1"/>
+<line class="wait" x1="526.04" y1="920.00" x2="526.05" y2="920.00" stroke-width="1"/>
+<line class="l2" x1="526.06" y1="920.00" x2="568.92" y2="920.00" stroke-width="1"/>
+<line class="wait" x1="568.92" y1="920.00" x2="568.94" y2="920.00" stroke-width="1"/>
+<line class="l2" x1="568.95" y1="920.00" x2="606.60" y2="920.00" stroke-width="1"/>
+<line class="wait" x1="606.60" y1="920.00" x2="606.65" y2="920.00" stroke-width="1"/>
+<rect class="t2" x="442.09" y="918.50" width="1.50" height="3.0"/>
+<rect class="t2" x="526.05" y="918.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.94" y="918.50" width="1.50" height="3.0"/>
+<rect class="t2" x="606.65" y="918.50" width="1.50" height="3.0"/>
+<path class="moved" d="M526.05,917.50 L528.55,920.00 L526.05,922.50 L523.55,920.00 Z"/>
+<path class="moved" d="M568.94,917.50 L571.44,920.00 L568.94,922.50 L566.44,920.00 Z"/>
+<line class="wait" x1="444.46" y1="924.00" x2="444.47" y2="924.00" stroke-width="1"/>
+<rect class="t0" x="444.47" y="922.50" width="1.50" height="3.0"/>
+<line class="wait" x1="446.38" y1="928.00" x2="446.39" y2="928.00" stroke-width="1"/>
+<rect class="t0" x="446.39" y="926.50" width="1.50" height="3.0"/>
+<line class="wait" x1="448.87" y1="932.00" x2="448.88" y2="932.00" stroke-width="1"/>
+<rect class="t0" x="448.88" y="930.50" width="1.50" height="3.0"/>
+<line class="wait" x1="451.63" y1="936.00" x2="451.66" y2="936.00" stroke-width="1"/>
+<rect class="t1" x="451.66" y="934.50" width="1.50" height="3.0"/>
+<line class="wait" x1="453.56" y1="940.00" x2="453.57" y2="940.00" stroke-width="1"/>
+<line class="l4" x1="453.60" y1="940.00" x2="533.77" y2="940.00" stroke-width="1"/>
+<line class="wait" x1="533.77" y1="940.00" x2="533.77" y2="940.00" stroke-width="1"/>
+<line class="l4" x1="533.78" y1="940.00" x2="616.84" y2="940.00" stroke-width="1"/>
+<line class="wait" x1="616.84" y1="940.00" x2="616.87" y2="940.00" stroke-width="1"/>
+<rect class="t4" x="453.57" y="938.50" width="1.50" height="3.0"/>
+<rect class="t4" x="533.77" y="938.50" width="1.50" height="3.0"/>
+<rect class="t4" x="616.87" y="938.50" width="1.50" height="3.0"/>
+<path class="moved" d="M616.87,937.50 L619.37,940.00 L616.87,942.50 L614.37,940.00 Z"/>
+<line class="wait" x1="455.99" y1="944.00" x2="456.00" y2="944.00" stroke-width="1"/>
+<line class="l2" x1="456.02" y1="944.00" x2="541.87" y2="944.00" stroke-width="1"/>
+<line class="wait" x1="541.87" y1="944.00" x2="541.87" y2="944.00" stroke-width="1"/>
+<line class="l2" x1="541.89" y1="944.00" x2="578.73" y2="944.00" stroke-width="1"/>
+<line class="wait" x1="578.73" y1="944.00" x2="578.74" y2="944.00" stroke-width="1"/>
+<line class="l2" x1="578.75" y1="944.00" x2="646.88" y2="944.00" stroke-width="1"/>
+<line class="wait" x1="646.88" y1="944.00" x2="646.89" y2="944.00" stroke-width="1"/>
+<rect class="t2" x="456.00" y="942.50" width="1.50" height="3.0"/>
+<rect class="t2" x="541.87" y="942.50" width="1.50" height="3.0"/>
+<rect class="t2" x="578.74" y="942.50" width="1.50" height="3.0"/>
+<rect class="t2" x="646.89" y="942.50" width="1.50" height="3.0"/>
+<path class="moved" d="M541.87,941.50 L544.37,944.00 L541.87,946.50 L539.37,944.00 Z"/>
+<path class="moved" d="M646.89,941.50 L649.39,944.00 L646.89,946.50 L644.39,944.00 Z"/>
+<line class="wait" x1="457.37" y1="948.00" x2="457.38" y2="948.00" stroke-width="1"/>
+<line class="l2" x1="457.40" y1="948.00" x2="507.84" y2="948.00" stroke-width="1"/>
+<line class="wait" x1="507.84" y1="948.00" x2="507.89" y2="948.00" stroke-width="1"/>
+<line class="l2" x1="507.90" y1="948.00" x2="568.93" y2="948.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="948.00" x2="568.98" y2="948.00" stroke-width="1"/>
+<line class="l2" x1="568.99" y1="948.00" x2="606.61" y2="948.00" stroke-width="1"/>
+<line class="wait" x1="606.61" y1="948.00" x2="606.65" y2="948.00" stroke-width="1"/>
+<rect class="t2" x="457.38" y="946.50" width="1.50" height="3.0"/>
+<rect class="t2" x="507.89" y="946.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.98" y="946.50" width="1.50" height="3.0"/>
+<rect class="t2" x="606.65" y="946.50" width="1.50" height="3.0"/>
+<path class="moved" d="M507.89,945.50 L510.39,948.00 L507.89,950.50 L505.39,948.00 Z"/>
+<path class="moved" d="M606.65,945.50 L609.15,948.00 L606.65,950.50 L604.15,948.00 Z"/>
+<line class="wait" x1="460.12" y1="952.00" x2="460.15" y2="952.00" stroke-width="1"/>
+<line class="l2" x1="460.18" y1="952.00" x2="541.87" y2="952.00" stroke-width="1"/>
+<line class="wait" x1="541.87" y1="952.00" x2="541.87" y2="952.00" stroke-width="1"/>
+<line class="l2" x1="541.88" y1="952.00" x2="606.61" y2="952.00" stroke-width="1"/>
+<line class="wait" x1="606.61" y1="952.00" x2="606.65" y2="952.00" stroke-width="1"/>
+<line class="l2" x1="606.66" y1="952.00" x2="654.55" y2="952.00" stroke-width="1"/>
+<line class="wait" x1="654.55" y1="952.00" x2="654.55" y2="952.00" stroke-width="1"/>
+<rect class="t2" x="460.15" y="950.50" width="1.50" height="3.0"/>
+<rect class="t2" x="541.87" y="950.50" width="1.50" height="3.0"/>
+<rect class="t2" x="606.65" y="950.50" width="1.50" height="3.0"/>
+<rect class="t2" x="654.55" y="950.50" width="1.50" height="3.0"/>
+<path class="moved" d="M541.87,949.50 L544.37,952.00 L541.87,954.50 L539.37,952.00 Z"/>
+<path class="moved" d="M606.65,949.50 L609.15,952.00 L606.65,954.50 L604.15,952.00 Z"/>
+<path class="moved" d="M654.55,949.50 L657.05,952.00 L654.55,954.50 L652.05,952.00 Z"/>
+<line class="wait" x1="462.87" y1="956.00" x2="462.89" y2="956.00" stroke-width="1"/>
+<rect class="t1" x="462.89" y="954.50" width="1.50" height="3.0"/>
+<line class="wait" x1="464.68" y1="960.00" x2="464.73" y2="960.00" stroke-width="1"/>
+<line class="l4" x1="464.85" y1="960.00" x2="533.44" y2="960.00" stroke-width="1"/>
+<line class="wait" x1="533.44" y1="960.00" x2="533.45" y2="960.00" stroke-width="1"/>
+<line class="l4" x1="533.46" y1="960.00" x2="568.93" y2="960.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="960.00" x2="568.97" y2="960.00" stroke-width="1"/>
+<rect class="t4" x="464.73" y="958.50" width="1.50" height="3.0"/>
+<rect class="t4" x="533.45" y="958.50" width="1.50" height="3.0"/>
+<rect class="t4" x="568.97" y="958.50" width="1.50" height="3.0"/>
+<path class="moved" d="M533.45,957.50 L535.95,960.00 L533.45,962.50 L530.95,960.00 Z"/>
+<line class="wait" x1="467.01" y1="964.00" x2="467.04" y2="964.00" stroke-width="1"/>
+<line class="l3" x1="467.08" y1="964.00" x2="467.32" y2="964.00" stroke-width="1"/>
+<line class="wait" x1="467.32" y1="964.00" x2="467.33" y2="964.00" stroke-width="1"/>
+<rect class="t3" x="467.04" y="962.50" width="1.50" height="3.0"/>
+<rect class="t3" x="467.33" y="962.50" width="1.50" height="3.0"/>
+<path class="moved" d="M467.33,961.50 L469.83,964.00 L467.33,966.50 L464.83,964.00 Z"/>
+<line class="wait" x1="467.24" y1="968.00" x2="467.25" y2="968.00" stroke-width="1"/>
+<rect class="t0" x="467.25" y="966.50" width="1.50" height="3.0"/>
+<line class="wait" x1="468.76" y1="972.00" x2="468.78" y2="972.00" stroke-width="1"/>
+<rect class="t0" x="468.78" y="970.50" width="1.50" height="3.0"/>
+<line class="wait" x1="472.00" y1="976.00" x2="472.06" y2="976.00" stroke-width="1"/>
+<line class="l2" x1="472.19" y1="976.00" x2="568.93" y2="976.00" stroke-width="1"/>
+<line class="wait" x1="568.93" y1="976.00" x2="568.94" y2="976.00" stroke-width="1"/>
+<line class="l2" x1="568.95" y1="976.00" x2="622.42" y2="976.00" stroke-width="1"/>
+<line class="wait" x1="622.42" y1="976.00" x2="622.43" y2="976.00" stroke-width="1"/>
+<line class="l2" x1="622.44" y1="976.00" x2="662.48" y2="976.00" stroke-width="1"/>
+<line class="wait" x1="662.48" y1="976.00" x2="662.50" y2="976.00" stroke-width="1"/>
+<rect class="t2" x="472.06" y="974.50" width="1.50" height="3.0"/>
+<rect class="t2" x="568.94" y="974.50" width="1.50" height="3.0"/>
+<rect class="t2" x="622.43" y="974.50" width="1.50" height="3.0"/>
+<rect class="t2" x="662.50" y="974.50" width="1.50" height="3.0"/>
+<path class="moved" d="M568.94,973.50 L571.44,976.00 L568.94,978.50 L566.44,976.00 Z"/>
+<path class="moved" d="M622.43,973.50 L624.93,976.00 L622.43,978.50 L619.93,976.00 Z"/>
+<path class="moved" d="M662.50,973.50 L665.00,976.00 L662.50,978.50 L660.00,976.00 Z"/>
+<line class="wait" x1="473.50" y1="980.00" x2="473.53" y2="980.00" stroke-width="1"/>
+<rect class="t0" x="473.53" y="978.50" width="1.50" height="3.0"/>
+<line class="wait" x1="476.77" y1="984.00" x2="476.79" y2="984.00" stroke-width="1"/>
+<rect class="t0" x="476.79" y="982.50" width="1.50" height="3.0"/>
+<line class="wait" x1="477.90" y1="988.00" x2="477.91" y2="988.00" stroke-width="1"/>
+<line class="l3" x1="477.93" y1="988.00" x2="478.15" y2="988.00" stroke-width="1"/>
+<line class="wait" x1="478.15" y1="988.00" x2="478.16" y2="988.00" stroke-width="1"/>
+<rect class="t3" x="477.91" y="986.50" width="1.50" height="3.0"/>
+<rect class="t3" x="478.16" y="986.50" width="1.50" height="3.0"/>
+<path class="moved" d="M478.16,985.50 L480.66,988.00 L478.16,990.50 L475.66,988.00 Z"/>
+<line class="wait" x1="478.08" y1="992.00" x2="478.09" y2="992.00" stroke-width="1"/>
+<rect class="t0" x="478.09" y="990.50" width="1.50" height="3.0"/>
+<line class="wait" x1="480.59" y1="996.00" x2="480.63" y2="996.00" stroke-width="1"/>
+<rect class="t0" x="480.63" y="994.50" width="1.50" height="3.0"/>
+<line class="wait" x1="482.98" y1="1000.00" x2="483.03" y2="1000.00" stroke-width="1"/>
+<rect class="t1" x="483.03" y="998.50" width="1.50" height="3.0"/>
+<line class="wait" x1="485.35" y1="1004.00" x2="485.39" y2="1004.00" stroke-width="1"/>
+<rect class="t0" x="485.39" y="1002.50" width="1.50" height="3.0"/>
+<line class="wait" x1="487.10" y1="1008.00" x2="487.12" y2="1008.00" stroke-width="1"/>
+<rect class="t0" x="487.12" y="1006.50" width="1.50" height="3.0"/>
+<line class="wait" x1="490.59" y1="1012.00" x2="490.60" y2="1012.00" stroke-width="1"/>
+<rect class="t1" x="490.60" y="1010.50" width="1.50" height="3.0"/>
+<line class="wait" x1="492.01" y1="1016.00" x2="492.03" y2="1016.00" stroke-width="1"/>
+<rect class="t0" x="492.03" y="1014.50" width="1.50" height="3.0"/>
+<line class="wait" x1="494.30" y1="1020.00" x2="494.34" y2="1020.00" stroke-width="1"/>
+<rect class="t0" x="494.34" y="1018.50" width="1.50" height="3.0"/>
+<line class="wait" x1="496.74" y1="1024.00" x2="496.75" y2="1024.00" stroke-width="1"/>
+<rect class="t0" x="496.75" y="1022.50" width="1.50" height="3.0"/>
+<line class="wait" x1="498.45" y1="1028.00" x2="498.49" y2="1028.00" stroke-width="1"/>
+<rect class="t0" x="498.49" y="1026.50" width="1.50" height="3.0"/>
+<line class="wait" x1="500.80" y1="1032.00" x2="500.81" y2="1032.00" stroke-width="1"/>
+<rect class="t0" x="500.81" y="1030.50" width="1.50" height="3.0"/>
+<line class="wait" x1="503.68" y1="1036.00" x2="503.70" y2="1036.00" stroke-width="1"/>
+<rect class="t1" x="503.70" y="1034.50" width="1.50" height="3.0"/>
+<line class="wait" x1="506.45" y1="1040.00" x2="506.46" y2="1040.00" stroke-width="1"/>
+<rect class="t1" x="506.46" y="1038.50" width="1.50" height="3.0"/>
+<line class="wait" x1="507.81" y1="1044.00" x2="507.82" y2="1044.00" stroke-width="1"/>
+<rect class="t1" x="507.82" y="1042.50" width="1.50" height="3.0"/>
+<line class="wait" x1="510.06" y1="1048.00" x2="510.07" y2="1048.00" stroke-width="1"/>
+<rect class="t0" x="510.07" y="1046.50" width="1.50" height="3.0"/>
+<line class="wait" x1="512.58" y1="1052.00" x2="512.60" y2="1052.00" stroke-width="1"/>
+<rect class="t0" x="512.60" y="1050.50" width="1.50" height="3.0"/>
+<line class="wait" x1="515.39" y1="1056.00" x2="515.41" y2="1056.00" stroke-width="1"/>
+<rect class="t0" x="515.41" y="1054.50" width="1.50" height="3.0"/>
+<line class="wait" x1="517.39" y1="1060.00" x2="517.41" y2="1060.00" stroke-width="1"/>
+<rect class="t0" x="517.41" y="1058.50" width="1.50" height="3.0"/>
+<line class="wait" x1="520.20" y1="1064.00" x2="520.22" y2="1064.00" stroke-width="1"/>
+<rect class="t0" x="520.22" y="1062.50" width="1.50" height="3.0"/>
+<line class="wait" x1="521.57" y1="1068.00" x2="521.60" y2="1068.00" stroke-width="1"/>
+<rect class="t1" x="521.60" y="1066.50" width="1.50" height="3.0"/>
+<line class="wait" x1="523.90" y1="1072.00" x2="523.92" y2="1072.00" stroke-width="1"/>
+<rect class="t0" x="523.92" y="1070.50" width="1.50" height="3.0"/>
+<line class="wait" x1="525.97" y1="1076.00" x2="525.99" y2="1076.00" stroke-width="1"/>
+<line class="l2" x1="526.03" y1="1076.00" x2="614.46" y2="1076.00" stroke-width="1"/>
+<line class="wait" x1="614.46" y1="1076.00" x2="614.46" y2="1076.00" stroke-width="1"/>
+<line class="l2" x1="614.48" y1="1076.00" x2="644.18" y2="1076.00" stroke-width="1"/>
+<line class="wait" x1="644.18" y1="1076.00" x2="644.19" y2="1076.00" stroke-width="1"/>
+<line class="l2" x1="644.20" y1="1076.00" x2="695.05" y2="1076.00" stroke-width="1"/>
+<line class="wait" x1="695.05" y1="1076.00" x2="695.06" y2="1076.00" stroke-width="1"/>
+<rect class="t2" x="525.99" y="1074.50" width="1.50" height="3.0"/>
+<rect class="t2" x="614.46" y="1074.50" width="1.50" height="3.0"/>
+<rect class="t2" x="644.19" y="1074.50" width="1.50" height="3.0"/>
+<rect class="t2" x="695.06" y="1074.50" width="1.50" height="3.0"/>
+<path class="moved" d="M614.46,1073.50 L616.96,1076.00 L614.46,1078.50 L611.96,1076.00 Z"/>
+<path class="moved" d="M644.19,1073.50 L646.69,1076.00 L644.19,1078.50 L641.69,1076.00 Z"/>
+<path class="moved" d="M695.06,1073.50 L697.56,1076.00 L695.06,1078.50 L692.56,1076.00 Z"/>
+<line class="wait" x1="529.28" y1="1080.00" x2="529.36" y2="1080.00" stroke-width="1"/>
+<rect class="t0" x="529.36" y="1078.50" width="1.50" height="3.0"/>
+<line class="wait" x1="530.46" y1="1084.00" x2="530.48" y2="1084.00" stroke-width="1"/>
+<rect class="t0" x="530.48" y="1082.50" width="1.50" height="3.0"/>
+<line class="wait" x1="532.86" y1="1088.00" x2="532.90" y2="1088.00" stroke-width="1"/>
+<rect class="t1" x="532.90" y="1086.50" width="1.50" height="3.0"/>
+<line class="wait" x1="535.33" y1="1092.00" x2="535.39" y2="1092.00" stroke-width="1"/>
+<rect class="t0" x="535.39" y="1090.50" width="1.50" height="3.0"/>
+<line class="wait" x1="537.37" y1="1096.00" x2="537.39" y2="1096.00" stroke-width="1"/>
+<rect class="t0" x="537.39" y="1094.50" width="1.50" height="3.0"/>
+<line class="wait" x1="540.39" y1="1100.00" x2="540.43" y2="1100.00" stroke-width="1"/>
+<rect class="t0" x="540.43" y="1098.50" width="1.50" height="3.0"/>
+<line class="wait" x1="541.81" y1="1104.00" x2="541.82" y2="1104.00" stroke-width="1"/>
+<line class="l2" x1="541.85" y1="1104.00" x2="606.61" y2="1104.00" stroke-width="1"/>
+<line class="wait" x1="606.61" y1="1104.00" x2="606.66" y2="1104.00" stroke-width="1"/>
+<line class="l2" x1="606.67" y1="1104.00" x2="695.06" y2="1104.00" stroke-width="1"/>
+<line class="wait" x1="695.06" y1="1104.00" x2="695.06" y2="1104.00" stroke-width="1"/>
+<line class="l2" x1="695.08" y1="1104.00" x2="746.19" y2="1104.00" stroke-width="1"/>
+<line class="wait" x1="746.19" y1="1104.00" x2="746.20" y2="1104.00" stroke-width="1"/>
+<rect class="t2" x="541.82" y="1102.50" width="1.50" height="3.0"/>
+<rect class="t2" x="606.66" y="1102.50" width="1.50" height="3.0"/>
+<rect class="t2" x="695.06" y="1102.50" width="1.50" height="3.0"/>
+<rect class="t2" x="746.20" y="1102.50" width="1.50" height="3.0"/>
+<path class="moved" d="M606.66,1101.50 L609.16,1104.00 L606.66,1106.50 L604.16,1104.00 Z"/>
+<path class="moved" d="M746.20,1101.50 L748.70,1104.00 L746.20,1106.50 L743.70,1104.00 Z"/>
+<line class="wait" x1="544.88" y1="1108.00" x2="544.91" y2="1108.00" stroke-width="1"/>
+<rect class="t0" x="544.91" y="1106.50" width="1.50" height="3.0"/>
+<line class="wait" x1="547.54" y1="1112.00" x2="547.55" y2="1112.00" stroke-width="1"/>
+<rect class="t0" x="547.55" y="1110.50" width="1.50" height="3.0"/>
+<line class="wait" x1="549.01" y1="1116.00" x2="549.06" y2="1116.00" stroke-width="1"/>
+<rect class="t0" x="549.06" y="1114.50" width="1.50" height="3.0"/>
+<line class="wait" x1="551.70" y1="1120.00" x2="551.72" y2="1120.00" stroke-width="1"/>
+<rect class="t0" x="551.72" y="1118.50" width="1.50" height="3.0"/>
+<line class="wait" x1="553.19" y1="1124.00" x2="553.20" y2="1124.00" stroke-width="1"/>
+<rect class="t1" x="553.20" y="1122.50" width="1.50" height="3.0"/>
+<line class="wait" x1="555.56" y1="1128.00" x2="555.60" y2="1128.00" stroke-width="1"/>
+<rect class="t0" x="555.60" y="1126.50" width="1.50" height="3.0"/>
+<line class="wait" x1="559.09" y1="1132.00" x2="559.10" y2="1132.00" stroke-width="1"/>
+<rect class="t0" x="559.10" y="1130.50" width="1.50" height="3.0"/>
+<line class="wait" x1="560.12" y1="1136.00" x2="560.13" y2="1136.00" stroke-width="1"/>
+<rect class="t1" x="560.13" y="1134.50" width="1.50" height="3.0"/>
+<line class="wait" x1="563.42" y1="1140.00" x2="563.46" y2="1140.00" stroke-width="1"/>
+<rect class="t0" x="563.46" y="1138.50" width="1.50" height="3.0"/>
+<line class="wait" x1="564.83" y1="1144.00" x2="564.88" y2="1144.00" stroke-width="1"/>
+<rect class="t1" x="564.88" y="1142.50" width="1.50" height="3.0"/>
+<line class="wait" x1="567.63" y1="1148.00" x2="567.67" y2="1148.00" stroke-width="1"/>
+<rect class="t1" x="567.67" y="1146.50" width="1.50" height="3.0"/>
+<line class="wait" x1="569.25" y1="1152.00" x2="569.26" y2="1152.00" stroke-width="1"/>
+<rect class="t0" x="569.26" y="1150.50" width="1.50" height="3.0"/>
+<line class="wait" x1="572.45" y1="1156.00" x2="572.47" y2="1156.00" stroke-width="1"/>
+<rect class="t0" x="572.47" y="1154.50" width="1.50" height="3.0"/>
+<line class="wait" x1="573.87" y1="1160.00" x2="573.89" y2="1160.00" stroke-width="1"/>
+<rect class="t0" x="573.89" y="1158.50" width="1.50" height="3.0"/>
+<line class="wait" x1="577.27" y1="1164.00" x2="577.29" y2="1164.00" stroke-width="1"/>
+<rect class="t0" x="577.29" y="1162.50" width="1.50" height="3.0"/>
+<line class="wait" x1="578.69" y1="1168.00" x2="578.70" y2="1168.00" stroke-width="1"/>
+<line class="l3" x1="578.72" y1="1168.00" x2="578.92" y2="1168.00" stroke-width="1"/>
+<line class="wait" x1="578.92" y1="1168.00" x2="578.92" y2="1168.00" stroke-width="1"/>
+<rect class="t3" x="578.70" y="1166.50" width="1.50" height="3.0"/>
+<rect class="t3" x="578.92" y="1166.50" width="1.50" height="3.0"/>
+<path class="moved" d="M578.92,1165.50 L581.42,1168.00 L578.92,1170.50 L576.42,1168.00 Z"/>
+<line class="wait" x1="578.86" y1="1172.00" x2="578.88" y2="1172.00" stroke-width="1"/>
+<rect class="t0" x="578.88" y="1170.50" width="1.50" height="3.0"/>
+<line class="wait" x1="580.87" y1="1176.00" x2="580.91" y2="1176.00" stroke-width="1"/>
+<line class="l2" x1="580.92" y1="1176.00" x2="644.18" y2="1176.00" stroke-width="1"/>
+<line class="wait" x1="644.18" y1="1176.00" x2="644.19" y2="1176.00" stroke-width="1"/>
+<line class="l2" x1="644.20" y1="1176.00" x2="674.83" y2="1176.00" stroke-width="1"/>
+<line class="wait" x1="674.83" y1="1176.00" x2="674.83" y2="1176.00" stroke-width="1"/>
+<line class="l2" x1="674.84" y1="1176.00" x2="751.82" y2="1176.00" stroke-width="1"/>
+<line class="wait" x1="751.82" y1="1176.00" x2="751.83" y2="1176.00" stroke-width="1"/>
+<rect class="t2" x="580.91" y="1174.50" width="1.50" height="3.0"/>
+<rect class="t2" x="644.19" y="1174.50" width="1.50" height="3.0"/>
+<rect class="t2" x="674.83" y="1174.50" width="1.50" height="3.0"/>
+<rect class="t2" x="751.83" y="1174.50" width="1.50" height="3.0"/>
+<path class="moved" d="M644.19,1173.50 L646.69,1176.00 L644.19,1178.50 L641.69,1176.00 Z"/>
+<path class="moved" d="M751.83,1173.50 L754.33,1176.00 L751.83,1178.50 L749.33,1176.00 Z"/>
+<line class="wait" x1="583.40" y1="1180.00" x2="583.43" y2="1180.00" stroke-width="1"/>
+<line class="l3" x1="583.45" y1="1180.00" x2="583.61" y2="1180.00" stroke-width="1"/>
+<line class="wait" x1="583.61" y1="1180.00" x2="583.62" y2="1180.00" stroke-width="1"/>
+<rect class="t3" x="583.43" y="1178.50" width="1.50" height="3.0"/>
+<rect class="t3" x="583.62" y="1178.50" width="1.50" height="3.0"/>
+<path class="moved" d="M583.62,1177.50 L586.12,1180.00 L583.62,1182.50 L581.12,1180.00 Z"/>
+<line class="wait" x1="583.56" y1="1184.00" x2="583.57" y2="1184.00" stroke-width="1"/>
+<rect class="t0" x="583.57" y="1182.50" width="1.50" height="3.0"/>
+<line class="wait" x1="585.48" y1="1188.00" x2="585.52" y2="1188.00" stroke-width="1"/>
+<rect class="t0" x="585.52" y="1186.50" width="1.50" height="3.0"/>
+<line class="wait" x1="587.71" y1="1192.00" x2="587.72" y2="1192.00" stroke-width="1"/>
+<line class="l4" x1="587.74" y1="1192.00" x2="674.82" y2="1192.00" stroke-width="1"/>
+<line class="wait" x1="674.82" y1="1192.00" x2="674.83" y2="1192.00" stroke-width="1"/>
+<line class="l4" x1="674.84" y1="1192.00" x2="746.19" y2="1192.00" stroke-width="1"/>
+<line class="wait" x1="746.19" y1="1192.00" x2="746.20" y2="1192.00" stroke-width="1"/>
+<rect class="t4" x="587.72" y="1190.50" width="1.50" height="3.0"/>
+<rect class="t4" x="674.83" y="1190.50" width="1.50" height="3.0"/>
+<rect class="t4" x="746.20" y="1190.50" width="1.50" height="3.0"/>
+<path class="moved" d="M674.83,1189.50 L677.33,1192.00 L674.83,1194.50 L672.33,1192.00 Z"/>
+<path class="moved" d="M746.20,1189.50 L748.70,1192.00 L746.20,1194.50 L743.70,1192.00 Z"/>
+<line class="wait" x1="589.93" y1="1196.00" x2="589.98" y2="1196.00" stroke-width="1"/>
+<rect class="t0" x="589.98" y="1194.50" width="1.50" height="3.0"/>
+<line class="wait" x1="592.75" y1="1200.00" x2="592.81" y2="1200.00" stroke-width="1"/>
+<rect class="t0" x="592.81" y="1198.50" width="1.50" height="3.0"/>
+<line class="wait" x1="594.37" y1="1204.00" x2="594.39" y2="1204.00" stroke-width="1"/>
+<rect class="t0" x="594.39" y="1202.50" width="1.50" height="3.0"/>
+<line class="wait" x1="596.78" y1="1208.00" x2="596.80" y2="1208.00" stroke-width="1"/>
+<rect class="t0" x="596.80" y="1206.50" width="1.50" height="3.0"/>
+<line class="wait" x1="599.48" y1="1212.00" x2="599.54" y2="1212.00" stroke-width="1"/>
+<rect class="t0" x="599.54" y="1210.50" width="1.50" height="3.0"/>
+<line class="wait" x1="601.49" y1="1216.00" x2="601.52" y2="1216.00" stroke-width="1"/>
+<rect class="t1" x="601.52" y="1214.50" width="1.50" height="3.0"/>
+<line class="wait" x1="603.59" y1="1220.00" x2="603.65" y2="1220.00" stroke-width="1"/>
+<rect class="t0" x="603.65" y="1218.50" width="1.50" height="3.0"/>
+<line class="wait" x1="605.78" y1="1224.00" x2="605.82" y2="1224.00" stroke-width="1"/>
+<rect class="t0" x="605.82" y="1222.50" width="1.50" height="3.0"/>
+<line class="wait" x1="609.40" y1="1228.00" x2="609.46" y2="1228.00" stroke-width="1"/>
+<line class="l4" x1="609.48" y1="1228.00" x2="654.49" y2="1228.00" stroke-width="1"/>
+<line class="wait" x1="654.49" y1="1228.00" x2="654.49" y2="1228.00" stroke-width="1"/>
+<line class="l4" x1="654.51" y1="1228.00" x2="934.65" y2="1228.00" stroke-width="1"/>
+<line class="wait" x1="934.65" y1="1228.00" x2="934.68" y2="1228.00" stroke-width="1"/>
+<rect class="t4" x="609.46" y="1226.50" width="1.50" height="3.0"/>
+<rect class="t4" x="654.49" y="1226.50" width="1.50" height="3.0"/>
+<rect class="t4" x="934.68" y="1226.50" width="1.50" height="3.0"/>
+<path class="moved" d="M654.49,1225.50 L656.99,1228.00 L654.49,1230.50 L651.99,1228.00 Z"/>
+<path class="critline" d="M932.19,1225.50 L937.19,1230.50 M932.19,1230.50 L937.19,1225.50"/>
+<text class="ink" font-weight="600" x="941.7" y="1232.0">504</text>
+<line class="wait" x1="610.80" y1="1232.00" x2="610.86" y2="1232.00" stroke-width="1"/>
+<line class="l2" x1="610.89" y1="1232.00" x2="662.45" y2="1232.00" stroke-width="1"/>
+<line class="wait" x1="662.45" y1="1232.00" x2="662.50" y2="1232.00" stroke-width="1"/>
+<line class="l2" x1="662.55" y1="1232.00" x2="702.86" y2="1232.00" stroke-width="1"/>
+<line class="wait" x1="702.86" y1="1232.00" x2="702.90" y2="1232.00" stroke-width="1"/>
+<line class="l2" x1="702.94" y1="1232.00" x2="750.35" y2="1232.00" stroke-width="1"/>
+<line class="wait" x1="750.35" y1="1232.00" x2="750.36" y2="1232.00" stroke-width="1"/>
+<rect class="t2" x="610.86" y="1230.50" width="1.50" height="3.0"/>
+<rect class="t2" x="662.50" y="1230.50" width="1.50" height="3.0"/>
+<rect class="t2" x="702.90" y="1230.50" width="1.50" height="3.0"/>
+<rect class="t2" x="750.36" y="1230.50" width="1.50" height="3.0"/>
+<path class="moved" d="M662.50,1229.50 L665.00,1232.00 L662.50,1234.50 L660.00,1232.00 Z"/>
+<path class="moved" d="M702.90,1229.50 L705.40,1232.00 L702.90,1234.50 L700.40,1232.00 Z"/>
+<path class="moved" d="M750.36,1229.50 L752.86,1232.00 L750.36,1234.50 L747.86,1232.00 Z"/>
+<line class="wait" x1="612.62" y1="1236.00" x2="612.67" y2="1236.00" stroke-width="1"/>
+<line class="l2" x1="612.73" y1="1236.00" x2="657.34" y2="1236.00" stroke-width="1"/>
+<line class="wait" x1="657.34" y1="1236.00" x2="657.36" y2="1236.00" stroke-width="1"/>
+<line class="l2" x1="657.40" y1="1236.00" x2="697.98" y2="1236.00" stroke-width="1"/>
+<line class="wait" x1="697.98" y1="1236.00" x2="698.00" y2="1236.00" stroke-width="1"/>
+<line class="l2" x1="698.03" y1="1236.00" x2="717.86" y2="1236.00" stroke-width="1"/>
+<line class="wait" x1="717.86" y1="1236.00" x2="717.86" y2="1236.00" stroke-width="1"/>
+<rect class="t2" x="612.67" y="1234.50" width="1.50" height="3.0"/>
+<rect class="t2" x="657.36" y="1234.50" width="1.50" height="3.0"/>
+<rect class="t2" x="698.00" y="1234.50" width="1.50" height="3.0"/>
+<rect class="t2" x="717.86" y="1234.50" width="1.50" height="3.0"/>
+<path class="moved" d="M657.36,1233.50 L659.86,1236.00 L657.36,1238.50 L654.86,1236.00 Z"/>
+<line class="wait" x1="615.29" y1="1240.00" x2="615.34" y2="1240.00" stroke-width="1"/>
+<rect class="t0" x="615.34" y="1238.50" width="1.50" height="3.0"/>
+<line class="wait" x1="618.13" y1="1244.00" x2="618.15" y2="1244.00" stroke-width="1"/>
+<rect class="t0" x="618.15" y="1242.50" width="1.50" height="3.0"/>
+<line class="wait" x1="619.52" y1="1248.00" x2="619.54" y2="1248.00" stroke-width="1"/>
+<rect class="t0" x="619.54" y="1246.50" width="1.50" height="3.0"/>
+<line class="wait" x1="622.33" y1="1252.00" x2="622.35" y2="1252.00" stroke-width="1"/>
+<line class="l4" x1="622.40" y1="1252.00" x2="702.85" y2="1252.00" stroke-width="1"/>
+<line class="wait" x1="702.85" y1="1252.00" x2="702.89" y2="1252.00" stroke-width="1"/>
+<line class="l4" x1="702.94" y1="1252.00" x2="934.65" y2="1252.00" stroke-width="1"/>
+<line class="wait" x1="934.65" y1="1252.00" x2="934.68" y2="1252.00" stroke-width="1"/>
+<rect class="t4" x="622.35" y="1250.50" width="1.50" height="3.0"/>
+<rect class="t4" x="702.89" y="1250.50" width="1.50" height="3.0"/>
+<rect class="t4" x="934.68" y="1250.50" width="1.50" height="3.0"/>
+<path class="moved" d="M702.89,1249.50 L705.39,1252.00 L702.89,1254.50 L700.39,1252.00 Z"/>
+<path class="critline" d="M932.20,1249.50 L937.20,1254.50 M932.20,1254.50 L937.20,1249.50"/>
+<text class="ink" font-weight="600" x="941.7" y="1256.0">504</text>
+<line class="wait" x1="625.13" y1="1256.00" x2="625.16" y2="1256.00" stroke-width="1"/>
+<rect class="t1" x="625.16" y="1254.50" width="1.50" height="3.0"/>
+<line class="wait" x1="626.49" y1="1260.00" x2="626.54" y2="1260.00" stroke-width="1"/>
+<rect class="t0" x="626.54" y="1258.50" width="1.50" height="3.0"/>
+<line class="wait" x1="629.10" y1="1264.00" x2="629.12" y2="1264.00" stroke-width="1"/>
+<rect class="t0" x="629.12" y="1262.50" width="1.50" height="3.0"/>
+<line class="wait" x1="631.43" y1="1268.00" x2="631.44" y2="1268.00" stroke-width="1"/>
+<line class="l2" x1="631.46" y1="1268.00" x2="717.85" y2="1268.00" stroke-width="1"/>
+<line class="wait" x1="717.85" y1="1268.00" x2="717.86" y2="1268.00" stroke-width="1"/>
+<line class="l2" x1="717.87" y1="1268.00" x2="772.80" y2="1268.00" stroke-width="1"/>
+<line class="wait" x1="772.80" y1="1268.00" x2="772.81" y2="1268.00" stroke-width="1"/>
+<line class="l2" x1="772.83" y1="1268.00" x2="876.44" y2="1268.00" stroke-width="1"/>
+<line class="wait" x1="876.44" y1="1268.00" x2="876.52" y2="1268.00" stroke-width="1"/>
+<rect class="t2" x="631.44" y="1266.50" width="1.50" height="3.0"/>
+<rect class="t2" x="717.86" y="1266.50" width="1.50" height="3.0"/>
+<rect class="t2" x="772.81" y="1266.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.52" y="1266.50" width="1.50" height="3.0"/>
+<path class="moved" d="M717.86,1265.50 L720.36,1268.00 L717.86,1270.50 L715.36,1268.00 Z"/>
+<path class="moved" d="M772.81,1265.50 L775.31,1268.00 L772.81,1270.50 L770.31,1268.00 Z"/>
+<path class="moved" d="M876.52,1265.50 L879.02,1268.00 L876.52,1270.50 L874.02,1268.00 Z"/>
+<line class="wait" x1="634.17" y1="1272.00" x2="634.21" y2="1272.00" stroke-width="1"/>
+<rect class="t0" x="634.21" y="1270.50" width="1.50" height="3.0"/>
+<line class="wait" x1="635.52" y1="1276.00" x2="635.53" y2="1276.00" stroke-width="1"/>
+<rect class="t0" x="635.53" y="1274.50" width="1.50" height="3.0"/>
+<line class="wait" x1="638.93" y1="1280.00" x2="638.94" y2="1280.00" stroke-width="1"/>
+<rect class="t0" x="638.94" y="1278.50" width="1.50" height="3.0"/>
+<line class="wait" x1="640.32" y1="1284.00" x2="640.33" y2="1284.00" stroke-width="1"/>
+<rect class="t1" x="640.33" y="1282.50" width="1.50" height="3.0"/>
+<line class="wait" x1="643.06" y1="1288.00" x2="643.08" y2="1288.00" stroke-width="1"/>
+<rect class="t0" x="643.08" y="1286.50" width="1.50" height="3.0"/>
+<line class="wait" x1="644.60" y1="1292.00" x2="644.61" y2="1292.00" stroke-width="1"/>
+<rect class="t0" x="644.61" y="1290.50" width="1.50" height="3.0"/>
+<line class="wait" x1="646.83" y1="1296.00" x2="646.85" y2="1296.00" stroke-width="1"/>
+<line class="l4" x1="646.87" y1="1296.00" x2="702.86" y2="1296.00" stroke-width="1"/>
+<line class="wait" x1="702.86" y1="1296.00" x2="702.95" y2="1296.00" stroke-width="1"/>
+<line class="l4" x1="702.95" y1="1296.00" x2="782.45" y2="1296.00" stroke-width="1"/>
+<line class="wait" x1="782.45" y1="1296.00" x2="782.45" y2="1296.00" stroke-width="1"/>
+<rect class="t4" x="646.85" y="1294.50" width="1.50" height="3.0"/>
+<rect class="t4" x="702.95" y="1294.50" width="1.50" height="3.0"/>
+<rect class="t4" x="782.45" y="1294.50" width="1.50" height="3.0"/>
+<path class="moved" d="M702.95,1293.50 L705.45,1296.00 L702.95,1298.50 L700.45,1296.00 Z"/>
+<path class="moved" d="M782.45,1293.50 L784.95,1296.00 L782.45,1298.50 L779.95,1296.00 Z"/>
+<line class="wait" x1="649.25" y1="1300.00" x2="649.27" y2="1300.00" stroke-width="1"/>
+<rect class="t0" x="649.27" y="1298.50" width="1.50" height="3.0"/>
+<line class="wait" x1="651.63" y1="1304.00" x2="651.68" y2="1304.00" stroke-width="1"/>
+<rect class="t1" x="651.68" y="1302.50" width="1.50" height="3.0"/>
+<line class="wait" x1="654.41" y1="1308.00" x2="654.46" y2="1308.00" stroke-width="1"/>
+<line class="l2" x1="654.48" y1="1308.00" x2="695.06" y2="1308.00" stroke-width="1"/>
+<line class="wait" x1="695.06" y1="1308.00" x2="695.06" y2="1308.00" stroke-width="1"/>
+<line class="l2" x1="695.08" y1="1308.00" x2="766.43" y2="1308.00" stroke-width="1"/>
+<line class="wait" x1="766.43" y1="1308.00" x2="766.44" y2="1308.00" stroke-width="1"/>
+<line class="l2" x1="766.45" y1="1308.00" x2="876.42" y2="1308.00" stroke-width="1"/>
+<line class="wait" x1="876.42" y1="1308.00" x2="876.48" y2="1308.00" stroke-width="1"/>
+<rect class="t2" x="654.46" y="1306.50" width="1.50" height="3.0"/>
+<rect class="t2" x="695.06" y="1306.50" width="1.50" height="3.0"/>
+<rect class="t2" x="766.44" y="1306.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.48" y="1306.50" width="1.50" height="3.0"/>
+<path class="moved" d="M766.44,1305.50 L768.94,1308.00 L766.44,1310.50 L763.94,1308.00 Z"/>
+<path class="moved" d="M876.48,1305.50 L878.98,1308.00 L876.48,1310.50 L873.98,1308.00 Z"/>
+<line class="wait" x1="656.73" y1="1312.00" x2="656.79" y2="1312.00" stroke-width="1"/>
+<line class="l4" x1="656.92" y1="1312.00" x2="705.82" y2="1312.00" stroke-width="1"/>
+<line class="wait" x1="705.82" y1="1312.00" x2="705.82" y2="1312.00" stroke-width="1"/>
+<line class="l4" x1="705.84" y1="1312.00" x2="757.10" y2="1312.00" stroke-width="1"/>
+<line class="wait" x1="757.10" y1="1312.00" x2="757.13" y2="1312.00" stroke-width="1"/>
+<rect class="t4" x="656.79" y="1310.50" width="1.50" height="3.0"/>
+<rect class="t4" x="705.82" y="1310.50" width="1.50" height="3.0"/>
+<rect class="t4" x="757.13" y="1310.50" width="1.50" height="3.0"/>
+<path class="moved" d="M705.82,1309.50 L708.32,1312.00 L705.82,1314.50 L703.32,1312.00 Z"/>
+<line class="wait" x1="658.36" y1="1316.00" x2="658.37" y2="1316.00" stroke-width="1"/>
+<rect class="t0" x="658.37" y="1314.50" width="1.50" height="3.0"/>
+<line class="wait" x1="661.38" y1="1320.00" x2="661.40" y2="1320.00" stroke-width="1"/>
+<rect class="t0" x="661.40" y="1318.50" width="1.50" height="3.0"/>
+<line class="wait" x1="663.59" y1="1324.00" x2="663.66" y2="1324.00" stroke-width="1"/>
+<rect class="t0" x="663.66" y="1322.50" width="1.50" height="3.0"/>
+<line class="wait" x1="665.13" y1="1328.00" x2="665.20" y2="1328.00" stroke-width="1"/>
+<rect class="t0" x="665.20" y="1326.50" width="1.50" height="3.0"/>
+<line class="wait" x1="667.82" y1="1332.00" x2="667.86" y2="1332.00" stroke-width="1"/>
+<rect class="t1" x="667.86" y="1330.50" width="1.50" height="3.0"/>
+<line class="wait" x1="670.22" y1="1336.00" x2="670.27" y2="1336.00" stroke-width="1"/>
+<rect class="t1" x="670.27" y="1334.50" width="1.50" height="3.0"/>
+<line class="wait" x1="672.59" y1="1340.00" x2="672.65" y2="1340.00" stroke-width="1"/>
+<rect class="t0" x="672.65" y="1338.50" width="1.50" height="3.0"/>
+<line class="wait" x1="674.77" y1="1344.00" x2="674.78" y2="1344.00" stroke-width="1"/>
+<line class="l2" x1="674.81" y1="1344.00" x2="757.09" y2="1344.00" stroke-width="1"/>
+<line class="wait" x1="757.09" y1="1344.00" x2="757.12" y2="1344.00" stroke-width="1"/>
+<line class="l2" x1="757.16" y1="1344.00" x2="876.42" y2="1344.00" stroke-width="1"/>
+<line class="wait" x1="876.42" y1="1344.00" x2="876.48" y2="1344.00" stroke-width="1"/>
+<line class="l2" x1="876.50" y1="1344.00" x2="934.67" y2="1344.00" stroke-width="1"/>
+<line class="wait" x1="934.67" y1="1344.00" x2="934.73" y2="1344.00" stroke-width="1"/>
+<rect class="t2" x="674.78" y="1342.50" width="1.50" height="3.0"/>
+<rect class="t2" x="757.12" y="1342.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.48" y="1342.50" width="1.50" height="3.0"/>
+<rect class="t2" x="934.73" y="1342.50" width="1.50" height="3.0"/>
+<path class="moved" d="M757.12,1341.50 L759.62,1344.00 L757.12,1346.50 L754.62,1344.00 Z"/>
+<path class="moved" d="M876.48,1341.50 L878.98,1344.00 L876.48,1346.50 L873.98,1344.00 Z"/>
+<line class="wait" x1="676.61" y1="1348.00" x2="676.64" y2="1348.00" stroke-width="1"/>
+<line class="l2" x1="676.67" y1="1348.00" x2="746.19" y2="1348.00" stroke-width="1"/>
+<line class="wait" x1="746.19" y1="1348.00" x2="746.20" y2="1348.00" stroke-width="1"/>
+<line class="l2" x1="746.21" y1="1348.00" x2="876.43" y2="1348.00" stroke-width="1"/>
+<line class="wait" x1="876.43" y1="1348.00" x2="876.51" y2="1348.00" stroke-width="1"/>
+<line class="l2" x1="876.51" y1="1348.00" x2="934.66" y2="1348.00" stroke-width="1"/>
+<line class="wait" x1="934.66" y1="1348.00" x2="934.68" y2="1348.00" stroke-width="1"/>
+<rect class="t2" x="676.64" y="1346.50" width="1.50" height="3.0"/>
+<rect class="t2" x="746.20" y="1346.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.51" y="1346.50" width="1.50" height="3.0"/>
+<rect class="t2" x="934.68" y="1346.50" width="1.50" height="3.0"/>
+<path class="moved" d="M746.20,1345.50 L748.70,1348.00 L746.20,1350.50 L743.70,1348.00 Z"/>
+<path class="moved" d="M876.51,1345.50 L879.01,1348.00 L876.51,1350.50 L874.01,1348.00 Z"/>
+<line class="wait" x1="678.77" y1="1352.00" x2="678.79" y2="1352.00" stroke-width="1"/>
+<rect class="t1" x="678.79" y="1350.50" width="1.50" height="3.0"/>
+<line class="wait" x1="681.73" y1="1356.00" x2="681.74" y2="1356.00" stroke-width="1"/>
+<rect class="t0" x="681.74" y="1354.50" width="1.50" height="3.0"/>
+<line class="wait" x1="684.55" y1="1360.00" x2="684.56" y2="1360.00" stroke-width="1"/>
+<line class="l4" x1="684.58" y1="1360.00" x2="751.82" y2="1360.00" stroke-width="1"/>
+<line class="wait" x1="751.82" y1="1360.00" x2="751.83" y2="1360.00" stroke-width="1"/>
+<line class="l4" x1="751.84" y1="1360.00" x2="973.13" y2="1360.00" stroke-width="1"/>
+<line class="wait" x1="973.13" y1="1360.00" x2="973.16" y2="1360.00" stroke-width="1"/>
+<rect class="t4" x="684.56" y="1358.50" width="1.50" height="3.0"/>
+<rect class="t4" x="751.83" y="1358.50" width="1.50" height="3.0"/>
+<rect class="t4" x="973.16" y="1358.50" width="1.50" height="3.0"/>
+<path class="critline" d="M970.72,1357.50 L975.72,1362.50 M970.72,1362.50 L975.72,1357.50"/>
+<text class="ink" font-weight="600" x="980.2" y="1364.0">504</text>
+<line class="wait" x1="685.92" y1="1364.00" x2="685.94" y2="1364.00" stroke-width="1"/>
+<rect class="t1" x="685.94" y="1362.50" width="1.50" height="3.0"/>
+<line class="wait" x1="688.67" y1="1368.00" x2="688.69" y2="1368.00" stroke-width="1"/>
+<rect class="t0" x="688.69" y="1366.50" width="1.50" height="3.0"/>
+<line class="wait" x1="690.25" y1="1372.00" x2="690.26" y2="1372.00" stroke-width="1"/>
+<rect class="t0" x="690.26" y="1370.50" width="1.50" height="3.0"/>
+<line class="wait" x1="693.34" y1="1376.00" x2="693.35" y2="1376.00" stroke-width="1"/>
+<rect class="t0" x="693.35" y="1374.50" width="1.50" height="3.0"/>
+<line class="wait" x1="694.97" y1="1380.00" x2="694.99" y2="1380.00" stroke-width="1"/>
+<line class="l2" x1="695.04" y1="1380.00" x2="754.74" y2="1380.00" stroke-width="1"/>
+<line class="wait" x1="754.74" y1="1380.00" x2="754.76" y2="1380.00" stroke-width="1"/>
+<line class="l2" x1="754.80" y1="1380.00" x2="876.44" y2="1380.00" stroke-width="1"/>
+<line class="wait" x1="876.44" y1="1380.00" x2="876.53" y2="1380.00" stroke-width="1"/>
+<line class="l2" x1="876.54" y1="1380.00" x2="934.66" y2="1380.00" stroke-width="1"/>
+<line class="wait" x1="934.66" y1="1380.00" x2="934.68" y2="1380.00" stroke-width="1"/>
+<rect class="t2" x="694.99" y="1378.50" width="1.50" height="3.0"/>
+<rect class="t2" x="754.76" y="1378.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.53" y="1378.50" width="1.50" height="3.0"/>
+<rect class="t2" x="934.68" y="1378.50" width="1.50" height="3.0"/>
+<path class="moved" d="M754.76,1377.50 L757.26,1380.00 L754.76,1382.50 L752.26,1380.00 Z"/>
+<path class="moved" d="M876.53,1377.50 L879.03,1380.00 L876.53,1382.50 L874.03,1380.00 Z"/>
+<path class="moved" d="M934.68,1377.50 L937.18,1380.00 L934.68,1382.50 L932.18,1380.00 Z"/>
+<line class="wait" x1="697.11" y1="1384.00" x2="697.15" y2="1384.00" stroke-width="1"/>
+<line class="l2" x1="697.17" y1="1384.00" x2="754.73" y2="1384.00" stroke-width="1"/>
+<line class="wait" x1="754.73" y1="1384.00" x2="754.76" y2="1384.00" stroke-width="1"/>
+<line class="l2" x1="754.80" y1="1384.00" x2="782.33" y2="1384.00" stroke-width="1"/>
+<line class="wait" x1="782.33" y1="1384.00" x2="782.33" y2="1384.00" stroke-width="1"/>
+<line class="l2" x1="782.35" y1="1384.00" x2="876.43" y2="1384.00" stroke-width="1"/>
+<line class="wait" x1="876.43" y1="1384.00" x2="876.51" y2="1384.00" stroke-width="1"/>
+<rect class="t2" x="697.15" y="1382.50" width="1.50" height="3.0"/>
+<rect class="t2" x="754.76" y="1382.50" width="1.50" height="3.0"/>
+<rect class="t2" x="782.33" y="1382.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.51" y="1382.50" width="1.50" height="3.0"/>
+<path class="moved" d="M782.33,1381.50 L784.83,1384.00 L782.33,1386.50 L779.83,1384.00 Z"/>
+<path class="moved" d="M876.51,1381.50 L879.01,1384.00 L876.51,1386.50 L874.01,1384.00 Z"/>
+<line class="wait" x1="699.34" y1="1388.00" x2="699.35" y2="1388.00" stroke-width="1"/>
+<line class="l2" x1="699.37" y1="1388.00" x2="761.41" y2="1388.00" stroke-width="1"/>
+<line class="wait" x1="761.41" y1="1388.00" x2="761.41" y2="1388.00" stroke-width="1"/>
+<line class="l2" x1="761.42" y1="1388.00" x2="876.40" y2="1388.00" stroke-width="1"/>
+<line class="wait" x1="876.40" y1="1388.00" x2="876.48" y2="1388.00" stroke-width="1"/>
+<line class="l2" x1="876.50" y1="1388.00" x2="934.66" y2="1388.00" stroke-width="1"/>
+<line class="wait" x1="934.66" y1="1388.00" x2="934.73" y2="1388.00" stroke-width="1"/>
+<rect class="t2" x="699.35" y="1386.50" width="1.50" height="3.0"/>
+<rect class="t2" x="761.41" y="1386.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.48" y="1386.50" width="1.50" height="3.0"/>
+<rect class="t2" x="934.73" y="1386.50" width="1.50" height="3.0"/>
+<line class="wait" x1="702.90" y1="1392.00" x2="702.95" y2="1392.00" stroke-width="1"/>
+<rect class="t1" x="702.95" y="1390.50" width="1.50" height="3.0"/>
+<line class="wait" x1="704.32" y1="1396.00" x2="704.33" y2="1396.00" stroke-width="1"/>
+<line class="l2" x1="704.35" y1="1396.00" x2="750.35" y2="1396.00" stroke-width="1"/>
+<line class="wait" x1="750.35" y1="1396.00" x2="750.36" y2="1396.00" stroke-width="1"/>
+<line class="l2" x1="750.37" y1="1396.00" x2="777.74" y2="1396.00" stroke-width="1"/>
+<line class="wait" x1="777.74" y1="1396.00" x2="777.76" y2="1396.00" stroke-width="1"/>
+<line class="l2" x1="777.80" y1="1396.00" x2="876.45" y2="1396.00" stroke-width="1"/>
+<line class="wait" x1="876.45" y1="1396.00" x2="876.54" y2="1396.00" stroke-width="1"/>
+<rect class="t2" x="704.33" y="1394.50" width="1.50" height="3.0"/>
+<rect class="t2" x="750.36" y="1394.50" width="1.50" height="3.0"/>
+<rect class="t2" x="777.76" y="1394.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.54" y="1394.50" width="1.50" height="3.0"/>
+<path class="moved" d="M750.36,1393.50 L752.86,1396.00 L750.36,1398.50 L747.86,1396.00 Z"/>
+<path class="moved" d="M777.76,1393.50 L780.26,1396.00 L777.76,1398.50 L775.26,1396.00 Z"/>
+<path class="moved" d="M876.54,1393.50 L879.04,1396.00 L876.54,1398.50 L874.04,1396.00 Z"/>
+<line class="wait" x1="706.18" y1="1400.00" x2="706.20" y2="1400.00" stroke-width="1"/>
+<rect class="t0" x="706.20" y="1398.50" width="1.50" height="3.0"/>
+<line class="wait" x1="708.95" y1="1404.00" x2="708.96" y2="1404.00" stroke-width="1"/>
+<rect class="t0" x="708.96" y="1402.50" width="1.50" height="3.0"/>
+<line class="wait" x1="711.25" y1="1408.00" x2="711.27" y2="1408.00" stroke-width="1"/>
+<line class="l4" x1="711.31" y1="1408.00" x2="876.41" y2="1408.00" stroke-width="1"/>
+<line class="wait" x1="876.41" y1="1408.00" x2="876.48" y2="1408.00" stroke-width="1"/>
+<line class="l4" x1="876.50" y1="1408.00" x2="973.14" y2="1408.00" stroke-width="1"/>
+<line class="wait" x1="973.14" y1="1408.00" x2="973.17" y2="1408.00" stroke-width="1"/>
+<rect class="t4" x="711.27" y="1406.50" width="1.50" height="3.0"/>
+<rect class="t4" x="876.48" y="1406.50" width="1.50" height="3.0"/>
+<rect class="t4" x="973.17" y="1406.50" width="1.50" height="3.0"/>
+<path class="moved" d="M876.48,1405.50 L878.98,1408.00 L876.48,1410.50 L873.98,1408.00 Z"/>
+<path class="moved" d="M973.17,1405.50 L975.67,1408.00 L973.17,1410.50 L970.67,1408.00 Z"/>
+<line class="wait" x1="713.74" y1="1412.00" x2="713.77" y2="1412.00" stroke-width="1"/>
+<rect class="t0" x="713.77" y="1410.50" width="1.50" height="3.0"/>
+<line class="wait" x1="716.18" y1="1416.00" x2="716.19" y2="1416.00" stroke-width="1"/>
+<rect class="t0" x="716.19" y="1414.50" width="1.50" height="3.0"/>
+<line class="wait" x1="717.81" y1="1420.00" x2="717.82" y2="1420.00" stroke-width="1"/>
+<line class="l3" x1="717.85" y1="1420.00" x2="718.04" y2="1420.00" stroke-width="1"/>
+<line class="wait" x1="718.04" y1="1420.00" x2="718.05" y2="1420.00" stroke-width="1"/>
+<rect class="t3" x="717.82" y="1418.50" width="1.50" height="3.0"/>
+<rect class="t3" x="718.05" y="1418.50" width="1.50" height="3.0"/>
+<line class="wait" x1="717.98" y1="1424.00" x2="717.99" y2="1424.00" stroke-width="1"/>
+<rect class="t0" x="717.99" y="1422.50" width="1.50" height="3.0"/>
+<line class="wait" x1="721.44" y1="1428.00" x2="721.50" y2="1428.00" stroke-width="1"/>
+<rect class="t1" x="721.50" y="1426.50" width="1.50" height="3.0"/>
+<line class="wait" x1="722.24" y1="1432.00" x2="722.29" y2="1432.00" stroke-width="1"/>
+<rect class="t0" x="722.29" y="1430.50" width="1.50" height="3.0"/>
+<line class="wait" x1="724.82" y1="1436.00" x2="724.85" y2="1436.00" stroke-width="1"/>
+<rect class="t0" x="724.85" y="1434.50" width="1.50" height="3.0"/>
+<line class="wait" x1="727.61" y1="1440.00" x2="727.63" y2="1440.00" stroke-width="1"/>
+<rect class="t0" x="727.63" y="1438.50" width="1.50" height="3.0"/>
+<line class="wait" x1="729.16" y1="1444.00" x2="729.22" y2="1444.00" stroke-width="1"/>
+<rect class="t1" x="729.22" y="1442.50" width="1.50" height="3.0"/>
+<line class="wait" x1="731.53" y1="1448.00" x2="731.56" y2="1448.00" stroke-width="1"/>
+<rect class="t1" x="731.56" y="1446.50" width="1.50" height="3.0"/>
+<line class="wait" x1="733.87" y1="1452.00" x2="733.88" y2="1452.00" stroke-width="1"/>
+<rect class="t0" x="733.88" y="1450.50" width="1.50" height="3.0"/>
+<line class="wait" x1="736.23" y1="1456.00" x2="736.24" y2="1456.00" stroke-width="1"/>
+<rect class="t1" x="736.24" y="1454.50" width="1.50" height="3.0"/>
+<line class="wait" x1="738.45" y1="1460.00" x2="738.46" y2="1460.00" stroke-width="1"/>
+<rect class="t0" x="738.46" y="1458.50" width="1.50" height="3.0"/>
+<line class="wait" x1="741.23" y1="1464.00" x2="741.27" y2="1464.00" stroke-width="1"/>
+<rect class="t1" x="741.27" y="1462.50" width="1.50" height="3.0"/>
+<line class="wait" x1="742.79" y1="1468.00" x2="742.81" y2="1468.00" stroke-width="1"/>
+<rect class="t1" x="742.81" y="1466.50" width="1.50" height="3.0"/>
+<line class="wait" x1="746.11" y1="1472.00" x2="746.16" y2="1472.00" stroke-width="1"/>
+<line class="l3" x1="746.18" y1="1472.00" x2="746.38" y2="1472.00" stroke-width="1"/>
+<line class="wait" x1="746.38" y1="1472.00" x2="746.38" y2="1472.00" stroke-width="1"/>
+<rect class="t3" x="746.16" y="1470.50" width="1.50" height="3.0"/>
+<rect class="t3" x="746.38" y="1470.50" width="1.50" height="3.0"/>
+<path class="moved" d="M746.38,1469.50 L748.88,1472.00 L746.38,1474.50 L743.88,1472.00 Z"/>
+<line class="wait" x1="746.31" y1="1476.00" x2="746.33" y2="1476.00" stroke-width="1"/>
+<rect class="t0" x="746.33" y="1474.50" width="1.50" height="3.0"/>
+<line class="wait" x1="747.50" y1="1480.00" x2="747.53" y2="1480.00" stroke-width="1"/>
+<rect class="t1" x="747.53" y="1478.50" width="1.50" height="3.0"/>
+<line class="wait" x1="750.29" y1="1484.00" x2="750.32" y2="1484.00" stroke-width="1"/>
+<line class="l3" x1="750.34" y1="1484.00" x2="750.50" y2="1484.00" stroke-width="1"/>
+<line class="wait" x1="750.50" y1="1484.00" x2="750.50" y2="1484.00" stroke-width="1"/>
+<rect class="t3" x="750.32" y="1482.50" width="1.50" height="3.0"/>
+<rect class="t3" x="750.50" y="1482.50" width="1.50" height="3.0"/>
+<line class="wait" x1="750.44" y1="1488.00" x2="750.45" y2="1488.00" stroke-width="1"/>
+<rect class="t0" x="750.45" y="1486.50" width="1.50" height="3.0"/>
+<line class="wait" x1="751.85" y1="1492.00" x2="751.86" y2="1492.00" stroke-width="1"/>
+<rect class="t0" x="751.86" y="1490.50" width="1.50" height="3.0"/>
+<line class="wait" x1="754.77" y1="1496.00" x2="754.81" y2="1496.00" stroke-width="1"/>
+<rect class="t0" x="754.81" y="1494.50" width="1.50" height="3.0"/>
+<line class="wait" x1="757.16" y1="1500.00" x2="757.20" y2="1500.00" stroke-width="1"/>
+<rect class="t0" x="757.20" y="1498.50" width="1.50" height="3.0"/>
+<line class="wait" x1="758.74" y1="1504.00" x2="758.76" y2="1504.00" stroke-width="1"/>
+<rect class="t1" x="758.76" y="1502.50" width="1.50" height="3.0"/>
+<line class="wait" x1="761.34" y1="1508.00" x2="761.38" y2="1508.00" stroke-width="1"/>
+<line class="l4" x1="761.40" y1="1508.00" x2="876.44" y2="1508.00" stroke-width="1"/>
+<line class="wait" x1="876.44" y1="1508.00" x2="876.54" y2="1508.00" stroke-width="1"/>
+<line class="l4" x1="876.55" y1="1508.00" x2="1169.87" y2="1508.00" stroke-width="1"/>
+<line class="wait" x1="1169.87" y1="1508.00" x2="1169.92" y2="1508.00" stroke-width="1"/>
+<rect class="t4" x="761.38" y="1506.50" width="1.50" height="3.0"/>
+<rect class="t4" x="876.54" y="1506.50" width="1.50" height="3.0"/>
+<rect class="t4" x="1169.92" y="1506.50" width="1.50" height="3.0"/>
+<path class="critline" d="M1167.46,1505.50 L1172.46,1510.50 M1167.46,1510.50 L1172.46,1505.50"/>
+<text class="ink" font-weight="600" x="1177.0" y="1512.0">504</text>
+<line class="wait" x1="764.12" y1="1512.00" x2="764.14" y2="1512.00" stroke-width="1"/>
+<rect class="t0" x="764.14" y="1510.50" width="1.50" height="3.0"/>
+<line class="wait" x1="766.06" y1="1516.00" x2="766.11" y2="1516.00" stroke-width="1"/>
+<rect class="t0" x="766.11" y="1514.50" width="1.50" height="3.0"/>
+<line class="wait" x1="769.21" y1="1520.00" x2="769.28" y2="1520.00" stroke-width="1"/>
+<rect class="t0" x="769.28" y="1518.50" width="1.50" height="3.0"/>
+<line class="wait" x1="770.56" y1="1524.00" x2="770.63" y2="1524.00" stroke-width="1"/>
+<rect class="t1" x="770.63" y="1522.50" width="1.50" height="3.0"/>
+<line class="wait" x1="772.72" y1="1528.00" x2="772.74" y2="1528.00" stroke-width="1"/>
+<line class="l2" x1="772.79" y1="1528.00" x2="876.45" y2="1528.00" stroke-width="1"/>
+<line class="wait" x1="876.45" y1="1528.00" x2="876.54" y2="1528.00" stroke-width="1"/>
+<line class="l2" x1="876.55" y1="1528.00" x2="973.13" y2="1528.00" stroke-width="1"/>
+<line class="wait" x1="973.13" y1="1528.00" x2="973.16" y2="1528.00" stroke-width="1"/>
+<line class="l2" x1="973.22" y1="1528.00" x2="1169.89" y2="1528.00" stroke-width="1"/>
+<line class="wait" x1="1169.89" y1="1528.00" x2="1169.92" y2="1528.00" stroke-width="1"/>
+<rect class="t2" x="772.74" y="1526.50" width="1.50" height="3.0"/>
+<rect class="t2" x="876.54" y="1526.50" width="1.50" height="3.0"/>
+<rect class="t2" x="973.16" y="1526.50" width="1.50" height="3.0"/>
+<rect class="t2" x="1169.92" y="1526.50" width="1.50" height="3.0"/>
+<path class="moved" d="M876.54,1525.50 L879.04,1528.00 L876.54,1530.50 L874.04,1528.00 Z"/>
+<path class="moved" d="M973.16,1525.50 L975.66,1528.00 L973.16,1530.50 L970.66,1528.00 Z"/>
+<path class="moved" d="M1169.92,1525.50 L1172.42,1528.00 L1169.92,1530.50 L1167.42,1528.00 Z"/>
+<line class="wait" x1="774.70" y1="1532.00" x2="774.72" y2="1532.00" stroke-width="1"/>
+<rect class="t1" x="774.72" y="1530.50" width="1.50" height="3.0"/>
+<text x="84.0" y="290.0" text-anchor="end">first</text>
+<text x="84.0" y="1534.0" text-anchor="end">last</text>
+<text x="92" y="1562.0">Runs shorter than 1.5 px are drawn 1.5 px wide; hover (in the HTML) or the table gives exact times.</text>
+</svg>
