@@ -32,6 +32,17 @@
 //! of the answer's due time and the deadline, and a run whose deadline came
 //! first is cancelled — `ParkedVm::cancel` — and answered 504.
 //!
+//! What the cancelled run was waiting on is withdrawn with it: a fetch is
+//! aborted in the pool ([`Fetcher::abort`]), which shuts its socket so the
+//! upstream sees the request abandoned rather than read to the end. ADR 0082
+//! left telling a host this to the embedder, and no runtime API was needed
+//! for it: the embedder took the request out of the parked run with
+//! `ParkedVm::take_request` and handed it to its host itself, so it already
+//! holds the handle — here the id — that the host needs to stop. (An
+//! embedder that leaves the request in the run sees it dropped by
+//! `ParkedVm::cancel`, so a host can observe that too, by a `Drop` on its
+//! request type.)
+//!
 //! None of this is the runtime's. ADR 0080 gives a run that can be parked
 //! and resumed anywhere; when and where is this file's policy.
 
@@ -640,8 +651,18 @@ impl Shared {
                     continue;
                 };
                 // Woken by its deadline rather than its answer: the run is
-                // cancelled on a worker, and the answer never comes.
+                // cancelled on a worker, and the answer never comes. The work
+                // it was waiting on is no longer wanted, so it is withdrawn
+                // too — a simulated call's entry is already gone from the
+                // heap, and a fetch is aborted in the pool, queued or on the
+                // wire. The id is all that takes: this server took the
+                // request out of the parked run (`ParkedVm::take_request`)
+                // and handed it to the pool itself, so it already holds what
+                // it needs to tell its host to stop.
                 if timed.deadline.is_some_and(|deadline| deadline <= now) {
+                    if let Wait::Fetch { .. } = timed.wait {
+                        self.fetcher.abort(timed.id);
+                    }
                     ready.push(timed.resume(None));
                     continue;
                 }

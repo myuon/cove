@@ -31,20 +31,25 @@ free port and ask it over TCP, and call `check` and `test` as functions.
 ```console
 $ cargo run --release -p cove-edge -- --port 8787
 cove-edge: deploying tenants from …/examples/edge/tenants
-  aggregate  requires [upstream]  granted [upstream]  deployed: 221 fn, checked in 16.9 ms, prepared in 1.4 ms, isolate 3 us
-  counter    requires [kv, log]  granted [kv, log]  deployed: 218 fn, checked in 16.0 ms, prepared in 1.2 ms, isolate 3 us
+  aggregate  requires [upstream]  granted [upstream]  deployed: 223 fn, checked in 43.8 ms, prepared in 2.9 ms, isolate 5 us
+  counter    requires [kv, log]  granted [kv, log]  deployed: 220 fn, checked in 27.5 ms, prepared in 2.7 ms, isolate 12 us
   greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
-  hello      requires [-]  granted [-]  deployed: 220 fn, checked in 13.9 ms, prepared in 0.9 ms, isolate 3 us
-  impatient  requires [upstream]  granted [upstream]  deployed: 221 fn, checked in 11.9 ms, prepared in 2.0 ms, isolate 2 us
+  hello      requires [-]  granted [-]  deployed: 223 fn, checked in 28.3 ms, prepared in 1.8 ms, isolate 4 us
+  impatient  requires [upstream]  granted [upstream]  deployed: 223 fn, checked in 21.9 ms, prepared in 2.4 ms, isolate 4 us
+  proxy      requires [upstream]  granted [upstream]  fetch [127.0.0.1, localhost]  deployed: 222 fn, checked in 25.7 ms, prepared in 3.3 ms, isolate 3 us
 
-listening on http://127.0.0.1:8787 — 4 worker thread(s), a fresh isolate per request, upstream latency 20..100 ms (parked), open-file limit 1048576
+listening on http://127.0.0.1:8787 — 4 worker thread(s), a fresh isolate per request, upstream latency 20..100 ms (parked), keep-alive (idle 5000 ms, 1000 requests per connection), open-file limit 1048576
 
 try:
-  curl -s http://127.0.0.1:8787/aggregate/
-  curl -s http://127.0.0.1:8787/counter/home
-  curl -s http://127.0.0.1:8787/hello/?name=Cove
+  curl -s 'http://127.0.0.1:8787/aggregate/'
+  curl -s 'http://127.0.0.1:8787/counter/home'
+  curl -s 'http://127.0.0.1:8787/hello/?name=Cove'
+  curl -s 'http://127.0.0.1:8787/proxy/?url=http://127.0.0.1:8787/hello/'
   curl -s http://127.0.0.1:8787/_stats
 ```
+
+(The check times are from a machine also running another build; on an idle
+one they were 12–17 ms.)
 
 `requires` is what the checker derived from each entry's call graph
 (`FnEntry::required_capabilities`); `granted` is `allow` in `tenants/cove.toml`,
@@ -52,7 +57,9 @@ and nothing else. `hello` requires nothing: building an `edge.Response`
 initializes a type the `edge` schema declares, which is not a call into the
 host (see [what was awkward](#what-was-awkward) item 2). `greedy` asks
 for `upstream` without being granted it, so it is refused **at deploy** and the
-other four start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
+other five start. `fetch [...]` is `proxy`'s allowlist from
+[`tenants/edge.toml`](tenants/edge.toml). `--fetchers N` sets the threads
+that perform real fetches (default 4). Flags: `--workers N`, `--latency MIN..MAX` (ms),
 `--pool N` (resident isolates instead of fresh ones), `--blocking-upstream`
 (the control: `upstream.get` sleeps on the worker instead of parking),
 `--quiet` (no `log.info` lines), `--no-keep-alive`, `--idle-timeout MS`,
@@ -127,15 +134,22 @@ simulated service by name (what the load tests use), and `fetch`, a real URL.
 ## A curl walkthrough
 
 Every response below is what the server above answered, copied verbatim.
+curl speaks HTTP/1.1, so every connection is kept alive; two URLs on one
+command line share one connection:
 
 ```console
 $ curl -i 'http://localhost:8787/hello/?name=Cove'
 HTTP/1.1 200 OK
 Content-Type: text/plain
 Content-Length: 21
-Connection: close
+Connection: keep-alive
 
 Hello, Cove! (GET /)
+$ curl -sv 'http://localhost:8787/hello/?name=one' 'http://localhost:8787/hello/?name=two' 2>&1 | grep -E '^\* (Connected|Re-using)|^Hello'
+* Connected to localhost (127.0.0.1) port 8787
+Hello, one! (GET /)
+* Re-using existing connection with host localhost
+Hello, two! (GET /)
 ```
 
 A tenant's bug is one failed request. The error is the runtime's own
@@ -146,7 +160,7 @@ $ curl -i 'http://localhost:8787/hello/spin'
 HTTP/1.1 500 Internal Server Error
 Content-Type: text/plain
 Content-Length: 365
-Connection: close
+Connection: keep-alive
 
 error[cove::runtime]: execution stopped: fuel budget of 2000000 exhausted
   --> hello/hello.cove:23:3
@@ -199,7 +213,7 @@ $ curl -i 'http://localhost:8787/impatient/?services=weather,hang'
 HTTP/1.1 504 Gateway Timeout
 Content-Type: text/plain
 Content-Length: 306
-Connection: close
+Connection: keep-alive
 
 error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
   --> aggregate/aggregate.cove:17:11
@@ -252,6 +266,46 @@ $ curl -s 'http://localhost:8787/proxy/?url=http://localhost:8787/nobody/'
 `https://` is refused the same way (no TLS here), and a tenant named in no
 `edge.toml` table — `aggregate`, granted `upstream` — may fetch from nowhere.
 
+A fetch of an upstream that never answers is `impatient`'s case with a real
+socket: `proxy`'s `deadline = "500ms"` passes while the run is parked, the
+parking lot cancels it, and — because nothing else wants it — **aborts the
+fetch**, shutting the socket so the upstream sees its request abandoned
+instead of a connection held for the fetch's 30 s read timeout. Here the
+upstream is `nc`, which takes the request and says nothing:
+
+```console
+$ sleep 20 | nc -l 127.0.0.1 9999 &
+$ curl -i 'http://localhost:8787/proxy/?url=http://127.0.0.1:9999/slow'
+HTTP/1.1 504 Gateway Timeout
+Content-Type: text/plain
+Content-Length: 289
+Connection: keep-alive
+
+error[cove::runtime]: execution stopped: wall-clock deadline of 500ms exceeded
+  --> proxy/proxy.cove:13:9
+   |
+13 |   match upstream.fetch(url) {
+   |         ^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+$ curl -s http://localhost:8787/_stats | grep fetches
+  "fetches": 2,
+  "fetches_aborted": 1,
+```
+
+ADR 0082 deferred how a host learns that a cancelled run's pending work is
+no longer wanted, and the answer here needed **no runtime API**. The
+embedder already holds the request: the server takes it out of the parked
+run (`ParkedVm::take_request`), gives the fetch an id and hands it to its own
+pool, so when it cancels the run it tells the pool `abort(id)` — dropped if
+still queued, its socket shut down if on the wire (`host/src/fetch.rs`,
+`run_lot` in `host/src/server.rs`). A simulated `upstream.get` needs nothing:
+its timer entry is the run's and goes with it. An embedder that leaves the
+request inside the run has the other half already: `ParkedVm::cancel` drops
+an untaken request, so a host can observe it with `Drop` on its request type.
+`host/tests/fetch.rs` holds the upstream's side of it: removing the one
+`abort` call turns that test red, the upstream still waiting ten seconds
+later.
+
 The refused tenant, and one that does not exist:
 
 ```console
@@ -259,14 +313,14 @@ $ curl -i 'http://localhost:8787/greedy/'
 HTTP/1.1 503 Service Unavailable
 Content-Type: text/plain
 Content-Length: 102
-Connection: close
+Connection: keep-alive
 
 tenant `greedy` was not deployed: `greedy.handle` requires `upstream`, which cove.toml does not grant
 $ curl -i 'http://localhost:8787/nobody/'
 HTTP/1.1 404 Not Found
 Content-Type: text/plain
 Content-Length: 25
-Connection: close
+Connection: keep-alive
 
 no tenant named `nobody`
 ```
@@ -276,28 +330,40 @@ no tenant named `nobody`
 ```console
 $ curl -s http://localhost:8787/_stats
 {
-  "uptime_s": 18.8,
+  "uptime_s": 5.5,
   "workers": 4,
   "isolates": "a fresh isolate per request",
-  "served": 10007,
-  "errors": 1,
+  "served": 10,
+  "errors": 2,
   "in_flight": 0,
-  "in_flight_peak": 1000,
+  "in_flight_peak": 1,
   "parked": 0,
-  "parked_peak": 1000,
-  "parks": 30006,
-  "timeouts": 0,
-  "queue_peak": 53,
+  "parked_peak": 1,
+  "parks": 8,
+  "timeouts": 1,
+  "queue_peak": 1,
+  "connections": 12,
+  "keep_alive_reuses": 1,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 0,
+  "fetches_aborted": 0,
   "live_isolates": 0,
   "pooled_isolates": 0,
-  "isolate_heap_bytes": {"mean": 1647, "max": 1760},
-  "latency_ms": {"p50": 181.27, "p99": 270.44, "max": 314.48, "samples": 10000},
-  "rss_kib": 65840,
-  "peak_rss_kib": 65840,
+  "isolate_heap_bytes": {"mean": 716, "max": 1760},
+  "latency_ms": {"p50": 0.22, "p99": 467.78, "max": 467.78, "samples": 10},
+  "rss_kib": 37568,
+  "peak_rss_kib": 37568,
   "tenants": {
-    "aggregate": {"state": "deployed", "served": 10002, "errors": 0},
+    "aggregate": {"state": "deployed", "served": 2, "errors": 0},
     …
 ```
+
+`connections` and `keep_alive_reuses` count accepted connections and the
+requests that arrived on one an earlier request had opened;
+`idle_connections` is how many are waiting in the idle thread now, and
+`idle_expired` how many it closed for waiting too long. `fetches` and
+`fetches_aborted` are the fetch pool's.
 
 ## Load
 
@@ -345,6 +411,11 @@ build, load average 6 to 10, so read the ratios rather than the totals):
 | `hello`, **keep-alive** | 1,000 | **86,930 / 75,911 req/s** | 8.3 / 27.0, 10.0 / 30.8 ms |
 | `aggregate`, a connection per request | 10,000 | 4,843 / 4,973 req/s | 182.5 / 271.9, 181.5 / 275.5 ms |
 | `aggregate`, **keep-alive** | 1,000 | 4,921 / 4,634 req/s | 181.0 / 275.0, 182.0 / 270.0 ms |
+
+Re-measured on this branch's tip — after the parking lot and the fetch pool
+— at load average 13.7, the same picture: `hello` 24,623 / 13,112 req/s with a
+connection per request against 81,151 / 50,354 with keep-alive; `aggregate`
+4,542 / 4,872 against 4,934 / 4,561.
 
 `hello` is where the connection was the cost, and keep-alive is three to four
 times the throughput. `aggregate` is bound by its 180 ms floor — 1,000 in
@@ -544,19 +615,35 @@ The most useful output of this demo. Ordered by how much each cost.
    still wakes nothing: the timer thread here holds every parked run until
    the earlier of its answer and its deadline (`Timed::wake`,
    `host/src/server.rs`), and a run whose deadline came first is cancelled
-   and answered 504 — see `impatient` above.
+   and answered 504 — see `impatient` above. What ADR 0082 deferred — telling
+   the host the cancelled run's pending work is no longer wanted — needed
+   nothing from the runtime: the embedder took the request out
+   (`ParkedVm::take_request`) and handed it to its host itself, so it aborts
+   the fetch by the id it gave it (see `proxy` above).
 9. **Small things in the language.** `"\n".join(lines) + "\n"` is refused
    (`+` is not defined for `String`) and wants a `let` and an interpolation;
    `kv.get` then `kv.put` is a lost update under concurrency, which is the
    host's to fix (`kv.increment`), and Cove has no way to say "these two host
    calls are one transaction".
+10. **An embedder's test runner copies `cove test`'s reporting, and cannot
+    run a test parked.** `cove-cli`'s runner is a binary's private module, so
+    `cove-edge test` re-states its failure rules — an `Err` is a failure, the
+    assertion's span if the message is the assertion's, the lowering error as
+    the test's own — in about eighty lines of `host/src/toolchain.rs`; a
+    library "run this `DeclaredTest` on this registry" would serve `cove
+    test`, `cove-edge test` and the rules example's missing half alike. And
+    `assertion_failure` is on `Vm` but not on `OwnedVm`, so a test that wants
+    its assertion's span runs on a borrowed `Vm` through the hosts' blocking
+    path (`HostApi::call`); the parked path (`call_parkable`, the server's)
+    is exercised by the server's tests and not by any `test fn`.
 
 What worked without friction is worth a line too: `Step`/`ParkedVm` did
 exactly what ADR 0080 says, across threads, with no change to the tenant's
 source; `PreparedProgram` made isolate-per-request the obvious default; the
 runtime's error, rendered with the tenant's `SourceMap`, is a good 500 body;
-and `FnEntry::required_capabilities` was all it took to refuse a tenant at
-deploy.
+`FnEntry::required_capabilities` was all it took to refuse a tenant at
+deploy; and `Compiler::with_schemas` plus the deploy's own admission was all a
+checker needed.
 
 ## Not done
 
@@ -570,6 +657,9 @@ deploy.
   connections would change `host/src/fetch.rs` and nothing else. `http://`
   only, no redirects, no request body or headers from the tenant, a 1 MiB
   response cap, and the allowlist matches the host as written on any port.
-- Telling the upstream a timed-out request's call is no longer wanted: the
-  timer drops it, and a real upstream would want its request aborted, which
-  is between the host and the embedder (ADR 0082 leaves it there).
+- A client that disconnects while its run is parked is not noticed until
+  the answer is written: the run is not cancelled early, and its fetch is
+  not aborted. The idle thread could watch parked connections for a hang-up
+  as it watches idle ones, and cancel through the same `abort(id)`.
+- An abort reaches a fetch that is queued or connected; one still in its
+  connect (at most 5 s) finishes connecting and is then dropped unsent.

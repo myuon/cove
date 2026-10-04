@@ -112,3 +112,53 @@ fn a_tenant_with_no_allowlist_may_fetch_from_nowhere() {
         "{message}"
     );
 }
+
+#[test]
+fn a_timed_out_run_s_fetch_is_aborted_and_the_upstream_sees_it_go() {
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    // An upstream that takes the request and never answers. What it reports
+    // is what happened to the connection afterwards: closed by the server's
+    // abort, or still open when it stopped waiting.
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = upstream.local_addr().unwrap().port();
+    let (told, heard) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut chunk).unwrap();
+            request.extend_from_slice(&chunk[..n]);
+        }
+        // Far longer than `proxy`'s 500 ms deadline, and far shorter than
+        // the 30 s the fetch would otherwise wait for an answer.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let closed = matches!(stream.read(&mut chunk), Ok(0));
+        told.send(closed).unwrap();
+    });
+
+    let server = start();
+    let (status, body) = get(
+        server.addr,
+        &format!("/proxy/?url=http://127.0.0.1:{port}/never"),
+    )
+    .unwrap();
+    assert_eq!(status, 504, "{body}");
+    assert!(
+        body.contains("execution stopped: wall-clock deadline of 500ms exceeded"),
+        "{body}"
+    );
+    assert!(body.contains("proxy/proxy.cove:13"), "{body}");
+    assert!(
+        heard.recv().unwrap(),
+        "the upstream saw its connection closed, not left waiting"
+    );
+    assert_eq!(stat(&server, "fetches_aborted"), 1);
+    assert_eq!(stat(&server, "timeouts"), 1);
+    assert_eq!(stat(&server, "parked"), 0);
+}
