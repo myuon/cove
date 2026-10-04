@@ -9,9 +9,23 @@ use std::time::Duration;
 use cove_edge::http::get;
 use cove_edge::json::{self, Json};
 use cove_edge::picture::{self, Began};
-use cove_edge::{DeployOptions, Isolates, KeepAlive, Latency, Recording, Server, ServerOptions};
+use cove_edge::{
+    DeployOptions, Discipline, Isolates, KeepAlive, Latency, Recording, Server, ServerOptions,
+};
 
 fn start(timeline: Option<Recording>) -> Server {
+    start_with(
+        timeline,
+        Discipline::Stealing,
+        Some(Duration::from_millis(2)),
+    )
+}
+
+fn start_with(
+    timeline: Option<Recording>,
+    scheduler: Discipline,
+    slice: Option<Duration>,
+) -> Server {
     Server::start(ServerOptions {
         listen: "127.0.0.1:0".to_string(),
         workers: 2,
@@ -19,6 +33,8 @@ fn start(timeline: Option<Recording>) -> Server {
         keep_alive: KeepAlive::default(),
         fetchers: 2,
         timeline,
+        scheduler,
+        slice,
         deploy: DeployOptions {
             tenants: cove_edge::tenants_root(),
             latency: Latency {
@@ -222,7 +238,12 @@ fn a_cpu_and_io_mix_draws_the_concurrency_strips() {
     );
     for req in &trace.requests {
         assert!(req.written.is_some(), "#{} was never written", req.id);
-        assert_eq!(req.segments.len(), req.parks.len() + 1, "#{}", req.id);
+        assert_eq!(
+            req.segments.len(),
+            req.parks.len() + req.yields.len() + 1,
+            "#{}",
+            req.id
+        );
         if req.tenant == "crunch" {
             assert!(req.parks.is_empty(), "crunch never parks");
             assert_eq!(req.host_calls, 0);
@@ -322,4 +343,52 @@ fn without_recording_the_timeline_is_refused() {
     let (status, body) = get(server.addr, "/_timeline").unwrap();
     assert_eq!(status, 409, "{body}");
     assert!(body.contains("--timeline"), "{body}");
+}
+
+/// Four long `crunch`es on two workers, under a 1 ms slice: every one of them
+/// is asked to yield while the others wait, each yield is continued — on
+/// either worker — and every answer is the one an unsliced run gives. The
+/// timeline records the yields, and the picture draws a mark for each.
+#[test]
+fn long_runs_are_sliced_at_safepoints_and_answer_the_same() {
+    for (scheduler, slice) in [
+        (Discipline::Stealing, Some(Duration::from_millis(1))),
+        (Discipline::Fifo, Some(Duration::from_millis(1))),
+        (Discipline::Stealing, None),
+    ] {
+        let server = start_with(Some(Recording::default()), scheduler, slice);
+        let clients: Vec<_> = (0..4)
+            .map(|_| {
+                let addr = server.addr;
+                std::thread::spawn(move || get(addr, "/crunch/?n=150000").unwrap())
+            })
+            .collect();
+        for client in clients {
+            let (status, body) = client.join().unwrap();
+            assert_eq!(status, 200, "{body}");
+            assert!(body.starts_with("13848 primes up to 150000"), "{body}");
+        }
+        let trace = picture::read(&server.timeline().unwrap()).expect("the dump reads back");
+        let yields: usize = trace.requests.iter().map(|r| r.yields.len()).sum();
+        for req in &trace.requests {
+            assert_eq!(req.segments.len(), req.yields.len() + 1, "#{}", req.id);
+            assert!(
+                req.yields.iter().all(|y| y.continued.is_some()),
+                "#{} was left yielded",
+                req.id
+            );
+        }
+        let stats: Json = json::parse(&server.stats()).unwrap();
+        let count = |key: &str| stats.get(key).and_then(Json::as_f64).unwrap() as usize;
+        assert_eq!(count("yields"), yields, "{scheduler:?} {slice:?}");
+        match slice {
+            Some(_) => {
+                assert!(yields >= 4, "{scheduler:?}: only {yields} yields");
+                let svg = picture::svg(&trace, true);
+                assert!(svg.contains("class=\"yieldmark\""), "no yield drawn");
+                assert!(picture::stats(&trace).yields == yields);
+            }
+            None => assert_eq!(yields, 0, "nothing asks without a slice"),
+        }
+    }
 }

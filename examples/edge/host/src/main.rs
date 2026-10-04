@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use cove_edge::toolchain::{self, TestOptions};
 use cove_edge::{
-    os, DeployOptions, Isolates, KeepAlive, Latency, Recording, Server, ServerOptions, State,
+    os, DeployOptions, Discipline, Isolates, KeepAlive, Latency, Recording, Server, ServerOptions,
+    State,
 };
 
 const USAGE: &str = "\
@@ -26,6 +27,8 @@ usage: cove-edge [--port 8787] [--host 127.0.0.1] [--workers 4]
                  [--max-requests N (per connection, default 1000)]
                  [--fetchers N (threads performing `upstream.fetch`, default 4)]
                  [--timeline PATH (record every request; GET /_timeline dumps it here)]
+                 [--scheduler steal|fifo (default steal: a queue per worker, work stealing)]
+                 [--slice MS (ask a run to yield after MS while others wait; default 2, 0 = never)]
        cove-edge check [tenant…] [--tenants DIR]
        cove-edge test [tenant…] [--filter TEXT] [--latency MIN..MAX (ms, default 0)]
                       [--tenants DIR]";
@@ -101,6 +104,8 @@ fn serve(args: Vec<String>) -> ExitCode {
     let mut keep_alive = KeepAlive::default();
     let mut fetchers = 4usize;
     let mut timeline = None;
+    let mut scheduler = Discipline::Stealing;
+    let mut slice = Some(Duration::from_millis(2));
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -128,6 +133,19 @@ fn serve(args: Vec<String>) -> ExitCode {
                     file: Some(value("--timeline").into()),
                 })
             }
+            "--scheduler" => {
+                scheduler = match value("--scheduler").as_str() {
+                    "steal" => Discipline::Stealing,
+                    "fifo" => Discipline::Fifo,
+                    other => fail(&format!(
+                        "`--scheduler` is `steal` or `fifo`, not `{other}`"
+                    )),
+                }
+            }
+            "--slice" => {
+                let ms: f64 = parse(&value("--slice"));
+                slice = (ms > 0.0).then(|| Duration::from_secs_f64(ms / 1e3));
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -145,6 +163,8 @@ fn serve(args: Vec<String>) -> ExitCode {
         keep_alive,
         fetchers,
         timeline: timeline.clone(),
+        scheduler,
+        slice,
         deploy: DeployOptions {
             tenants,
             latency,
@@ -160,7 +180,7 @@ fn serve(args: Vec<String>) -> ExitCode {
     let addr = server.addr;
     println!(
         "\nlistening on http://{addr} — {workers} worker thread(s), {isolates}, \
-         upstream latency {}..{} ms ({}), {}, open-file limit {files}",
+         upstream latency {}..{} ms ({}), {}, {scheduler}, {}, open-file limit {files}",
         latency.min.as_millis(),
         latency.max.as_millis(),
         if blocking_upstream {
@@ -176,6 +196,13 @@ fn serve(args: Vec<String>) -> ExitCode {
             )
         } else {
             "no keep-alive".to_string()
+        },
+        match slice {
+            Some(slice) => format!(
+                "a run is asked to yield after {:.1} ms while others wait",
+                slice.as_secs_f64() * 1e3
+            ),
+            None => "no time slice".to_string(),
         },
     );
     println!("\ntry:");

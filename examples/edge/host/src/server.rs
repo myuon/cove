@@ -43,20 +43,34 @@
 //! `ParkedVm::cancel`, so a host can observe that too, by a `Drop` on its
 //! request type.)
 //!
+//! The run queue is [`crate::runq`]: one FIFO (`--scheduler fifo`), or a
+//! queue per worker with a global injection queue and work stealing (the
+//! default). A run that has held its worker for longer than `--slice`
+//! (default 2 ms) while something else is waiting for a worker is asked to
+//! yield: a monitor thread raises its [`YieldRequest`], the run gives its
+//! worker up at its next safepoint (ADR 0084) — at most 1,024 instructions
+//! later — and the [`YieldedVm`] goes to the back of the global queue, from
+//! where any worker continues it. This is Go's arrangement: the stride
+//! safepoints are the preemption points, the monitor is `sysmon`, and the
+//! queues are its per-P run queues.
+//!
 //! None of this is the runtime's. ADR 0080 gives a run that can be parked
-//! and resumed anywhere; when and where is this file's policy.
+//! and resumed anywhere, and ADR 0084 one that can be asked to stop at its
+//! next safepoint; when and where is this file's policy.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cove_diag::render;
 use cove_runtime::trace::RunOutcome;
-use cove_runtime::{Budget, OwnedVm, ParkedVm, RuntimeError, Step, Transfer, Value};
+use cove_runtime::{
+    Budget, OwnedVm, ParkedVm, RuntimeError, Step, Transfer, Value, YieldRequest, YieldedVm,
+};
 
 use crate::deploy::{deploy_all, request_value, DeployOptions, Deployed, State, Tenant};
 use crate::fetch::{Fetched, Fetcher};
@@ -64,6 +78,7 @@ use crate::hosts::{fetch_answer, result_value, upstream_answer, upstream_latency
 use crate::http::{holds_a_head, read_request, Request, Response};
 use crate::idle::{Conn, Idle};
 use crate::os;
+use crate::runq::{Discipline, Queued, RunQueue, Taker};
 use crate::timeline::{By, Recorder, Recording, What};
 
 /// Whether a request gets a fresh isolate or a resident one.
@@ -103,6 +118,11 @@ pub struct ServerOptions {
     /// Record every request's timeline (`--timeline`), dumped by
     /// `GET /_timeline`.
     pub timeline: Option<Recording>,
+    /// How the workers share the run queue (`--scheduler`).
+    pub scheduler: Discipline,
+    /// How long a run may hold a worker while others wait before it is asked
+    /// to yield (`--slice`); `None` never asks (`--slice 0`).
+    pub slice: Option<Duration>,
 }
 
 /// Whether, and for how long, a connection is kept open between requests.
@@ -170,8 +190,10 @@ impl Server {
             pools: tenants.iter().map(|_| Mutex::new(Vec::new())).collect(),
             tenants,
             by_name,
-            queue: Mutex::new(VecDeque::new()),
-            ready: Condvar::new(),
+            runq: RunQueue::new(options.scheduler, options.workers.max(1)),
+            slices: (0..options.workers.max(1))
+                .map(|_| Mutex::new(None))
+                .collect(),
             timer: Mutex::new(timer),
             fetcher,
             idle: OnceLock::new(),
@@ -192,6 +214,13 @@ impl Server {
             std::thread::Builder::new()
                 .name("edge-timer".into())
                 .spawn(move || shared.run_lot(timed))
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(slice) = shared.options.slice {
+            let shared = Arc::clone(&shared);
+            std::thread::Builder::new()
+                .name("edge-monitor".into())
+                .spawn(move || shared.run_monitor(slice))
                 .map_err(|e| e.to_string())?;
         }
         for at in 0..shared.options.workers.max(1) {
@@ -256,6 +285,31 @@ enum Job {
     /// A parked run whose host call has its answer. Boxed, because a
     /// `ParkedVm` is a whole machine and a connection is a socket.
     Resume(Box<Resume>),
+    /// A run that yielded at the end of its slice, to be run on.
+    Continue(Box<Continue>),
+}
+
+impl Queued for Job {
+    fn request(&self) -> Option<u64> {
+        match self {
+            Job::Connection(..) => None,
+            Job::Resume(resume) => Some(resume.flight.id),
+            Job::Continue(cont) => Some(cont.flight.id),
+        }
+    }
+}
+
+struct Continue {
+    yielded: YieldedVm,
+    flight: Flight,
+}
+
+/// The run a worker is running now, for the monitor: when its slice began,
+/// whether it has been asked to yield, and how to ask.
+struct Slice {
+    since: Instant,
+    asked: bool,
+    signal: YieldRequest,
 }
 
 struct Resume {
@@ -335,8 +389,9 @@ struct Shared {
     by_name: HashMap<String, usize>,
     /// Resident isolates, per tenant, under [`Isolates::Pooled`].
     pools: Vec<Mutex<Vec<OwnedVm>>>,
-    queue: Mutex<VecDeque<Job>>,
-    ready: Condvar,
+    runq: RunQueue<Job>,
+    /// Per worker, the run it is running now, if any.
+    slices: Vec<Mutex<Option<Slice>>>,
     timer: Mutex<mpsc::Sender<Lot>>,
     /// The threads that perform `upstream.fetch`.
     fetcher: Fetcher,
@@ -355,14 +410,10 @@ struct Shared {
 }
 
 impl Shared {
+    /// Work from outside the workers, and a run that yielded: the global
+    /// queue.
     fn push(&self, job: Job) {
-        let depth = {
-            let mut queue = self.queue.lock().unwrap();
-            queue.push_back(job);
-            queue.len() as i64
-        };
-        self.stats.queue_peak.fetch_max(depth, Ordering::Relaxed);
-        self.ready.notify_one();
+        self.runq.push_global(job);
     }
 
     fn idle(&self) -> &Idle {
@@ -372,43 +423,36 @@ impl Shared {
     /// Connections the idle thread found readable, onto the run queue.
     fn push_connections(&self, conns: Vec<Conn>) {
         let now = Instant::now();
-        let count = conns.len();
-        let depth = {
-            let mut queue = self.queue.lock().unwrap();
-            queue.extend(conns.into_iter().map(|conn| Job::Connection(conn, now)));
-            queue.len() as i64
-        };
-        self.stats.queue_peak.fetch_max(depth, Ordering::Relaxed);
-        if count == 1 {
-            self.ready.notify_one();
-        } else {
-            self.ready.notify_all();
-        }
+        self.runq
+            .push_global_all(conns.into_iter().map(|conn| Job::Connection(conn, now)));
     }
 
     /// Writes a response and decides what becomes of the connection: closed,
     /// back on the queue if a pipelined request is already buffered, or
     /// parked with the idle thread until the next one arrives.
     ///
-    /// `written` is the worker and request id the timeline records the
-    /// write under: noted before the connection is closed or handed on, so
-    /// that a client which has read its answer finds it recorded.
+    /// `written` is the request id the timeline records the write under:
+    /// noted before the connection is closed or handed on, so that a client
+    /// which has read its answer finds it recorded. A pipelined request is
+    /// this worker's own work, so it goes on this worker's queue.
     fn finish(
         &self,
         mut conn: Conn,
         response: &Response,
         keep_alive: bool,
-        written: Option<(usize, u64)>,
+        worker: usize,
+        written: Option<u64>,
     ) {
         let sent = response.send(&mut conn.stream, keep_alive);
-        if let Some((worker, id)) = written {
+        if let Some(id) = written {
             self.note(worker, id, || What::Written { worker });
         }
         if sent.is_err() || !keep_alive {
             return;
         }
         if holds_a_head(&conn.buffer) {
-            self.push(Job::Connection(conn, Instant::now()));
+            self.runq
+                .push_local(worker, Job::Connection(conn, Instant::now()));
         } else {
             self.idle().park(conn);
         }
@@ -435,16 +479,17 @@ impl Shared {
     }
 
     fn run_worker(&self, worker: usize) {
+        let mut taker = Taker::new(worker);
         loop {
-            let job = {
-                let mut queue = self.queue.lock().unwrap();
-                loop {
-                    if let Some(job) = queue.pop_front() {
-                        break job;
-                    }
-                    queue = self.ready.wait(queue).unwrap();
+            let (job, stole) = self.runq.take(&mut taker);
+            if let Some(stole) = stole {
+                for id in stole.requests {
+                    self.note(worker, id, || What::Steal {
+                        from: stole.from,
+                        to: worker,
+                    });
                 }
-            };
+            }
             match job {
                 Job::Connection(conn, accepted) => self.serve(conn, accepted, worker),
                 Job::Resume(resume) => {
@@ -457,7 +502,8 @@ impl Shared {
                     let step = match answer {
                         Some(answer) => {
                             self.note(worker, flight.id, || What::Resume { worker });
-                            parked.resume(answer)
+                            let signal = parked.yield_request();
+                            self.sliced(worker, signal, || parked.resume(answer))
                         }
                         None => {
                             self.note(worker, flight.id, || What::Cancel { worker });
@@ -466,6 +512,55 @@ impl Shared {
                         }
                     };
                     self.settle(step, flight, worker);
+                }
+                Job::Continue(cont) => {
+                    let Continue { yielded, flight } = *cont;
+                    self.note(worker, flight.id, || What::Continue { worker });
+                    let signal = yielded.yield_request();
+                    let step = self.sliced(worker, signal, || yielded.resume());
+                    self.settle(step, flight, worker);
+                }
+            }
+        }
+    }
+
+    /// Runs `step` as this worker's current run, where the monitor can see
+    /// it and ask it to yield once it has had its slice.
+    fn sliced(&self, worker: usize, signal: YieldRequest, step: impl FnOnce() -> Step) -> Step {
+        if self.options.slice.is_none() {
+            return step();
+        }
+        *self.slices[worker].lock().unwrap() = Some(Slice {
+            since: Instant::now(),
+            asked: false,
+            signal,
+        });
+        let step = step();
+        *self.slices[worker].lock().unwrap() = None;
+        step
+    }
+
+    /// The monitor: every quarter slice, asks each run that has held its
+    /// worker for a whole slice to yield — but only while something is
+    /// waiting for a worker. With nothing waiting, a yield would put the
+    /// run back on an empty queue for the same worker to take straight back,
+    /// a resume's cost for nothing.
+    fn run_monitor(&self, slice: Duration) {
+        let tick = (slice / 4).clamp(Duration::from_micros(50), Duration::from_millis(5));
+        loop {
+            std::thread::sleep(tick);
+            if self.runq.is_empty() {
+                continue;
+            }
+            let now = Instant::now();
+            for running in &self.slices {
+                let mut running = running.lock().unwrap();
+                if let Some(running) = running.as_mut() {
+                    if !running.asked && now.duration_since(running.since) >= slice {
+                        running.asked = true;
+                        running.signal.request();
+                        self.stats.yield_requests.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -523,6 +618,7 @@ impl Shared {
                 let body = self.render_stats();
                 if request.query.iter().any(|(k, _)| k == "reset") {
                     self.stats.reset();
+                    self.runq.reset();
                 }
                 Response {
                     status: 200,
@@ -567,7 +663,7 @@ impl Shared {
                 },
             },
         };
-        self.finish(conn, &response, keep_alive, None);
+        self.finish(conn, &response, keep_alive, worker, None);
     }
 
     /// Starts a tenant's run on this worker, and settles what it comes to.
@@ -591,8 +687,10 @@ impl Shared {
             .fetch_max(in_flight, Ordering::Relaxed);
         let argument = request_value(&request.method, &path, &request.query, &request.body);
         let budget = Budget::new(self.tenants[at].limits.clone());
-        let step =
-            vm.invoke_within_parkable(budget, &deployed.module, &deployed.function, vec![argument]);
+        let signal = vm.yield_request();
+        let step = self.sliced(worker, signal, || {
+            vm.invoke_within_parkable(budget, &deployed.module, &deployed.function, vec![argument])
+        });
         self.settle(step, flight, worker);
     }
 
@@ -638,7 +736,8 @@ impl Shared {
                     flight.conn,
                     &response,
                     flight.keep_alive,
-                    Some((worker, flight.id)),
+                    worker,
+                    Some(flight.id),
                 );
             }
             Step::Parked(mut parked) => {
@@ -726,7 +825,13 @@ impl Shared {
                     }
                 }
             }
-            Step::Yielded(_) => unreachable!("this server never asks a run to yield"),
+            Step::Yielded(yielded) => {
+                // Its slice is up and something is waiting: to the back of
+                // the global queue, behind everything already waiting.
+                self.stats.yields.fetch_add(1, Ordering::Relaxed);
+                self.note(worker, flight.id, || What::Yield { worker });
+                self.push(Job::Continue(Box::new(Continue { yielded, flight })));
+            }
         }
     }
 
@@ -824,19 +929,7 @@ impl Shared {
             if ready.is_empty() {
                 continue;
             }
-            let count = ready.len();
-            {
-                let mut queue = self.queue.lock().unwrap();
-                queue.extend(ready);
-                self.stats
-                    .queue_peak
-                    .fetch_max(queue.len() as i64, Ordering::Relaxed);
-            }
-            if count == 1 {
-                self.ready.notify_one();
-            } else {
-                self.ready.notify_all();
-            }
+            self.runq.push_global_all(ready);
         }
     }
 
@@ -881,6 +974,8 @@ impl Shared {
              \"served\": {},\n  \"errors\": {},\n  \"in_flight\": {in_flight},\n  \
              \"in_flight_peak\": {},\n  \"parked\": {},\n  \"parked_peak\": {},\n  \
              \"parks\": {},\n  \"timeouts\": {},\n  \"queue_peak\": {},\n  \
+             \"scheduler\": \"{}\",\n  \"slice_ms\": {},\n  \"yield_requests\": {},\n  \
+             \"yields\": {},\n  \"steals\": {},\n  \"stolen\": {},\n  \
              \"connections\": {},\n  \"keep_alive_reuses\": {},\n  \"idle_connections\": {},\n  \
              \"idle_expired\": {},\n  \"fetches\": {},\n  \"fetches_aborted\": {},\n  \
              \"live_isolates\": {},\n  \
@@ -897,7 +992,15 @@ impl Shared {
             stats.parked_peak.load(Ordering::Relaxed),
             stats.parks.load(Ordering::Relaxed),
             stats.timeouts.load(Ordering::Relaxed),
-            stats.queue_peak.load(Ordering::Relaxed),
+            self.runq.peak.load(Ordering::Relaxed),
+            self.runq.discipline(),
+            self.options
+                .slice
+                .map_or("null".to_string(), |s| format!("{}", s.as_secs_f64() * 1e3)),
+            stats.yield_requests.load(Ordering::Relaxed),
+            stats.yields.load(Ordering::Relaxed),
+            self.runq.steals.load(Ordering::Relaxed),
+            self.runq.stolen.load(Ordering::Relaxed),
             stats.connections.load(Ordering::Relaxed),
             stats.reused.load(Ordering::Relaxed),
             self.idle().stats.idle.load(Ordering::Relaxed),
@@ -960,7 +1063,9 @@ struct Stats {
     parks: AtomicU64,
     /// Requests whose run was stopped by its deadline and answered 504.
     timeouts: AtomicU64,
-    queue_peak: AtomicI64,
+    /// Runs the monitor asked to yield, and runs that did.
+    yield_requests: AtomicU64,
+    yields: AtomicU64,
     /// Connections accepted.
     connections: AtomicU64,
     /// Requests that arrived on a connection an earlier request had opened.
@@ -985,7 +1090,8 @@ impl Stats {
             parked_peak: AtomicI64::new(0),
             parks: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
-            queue_peak: AtomicI64::new(0),
+            yield_requests: AtomicU64::new(0),
+            yields: AtomicU64::new(0),
             connections: AtomicU64::new(0),
             reused: AtomicU64::new(0),
             per_tenant: tenants
@@ -1035,7 +1141,8 @@ impl Stats {
             .store(self.in_flight.load(Ordering::Relaxed), Ordering::Relaxed);
         self.parked_peak
             .store(self.parked.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.queue_peak.store(0, Ordering::Relaxed);
+        self.yield_requests.store(0, Ordering::Relaxed);
+        self.yields.store(0, Ordering::Relaxed);
         *self.latencies.lock().unwrap() = (Vec::with_capacity(LATENCY_SAMPLES), 0);
     }
 }

@@ -10,7 +10,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use cove_edge::http::{get, Client};
-use cove_edge::{DeployOptions, Isolates, KeepAlive, Latency, Server, ServerOptions};
+use cove_edge::{DeployOptions, Discipline, Isolates, KeepAlive, Latency, Server, ServerOptions};
 
 fn start(keep_alive: KeepAlive) -> Server {
     Server::start(ServerOptions {
@@ -20,6 +20,8 @@ fn start(keep_alive: KeepAlive) -> Server {
         keep_alive,
         fetchers: 2,
         timeline: None,
+        scheduler: Discipline::Stealing,
+        slice: Some(Duration::from_millis(2)),
         deploy: DeployOptions {
             tenants: cove_edge::tenants_root(),
             latency: Latency {
