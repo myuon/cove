@@ -14,6 +14,7 @@ pub mod capability;
 pub mod compile;
 pub mod config;
 pub mod facts;
+mod library;
 pub mod package;
 pub mod resolve;
 pub mod stdlib;

@@ -576,7 +576,7 @@ The most useful output of this demo. Ordered by how much each cost.
    (an unknown key, or a tenant `cove.toml` does not name, is refused). Two
    files describing one tenant is the shape a `[run]` table that tolerated an
    embedder's namespace (`[run.proxy.edge]`, say) would avoid.
-5. **Each tenant re-checks the standard library** — a third of it fixed
+5. **Each tenant re-checked the standard library** — fixed in two steps
    since. A ten-line handler reaches 218–221 functions, and deploying it cost
    14–17 ms of checking, all of it the standard library
    `cove_sema::stdlib::install` attaches to every package: deploying `hello`
@@ -586,10 +586,13 @@ The most useful output of this demo. Ordered by how much each cost.
    parse is now done once per process (`stdlib::attach` keeps it), which
    makes the same deploy 9.1 ms: parse 0.3, resolve 2.9, type-check 5.1,
    lower 0.8. A thousand tenants would be about nine seconds rather than
-   fifteen. The resolve and the type-check still run per tenant, because
-   both run over the whole package at once; sharing them is
-   [issue 569](https://github.com/myuon/cove/issues/569)'s separate
-   compilation of the standard library.
+   fifteen. **Fixed** since, as
+   [issue 569](https://github.com/myuon/cove/issues/569)'s first stage
+   ([ADR 0083](../../docs/adr/0083-the-standard-library-is-checked-once-per-process.md)):
+   the library's modules are resolved and checked once per process and every
+   later tenant links against them, which makes the same deploy about 3.9 ms
+   (compile 9.5 → 2.6 ms). What is left of the compile is the package-wide
+   passes, still run over the library's modules and the tenant's together.
 6. **Composing a one-module package by hand is copied code.**
    `host/src/deploy.rs`'s `load` is the same walk as
    `examples/rules/host/src/lib.rs:913` (`collect`), for the same reason: an

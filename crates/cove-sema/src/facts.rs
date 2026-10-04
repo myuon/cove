@@ -65,6 +65,7 @@
 //! the right shape here and the wrong one there.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use cove_diag::{FileId, Span};
 use cove_syntax::ast::ExprId;
@@ -159,12 +160,17 @@ pub struct Signature {
 /// boundary of every declaration it resolved. It is published on
 /// [`Program`](crate::resolve::Program), which is what a consumer of a
 /// checked package already holds.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Facts {
     /// Indexed by [`FileId`]. A file the checker never walked is an empty
     /// entry rather than a missing one, because the index has to stay the
     /// id.
-    files: Vec<FileFacts>,
+    ///
+    /// Shared rather than owned, because the standard library's files are
+    /// checked once per process and every package after that holds the same
+    /// tables ([`crate::library`]): handing them over is a count rather than a
+    /// copy of every type the library's bodies settled.
+    files: Vec<Arc<FileFacts>>,
     /// One entry per declared function, method, struct, and enum case, keyed
     /// by the file it was written in and the start offset of its
     /// declaration.
@@ -188,7 +194,7 @@ pub struct Facts {
 /// are populated at different densities: a type is recorded for every
 /// expression, and a target for the few that are calls to a declared
 /// method. Kept together, the sparse half would cost a slot per expression.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct FileFacts {
     types: Vec<Option<Ty>>,
     targets: Vec<Option<MethodTarget>>,
@@ -300,21 +306,73 @@ impl Facts {
     /// that an observation about the caller instead of an assumption here.
     pub(crate) fn merge(&mut self, other: Facts) {
         for (index, from) in other.files.into_iter().enumerate() {
-            let into = self.file_mut(FileId(index as u32));
+            let into = self.file_entry(FileId(index as u32));
+            if into.is_empty() {
+                // What merging slot by slot into nothing would build.
+                *into = from;
+                continue;
+            }
+            let from = Arc::unwrap_or_clone(from);
+            let into = Arc::make_mut(into);
             merge_table(&mut into.types, from.types);
             merge_table(&mut into.targets, from.targets);
         }
         self.signatures.extend(other.signatures);
     }
 
+    /// [`Facts::merge`] for a table the caller keeps: a file this one holds
+    /// nothing for is shared with `other` rather than copied.
+    pub(crate) fn merge_shared(&mut self, other: &Facts) {
+        for (index, from) in other.files.iter().enumerate() {
+            let into = self.file_entry(FileId(index as u32));
+            if into.is_empty() {
+                *into = Arc::clone(from);
+                continue;
+            }
+            let from = FileFacts::clone(from);
+            let into = Arc::make_mut(into);
+            merge_table(&mut into.types, from.types);
+            merge_table(&mut into.targets, from.targets);
+        }
+        self.signatures.extend(
+            other
+                .signatures
+                .iter()
+                .map(|(key, signature)| (*key, signature.clone())),
+        );
+    }
+
+    /// The entry for `file`, writable.
+    fn file_mut(&mut self, file: FileId) -> &mut FileFacts {
+        Arc::make_mut(self.file_entry(file))
+    }
+
     /// The entry for `file`, growing the table until the id is an index into
     /// it.
-    fn file_mut(&mut self, file: FileId) -> &mut FileFacts {
+    fn file_entry(&mut self, file: FileId) -> &mut Arc<FileFacts> {
         let index = file.0 as usize;
         if self.files.len() <= index {
-            self.files.resize_with(index + 1, FileFacts::default);
+            self.files.resize_with(index + 1, Arc::default);
         }
         &mut self.files[index]
+    }
+}
+
+#[cfg(test)]
+impl Facts {
+    /// Everything recorded, in an order that does not depend on hashing, for
+    /// a test comparing two tables.
+    pub(crate) fn describe(&self) -> String {
+        let mut signatures: Vec<_> = self.signatures.iter().collect();
+        signatures.sort_by_key(|(key, _)| **key);
+        format!("{:?}\n{signatures:?}", self.files)
+    }
+}
+
+impl FileFacts {
+    /// Whether nothing is recorded for this file.
+    fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.targets.is_empty()
     }
 }
 
