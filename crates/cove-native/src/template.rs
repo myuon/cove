@@ -33,9 +33,9 @@ use cove_ir::{
 };
 
 use crate::abi::{
-    Entry, FrameRecord, FrameStack, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp,
-    WordStack, DYN_ASK, DYN_COUNT_SHIFT, DYN_KIND_MASK, DYN_OFFSET_SHIFT, DYN_TYPE_MASK,
-    HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    Entry, FrameRecord, FrameStack, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise,
+    ResumeEntry, ResumePoints, RunOp, WordStack, DYN_ASK, DYN_COUNT_SHIFT, DYN_KIND_MASK,
+    DYN_OFFSET_SHIFT, DYN_TYPE_MASK, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, byte_store, leaders, literal_offset, observation, overflow_of, reserve,
@@ -382,6 +382,12 @@ mod pages {
 pub struct Jit {
     helpers: Helpers,
     code: Vec<Mapping>,
+    /// Per mapping, where its function may be re-entered: [ADR 0085]'s resume
+    /// prologue and the two tables of [`ResumePoints`], as offsets into the
+    /// mapping. Parallel to `code`.
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    resumes: Vec<Resumes>,
     finalized: bool,
     /// Whether a call whose callee is compiled is made by emitted code itself.
     ///
@@ -460,6 +466,7 @@ impl Jit {
                 dynamic: helpers.dynamic as usize,
             },
             code: Vec::new(),
+            resumes: Vec::new(),
             finalized: false,
             direct: false,
             inline_frames: false,
@@ -505,7 +512,7 @@ impl Jit {
         if !supported(program, function) {
             return None;
         }
-        let (code, windows) = Emit::new(
+        let (code, windows, resumes) = Emit::new(
             program,
             function,
             &self.helpers,
@@ -515,6 +522,7 @@ impl Jit {
         .run();
         let mapping = Mapping::write(&code)?;
         self.code.push(mapping);
+        self.resumes.push(resumes);
         self.finalized = false;
         Some(Compiled {
             at: self.code.len() - 1,
@@ -558,6 +566,50 @@ impl Jit {
         // shape.
         unsafe { std::mem::transmute::<*const u8, Entry>(mapping.at.cast_const()) }
     }
+
+    /// Where a compiled function may be re-entered part-way through — [ADR
+    /// 0085]'s resume prologue, and its blocks and call returns.
+    ///
+    /// # Panics
+    ///
+    /// As [`Jit::entry`]: the mapping has to be finalized first.
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    pub fn resume_points(&self, compiled: Compiled) -> ResumePoints {
+        assert!(
+            self.finalized,
+            "`Jit::finalize` has to run before a compiled function is entered"
+        );
+        let mapping = &self.code[compiled.at];
+        assert!(mapping.executable, "the mapping is not executable");
+        let resumes = &self.resumes[compiled.at];
+        let code = mapping.at.cast_const();
+        // Safety: `prologue` is the offset of the resume prologue `Emit::run`
+        // laid down after the body, which has `ResumeEntry`'s shape; the two
+        // tables are the offsets it recorded at each block's start and after
+        // each call's template, of this same mapping.
+        unsafe {
+            let entry =
+                std::mem::transmute::<*const u8, ResumeEntry>(code.add(resumes.prologue as usize));
+            ResumePoints::new(
+                entry,
+                code,
+                resumes.blocks.clone(),
+                resumes.insts.clone(),
+                resumes.returns.clone(),
+            )
+        }
+    }
+}
+
+/// One function's resume points, as offsets into its mapping. See
+/// [`ResumePoints`].
+struct Resumes {
+    /// The resume prologue.
+    prologue: u32,
+    blocks: Box<[u32]>,
+    insts: Box<[u32]>,
+    returns: Box<[u32]>,
 }
 
 /// Where a jump goes.
@@ -613,6 +665,18 @@ struct Emit<'a> {
     /// code, and how long the block is.
     blocks: Vec<Option<u32>>,
     block_at: Vec<Option<usize>>,
+    /// Per IR instruction: where the code just past that call's template is,
+    /// for a call — the point a frame waiting on the call resumes at
+    /// ([ADR 0085]).
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    returns: Vec<Option<usize>>,
+    /// Per IR instruction: where its template starts, for an allocation or a
+    /// call — the two instructions whose helper may give the thread up before
+    /// it does anything ([ADR 0085]).
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    insts: Vec<Option<usize>>,
     /// Per IR instruction: the [ADR 0062] window whose head it is, if one is.
     /// See [`BufferWindow`].
     ///
@@ -666,6 +730,8 @@ impl<'a> Emit<'a> {
             fixups: Vec::new(),
             labels: Vec::new(),
             block_at: vec![None; blocks.len()],
+            returns: vec![None; blocks.len()],
+            insts: vec![None; blocks.len()],
             blocks,
             windows,
             frame_live: false,
@@ -673,8 +739,9 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// The function's machine code, and what its windows are of it.
-    fn run(mut self) -> (Vec<u8>, WindowCode) {
+    /// The function's machine code, what its windows are of it, and where it
+    /// may be resumed.
+    fn run(mut self) -> (Vec<u8>, WindowCode, Resumes) {
         self.prologue();
         let mut pc = 0;
         while pc < self.function.code.len() {
@@ -696,8 +763,44 @@ impl<'a> Emit<'a> {
             self.inst(pc);
             pc += 1;
         }
+        let prologue = self.resume_prologue();
         self.patch();
-        (self.code, self.window_code)
+        let offsets = |table: &[Option<usize>]| -> Box<[u32]> {
+            table
+                .iter()
+                .map(|at| at.map_or(ResumePoints::NONE, |at| at as u32))
+                .collect()
+        };
+        let resumes = Resumes {
+            prologue,
+            blocks: offsets(&self.block_at),
+            insts: offsets(&self.insts),
+            returns: offsets(&self.returns),
+        };
+        (self.code, self.window_code, resumes)
+    }
+
+    /// [`ResumeEntry`]'s prologue, after the body: [`Emit::prologue`] exactly,
+    /// and then `jmp r8` to the resume point the runtime chose ([ADR 0085]).
+    ///
+    /// The same seven pushes and the same three registers derived from the
+    /// same four arguments, so a resumed frame leaves through the same
+    /// epilogue as an entered one, back to whoever called the prologue, with
+    /// `rsp` aligned as it was. `r8` is the fifth System V argument and the
+    /// prologue does not touch it. The work accumulator starts at nought, which
+    /// is what it holds at both kinds of resume point in an uninterrupted run:
+    /// a backedge's safepoint clears it before the jump, and a call clears it
+    /// before the hand-over.
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    fn resume_prologue(&mut self) -> u32 {
+        let at = self.code.len() as u32;
+        self.prologue();
+        // `jmp r8`: REX.B, FF /4.
+        self.byte(0x41);
+        self.byte(0xff);
+        self.byte(0xe0);
+        at
     }
 
     /// [`Entry`] received: `ctx` in `rdi`, `base` in `rsi`, `return_base` in
@@ -1175,7 +1278,16 @@ impl<'a> Emit<'a> {
                 index,
                 storage: Storage::PackedBytes,
             } => self.byte_at(*dst, *run, *index),
-            Inst::Call { dst, callee, args } => self.callee(*dst, callee.0, args.0),
+            Inst::Call { dst, callee, args } => {
+                // Where this frame resumes if the call's poll yields (ADR 0085):
+                // the template from its first byte, which takes the poll again.
+                self.insts[pc] = Some(self.code.len());
+                self.callee(*dst, callee.0, args.0);
+                // Where a frame waiting on this call resumes (ADR 0085):
+                // `callee` ends with the frame pointer dead and the accumulator
+                // nought, which is what the resume prologue leaves.
+                self.returns[pc] = Some(self.code.len());
+            }
             // ADR 0052's four. An alloc, an extend and a finish are handed to the
             // runtime whole: see [`crate::abi::GrowableFn`] for why none of them
             // has an emitted fast path — one rooting discipline that is not the
@@ -1276,7 +1388,12 @@ impl<'a> Emit<'a> {
                 args,
                 storage: Storage::PackedBytes,
             } => self.run_copy(args.0, RunOp::FindBytes, 0),
-            Inst::Alloc { dst, layout, len } => self.allocate(*dst, layout.0, *len),
+            Inst::Alloc { dst, layout, len } => {
+                // Where this frame resumes if the allocation's safepoint yields
+                // (ADR 0085): the template from its first byte.
+                self.insts[pc] = Some(self.code.len());
+                self.allocate(*dst, layout.0, *len);
+            }
             Inst::Switch { on, table } => self.switch(*on, *table),
             // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
             // `overflowed("negation")`. `neg` sets the overflow flag for exactly
