@@ -690,9 +690,11 @@ What it says:
   waker and lost a wake-up — the server stopped answering in the first A/B —
   which is why the comment there says which order and why.
 
-The two together are about 6.5–8.5 µs of a request's 41, a third or more of
-the 18 µs between it and Go's 23 (*estimated*, by adding two A/Bs that were
-run apart, at different loads).
+Re-measured together once the machine was quieter (load average 2.8–3.7,
+3 interleaved rounds, [`results/ab-hello-low-load.jsonl`](results/ab-hello-low-load.jsonl)):
+**40.5 µs per request before, 36.1 with the socket options, 33.7 with both
+(−17%)**, and 86,837 → 93,361 → 96,354 req/s, no ranges overlapping. That is
+6.8 µs of the 17.5 between the edge server and Go's 23 µs in the first pass.
 
 **Not implemented.** The boundary conversions (`boundary::into` and `out`,
 2.4 µs) and `Vm::assemble` (1.6) are the runtime's and were not looked into
@@ -753,12 +755,12 @@ prints this table). **Observed**, medians over rounds, ms:
 
 | lot | rate | rounds | load | lot late p50 / p99 / max | to worker p50 / p99 / max | total p50 / p99 / max |
 | --- | ---: | ---: | --- | ---: | ---: | ---: |
-| before (`recv_timeout`) | 50 | 5 | 3.5–9.8 | 7.15 / 22.0 / 149 | 0.012 / 0.067 / 0.1 | 7.16 / 22.1 / 149 |
+| before (`recv_timeout`) | 50 | 6 | 3.5–9.8 | 7.16 / 22.0 / 149 | 0.012 / 0.067 / 0.1 | 7.17 / 22.1 / 149 |
 | `poll(2)`, tried first | 50 | 3 | 4.4–9.8 | 0.92 / 2.65 / 3.0 | 0.013 / 0.064 / 0.1 | 0.94 / 2.66 / 3.0 |
-| **`kevent` (committed)** | 50 | 2 | 4.4–5.3 | **0.047 / 0.165 / 0.3** | 0.022 / 0.064 / 0.1 | **0.071 / 0.211 / 0.3** |
-| before (`recv_timeout`) | 10,000 | 5 | 4.3–9.3 | 0.029 / 0.82 / 96 | 0.018 / 0.47 / 3.0 | 0.064 / 1.11 / 96 |
+| **`kevent` (committed)** | 50 | 3 | 4.0–5.3 | **0.047 / 0.165 / 0.2** | 0.022 / 0.064 / 0.1 | **0.071 / 0.207 / 0.3** |
+| before (`recv_timeout`) | 10,000 | 6 | 3.4–9.3 | 0.029 / 0.82 / 120 | 0.018 / 0.47 / 3.0 | 0.064 / 1.14 / 120 |
 | `poll(2)`, tried first | 10,000 | 3 | 6.2–9.4 | 0.21 / 1.24 / 4.9 | 0.10 / 0.80 / 2.7 | 0.36 / 1.82 / 5.3 |
-| **`kevent` (committed)** | 10,000 | 2 | 4.5–5.1 | **0.013 / 0.25 / 6.1** | 0.009 / 0.26 / 2.4 | **0.022 / 0.49 / 6.4** |
+| **`kevent` (committed)** | 10,000 | 3 | 4.0–5.1 | **0.013 / 0.21 / 3.6** | 0.009 / 0.26 / 2.4 | **0.022 / 0.49 / 3.8** |
 
 (`kqueue2` in the file is the committed version; `kqueue` is an earlier one
 that re-armed the timer on every wait, and is within noise of it.)
@@ -768,7 +770,8 @@ that re-armed the timer on every wait, and is within noise of it.)
   7 ms at the median and up to 149 ms at 50 req/s.
 - **At 10,000 req/s it was hidden, not absent.** The median is 0.03 ms
   because a park arrives every few microseconds and each wakes the lot
-  early; the worst case was still 96 ms, a wait whose timeout did expire.
+  early; the worst case was still 96–144 ms in every round, a wait whose
+  timeout did expire.
   The edge README's "under load the timer thread wakes on time" was the
   messages, not the timer.
 
@@ -903,10 +906,11 @@ evidence is in [Verifying the diagnosis](#verifying-the-diagnosis).
      thread's `poll`. **Syscalls are 54%** — seven per request.
 
    For the example server the syscalls are the target: once-per-connection
-   socket options are worth 7% of a request's CPU (branch
-   `perf/edge-socket-options`, *observed*) and a pending-wake flag on the
-   idle hand-off about 8% more (branch `perf/edge-idle-wake`, *observed*, from paired rounds). For the runtime, the boundary conversions
-   (2.4 µs in the profile) and `Vm::assemble` (1.6 µs) are the targets. Below
+   socket options are worth 7–12% of a request's CPU (branch
+   `perf/edge-socket-options`) and a pending-wake flag on the idle hand-off
+   7–8% more (branch `perf/edge-idle-wake`); together 40.5 → 33.7 µs at low
+   load (*observed*). For the runtime, the boundary conversions (2.4 µs in
+   the profile) and `Vm::assemble` (1.6 µs) are the targets. Below
    75,000 req/s none of this is visible in latency (*observed*, at this
    tool's resolution).
 3. **Concurrency: two host-level I/O problems.**
