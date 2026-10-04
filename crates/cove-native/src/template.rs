@@ -507,6 +507,10 @@ impl Jit {
 
     /// Compiles `program`'s function `id`, or answers `None` if any part of it
     /// is outside the subset — or if a mapping could not be had.
+    ///
+    /// With `COVE_NATIVE_DUMP=DIR` in the environment, each function's machine
+    /// code is also written to `DIR` raw, and its IR beside it — see the
+    /// private `dump` below, named without a link because it is private.
     pub fn compile(&mut self, program: &Program, id: FunctionId) -> Option<Compiled> {
         let function = program.function(id);
         if !supported(program, function) {
@@ -520,6 +524,7 @@ impl Jit {
             self.inline_frames,
         )
         .run();
+        dump(id, function, &code);
         let mapping = Mapping::write(&code)?;
         self.code.push(mapping);
         self.resumes.push(resumes);
@@ -610,6 +615,37 @@ struct Resumes {
     blocks: Box<[u32]>,
     insts: Box<[u32]>,
     returns: Box<[u32]>,
+}
+
+/// `COVE_NATIVE_DUMP=DIR`: a compiled function's bytes, as
+/// `DIR/<id>.<module>.<name>.bin`, and its IR, one instruction a line, as the
+/// `.ir` beside it.
+///
+/// For reading the code this arm emits — the bytes are position-independent
+/// but for the helper addresses, so any disassembler that takes raw x86-64
+/// reads them (`examples/edge/compare` does, and times them too). The
+/// variable is read at every compile and nothing is written without it; a
+/// failed write is ignored, because a dump is never what the caller asked for.
+fn dump(id: FunctionId, function: &Function, code: &[u8]) {
+    let Some(dir) = std::env::var_os("COVE_NATIVE_DUMP") else {
+        return;
+    };
+    let stem: String = format!("{}.{}.{}", id.0, function.module, function.name)
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '_',
+            c => c,
+        })
+        .collect();
+    let dir = std::path::Path::new(&dir);
+    let _ = std::fs::write(dir.join(format!("{stem}.bin")), code);
+    let ir: String = function
+        .code
+        .iter()
+        .enumerate()
+        .map(|(pc, inst)| format!("{pc:4} {inst:?}\n"))
+        .collect();
+    let _ = std::fs::write(dir.join(format!("{stem}.ir")), ir);
 }
 
 /// Where a jump goes.

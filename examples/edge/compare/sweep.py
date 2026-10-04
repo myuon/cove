@@ -93,12 +93,20 @@ def start(server, latency=None):
         if latency:
             cmd += ["-latency", latency]
         env = dict(os.environ, GOMAXPROCS="4")
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/_stats", timeout=0.5).read()
+        raise SystemExit(f"port {port} is already answered by another process")
+    except OSError:
+        pass
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     atexit.register(lambda: proc.poll() is None and proc.kill())
     deadline = time.time() + 30
     while time.time() < deadline:
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/_stats", timeout=1).read()
+            if proc.poll() is not None:
+                # Ours exited (the port was taken) and something else answered.
+                raise SystemExit(f"port {port} is answered by another process")
             return proc
         except Exception:
             time.sleep(0.1)
@@ -137,7 +145,9 @@ def load_average():
 def run_load(server, args, sample_rss_of=None):
     """One `cove-edge-load` run; its summary, plus the server's CPU over it
     and, if asked, its peak RSS sampled every 20 ms."""
-    out = "/tmp/edge-compare-summary.json"
+    # One file per process: two sweeps on one machine must not read each
+    # other's summaries.
+    out = f"/tmp/edge-compare-summary-{os.getpid()}.json"
     if os.path.exists(out):
         os.remove(out)
     cmd = [LOAD, "--addr", f"127.0.0.1:{PORT[server]}", "--summary-out", out] + args

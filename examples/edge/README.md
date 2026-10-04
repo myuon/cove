@@ -357,6 +357,7 @@ $ curl -s http://localhost:8787/_stats
   "keep_alive_reuses": 1,
   "idle_connections": 0,
   "idle_expired": 0,
+  "idle_poller": {"wakes": 31, "pollfds": 44, "in_poll_ms": 5401.233, "around_poll_ms": 1.012},
   "fetches": 0,
   "fetches_aborted": 0,
   "live_isolates": 0,
@@ -373,7 +374,11 @@ $ curl -s http://localhost:8787/_stats
 `connections` and `keep_alive_reuses` count accepted connections and the
 requests that arrived on one an earlier request had opened;
 `idle_connections` is how many are waiting in the idle thread now, and
-`idle_expired` how many it closed for waiting too long. `fetches` and
+`idle_expired` how many it closed for waiting too long. `idle_poller` is
+what the idle thread's `poll(2)` costs: how many times it came out of
+`poll`, the `pollfd`s it had handed it, summed, and the wall time inside
+`poll` and around it (rebuilding the array and sorting what it answered) —
+[`compare/idle_cost.py`](compare/idle_cost.py) reads it. `fetches` and
 `fetches_aborted` are the fetch pool's.
 
 ## Load

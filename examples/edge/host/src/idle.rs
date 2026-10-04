@@ -56,6 +56,16 @@ pub struct IdleStats {
     pub idle: AtomicI64,
     /// Connections closed here because they stayed idle past the timeout.
     pub expired: AtomicU64,
+    /// Times the thread came out of `poll`, and the `pollfd`s it had handed
+    /// it, summed: what one wake-up costs grows with the second over the
+    /// first.
+    pub wakes: AtomicU64,
+    pub polled: AtomicU64,
+    /// Nanoseconds spent inside `poll`, and in the rest of the loop —
+    /// rebuilding the `pollfd`s and sorting what it answered. Wall time on
+    /// the idle thread, not CPU: a `poll` that waits counts its wait.
+    pub in_poll_ns: AtomicU64,
+    pub around_poll_ns: AtomicU64,
 }
 
 /// The handle every thread parks idle connections through.
@@ -145,6 +155,7 @@ mod imp {
         let mut idle: Vec<(Conn, Instant)> = Vec::new();
         let mut fds: Vec<libc::pollfd> = Vec::new();
         let mut drain = [0u8; 256];
+        let mut polled_at = Instant::now();
         loop {
             let now = Instant::now();
             idle.extend(received.try_iter().map(|conn| (conn, now + timeout)));
@@ -164,9 +175,20 @@ mod imp {
                 .map(|(_, expires)| expires.saturating_duration_since(now))
                 .min()
                 .map_or(-1, |left| (left.as_millis() as i32).saturating_add(1));
+            let polling = Instant::now();
             // Safety: `fds` is a live, correctly sized array of `pollfd`s, and
             // every descriptor in it is owned by a value this thread holds.
             let woke = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait) };
+            let polled = Instant::now();
+            stats.wakes.fetch_add(1, Ordering::Relaxed);
+            stats.polled.fetch_add(fds.len() as u64, Ordering::Relaxed);
+            stats
+                .in_poll_ns
+                .fetch_add((polled - polling).as_nanos() as u64, Ordering::Relaxed);
+            stats
+                .around_poll_ns
+                .fetch_add((polling - polled_at).as_nanos() as u64, Ordering::Relaxed);
+            polled_at = polled;
             if woke < 0 && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
                 eprintln!("edge-idle: poll: {}", std::io::Error::last_os_error());
             }

@@ -977,7 +977,7 @@ impl Shared {
              \"scheduler\": \"{}\",\n  \"slice_ms\": {},\n  \"yield_requests\": {},\n  \
              \"yields\": {},\n  \"steals\": {},\n  \"stolen\": {},\n  \
              \"connections\": {},\n  \"keep_alive_reuses\": {},\n  \"idle_connections\": {},\n  \
-             \"idle_expired\": {},\n  \"fetches\": {},\n  \"fetches_aborted\": {},\n  \
+             \"idle_expired\": {},\n  \"idle_poller\": {},\n  \"fetches\": {},\n  \"fetches_aborted\": {},\n  \
              \"live_isolates\": {},\n  \
              \"pooled_isolates\": {pooled},\n  \"isolate_heap_bytes\": {{\"mean\": {heap_mean}, \"max\": {heap_max}}},\n  \
              \"latency_ms\": {{\"p50\": {:.2}, \"p99\": {:.2}, \"max\": {:.2}, \"samples\": {samples}}},\n  \
@@ -1005,6 +1005,16 @@ impl Shared {
             stats.reused.load(Ordering::Relaxed),
             self.idle().stats.idle.load(Ordering::Relaxed),
             self.idle().stats.expired.load(Ordering::Relaxed),
+            {
+                let idle = &self.idle().stats;
+                format!(
+                    "{{\"wakes\": {}, \"pollfds\": {}, \"in_poll_ms\": {:.3}, \"around_poll_ms\": {:.3}}}",
+                    idle.wakes.load(Ordering::Relaxed),
+                    idle.polled.load(Ordering::Relaxed),
+                    idle.in_poll_ns.load(Ordering::Relaxed) as f64 / 1e6,
+                    idle.around_poll_ns.load(Ordering::Relaxed) as f64 / 1e6,
+                )
+            },
             self.fetcher.stats().started.load(Ordering::Relaxed),
             self.fetcher.stats().aborted_queued.load(Ordering::Relaxed)
                 + self.fetcher.stats().aborted_running.load(Ordering::Relaxed),
