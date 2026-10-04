@@ -31,6 +31,7 @@ pub mod fetch;
 pub mod hosts;
 pub mod http;
 pub mod idle;
+pub mod inbox;
 pub mod json;
 pub mod os;
 pub mod picture;
