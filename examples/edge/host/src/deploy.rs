@@ -27,7 +27,7 @@ use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program;
 use cove_sema::{Compiler, Config, HostSchemas, RunConfig};
 
-use crate::hosts::{Edge, Kv, Latency, Log, Upstream, EDGE, SCHEMAS};
+use crate::hosts::{Edge, Kv, Latency, Log, Upstream, SCHEMAS};
 
 /// How the server is asked to deploy its tenants.
 #[derive(Clone, Debug)]
@@ -229,19 +229,10 @@ fn deploy(options: &DeployOptions, name: &str, run: &RunConfig) -> Tenant {
     let mut tenant = Tenant {
         name: name.to_string(),
         entry: run.entry.clone(),
-        // `edge` is granted to every tenant, because the checker charges
-        // building an `edge.Response` to the `edge` capability as though it
-        // were a call: `cove_sema::resolve::call_capability` reads any
-        // `module.Name(...)` on a host module as an operation, and a name the
-        // schema declares no operation for falls back to the module's
-        // capability. `edge` has no operations, so granting it grants nothing
-        // a run could use.
-        granted: run
-            .allow
-            .iter()
-            .cloned()
-            .chain([EDGE.capability.to_string()])
-            .collect(),
+        // Exactly what `cove.toml` grants. `edge` is not among it: building
+        // an `edge.Response` initializes a type the schema declares, which
+        // requires no capability, so a tenant that only answers is pure.
+        granted: run.allow.iter().cloned().collect(),
         required: BTreeSet::new(),
         open: false,
         limits: Limits {

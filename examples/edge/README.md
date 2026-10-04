@@ -31,10 +31,10 @@ free port and asks it over TCP.
 ```console
 $ cargo run --release -p cove-edge -- --port 8787
 cove-edge: deploying tenants from …/examples/edge/tenants
-  aggregate  requires [edge, upstream]  granted [edge, upstream]  deployed: 221 fn, checked in 16.9 ms, prepared in 1.4 ms, isolate 3 us
-  counter    requires [edge, kv, log]  granted [edge, kv, log]  deployed: 218 fn, checked in 16.0 ms, prepared in 1.2 ms, isolate 3 us
-  greedy     requires [edge, kv, upstream]  granted [edge, kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
-  hello      requires [edge]  granted [edge]  deployed: 220 fn, checked in 13.9 ms, prepared in 0.9 ms, isolate 3 us
+  aggregate  requires [upstream]  granted [upstream]  deployed: 221 fn, checked in 16.9 ms, prepared in 1.4 ms, isolate 3 us
+  counter    requires [kv, log]  granted [kv, log]  deployed: 218 fn, checked in 16.0 ms, prepared in 1.2 ms, isolate 3 us
+  greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
+  hello      requires [-]  granted [-]  deployed: 220 fn, checked in 13.9 ms, prepared in 0.9 ms, isolate 3 us
 
 listening on http://127.0.0.1:8787 — 4 worker thread(s), a fresh isolate per request, upstream latency 20..100 ms (parked), open-file limit 1048576
 
@@ -46,8 +46,10 @@ try:
 ```
 
 `requires` is what the checker derived from each entry's call graph
-(`FnEntry::required_capabilities`); `granted` is `allow` in `tenants/cove.toml`
-(plus `edge`, see [what was awkward](#what-was-awkward) item 2). `greedy` asks
+(`FnEntry::required_capabilities`); `granted` is `allow` in `tenants/cove.toml`,
+and nothing else. `hello` requires nothing: building an `edge.Response`
+initializes a type the `edge` schema declares, which is not a call into the
+host (see [what was awkward](#what-was-awkward) item 2). `greedy` asks
 for `upstream` without being granted it, so it is refused **at deploy** and the
 other three start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
 `--pool N` (resident isolates instead of fresh ones), `--blocking-upstream`
@@ -271,18 +273,20 @@ The most useful output of this demo. Ordered by how much each cost.
    still 3 µs) but is not something an embedder would guess. This is the one
    item here that is a bug rather than friction: under ADR 0080's intended use
    the limits of one run are silently another's.
-2. **Building a host-declared struct requires the module's capability.**
-   `edge.Response(status: …)` is read as a call into `edge`
-   (`crates/cove-sema/src/resolve.rs:3776`, `call_capability`), and a name the
-   schema declares no operation for falls back to the module's capability
-   (`resolve.rs:3803`). So a pure tenant requires `edge`, although the
-   runtime never crosses the boundary to build a struct. `ModuleSchema`
-   cannot say "types only, no capability" (`capability` is a required
-   `&'static str`, `crates/cove-schema/src/lib.rs:336`), so the server grants
-   `edge` to every tenant (`host/src/deploy.rs`, the `chain([EDGE…])` in
-   `deploy`). The checker over-reports here, which is the safe direction —
-   but every capability report for every tenant now carries a capability that
-   means nothing.
+2. **Building a host-declared struct required the module's capability** —
+   fixed since. `edge.Response(status: …)` was read as a call into `edge`
+   (`call_capability` in `crates/cove-sema/src/resolve.rs`), and a name the
+   schema declares no operation for falls back to the module's capability.
+   So a pure tenant required `edge`, although the runtime never crosses the
+   boundary to build a struct, and the server granted `edge` to every tenant
+   to make up for it. The checker now asks the schema for a declared type
+   before it asks for an operation, the same precedence the interpreter
+   gives the name: initializing a type a module declares requires nothing,
+   just as naming one of its enum cases (`http.Method.Get`) never did. No
+   schema syntax was needed — a module with types and no operations already
+   says "types only". What remains is item 3: a `cove` command with no
+   schema for `edge` still cannot tell `edge.Response(…)` from an operation,
+   so `cove outline` in `tenants/` still says `requires edge`.
 3. **No `cove` command can be handed the server's schemas** (issue #151, which
    the rules example already names). `cove check` in `tenants/` reports nine
    `cove::type::host_type` warnings — every `edge.Request` and
