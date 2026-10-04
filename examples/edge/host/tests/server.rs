@@ -19,6 +19,7 @@ fn start(latency_ms: u64, workers: usize, isolates: Isolates) -> Server {
         isolates,
         keep_alive: KeepAlive::default(),
         fetchers: 2,
+        timeline: None,
         deploy: DeployOptions {
             tenants: cove_edge::tenants_root(),
             latency: Latency {

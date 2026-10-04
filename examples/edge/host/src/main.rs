@@ -12,7 +12,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use cove_edge::toolchain::{self, TestOptions};
-use cove_edge::{os, DeployOptions, Isolates, KeepAlive, Latency, Server, ServerOptions, State};
+use cove_edge::{
+    os, DeployOptions, Isolates, KeepAlive, Latency, Recording, Server, ServerOptions, State,
+};
 
 const USAGE: &str = "\
 usage: cove-edge [--port 8787] [--host 127.0.0.1] [--workers 4]
@@ -23,6 +25,7 @@ usage: cove-edge [--port 8787] [--host 127.0.0.1] [--workers 4]
                  [--no-keep-alive] [--idle-timeout MS (default 5000)]
                  [--max-requests N (per connection, default 1000)]
                  [--fetchers N (threads performing `upstream.fetch`, default 4)]
+                 [--timeline PATH (record every request; GET /_timeline dumps it here)]
        cove-edge check [tenant…] [--tenants DIR]
        cove-edge test [tenant…] [--filter TEXT] [--latency MIN..MAX (ms, default 0)]
                       [--tenants DIR]";
@@ -97,6 +100,7 @@ fn serve(args: Vec<String>) -> ExitCode {
     let mut tenants = cove_edge::tenants_root();
     let mut keep_alive = KeepAlive::default();
     let mut fetchers = 4usize;
+    let mut timeline = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -119,6 +123,11 @@ fn serve(args: Vec<String>) -> ExitCode {
             }
             "--max-requests" => keep_alive.max_requests = parse(&value("--max-requests")),
             "--fetchers" => fetchers = parse(&value("--fetchers")),
+            "--timeline" => {
+                timeline = Some(Recording {
+                    file: Some(value("--timeline").into()),
+                })
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -135,6 +144,7 @@ fn serve(args: Vec<String>) -> ExitCode {
         isolates,
         keep_alive,
         fetchers,
+        timeline: timeline.clone(),
         deploy: DeployOptions {
             tenants,
             latency,
@@ -184,7 +194,14 @@ fn serve(args: Vec<String>) -> ExitCode {
             }
         }
     }
-    println!("  curl -s http://{addr}/_stats\n");
+    println!("  curl -s http://{addr}/_stats");
+    if let Some(Recording { file: Some(file) }) = &timeline {
+        println!(
+            "  curl -s http://{addr}/_timeline > /dev/null   # recording; writes {}",
+            file.display()
+        );
+    }
+    println!();
 
     loop {
         std::thread::park();
