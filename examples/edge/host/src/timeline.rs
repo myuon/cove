@@ -84,6 +84,14 @@ pub enum What {
     },
     /// Its response was written to the socket.
     Written { worker: usize },
+    /// Its run had its slice and yielded at a safepoint on this worker
+    /// (ADR 0084); it went to the back of the global run queue.
+    Yield { worker: usize },
+    /// A worker took up its yielded run again.
+    Continue { worker: usize },
+    /// A job of it — a resume or a continue — was stolen from `from`'s run
+    /// queue by `to`.
+    Steal { from: usize, to: usize },
 }
 
 /// One event.
@@ -217,6 +225,11 @@ pub fn render(workers: usize, tenants: &[String], events: &[Event]) -> String {
                  \"host_calls\": {host_calls}, \"heap_bytes\": {heap_bytes}"
             ),
             What::Written { worker } => write!(out, "\"response_written\", \"worker\": {worker}"),
+            What::Yield { worker } => write!(out, "\"yield\", \"worker\": {worker}"),
+            What::Continue { worker } => write!(out, "\"continue\", \"worker\": {worker}"),
+            What::Steal { from, to } => {
+                write!(out, "\"steal\", \"from\": {from}, \"worker\": {to}")
+            }
         };
         out.push('}');
         if at + 1 < events.len() {

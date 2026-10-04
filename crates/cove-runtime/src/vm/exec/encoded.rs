@@ -2697,6 +2697,12 @@ pub(super) fn dispatch<'s, 'a>(
             // the old condition then answered false, losing the cancellation
             // check, the fuel accounting and the collector's poll together.
             if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
+                // ADR 0084: a run asked to give its thread up does so here,
+                // before the safepoint's own work, which it does on resuming.
+                // A load once a stride, inside a branch taken once a stride.
+                if machine.yield_requested() {
+                    machine.offer_yield()?;
+                }
                 machine.safepoint(budget, id, pc)?;
             }
             machine.next_check = machine.next_question();

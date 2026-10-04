@@ -42,6 +42,21 @@ pub enum Began {
     Run,
     Resume,
     Cancel,
+    /// Taken up again after it yielded at the end of its slice.
+    Continue,
+}
+
+/// How a run segment ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// At a host call: the request's `parks[k]`.
+    Park(usize),
+    /// At a safepoint, its slice up: the request's `yields[k]`.
+    Yield(usize),
+    /// The run answered.
+    Answer,
+    /// Still running when the timeline was dumped.
+    Running,
 }
 
 /// One stretch of a request's run on one worker.
@@ -52,6 +67,25 @@ pub struct Seg {
     /// `None` while still running when the timeline was dumped.
     pub end: Option<f64>,
     pub began: Began,
+    pub ended: Ended,
+}
+
+/// One yield: a run whose slice was up gave its worker back at a safepoint
+/// (ADR 0084), and was taken up again — perhaps elsewhere — later.
+#[derive(Clone, Debug)]
+pub struct Yielded {
+    pub worker: usize,
+    pub at: f64,
+    pub continued: Option<f64>,
+    pub continue_worker: Option<usize>,
+}
+
+/// A job of a request stolen from one worker's run queue by another.
+#[derive(Clone, Debug)]
+pub struct Stolen {
+    pub at: f64,
+    pub from: usize,
+    pub to: usize,
 }
 
 /// One park: where the run parked, when its answer was ready, where it
@@ -83,6 +117,8 @@ pub struct Req {
     pub queued: f64,
     pub segments: Vec<Seg>,
     pub parks: Vec<Park>,
+    pub yields: Vec<Yielded>,
+    pub steals: Vec<Stolen>,
     pub status: Option<u16>,
     pub ended: Option<f64>,
     pub written: Option<f64>,
@@ -122,9 +158,9 @@ fn phase(ev: &str) -> u8 {
         "accepted" => 0,
         "queued" => 1,
         "run_start" => 2,
-        "park" => 3,
-        "answer_ready" => 4,
-        "resume" | "cancel" => 5,
+        "park" | "yield" => 3,
+        "answer_ready" | "steal" => 4,
+        "resume" | "cancel" | "continue" => 5,
         "run_end" => 6,
         _ => 7,
     }
@@ -166,6 +202,8 @@ pub fn read(text: &str) -> Result<Trace, String> {
             queued: num(events[0], "t"),
             segments: Vec::new(),
             parks: Vec::new(),
+            yields: Vec::new(),
+            steals: Vec::new(),
             status: None,
             ended: None,
             written: None,
@@ -177,10 +215,11 @@ pub fn read(text: &str) -> Result<Trace, String> {
         for e in events {
             let t = num(e, "t");
             let worker = num(e, "worker") as usize;
-            let close = |req: &mut Req| {
+            let close = |req: &mut Req, ended: Ended| {
                 if let Some(seg) = req.segments.last_mut() {
                     if seg.end.is_none() {
                         seg.end = Some(t);
+                        seg.ended = ended;
                     }
                 }
             };
@@ -196,10 +235,12 @@ pub fn read(text: &str) -> Result<Trace, String> {
                         start: t,
                         end: None,
                         began: Began::Run,
+                        ended: Ended::Running,
                     });
                 }
                 "park" => {
-                    close(&mut req);
+                    let k = req.parks.len();
+                    close(&mut req, Ended::Park(k));
                     req.parks.push(Park {
                         worker,
                         at: t,
@@ -235,10 +276,39 @@ pub fn read(text: &str) -> Result<Trace, String> {
                         } else {
                             Began::Resume
                         },
+                        ended: Ended::Running,
                     });
                 }
+                "yield" => {
+                    let k = req.yields.len();
+                    close(&mut req, Ended::Yield(k));
+                    req.yields.push(Yielded {
+                        worker,
+                        at: t,
+                        continued: None,
+                        continue_worker: None,
+                    });
+                }
+                "continue" => {
+                    if let Some(y) = req.yields.last_mut() {
+                        y.continued = Some(t);
+                        y.continue_worker = Some(worker);
+                    }
+                    req.segments.push(Seg {
+                        worker,
+                        start: t,
+                        end: None,
+                        began: Began::Continue,
+                        ended: Ended::Running,
+                    });
+                }
+                "steal" => req.steals.push(Stolen {
+                    at: t,
+                    from: num(e, "from") as usize,
+                    to: worker,
+                }),
                 "run_end" => {
-                    close(&mut req);
+                    close(&mut req, Ended::Answer);
                     req.ended = Some(t);
                     req.status = Some(num(e, "status") as u16);
                     req.fuel = num(e, "fuel") as u64;
@@ -295,7 +365,8 @@ pub struct Series {
     /// (or the deadline): the waits on I/O, without the run queue.
     pub waiting_on_io: Steps,
     /// Requests ready to run with no worker free: queued and not yet
-    /// started, or answered and not yet resumed — the run queue.
+    /// started, answered and not yet resumed, or yielded and not yet
+    /// continued — the run queue.
     pub queue: Steps,
 }
 
@@ -337,6 +408,11 @@ pub fn series(trace: &Trace) -> Series {
                 queue.push((ready, 1));
                 queue.push((park.resumed.unwrap_or(trace.t1).max(ready), -1));
             }
+        }
+        // A yielded run is ready to run from its yield to its continue.
+        for y in &req.yields {
+            queue.push((y.at, 1));
+            queue.push((y.continued.unwrap_or(trace.t1).max(y.at), -1));
         }
     }
     Series {
@@ -420,6 +496,16 @@ pub struct Stats {
     pub max_queue: usize,
     /// The most parked runs whose answer was not in yet, at once.
     pub max_waiting_on_io: usize,
+    /// Runs that yielded at the end of a slice, and of those how many were
+    /// continued on another worker.
+    pub yields: usize,
+    pub continued_elsewhere: usize,
+    /// From yield to continue: the wait in the queue a slice costs.
+    pub continue_wait_p50_ms: f64,
+    pub continue_wait_max_ms: f64,
+    /// Steals of a request's job (a resume or a continue) — a connection
+    /// stolen before its request is read is not a request's yet.
+    pub steals: usize,
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -442,6 +528,7 @@ pub fn stats(trace: &Trace) -> Stats {
     let mut resume_waits = Vec::new();
     let mut late = Vec::new();
     let mut start_waits = Vec::new();
+    let mut continue_waits = Vec::new();
     let mut edges: Vec<(f64, i32)> = Vec::new();
     let mut starts: Vec<f64> = Vec::new();
     for req in &trace.requests {
@@ -459,6 +546,16 @@ pub fn stats(trace: &Trace) -> Stats {
             starts.push(seg.start);
             if let (Some(end), Some(busy)) = (seg.end, s.busy.get_mut(seg.worker)) {
                 *busy += end - seg.start;
+            }
+        }
+        s.steals += req.steals.len();
+        for y in &req.yields {
+            s.yields += 1;
+            if let Some(continued) = y.continued {
+                continue_waits.push((continued - y.at) / 1e3);
+                if y.continue_worker != Some(y.worker) {
+                    s.continued_elsewhere += 1;
+                }
             }
         }
         for park in &req.parks {
@@ -506,6 +603,7 @@ pub fn stats(trace: &Trace) -> Stats {
         &mut resume_waits,
         &mut start_waits,
         &mut late,
+        &mut continue_waits,
     ] {
         list.sort_by(f64::total_cmp);
     }
@@ -517,6 +615,8 @@ pub fn stats(trace: &Trace) -> Stats {
     s.timer_late_max_ms = percentile(&late, 1.0);
     s.start_wait_p50_ms = percentile(&start_waits, 0.5);
     s.start_wait_max_ms = percentile(&start_waits, 1.0);
+    s.continue_wait_p50_ms = percentile(&continue_waits, 0.5);
+    s.continue_wait_max_ms = percentile(&continue_waits, 1.0);
 
     let mut by_tenant: BTreeMap<String, (Vec<f64>, f64, usize)> = BTreeMap::new();
     for req in &trace.requests {
@@ -611,6 +711,18 @@ impl Stats {
             self.max_waiting_on_io,
             self.max_queue
         );
+        if self.yields > 0 || self.steals > 0 {
+            let _ = writeln!(
+                out,
+                "yields at a safepoint: {} ({} continued on another worker), waiting p50 {:.3} ms \
+                 (max {:.2}) to continue; requests' jobs stolen: {}",
+                self.yields,
+                self.continued_elsewhere,
+                self.continue_wait_p50_ms,
+                self.continue_wait_max_ms,
+                self.steals
+            );
+        }
         for (tenant, t) in &self.tenants {
             let _ = writeln!(
                 out,
@@ -688,26 +800,33 @@ pub fn chrome_trace(trace: &Trace) -> String {
             ));
         }
         // Each segment, and what began and ended it.
-        let mut park_at = 0;
         for (index, seg) in req.segments.iter().enumerate() {
             let end = seg.end.unwrap_or(trace.t1);
-            let began = match seg.began {
-                Began::Run => format!("run {}", req.path),
-                Began::Resume => {
-                    let p = &req.parks[index - 1];
+            let before = index
+                .checked_sub(1)
+                .and_then(|at| req.segments.get(at))
+                .map(|s| s.ended);
+            let began = match (seg.began, before) {
+                (Began::Run, _) => format!("run {}", req.path),
+                (Began::Resume, Some(Ended::Park(k))) => {
+                    let p = &req.parks[k];
                     format!("resumed after {} {}", p.op, p.target)
                 }
-                Began::Cancel => "cancelled: deadline passed while parked".to_string(),
+                (Began::Resume, _) => "resumed".to_string(),
+                (Began::Cancel, _) => "cancelled: deadline passed while parked".to_string(),
+                (Began::Continue, _) => "continued after a yield".to_string(),
             };
-            let ended = match req.parks.get(park_at) {
-                Some(p) if (p.at - end).abs() < 1e-6 => {
-                    park_at += 1;
+            let ended = match seg.ended {
+                Ended::Park(k) => {
+                    let p = &req.parks[k];
                     format!("parked at {} {}", p.op, p.target)
                 }
-                _ => match req.status {
-                    Some(status) if seg.end.is_some() => format!("answered {status}"),
-                    _ => "still running at the dump".to_string(),
+                Ended::Yield(_) => "yielded at a safepoint: its slice was up".to_string(),
+                Ended::Answer => match req.status {
+                    Some(status) => format!("answered {status}"),
+                    None => "answered".to_string(),
                 },
+                Ended::Running => "still running at the dump".to_string(),
             };
             events.push(format!(
                 "{{\"ph\":\"X\",\"pid\":1,\"tid\":{},\"ts\":{:.3},\"dur\":{:.3},\"name\":{},\"cat\":{},\
@@ -723,20 +842,21 @@ pub fn chrome_trace(trace: &Trace) -> String {
                 quote(&ended)
             ));
         }
-        // Flow arrows: the segment that parked to the one that resumed.
-        for (index, park) in req.parks.iter().enumerate() {
-            let (Some(before), Some(after)) =
-                (req.segments.get(index), req.segments.get(index + 1))
-            else {
-                continue;
+        // Flow arrows: the segment that parked or yielded to the one that
+        // took it up again.
+        for pair in req.segments.windows(2) {
+            let (before, after) = (&pair[0], &pair[1]);
+            let flow_name = match before.ended {
+                Ended::Park(k) if req.parks[k].resume_worker == Some(req.parks[k].worker) => {
+                    "resume (same worker)"
+                }
+                Ended::Park(_) => "resume (other worker)",
+                Ended::Yield(_) if after.worker == before.worker => "continue (same worker)",
+                Ended::Yield(_) => "continue (other worker)",
+                Ended::Answer | Ended::Running => continue,
             };
             let mid = |s: &Seg| (s.start + s.end.unwrap_or(trace.t1)) / 2.0;
             flow += 1;
-            let flow_name = if park.resume_worker == Some(park.worker) {
-                "resume (same worker)"
-            } else {
-                "resume (other worker)"
-            };
             events.push(format!(
                 "{{\"ph\":\"s\",\"pid\":1,\"tid\":{},\"ts\":{:.3},\"id\":{flow},\"name\":\"{flow_name}\",\"cat\":\"park\"}}",
                 TID_WORKER + before.worker as u64,
@@ -783,6 +903,22 @@ pub fn chrome_trace(trace: &Trace) -> String {
         let outer_end = events.remove(outer + 1);
         if let Some(first) = req.segments.first() {
             slice(&mut events, "queued".to_string(), req.queued, first.start);
+        }
+        for y in &req.yields {
+            slice(
+                &mut events,
+                "yielded, waiting for a worker".to_string(),
+                y.at,
+                y.continued.unwrap_or(trace.t1),
+            );
+        }
+        for steal in &req.steals {
+            events.push(format!(
+                "{{\"ph\":\"i\",\"s\":\"t\",\"pid\":1,\"tid\":{},\"ts\":{:.3},\"name\":{},\"cat\":\"steal\"}}",
+                TID_WORKER + steal.to as u64,
+                ts(steal.at),
+                quote(&format!("stole #{} from worker {}", req.id, steal.from))
+            ));
         }
         for park in &req.parks {
             let ready = park.ready.unwrap_or(trace.t1);
@@ -900,6 +1036,7 @@ fn style() -> String {
          svg.edge-timeline .wait { stroke: var(--wait); stroke-width: 1; }\n\
          svg.edge-timeline .bg { fill: var(--surface); }\n\
          svg.edge-timeline .moved { fill: var(--ink); stroke: var(--surface); stroke-width: 1; }\n\
+         svg.edge-timeline .yieldmark { stroke: var(--ink2); stroke-width: 1; }\n\
          svg.edge-timeline .crit { fill: var(--critical); font-weight: 700; }\n\
          svg.edge-timeline .critline { stroke: var(--critical); stroke-width: 2; stroke-linecap: round; }\n\
          svg.edge-timeline .hover { fill: var(--ink); opacity: 0.06; }\n\
@@ -1024,10 +1161,12 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
             "<text class=\"ink\" x=\"{}\" y=\"68\">{}</text>",
             lay.left,
             esc(&format!(
-                "pool CPU {:.0}% · share of the span with N workers running: {} · at most {} waiting for a worker",
+                "pool CPU {:.0}% · share of the span with N workers running: {} · at most {} waiting for a worker · {} yields, {} steals",
                 s.utilisation * 100.0,
                 s.running_text(),
-                s.max_queue
+                s.max_queue,
+                s.yields,
+                s.steals
             ))
         );
         legend_svg(&mut out, lay.left, 96.0);
@@ -1113,6 +1252,26 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
         }
     }
 
+    // A yield: the bar already ends there, with the 2 px gap before the next
+    // one; a short tick hanging under the bar says the end was a slice and
+    // not an answer or a park. Small and in secondary ink, because at a 2 ms
+    // slice there are hundreds of them and they must not cover the bars.
+    for req in &trace.requests {
+        for y in &req.yields {
+            if y.worker >= trace.workers {
+                continue;
+            }
+            let ly = lay.workers_top + lay.lane * y.worker as f64;
+            let tx = x(y.at);
+            let _ = writeln!(
+                out,
+                "<line class=\"yieldmark\" x1=\"{tx:.2}\" y1=\"{:.1}\" x2=\"{tx:.2}\" y2=\"{:.1}\"/>",
+                ly + lay.lane - 5.0,
+                ly + lay.lane - 2.0
+            );
+        }
+    }
+
     // The strips: how many workers ran at each instant, how many parked runs
     // were waiting on I/O, how many requests waited for a worker. Neutral
     // ink, not a tenant's colour: they count every tenant together.
@@ -1189,6 +1348,9 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
             if let Some(resumed) = park.resumed {
                 line(&mut out, "wait", ready, resumed, 1.0);
             }
+        }
+        for y in &req.yields {
+            line(&mut out, "wait", y.at, y.continued.unwrap_or(trace.t1), 1.0);
         }
         let bar_h = (lay.row - 1.0).max(2.0);
         for seg in &req.segments {
@@ -1397,16 +1559,27 @@ fn legend_svg(out: &mut String, left: f64, y: f64) {
             "resumed on another worker",
         ),
         (
+            "<rect class=\"t5\" x=\"0\" y=\"-10\" width=\"7\" height=\"9\"/><rect class=\"t5\" x=\"9\" y=\"-10\" width=\"7\" height=\"9\"/><line class=\"yieldmark\" x1=\"8\" y1=\"-1\" x2=\"8\" y2=\"2\"/>",
+            "yielded at a safepoint (slice up)",
+        ),
+        (
             "<path class=\"critline\" d=\"M4,-8 L12,0 M4,0 L12,-8\"/>",
             "504 timeout",
         ),
     ];
+    let mut y = y;
     for (mark, label) in keys {
+        let width = 34.0 + label.len() as f64 * 6.2;
+        // Onto a second row rather than off the edge of a 1,240 px figure.
+        if lx + width > 1230.0 {
+            lx = left;
+            y += 20.0;
+        }
         let _ = writeln!(
             out,
             "<g transform=\"translate({lx:.1},{y:.1})\">{mark}<text class=\"ink\" x=\"21\" y=\"0\">{label}</text></g>"
         );
-        lx += 34.0 + label.len() as f64 * 6.2;
+        lx += width;
     }
 }
 
@@ -1546,7 +1719,7 @@ pub fn html(trace: &Trace) -> String {
     out.push_str("</tbody></table></details>\n");
     out.push_str("<details><summary>Every request as a table</summary>\n<table><thead><tr>\
                   <th>id</th><th>tenant</th><th>path</th><th>status</th><th>queued ms</th><th>answered ms</th>\
-                  <th>latency ms</th><th>workers</th><th>parks</th></tr></thead><tbody>\n");
+                  <th>latency ms</th><th>workers</th><th>yields</th><th>parks</th></tr></thead><tbody>\n");
     let ms = |t: f64| (t - trace.t0) / 1e3;
     for req in &trace.requests {
         let workers: Vec<String> = req
@@ -1569,7 +1742,7 @@ pub fn html(trace: &Trace) -> String {
             .collect();
         let _ = writeln!(
             out,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             req.id,
             esc(&req.tenant),
             esc(&req.path),
@@ -1578,6 +1751,7 @@ pub fn html(trace: &Trace) -> String {
             req.written.or(req.ended).map_or("-".to_string(), |t| format!("{:.3}", ms(t))),
             req.latency().map_or("-".to_string(), |l| format!("{:.3}", l / 1e3)),
             workers.join(" → "),
+            req.yields.len(),
             esc(&parks.join("; "))
         );
     }
@@ -1609,8 +1783,24 @@ pub fn html(trace: &Trace) -> String {
             .segments
             .iter()
             .map(|seg| {
+                let (park, yielded) = match seg.ended {
+                    Ended::Park(k) => (k as i64, "null".to_string()),
+                    Ended::Yield(k) => {
+                        let y = &req.yields[k];
+                        (
+                            -1,
+                            format!(
+                                "[{:.3},{}]",
+                                y.continued.unwrap_or(trace.t1) - y.at,
+                                y.continue_worker
+                                    .map_or("null".to_string(), |w| w.to_string())
+                            ),
+                        )
+                    }
+                    Ended::Answer | Ended::Running => (-1, "null".to_string()),
+                };
                 format!(
-                    "[{},{:.3},{:.3},\"{}\"]",
+                    "[{},{:.3},{:.3},\"{}\",{park},{yielded}]",
                     seg.worker,
                     seg.start,
                     seg.end.unwrap_or(trace.t1),
@@ -1618,6 +1808,7 @@ pub fn html(trace: &Trace) -> String {
                         Began::Run => "run",
                         Began::Resume => "resume",
                         Began::Cancel => "cancel",
+                        Began::Continue => "continue",
                     }
                 )
             })
@@ -1696,10 +1887,15 @@ function describe(i) {
   lines.push(['strong', tenant + ' #' + id + ' · ' + (status === null ? 'still running' : status === 504 ? '✕ 504 timeout' : status)]);
   lines.push(['', path]);
   lines.push(['', 'queued ' + ms(queued) + ' ms' + (done === null ? '' : ', answered ' + ms(done) + ' ms (' + ((done - queued) / 1000).toFixed(2) + ' ms)')]);
-  const run = s => lines.push(['', (s[3] === 'run' ? 'ran' : s[3] === 'resume' ? 'resumed' : 'cancelled') + ' on worker ' + s[0] + ': ' + ms(s[1]) + ' to ' + ms(s[2]) + ' ms (' + Math.round(s[2] - s[1]) + ' µs)']);
-  ss.forEach((s, k) => {
+  const began = { run: 'ran', resume: 'resumed', cancel: 'cancelled', continue: 'continued' };
+  const run = s => lines.push(['', began[s[3]] + ' on worker ' + s[0] + ': ' + ms(s[1]) + ' to ' + ms(s[2]) + ' ms (' + Math.round(s[2] - s[1]) + ' µs)']);
+  ss.forEach(s => {
     run(s);
-    const p = ps[k];
+    if (s[5]) {
+      const [waited, to] = s[5];
+      lines.push(['', '  yielded at a safepoint (slice up), waited ' + waited.toFixed(0) + ' µs for worker ' + to + (to !== s[0] ? ' (moved)' : '')]);
+    }
+    const p = s[4] >= 0 ? ps[s[4]] : null;
     if (!p) return;
     const [op, target, from, at, ready, resumed, to, by, due] = p;
     let text = 'parked on worker ' + from + ' at ' + op + ' ' + target + ' for ' + (((ready ?? T1) - at) / 1000).toFixed(1) + ' ms (' + by + (due !== null ? ', due after ' + due.toFixed(1) + ' ms' : '') + ')';

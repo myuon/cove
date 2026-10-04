@@ -9,13 +9,16 @@
 //! embedder decides what happens next — which is the line PHILOSOPHY's
 //! "Separate policy from mechanism" draws.
 //!
-//! Three types. [`OwnedVm`] is a [`Vm`] that owns the three things a `Vm`
-//! borrows, so that it is `'static` and `Send` and can be put in a queue.
-//! [`ParkedVm`] is one of those that is parked at a host call. [`Step`] is
-//! what running one comes to: answered, or parked.
+//! [`OwnedVm`] is a [`Vm`] that owns the three things a `Vm` borrows, so that
+//! it is `'static` and `Send` and can be put in a queue. [`ParkedVm`] is one
+//! of those that is parked at a host call. [`YieldedVm`] is one that gave its
+//! thread up at a safepoint because its [`YieldRequest`] was raised
+//! ([ADR 0084](../../../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md)).
+//! [`Step`] is what running one comes to: answered, parked, or yielded.
 
 use std::any::Any;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,6 +72,9 @@ const _: () = {
     const fn sends<T: Send>() {}
     sends::<OwnedVm>();
     sends::<ParkedVm>();
+    sends::<YieldedVm>();
+    const fn shares<T: Send + Sync>() {}
+    shares::<YieldRequest>();
 };
 
 impl OwnedVm {
@@ -88,7 +94,7 @@ impl OwnedVm {
         // do not move with the handle. The `Vm` is dropped before the `Arc`s
         // (field order), and nothing below hands out the `Vm` or a reference
         // carrying its `'static`, which is what would let one outlive them.
-        let vm = unsafe {
+        let mut vm = unsafe {
             let runtime_ref: &'static Runtime = &*Arc::as_ptr(&runtime);
             let hosts_ref: &'static HostRegistry = &*Arc::as_ptr(&hosts);
             let program: &'static Program = &*Arc::as_ptr(&prepared.program);
@@ -100,6 +106,8 @@ impl OwnedVm {
                 DEFAULT_HEAP_WORDS,
             )
         };
+        vm.machine
+            .install_yield_request(Arc::new(AtomicBool::new(false)));
         OwnedVm {
             vm,
             _runtime: runtime,
@@ -181,6 +189,34 @@ impl OwnedVm {
         self.vm.instructions()
     }
 
+    /// The handle another thread raises to ask this machine's run to give its
+    /// thread up at its next safepoint, answering [`Step::Yielded`].
+    ///
+    /// One per machine, for every run it makes; clones share it. Only a
+    /// parkable run honours it, and only where it could park (ADR 0080 §2,
+    /// less the `Shared` cell clause): inside a host's callback, beside a
+    /// running task, below a compiled frame or under a debugger the request
+    /// stays raised and the run yields at the first safepoint where it can.
+    /// The runtime lowers it when the run yields, parks or answers, and when
+    /// a parkable run begins — a request is about the run that is running
+    /// now. *When* to raise it is the embedder's: the runtime keeps no clock
+    /// for it ([ADR 0084](../../../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md)).
+    pub fn yield_request(&self) -> YieldRequest {
+        YieldRequest(Arc::clone(
+            self.vm
+                .machine
+                .yield_flag()
+                .expect("an `OwnedVm` installs its yield flag when it is built"),
+        ))
+    }
+
+    /// How many safepoints, over this machine's life, were asked to yield
+    /// and could not, because the run was not where it could give its thread
+    /// up. Each is one stride the request waited longer.
+    pub fn yields_declined(&self) -> u64 {
+        self.vm.machine.yields_declined()
+    }
+
     /// [`Vm::meter`]: this run's accounting, or the last one's.
     ///
     /// The run's own, however many other runs share its registry: a budget
@@ -199,10 +235,13 @@ impl OwnedVm {
         self.vm.allocated_words()
     }
 
-    /// The run, answered or parked.
+    /// The run, answered, parked or yielded — with its yield request
+    /// lowered, since either way it has left the thread.
     fn step(self, outcome: Option<Result<Value, RuntimeError>>) -> Step {
+        self.vm.machine.clear_yield_request();
         match outcome {
             Some(outcome) => Step::Answered(self, outcome),
+            None if self.vm.machine.is_yielded() => Step::Yielded(YieldedVm { vm: self }),
             None => Step::Parked(ParkedVm { vm: self }),
         }
     }
@@ -220,6 +259,112 @@ pub enum Step {
     Answered(OwnedVm, Result<Value, RuntimeError>),
     /// A host call answered pending, and the run is waiting for its answer.
     Parked(ParkedVm),
+    /// The run's [`YieldRequest`] was raised, and it gave its thread up at a
+    /// safepoint. It needs no answer: [`YieldedVm::resume`] runs it on.
+    Yielded(YieldedVm),
+}
+
+/// The flag that asks a run to give its thread up at its next safepoint.
+///
+/// From [`OwnedVm::yield_request`]; `Send + Sync` and cheap to clone, so a
+/// scheduler's monitor thread can hold one per running run and raise it when
+/// the run has had its slice. Raising it is a relaxed store and costs the run
+/// nothing until its next safepoint, where it is one load — at most
+/// [`SAFEPOINT_STRIDE`](super::exec::SAFEPOINT_STRIDE) instructions later.
+#[derive(Clone, Debug)]
+pub struct YieldRequest(Arc<AtomicBool>);
+
+impl YieldRequest {
+    /// Asks the run to yield. Idempotent, and harmless when the run is not
+    /// running: the flag is lowered whenever the run leaves its thread.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a request is raised and not yet honoured.
+    pub fn is_requested(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// A run that gave its thread up at a safepoint, because its [`YieldRequest`]
+/// was raised.
+///
+/// `Send`, as a [`ParkedVm`] is and for the same reason: it yielded only
+/// where it could have parked — no callback below it, no task running, no
+/// compiled frame — so what it holds is its heap, its stack and its frames.
+/// It may hold a `Shared` cell, which is the task's and not the thread's
+/// ([ADR 0084](../../../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md)).
+///
+/// It stands before the instruction it was about to run, and the safepoint
+/// it yielded at has not been taken: resuming takes it, so the run is charged,
+/// collected and counted exactly as one that was never interrupted, and its
+/// trace is that run's — a yield writes no event.
+pub struct YieldedVm {
+    vm: OwnedVm,
+}
+
+impl YieldedVm {
+    /// Runs the run on, on this thread, until it answers, parks or yields
+    /// again.
+    ///
+    /// Asked first, as [`ParkedVm::resume`] asks, whether the run has been
+    /// stopped while it waited: its [`Cancellation`](crate::Cancellation)
+    /// raised or its deadline passed. A deadline is wall-clock and kept
+    /// running while the run was off its thread. If it has, the run ends as
+    /// [`YieldedVm::cancel`] ends it, with that stop.
+    pub fn resume(mut self) -> Step {
+        if let Some(stopped) = self.vm.meter().interrupted() {
+            return self.stop(stopped);
+        }
+        let outcome = self.vm.vm.resume_yielded();
+        self.vm.step(outcome)
+    }
+
+    /// Ends the run at the safepoint it yielded at, the way that safepoint
+    /// would have ended it: [`Stopped::Cancelled`] if its flag is raised,
+    /// [`Stopped::Deadline`] if its deadline has passed, and
+    /// [`Stopped::Cancelled`] otherwise. The error is the budget's own at the
+    /// instruction the run stood before, with the call chain under it; the
+    /// entry's `entry_exit`, `heap_summary` and `run_ended` are written,
+    /// classified as the stop; a cell the run held is given back; and the
+    /// machine comes back for its next run.
+    pub fn cancel(self) -> (OwnedVm, RuntimeError) {
+        let stopped = self.vm.meter().interrupted().unwrap_or(Stopped::Cancelled);
+        match self.stop(stopped) {
+            Step::Answered(vm, Err(error)) => (vm, error),
+            Step::Answered(..) | Step::Parked(_) | Step::Yielded(_) => {
+                unreachable!("a yielded run stopped ends with that stop")
+            }
+        }
+    }
+
+    /// What the run's deadline leaves, or `None` for a run with no deadline:
+    /// [`ParkedVm::time_left`]'s answer, for a run waiting in a queue rather
+    /// than on a host.
+    pub fn time_left(&self) -> Option<Duration> {
+        self.vm.meter().time_left()
+    }
+
+    fn stop(mut self, stopped: Stopped) -> Step {
+        let outcome = self.vm.vm.stop_yielded(stopped);
+        self.vm.step(outcome)
+    }
+
+    /// [`Vm::instructions`], up to the instruction it stands before.
+    pub fn instructions(&self) -> u64 {
+        self.vm.instructions()
+    }
+
+    /// [`Vm::meter`]: the run's accounting so far.
+    pub fn meter(&self) -> &Meter {
+        self.vm.meter()
+    }
+
+    /// [`OwnedVm::yield_request`].
+    pub fn yield_request(&self) -> YieldRequest {
+        self.vm.yield_request()
+    }
 }
 
 /// A run parked at a host call, waiting for the answer.
@@ -310,7 +455,7 @@ impl ParkedVm {
         let stopped = self.vm.meter().interrupted().unwrap_or(Stopped::Cancelled);
         match self.stop(stopped) {
             Step::Answered(vm, Err(error)) => (vm, error),
-            Step::Answered(..) | Step::Parked(_) => {
+            Step::Answered(..) | Step::Parked(_) | Step::Yielded(_) => {
                 unreachable!("a run resumed with a stop ends with that stop")
             }
         }
@@ -350,5 +495,11 @@ impl ParkedVm {
     /// parked at.
     pub fn meter(&self) -> &Meter {
         self.vm.meter()
+    }
+
+    /// [`OwnedVm::yield_request`]: the handle a scheduler's monitor raises
+    /// once this run is resumed and has had its slice.
+    pub fn yield_request(&self) -> YieldRequest {
+        self.vm.yield_request()
     }
 }

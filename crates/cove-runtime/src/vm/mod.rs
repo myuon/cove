@@ -96,7 +96,7 @@ use std::sync::Arc;
 use cove_diag::Span;
 use cove_ir::{Function, FunctionId, Program};
 
-use crate::budget::{Budget, Limits, Meter};
+use crate::budget::{Budget, Limits, Meter, Stopped};
 use crate::error::RuntimeError;
 use crate::host::HostRegistry;
 use crate::runtime::Runtime;
@@ -127,7 +127,7 @@ pub(crate) mod render;
 pub(crate) mod report;
 mod sequences;
 
-pub use parked::{OwnedVm, ParkedVm, Step};
+pub use parked::{OwnedVm, ParkedVm, Step, YieldRequest, YieldedVm};
 
 /// The words a run's heap region may grow to, for every [`Vm`] [`Vm::new`]
 /// builds. [`Vm::with_heap_words`] is the one way to build a run over a
@@ -238,6 +238,9 @@ struct Entered {
     /// The machine's host wait when the entry began, so that the exit reports
     /// this entry's share of it.
     waited: std::time::Duration,
+    /// The machine's descheduled time when the entry began: the time it
+    /// spent yielded is neither its `cpu` nor its `wait` (ADR 0084).
+    descheduled: std::time::Duration,
 }
 
 impl<'a> Vm<'a> {
@@ -857,13 +860,14 @@ impl<'a> Vm<'a> {
             span,
             timing: Timing::start(),
             waited: self.machine.host_wait(),
+            descheduled: self.machine.descheduled(),
         };
 
         let answer = self
             .words_of(function, &args)
             .map_err(|e| e.at(span))
             .and_then(|words| self.machine.run(id, &words, &self.budget));
-        if self.machine.is_parked() {
+        if self.machine.is_suspended() {
             // The words are not an answer, and the entry has not left: the
             // rest of this function runs when the run does answer, from
             // [`Vm::resume`]. The value is never read — see `Vm::parkable`.
@@ -889,6 +893,7 @@ impl<'a> Vm<'a> {
             span,
             timing,
             waited,
+            descheduled,
         } = entered;
         let outcome = answer.and_then(|answer| {
             boundary::to_value(&self.machine, returns, &answer).map_err(|e| e.at(span))
@@ -903,7 +908,8 @@ impl<'a> Vm<'a> {
             function,
             cpu: timing
                 .elapsed()
-                .saturating_sub(self.machine.host_wait().saturating_sub(waited)),
+                .saturating_sub(self.machine.host_wait().saturating_sub(waited))
+                .saturating_sub(self.machine.descheduled().saturating_sub(descheduled)),
             wait: self.machine.host_wait().saturating_sub(waited),
         });
         self.summarize_heap();
@@ -923,6 +929,9 @@ impl<'a> Vm<'a> {
         start: impl FnOnce(&mut Self) -> Result<Value, RuntimeError>,
     ) -> Option<Result<Value, RuntimeError>> {
         self.machine.allow_parking(true);
+        // A request raised for the run this machine last ran, too late for it
+        // to see, is not a request for this one.
+        self.machine.clear_yield_request();
         let outcome = start(self);
         self.answered(outcome)
     }
@@ -935,7 +944,31 @@ impl<'a> Vm<'a> {
         answer: Result<Value, RuntimeError>,
     ) -> Option<Result<Value, RuntimeError>> {
         let words = self.machine.resume(answer, &self.budget);
-        if self.machine.is_parked() {
+        self.went_on(words)
+    }
+
+    /// Runs on a run that yielded at a safepoint, until it answers — `Some` —
+    /// or parks or yields again, `None` (ADR 0084).
+    fn resume_yielded(&mut self) -> Option<Result<Value, RuntimeError>> {
+        let words = self.machine.resume_yielded(&self.budget);
+        self.went_on(words)
+    }
+
+    /// Ends a run that yielded at a safepoint with `stopped`, as that
+    /// safepoint would have: the entry's events are written and the run
+    /// answers the budget's error.
+    fn stop_yielded(&mut self, stopped: Stopped) -> Option<Result<Value, RuntimeError>> {
+        let words = self.machine.stop_yielded(stopped, &self.budget);
+        self.went_on(words)
+    }
+
+    /// What a resumed run came to: `None` if it left the thread again, and
+    /// otherwise the entry finished with its words.
+    fn went_on(
+        &mut self,
+        words: Result<Vec<u64>, RuntimeError>,
+    ) -> Option<Result<Value, RuntimeError>> {
+        if self.machine.is_suspended() {
             return None;
         }
         let entered = self
@@ -953,7 +986,7 @@ impl<'a> Vm<'a> {
         &mut self,
         outcome: Result<Value, RuntimeError>,
     ) -> Option<Result<Value, RuntimeError>> {
-        if self.machine.is_parked() {
+        if self.machine.is_suspended() {
             return None;
         }
         self.machine.allow_parking(false);

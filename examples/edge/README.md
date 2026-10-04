@@ -39,7 +39,7 @@ cove-edge: deploying tenants from …/examples/edge/tenants
   impatient  requires [upstream]  granted [upstream]  deployed: 223 fn, checked in 21.9 ms, prepared in 2.4 ms, isolate 4 us
   proxy      requires [upstream]  granted [upstream]  fetch [127.0.0.1, localhost]  deployed: 222 fn, checked in 25.7 ms, prepared in 3.3 ms, isolate 3 us
 
-listening on http://127.0.0.1:8787 — 4 worker thread(s), a fresh isolate per request, upstream latency 20..100 ms (parked), keep-alive (idle 5000 ms, 1000 requests per connection), open-file limit 1048576
+listening on http://127.0.0.1:8787 — 4 worker thread(s), a fresh isolate per request, upstream latency 20..100 ms (parked), keep-alive (idle 5000 ms, 1000 requests per connection), a run queue per worker, with work stealing, a run is asked to yield after 2.0 ms while others wait, open-file limit 1048576
 
 try:
   curl -s 'http://127.0.0.1:8787/aggregate/'
@@ -66,7 +66,10 @@ that perform real fetches (default 4). Flags: `--workers N`, `--latency MIN..MAX
 `--quiet` (no `log.info` lines), `--no-keep-alive`, `--idle-timeout MS`,
 `--max-requests N` (see [keep-alive](#keep-alive)), `--timeline PATH` (record
 where every request ran; see [watching requests move between
-threads](#watching-requests-move-between-threads)).
+threads](#watching-requests-move-between-threads)), `--scheduler steal|fifo`
+and `--slice MS` (how the workers share their queue, and how long a run may
+hold a worker while others wait; see [slicing long runs at
+safepoints](#slicing-long-runs-at-safepoints)).
 
 ## Checking and testing a tenant
 
@@ -760,6 +763,9 @@ What it shows:
   run-to-completion workers does. A cure would be a scheduler's, not a
   tenant's: a quantum on long runs (the VM's fuel safepoint is a natural
   place to yield), a queue per cost class, or a worker kept for short work.
+  The first is what [the next section](#slicing-long-runs-at-safepoints)
+  does — and since it is now the default, the server commands above
+  reproduce this section's numbers only with `--scheduler fifo --slice 0`.
 - **With one worker the queue is the whole latency.** A request waited
   973 ms at the median to start; `hello`'s run is still 19 µs. A deadline
   starts with the run, not on arrival, so `impatient`'s 300 ms became a
@@ -768,6 +774,142 @@ What it shows:
   `hello` from this same server, so its fetch waits behind the `crunch`es
   too: 45 of 52 passed their 500 ms deadline and were answered 504 — a
   service that calls itself turns its own queue into its own timeout.
+
+## Slicing long runs at safepoints
+
+The head-of-line blocking above has a scheduler's cure, and the runtime now
+has the mechanism for it: [ADR
+0084](../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md) lets an
+embedder ask a run to give its thread up at its next safepoint — the VM takes
+one every 1,024 instructions, at loop backedges and calls alike — and hands
+the run back as a `YieldedVm` that any thread can `resume()`, no answer
+needed. A yielded run answers what an uninterrupted one answers, in the same
+instructions, for the same fuel, with the same trace. The policy is all in
+[`host/src/server.rs`](host/src/server.rs) and
+[`host/src/runq.rs`](host/src/runq.rs), and it is Go's, cut down:
+
+- **A run queue per worker, a global injection queue, and work stealing**
+  (`--scheduler steal`, the default; `--scheduler fifo` is the old single
+  queue). Work from outside a worker — a connection the idle thread found
+  readable, a parked run the lot has an answer for, a run that yielded — goes
+  on the global queue, because neither the idle thread nor the lot is a
+  worker, and whichever worker comes free first should take it. A pipelined
+  request goes on the queue of the worker that answered the one before it.
+  A worker takes from its own queue, then a fair share of the global one
+  (`len / workers + 1`, the rest kept locally), then half of a random
+  victim's queue; every 61st take looks at the global queue first, so a busy
+  local queue cannot starve it. There is no `runnext` slot: nothing here
+  readies work for itself often enough to want one.
+- **A monitor thread and a time slice** (`--slice MS`, default 2, `0` never
+  asks). Each worker publishes the run it is running and when that run's
+  turn began; every quarter slice the monitor raises the `YieldRequest` of a
+  run that has had a whole slice — **only while something is waiting for a
+  worker**, because with nothing waiting a yield is a resume's cost for
+  nothing. The run yields within a stride, and goes to the back of the global
+  queue, as a preempted goroutine goes to Go's: a slice is a turn, not a
+  pause. A run inside a host's callback or beside a running task cannot
+  yield; it declines and yields at the first safepoint where it can (no
+  tenant here does either).
+- The timeline records `yield {worker}`, `continue {worker}` and `steal
+  {from, worker}`; the picture shows a yield as the end of a bar with a small
+  tick hanging under it, and the run queue strip counts a yielded run as
+  waiting for a worker until it is continued.
+
+```console
+$ cargo run --release -p cove-edge -- --quiet --scheduler steal --slice 2 \
+    --timeline /tmp/edge-timeline.json
+$ cargo run --release -p cove-edge --bin cove-edge-load -- \
+    --mix cpu-io --requests 500 --concurrency 200 --keep-alive --rate 330 \
+    --timeline-out timeline.json
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.88 s: 267 req/s
+  connections opened: 200
+  latency ms: p50 71.7  p90 245.8  p99 325.5  max 420.4
+  aggregate  153 x 200               81.6 req/s  p50  213.0 ms  p99  362.0 ms
+  crunch     180 x 200               96.0 req/s  p50   41.6 ms  p99  182.5 ms
+  hello      83 x 200                44.3 req/s  p50    4.0 ms  p99   15.6 ms
+  impatient  13 x 200, 19 x 504      17.1 req/s  p50  306.7 ms  p99  402.3 ms
+  proxy      52 x 200                27.7 req/s  p50    9.1 ms  p99   23.7 ms
+…
+$ cargo run --release -p cove-edge --bin cove-edge-timeline -- timeline.json \
+    --svg timeline-sliced.svg
+…
+yields at a safepoint: 1278 (999 continued on another worker), waiting p50 2.848 ms (max 20.47) to continue; requests' jobs stolen: 8
+```
+
+![The same arrivals as the picture above, with a 2 ms slice: every long crunch bar is cut into turns, and the run queue strip stays low](timeline-sliced.svg)
+
+The same arrivals as [the picture above](#cpu-heavy-and-io-bound-together),
+four ways, on the same machine one after another. Client-side columns from
+`cove-edge-load`, server-side ones from `cove-edge-timeline`; the figure in
+parentheses is a second run of the same command:
+
+| | (a) FIFO, no slice | (b) stealing, no slice | (c) stealing, 2 ms slice | (d) stealing, 1 ms slice |
+| --- | ---: | ---: | ---: | ---: |
+| `hello` p50 / **p99** | 19.8 / **77.0** ms (25.6 / 85.2) | 21.2 / **99.9** ms (28.4 / 107.1) | 4.0 / **15.6** ms (4.1 / 13.6) | 2.8 / **9.0** ms (3.1 / 9.2) |
+| `aggregate` **p50** / p99 | **275** / 403 ms (292) | **282** / 429 ms (300) | **213** / 362 ms (215) | **206** / 399 ms (207) |
+| `proxy` p99 | 150 ms | 176 ms | 24 ms | 15 ms |
+| `crunch` throughput, p50 / p99 | 94.0 req/s, 51.6 / 118 ms | 94.0 req/s, 48.5 / 153 ms | 96.0 req/s, 41.6 / 183 ms (p99 228) | 96.3 req/s, 42.0 / 197 ms |
+| `crunch` worker time per request | 30.4 ms (31.0) | 30.6 ms (31.3) | 30.5 ms (31.4) | 30.9 ms (31.1) |
+| wait for a worker at start, p50 (max) | 16.1 ms (85.0) | 14.5 ms (157) | 2.1 ms (19.9) | 1.4 ms (9.1) |
+| at most waiting for a worker at once | 51 | 53 | 24 | 21 |
+| pool CPU utilisation | 71.6% | 72.1% | 73.6% | 74.7% |
+| yields (continued on another worker) | 0 | 0 | 1,278 (999) | 2,787 (2,203) |
+| a yielded run's wait to continue, p50 | – | – | 2.85 ms | 1.54 ms |
+| steals (jobs taken) | 0 | 26 (30) | 8 (8) | 8 (8) |
+| wall clock, throughput | 1.91 s, 261 req/s | 1.92 s, 261 req/s | 1.88 s, 267 req/s | 1.87 s, 267 req/s |
+| `impatient` | 13 × 200, 19 × 504 | the same | the same | the same |
+
+**Unthrottled** (`--requests 1000 --concurrency 64 --keep-alive`, no
+`--rate`), the pool's capacity, three runs each: (a) 325, 303, 320 req/s;
+(b) 318, 306, 311; (c) 330, 332, 330; (d) 343, 317, 329. In the first of each
+(the one recorded with `--timeline`) pool CPU was 87.8%, 88.0%, 91.0% and
+95.5%, `hello`'s p99 193, 244, 37 and 24 ms, and `crunch`'s p99 212, 234,
+549 and 660 ms.
+
+What it shows:
+
+- **The slice is what ends the head-of-line blocking.** `hello`'s p99 falls
+  from 77–85 ms to 14–16 ms at 2 ms and to 9 ms at 1 ms, and its median
+  from 20–26 ms to 3–4. A short request now waits for at most a few slices
+  of the runs ahead of it, not for whole runs: the longest wait for a worker
+  at start went from 85 ms to 20 and then 9, and the run queue's peak
+  halved. `proxy` gains most, because its fetch is a `hello` behind the same
+  queue: p99 150 ms to 15. `aggregate`'s median falls by a quarter, 275 ms
+  to 206–213, because each of its three resumes waited behind `crunch`es too.
+- **Work stealing alone did nothing for it, and was a little worse.** (b) is
+  (a) within the noise at the median and worse at the tail (`hello` p99
+  100–107 against 77–85, longest start wait 157 ms against 85). Stealing
+  balances *queued* work between workers, and the problem is not
+  imbalance: every worker is busy with a long run. Worse, a worker that
+  takes its share of the global queue and then starts a 60 ms `crunch` holds
+  that share in its own queue until another worker is idle enough to steal
+  it — which, under this load, is rarely: 26 steals in the whole run. With a
+  slice, the holder comes back to its own queue every 2 ms, and steals fall
+  to 8. The queues are the shape a scheduler needs once there is a slice to
+  make turns of; they are not the cure.
+- **What slicing costs is the long runs' latency, not their CPU.** A
+  `crunch` took the same worker time in all four, 30.4–31.4 ms a request —
+  the variation between two runs of one configuration is as large as the
+  variation between configurations — and 2,787 yields at about 3 µs a
+  resume (ADR 0080's measurement of a park) would be 8 ms of 5.5 s of worker
+  time, 0.15%, which is below what this can see. Throughput did not fall:
+  `crunch` 94–96 req/s, the whole mix 261–267 req/s, and unthrottled
+  capacity 303–343 req/s in every configuration, the sliced ones at the top
+  of that range. What does move is that long runs now share the workers, so
+  each finishes later: `crunch`'s p99 rose from 118 ms to 183–228 at 2 ms
+  and 197 at 1 ms, and unthrottled from 212 ms to 549–660. Its median
+  *fell*, 52 ms to 42, because a short `crunch` is no longer stuck behind a
+  long one. That is processor sharing's trade, and it is the right one for
+  a server whose short requests are its interactive ones: the
+  shortest-running requests gain the most, the longest lose some.
+- **A shorter slice buys a little more for a little more.** 1 ms against
+  2 ms: `hello` p99 9 against 14–16 ms, twice the yields, the same CPU per
+  `crunch`, and `crunch`'s p99 197 against 183–228 ms. Most yields (78–79%)
+  continue on another worker, so each one also moves a machine to a cold
+  cache; at this run length that is not visible either.
+- **`impatient`'s 504s are unchanged**, 19 of 32, because its deadline is
+  spent waiting on an upstream, not on a worker.
 
 ## What was awkward
 

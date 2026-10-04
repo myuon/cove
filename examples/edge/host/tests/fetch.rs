@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use cove_edge::http::get;
-use cove_edge::{DeployOptions, Isolates, KeepAlive, Latency, Server, ServerOptions};
+use cove_edge::{DeployOptions, Discipline, Isolates, KeepAlive, Latency, Server, ServerOptions};
 
 fn start() -> Server {
     Server::start(ServerOptions {
@@ -18,6 +18,8 @@ fn start() -> Server {
         keep_alive: KeepAlive::default(),
         fetchers: 2,
         timeline: None,
+        scheduler: Discipline::Stealing,
+        slice: Some(Duration::from_millis(2)),
         deploy: DeployOptions {
             tenants: cove_edge::tenants_root(),
             latency: Latency {

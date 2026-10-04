@@ -17,7 +17,9 @@
 //! every run of it), [`ParkedVm`], [`Step`] and
 //! [`HostApi::call_parkable`](cove_runtime::HostApi::call_parkable) (ADR
 //! 0080), and the pacing collector of ADR 0081 that keeps a resident run's
-//! heap small.
+//! heap small; and [`YieldRequest`](cove_runtime::YieldRequest) and
+//! [`YieldedVm`](cove_runtime::YieldedVm) (ADR 0084), which let the
+//! scheduler slice a long run at a safepoint.
 //!
 //! [`OwnedVm`]: cove_runtime::OwnedVm
 //! [`PreparedProgram`]: cove_runtime::PreparedProgram
@@ -32,12 +34,14 @@ pub mod idle;
 pub mod json;
 pub mod os;
 pub mod picture;
+pub mod runq;
 pub mod server;
 pub mod timeline;
 pub mod toolchain;
 
 pub use deploy::{DeployOptions, State, Tenant};
 pub use hosts::Latency;
+pub use runq::Discipline;
 pub use server::{Isolates, KeepAlive, Server, ServerOptions};
 pub use timeline::Recording;
 

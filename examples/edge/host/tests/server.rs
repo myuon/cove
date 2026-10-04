@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use cove_edge::http::get;
-use cove_edge::{DeployOptions, Isolates, KeepAlive, Latency, Server, ServerOptions, State};
+use cove_edge::{
+    DeployOptions, Discipline, Isolates, KeepAlive, Latency, Server, ServerOptions, State,
+};
 
 fn start(latency_ms: u64, workers: usize, isolates: Isolates) -> Server {
     Server::start(ServerOptions {
@@ -20,6 +22,8 @@ fn start(latency_ms: u64, workers: usize, isolates: Isolates) -> Server {
         keep_alive: KeepAlive::default(),
         fetchers: 2,
         timeline: None,
+        scheduler: Discipline::Stealing,
+        slice: Some(Duration::from_millis(2)),
         deploy: DeployOptions {
             tenants: cove_edge::tenants_root(),
             latency: Latency {
