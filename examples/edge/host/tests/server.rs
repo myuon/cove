@@ -10,13 +10,14 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use cove_edge::http::get;
-use cove_edge::{DeployOptions, Isolates, Latency, Server, ServerOptions, State};
+use cove_edge::{DeployOptions, Isolates, KeepAlive, Latency, Server, ServerOptions, State};
 
 fn start(latency_ms: u64, workers: usize, isolates: Isolates) -> Server {
     Server::start(ServerOptions {
         listen: "127.0.0.1:0".to_string(),
         workers,
         isolates,
+        keep_alive: KeepAlive::default(),
         deploy: DeployOptions {
             tenants: cove_edge::tenants_root(),
             latency: Latency {

@@ -27,13 +27,14 @@
 pub mod deploy;
 pub mod hosts;
 pub mod http;
+pub mod idle;
 pub mod os;
 pub mod server;
 pub mod toolchain;
 
 pub use deploy::{DeployOptions, State, Tenant};
 pub use hosts::Latency;
-pub use server::{Isolates, Server, ServerOptions};
+pub use server::{Isolates, KeepAlive, Server, ServerOptions};
 
 /// Where the demo's tenants live, relative to this crate.
 pub fn tenants_root() -> std::path::PathBuf {

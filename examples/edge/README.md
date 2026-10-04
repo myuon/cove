@@ -23,8 +23,8 @@ It is a demonstration of the embedding API this repository grew in one week:
   which is what keeps a resident (pooled) isolate's heap from growing.
 
 std only — no async runtime, no HTTP crate. `host/` is a workspace member, so
-`cargo t` runs `host/tests/server.rs`, which starts the server in-process on a
-free port and asks it over TCP.
+`cargo t` runs `host/tests/`, which start the server in-process on a
+free port and ask it over TCP, and call `check` and `test` as functions.
 
 ## Running it
 
@@ -55,7 +55,8 @@ for `upstream` without being granted it, so it is refused **at deploy** and the
 other four start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
 `--pool N` (resident isolates instead of fresh ones), `--blocking-upstream`
 (the control: `upstream.get` sleeps on the worker instead of parking),
-`--quiet` (no `log.info` lines).
+`--quiet` (no `log.info` lines), `--no-keep-alive`, `--idle-timeout MS`,
+`--max-requests N` (see [keep-alive](#keep-alive)).
 
 ## Checking and testing a tenant
 
@@ -263,7 +264,59 @@ server /_stats after the run:
 
 The load generator is std too: each client thread owns its share of the
 connections and polls them without blocking, so it holds ten thousand
-requests in flight on eight threads.
+requests in flight on eight threads. `--keep-alive` makes each of the
+`--concurrency` connections ask its next request as soon as the last is
+answered, instead of opening a connection per request.
+
+### Keep-alive
+
+HTTP/1.1 connections stay open by default: a response says `Connection:
+keep-alive` unless the client asked for `close` (or spoke HTTP/1.0 without
+asking for `keep-alive`), the connection has made `--max-requests` requests
+(default 1,000; the last is answered `close`), or the server runs with
+`--no-keep-alive`. A connection that waits longer than `--idle-timeout`
+(default 5 s) for its next request is closed. Pipelined requests are answered
+in order.
+
+No thread waits on an idle connection. Between requests — and before the
+first, so a client that connects and says nothing holds no worker either — a
+connection is handed to one `edge-idle` thread ([`host/src/idle.rs`](host/src/idle.rs))
+that `poll(2)`s every idle socket at once through the `libc` crate already in
+the tree; one that becomes readable goes back on the run queue, and whichever
+worker takes it reads the request. A worker still reads a request that has
+started arriving with a 5 s timeout, so a client that sends half a head and
+stops holds one for that long.
+
+Same machine and setup as the table below, 10,000 requests, 1,000 in flight,
+4 workers, two rounds each (the machine was also running another agent's
+build, load average 6 to 10, so read the ratios rather than the totals):
+
+| workload | connections opened | throughput | p50 / p99 |
+| --- | ---: | ---: | ---: |
+| `hello`, a connection per request | 10,000 | 25,438 / 20,735 req/s | 16.5 / 38.8, 21.2 / 51.0 ms |
+| `hello`, **keep-alive** | 1,000 | **86,930 / 75,911 req/s** | 8.3 / 27.0, 10.0 / 30.8 ms |
+| `aggregate`, a connection per request | 10,000 | 4,843 / 4,973 req/s | 182.5 / 271.9, 181.5 / 275.5 ms |
+| `aggregate`, **keep-alive** | 1,000 | 4,921 / 4,634 req/s | 181.0 / 275.0, 182.0 / 270.0 ms |
+
+`hello` is where the connection was the cost, and keep-alive is three to four
+times the throughput. `aggregate` is bound by its 180 ms floor — 1,000 in
+flight over 0.18 s is 5,500 req/s at best — and the connection was never its
+cost. At 32 in flight `hello` is 19,661 to 27,204 req/s with a connection per
+request against 58,558 to 64,718 with keep-alive (three rounds each), so
+handing every new connection through the idle thread costs no more than the
+earlier table's 30,455 within this machine's noise.
+
+**The half-minute wait between 10,000-connection runs is gone, and it was
+not where it looked.** Two back-to-back runs of 20,000 requests at 10,000 in
+flight (50 ms upstream) both answered every request with a connection per
+request. With keep-alive the first version failed the second run's 13,718
+connects with `EADDRNOTAVAIL`: once the client is the side that closes, *it*
+holds the `TIME_WAIT`s, each for twice macOS's 15 s MSL, on an ephemeral range
+of 16,384 ports. The generator now drops a kept-alive connection it has no
+more use for with a reset (`SO_LINGER` 0), and four back-to-back runs —
+keep-alive, keep-alive, a connection per request, keep-alive — answered all
+80,000 requests, each keep-alive run opening 10,000 connections for 20,000
+requests at 22,800–23,000 req/s against 13,600 without.
 
 ### Numbers
 
@@ -317,10 +370,11 @@ a single `curl` to `aggregate` takes about 0.45 s instead of 0.18 s, the
 both pay it — which is why they are compared with each other and with nothing
 else.
 
-Between two 10,000-connection runs, wait half a minute: the server closes each
-connection, so macOS holds every one of them in `TIME_WAIT`, and a new
-connection that lands on one can stall. The generator gives up on a request
-after 30 s and counts it, rather than hanging.
+The rows above were measured before keep-alive, with a connection per
+request. They used to come with a warning to wait half a minute between two
+10,000-connection runs; see [keep-alive](#keep-alive) for why that is no
+longer needed. The generator still gives up on a request after 30 s and
+counts it, rather than hanging.
 
 ## What was awkward
 
@@ -449,8 +503,11 @@ deploy.
 
 ## Not done
 
-- Keep-alive, chunked bodies, TLS: one request per connection, `Connection:
-  close`. The request is read on a worker, so a slow client holds one.
+- Chunked bodies and TLS. A request that has started arriving is read on a
+  worker, so a client that sends half a head holds one for up to 5 s; idle
+  connections cost no thread, but the idle thread's `poll` is O(idle
+  connections) per wake-up, which a server with far more than ten thousand
+  would replace with `epoll`/`kqueue`.
 - A real outbound fetch: `upstream` is a timer heap that answers after the
   chosen latency. Swapping it for an I/O thread doing real requests changes
   `run_timer` and nothing else.

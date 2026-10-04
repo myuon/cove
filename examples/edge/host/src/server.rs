@@ -1,12 +1,18 @@
-//! The scheduler: one acceptor, a fixed pool of workers, one timer.
+//! The scheduler: one acceptor, one idle thread, a fixed pool of workers,
+//! one timer.
 //!
 //! ```text
-//!   acceptor ──Connection──▶ ┌──────────┐ ◀──Resume── timer (the "upstream")
-//!                            │ run queue │                ▲
-//!                            └──────────┘                │ ParkedVm + due time
-//!                     workers × N  ── Step::Parked ───────┘
-//!                                  ── Step::Answered ──▶ response written
+//!   acceptor ──▶ idle (poll) ──readable──▶ ┌──────────┐ ◀──Resume── timer (the "upstream")
+//!                    ▲                     │ run queue │                ▲
+//!                    │ kept alive          └──────────┘                │ ParkedVm + due time
+//!                    │              workers × N  ── Step::Parked ───────┘
+//!                    └──────────────────────── ── Step::Answered ──▶ response written
 //! ```
+//!
+//! A connection waits for its request — the first, and every one after it
+//! on a kept-alive connection — in [`crate::idle`], where one thread polls
+//! every idle socket; a worker sees a connection only once it has something
+//! to read.
 //!
 //! A worker takes a job off the queue and runs a tenant's isolate until it
 //! answers or parks. A parked run is a [`ParkedVm`] — `Send`, a few kilobytes
@@ -28,10 +34,10 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cove_diag::render;
@@ -40,7 +46,8 @@ use cove_runtime::{Budget, OwnedVm, ParkedVm, RuntimeError, Step, Transfer, Valu
 
 use crate::deploy::{deploy_all, request_value, DeployOptions, Deployed, State, Tenant};
 use crate::hosts::{upstream_answer, upstream_latency, UpstreamCall};
-use crate::http::{read_request, Request, Response};
+use crate::http::{holds_a_head, read_request, Request, Response};
+use crate::idle::{Conn, Idle};
 use crate::os;
 
 /// Whether a request gets a fresh isolate or a resident one.
@@ -74,6 +81,31 @@ pub struct ServerOptions {
     pub workers: usize,
     pub isolates: Isolates,
     pub deploy: DeployOptions,
+    pub keep_alive: KeepAlive,
+}
+
+/// Whether, and for how long, a connection is kept open between requests.
+#[derive(Clone, Copy, Debug)]
+pub struct KeepAlive {
+    /// Off: every response says `Connection: close`, whatever the client
+    /// asked for.
+    pub enabled: bool,
+    /// How long a connection may wait for its next request — or its first —
+    /// before the server closes it.
+    pub idle: Duration,
+    /// How many requests one connection may make; the last is answered with
+    /// `Connection: close`.
+    pub max_requests: u32,
+}
+
+impl Default for KeepAlive {
+    fn default() -> KeepAlive {
+        KeepAlive {
+            enabled: true,
+            idle: Duration::from_secs(5),
+            max_requests: 1000,
+        }
+    }
 }
 
 /// A running server.
@@ -105,10 +137,19 @@ impl Server {
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
             timer: Mutex::new(timer),
+            idle: OnceLock::new(),
             options,
             started: Instant::now(),
             calls: AtomicU64::new(0),
         });
+        {
+            let ready = Arc::clone(&shared);
+            let idle = Idle::start(shared.options.keep_alive.idle, move |conns| {
+                ready.push_connections(conns)
+            })
+            .map_err(|e| e.to_string())?;
+            let _ = shared.idle.set(idle);
+        }
         {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
@@ -130,7 +171,10 @@ impl Server {
                 .spawn(move || {
                     for stream in listener.incoming() {
                         match stream {
-                            Ok(stream) => shared.push(Job::Connection(stream, Instant::now())),
+                            Ok(stream) => {
+                                shared.stats.connections.fetch_add(1, Ordering::Relaxed);
+                                shared.idle().park(Conn::new(stream));
+                            }
                             Err(error) => eprintln!("accept: {error}"),
                         }
                     }
@@ -151,16 +195,19 @@ impl Server {
     }
 }
 
-/// A request in flight: the socket it owes an answer to, and its tenant.
+/// A request in flight: the connection it owes an answer to, and its tenant.
 struct Flight {
-    stream: TcpStream,
+    conn: Conn,
     tenant: usize,
     accepted: Instant,
+    /// Whether the connection stays open after the answer.
+    keep_alive: bool,
 }
 
 enum Job {
-    /// A connection the acceptor took, whose request is not read yet.
-    Connection(TcpStream, Instant),
+    /// A connection with a request to read — new, or back from idle — and
+    /// when it became ready, which is where the request's latency starts.
+    Connection(Conn, Instant),
     /// A parked run whose host call has its answer. Boxed, because a
     /// `ParkedVm` is a whole machine and a connection is a socket.
     Resume(Box<Resume>),
@@ -204,6 +251,8 @@ struct Shared {
     queue: Mutex<VecDeque<Job>>,
     ready: Condvar,
     timer: Mutex<mpsc::Sender<Timed>>,
+    /// Where connections wait between requests; set once, at start.
+    idle: OnceLock<Idle>,
     stats: Stats,
     options: ServerOptions,
     started: Instant,
@@ -222,6 +271,41 @@ impl Shared {
         self.ready.notify_one();
     }
 
+    fn idle(&self) -> &Idle {
+        self.idle.get().expect("set before the acceptor starts")
+    }
+
+    /// Connections the idle thread found readable, onto the run queue.
+    fn push_connections(&self, conns: Vec<Conn>) {
+        let now = Instant::now();
+        let count = conns.len();
+        let depth = {
+            let mut queue = self.queue.lock().unwrap();
+            queue.extend(conns.into_iter().map(|conn| Job::Connection(conn, now)));
+            queue.len() as i64
+        };
+        self.stats.queue_peak.fetch_max(depth, Ordering::Relaxed);
+        if count == 1 {
+            self.ready.notify_one();
+        } else {
+            self.ready.notify_all();
+        }
+    }
+
+    /// Writes a response and decides what becomes of the connection: closed,
+    /// back on the queue if a pipelined request is already buffered, or
+    /// parked with the idle thread until the next one arrives.
+    fn finish(&self, mut conn: Conn, response: &Response, keep_alive: bool) {
+        if response.send(&mut conn.stream, keep_alive).is_err() || !keep_alive {
+            return;
+        }
+        if holds_a_head(&conn.buffer) {
+            self.push(Job::Connection(conn, Instant::now()));
+        } else {
+            self.idle().park(conn);
+        }
+    }
+
     fn run_worker(&self) {
         loop {
             let job = {
@@ -234,7 +318,7 @@ impl Shared {
                 }
             };
             match job {
-                Job::Connection(stream, accepted) => self.serve(stream, accepted),
+                Job::Connection(conn, accepted) => self.serve(conn, accepted),
                 Job::Resume(resume) => {
                     let Resume {
                         parked,
@@ -256,16 +340,29 @@ impl Shared {
     }
 
     /// Reads a request and answers it, or starts the tenant's run.
-    fn serve(&self, mut stream: TcpStream, accepted: Instant) {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-        let _ = stream.set_nodelay(true);
-        let request = match read_request(&mut stream) {
-            Ok(request) => request,
+    ///
+    /// The connection is readable when it gets here, so the read waits only
+    /// for the rest of a request that has started arriving — at most five
+    /// seconds, for a client that sends half a head and stops.
+    fn serve(&self, mut conn: Conn, accepted: Instant) {
+        let _ = conn.stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = conn.stream.set_nodelay(true);
+        let request = match read_request(&mut conn.stream, &mut conn.buffer) {
+            Ok(Some(request)) => request,
+            // Closed by the client between requests: nothing is owed.
+            Ok(None) => return,
             Err(why) => {
-                let _ = Response::text(400, format!("{why}\n")).send(&mut stream);
+                let _ = Response::text(400, format!("{why}\n")).send(&mut conn.stream, false);
                 return;
             }
         };
+        conn.served += 1;
+        let options = self.options.keep_alive;
+        let keep_alive =
+            options.enabled && request.keep_alive && conn.served < options.max_requests;
+        if conn.served > 1 {
+            self.stats.reused.fetch_add(1, Ordering::Relaxed);
+        }
         let path = request.path.trim_start_matches('/');
         let (name, rest) = match path.split_once('/') {
             Some((name, rest)) => (name, format!("/{rest}")),
@@ -292,9 +389,10 @@ impl Shared {
                     }
                     State::Deployed(deployed) => {
                         let flight = Flight {
-                            stream,
+                            conn,
                             tenant: at,
                             accepted,
+                            keep_alive,
                         };
                         self.start(deployed, at, &request, rest, flight);
                         return;
@@ -302,7 +400,7 @@ impl Shared {
                 },
             },
         };
-        let _ = response.send(&mut stream);
+        self.finish(conn, &response, keep_alive);
     }
 
     /// Starts a tenant's run on this worker, and settles what it comes to.
@@ -331,7 +429,7 @@ impl Shared {
     }
 
     /// What a run came to: an answer to write, or a park to hand on.
-    fn settle(&self, step: Step, mut flight: Flight) {
+    fn settle(&self, step: Step, flight: Flight) {
         match step {
             Step::Answered(vm, outcome) => {
                 let tenant = &self.tenants[flight.tenant];
@@ -358,9 +456,9 @@ impl Shared {
                         pool.push(vm);
                     }
                 }
-                let _ = response.send(&mut flight.stream);
                 self.stats
                     .answered(flight.tenant, failed, flight.accepted.elapsed());
+                self.finish(flight.conn, &response, flight.keep_alive);
             }
             Step::Parked(mut parked) => {
                 let parked_now = self.stats.parked.fetch_add(1, Ordering::Relaxed) + 1;
@@ -519,7 +617,9 @@ impl Shared {
             "{{\n  \"uptime_s\": {:.1},\n  \"workers\": {},\n  \"isolates\": \"{}\",\n  \
              \"served\": {},\n  \"errors\": {},\n  \"in_flight\": {in_flight},\n  \
              \"in_flight_peak\": {},\n  \"parked\": {},\n  \"parked_peak\": {},\n  \
-             \"parks\": {},\n  \"timeouts\": {},\n  \"queue_peak\": {},\n  \"live_isolates\": {},\n  \
+             \"parks\": {},\n  \"timeouts\": {},\n  \"queue_peak\": {},\n  \
+             \"connections\": {},\n  \"keep_alive_reuses\": {},\n  \"idle_connections\": {},\n  \
+             \"idle_expired\": {},\n  \"live_isolates\": {},\n  \
              \"pooled_isolates\": {pooled},\n  \"isolate_heap_bytes\": {{\"mean\": {heap_mean}, \"max\": {heap_max}}},\n  \
              \"latency_ms\": {{\"p50\": {:.2}, \"p99\": {:.2}, \"max\": {:.2}, \"samples\": {samples}}},\n  \
              \"rss_kib\": {},\n  \"peak_rss_kib\": {},\n  \"tenants\": {{\n{}\n  }}\n}}\n",
@@ -534,6 +634,10 @@ impl Shared {
             stats.parks.load(Ordering::Relaxed),
             stats.timeouts.load(Ordering::Relaxed),
             stats.queue_peak.load(Ordering::Relaxed),
+            stats.connections.load(Ordering::Relaxed),
+            stats.reused.load(Ordering::Relaxed),
+            self.idle().stats.idle.load(Ordering::Relaxed),
+            self.idle().stats.expired.load(Ordering::Relaxed),
             in_flight + pooled as i64,
             p50.as_secs_f64() * 1e3,
             p99.as_secs_f64() * 1e3,
@@ -581,6 +685,10 @@ struct Stats {
     /// Requests whose run was stopped by its deadline and answered 504.
     timeouts: AtomicU64,
     queue_peak: AtomicI64,
+    /// Connections accepted.
+    connections: AtomicU64,
+    /// Requests that arrived on a connection an earlier request had opened.
+    reused: AtomicU64,
     /// Served and failed, per tenant.
     per_tenant: Vec<(AtomicU64, AtomicU64)>,
     /// The last [`LATENCY_SAMPLES`] request latencies, in microseconds.
@@ -602,6 +710,8 @@ impl Stats {
             parks: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
             queue_peak: AtomicI64::new(0),
+            connections: AtomicU64::new(0),
+            reused: AtomicU64::new(0),
             per_tenant: tenants
                 .iter()
                 .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
