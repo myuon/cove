@@ -33,6 +33,7 @@ $ cargo run --release -p cove-edge -- --port 8787
 cove-edge: deploying tenants from …/examples/edge/tenants
   aggregate  requires [upstream]  granted [upstream]  deployed: 223 fn, checked in 43.8 ms, prepared in 2.9 ms, isolate 5 us
   counter    requires [kv, log]  granted [kv, log]  deployed: 220 fn, checked in 27.5 ms, prepared in 2.7 ms, isolate 12 us
+  crunch     requires [-]  granted [-]  deployed: 227 fn, checked in 3.3 ms, prepared in 1.3 ms, isolate 2 us
   greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
   hello      requires [-]  granted [-]  deployed: 223 fn, checked in 28.3 ms, prepared in 1.8 ms, isolate 4 us
   impatient  requires [upstream]  granted [upstream]  deployed: 223 fn, checked in 21.9 ms, prepared in 2.4 ms, isolate 4 us
@@ -57,7 +58,7 @@ and nothing else. `hello` requires nothing: building an `edge.Response`
 initializes a type the `edge` schema declares, which is not a call into the
 host (see [what was awkward](#what-was-awkward) item 2). `greedy` asks
 for `upstream` without being granted it, so it is refused **at deploy** and the
-other five start. `fetch [...]` is `proxy`'s allowlist from
+other six start. `fetch [...]` is `proxy`'s allowlist from
 [`tenants/edge.toml`](tenants/edge.toml). `--fetchers N` sets the threads
 that perform real fetches (default 4). Flags: `--workers N`, `--latency MIN..MAX` (ms),
 `--pool N` (resident isolates instead of fresh ones), `--blocking-upstream`
@@ -79,11 +80,12 @@ checked against the schemas the server registers, then each tenant's verdict
 $ cargo run --release -p cove-edge -- check
 aggregate  requires [upstream]  granted [upstream]  ok
 counter    requires [kv, log]  granted [kv, log]  ok
+crunch     requires [-]  granted [-]  ok
 greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
 hello      requires [-]  granted [-]  ok
 impatient  requires [upstream]  granted [upstream]  ok
 proxy      requires [upstream]  granted [upstream]  fetch [127.0.0.1, localhost]  ok
-checked 5 module(s), 9 file(s) against the server's schemas; 6 tenant(s), 1 refused
+checked 6 module(s), 11 file(s) against the server's schemas; 7 tenant(s), 1 refused
 $ echo $?
 1
 ```
@@ -101,15 +103,18 @@ share a module, so its test runs under each:
 $ cargo run --release -p cove-edge -- test
 ok    aggregate  aggregate.aServiceThatIsDownIsOneLineOfTheAnswer
 ok    counter    counter.countsEachPathApart
+ok    crunch     crunch.aSizeOutOfRangeIsRefused
+ok    crunch     crunch.countsThePrimesUpToN
+ok    crunch     crunch.countsToTwentyThousandByDefault
 ok    hello      hello.greetsTheWorldWhenNobodyIsNamed
 ok    hello      hello.greetsWhoeverTheQueryNames
 ok    impatient  aggregate.aServiceThatIsDownIsOneLineOfTheAnswer
 ok    proxy      proxy.aHostOffTheAllowlistIsRefused
 ok    proxy      proxy.httpsIsRefused
-ran 7 test(s), 7 passed
+ran 10 test(s), 10 passed
 ```
 
-`cove test` in `tenants/` runs the same six tests and fails all six with
+`cove test` in `tenants/` runs the same nine tests and fails all nine with
 `cove::test::no_host`. A test that reaches a capability its tenant is not
 granted fails before it runs, naming the grant: ``test `bad.logs` requires
 `log`, which cove.toml does not grant tenant `bad` ``.
@@ -123,6 +128,7 @@ granted fails before it runs, naming the grant: ``test `bad.logs` requires
 | [`aggregate`](tenants/aggregate/aggregate.cove) | `upstream` | three slow calls in a row; the run parks at each; `max_host_calls = 8` per request, however many are in flight |
 | `impatient` | `upstream` | `aggregate`'s code under `deadline = "300ms"`: a request parked at an upstream that has not answered by then is cancelled and answered 504 |
 | [`proxy`](tenants/proxy/proxy.cove) | `upstream`, fetch `127.0.0.1`, `localhost` | `upstream.fetch(?url=)`: a real HTTP request from the fetch pool, to the hosts [`edge.toml`](tenants/edge.toml) allows it; `deadline = "500ms"` |
+| [`crunch`](tenants/crunch/crunch.cove) | — | CPU-heavy and never parks: the primes up to `?n=` (default 20000, about 4.5 ms on the VM; capped at 200000) by trial division, under `fuel = 30000000`; see [CPU-heavy and I/O-bound together](#cpu-heavy-and-io-bound-together) |
 | [`greedy`](tenants/greedy/greedy.cove) | `kv` | over-reaches for `upstream` and is not deployed |
 
 The contract is a host module, [`edge`](host/src/hosts.rs), whose schema
@@ -599,7 +605,10 @@ resumed, so a migration is an arrow between two worker tracks; each request
 has an async track of its own with its queued, parked and
 ready-but-waiting intervals nested inside it; the accept, parking-lot and
 fetch-pool tracks carry an instant per accepted connection and per answer;
-and a `parked runs` counter track draws how many were parked over time. In
+and counter tracks draw `parked runs` (park to resume), `waiting on I/O`
+(park to answer), `workers running` and `waiting for a worker` over time —
+the last three are the strips of the [next
+section](#cpu-heavy-and-io-bound-together). In
 Perfetto's SQL page, `select count(*) from flow` for the run above answers
 195, one per park.
 
@@ -619,13 +628,146 @@ once, 2,648 of 3,503 resumes (76%) on another worker, 124 timeouts, each
 worker busy 6.2%, the wait for a worker at most 2.25 ms at start and 2.13 ms
 at resume, and the timer 0.22 ms late at the median (25.9 ms at worst) — a
 busy timer thread wakes on time. 32,716 events are 2.8 MB of timeline, a
-4.4 MB page (rows shrink to 4 px; the figure is drawn for the 300-request
+4.4 MB page (rows shrank to 4 px, 3 px since; the figure is drawn for the 300-request
 run) and an 8.7 MB Perfetto trace, all three written in 0.23 s.
 `host/tests/timeline.rs` runs a small mix in-process with recording on and
 checks the timeline's shape: every request has its run start and end, every
 park an answer and a resume or a cancel on a recorded worker, the Perfetto
 JSON parses with one flow start and one finish per park, and the page holds
 the figure and every tenant in its legend.
+
+## CPU-heavy and I/O-bound together
+
+The picture above looks serial, and it is not: at `--rate 400` a run is
+about 20 µs and the workers are 0.3% busy, so two of them are rarely running
+at the same instant — 7% of the busy time — and a bar 1.5 px wide cannot show
+that. Saturated, the same server is parallel: `hello` with keep-alive and 64
+in flight answered 38.6k / 58.4k / 84.8k req/s on 1 / 2 / 4 workers, with two
+or more running 52% of the busy time on four. To make it visible the load has
+to *use* the workers, so there is a tenant that does nothing else.
+
+[`crunch`](tenants/crunch/crunch.cove) counts the primes up to `?n=` by trial
+division and answers the count and the largest — pure Cove, granted nothing,
+never parked: about 4.5 ms at the default `n=20000`, 15 ms at 50000, 38 ms at
+100000, 66 ms at 150000. **It runs on the VM**: an edge isolate is an
+`OwnedVm`, which has no native tier (that is `cove run --backend native`'s
+alone), so those are encoded-VM times. Its tests, `cove-edge test crunch`,
+check the prime-counting function at 2, 100, 10000 and 20000 and refuse a
+size that is not a number or is out of range.
+
+`--mix cpu-io` is `crunch=35,aggregate=30,proxy=10,hello=20,impatient=5`,
+with each `crunch` asking one of `n` = 20000, 50000, 100000, 150000 (chosen
+per request from its index, like the rest of the mix). The sizes are larger
+than "a few milliseconds" on purpose: four workers kept busy for two seconds
+is eight seconds of CPU, which at 4.5 ms a request is 1,800 `crunch`es and a
+picture nobody can read; at the mix's mean of 30 ms it is about 180.
+
+```console
+$ cargo run --release -p cove-edge -- --quiet --timeline /tmp/edge-timeline.json
+$ cargo run --release -p cove-edge --bin cove-edge-load -- \
+    --mix cpu-io --requests 500 --concurrency 200 --keep-alive --rate 330 \
+    --timeline-out timeline.json
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.93 s: 259 req/s
+  connections opened: 200
+  latency ms: p50 70.2  p90 324.4  p99 386.5  max 459.7
+  aggregate  153 x 200               79.1 req/s  p50  267.8 ms  p99  399.6 ms
+  crunch     180 x 200               93.1 req/s  p50   50.1 ms  p99  123.4 ms
+  hello      83 x 200                42.9 req/s  p50   17.6 ms  p99   77.4 ms
+  impatient  13 x 200, 19 x 504      16.6 req/s  p50  327.8 ms  p99  459.7 ms
+  proxy      52 x 200                26.9 req/s  p50   11.7 ms  p99  147.2 ms
+…
+$ cargo run --release -p cove-edge --bin cove-edge-timeline -- timeline.json \
+    -o timeline.html --perfetto timeline.perfetto.json --svg timeline-cpu-io.svg
+552 requests over 1932.2 ms on 4 workers; 575 parks, at most 40 parked at once
+…
+pool CPU utilisation 70.2%; time with N workers running: 0: 20.6% · 1: 3.6% · 2: 8.7% · 3: 8.5% · 4: 58.5%; at most 40 waiting on I/O and 50 waiting for a worker at once
+  aggregate   153 requests  p50  266.72 ms  p99  399.44 ms  worker time      9.3 ms
+  crunch      180 requests  p50   49.73 ms  p99  122.04 ms  worker time   5405.6 ms
+  hello       135 requests  p50   12.45 ms  p99   76.61 ms  worker time      3.3 ms
+  impatient    32 requests  p50  327.16 ms  p99  458.99 ms  worker time      2.0 ms
+  proxy        52 requests  p50   11.24 ms  p99  146.24 ms  worker time      1.9 ms
+```
+
+(`cove-edge-load` now prints each tenant's rate and client-side p50/p99, and
+`cove-edge-timeline` the server-side ones, from queued to written. The
+server sees 135 `hello`s, the client 83: the other 52 are `proxy`'s fetches.)
+
+![Worker swimlanes, then three strips — workers running, parked runs waiting on I/O, the run queue — then a lane per request, on one time axis](timeline-cpu-io.svg)
+
+Under the swimlanes are three small charts with one axis each, never a dual
+axis, in neutral ink because they count every tenant together: **workers
+running** at each instant (0 to 4, a gridline per worker), **parked runs
+waiting on I/O** (from the park to the answer), and **requests ready to run
+with no worker free** (queued and not started, or answered and not yet
+resumed: the run queue). The HTML adds a tile per level — the share of the
+span with 0, 1, 2, 3 and 4 workers running — the pool's CPU utilisation, a
+per-tenant table, and a hover readout on the strips; the Perfetto export has
+the same three as counter tracks, beside `parked runs`. The strips count a
+20 µs run at its true length; the 1.5 px minimum is only for the bars.
+(`timeline.svg` above was drawn before the strips existed.)
+
+**Four workers, then one**, the same command against `--workers 1`
+(`cove-edge-load`'s columns, then `cove-edge-timeline`'s):
+
+| | 4 workers | 1 worker |
+| --- | ---: | ---: |
+| wall clock, 500 requests | 1.93 s | 5.59 s |
+| throughput | 259 req/s | 89 req/s |
+| `crunch` (180 × 200) | 93.1 req/s, p50 50.1 / p99 123.4 ms | 32.2 req/s, p50 1,003 / p99 1,872 ms |
+| `aggregate` (153 × 200) | 79.1 req/s, p50 268 / p99 400 ms | 27.3 req/s, p50 3,636 / p99 4,647 ms |
+| `hello` (83 × 200) | 42.9 req/s, p50 17.6 / p99 77.4 ms | 14.8 req/s, p50 1,006 / p99 1,867 ms |
+| `proxy` | 52 × 200, p50 11.7 / p99 147 ms | 7 × 200, **45 × 504**, p50 2,606 ms |
+| `impatient` | 13 × 200, 19 × 504, p50 328 ms | **32 × 504**, p50 2,299 ms |
+| pool CPU utilisation | 70.2% | 94.4% |
+| share of the span with 0 / 1 / 2 / 3 / 4 running | 20.6 / 3.6 / 8.7 / 8.5 / 58.5% | 5.6 / 94.4% |
+| at most waiting on I/O at once | 40 | 62 |
+| at most waiting for a worker at once | 50 | 212 |
+| at most parked (park to resume) | 40 | 130 |
+| wait for a worker at start, p50 (max) | 14.6 ms (83.4) | 973 ms (1,930) |
+| timeouts (504) | 19 | 77 |
+
+The offered load is the same in both — 330 arrivals a second, of which
+`crunch`'s want about 2.9 workers — so one worker falls behind and four keep
+up with room to spare. Without a rate limit, holding 64 in flight for 1,000
+requests, the pool's capacity is **92 req/s on one worker and 328 on four
+(3.6×)**: CPU 97.6% against 89.7%, four running 88.5% of that run's span.
+
+What it shows:
+
+- **CPU work occupies the workers in parallel.** Four workers ran at once
+  58.5% of the span and two or more 76%; of the 20.6% with none running,
+  389 ms is after the last `crunch` ended at 1,542 ms, when only the last
+  upstreams are outstanding, and 10 ms is before it. Running four at a time did not slow the
+  runs down: a `crunch` took the same time on four workers as on one —
+  4.25 against 4.11 ms at `n=20000`, 66.9 against 65.0 at 150000, 2–3% —
+  so they were not taking turns on a core.
+- **The I/O waits overlap the CPU work.** For the 1.13 s that all four
+  workers were running, 21 runs on average were parked waiting on an
+  upstream at the same time, and up to 39 (40 at most over the whole span);
+  a parked run costs a worker nothing: `aggregate`'s 153 requests, three
+  upstream calls each, took 9.3 ms of worker time between them.
+- **The run queue is FIFO and a run is never pre-empted, and that is
+  head-of-line blocking.** A `hello` runs for 19 µs (p50), but under this
+  load it waited 12.4 ms for a worker at the median and 83 ms at worst,
+  because what was ahead of it in the queue, or on every worker, was a
+  `crunch` of up to 68 ms. The same arrivals without `crunch`
+  (`--mix aggregate=30,proxy=10,hello=20,impatient=5 --requests 325 --rate 215`)
+  answer `hello` in 0.04 ms at the median, waiting 0.01 ms. A resumed run
+  queues the same way — an answer waited 4.5 ms at the median for a worker,
+  three times per `aggregate` — so `aggregate`'s median went from 186 ms to
+  267 ms. Nothing here is a bug; it is what a FIFO queue in front of
+  run-to-completion workers does. A cure would be a scheduler's, not a
+  tenant's: a quantum on long runs (the VM's fuel safepoint is a natural
+  place to yield), a queue per cost class, or a worker kept for short work.
+- **With one worker the queue is the whole latency.** A request waited
+  973 ms at the median to start; `hello`'s run is still 19 µs. A deadline
+  starts with the run, not on arrival, so `impatient`'s 300 ms became a
+  2.3 s median: about a second queued before it started, its 300 ms, and
+  the cancel itself waiting its turn in the same queue. And `proxy` fetches
+  `hello` from this same server, so its fetch waits behind the `crunch`es
+  too: 45 of 52 passed their 500 ms deadline and were answered 504 — a
+  service that calls itself turns its own queue into its own timeout.
 
 ## What was awkward
 

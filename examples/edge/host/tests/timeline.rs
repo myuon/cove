@@ -170,6 +170,151 @@ fn a_mixed_load_records_a_well_formed_timeline() {
     assert!(empty.requests.is_empty());
 }
 
+/// `crunch` beside tenants that park: the answers are right, the timeline
+/// is well formed, and the strips under the swimlanes are drawn from step
+/// functions that start and end at zero and never exceed what they count.
+#[test]
+fn a_cpu_and_io_mix_draws_the_concurrency_strips() {
+    let server = start(Some(Recording::default()));
+    let port = server.addr.port();
+    let targets = [
+        "/crunch/?n=2000".to_string(),
+        "/crunch/?n=2000".to_string(),
+        "/crunch/?n=200000".to_string(),
+        "/crunch/?n=lots".to_string(),
+        "/aggregate/?services=a,b".to_string(),
+        "/aggregate/?services=c,d".to_string(),
+        "/hello/?name=a".to_string(),
+        format!("/proxy/?url=http://127.0.0.1:{port}/hello/?name=proxied"),
+    ];
+    let clients: Vec<_> = targets
+        .iter()
+        .cloned()
+        .map(|target| {
+            let addr = server.addr;
+            std::thread::spawn(move || (target.clone(), get(addr, &target).unwrap()))
+        })
+        .collect();
+    for client in clients {
+        let (target, (status, body)) = client.join().unwrap();
+        match target.as_str() {
+            "/crunch/?n=2000" => {
+                assert_eq!(
+                    (status, body.as_str()),
+                    (200, "303 primes up to 2000, the largest 1999\n")
+                )
+            }
+            // The cap, within the tenant's fuel.
+            "/crunch/?n=200000" => assert_eq!(
+                (status, body.as_str()),
+                (200, "17984 primes up to 200000, the largest 199999\n")
+            ),
+            "/crunch/?n=lots" => assert_eq!(status, 400, "{body}"),
+            _ => assert_eq!(status, 200, "{target}: {body}"),
+        }
+    }
+
+    let trace = picture::read(&server.timeline().unwrap()).expect("the dump reads back");
+    assert_eq!(
+        trace.requests.len(),
+        targets.len() + 1,
+        "and the proxied hello"
+    );
+    for req in &trace.requests {
+        assert!(req.written.is_some(), "#{} was never written", req.id);
+        assert_eq!(req.segments.len(), req.parks.len() + 1, "#{}", req.id);
+        if req.tenant == "crunch" {
+            assert!(req.parks.is_empty(), "crunch never parks");
+            assert_eq!(req.host_calls, 0);
+        }
+    }
+
+    let series = picture::series(&trace);
+    for (name, steps, bound) in [
+        ("running", &series.running, trace.workers),
+        ("parked", &series.parked, usize::MAX),
+        ("waiting on I/O", &series.waiting_on_io, usize::MAX),
+        ("queue", &series.queue, usize::MAX),
+    ] {
+        assert!(!steps.is_empty(), "{name} has no steps");
+        assert!(
+            steps.windows(2).all(|w| w[0].0 < w[1].0),
+            "{name} is not in time order"
+        );
+        assert!(
+            steps.iter().all(|&(_, v)| v <= bound),
+            "{name} exceeds {bound}"
+        );
+        assert_eq!(steps.last().unwrap().1, 0, "{name} does not end at zero");
+    }
+    assert!(series.running.iter().any(|&(_, v)| v >= 1));
+    // Four parks at least (two services each, twice), all waiting on I/O.
+    assert!(series.waiting_on_io.iter().any(|&(_, v)| v >= 1));
+
+    let stats = picture::stats(&trace);
+    assert_eq!(
+        stats.running.len(),
+        trace.workers + 1,
+        "a share per level, 0 to workers"
+    );
+    let total: f64 = stats.running.iter().sum();
+    assert!(
+        (total - 1.0).abs() < 1e-6,
+        "the shares cover the span: {total}"
+    );
+    assert!(stats.utilisation > 0.0 && stats.utilisation <= 1.0);
+    let busy_share: f64 = stats
+        .running
+        .iter()
+        .enumerate()
+        .map(|(k, share)| k as f64 * share)
+        .sum::<f64>()
+        / trace.workers as f64;
+    assert!(
+        (busy_share - stats.utilisation).abs() < 1e-6,
+        "time at each level weighs up to the utilisation: {busy_share} against {}",
+        stats.utilisation
+    );
+    assert_eq!(stats.tenants["crunch"].requests, 4);
+    assert!(stats.tenants["crunch"].cpu_ms > 0.0);
+
+    // The page draws the strips and carries their data for the hover; the
+    // Perfetto trace has a counter track for each.
+    let html = picture::html(&trace);
+    assert!(
+        html.contains("Workers running at once, 0 to 2"),
+        "no running strip"
+    );
+    assert!(
+        html.contains("Parked runs waiting on I/O"),
+        "no waiting strip"
+    );
+    assert!(html.contains("the run queue"), "no queue strip");
+    assert!(html.contains("const STEPS = [[["), "no strip data");
+    assert!(html.contains("of the span with 2 workers running"));
+    assert!(
+        html.contains("</i>crunch</span>"),
+        "crunch missing from the legend"
+    );
+    let chrome = json::parse(&picture::chrome_trace(&trace)).expect("the trace is JSON");
+    let counters: std::collections::BTreeSet<String> = chrome
+        .get("traceEvents")
+        .and_then(Json::as_array)
+        .unwrap()
+        .iter()
+        .filter(|e| e.get("ph").and_then(Json::as_str) == Some("C"))
+        .filter_map(|e| e.get("name").and_then(Json::as_str).map(str::to_string))
+        .collect();
+    for name in [
+        "parked runs",
+        "waiting on I/O",
+        "workers running",
+        "waiting for a worker",
+    ] {
+        assert!(counters.contains(name), "no `{name}` counter: {counters:?}");
+    }
+}
+
 #[test]
 fn without_recording_the_timeline_is_refused() {
     let server = start(None);

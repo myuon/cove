@@ -1,0 +1,64 @@
+use edge
+
+/// Counts the primes up to `?n=` (default 20000) by trial division, and
+/// answers the count and the largest.
+///
+/// It reaches nothing outside the run and never parks: what it costs is
+/// worker time alone — the CPU-heavy tenant of the `cpu-io` load mix,
+/// beside `aggregate`'s waits. `n` is capped so that no request can ask for
+/// more than its fuel.
+export fn handle(request: edge.Request) -> edge.Response {
+  let asked = Int.parse(request.query.get("n").unwrapOr("20000")).unwrapOr(-1)
+  if asked < 2 || asked > 200000 {
+    return edge.Response(
+      status: 400,
+      contentType: "text/plain",
+      body: "?n= must be a whole number from 2 to 200000\n",
+    )
+  }
+  let count = primesUpTo(asked)
+  let largest = largestPrimeUpTo(asked)
+  edge.Response(
+    status: 200,
+    contentType: "text/plain",
+    body: "{count} primes up to {asked}, the largest {largest}\n",
+  )
+}
+
+/// How many primes there are from 2 to `n`.
+fn primesUpTo(n: Int) -> Int {
+  var count = 1
+  var candidate = 3
+  while candidate <= n {
+    if isOddPrime(candidate) {
+      count += 1
+    }
+    candidate += 2
+  }
+  count
+}
+
+/// The largest prime no greater than `n`, found counting down.
+fn largestPrimeUpTo(n: Int) -> Int {
+  // The largest odd number no greater than `n`.
+  var candidate = n - 1 + n % 2
+  while candidate > 2 {
+    if isOddPrime(candidate) {
+      return candidate
+    }
+    candidate -= 2
+  }
+  2
+}
+
+/// Whether an odd `candidate` above 1 has no odd divisor up to its root.
+fn isOddPrime(candidate: Int) -> Bool {
+  var divisor = 3
+  while divisor * divisor <= candidate {
+    if candidate % divisor == 0 {
+      return false
+    }
+    divisor += 2
+  }
+  true
+}

@@ -5,7 +5,7 @@
 //! cargo run --release -p cove-edge --bin cove-edge-load -- \
 //!     [--addr 127.0.0.1:8787] [--path /aggregate/] \
 //!     [--concurrency 1000] [--requests 10000] [--threads 8] [--keep-alive] \
-//!     [--mix hello=50,counter=20,aggregate=20,proxy=5,impatient=5 | --mix default] \
+//!     [--mix hello=50,counter=20,aggregate=20,proxy=5,impatient=5 | --mix default | --mix cpu-io] \
 //!     [--timeline-out timeline.json] [--rate 500]
 //! ```
 //!
@@ -14,7 +14,9 @@
 //! `hello` and `counter` are short pure and `kv` runs, `aggregate` parks
 //! three times, `proxy` makes a real fetch of `hello` on the same server,
 //! and half of `impatient`'s requests ask the `hang` service and are
-//! answered 504 at its 300 ms deadline. `--timeline-out` resets the server's
+//! answered 504 at its 300 ms deadline. `--mix cpu-io` adds `crunch`, which
+//! counts primes on the worker for milliseconds to tens of milliseconds and
+//! never parks, to the tenants that wait. `--timeline-out` resets the server's
 //! request timeline (`cove-edge --timeline`) before the run and writes it to
 //! the file after. `--rate` starts request number `i` no sooner than
 //! `i / rate` seconds into the run, so arrivals spread over time instead of
@@ -45,13 +47,33 @@ const USAGE: &str = "\
 usage: cove-edge-load [--addr 127.0.0.1:8787] [--path /aggregate/]
                       [--concurrency 1000] [--requests 10000] [--threads 8]
                       [--keep-alive (reuse each connection)]
-                      [--mix NAME=WEIGHT,... | --mix default (instead of --path)]
+                      [--mix NAME=WEIGHT,... | --mix default | --mix cpu-io (instead of --path)]
                       [--timeline-out FILE (dump the server's /_timeline here)]
                       [--rate N (start at most N requests per second)]";
 
 /// `--mix default`: every behaviour the server has, in proportions that keep
 /// a 300-request picture legible.
 const DEFAULT_MIX: &str = "hello=50,counter=20,aggregate=20,proxy=5,impatient=5";
+
+/// `--mix cpu-io`: CPU-heavy `crunch` beside the tenants that park —
+/// `aggregate`'s three simulated upstreams, `proxy`'s real fetch,
+/// `impatient`'s deadlines — and `hello`, the short run that shows what
+/// waiting behind a `crunch` costs.
+const CPU_IO_MIX: &str = "crunch=35,aggregate=30,proxy=10,hello=20,impatient=5";
+
+/// The presets `--mix` knows by name.
+fn preset(name: &str) -> &str {
+    match name {
+        "default" => DEFAULT_MIX,
+        "cpu-io" => CPU_IO_MIX,
+        other => other,
+    }
+}
+
+/// The sizes `crunch` is asked for under a mix, chosen per request: from
+/// about 4.5 ms on the VM to about 65 ms, so that a few hundred requests keep
+/// four workers busy for a second or two.
+const CRUNCH_SIZES: [u32; 4] = [20_000, 50_000, 100_000, 150_000];
 
 /// What each request asks for.
 enum Paths {
@@ -67,7 +89,7 @@ enum Paths {
 
 impl Paths {
     fn parse_mix(text: &str, addr: &str) -> Paths {
-        let text = if text == "default" { DEFAULT_MIX } else { text };
+        let text = preset(text);
         let mut tenants = Vec::new();
         let mut total = 0;
         for part in text.split(',').filter(|p| !p.is_empty()) {
@@ -113,6 +135,10 @@ impl Paths {
                         "/impatient/?services=weather,hang".to_string()
                     }
                     "impatient" => "/impatient/?services=weather,stocks".to_string(),
+                    "crunch" => {
+                        let size = splitmix(index as u64 ^ 0xc0de) % CRUNCH_SIZES.len() as u64;
+                        format!("/crunch/?n={}", CRUNCH_SIZES[size as usize])
+                    }
                     other => format!("/{other}/"),
                 };
                 (name, target)
@@ -143,6 +169,8 @@ struct Outcome {
     connections: usize,
     /// Per tenant under `--mix`: how many of each status came back.
     by_tenant: BTreeMap<String, BTreeMap<u16, usize>>,
+    /// Per tenant under `--mix`: every latency, as the client saw it.
+    tenant_latencies: BTreeMap<String, Vec<Duration>>,
 }
 
 impl Outcome {
@@ -154,6 +182,7 @@ impl Outcome {
             refused: None,
             connections: 0,
             by_tenant: BTreeMap::new(),
+            tenant_latencies: BTreeMap::new(),
         }
     }
 }
@@ -257,10 +286,7 @@ fn main() {
         None => Paths::One(path.clone()),
     });
     let what = match &mix {
-        Some(mix) => format!(
-            "a mix of {}",
-            if mix == "default" { DEFAULT_MIX } else { mix }
-        ),
+        Some(mix) => format!("a mix of {}", preset(mix)),
         None => format!("http://{addr}{path}"),
     };
     println!(
@@ -332,7 +358,24 @@ fn main() {
             .iter()
             .map(|(status, count)| format!("{count} x {status}"))
             .collect();
-        println!("  {tenant:<10} {}", statuses.join(", "));
+        let mut latencies = outcome
+            .tenant_latencies
+            .get(tenant)
+            .cloned()
+            .unwrap_or_default();
+        latencies.sort();
+        let at = |p: f64| {
+            latencies
+                .get(((latencies.len().max(1) - 1) as f64 * p).round() as usize)
+                .map_or(0.0, |d| d.as_secs_f64() * 1e3)
+        };
+        println!(
+            "  {tenant:<10} {:<20} {:>7.1} req/s  p50 {:>6.1} ms  p99 {:>6.1} ms",
+            statuses.join(", "),
+            latencies.len() as f64 / wall.as_secs_f64(),
+            at(0.5),
+            at(0.99)
+        );
     }
     if let Some(first) = outcome.errors.first() {
         println!("  first error: {first}");
@@ -375,6 +418,7 @@ fn drive(
     let mut refused = None;
     let mut connections = 0;
     let mut by_tenant: BTreeMap<String, BTreeMap<u16, usize>> = BTreeMap::new();
+    let mut tenant_latencies: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
     let mut chunk = [0u8; 4096];
     loop {
         while open.len() < share {
@@ -479,6 +523,10 @@ fn drive(
                             .or_default()
                             .entry(status)
                             .or_default() += 1;
+                        tenant_latencies
+                            .entry(open[at].tenant.clone())
+                            .or_default()
+                            .push(open[at].started.elapsed());
                     }
                     if status != 200 && refused.is_none() {
                         refused = Some((status, body));
@@ -528,6 +576,13 @@ fn drive(
         for (status, count) in statuses {
             *into.entry(status).or_default() += count;
         }
+    }
+    for (tenant, latencies) in tenant_latencies {
+        outcome
+            .tenant_latencies
+            .entry(tenant)
+            .or_default()
+            .extend(latencies);
     }
     if outcome.refused.is_none() {
         outcome.refused = refused;

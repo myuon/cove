@@ -51,6 +51,16 @@ allow = ["upstream"]
 deadline = "500ms"
 max_host_calls = 4
 
+# CPU-heavy on purpose: the primes up to `?n=` counted by trial division,
+# milliseconds of VM time per request and never parked — about 4.5 ms at the
+# default `n=20000`, 65 ms at 150000. Pure, so granted nothing; fuel is what
+# bounds it. `n=150000` spends 14.6 million and the cap, 200000, about 22
+# million, so 30 million admits every size the tenant accepts.
+[run.crunch]
+entry = "crunch.handle"
+allow = []
+fuel = 30000000
+
 # Over-reaching on purpose: its entry requires `upstream` as well.
 [run.greedy]
 entry = "greedy.handle"

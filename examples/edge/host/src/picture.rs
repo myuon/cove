@@ -9,7 +9,10 @@
 //! views sharing one time axis (worker swimlanes above, a lane per request
 //! below), colour for tenant identity only and in a fixed order, a timeout
 //! as status (red, with a glyph and a label, never colour alone), a legend
-//! always, recessive grid, a hover readout, and a table view.
+//! always, recessive grid, a hover readout, and a table view. Between the
+//! two views, three small charts of their own (never a dual axis) count
+//! across tenants in neutral ink ([`Series`]): workers running, parked runs
+//! waiting on I/O, and requests waiting for a free worker.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -18,9 +21,20 @@ use crate::json::{self, Json};
 use crate::timeline::quote;
 
 /// The tenants the palette knows, in its fixed order.
-pub const TENANTS: [&str; 5] = ["hello", "counter", "aggregate", "proxy", "impatient"];
-const LIGHT: [&str; 5] = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"];
-const DARK: [&str; 5] = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"];
+pub const TENANTS: [&str; 6] = [
+    "hello",
+    "counter",
+    "aggregate",
+    "proxy",
+    "impatient",
+    "crunch",
+];
+const LIGHT: [&str; 6] = [
+    "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300",
+];
+const DARK: [&str; 6] = [
+    "#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300",
+];
 
 /// How a run segment began.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,7 +277,106 @@ pub fn read(text: &str) -> Result<Trace, String> {
     })
 }
 
+// ----------------------------------------------------------------- series
+
+/// A step function over time: `(t, value)`, the value from `t` until the
+/// next step, starting at zero before the first.
+pub type Steps = Vec<(f64, usize)>;
+
+/// What the strips under the worker swimlanes draw.
+#[derive(Clone, Debug, Default)]
+pub struct Series {
+    /// Workers running a tenant's isolate.
+    pub running: Steps,
+    /// Runs parked, from the park to the resume (or the cancel) — the
+    /// `ParkedVm`s that exist, the same count as [`Stats::max_parked`].
+    pub parked: Steps,
+    /// Runs parked whose answer is not in yet, from the park to the answer
+    /// (or the deadline): the waits on I/O, without the run queue.
+    pub waiting_on_io: Steps,
+    /// Requests ready to run with no worker free: queued and not yet
+    /// started, or answered and not yet resumed — the run queue.
+    pub queue: Steps,
+}
+
+/// Folds `+1`/`-1` edges into steps. At equal times a `-1` goes first, so a
+/// run that ends as another starts does not count twice.
+fn steps(mut edges: Vec<(f64, i32)>) -> Steps {
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut out: Steps = Vec::with_capacity(edges.len());
+    let mut level = 0i64;
+    for (t, delta) in edges {
+        level = (level + delta as i64).max(0);
+        match out.last_mut() {
+            Some(last) if last.0 == t => last.1 = level as usize,
+            _ => out.push((t, level as usize)),
+        }
+    }
+    out
+}
+
+/// The three step functions of a trace.
+pub fn series(trace: &Trace) -> Series {
+    let (mut running, mut parked, mut queue) = (Vec::new(), Vec::new(), Vec::new());
+    let mut io = Vec::new();
+    for req in &trace.requests {
+        for seg in &req.segments {
+            running.push((seg.start, 1));
+            running.push((seg.end.unwrap_or(trace.t1), -1));
+        }
+        if let Some(first) = req.segments.first() {
+            queue.push((req.queued, 1));
+            queue.push((first.start, -1));
+        }
+        for park in &req.parks {
+            parked.push((park.at, 1));
+            parked.push((park.resumed.unwrap_or(trace.t1), -1));
+            io.push((park.at, 1));
+            io.push((park.ready.unwrap_or(trace.t1), -1));
+            if let Some(ready) = park.ready {
+                queue.push((ready, 1));
+                queue.push((park.resumed.unwrap_or(trace.t1).max(ready), -1));
+            }
+        }
+    }
+    Series {
+        running: steps(running),
+        parked: steps(parked),
+        waiting_on_io: steps(io),
+        queue: steps(queue),
+    }
+}
+
+/// For each level, the time a step function spent at it within `[t0, t1]`.
+fn time_at_level(steps: &Steps, t0: f64, t1: f64, levels: usize) -> Vec<f64> {
+    let mut out = vec![0.0; levels];
+    let mut level = 0usize;
+    let mut since = t0;
+    for &(t, next) in steps {
+        let t = t.clamp(t0, t1);
+        if let Some(slot) = out.get_mut(level.min(levels - 1)) {
+            *slot += t - since;
+        }
+        since = t;
+        level = next;
+    }
+    if let Some(slot) = out.get_mut(level.min(levels - 1)) {
+        *slot += t1 - since;
+    }
+    out
+}
+
 // ------------------------------------------------------------------ stats
+
+/// One tenant's requests, server side: queued to written.
+#[derive(Clone, Debug, Default)]
+pub struct TenantStats {
+    pub requests: usize,
+    pub p50_ms: f64,
+    pub p99_ms: f64,
+    /// Worker time its runs took, in milliseconds.
+    pub cpu_ms: f64,
+}
 
 /// The figures the summary row shows, and the README's interpretation reads.
 #[derive(Clone, Debug, Default)]
@@ -296,6 +409,17 @@ pub struct Stats {
     pub timer_late_p50_ms: f64,
     pub timer_late_max_ms: f64,
     pub per_tenant: BTreeMap<String, usize>,
+    /// Per tenant: count, latency percentiles and worker time.
+    pub tenants: BTreeMap<String, TenantStats>,
+    /// `running[k]`: the share of the span with exactly `k` workers running
+    /// (`k` from 0 to `workers`).
+    pub running: Vec<f64>,
+    /// Worker time over workers × span: the pool's CPU utilisation.
+    pub utilisation: f64,
+    /// The most requests ready to run with no worker free at once.
+    pub max_queue: usize,
+    /// The most parked runs whose answer was not in yet, at once.
+    pub max_waiting_on_io: usize,
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -393,6 +517,43 @@ pub fn stats(trace: &Trace) -> Stats {
     s.timer_late_max_ms = percentile(&late, 1.0);
     s.start_wait_p50_ms = percentile(&start_waits, 0.5);
     s.start_wait_max_ms = percentile(&start_waits, 1.0);
+
+    let mut by_tenant: BTreeMap<String, (Vec<f64>, f64, usize)> = BTreeMap::new();
+    for req in &trace.requests {
+        let entry = by_tenant.entry(req.tenant.clone()).or_default();
+        entry.2 += 1;
+        if let Some(latency) = req.latency() {
+            entry.0.push(latency / 1e3);
+        }
+        for seg in &req.segments {
+            entry.1 += (seg.end.unwrap_or(trace.t1) - seg.start) / 1e3;
+        }
+    }
+    for (tenant, (mut latencies, cpu_ms, requests)) in by_tenant {
+        latencies.sort_by(f64::total_cmp);
+        s.tenants.insert(
+            tenant,
+            TenantStats {
+                requests,
+                p50_ms: percentile(&latencies, 0.5),
+                p99_ms: percentile(&latencies, 0.99),
+                cpu_ms,
+            },
+        );
+    }
+    let series = series(trace);
+    s.running = time_at_level(&series.running, trace.t0, trace.t1, trace.workers + 1)
+        .into_iter()
+        .map(|t| t / span)
+        .collect();
+    s.utilisation = s.busy.iter().sum::<f64>() / trace.workers.max(1) as f64;
+    s.max_queue = series.queue.iter().map(|&(_, v)| v).max().unwrap_or(0);
+    s.max_waiting_on_io = series
+        .waiting_on_io
+        .iter()
+        .map(|&(_, v)| v)
+        .max()
+        .unwrap_or(0);
     s
 }
 
@@ -441,7 +602,38 @@ impl Stats {
             "simulated answers put on the run queue after their due time by p50 {:.2} ms, max {:.2} ms",
             self.timer_late_p50_ms, self.timer_late_max_ms
         );
+        let _ = writeln!(
+            out,
+            "pool CPU utilisation {:.1}%; time with N workers running: {}; \
+             at most {} waiting on I/O and {} waiting for a worker at once",
+            self.utilisation * 100.0,
+            self.running_text(),
+            self.max_waiting_on_io,
+            self.max_queue
+        );
+        for (tenant, t) in &self.tenants {
+            let _ = writeln!(
+                out,
+                "  {tenant:<10} {:>4} requests  p50 {:>7.2} ms  p99 {:>7.2} ms  worker time {:>8.1} ms",
+                t.requests, t.p50_ms, t.p99_ms, t.cpu_ms
+            );
+        }
         out
+    }
+
+    /// `0: 12% · 1: 30% · …`, the share of the span at each level.
+    pub fn running_text(&self) -> String {
+        self.running
+            .iter()
+            .enumerate()
+            .map(|(k, share)| format!("{k}: {:.1}%", share * 100.0))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// The share of the span with at least `k` workers running.
+    pub fn running_at_least(&self, k: usize) -> f64 {
+        self.running.iter().skip(k).sum()
     }
 }
 
@@ -455,8 +647,9 @@ const TID_WORKER: u64 = 10;
 /// The trace as Chrome Trace Event JSON, for <https://ui.perfetto.dev> or
 /// `chrome://tracing`: a track per worker with a slice per run segment,
 /// flow arrows from each park to its resume, the parked intervals as async
-/// slices per request, and the accept, parking-lot and fetch-pool events on
-/// tracks of their own.
+/// slices per request, the accept, parking-lot and fetch-pool events on
+/// tracks of their own, and four counter tracks — parked runs, waiting on
+/// I/O, workers running, waiting for a worker ([`series`]).
 pub fn chrome_trace(trace: &Trace) -> String {
     let mut events: Vec<String> = Vec::new();
     let ts = |t: f64| t - trace.t0;
@@ -485,7 +678,6 @@ pub fn chrome_trace(trace: &Trace) -> String {
     meta(&mut events, TID_LOT, "parking lot (timer)", 101);
     meta(&mut events, TID_FETCH, "fetch pool", 102);
     let mut flow = 0u64;
-    let mut parked_edges: Vec<(f64, i32)> = Vec::new();
     for req in &trace.requests {
         let name = format!("{} #{}", req.tenant, req.id);
         if let Some(accepted) = req.accepted {
@@ -608,8 +800,6 @@ pub fn chrome_trace(trace: &Trace) -> String {
                     resumed,
                 );
             }
-            parked_edges.push((park.at, 1));
-            parked_edges.push((park.resumed.unwrap_or(trace.t1), -1));
             if let Some(ready) = park.ready {
                 let tid = if park.by == "fetcher" {
                     TID_FETCH
@@ -637,14 +827,20 @@ pub fn chrome_trace(trace: &Trace) -> String {
         }
         events.push(outer_end);
     }
-    parked_edges.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    let mut parked = 0i64;
-    for (t, delta) in parked_edges {
-        parked += delta as i64;
-        events.push(format!(
-            "{{\"ph\":\"C\",\"pid\":1,\"ts\":{:.3},\"name\":\"parked runs\",\"args\":{{\"parked\":{parked}}}}}",
-            ts(t)
-        ));
+    // Counter tracks: the strips under the HTML's swimlanes.
+    let series = series(trace);
+    for (name, key, steps) in [
+        ("parked runs", "parked", &series.parked),
+        ("waiting on I/O", "waiting", &series.waiting_on_io),
+        ("workers running", "running", &series.running),
+        ("waiting for a worker", "waiting", &series.queue),
+    ] {
+        for &(t, value) in steps {
+            events.push(format!(
+                "{{\"ph\":\"C\",\"pid\":1,\"ts\":{:.3},\"name\":\"{name}\",\"args\":{{\"{key}\":{value}}}}}",
+                ts(t)
+            ));
+        }
     }
     let mut out = String::from("{\"displayTimeUnit\":\"ms\",\"traceEvents\":[\n");
     out.push_str(&events.join(",\n"));
@@ -706,7 +902,10 @@ fn style() -> String {
          svg.edge-timeline .moved { fill: var(--ink); stroke: var(--surface); stroke-width: 1; }\n\
          svg.edge-timeline .crit { fill: var(--critical); font-weight: 700; }\n\
          svg.edge-timeline .critline { stroke: var(--critical); stroke-width: 2; stroke-linecap: round; }\n\
-         svg.edge-timeline .hover { fill: var(--ink); opacity: 0.06; }\n",
+         svg.edge-timeline .hover { fill: var(--ink); opacity: 0.06; }\n\
+         svg.edge-timeline .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }\n\
+         svg.edge-timeline .area { fill: var(--ink2); fill-opacity: 0.22; stroke: none; }\n\
+         svg.edge-timeline .step { fill: none; stroke: var(--ink2); stroke-width: 1; stroke-linejoin: round; }\n",
     );
     css
 }
@@ -733,20 +932,34 @@ pub struct Layout {
     pub row: f64,
     /// Where each part starts, top to bottom.
     pub workers_top: f64,
+    /// The three strips under the swimlanes, each `(top, height)`: workers
+    /// running, parked runs waiting on I/O, requests waiting for a worker.
+    pub strips: [(f64, f64); 3],
     pub axis_y: f64,
     pub requests_top: f64,
     pub height: f64,
 }
+
+/// Room above each strip for its title.
+const STRIP_TITLE: f64 = 20.0;
 
 impl Layout {
     fn new(trace: &Trace, header: f64) -> Layout {
         let width = 1240.0;
         let lane = 26.0;
         let n = trace.requests.len().max(1) as f64;
-        // Rows as tall as fit in about 900 px, between 4 and 14 px each.
-        let row = (900.0 / n).clamp(4.0, 14.0).floor();
+        // Rows as tall as fit in about 900 px, between 3 and 14 px each.
+        let row = (900.0 / n).clamp(3.0, 14.0).floor();
         let workers_top = header + 22.0;
-        let axis_y = workers_top + lane * trace.workers as f64 + 8.0;
+        // The running strip is 12 px a worker, so a step of one is legible.
+        let running_h = (12.0 * trace.workers as f64).max(24.0);
+        let mut top = workers_top + lane * trace.workers as f64 + 4.0 + STRIP_TITLE;
+        let mut strips = [(0.0, 0.0); 3];
+        for (at, height) in [running_h, 40.0, 40.0].into_iter().enumerate() {
+            strips[at] = (top, height);
+            top += height + 8.0 + STRIP_TITLE;
+        }
+        let axis_y = top - STRIP_TITLE;
         let requests_top = axis_y + 44.0;
         let height = requests_top + row * n + 40.0;
         Layout {
@@ -756,6 +969,7 @@ impl Layout {
             lane,
             row,
             workers_top,
+            strips,
             axis_y,
             requests_top,
             height,
@@ -771,7 +985,7 @@ impl Layout {
 /// inside it (for an image file); the HTML page draws those as HTML.
 pub fn svg(trace: &Trace, standalone: bool) -> String {
     let s = stats(trace);
-    let header = if standalone { 104.0 } else { 6.0 };
+    let header = if standalone { 124.0 } else { 6.0 };
     let lay = Layout::new(trace, header);
     let span = trace.t1 - trace.t0;
     let x = |t: f64| lay.left + (t - trace.t0) / span * lay.plot();
@@ -805,7 +1019,18 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
             lay.left,
             esc(&summary_line(&s))
         );
-        legend_svg(&mut out, lay.left, 74.0);
+        let _ = writeln!(
+            out,
+            "<text class=\"ink\" x=\"{}\" y=\"68\">{}</text>",
+            lay.left,
+            esc(&format!(
+                "pool CPU {:.0}% · share of the span with N workers running: {} · at most {} waiting for a worker",
+                s.utilisation * 100.0,
+                s.running_text(),
+                s.max_queue
+            ))
+        );
+        legend_svg(&mut out, lay.left, 96.0);
     }
 
     // Gridlines and the one time axis, between the two views.
@@ -886,6 +1111,48 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
                 lay.lane - 8.0
             );
         }
+    }
+
+    // The strips: how many workers ran at each instant, how many parked runs
+    // were waiting on I/O, how many requests waited for a worker. Neutral
+    // ink, not a tenant's colour: they count every tenant together.
+    let series = series(trace);
+    let titles = [
+        format!(
+            "Workers running at once, 0 to {} — pool CPU {:.0}%, two or more running {:.0}% of the span",
+            trace.workers,
+            s.utilisation * 100.0,
+            s.running_at_least(2) * 100.0
+        ),
+        format!(
+            "Parked runs waiting on I/O (park to answer), at most {} at once",
+            s.max_waiting_on_io
+        ),
+        format!(
+            "Requests ready to run with no worker free (the run queue), at most {} at once",
+            s.max_queue
+        ),
+    ];
+    let tops = [
+        trace.workers.max(1),
+        s.max_waiting_on_io.max(1),
+        s.max_queue.max(1),
+    ];
+    for (at, steps) in [&series.running, &series.waiting_on_io, &series.queue]
+        .into_iter()
+        .enumerate()
+    {
+        strip(
+            &mut out,
+            &lay,
+            &x,
+            steps,
+            lay.strips[at],
+            tops[at],
+            &titles[at],
+            (trace.t0, trace.t1),
+            at == 0,
+        );
     }
 
     // (ii) Request lanes.
@@ -974,7 +1241,7 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
                 labelled.push((cx, mid));
                 let _ = writeln!(
                     out,
-                    "<text class=\"ink\" font-weight=\"600\" x=\"{:.1}\" y=\"{:.1}\">504</text>",
+                    "<text class=\"ink halo\" font-weight=\"600\" x=\"{:.1}\" y=\"{:.1}\">504</text>",
                     cx + 7.0,
                     mid + 4.0
                 );
@@ -995,7 +1262,7 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
                 labelled.push((lx, mid));
                 let _ = writeln!(
                     out,
-                    "<text x=\"{lx:.1}\" y=\"{:.1}\">{}</text>",
+                    "<text class=\"halo\" x=\"{lx:.1}\" y=\"{:.1}\">{}</text>",
                     mid + 4.0,
                     esc(&req.tenant)
                 );
@@ -1016,12 +1283,64 @@ pub fn svg(trace: &Trace, standalone: bool) -> String {
     );
     let _ = writeln!(
         out,
-        "<text x=\"{}\" y=\"{:.1}\">Runs shorter than 1.5 px are drawn 1.5 px wide; hover (in the HTML) or the table gives exact times.</text>",
+        "<text x=\"{}\" y=\"{:.1}\">Runs shorter than 1.5 px are drawn 1.5 px wide (the strips count them at their true length); hover (in the HTML) or the table gives exact times.</text>",
         lay.left,
         lay.height - 12.0
     );
     out.push_str("</svg>\n");
     out
+}
+
+/// One strip: a step line over a light area, on an axis from 0 to `top`,
+/// with a gridline at every level when `every_level` (the running strip,
+/// whose levels are the workers) and at 0 and `top` otherwise.
+#[allow(clippy::too_many_arguments)]
+fn strip(
+    out: &mut String,
+    lay: &Layout,
+    x: &dyn Fn(f64) -> f64,
+    steps: &Steps,
+    (top, height): (f64, f64),
+    max: usize,
+    title: &str,
+    (t0, t1): (f64, f64),
+    every_level: bool,
+) {
+    let base = top + height;
+    let y = |v: usize| base - v as f64 / max as f64 * height;
+    let _ = writeln!(
+        out,
+        "<text class=\"ink\" x=\"{}\" y=\"{:.1}\">{}</text>",
+        lay.left,
+        top - 7.0,
+        esc(title)
+    );
+    let levels: Vec<usize> = if every_level {
+        (0..=max).collect()
+    } else {
+        vec![0, max]
+    };
+    for level in levels {
+        let ly = y(level);
+        let _ = writeln!(
+            out,
+            "<line class=\"grid\" x1=\"{}\" y1=\"{ly:.1}\" x2=\"{}\" y2=\"{ly:.1}\"/>\
+             <text class=\"tick\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{level}</text>",
+            lay.left,
+            lay.width - lay.right,
+            lay.left - 8.0,
+            ly + 4.0
+        );
+    }
+    let mut line = format!("M{:.2},{base:.2}", x(t0));
+    for &(t, value) in steps {
+        let _ = write!(line, " H{:.2} V{:.2}", x(t.clamp(t0, t1)), y(value));
+    }
+    let _ = write!(line, " H{:.2}", x(t1));
+    let _ = writeln!(
+        out,
+        "<path class=\"area\" d=\"{line} V{base:.2} Z\"/>\n<path class=\"step\" d=\"{line}\"/>"
+    );
 }
 
 fn format_ms(value: f64, step: f64) -> String {
@@ -1159,6 +1478,37 @@ pub fn html(trace: &Trace) -> String {
     stat(&mut out, s.timeouts.to_string(), "timeouts (504)");
     stat(&mut out, format!("{:.1} ms", s.p50_ms), "p50 latency");
     stat(&mut out, format!("{:.1} ms", s.p99_ms), "p99 latency");
+    stat(
+        &mut out,
+        format!("{:.0}%", s.utilisation * 100.0),
+        "pool CPU utilisation",
+    );
+    stat(
+        &mut out,
+        format!("{:.0}%", s.running_at_least(2) * 100.0),
+        "of the span with 2+ workers running",
+    );
+    stat(
+        &mut out,
+        s.max_waiting_on_io.to_string(),
+        "max waiting on I/O at once",
+    );
+    stat(
+        &mut out,
+        s.max_queue.to_string(),
+        "max waiting for a worker at once",
+    );
+    out.push_str("</div>\n<div class=\"stats\">");
+    for (k, share) in s.running.iter().enumerate() {
+        stat(
+            &mut out,
+            format!("{:.1}%", share * 100.0),
+            &format!(
+                "of the span with {k} worker{} running",
+                if k == 1 { "" } else { "s" }
+            ),
+        );
+    }
     out.push_str("</div>\n<div class=\"legend\">");
     for (at, name) in TENANTS.iter().enumerate() {
         let _ = write!(
@@ -1176,7 +1526,24 @@ pub fn html(trace: &Trace) -> String {
     out.push_str(&svg(trace, false));
     out.push_str("</div>\n<div id=\"tip\"></div>\n");
 
-    // The table view.
+    // Per tenant, then every request.
+    out.push_str(
+        "<details open><summary>Per tenant</summary>\n<table><thead><tr>\
+         <th>tenant</th><th>requests</th><th>p50 ms</th><th>p99 ms</th><th>worker time ms</th>\
+         </tr></thead><tbody>\n",
+    );
+    for (tenant, t) in &s.tenants {
+        let _ = writeln!(
+            out,
+            "<tr><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.2}</td><td>{:.1}</td></tr>",
+            esc(tenant),
+            t.requests,
+            t.p50_ms,
+            t.p99_ms,
+            t.cpu_ms
+        );
+    }
+    out.push_str("</tbody></table></details>\n");
     out.push_str("<details><summary>Every request as a table</summary>\n<table><thead><tr>\
                   <th>id</th><th>tenant</th><th>path</th><th>status</th><th>queued ms</th><th>answered ms</th>\
                   <th>latency ms</th><th>workers</th><th>parks</th></tr></thead><tbody>\n");
@@ -1290,6 +1657,21 @@ pub fn html(trace: &Trace) -> String {
         );
     }
     out.push_str("];\n");
+    // The strips' step functions, `[t, value]` each, and where each is drawn.
+    let series = series(trace);
+    out.push_str("const STEPS = [");
+    for steps in [&series.running, &series.waiting_on_io, &series.queue] {
+        out.push('[');
+        for (t, value) in steps {
+            let _ = write!(out, "[{t:.3},{value}],");
+        }
+        out.push_str("],");
+    }
+    out.push_str("];\nconst STRIPS = [");
+    for (top, height) in lay.strips {
+        let _ = write!(out, "[{top},{height}],");
+    }
+    out.push_str("];\n");
     out.push_str(SCRIPT);
     out.push_str("</script>\n</body></html>\n");
     out
@@ -1351,6 +1733,19 @@ svg.addEventListener('pointermove', evt => {
     band.setAttribute('y', RTOP + i * ROW); band.setAttribute('height', ROW);
     band.style.display = '';
     show(evt, describe(i));
+    return;
+  }
+  const inStrip = STRIPS.findIndex(([top, h]) => p.y >= top - 4 && p.y < top + h + 4);
+  if (inStrip >= 0 && t >= T0 && t <= T1) {
+    const at = steps => { let v = 0; for (const [st, sv] of steps) { if (st > t) break; v = sv; } return v; };
+    const [top, h] = STRIPS[inStrip];
+    band.setAttribute('x', LEFT); band.setAttribute('width', PLOT);
+    band.setAttribute('y', top); band.setAttribute('height', h);
+    band.style.display = '';
+    show(evt, [['strong', ms(t) + ' ms'],
+      ['', at(STEPS[0]) + ' of ' + WORKERS + ' workers running'],
+      ['', at(STEPS[1]) + ' parked runs waiting on I/O'],
+      ['', at(STEPS[2]) + ' requests waiting for a worker']]);
     return;
   }
   if (p.y >= WTOP && p.y < WTOP + LANE * WORKERS) {
