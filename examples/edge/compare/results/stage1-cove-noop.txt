@@ -1,0 +1,5 @@
+edge    hello name=Cove             6652       6610..6692       65536
+vm      hello name=Cove             2979       2966..3014       131072
+native  hello name=Cove             2981       2974..2994       131072
+        hello name=Cove   native: 1 of 1 reachable fn compiled; refused: -
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
