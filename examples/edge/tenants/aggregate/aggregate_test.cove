@@ -1,0 +1,19 @@
+use edge
+
+/// `aggregate` asked for `services`, as the server hands the request over.
+fn ask(services: String) -> edge.Response {
+  let query = Map.of(MapEntry(key: "services", value: services))
+  handle(edge.Request(method: "GET", path: "/", query: query, body: ""))
+}
+
+/// One line per service, in the order asked, and a service that is down is
+/// a line that says so rather than a failed request.
+test fn aServiceThatIsDownIsOneLineOfTheAnswer() -> Result<Unit, Error> {
+  let lines = ask("weather,fail-db").body.split("\n")
+  assert(lines.get(0).unwrapOr("").startsWith("weather: sunny, 21C ["))?
+  assertEqual(
+    lines.get(1).unwrapOr(""),
+    "fail-db: unavailable (`fail-db` is down)",
+  )?
+  Ok(())
+}

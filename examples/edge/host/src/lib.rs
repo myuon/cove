@@ -29,6 +29,7 @@ pub mod hosts;
 pub mod http;
 pub mod os;
 pub mod server;
+pub mod toolchain;
 
 pub use deploy::{DeployOptions, State, Tenant};
 pub use hosts::Latency;

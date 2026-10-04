@@ -1,12 +1,17 @@
-//! `cove-edge`: the server.
+//! `cove-edge`: the server, and the checker and test runner for its tenants.
 //!
 //! ```text
 //! cargo run --release -p cove-edge -- [--port 8787] [--workers 4]
 //!     [--latency 20..100] [--pool N] [--quiet] [--tenants DIR]
+//! cargo run --release -p cove-edge -- check [tenant…] [--tenants DIR]
+//! cargo run --release -p cove-edge -- test [tenant…] [--filter TEXT]
+//!     [--latency MIN..MAX] [--tenants DIR]
 //! ```
 
+use std::process::ExitCode;
 use std::time::Duration;
 
+use cove_edge::toolchain::{self, TestOptions};
 use cove_edge::{os, DeployOptions, Isolates, Latency, Server, ServerOptions, State};
 
 const USAGE: &str = "\
@@ -14,9 +19,68 @@ usage: cove-edge [--port 8787] [--host 127.0.0.1] [--workers 4]
                  [--latency MIN..MAX (ms, default 20..100)]
                  [--pool N (resident isolates per tenant; default: fresh per request)]
                  [--blocking-upstream (sleep on the worker instead of parking)]
-                 [--quiet (no `log.info` lines)] [--tenants DIR]";
+                 [--quiet (no `log.info` lines)] [--tenants DIR]
+       cove-edge check [tenant…] [--tenants DIR]
+       cove-edge test [tenant…] [--filter TEXT] [--latency MIN..MAX (ms, default 0)]
+                      [--tenants DIR]";
 
-fn main() {
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("check") => tool(&args[1..], false),
+        Some("test") => tool(&args[1..], true),
+        _ => serve(args),
+    }
+}
+
+/// `check` and `test`: the toolchain, with the server's schemas and hosts.
+fn tool(args: &[String], test: bool) -> ExitCode {
+    let mut tenants = cove_edge::tenants_root();
+    let mut only = Vec::new();
+    let mut filter = None;
+    let mut latency = Latency {
+        min: Duration::ZERO,
+        max: Duration::ZERO,
+    };
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| {
+            args.next()
+                .cloned()
+                .unwrap_or_else(|| fail(&format!("`{name}` takes a value")))
+        };
+        match arg.as_str() {
+            "--tenants" => tenants = value("--tenants").into(),
+            "--filter" if test => filter = Some(value("--filter")),
+            "--latency" if test => latency = parse_latency(&value("--latency")),
+            flag if flag.starts_with('-') => fail(&format!("unknown argument `{flag}`")),
+            name => only.push(name.to_string()),
+        }
+    }
+    let report = if test {
+        toolchain::test(&tenants, &only, &TestOptions { latency, filter })
+    } else {
+        toolchain::check(&tenants, &only)
+    }
+    .unwrap_or_else(|why| fail(&why));
+    eprint!("{}", report.err);
+    print!("{}", report.out);
+    if report.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn parse_latency(text: &str) -> Latency {
+    let (min, max) = text.split_once("..").unwrap_or((text, text));
+    Latency {
+        min: Duration::from_millis(parse(min)),
+        max: Duration::from_millis(parse(max)),
+    }
+}
+
+fn serve(args: Vec<String>) -> ExitCode {
     let mut port = 8787u16;
     let mut host = "127.0.0.1".to_string();
     let mut workers = 4usize;
@@ -29,7 +93,7 @@ fn main() {
     let mut blocking_upstream = false;
     let mut tenants = cove_edge::tenants_root();
 
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
             args.next()
@@ -43,17 +107,10 @@ fn main() {
             "--quiet" => quiet = true,
             "--blocking-upstream" => blocking_upstream = true,
             "--tenants" => tenants = value("--tenants").into(),
-            "--latency" => {
-                let text = value("--latency");
-                let (min, max) = text.split_once("..").unwrap_or((&text, &text));
-                latency = Latency {
-                    min: Duration::from_millis(parse(min)),
-                    max: Duration::from_millis(parse(max)),
-                };
-            }
+            "--latency" => latency = parse_latency(&value("--latency")),
             "-h" | "--help" => {
                 println!("{USAGE}");
-                return;
+                return ExitCode::SUCCESS;
             }
             other => fail(&format!("unknown argument `{other}`")),
         }

@@ -57,6 +57,49 @@ other four start. Flags: `--workers N`, `--latency MIN..MAX` (ms),
 (the control: `upstream.get` sleeps on the worker instead of parking),
 `--quiet` (no `log.info` lines).
 
+## Checking and testing a tenant
+
+`cove check` and `cove test` cannot see the server's host modules (issue #151,
+closed by decision; [what was awkward](#what-was-awkward) item 3), so the
+server ships its own. `check` prints the diagnostics `cove check` would,
+checked against the schemas the server registers, then each tenant's verdict
+— the same admission the server makes at deploy:
+
+```console
+$ cargo run --release -p cove-edge -- check
+aggregate  requires [upstream]  granted [upstream]  ok
+counter    requires [kv, log]  granted [kv, log]  ok
+greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
+hello      requires [-]  granted [-]  ok
+impatient  requires [upstream]  granted [upstream]  ok
+checked 4 module(s), 7 file(s) against the server's schemas; 5 tenant(s), 1 refused
+$ echo $?
+1
+```
+
+No warnings: `cove check` in the same directory reports thirteen. `test` runs
+every `test fn` of each tenant's module the way `cove test` does — lowered
+as an entry, on the VM, an `Err` is a failure pointing at its assertion — but
+with the server's hosts (`kv` in memory, empty per test; `log` silent;
+`upstream` at `--latency`, zero by default), the tenant's grant rather than
+the test's derived one, and the tenant's limits. `aggregate` and `impatient`
+share a module, so its test runs under each:
+
+```console
+$ cargo run --release -p cove-edge -- test
+ok    aggregate  aggregate.aServiceThatIsDownIsOneLineOfTheAnswer
+ok    counter    counter.countsEachPathApart
+ok    hello      hello.greetsTheWorldWhenNobodyIsNamed
+ok    hello      hello.greetsWhoeverTheQueryNames
+ok    impatient  aggregate.aServiceThatIsDownIsOneLineOfTheAnswer
+ran 5 test(s), 5 passed
+```
+
+`cove test` in `tenants/` runs the same four tests and fails all four with
+`cove::test::no_host`. A test that reaches a capability its tenant is not
+granted fails before it runs, naming the grant: ``test `bad.logs` requires
+`log`, which cove.toml does not grant tenant `bad` ``.
+
 ## The tenants
 
 | tenant | grant | what it shows |
@@ -318,14 +361,28 @@ The most useful output of this demo. Ordered by how much each cost.
    says "types only". What remains is item 3: a `cove` command with no
    schema for `edge` still cannot tell `edge.Response(…)` from an operation,
    so `cove outline` in `tenants/` still says `requires edge`.
-3. **No `cove` command can be handed the server's schemas** (issue #151, which
-   the rules example already names). `cove check` in `tenants/` reports nine
-   `cove::type::host_type` warnings — every `edge.Request` and
-   `edge.Response` unchecked — and `cove run hello` fails with three
-   `cove::lower::unknown_type` errors ("the type of this expression was never
-   settled"), which says nothing about the real reason (the entry takes an
-   `edge.Request` only the server can supply). The server is the only full
-   checker of its tenants.
+3. **No `cove` command can be handed the server's schemas — answered by
+   `cove-edge check` and `cove-edge test`.** Issue #151 was closed by
+   decision: `cove` will not read a serialized schema, because it would be a
+   second description of a module whose first is Rust, and because `cove
+   test` would still need the implementation. So `cove check` in `tenants/`
+   still reports thirteen warnings (four `unchecked_host`, nine `host_type`:
+   every `edge.Request` and `edge.Response` unchecked), `cove test` there
+   fails every test with `cove::test::no_host` ("requires the `edge`
+   capability, which no host module provides"), and `cove run hello` fails
+   with `cove::lower::unknown_type`, which says nothing about the real reason
+   (the entry takes an `edge.Request` only the server can supply). Those
+   stay, and they are accurate. The embedder's answer is its own toolchain,
+   as [`cove-rules-check`](../rules/host/src/bin/check.rs) is the rules
+   example's: [`host/src/toolchain.rs`](host/src/toolchain.rs) runs the
+   compile and the admission the server runs at deploy (`deploy::compile`,
+   `deploy::admit`, the same lowering), and runs each tenant's `test fn`s on
+   the VM with the server's own hosts, the tenant's grant and its limits —
+   see [checking and testing a tenant](#checking-and-testing-a-tenant). It
+   took about 400 lines, a fifth of them `cove test`'s failure reporting
+   copied, because `cove-cli`'s runner is a binary's private module: the
+   precedent says "the embedder ships its own", and what it ships is the
+   reporting as well as the one line that hands over the schemas.
    One more thing came out of that blindness, and it is fixed on this branch:
    without the schema, `match upstream.get(service) { Ok(answer) => … }`
    bound `answer` as a `Recovery` unknown — "an error was already reported" —
