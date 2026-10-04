@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use cove_diag::{render, Diagnostic, Severity, SourceMap};
 use cove_runtime::{Grants, HostRegistry, Limits, OwnedVm, PreparedProgram, Runtime, Value};
 use cove_sema::package::{Module, Package, Unit};
+use cove_sema::resolve::Program;
 use cove_sema::{Compiler, Config, HostSchemas, RunConfig};
 
 use crate::hosts::{Edge, Kv, Latency, Log, Upstream, SCHEMAS};
@@ -63,6 +64,8 @@ pub struct Tenant {
     pub entry: String,
     /// What `cove.toml` grants.
     pub granted: BTreeSet<String>,
+    /// The hosts `upstream.fetch` may reach, from `edge.toml`.
+    pub fetch: BTreeSet<String>,
     /// What the checker derived the entry requires, when it checked.
     pub required: BTreeSet<String>,
     /// Whether `required` is a lower bound: the entry makes a call the call
@@ -167,11 +170,25 @@ impl Tenant {
             State::Refused(why) => format!("REFUSED: {why}"),
         };
         format!(
-            "{:<10} requires [{}]{open}  granted [{}]  {verdict}",
+            "{:<10} requires [{}]{open}  granted [{}]{}  {verdict}",
             self.name,
             list(&self.required),
-            list(&self.granted)
+            list(&self.granted),
+            self.fetch_note(),
         )
+    }
+
+    /// `  fetch [hosts]` for a tenant with a fetch allowlist, and nothing for
+    /// one without.
+    pub fn fetch_note(&self) -> String {
+        if self.fetch.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  fetch [{}]",
+                self.fetch.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        }
     }
 
     /// The deployed half, if there is one.
@@ -183,45 +200,127 @@ impl Tenant {
     }
 }
 
+/// Reads `cove.toml` from the tenants directory: one `[run.<tenant>]` table
+/// per tenant.
+pub fn read_manifest(root: &Path) -> Result<Config, String> {
+    let manifest = root.join("cove.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("cannot read `{}`: {e}", manifest.display()))?;
+    cove_sema::config::parse(&text).map_err(|e| format!("`{}`: {e}", manifest.display()))
+}
+
+/// The server's own policy for each tenant, beyond what `cove.toml` grants:
+/// `tenants/edge.toml`.
+///
+/// A file of its own because `cove.toml` cannot carry it: `cove_sema`'s
+/// parser rejects a key it does not know in a `[run.<name>]` table, which is
+/// right for `cove run` and leaves an embedder nowhere to put a key of its
+/// own (README, "what was awkward").
+///
+/// ```toml
+/// [proxy]
+/// fetch = ["127.0.0.1", "localhost"]   # hosts `upstream.fetch` may reach
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct Policy {
+    /// Per tenant, the hosts `upstream.fetch` may reach; a tenant not named
+    /// may reach none.
+    pub fetch: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Reads `edge.toml` from the tenants directory; no file is no policy.
+///
+/// A tenant `cove.toml` does not name, or a key this server does not know,
+/// is refused rather than skipped: a misspelt allowlist would otherwise be a
+/// tenant silently allowed nothing, or a typo that looks like a grant.
+pub fn read_policy(root: &Path, config: &Config) -> Result<Policy, String> {
+    let path = root.join("edge.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Policy::default());
+    };
+    let shown = path.display();
+    let table: toml::Table = text.parse().map_err(|e| format!("`{shown}`: {e}"))?;
+    let mut policy = Policy::default();
+    for (tenant, value) in table {
+        if !config.runs.contains_key(&tenant) {
+            return Err(format!(
+                "`{shown}` names `{tenant}`, which cove.toml does not"
+            ));
+        }
+        let toml::Value::Table(keys) = value else {
+            return Err(format!("`{shown}`: `{tenant}` is not a table"));
+        };
+        for (key, value) in keys {
+            match (key.as_str(), value) {
+                ("fetch", toml::Value::Array(hosts)) => {
+                    let hosts = hosts
+                        .into_iter()
+                        .map(|host| match host {
+                            toml::Value::String(host) => Ok(host.to_ascii_lowercase()),
+                            other => Err(format!(
+                                "`{shown}`: `{tenant}.fetch` holds `{other:?}`, not a host name"
+                            )),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    policy.fetch.insert(tenant.clone(), hosts);
+                }
+                (key, _) => {
+                    return Err(format!("`{shown}`: unknown key `{tenant}.{key}`"));
+                }
+            }
+        }
+    }
+    Ok(policy)
+}
+
 /// Deploys every tenant `cove.toml` names, refusing the ones that do not
 /// compile or that require more than they are granted.
 ///
 /// A refusal is per tenant: the others deploy. The error is only for a
-/// `cove.toml` that cannot be read at all.
+/// `cove.toml` or an `edge.toml` that cannot be read at all.
 pub fn deploy_all(options: &DeployOptions) -> Result<Vec<Tenant>, String> {
-    let manifest = options.tenants.join("cove.toml");
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("cannot read `{}`: {e}", manifest.display()))?;
-    let config: Config =
-        cove_sema::config::parse(&text).map_err(|e| format!("`{}`: {e}", manifest.display()))?;
+    let config = read_manifest(&options.tenants)?;
+    let policy = read_policy(&options.tenants, &config)?;
     Ok(config
         .runs
         .iter()
-        .map(|(name, run)| deploy(options, name, run))
+        .map(|(name, run)| deploy(options, describe(name, run, &policy)))
         .collect())
 }
 
-/// Deploys one tenant.
-fn deploy(options: &DeployOptions, name: &str, run: &RunConfig) -> Tenant {
+/// What a request's run is bounded by: `cove.toml`'s figures, and
+/// [`default_limits`] where it says nothing.
+pub fn limits_of(run: &RunConfig) -> Limits {
     let defaults = default_limits();
-    let mut tenant = Tenant {
+    Limits {
+        fuel: run.fuel.or(defaults.fuel),
+        deadline: run.deadline.or(defaults.deadline),
+        max_host_calls: run.max_host_calls.or(defaults.max_host_calls),
+        max_tasks: run.max_tasks.or(Some(8)),
+        ..defaults
+    }
+}
+
+/// A tenant as `cove.toml` and `edge.toml` describe it, before anything is
+/// compiled.
+pub fn describe(name: &str, run: &RunConfig, policy: &Policy) -> Tenant {
+    Tenant {
         name: name.to_string(),
         entry: run.entry.clone(),
         // Exactly what `cove.toml` grants. `edge` is not among it: building
         // an `edge.Response` initializes a type the schema declares, which
         // requires no capability, so a tenant that only answers is pure.
         granted: run.allow.iter().cloned().collect(),
+        fetch: policy.fetch.get(name).cloned().unwrap_or_default(),
         required: BTreeSet::new(),
         open: false,
-        limits: Limits {
-            fuel: run.fuel.or(defaults.fuel),
-            deadline: run.deadline.or(defaults.deadline),
-            max_host_calls: run.max_host_calls.or(defaults.max_host_calls),
-            max_tasks: run.max_tasks.or(Some(8)),
-            ..defaults
-        },
+        limits: limits_of(run),
         state: State::Refused(String::new()),
-    };
+    }
+}
+
+/// Deploys one tenant.
+fn deploy(options: &DeployOptions, mut tenant: Tenant) -> Tenant {
     tenant.state = match prepare(options, &mut tenant) {
         Ok(deployed) => State::Deployed(Box::new(deployed)),
         Err(why) => State::Refused(why),
@@ -229,35 +328,61 @@ fn deploy(options: &DeployOptions, name: &str, run: &RunConfig) -> Tenant {
     tenant
 }
 
-/// Compiles, checks the grant, lowers and prepares; or says why not.
-fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, String> {
+/// A tenant's module, checked against the server's schemas.
+pub struct Compiled {
+    /// The tenant's files and the standard library's.
+    pub sources: SourceMap,
+    /// The checked program, its notices included.
+    pub program: Program,
+    /// Reading, parsing and checking.
+    pub check: Duration,
+}
+
+/// Loads and checks `module` against the server's own schemas — the values
+/// the hosts answer [`cove_runtime::HostApi::module_schema`] with, not a copy
+/// of them.
+///
+/// The `Err` is rendered, after the stage that refused it: `does not parse`
+/// or `does not check`, then the diagnostics as `cove check` renders them.
+pub fn compile(root: &Path, module: &str) -> Result<Compiled, String> {
+    let started = Instant::now();
+    let (sources, package) = load(root, module)?;
+    let program = Compiler::new()
+        .with_schemas(HostSchemas::only(SCHEMAS))
+        .compile(&package)
+        .map_err(|items| format!("does not check:\n{}", report(&sources, &items)))?;
+    Ok(Compiled {
+        sources,
+        program,
+        check: started.elapsed(),
+    })
+}
+
+/// Whether a checked tenant may be deployed: it checks without warnings, it
+/// declares its entry, and the entry requires nothing `cove.toml` does not
+/// grant. Fills in what the entry requires.
+///
+/// The one decision the server and `cove-edge check` share, so that the
+/// checker cannot pass a tenant the server would refuse.
+pub fn admit(tenant: &mut Tenant, compiled: &Compiled) -> Result<(), String> {
     let Some((module, function)) = tenant.entry.split_once('.') else {
         return Err(format!("entry `{}` is not `module.function`", tenant.entry));
     };
-    let schemas = HostSchemas::only(SCHEMAS);
-
-    let started = Instant::now();
-    let (sources, package) = load(&options.tenants, module)?;
-    let checked = Compiler::new()
-        .with_schemas(schemas.clone())
-        .compile(&package)
-        .map_err(|items| format!("does not check:\n{}", report(&sources, &items)))?;
-    let check = started.elapsed();
-    let warnings: Vec<&Diagnostic> = checked
+    let warnings: Vec<Diagnostic> = compiled
+        .program
         .notices
         .iter()
         .filter(|item| item.severity == Severity::Warning)
+        .cloned()
         .collect();
     if !warnings.is_empty() {
-        let owned: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
         return Err(format!(
             "checks with warnings:\n{}",
-            report(&sources, &owned)
+            report(&compiled.sources, &warnings)
         ));
     }
-
-    let Some(entry) = checked.lookup_fn(module, function) else {
-        return Err(format!("`{}` declares no `{function}`", module));
+    let Some(entry) = compiled.program.lookup_fn(module, function) else {
+        return Err(format!("`{module}` declares no `{function}`"));
     };
     tenant.required = entry
         .required_capabilities
@@ -281,14 +406,16 @@ fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, Str
                 .join(" and ")
         ));
     }
+    Ok(())
+}
 
-    let started = Instant::now();
-    let lowered = cove_ir::lower_entry(&checked, &sources, &schemas, module, function)
-        .map_err(|items| format!("does not lower:\n{}", report(&sources, &items)))?;
-    let functions = lowered.functions.len();
-    let prepared = PreparedProgram::new(Arc::new(lowered));
-    let prepare = started.elapsed();
-
+/// The tenant's host registry: its grants, and the four hosts, with a `kv`
+/// store of its own that starts empty.
+///
+/// The server builds one per tenant, at deploy, and shares it with every
+/// request; `cove-edge test` builds one per test, so that no test sees what
+/// another left in the store.
+pub fn registry(tenant: &Tenant, options: &DeployOptions) -> HostRegistry {
     let mut hosts = HostRegistry::new(Grants::new(tenant.granted.iter().cloned()));
     hosts.register(Box::new(Edge));
     hosts.register(Box::new(Kv {
@@ -301,8 +428,36 @@ fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, Str
     hosts.register(Box::new(Upstream {
         latency: options.latency,
         blocking: options.blocking_upstream,
+        tenant: tenant.name.clone(),
+        allow: Arc::new(tenant.fetch.clone()),
     }));
-    let hosts = Arc::new(hosts);
+    hosts
+}
+
+/// Compiles, checks the grant, lowers and prepares; or says why not.
+fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, String> {
+    let Some((module, function)) = tenant.entry.split_once('.') else {
+        return Err(format!("entry `{}` is not `module.function`", tenant.entry));
+    };
+    let (module, function) = (module.to_string(), function.to_string());
+    let compiled = compile(&options.tenants, &module)?;
+    admit(tenant, &compiled)?;
+    let Compiled {
+        sources,
+        program: checked,
+        check,
+        ..
+    } = compiled;
+
+    let started = Instant::now();
+    let schemas = HostSchemas::only(SCHEMAS);
+    let lowered = cove_ir::lower_entry(&checked, &sources, &schemas, &module, &function)
+        .map_err(|items| format!("does not lower:\n{}", report(&sources, &items)))?;
+    let functions = lowered.functions.len();
+    let prepared = PreparedProgram::new(Arc::new(lowered));
+    let prepare = started.elapsed();
+
+    let hosts = Arc::new(registry(tenant, options));
     let sources = Arc::new(sources);
     let runtime = Arc::new(Runtime::new(
         Arc::new(checked),
@@ -311,8 +466,8 @@ fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, Str
     ));
 
     let mut deployed = Deployed {
-        module: module.to_string(),
-        function: function.to_string(),
+        module,
+        function,
         sources,
         hosts,
         runtime,
@@ -336,7 +491,7 @@ fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, Str
 ///
 /// The module is the `.cove` files directly in `tenants/<module>/`; nothing
 /// beside it is read, so no tenant's package holds another's code.
-fn load(root: &Path, module: &str) -> Result<(SourceMap, Package), String> {
+pub fn load(root: &Path, module: &str) -> Result<(SourceMap, Package), String> {
     let dir = root.join(module);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?
@@ -381,7 +536,7 @@ fn load(root: &Path, module: &str) -> Result<(SourceMap, Package), String> {
 }
 
 /// Diagnostics, rendered the way `cove check` renders them.
-fn report(sources: &SourceMap, items: &[Diagnostic]) -> String {
+pub fn report(sources: &SourceMap, items: &[Diagnostic]) -> String {
     items.iter().map(|item| render(sources, item)).collect()
 }
 

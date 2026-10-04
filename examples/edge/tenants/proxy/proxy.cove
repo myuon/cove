@@ -1,0 +1,25 @@
+use edge
+use upstream
+
+/// Fetches the URL `?url=` names and answers with what it said.
+///
+/// `upstream.fetch` is a real HTTP request, and the run parks at it like at
+/// any other upstream call. Where it may go is not this tenant's to decide:
+/// the server holds an allowlist of hosts for it (`tenants/edge.toml`), and a
+/// URL off the list is refused at the boundary with an `Err` — before
+/// anything is sent — which this answers as a 502 like any other failure.
+export fn handle(request: edge.Request) -> edge.Response {
+  let url = request.query.get("url").unwrapOr("")
+  match upstream.fetch(url) {
+    Ok(body) => edge.Response(
+      status: 200,
+      contentType: "text/plain",
+      body: "{url} said:\n{body}",
+    )
+    Err(error) => edge.Response(
+      status: 502,
+      contentType: "text/plain",
+      body: "{error.message}\n",
+    )
+  }
+}

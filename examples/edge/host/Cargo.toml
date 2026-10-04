@@ -21,6 +21,10 @@ cove-runtime.workspace = true
 cove-schema.workspace = true
 cove-sema.workspace = true
 cove-syntax.workspace = true
+# `tenants/edge.toml`, the server's own per-tenant policy (the fetch
+# allowlist), which `cove.toml`'s strict parser has no room for. The version
+# and features `cove-sema` already uses, so nothing new is built.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 
 # `setrlimit`, so that ten thousand sockets fit under the open-file limit
 # without a `ulimit -n` first, and `getrusage` for peak RSS. Already in the

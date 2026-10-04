@@ -1,0 +1,15 @@
+use edge
+
+/// A `GET` of `path`, as the server hands it to `handle`.
+fn visit(path: String) -> edge.Response {
+  handle(edge.Request(method: "GET", path: path, query: Map.of(), body: ""))
+}
+
+/// The count outlives the run that made it: it is in `kv`, which `cove-edge
+/// test` answers with the server's own store, empty at the start of each test.
+test fn countsEachPathApart() -> Result<Unit, Error> {
+  assertEqual(visit("/home").body, "/home has been visited 1 time(s)\n")?
+  assertEqual(visit("/home").body, "/home has been visited 2 time(s)\n")?
+  assertEqual(visit("/about").body, "/about has been visited 1 time(s)\n")?
+  Ok(())
+}

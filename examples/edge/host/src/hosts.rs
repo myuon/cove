@@ -11,13 +11,14 @@
 //! | `edge` | — | the `Request` and `Response` types; no operations |
 //! | `kv` | `kv` | a key-value store, one per tenant, answered at once |
 //! | `log` | `log` | a line on the server's standard output |
-//! | `upstream` | `upstream` | a slow outbound call, answered **pending** |
+//! | `upstream` | `upstream` | a slow outbound call, answered **pending**: `get` a simulated service, `fetch` a real `http://` URL on the tenant's allowlist |
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::http::{parse_url, Url};
 use cove_runtime::{
     Effect, FieldSchema, HostAnswer, HostApi, HostType, ModuleSchema, OperationSchema, Reentry,
     RuntimeError, TypeSchema, Value,
@@ -129,21 +130,35 @@ pub const LOG: ModuleSchema = ModuleSchema {
     resources: &[],
 };
 
-/// A slow outbound call to a named service.
+/// Slow outbound calls: `get` asks a simulated service by name, and `fetch`
+/// performs a real HTTP `GET` of a URL the tenant's allowlist admits.
 pub const UPSTREAM: ModuleSchema = ModuleSchema {
     name: "upstream",
     capability: "upstream",
-    operations: &[OperationSchema {
-        name: "get",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::String, &HostType::Error),
-        capability: "upstream",
-        effect: Effect::Read,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    }],
+    operations: &[
+        OperationSchema {
+            name: "get",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::String, &HostType::Error),
+            capability: "upstream",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "fetch",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::String, &HostType::Error),
+            capability: "upstream",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+    ],
     types: &[],
     resources: &[],
 };
@@ -216,12 +231,14 @@ impl HostApi for Log {
     }
 }
 
-/// What `upstream.get` hands the embedder when it answers pending: the
-/// service asked for. The scheduler downcasts [`cove_runtime::ParkedVm`]'s
-/// request to this.
+/// What `upstream` hands the embedder when it answers pending. The scheduler
+/// downcasts [`cove_runtime::ParkedVm`]'s request to this.
 #[derive(Debug)]
-pub struct UpstreamCall {
-    pub service: String,
+pub enum UpstreamCall {
+    /// `upstream.get`: the simulated service asked for.
+    Service(String),
+    /// `upstream.fetch`: a URL the tenant's allowlist admitted.
+    Fetch(Url),
 }
 
 /// How long the simulated upstream takes, chosen per call.
@@ -273,14 +290,70 @@ pub fn upstream_latency(service: &str) -> Option<Duration> {
 /// Blocking calls made, which seeds each one's latency.
 static CALLS: AtomicU64 = AtomicU64::new(0);
 
-/// `upstream`: pending wherever the run can park, and a blocking sleep where
-/// it cannot.
+/// `upstream`: pending wherever the run can park, and a blocking sleep or
+/// fetch where it cannot.
 pub struct Upstream {
     pub latency: Latency,
     /// Answer every call by sleeping on the worker, as a host that never
     /// heard of ADR 0080 would: the control the parked runs are measured
     /// against.
     pub blocking: bool,
+    /// The tenant this registry is for, which a refusal names.
+    pub tenant: String,
+    /// The hosts `fetch` may reach, from `tenants/edge.toml`. Empty: none.
+    ///
+    /// This is the filtered implementation PHILOSOPHY's "No ambient
+    /// authority" names. The `upstream` capability says a tenant may make
+    /// outbound calls at all; the allowlist says to where, and it is held
+    /// here, by the host, at the boundary — a URL the tenant builds at run
+    /// time cannot get past it, whatever the checker saw.
+    pub allow: Arc<BTreeSet<String>>,
+}
+
+impl Upstream {
+    /// The URL `fetch` was asked for, if it parses and its host is on the
+    /// allowlist; otherwise the `Err` the tenant's call answers with.
+    fn admit(&self, text: &str) -> Result<Url, String> {
+        let url = parse_url(text)?;
+        if !self.allow.contains(&url.host) {
+            return Err(format!(
+                "`{}` is not on tenant `{}`'s fetch allowlist{}",
+                url.host,
+                self.tenant,
+                if self.allow.is_empty() {
+                    " (it has none; see tenants/edge.toml)".to_string()
+                } else {
+                    format!(
+                        " ({})",
+                        self.allow.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                }
+            ));
+        }
+        Ok(url)
+    }
+}
+
+/// What a fetch came to, as the `Result<String, Error>` `upstream.fetch`
+/// answers: the body of a 2xx, and an `Err` that says what happened
+/// otherwise.
+pub fn fetch_answer(url: &str, fetched: Result<(u16, String), String>) -> Result<String, String> {
+    match fetched {
+        Ok((status, body)) if (200..300).contains(&status) => Ok(body),
+        Ok((status, body)) => Err(format!(
+            "`{url}` answered {status}: {}",
+            body.lines().next().unwrap_or_default()
+        )),
+        Err(why) => Err(why),
+    }
+}
+
+/// A `Result<String, Error>` as the value a host answers with.
+pub fn result_value(result: Result<String, String>) -> Value {
+    match result {
+        Ok(text) => Value::ok(Value::string(text)),
+        Err(message) => Value::err(Value::error(message)),
+    }
 }
 
 impl HostApi for Upstream {
@@ -292,26 +365,34 @@ impl HostApi for Upstream {
     /// callback, a spawned task, a `lock` — which in these tenants is never.
     /// It is what the same call costs without ADR 0080: a worker thread
     /// asleep for the whole of the latency.
-    fn call(&self, _op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let service = args[0].as_str().expect("checked by the boundary");
+        if op == "fetch" {
+            return Ok(result_value(self.admit(service).and_then(|url| {
+                fetch_answer(&url.to_string(), crate::http::fetch(&url, |_| true))
+            })));
+        }
         // `hang` sleeps its hour here too: a host that blocks its worker
         // cannot be timed out, which is the control's point.
         let latency = upstream_latency(service)
             .unwrap_or_else(|| self.latency.pick(CALLS.fetch_add(1, Ordering::Relaxed)));
         std::thread::sleep(latency);
-        Ok(match upstream_answer(service, latency) {
-            Ok(text) => Value::ok(Value::string(text)),
-            Err(message) => Value::err(Value::error(message)),
-        })
+        Ok(result_value(upstream_answer(service, latency)))
     }
 
     fn call_parkable(&self, op: &str, args: Vec<Value>, _back: &mut dyn Reentry) -> HostAnswer {
         if self.blocking {
             return HostAnswer::Ready(self.call(op, args));
         }
-        let service = args[0].as_str().expect("checked by the boundary");
-        HostAnswer::Pending(Box::new(UpstreamCall {
-            service: service.to_string(),
-        }))
+        let text = args[0].as_str().expect("checked by the boundary");
+        if op == "fetch" {
+            // Refused before anything is sent, and answered at once: a
+            // refusal is the tenant's `Err` to handle, not a parked run.
+            return match self.admit(text) {
+                Ok(url) => HostAnswer::Pending(Box::new(UpstreamCall::Fetch(url))),
+                Err(why) => HostAnswer::Ready(Ok(result_value(Err(why)))),
+            };
+        }
+        HostAnswer::Pending(Box::new(UpstreamCall::Service(text.to_string())))
     }
 }

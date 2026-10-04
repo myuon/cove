@@ -40,6 +40,17 @@ allow = ["upstream"]
 deadline = "300ms"
 max_host_calls = 8
 
+# A real outbound fetch: `upstream.fetch(url)`, to the hosts `edge.toml`
+# allows it and nowhere else. `?url=http://127.0.0.1:8787/hello/` asks
+# another tenant on the same server. The deadline is short on purpose: a
+# fetch of an upstream that never answers is cancelled at 500 ms, and the
+# server aborts the fetch it was waiting on.
+[run.proxy]
+entry = "proxy.handle"
+allow = ["upstream"]
+deadline = "500ms"
+max_host_calls = 4
+
 # Over-reaching on purpose: its entry requires `upstream` as well.
 [run.greedy]
 entry = "greedy.handle"
