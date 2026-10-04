@@ -511,7 +511,13 @@ idle and wakes on time (the 1,000-in-flight rows sit on the 180 ms floor), but
 a single `curl` to `aggregate` takes about 0.45 s instead of 0.18 s, the
 1 s-upstream row is 3.3 s rather than 3.0 s, and the two 100-in-flight rows
 both pay it — which is why they are compared with each other and with nothing
-else.
+else. (Corrected by [`compare/`](compare/README.md#3-the-parking-lots-late-timer)'s
+second pass: it is not idleness but the wait *primitive*. A condition
+variable's timed wait — `recv_timeout` — and `sleep` overshoot like this on
+this machine at any load, and `poll(2)` and `kevent` timeouts do not; a busy
+lot only *looks* on time because each new park wakes it early, and its worst
+case under load was still 96 ms. The lot waiting in `kevent` instead, on
+branch `perf/edge-lot-kqueue`, is on time to 0.3 ms.)
 
 The rows above were measured before keep-alive, with a connection per
 request. They used to come with a warning to wait half a minute between two
@@ -611,7 +617,10 @@ What it shows, from this run:
   columns of diamonds at 860 ms (11 answers), 925 ms (6) and 965 ms (3) —
   and the last `impatient` request's deadline fired 147 ms late, which is
   why its 504 sits at 447 ms. It is the macOS idle-timer overshoot described
-  under [numbers](#numbers), now visible per request.
+  under [numbers](#numbers), now visible per request. (The second pass of
+  [`compare/`](compare/README.md#3-the-parking-lots-late-timer) splits each
+  answer's delay this way for whole runs: the lot's wake is 7 ms late at the
+  median and up to 149 ms at 50 req/s, and the run queue after it 0.01 ms.)
 
 The same timeline opens in Perfetto: go to <https://ui.perfetto.dev> and drag
 `timeline.perfetto.json` in (or *Open trace file*; `chrome://tracing` reads it
@@ -643,7 +652,9 @@ and no `--rate`: 5,267 requests in the timeline, 3,627 parks, 500 parked at
 once, 2,648 of 3,503 resumes (76%) on another worker, 124 timeouts, each
 worker busy 6.2%, the wait for a worker at most 2.25 ms at start and 2.13 ms
 at resume, and the timer 0.22 ms late at the median (25.9 ms at worst) — a
-busy timer thread wakes on time. 32,716 events are 2.8 MB of timeline, a
+busy timer thread wakes on time (because each new park wakes it early —
+the second pass of [`compare/`](compare/README.md#3-the-parking-lots-late-timer)
+found the timer itself late under load too, at worst). 32,716 events are 2.8 MB of timeline, a
 4.4 MB page (rows shrank to 4 px, 3 px since; the figure is drawn for the 300-request
 run) and an 8.7 MB Perfetto trace, all three written in 0.23 s.
 `host/tests/timeline.rs` runs a small mix in-process with recording on and
@@ -1082,8 +1093,10 @@ checker needed.
 - Chunked bodies and TLS. A request that has started arriving is read on a
   worker, so a client that sends half a head holds one for up to 5 s; idle
   connections cost no thread, but the idle thread's `poll` is O(idle
-  connections) per wake-up, which a server with far more than ten thousand
-  would replace with `epoll`/`kqueue`.
+  connections) per wake-up. Measured, that saturates the idle thread from
+  about a thousand kept-alive connections at 10,000 req/s
+  ([`compare/`](compare/README.md#4-many-idle-connections-poll2-is-the-cost-confirmed));
+  `epoll`/`kqueue` is [issue #590](https://github.com/myuon/cove/issues/590).
 - The fetch pool is a few blocking threads, so more concurrent fetches than
   `--fetchers` queue; multiplexing them as the idle thread multiplexes
   connections would change `host/src/fetch.rs` and nothing else. `http://`

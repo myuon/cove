@@ -1,0 +1,113 @@
+# xctrace Time Profiler, cove-edge (fcf64a9) under hello, closed loop, 64 in flight, keep-alive, 500000 requests
+# 2026-10-04 22:50, load average 1.77 3.06 3.35 at start; 85,971 req/s with the profiler attached; ps CPU 20.03 s = 40.1 us/req
+# python3 examples/edge/compare/profile.py hello.xml --requests 500000 --leaves 40 --within invoke_within_parkable --depth 3
+# 13771 ms of samples
+
+thread role                                                ms  share   µs/req
+worker                                                  10750  78.1%    21.50
+edge-idle                                                2947  21.4%     5.89
+edge-monitor                                               69   0.5%     0.14
+edge-acceptor                                               5   0.0%     0.01
+
+worker phase (innermost)                                   ms  share   µs/req
+run: invoke_within_parkable                              2564  18.6%     5.13
+http: read(2) the request                                1847  13.4%     3.69
+http: write(2) the response                              1750  12.7%     3.50
+serve: setsockopt (read timeout, nodelay)                1094   7.9%     2.19
+settle                                                    931   6.8%     1.86
+isolate: OwnedVm::new (Deployed::isolate)                 877   6.4%     1.75
+idle: hand the connection to the idle thread              826   6.0%     1.65
+start                                                     419   3.0%     0.84
+boundary: request_value (build edge.Request)              283   2.1%     0.57
+runq: push                                                159   1.2%     0.32
+
+worker phase / leaf                                                                              ms   µs/req
+http: write(2) the response / __sendto                                                         1603     3.21
+http: read(2) the request / __recvfrom                                                         1282     2.56
+serve: setsockopt (read timeout, nodelay) / setsockopt                                         1088     2.18
+idle: hand the connection to the idle thread / __sendto                                         765     1.53
+run: invoke_within_parkable / _nanov2_free                                                      349     0.70
+run: invoke_within_parkable / nanov2_malloc_type                                                300     0.60
+run: invoke_within_parkable / vm::exec::encoded::dispatch                                       222     0.44
+start / s_9cove_e::server::_6Sha::run_worker                                                    160     0.32
+settle / _nanov2_free                                                                           155     0.31
+isolate: OwnedVm::new (Deployed::isolate) / nanov2_malloc_type                                  153     0.31
+settle / cove_runtime::vm::mem::Space                                                           109     0.22
+boundary: request_value (build edge.Request) / nanov2_malloc_type                               109     0.22
+isolate: OwnedVm::new (Deployed::isolate) / vm::exec::_7Mac::for_run                            107     0.21
+http: read(2) the request / s_9cove_e::http::read_request                                        94     0.19
+isolate: OwnedVm::new (Deployed::isolate) / vm::mem::_6Mem::new                                  92     0.18
+http: read(2) the request / nanov2_malloc_type                                                   87     0.17
+run: invoke_within_parkable / vm::exec::encoded::fused_append_bytes                              85     0.17
+run: invoke_within_parkable / cove_runtime::vm::boundary::into                                   80     0.16
+settle / vm::parked::OwnedVm::s_9cove_e                                                          67     0.13
+run: invoke_within_parkable / cove_runtime::vm::boundary::object_from_value                      67     0.13
+settle / s_9cove_e::server::_6Sha::settle                                                        62     0.12
+runq: push / __psynch_cvwait                                                                     54     0.11
+isolate: OwnedVm::new (Deployed::isolate) / pthread_mutex_lock                                   52     0.10
+http: read(2) the request / _platform_memmove$VARIANT$Haswell                                    48     0.10
+run: invoke_within_parkable / _platform_memcmp$VARIANT$Base                                      45     0.09
+settle / free_small                                                                              44     0.09
+settle / _platform_bzero$VARIANT$Haswell                                                         43     0.09
+start / _nanov2_free                                                                             43     0.09
+run: invoke_within_parkable / _platform_bzero$VARIANT$Haswell                                    41     0.08
+http: read(2) the request / pattern::_12C::_8Se::next_match                                      39     0.08
+run: invoke_within_parkable / _platform_memmove$VARIANT$Haswell                                  38     0.08
+isolate: OwnedVm::new (Deployed::isolate) / vm::mem::_5Spa::alloc                                36     0.07
+isolate: OwnedVm::new (Deployed::isolate) / pthread_mutex_unlock                                 36     0.07
+isolate: OwnedVm::new (Deployed::isolate) / s_9cove_e::deploy::_8::isolate                       35     0.07
+run: invoke_within_parkable / cove_runtime::vm::boundary::out                                    35     0.07
+http: read(2) the request / iter::_13Sp::next::s_9cove_e                                         34     0.07
+run: invoke_within_parkable / vm::exec::encoded::fused_push                                      34     0.07
+settle / _free                                                                                   34     0.07
+settle / s_9cove_e::server::_6Sha::finish                                                        33     0.07
+settle / _szone_free                                                                             32     0.06
+
+role / leaf                                                                                      ms   µs/req
+edge-idle / poll                                                                               2406     4.81
+edge-idle / __recvfrom                                                                          228     0.46
+edge-idle / s_9cove_e::idle::imp::run                                                            62     0.12
+edge-idle / __psynch_cvbroad                                                                     36     0.07
+edge-monitor / mach_msg2_trap                                                                    35     0.07
+
+inside invoke_within_parkable                                                                                        ms   µs/req
+cove_runtime::vm::_2Vm::words_of < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within      766     1.53
+vm::exec::_7Mac::run < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                  750     1.50
+cove_runtime::vm::_2Vm::left < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within          413     0.83
+cove_runtime::value::StructValue::drop_slow < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::che      147     0.29
+alloc::fmt::format::format_inner < qSvs_::cove_runtime::invoke::check < cove_runtime::vm::_2Vm::checked_within       82     0.16
+cove_sema::resolve::_7Pro::lookup_fn < qSvs_::cove_runtime::invoke::check < cove_runtime::vm::_2Vm::checked_wi       43     0.09
+cove_runtime::budget::_5Met::new < cove_runtime::vm::_2Vm::bind_budget < cove_runtime::vm::_2Vm::checked_withi       34     0.07
+nanov2_malloc_type < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                     31     0.06
+_nanov2_free < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                           27     0.05
+qSvs_::cove_runtime::invoke::check < cove_runtime::vm::_2Vm::checked_within                                          24     0.05
+cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                                          24     0.05
+unix::time::_8::now < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                    17     0.03
+qSvs_::cove_runtime::invoke::admits < qSvs_::cove_runtime::invoke::check < cove_runtime::vm::_2Vm::checked_wit       16     0.03
+_platform_memmove$VARIANT$Haswell                                                                                    14     0.03
+cove_runtime::budget::Accounting::drop_slow < cove_runtime::vm::_2Vm::bind_budget < cove_runtime::vm::_2Vm::ch       14     0.03
+cove_sema::facts::_5::signature < qSvs_::cove_runtime::invoke::check < cove_runtime::vm::_2Vm::checked_within        14     0.03
+qSvs_::cove_runtime::trace::TraceEvent < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_       13     0.03
+WPAnmGeBT_7cove_ir7programNtB5_7Program14function_named < cove_runtime::vm::_2Vm::lowered < cove_runtime::vm::       13     0.03
+_nanov2_free < cove_runtime::vm::_2Vm::bind_budget < cove_runtime::vm::_2Vm::checked_within                          12     0.02
+(self)                                                                                                               10     0.02
+DYLD-STUB$$__bzero < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                      9     0.02
+cove_runtime::vm::_2Vm::bind_budget < cove_runtime::vm::_2Vm::checked_within                                          9     0.02
+cove_runtime::vm::_2Vm::ended                                                                                         8     0.02
+_nanov2_free < qSvs_::cove_runtime::invoke::check < cove_runtime::vm::_2Vm::checked_within                            7     0.01
+0xfffffffffffffffe < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                      6     0.01
+cove_runtime::vm::_2Vm::checked_within                                                                                6     0.01
+_free < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                                   5     0.01
+_platform_memmove$VARIANT$Haswell < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_withi        4     0.01
+qSvs_::cove_runtime::value::Repr < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within        4     0.01
+_free < cove_runtime::vm::_2Vm::checked_within                                                                        4     0.01
+L9aB::_7_::___rdl_deallo < 0xfffffffffffffffe < cove_runtime::vm::_2Vm::checked_within                                3     0.01
+_malloc_zone_malloc < cove_runtime::vm::_2Vm::checked_within                                                          3     0.01
+free < cove_runtime::vm::_2Vm::enter_with < cove_runtime::vm::_2Vm::checked_within                                    2     0.00
+cove_runtime::vm::_2Vm::enter_with < 0xfffffffffffffffe                                                               2     0.00
+free < cove_runtime::vm::_2Vm::checked_within                                                                         2     0.00
+nanov2_try_free_default < cove_runtime::vm::_2Vm::checked_within                                                      2     0.00
+qSvs_::cove_runtime::invoke::check < 0xfffffffffffffffe                                                               2     0.00
+cove_runtime::vm::_2Vm::lowered < cove_runtime::vm::_2Vm::checked_within                                              2     0.00
+cove_runtime::vm::_2Vm::bind_budget < 0xfffffffffffffffe                                                              2     0.00
+L9aB::_7_::___rdl_deallo < cove_runtime::vm::_2Vm::checked_within                                                     1     0.00

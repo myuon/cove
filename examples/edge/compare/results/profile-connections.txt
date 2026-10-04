@@ -1,0 +1,134 @@
+# n=64: xctrace Time Profiler, cove-edge (fcf64a9 + idle counters), 10,000 hello req/s over 64 kept-alive connections, 40000 requests
+n=64 cpu   0:00.10 ->   0:03.48 load { 6.77 6.65 6.66 }
+  answered 40000 (40000 with 200), 0 failed to connect or read, in 4.00 s: 9993 req/s
+  latency ms: p50 1.0  p90 2.0  p99 2.8  max 3.6
+# 1509 ms of samples
+# 1509 ms of samples
+
+thread role                                                ms  share   µs/req
+worker                                                    877  58.1%    21.93
+edge-idle                                                 590  39.1%    14.75
+edge-monitor                                               41   2.7%     1.02
+edge-acceptor                                               1   0.1%     0.03
+
+worker phase (innermost)                                   ms  share   µs/req
+run: invoke_within_parkable                               198  13.1%     4.95
+http: read(2) the request                                 147   9.7%     3.67
+http: write(2) the response                               123   8.2%     3.08
+runq: push                                                 87   5.8%     2.17
+isolate: OwnedVm::new (Deployed::isolate)                  75   5.0%     1.88
+serve: setsockopt (read timeout, nodelay)                  66   4.4%     1.65
+start                                                      54   3.6%     1.35
+idle: hand the connection to the idle thread               48   3.2%     1.20
+settle                                                     46   3.0%     1.15
+boundary: request_value (build edge.Request)               33   2.2%     0.82
+
+worker phase / leaf                                                                              ms   µs/req
+http: read(2) the request / __recvfrom                                                          112     2.80
+http: write(2) the response / __sendto                                                          109     2.73
+serve: setsockopt (read timeout, nodelay) / setsockopt                                           65     1.62
+runq: push / __psynch_cvwait                                                                     42     1.05
+idle: hand the connection to the idle thread / __sendto                                          41     1.02
+run: invoke_within_parkable / _nanov2_free                                                       24     0.60
+start / s_9cove_e::server::_6Sha::run_worker                                                     24     0.60
+run: invoke_within_parkable / nanov2_malloc_type                                                 18     0.45
+run: invoke_within_parkable / vm::exec::encoded::dispatch                                        14     0.35
+boundary: request_value (build edge.Request) / nanov2_malloc_type                                14     0.35
+isolate: OwnedVm::new (Deployed::isolate) / nanov2_malloc_type                                   14     0.35
+runq: push / _8Run::_6serve::Job::take                                                            8     0.20
+
+role / leaf                                                                                      ms   µs/req
+edge-idle / poll                                                                                490    12.25
+edge-idle / __recvfrom                                                                           26     0.65
+edge-idle / __psynch_cvbroad                                                                     18     0.45
+
+# n=1000: xctrace Time Profiler, cove-edge (fcf64a9 + idle counters), 10,000 hello req/s over 1000 kept-alive connections, 40000 requests
+n=1000 cpu   0:00.10 ->   0:05.96 load { 7.48 6.80 6.71 }
+  answered 40000 (40000 with 200), 0 failed to connect or read, in 4.00 s: 9991 req/s
+  latency ms: p50 1.2  p90 2.5  p99 4.3  max 11.6
+# 3437 ms of samples
+# 3437 ms of samples
+
+thread role                                                ms  share   µs/req
+edge-idle                                                2254  65.6%    56.35
+worker                                                   1149  33.4%    28.73
+edge-monitor                                               33   1.0%     0.82
+edge-acceptor                                               1   0.0%     0.03
+
+worker phase (innermost)                                   ms  share   µs/req
+run: invoke_within_parkable                               244   7.1%     6.10
+http: read(2) the request                                 206   6.0%     5.15
+http: write(2) the response                               168   4.9%     4.20
+runq: push                                                110   3.2%     2.75
+settle                                                     98   2.9%     2.45
+serve: setsockopt (read timeout, nodelay)                  89   2.6%     2.23
+isolate: OwnedVm::new (Deployed::isolate)                  77   2.2%     1.93
+start                                                      73   2.1%     1.82
+idle: hand the connection to the idle thread               61   1.8%     1.52
+boundary: request_value (build edge.Request)               23   0.7%     0.57
+
+worker phase / leaf                                                                              ms   µs/req
+http: write(2) the response / __sendto                                                          154     3.85
+http: read(2) the request / __recvfrom                                                          133     3.33
+serve: setsockopt (read timeout, nodelay) / setsockopt                                           88     2.20
+idle: hand the connection to the idle thread / __sendto                                          50     1.25
+runq: push / __psynch_cvwait                                                                     45     1.12
+run: invoke_within_parkable / _nanov2_free                                                       30     0.75
+run: invoke_within_parkable / nanov2_malloc_type                                                 27     0.68
+start / s_9cove_e::server::_6Sha::run_worker                                                     23     0.57
+run: invoke_within_parkable / vm::exec::encoded::dispatch                                        21     0.53
+start / __sendto                                                                                 20     0.50
+settle / _nanov2_free                                                                            16     0.40
+isolate: OwnedVm::new (Deployed::isolate) / vm::mem::_6Mem::new                                  14     0.35
+
+role / leaf                                                                                      ms   µs/req
+edge-idle / poll                                                                               2001    50.02
+edge-idle / ?                                                                                   133     3.33
+edge-idle / s_9cove_e::idle::imp::run                                                            56     1.40
+
+# n=4000: xctrace Time Profiler, cove-edge (fcf64a9 + idle counters), 10,000 hello req/s over 4000 kept-alive connections, 40000 requests
+n=4000 cpu   0:00.09 ->   0:05.91 load { 7.39 6.81 6.72 }
+  answered 40000 (40000 with 200), 0 failed to connect or read, in 4.02 s: 9954 req/s
+  latency ms: p50 4.0  p90 8.2  p99 13.0  max 20.8
+# 3337 ms of samples
+# 3337 ms of samples
+
+thread role                                                ms  share   µs/req
+edge-idle                                                2309  69.2%    57.73
+worker                                                    973  29.2%    24.32
+edge-acceptor                                              28   0.8%     0.70
+edge-monitor                                               27   0.8%     0.68
+
+worker phase (innermost)                                   ms  share   µs/req
+run: invoke_within_parkable                               200   6.0%     5.00
+http: read(2) the request                                 144   4.3%     3.60
+start                                                     129   3.9%     3.23
+http: write(2) the response                               118   3.5%     2.95
+serve: setsockopt (read timeout, nodelay)                 101   3.0%     2.52
+isolate: OwnedVm::new (Deployed::isolate)                  75   2.2%     1.88
+settle                                                     69   2.1%     1.73
+idle: hand the connection to the idle thread               62   1.9%     1.55
+runq: push                                                 47   1.4%     1.18
+boundary: request_value (build edge.Request)               28   0.8%     0.70
+
+worker phase / leaf                                                                              ms   µs/req
+http: write(2) the response / __sendto                                                          107     2.67
+http: read(2) the request / __recvfrom                                                          100     2.50
+serve: setsockopt (read timeout, nodelay) / setsockopt                                           98     2.45
+start / __sendto                                                                                 68     1.70
+idle: hand the connection to the idle thread / __sendto                                          59     1.48
+run: invoke_within_parkable / _nanov2_free                                                       22     0.55
+start / s_9cove_e::server::_6Sha::run_worker                                                     17     0.42
+run: invoke_within_parkable / nanov2_malloc_type                                                 16     0.40
+run: invoke_within_parkable / vm::exec::encoded::dispatch                                        16     0.40
+boundary: request_value (build edge.Request) / nanov2_malloc_type                                13     0.33
+runq: push / __psynch_cvwait                                                                     12     0.30
+settle / _nanov2_free                                                                            12     0.30
+
+role / leaf                                                                                      ms   µs/req
+edge-idle / ?                                                                                  1413    35.33
+edge-idle / poll                                                                                814    20.35
+edge-idle / s_9cove_e::idle::imp::run                                                            46     1.15
+edge-acceptor / __accept                                                                         18     0.45
+edge-monitor / mach_msg2_trap                                                                    16     0.40
+

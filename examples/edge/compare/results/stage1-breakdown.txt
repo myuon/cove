@@ -1,0 +1,28 @@
+# ./target/release/cove-edge-compare --batches 7 --min-ms 200 --breakdown   (2026-10-04 23:29, load { 6.74 6.22 6.45 })
+mode    case              median ns/call   min..max ns/call   calls/batch
+edge    crunch n=2000             204264     203309..210910     1024
+vm      crunch n=2000             205950     199191..217184     1024
+native  crunch n=2000              67367      67134..68384      4096
+        crunch n=2000     native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+edge    crunch n=20000           4203182    4172919..4276712    64
+vm      crunch n=20000           4201037    4162459..4361506    64
+native  crunch n=20000           1338470    1332604..1358682    256
+        crunch n=20000    native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+edge    crunch n=150000         65878114   65049023..66610158   4
+vm      crunch n=150000         66819903   66721470..68069673   4
+native  crunch n=150000         20526229   20491159..20632233   16
+        crunch n=150000   native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+edge    hello name=Cove             8014       7907..8156       32768
+vm      hello name=Cove             3810       3797..3892       65536
+native  hello name=Cove             3763       3710..3789       65536
+        hello name=Cove   native: 5 of 5 reachable fn compiled; refused: -
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
+  request_value hello name=Cove              788        782..794        262144
+  isolate+drop hello name=Cove             1965       1956..1976       131072
+  budget hello name=Cove              138        138..140        2097152
+  isolate+invoke hello name=Cove             6965       6919..7070       32768
+  invoke, isolate reused hello name=Cove             4162       4128..4322       65536
+  response_of hello name=Cove               98         97..99         2097152
