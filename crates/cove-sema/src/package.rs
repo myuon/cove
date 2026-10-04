@@ -14,7 +14,7 @@ use crate::config::{self, Config};
 use crate::stdlib;
 
 /// One parsed `.cove` file.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Unit {
     pub file: FileId,
     pub path: PathBuf,
@@ -22,7 +22,7 @@ pub struct Unit {
 }
 
 /// One directory of `.cove` files.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Module {
     /// Dotted name derived from the directory path, such as `hello` or
     /// `booking.create`.

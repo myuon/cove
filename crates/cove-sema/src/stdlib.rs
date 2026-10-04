@@ -9,17 +9,33 @@
 //!
 //! # This is the precompile boundary
 //!
-//! [`attach`] parses the embedded source into the caller's [`SourceMap`]
-//! every time it is called, exactly as parsing any other module does. That
-//! is deliberate and temporary: nothing about the standard library changes
-//! between runs, so the day it is warm enough to matter, this is the one
-//! function that changes — to answer a cached checked
-//! [`Program`](crate::resolve::Program) or cached IR instead of parsing from
-//! scratch — and every caller stays as it is. Do not build that cache before
-//! there is a measurement asking for it; the point of writing it down here is
-//! that nothing outside this function has to know when it arrives.
+//! Nothing about the standard library changes between runs, so this is the
+//! one function that changes when it is warm enough to matter — to answer a
+//! cached checked [`Program`](crate::resolve::Program) or cached IR instead
+//! of parsing from scratch — and every caller stays as it is.
+//!
+//! The first step of that has been measured and taken: [`attach`] parses the
+//! library **once per process** for each [`FileId`](cove_diag::FileId) it
+//! starts at, and answers every later call that starts at the same one with
+//! a copy of the same trees. A host that compiles many packages in one
+//! process — the edge server of `examples/edge`, which compiles one per
+//! tenant — was spending about 5.6 ms of a 15 ms deploy parsing 8,900 lines
+//! it had already parsed, and the tenant's own share of the front end was
+//! too small to measure. A `cove` command compiles once, so it parses once,
+//! as it always did.
+//!
+//! What is cached is only what a parse produces, and a parse is a function
+//! of the text and the [`FileId`](cove_diag::FileId) its spans carry and
+//! nothing else, so a copy is the tree a fresh parse would have built. That
+//! is why the key is the starting id: the trees cannot be moved to other ids
+//! without rewriting every span in them. Resolving and checking the library — the next 8 ms —
+//! is still done per package, because both run over the whole package at
+//! once; caching them is [issue 569](https://github.com/myuon/cove/issues/569)'s
+//! separate compilation, not a cache in this function.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cove_diag::{Diagnostic, SourceMap};
 
@@ -240,7 +256,63 @@ pub fn install(
 
 /// See the module doc for what this function is allowed to become without
 /// its callers changing.
+///
+/// The library's files are added to `sources` on every call. Whether they
+/// are parsed again depends on where they land: the trees parsed the first
+/// time they were added at these ids are answered again, as a copy, and a
+/// function declaration's body is shared rather than copied — nothing
+/// writes to one after the parse numbers it.
 pub fn attach(sources: &mut SourceMap) -> Result<Vec<(String, Module)>, Vec<Diagnostic>> {
+    let base = sources.len() as u32;
+    if let Some(parsed) = parsed_at(base) {
+        for source in SOURCES {
+            sources.add_library(PathBuf::from(source.path), source.text);
+        }
+        return Ok(parsed.to_vec());
+    }
+    let modules = parse(sources)?;
+    remember(base, &modules);
+    Ok(modules)
+}
+
+/// How many starting ids [`attach`] keeps a parse for.
+///
+/// Every package a host composes the same way starts the library at the
+/// same id — a tenant of one file at 1 — so one entry serves a host
+/// compiling thousands of packages alike; the bound is for a process that
+/// compiles packages of many different file counts, which then parses as it
+/// always did rather than holding a copy of the trees per count.
+const PARSED_LIMIT: usize = 8;
+
+/// The parses [`attach`] has kept, by the id the library's first file had.
+type Parsed = HashMap<u32, Arc<[(String, Module)]>>;
+
+fn parsed() -> &'static Mutex<Parsed> {
+    static PARSED: OnceLock<Mutex<Parsed>> = OnceLock::new();
+    PARSED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The library as parsed starting at `base`, if [`attach`] has parsed it there.
+fn parsed_at(base: u32) -> Option<Arc<[(String, Module)]>> {
+    parsed()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&base)
+        .cloned()
+}
+
+fn remember(base: u32, modules: &[(String, Module)]) {
+    let mut parsed = parsed()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if parsed.len() < PARSED_LIMIT {
+        parsed.entry(base).or_insert_with(|| modules.into());
+    }
+}
+
+/// Adds the library's files to `sources` and parses them, as [`attach`] did
+/// before it kept anything.
+fn parse(sources: &mut SourceMap) -> Result<Vec<(String, Module)>, Vec<Diagnostic>> {
     let mut modules = Vec::with_capacity(SOURCES.len());
     let mut diagnostics = Vec::new();
     for source in SOURCES {
@@ -271,6 +343,37 @@ pub fn attach(sources: &mut SourceMap) -> Result<Vec<(String, Module)>, Vec<Diag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A kept parse is the parse: the same trees, with the same spans and
+    /// the same expression ids, as parsing the text again at the same ids —
+    /// both for a map the library is the first thing in and for one that
+    /// already holds a file of the program's.
+    #[test]
+    fn a_kept_parse_is_what_parsing_again_would_build() {
+        for before in [0, 1, 3] {
+            let fresh = |sources: &mut SourceMap| {
+                for i in 0..before {
+                    sources.add(format!("app{i}.cove"), "");
+                }
+            };
+            let mut first = SourceMap::new();
+            fresh(&mut first);
+            let kept = attach(&mut first).expect("the embedded standard library parses");
+            let mut again = SourceMap::new();
+            fresh(&mut again);
+            let reused = attach(&mut again).expect("the embedded standard library parses");
+            let mut reference = SourceMap::new();
+            fresh(&mut reference);
+            let parsed = parse(&mut reference).expect("the embedded standard library parses");
+            assert_eq!(format!("{kept:?}"), format!("{parsed:?}"));
+            assert_eq!(format!("{reused:?}"), format!("{parsed:?}"));
+            assert_eq!(again.len(), reference.len());
+            for (a, b) in again.files().zip(reference.files()) {
+                assert_eq!((a.id, &a.path, &a.text), (b.id, &b.path, &b.text));
+                assert_eq!(again.is_library(a.id), reference.is_library(b.id));
+            }
+        }
+    }
 
     #[test]
     fn attaches_every_module_it_names() {
