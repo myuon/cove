@@ -891,3 +891,134 @@ fn concurrent_interpreters_over_one_registry_are_charged_to_their_own_budgets() 
         worker.join().expect("every run was charged its own calls");
     }
 }
+
+// ----------------------------------------- a parked run keeps its deadline (0082)
+
+/// A budget with nothing but a deadline, and the flag that cancels it.
+fn within(
+    deadline: Option<std::time::Duration>,
+) -> (cove_runtime::Budget, cove_runtime::Cancellation) {
+    let cancellation = cove_runtime::Cancellation::new();
+    let budget = cove_runtime::Budget::with_cancellation(
+        cove_runtime::Limits {
+            deadline,
+            ..cove_runtime::Limits::default()
+        },
+        cancellation.clone(),
+    );
+    (budget, cancellation)
+}
+
+/// `main`, started parkably within `budget`, at its first park.
+fn parked_within(world: &World, budget: cove_runtime::Budget) -> ParkedVm {
+    match world
+        .vm()
+        .invoke_within_parkable(budget, "app", "main", Vec::new())
+    {
+        Step::Parked(parked) => parked,
+        Step::Answered(_, answer) => panic!("the first get parks: {}", shown(answer)),
+    }
+}
+
+/// A parked run says what its deadline leaves, and a run with none says so.
+#[test]
+fn a_parked_run_says_what_its_deadline_leaves() {
+    let world = world();
+    let hour = std::time::Duration::from_secs(3600);
+    let parked = parked_within(&world, within(Some(hour)).0);
+    let left = parked.time_left().expect("the run has a deadline");
+    assert!(left > std::time::Duration::ZERO && left <= hour, "{left:?}");
+    let parked = parked_within(&world, within(None).0);
+    assert_eq!(parked.time_left(), None);
+}
+
+/// A deadline kept running while the run was parked: once it has passed, the
+/// run says nothing is left, and resuming it fails at once with the deadline
+/// stop — the answer is never written, however promptly it came.
+#[test]
+fn a_parked_run_resumed_past_its_deadline_stops_with_the_deadline() {
+    let world = world();
+    let mut parked = parked_within(&world, within(Some(std::time::Duration::from_millis(1))).0);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(parked.time_left(), Some(std::time::Duration::ZERO));
+    let request = parked
+        .take_request()
+        .unwrap()
+        .downcast::<Request>()
+        .unwrap();
+    let Step::Answered(_, Err(error)) = parked.resume(Ok(Transfer::Int(reply(&request)))) else {
+        panic!("a run past its deadline does not take its answer");
+    };
+    assert_eq!(
+        error.message,
+        "execution stopped: wall-clock deadline of 1ms exceeded"
+    );
+    assert_eq!(error.outcome, cove_runtime::trace::RunOutcome::Deadline);
+}
+
+/// `cancel` ends a parked run before its deadline as cancelled, writes the
+/// trace a stopped run writes — the parked call with the stop as its
+/// outcome, then the entry's exit and the run's end — and hands the machine
+/// back for its next run.
+#[test]
+fn a_cancelled_parked_run_ends_with_a_trace_that_says_so() {
+    let world = world();
+    world.events.taken();
+    let parked = parked_within(&world, within(Some(std::time::Duration::from_secs(3600))).0);
+    let (mut vm, error) = parked.cancel();
+    assert_eq!(error.message, "execution stopped: the run was cancelled");
+    assert_eq!(error.outcome, cove_runtime::trace::RunOutcome::Cancelled);
+    let events = world.events.taken();
+    let calls: Vec<&String> = events.iter().filter(|e| e.starts_with("host ")).collect();
+    assert_eq!(calls.len(), 1, "{events:#?}");
+    assert!(
+        calls[0].contains("fetch.get") && calls[0].contains("the run was cancelled"),
+        "{events:#?}"
+    );
+    let last = events.last().expect("the run wrote events");
+    assert!(
+        last.starts_with("RunEnded") && last.contains("Cancelled"),
+        "{events:#?}"
+    );
+    assert!(events.iter().any(|e| e == "exit app.main"), "{events:#?}");
+
+    let (expected, _) = world.blocking("main");
+    assert_eq!(shown(vm.invoke("app", "main", Vec::new())), expected);
+}
+
+/// `cancel` on a run whose deadline has passed reports the deadline, which is
+/// what a scheduler timing a run out by `time_left` is told.
+#[test]
+fn a_parked_run_cancelled_past_its_deadline_stops_with_the_deadline() {
+    let world = world();
+    world.events.taken();
+    let parked = parked_within(&world, within(Some(std::time::Duration::from_millis(1))).0);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let (_, error) = parked.cancel();
+    assert_eq!(error.outcome, cove_runtime::trace::RunOutcome::Deadline);
+    let events = world.events.taken();
+    let last = events.last().expect("the run wrote events");
+    assert!(
+        last.starts_with("RunEnded") && last.contains("Deadline"),
+        "{events:#?}"
+    );
+}
+
+/// A run whose flag was raised while it was parked is cancelled when it is
+/// resumed, without its answer.
+#[test]
+fn a_parked_run_whose_flag_was_raised_is_cancelled_when_resumed() {
+    let world = world();
+    let (budget, cancellation) = within(None);
+    let mut parked = parked_within(&world, budget);
+    cancellation.cancel();
+    let request = parked
+        .take_request()
+        .unwrap()
+        .downcast::<Request>()
+        .unwrap();
+    let Step::Answered(_, Err(error)) = parked.resume(Ok(Transfer::Int(reply(&request)))) else {
+        panic!("a cancelled run does not take its answer");
+    };
+    assert_eq!(error.outcome, cove_runtime::trace::RunOutcome::Cancelled);
+}
