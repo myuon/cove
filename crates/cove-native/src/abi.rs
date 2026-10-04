@@ -279,6 +279,135 @@ pub type Entry = unsafe extern "C" fn(
     return_slot: u32,
 ) -> Outcome;
 
+/// A compiled function entered **part-way through**, at a resume point.
+///
+/// [ADR 0085]: a run that yielded inside compiled code leaves every compiled
+/// frame standing as the VM frame it already is — its slots in the word stack,
+/// its record on the frame stack, its `pc` the instruction it resumes at — and
+/// unwinds the native stack. Resuming it, on whatever thread, re-enters each
+/// frame's code here: the same prologue [`Entry`] runs, over the same four
+/// arguments, and then a jump to `at` instead of a fall into the first block.
+///
+/// `at` is an address [`ResumePoints`] answered for this function and nothing
+/// else. It is the start of a block, or the instant after a call's template —
+/// the two places at which nothing but the frame, the context and the prologue's
+/// registers is live (the code generator re-derives its frame pointer at both,
+/// and "Values stay in the frame" in this module's documentation says why no
+/// Cove value is anywhere else), which is the whole reason a resume needs no
+/// saved register state.
+///
+/// # Safety
+///
+/// As [`Entry`], and `at` is one of this function's own resume points.
+///
+/// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+pub type ResumeEntry = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    base: u64,
+    return_base: u64,
+    return_slot: u32,
+    at: *const u8,
+) -> Outcome;
+
+/// Where one compiled function may be re-entered, and how.
+///
+/// Three kinds of point, because those are the places a yielded compiled frame
+/// can stand:
+///
+/// - **a block's start** — the innermost frame, when it yielded at a
+///   backedge's safepoint and stands before the loop head it was jumping to.
+///   The block's static work is charged *after* this point, as the
+///   uninterrupted jump would have charged it;
+/// - **an instruction's start** — the innermost frame, when it yielded at the
+///   safepoint an allocation or a call takes before it does anything else. The
+///   instruction is run again from its first byte, which is after its block's
+///   charge, and takes that safepoint itself;
+/// - **the instant after a call** — every other compiled frame, which is
+///   waiting on the call above it and resumes, once that call has answered into
+///   its destination, at the instruction after it.
+///
+/// Addresses into one finalized, read-execute mapping, which never moves and
+/// is never written again; so a table is as good on any thread as on the one
+/// that built it.
+#[derive(Clone, Debug)]
+pub struct ResumePoints {
+    /// The resume prologue.
+    pub entry: ResumeEntry,
+    /// The first byte of the function's code.
+    code: *const u8,
+    /// Per IR instruction, the offset of the block that begins there, or
+    /// [`ResumePoints::NONE`].
+    blocks: Box<[u32]>,
+    /// Per IR instruction, the offset of its template's first byte where it is
+    /// an instruction that may yield before it does anything — an allocation
+    /// or a call — or [`ResumePoints::NONE`].
+    insts: Box<[u32]>,
+    /// Per IR instruction, the offset just past that call's template, or
+    /// [`ResumePoints::NONE`] where the instruction is not a call.
+    returns: Box<[u32]>,
+}
+
+// Safety: `code` and every address derived from it point into a finalized
+// mapping, which is read-execute and never written or unmapped while the code
+// generator that owns it is alive — the same promise `Entry` values are
+// `Send + Sync` under.
+unsafe impl Send for ResumePoints {}
+unsafe impl Sync for ResumePoints {}
+
+impl ResumePoints {
+    /// The offset that means "no resume point here".
+    pub const NONE: u32 = u32::MAX;
+
+    /// A table over `code`, from the per-instruction offsets the code generator
+    /// recorded.
+    ///
+    /// # Safety
+    ///
+    /// `entry` is the resume prologue of the function whose code starts at
+    /// `code`, and every offset other than [`ResumePoints::NONE`] is a resume
+    /// point of that code of the kind its table names.
+    pub unsafe fn new(
+        entry: ResumeEntry,
+        code: *const u8,
+        blocks: Box<[u32]>,
+        insts: Box<[u32]>,
+        returns: Box<[u32]>,
+    ) -> ResumePoints {
+        ResumePoints {
+            entry,
+            code,
+            blocks,
+            insts,
+            returns,
+        }
+    }
+
+    /// The start of the block that begins at `pc`, if one does.
+    pub fn at_block(&self, pc: u32) -> Option<*const u8> {
+        self.point(&self.blocks, pc)
+    }
+
+    /// The first byte of the instruction at `pc`, if it is one that may yield
+    /// before it does anything.
+    pub fn at_instruction(&self, pc: u32) -> Option<*const u8> {
+        self.point(&self.insts, pc)
+    }
+
+    /// The instant after the call at `pc`, if `pc` is a call.
+    pub fn after_call(&self, pc: u32) -> Option<*const u8> {
+        self.point(&self.returns, pc)
+    }
+
+    fn point(&self, table: &[u32], pc: u32) -> Option<*const u8> {
+        match table.get(pc as usize).copied() {
+            None | Some(ResumePoints::NONE) => None,
+            // Safety: the offset is inside the mapping `code` starts, which is
+            // `new`'s contract.
+            Some(offset) => Some(unsafe { self.code.add(offset as usize) }),
+        }
+    }
+}
+
 /// How a compiled function left.
 ///
 /// `#[repr(u32)]` with the three values written out, because the generated

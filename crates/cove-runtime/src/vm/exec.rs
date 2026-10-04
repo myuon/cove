@@ -543,12 +543,20 @@ pub(crate) struct Machine<'a> {
     /// frames are the continuation, and the instruction the loop was about to
     /// run is the one it runs on resuming.
     yielded: Option<Instant>,
+    /// Where a run that yielded *inside compiled code* stands: the index of
+    /// the outermost compiled frame its yield left standing, which
+    /// `native::resume` re-enters down to ([ADR 0085]). `None` for a yield the
+    /// dispatch loop took, and whenever the run is not yielded.
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    yielded_native: Option<native::Yielded>,
     /// How long this run has spent yielded: neither its own work nor a host's,
     /// so an entry's `cpu` leaves it out as it leaves out host wait.
     descheduled: Duration,
     /// Safepoints at which a yield was asked for and this run could not give
-    /// its thread up — inside a callback, beside a running task, below a
-    /// compiled frame, or under a debugger. The request stays raised, and
+    /// its thread up — inside a callback, beside a running task, below an
+    /// encoded callee of compiled code, under a debugger, or over a frame with
+    /// no resume point. The request stays raised, and
     /// the run yields at the first safepoint where it can.
     yields_declined: u64,
     /// Which task this machine is running, for a trace and for the way back
@@ -974,6 +982,7 @@ impl<'a> Machine<'a> {
             suspended: None,
             yield_request: None,
             yielded: None,
+            yielded_native: None,
             descheduled: Duration::ZERO,
             yields_declined: 0,
             task: ENTRY_TASK,
@@ -1058,6 +1067,7 @@ impl<'a> Machine<'a> {
             suspended: None,
             yield_request: None,
             yielded: None,
+            yielded_native: None,
             descheduled: Duration::ZERO,
             yields_declined: 0,
             task,
@@ -1466,27 +1476,6 @@ impl<'a> Machine<'a> {
     #[inline]
     pub(crate) fn safepoint_due(&self) -> bool {
         self.poll_budget() == 0
-    }
-
-    /// [`Machine::safepoint`] if one is due, and nothing otherwise: a poll.
-    ///
-    /// What the two native call helpers take instead of an unconditional
-    /// safepoint. The allocating helpers still take one every time, which is
-    /// ADR 0055's "around allocation" and which ADR 0078 leaves standing. See
-    /// [`safepoint_due`](Machine::safepoint_due) and [ADR 0078].
-    ///
-    /// [ADR 0078]: ../../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
-    #[inline]
-    pub(crate) fn safepoint_if_due(
-        &mut self,
-        budget: &Meter,
-        id: FunctionId,
-        pc: usize,
-    ) -> Result<(), RuntimeError> {
-        match self.safepoint_due() {
-            true => self.safepoint(budget, id, pc),
-            false => Ok(()),
-        }
     }
 
     /// What every collection so far has done.
@@ -2388,6 +2377,33 @@ impl<'a> Machine<'a> {
         Err(RuntimeError::new("yielded at a safepoint"))
     }
 
+    /// How many compiled frames a yield inside compiled code left standing, or
+    /// nought for any other yield and for a run that is not yielded.
+    pub(crate) fn yielded_compiled_frames(&self) -> usize {
+        self.yielded_native
+            .map_or(0, |yielded| self.frames.len().saturating_sub(yielded.floor))
+    }
+
+    /// Counts a safepoint at which a requested yield could not be honoured.
+    fn decline_yield(&mut self) {
+        self.yields_declined += 1;
+    }
+
+    /// Gives the thread up at a safepoint inside compiled code, whose chain's
+    /// outermost frame is at `floor` ([ADR 0085]).
+    ///
+    /// `offer_yield`'s bookkeeping less its count adjustment: compiled code
+    /// counts no dispatched instruction, so there is none to take back. The
+    /// work the frame did since its last safepoint is already on `bulk_work`
+    /// and the safepoint has not been taken; `native::resume` takes it first.
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    fn yield_compiled(&mut self, yielded: native::Yielded) {
+        self.clear_yield_request();
+        self.yielded = Some(Instant::now());
+        self.yielded_native = Some(yielded);
+    }
+
     /// Whether the run gave its thread up at a safepoint and is waiting for
     /// [`Machine::resume_yielded`].
     pub(crate) fn is_yielded(&self) -> bool {
@@ -2427,8 +2443,44 @@ impl<'a> Machine<'a> {
     /// If the run is not yielded. [`crate::YieldedVm`] is the only caller.
     pub(crate) fn resume_yielded(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
         self.unyield();
+        // A request raised while the run waited is not one for the slice that
+        // begins now, as one raised before a run begins is not (ADR 0084 §1).
+        // Left raised, it would be honoured at the very safepoint the run
+        // stands before — the first thing a resumed run reaches — and a run
+        // resumed with its flag up would yield again having done nothing, as
+        // often as it was resumed (ADR 0085).
+        self.clear_yield_request();
+        if let Some(yielded) = self.yielded_native.take() {
+            // ADR 0085: the compiled frames first, each re-entered where it
+            // stands, down to the one the encoded tier called; then the loop,
+            // at the instruction after that call, as `from_encoded`'s caller
+            // would have gone on.
+            //
+            // Safety: the run yielded inside compiled code with this floor,
+            // and a yielded run's frames are touched by nothing until it is
+            // resumed or stopped.
+            if let Err(error) = unsafe { native::resume(self, budget, yielded) } {
+                if self.yielded.is_some() {
+                    return Ok(Vec::new());
+                }
+                return Err(self.failed_below(error, yielded.floor, budget));
+            }
+        }
         let code = self.code()?;
         self.drive(&code, budget)
+    }
+
+    /// Ends a run whose resumed compiled frames failed, the way
+    /// [`Machine::drive`] ends one whose dispatch did — with the span of the
+    /// encoded `call` the chain was entered at, for an error that has none of
+    /// its own, as that call's arm would have added it.
+    fn failed_below(&mut self, error: RuntimeError, floor: usize, budget: &Meter) -> RuntimeError {
+        let caller = self.frames[floor - 1];
+        let error = error.at(self.span(caller.function, caller.pc as usize - 1));
+        let error = self.attach_call_chain(error);
+        self.give_cells_back(0);
+        self.spend_pending_fuel(budget);
+        error
     }
 
     /// Ends a yielded run with `stopped`, as the safepoint it yielded at
@@ -2443,8 +2495,11 @@ impl<'a> Machine<'a> {
     ) -> Result<Vec<u64>, RuntimeError> {
         self.unyield();
         // The count `offer_yield` took back: the stopped safepoint is reached
-        // with the instruction after it counted, and charges it.
-        self.instructions += 1;
+        // with the instruction after it counted, and charges it. A yield inside
+        // compiled code took nothing back (ADR 0085).
+        if self.yielded_native.take().is_none() {
+            self.instructions += 1;
+        }
         let frame = self.frames.last().expect("a yielded run is in a frame");
         let span = self.span(frame.function, frame.pc as usize);
         let error = self.attach_call_chain(budget.to_runtime_error(stopped).at(span));
