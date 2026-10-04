@@ -63,7 +63,9 @@ that perform real fetches (default 4). Flags: `--workers N`, `--latency MIN..MAX
 `--pool N` (resident isolates instead of fresh ones), `--blocking-upstream`
 (the control: `upstream.get` sleeps on the worker instead of parking),
 `--quiet` (no `log.info` lines), `--no-keep-alive`, `--idle-timeout MS`,
-`--max-requests N` (see [keep-alive](#keep-alive)).
+`--max-requests N` (see [keep-alive](#keep-alive)), `--timeline PATH` (record
+where every request ran; see [watching requests move between
+threads](#watching-requests-move-between-threads)).
 
 ## Checking and testing a tenant
 
@@ -494,6 +496,136 @@ request. They used to come with a warning to wait half a minute between two
 10,000-connection runs; see [keep-alive](#keep-alive) for why that is no
 longer needed. The generator still gives up on a request after 30 s and
 counts it, rather than hanging.
+
+## Watching requests move between threads
+
+`--timeline PATH` makes the server record, for every tenant request, when it
+was accepted and queued, which worker started its run, where it parked and
+at which host call, who answered (`timer` for a simulated `upstream.get`,
+`fetcher` for a real `upstream.fetch`, `deadline` for a run cancelled at its
+deadline), which worker resumed it, and when its response was written —
+timestamps in microseconds since the server started, plus the run's fuel,
+host calls and heap at `run_end` (`OwnedVm::meter`). `GET /_timeline` dumps
+it (and rewrites `PATH`); `GET /_timeline?reset` forgets it.
+[`host/src/timeline.rs`](host/src/timeline.rs) has one buffer per worker and
+one for the parking lot, each locked only by its own thread except during a
+dump, so recording adds no shared lock, counter or channel to the hot path.
+
+One mixed run, one file, one picture:
+
+```console
+$ cargo run --release -p cove-edge -- --quiet --timeline /tmp/edge-timeline.json
+$ cargo run --release -p cove-edge --bin cove-edge-load -- \
+    --mix default --requests 300 --concurrency 50 --keep-alive --rate 400 \
+    --timeline-out timeline.json
+…
+  aggregate  46 x 200
+  counter    54 x 200
+  hello      165 x 200
+  impatient  9 x 200, 13 x 504
+  proxy      13 x 200
+timeline: 1900 events written to timeline.json
+$ cargo run --release -p cove-edge --bin cove-edge-timeline -- timeline.json \
+    -o timeline.html --perfetto timeline.perfetto.json --svg timeline.svg
+313 requests over 1180.2 ms on 4 workers; 195 parks, at most 28 parked at once
+resumed on a different worker: 134 of 182 (74%); timeouts (504): 13
+latency p50 0.08 ms, p99 342.01 ms; wait for a worker at start p50 0.018 ms (max 0.11), at resume p50 0.011 ms (max 0.10)
+workers busy: w0 0.3%, w1 0.3%, w2 0.3%, w3 0.3%; runs begun elsewhere while a request was parked: 44.1 on average
+simulated answers put on the run queue after their due time by p50 3.71 ms, max 144.07 ms
+```
+
+`--mix default` is `hello=50,counter=20,aggregate=20,proxy=5,impatient=5`,
+chosen per request from its index, so the same command asks the same
+sequence: `proxy` fetches `hello` from the same server, and half of
+`impatient`'s requests ask the `hang` service and are cancelled at its
+300 ms deadline. `--rate 400` starts request *i* no sooner than *i*/400 s
+into the run, so arrivals spread over 750 ms instead of all landing in the
+first few; without it the 50 connections are all parked on slow tenants
+within milliseconds and the picture is a wall at the left edge.
+
+`timeline.html` is one file with no external resource: a summary row, the
+legend, the figure, a hover readout for every row and run (request, tenant,
+path, each run segment with its worker and duration, each park with its host
+call, who answered, how long after its due time, and which worker resumed
+it), and a table of every request. `timeline.svg` is the figure alone, with
+its summary and legend inside it — this one, from the run above (it follows
+the system's light or dark scheme):
+
+![Worker swimlanes above, one lane per request below, on a shared time axis](timeline.svg)
+
+The top view is the four workers, a bar wherever one is running a tenant's
+isolate (a run of 20 µs is drawn 1.5 px wide); the bottom view is one row per
+request in arrival order — a bar where it runs, a thin line in its tenant's
+colour where it is parked, grey where it waits for a worker, a black diamond
+where it resumed on a worker other than the one it parked on, and a red
+cross labelled 504 where its deadline cancelled it.
+
+What it shows, from this run:
+
+- **Requests move freely.** 134 of the 182 resumes (74%) were on a different
+  worker from the one the run parked on — `aggregate` 105 of 138, `impatient`
+  20 of 31, `proxy` 9 of 13. That is what four interchangeable workers give
+  by chance (three in four): the run queue has no affinity, and a `ParkedVm`
+  needs none.
+- **Parked requests cost the workers nothing.** Each worker was busy 0.3% of
+  the 1.18 s; the median run segment is 20 µs and the longest 238 µs (a
+  `hello`). While a request was parked, 10.8 other runs on average began on
+  the very worker it had parked on, 7.8 of them other tenants' (up to 48), and
+  at most 28 requests were parked at once on four threads.
+- **No queueing at resume at this load.** An answer waited for a free worker
+  11 µs at the median and 0.10 ms at worst, and a new request 18 µs (0.11 ms)
+  — the grey segments are invisible at this scale.
+- **Every 504 is `impatient`'s `hang`.** All 13 timeouts are
+  `?services=weather,hang`, and all 9 `weather,stocks` requests answered 200.
+  The timer cancelled them 6.5 ms after the 300 ms deadline at the median.
+- **`proxy`'s fetches are short and nested.** Its parks lasted 0.17–0.26 ms,
+  and the `hello` each one fetched is a row of its own (313 rows for 300
+  client requests).
+- **The surprise is the clock once the load stops.** While requests kept
+  arriving, a simulated answer reached the run queue 3.3 ms after it was due
+  at the median (28.6 ms at worst). After the last arrival, at 747 ms, the
+  server is idle and the parking lot's `recv_timeout` starts waking late:
+  21 answers p50 34 ms and up to 144 ms late, released in batches — the
+  columns of diamonds at 860 ms (11 answers), 925 ms (6) and 965 ms (3) —
+  and the last `impatient` request's deadline fired 147 ms late, which is
+  why its 504 sits at 447 ms. It is the macOS idle-timer overshoot described
+  under [numbers](#numbers), now visible per request.
+
+The same timeline opens in Perfetto: go to <https://ui.perfetto.dev> and drag
+`timeline.perfetto.json` in (or *Open trace file*; `chrome://tracing` reads it
+too). Each worker is a thread track with a slice per run segment named
+`tenant #id`; flow arrows join the segment that parked to the one that
+resumed, so a migration is an arrow between two worker tracks; each request
+has an async track of its own with its queued, parked and
+ready-but-waiting intervals nested inside it; the accept, parking-lot and
+fetch-pool tracks carry an instant per accepted connection and per answer;
+and a `parked runs` counter track draws how many were parked over time. In
+Perfetto's SQL page, `select count(*) from flow` for the run above answers
+195, one per park.
+
+**What recording costs: nothing measurable.** Same machine as above, load
+average 4 to 5, three rounds each alternating a server without and with
+`--timeline` (the recorded run reset before and dumped after, outside the
+timed window): `hello` with keep-alive, 50,000 requests at 32 in flight,
+53,822 / 55,326 / 54,825 req/s without and 53,573 / 54,528 / 57,030 with;
+the default mix, 5,000 requests at 500 in flight, 7,417 / 7,410 / 7,441
+against 7,420 / 7,428 / 7,409. That `hello` run is the worst case — four
+events per request and nothing to wait on — and its spread between rounds is
+larger than any difference between the modes.
+
+The stress run is the same command at `--requests 5000 --concurrency 500`
+and no `--rate`: 5,267 requests in the timeline, 3,627 parks, 500 parked at
+once, 2,648 of 3,503 resumes (76%) on another worker, 124 timeouts, each
+worker busy 6.2%, the wait for a worker at most 2.25 ms at start and 2.13 ms
+at resume, and the timer 0.22 ms late at the median (25.9 ms at worst) — a
+busy timer thread wakes on time. 32,716 events are 2.8 MB of timeline, a
+4.4 MB page (rows shrink to 4 px; the figure is drawn for the 300-request
+run) and an 8.7 MB Perfetto trace, all three written in 0.23 s.
+`host/tests/timeline.rs` runs a small mix in-process with recording on and
+checks the timeline's shape: every request has its run start and end, every
+park an answer and a resume or a cancel on a recorded worker, the Perfetto
+JSON parses with one flow start and one finish per park, and the page holds
+the figure and every tenant in its legend.
 
 ## What was awkward
 

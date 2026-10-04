@@ -29,13 +29,17 @@ pub mod fetch;
 pub mod hosts;
 pub mod http;
 pub mod idle;
+pub mod json;
 pub mod os;
+pub mod picture;
 pub mod server;
+pub mod timeline;
 pub mod toolchain;
 
 pub use deploy::{DeployOptions, State, Tenant};
 pub use hosts::Latency;
 pub use server::{Isolates, KeepAlive, Server, ServerOptions};
+pub use timeline::Recording;
 
 /// Where the demo's tenants live, relative to this crate.
 pub fn tenants_root() -> std::path::PathBuf {

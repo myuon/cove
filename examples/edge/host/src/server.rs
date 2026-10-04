@@ -64,6 +64,7 @@ use crate::hosts::{fetch_answer, result_value, upstream_answer, upstream_latency
 use crate::http::{holds_a_head, read_request, Request, Response};
 use crate::idle::{Conn, Idle};
 use crate::os;
+use crate::timeline::{By, Recorder, Recording, What};
 
 /// Whether a request gets a fresh isolate or a resident one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +100,9 @@ pub struct ServerOptions {
     pub keep_alive: KeepAlive,
     /// How many threads perform `upstream.fetch`es.
     pub fetchers: usize,
+    /// Record every request's timeline (`--timeline`), dumped by
+    /// `GET /_timeline`.
+    pub timeline: Option<Recording>,
 }
 
 /// Whether, and for how long, a connection is kept open between requests.
@@ -154,8 +158,15 @@ impl Server {
             .enumerate()
             .map(|(at, tenant)| (tenant.name.clone(), at))
             .collect();
+        let started = Instant::now();
+        let timeline = options
+            .timeline
+            .clone()
+            .map(|recording| Recorder::new(options.workers.max(1), started, recording));
         let shared = Arc::new(Shared {
             stats: Stats::new(&tenants),
+            timeline,
+            requests: AtomicU64::new(0),
             pools: tenants.iter().map(|_| Mutex::new(Vec::new())).collect(),
             tenants,
             by_name,
@@ -165,7 +176,7 @@ impl Server {
             fetcher,
             idle: OnceLock::new(),
             options,
-            started: Instant::now(),
+            started,
             calls: AtomicU64::new(0),
         });
         {
@@ -187,7 +198,7 @@ impl Server {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name(format!("edge-worker-{at}"))
-                .spawn(move || shared.run_worker())
+                .spawn(move || shared.run_worker(at))
                 .map_err(|e| e.to_string())?;
         }
         {
@@ -219,10 +230,18 @@ impl Server {
     pub fn stats(&self) -> String {
         self.shared.render_stats()
     }
+
+    /// The request timeline recorded so far, if recording is on — what
+    /// `GET /_timeline` answers.
+    pub fn timeline(&self) -> Option<String> {
+        self.shared.dump_timeline()
+    }
 }
 
 /// A request in flight: the connection it owes an answer to, and its tenant.
 struct Flight {
+    /// The request's id, which the timeline records it under.
+    id: u64,
     conn: Conn,
     tenant: usize,
     accepted: Instant,
@@ -326,6 +345,10 @@ struct Shared {
     stats: Stats,
     options: ServerOptions,
     started: Instant,
+    /// The request timeline, when `--timeline` is on.
+    timeline: Option<Recorder>,
+    /// Tenant requests started: each one's id in the timeline.
+    requests: AtomicU64,
     /// Upstream calls made: each one's id in the lot, and the seed of a
     /// simulated call's latency.
     calls: AtomicU64,
@@ -366,8 +389,22 @@ impl Shared {
     /// Writes a response and decides what becomes of the connection: closed,
     /// back on the queue if a pipelined request is already buffered, or
     /// parked with the idle thread until the next one arrives.
-    fn finish(&self, mut conn: Conn, response: &Response, keep_alive: bool) {
-        if response.send(&mut conn.stream, keep_alive).is_err() || !keep_alive {
+    ///
+    /// `written` is the worker and request id the timeline records the
+    /// write under: noted before the connection is closed or handed on, so
+    /// that a client which has read its answer finds it recorded.
+    fn finish(
+        &self,
+        mut conn: Conn,
+        response: &Response,
+        keep_alive: bool,
+        written: Option<(usize, u64)>,
+    ) {
+        let sent = response.send(&mut conn.stream, keep_alive);
+        if let Some((worker, id)) = written {
+            self.note(worker, id, || What::Written { worker });
+        }
+        if sent.is_err() || !keep_alive {
             return;
         }
         if holds_a_head(&conn.buffer) {
@@ -377,7 +414,27 @@ impl Shared {
         }
     }
 
-    fn run_worker(&self) {
+    /// Records `what` for `request` now, if the timeline is on.
+    fn note(&self, shard: usize, request: u64, what: impl FnOnce() -> What) {
+        if let Some(timeline) = &self.timeline {
+            timeline.record(shard, Instant::now(), request, what());
+        }
+    }
+
+    /// The `/_timeline` body: the dump, also written to `--timeline`'s file.
+    fn dump_timeline(&self) -> Option<String> {
+        let timeline = self.timeline.as_ref()?;
+        let names: Vec<String> = self.tenants.iter().map(|t| t.name.clone()).collect();
+        let dump = timeline.dump(&names);
+        if let Some(file) = &timeline.recording.file {
+            if let Err(error) = std::fs::write(file, &dump) {
+                eprintln!("timeline: cannot write {}: {error}", file.display());
+            }
+        }
+        Some(dump)
+    }
+
+    fn run_worker(&self, worker: usize) {
         loop {
             let job = {
                 let mut queue = self.queue.lock().unwrap();
@@ -389,7 +446,7 @@ impl Shared {
                 }
             };
             match job {
-                Job::Connection(conn, accepted) => self.serve(conn, accepted),
+                Job::Connection(conn, accepted) => self.serve(conn, accepted, worker),
                 Job::Resume(resume) => {
                     let Resume {
                         parked,
@@ -398,13 +455,17 @@ impl Shared {
                     } = *resume;
                     self.stats.parked.fetch_sub(1, Ordering::Relaxed);
                     let step = match answer {
-                        Some(answer) => parked.resume(answer),
+                        Some(answer) => {
+                            self.note(worker, flight.id, || What::Resume { worker });
+                            parked.resume(answer)
+                        }
                         None => {
+                            self.note(worker, flight.id, || What::Cancel { worker });
                             let (vm, error) = parked.cancel();
                             Step::Answered(vm, Err(error))
                         }
                     };
-                    self.settle(step, flight);
+                    self.settle(step, flight, worker);
                 }
             }
         }
@@ -415,7 +476,7 @@ impl Shared {
     /// The connection is readable when it gets here, so the read waits only
     /// for the rest of a request that has started arriving — at most five
     /// seconds, for a client that sends half a head and stops.
-    fn serve(&self, mut conn: Conn, accepted: Instant) {
+    fn serve(&self, mut conn: Conn, accepted: Instant, worker: usize) {
         let _ = conn.stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = conn.stream.set_nodelay(true);
         let request = match read_request(&mut conn.stream, &mut conn.buffer) {
@@ -441,6 +502,23 @@ impl Shared {
         };
         let response = match name {
             "" => Response::text(200, self.index()),
+            "_timeline" => match request.query.iter().any(|(k, _)| k == "reset") {
+                _ if self.timeline.is_none() => Response::text(
+                    409,
+                    "the timeline is not being recorded; start the server with --timeline PATH\n",
+                ),
+                true => {
+                    if let Some(timeline) = &self.timeline {
+                        timeline.reset();
+                    }
+                    Response::text(200, "timeline reset\n")
+                }
+                false => Response {
+                    status: 200,
+                    content_type: "application/json".to_string(),
+                    body: self.dump_timeline().unwrap_or_default(),
+                },
+            },
             "_stats" => {
                 let body = self.render_stats();
                 if request.query.iter().any(|(k, _)| k == "reset") {
@@ -459,19 +537,37 @@ impl Shared {
                         Response::text(503, format!("tenant `{name}` was not deployed: {why}\n"))
                     }
                     State::Deployed(deployed) => {
+                        let id = self.requests.fetch_add(1, Ordering::Relaxed);
+                        if let Some(timeline) = &self.timeline {
+                            if conn.served == 1 {
+                                timeline.record(worker, conn.opened, id, What::Accepted);
+                            }
+                            timeline.record(worker, accepted, id, What::Queued);
+                            timeline.record(
+                                worker,
+                                Instant::now(),
+                                id,
+                                What::RunStart {
+                                    worker,
+                                    tenant: name.to_string(),
+                                    path: with_query(&rest, &request.query),
+                                },
+                            );
+                        }
                         let flight = Flight {
+                            id,
                             conn,
                             tenant: at,
                             accepted,
                             keep_alive,
                         };
-                        self.start(deployed, at, &request, rest, flight);
+                        self.start(deployed, at, &request, rest, flight, worker);
                         return;
                     }
                 },
             },
         };
-        self.finish(conn, &response, keep_alive);
+        self.finish(conn, &response, keep_alive, None);
     }
 
     /// Starts a tenant's run on this worker, and settles what it comes to.
@@ -482,6 +578,7 @@ impl Shared {
         request: &Request,
         path: String,
         flight: Flight,
+        worker: usize,
     ) {
         let vm = match self.options.isolates {
             Isolates::PerRequest => None,
@@ -496,11 +593,11 @@ impl Shared {
         let budget = Budget::new(self.tenants[at].limits.clone());
         let step =
             vm.invoke_within_parkable(budget, &deployed.module, &deployed.function, vec![argument]);
-        self.settle(step, flight);
+        self.settle(step, flight, worker);
     }
 
     /// What a run came to: an answer to write, or a park to hand on.
-    fn settle(&self, step: Step, flight: Flight) {
+    fn settle(&self, step: Step, flight: Flight, worker: usize) {
         match step {
             Step::Answered(vm, outcome) => {
                 let tenant = &self.tenants[flight.tenant];
@@ -520,7 +617,15 @@ impl Shared {
                 };
                 let failed = response.is_err();
                 let response = response.unwrap_or_else(|why| Response::text(status, why));
-                self.stats.heap_bytes.record(vm.heap_words() * 8);
+                let heap_bytes = vm.heap_words() * 8;
+                self.stats.heap_bytes.record(heap_bytes);
+                self.note(worker, flight.id, || What::RunEnd {
+                    worker,
+                    status: response.status,
+                    fuel: vm.meter().fuel_spent(),
+                    host_calls: vm.meter().host_calls(),
+                    heap_bytes,
+                });
                 if let Isolates::Pooled(cap) = self.options.isolates {
                     let mut pool = self.pools[flight.tenant].lock().unwrap();
                     if pool.len() < cap {
@@ -529,7 +634,12 @@ impl Shared {
                 }
                 self.stats
                     .answered(flight.tenant, failed, flight.accepted.elapsed());
-                self.finish(flight.conn, &response, flight.keep_alive);
+                self.finish(
+                    flight.conn,
+                    &response,
+                    flight.keep_alive,
+                    Some((worker, flight.id)),
+                );
             }
             Step::Parked(mut parked) => {
                 let parked_now = self.stats.parked.fetch_add(1, Ordering::Relaxed) + 1;
@@ -561,6 +671,25 @@ impl Shared {
                                 (wait, Some(url))
                             }
                         };
+                        if let Some(timeline) = &self.timeline {
+                            let what = match &wait {
+                                Wait::Service {
+                                    service, latency, ..
+                                } => What::Park {
+                                    worker,
+                                    op: "upstream.get",
+                                    target: service.clone(),
+                                    latency: Some(*latency),
+                                },
+                                Wait::Fetch { url } => What::Park {
+                                    worker,
+                                    op: "upstream.fetch",
+                                    target: url.clone(),
+                                    latency: None,
+                                },
+                            };
+                            timeline.record(worker, now, flight.id, what);
+                        }
                         let timed = Timed {
                             id,
                             deadline: parked.time_left().map(|left| now + left),
@@ -579,6 +708,13 @@ impl Shared {
                         }
                     }
                     _ => {
+                        self.note(worker, flight.id, || What::Park {
+                            worker,
+                            op: "unknown",
+                            target: String::new(),
+                            latency: None,
+                        });
+                        self.note(worker, flight.id, || What::AnswerReady { by: By::Host });
                         let answer = Err(RuntimeError::new(
                             "the host parked with a request this server does not know",
                         ));
@@ -604,6 +740,7 @@ impl Shared {
     fn run_lot(&self, lot: mpsc::Receiver<Lot>) {
         let mut due: BinaryHeap<Reverse<(Instant, u64)>> = BinaryHeap::new();
         let mut waiting: HashMap<u64, Timed> = HashMap::new();
+        let lot_shard = self.timeline.as_ref().map_or(0, Recorder::lot);
         loop {
             let received = match due.peek() {
                 None => lot.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -632,6 +769,9 @@ impl Shared {
                                     unreachable!("only a fetch is answered by the pool");
                                 };
                                 let answer = transfer(fetch_answer(url, fetched));
+                                self.note(lot_shard, timed.flight.id, || What::AnswerReady {
+                                    by: By::Fetcher,
+                                });
                                 ready.push(timed.resume(Some(answer)));
                             }
                         }
@@ -663,6 +803,9 @@ impl Shared {
                     if let Wait::Fetch { .. } = timed.wait {
                         self.fetcher.abort(timed.id);
                     }
+                    self.note(lot_shard, timed.flight.id, || What::AnswerReady {
+                        by: By::Deadline,
+                    });
                     ready.push(timed.resume(None));
                     continue;
                 }
@@ -672,6 +815,9 @@ impl Shared {
                     } => transfer(upstream_answer(service, *latency)),
                     Wait::Fetch { .. } => unreachable!("a fetch wakes only at its deadline"),
                 };
+                self.note(lot_shard, timed.flight.id, || What::AnswerReady {
+                    by: By::Timer,
+                });
                 ready.push(timed.resume(Some(answer)));
             }
             if ready.is_empty() {
@@ -700,6 +846,7 @@ impl Shared {
             out.push_str(&format!("  /{}/  {}\n", tenant.name, tenant.describe()));
         }
         out.push_str("\n  /_stats  requests, parked runs, latency, memory\n");
+        out.push_str("  /_timeline  every request's runs, parks and resumes (with --timeline)\n");
         out
     }
 
@@ -766,6 +913,15 @@ impl Shared {
             tenants.join(",\n"),
         )
     }
+}
+
+/// A tenant's path and its query, as the timeline shows it.
+fn with_query(path: &str, query: &[(String, String)]) -> String {
+    if query.is_empty() {
+        return path.to_string();
+    }
+    let pairs: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{path}?{}", pairs.join("&"))
 }
 
 /// An `edge.Response` value as the response to write, or why it is not one.

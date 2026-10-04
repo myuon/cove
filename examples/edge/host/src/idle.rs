@@ -34,6 +34,8 @@ pub struct Conn {
     pub buffer: Vec<u8>,
     /// Requests answered on this connection so far.
     pub served: u32,
+    /// When it was accepted, which the request timeline records.
+    pub opened: std::time::Instant,
 }
 
 impl Conn {
@@ -42,6 +44,7 @@ impl Conn {
             stream,
             buffer: Vec::new(),
             served: 0,
+            opened: std::time::Instant::now(),
         }
     }
 }
