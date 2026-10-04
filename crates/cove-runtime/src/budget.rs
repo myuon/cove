@@ -454,6 +454,36 @@ impl Meter {
         self.state.started_at.elapsed()
     }
 
+    /// What the run's deadline leaves, or `None` for a run with no deadline.
+    ///
+    /// Zero once the deadline has passed, never a wrapped figure: the
+    /// subtraction saturates. The clock started when the run did and has not
+    /// stopped since — a run parked at a host call is still running — so this
+    /// is what a scheduler holding a parked run sets its timer by
+    /// ([ADR 0082](../../../docs/adr/0082-a-parked-run-keeps-its-deadline.md)).
+    pub fn time_left(&self) -> Option<Duration> {
+        let deadline = self.state.limits.deadline?;
+        Some(deadline.saturating_sub(self.state.started_at.elapsed()))
+    }
+
+    /// The stop a run that is not executing has already reached, if any:
+    /// [`Stopped::Cancelled`] if its flag is raised, [`Stopped::Deadline`] if
+    /// its deadline has passed, and `None` otherwise.
+    ///
+    /// The two questions [`Meter::safepoint`] asks without spending anything,
+    /// in the order it asks them, with the clock read every time. Fuel, the
+    /// host-call limit and the concurrency limit are not among them: each is
+    /// charged for work, and a run that is not executing is doing none. This
+    /// is what a parked run is asked as it is resumed
+    /// ([ADR 0082](../../../docs/adr/0082-a-parked-run-keeps-its-deadline.md)).
+    pub fn interrupted(&self) -> Option<Stopped> {
+        if self.state.cancellation.is_cancelled() {
+            return Some(Stopped::Cancelled);
+        }
+        let deadline = self.state.limits.deadline?;
+        (self.state.started_at.elapsed() >= deadline).then_some(Stopped::Deadline)
+    }
+
     /// Converts why execution stopped into a [`RuntimeError`] naming the
     /// limit and its configured value, quoting ADR 0001's position that these
     /// are runtime controls rather than termination proofs.

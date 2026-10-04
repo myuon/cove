@@ -137,3 +137,44 @@ fn more_runs_wait_on_the_upstream_than_there_are_workers() {
     // Resident isolates are reused, so no more than the pool's cap are kept.
     assert!(stat(&server, "pooled_isolates") <= 4);
 }
+
+#[test]
+fn a_parked_run_past_its_tenant_s_deadline_is_answered_504() {
+    // `impatient` is `aggregate` under a 300 ms deadline, and `hang` answers
+    // after an hour: the deadline is certain to come first, whatever the
+    // clock does, so nothing here depends on how long anything took.
+    let server = start(1, 2, Isolates::PerRequest);
+    let impatient = server
+        .tenants()
+        .iter()
+        .find(|t| t.name == "impatient")
+        .expect("the tenant is listed");
+    assert!(
+        matches!(impatient.state, State::Deployed(_)),
+        "{}",
+        impatient.describe()
+    );
+    assert_eq!(
+        impatient.required,
+        BTreeSet::from(["upstream".to_string()]),
+        "the same code as `aggregate`, so the same requirement"
+    );
+    let parks_before = stat(&server, "parks");
+    let (status, body) = get(server.addr, "/impatient/?services=weather,hang").unwrap();
+    assert_eq!(status, 504, "{body}");
+    assert!(
+        body.contains("execution stopped: wall-clock deadline of 300ms exceeded"),
+        "{body}"
+    );
+    assert!(body.contains("aggregate/aggregate.cove:17"), "{body}");
+    assert_eq!(stat(&server, "timeouts"), 1);
+    assert_eq!(
+        stat(&server, "parks") - parks_before,
+        2,
+        "weather, then hang"
+    );
+    assert_eq!(stat(&server, "parked"), 0, "the timed-out run is not held");
+    // The tenant is not hurt by it: the next request is answered.
+    let (status, body) = get(server.addr, "/aggregate/?services=weather").unwrap();
+    assert_eq!(status, 200, "{body}");
+}
