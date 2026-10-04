@@ -3757,6 +3757,27 @@ impl<'a> Emit<'a> {
             ArithOp::Div | ArithOp::Rem => {
                 self.test_rr(RCX, RCX);
                 self.raise_unless(CC_NE, by_zero_of(op));
+                // Both operands in `0..2^32` — which every trial division in
+                // `examples/edge`'s `crunch` is — divide in 32 bits. Two such
+                // words answer the same quotient and remainder unsigned as
+                // signed, neither is `i64::MIN`, and `div r32` writes `eax`
+                // and `edx`, zeroing their upper halves, so the answer is the
+                // whole word `idiv` would have left. It is the test LLVM puts
+                // in front of an `i64` division on x86-64 (`idivq-to-divl`),
+                // and the reason is the same: `idiv r64` is microcoded, and
+                // on the i7-10700K `compare/README.md` was measured on, Go's
+                // own `crunch` loop ran 2.7x faster with `idivl` in place of
+                // its `idivq`.
+                let wide = self.label();
+                let done = self.label();
+                self.mov_rr(RDX, RAX);
+                self.or_rr(RDX, RCX);
+                self.shr_imm8(RDX, 32);
+                self.jcc(CC_NE, Target::Label(wide));
+                self.xor_rr(RDX, RDX);
+                self.div32(RCX);
+                self.jmp(Target::Label(done));
+                self.bind(wide);
                 // `i64::MIN / -1` is `checked_div`'s other `None`, which
                 // `int_arith` reports as an overflow of the named operation.
                 // Both halves have to hold for it, so the ordinary path leaves
@@ -3775,6 +3796,7 @@ impl<'a> Emit<'a> {
                 // remainder in `RDX`.
                 self.cqo();
                 self.idiv(RCX);
+                self.bind(done);
                 let answer = if matches!(op, ArithOp::Rem) { RDX } else { RAX };
                 self.store_slot(dst, answer);
             }
@@ -5278,6 +5300,14 @@ impl<'a> Emit<'a> {
         self.rex(true, 0, by);
         self.byte(0xf7);
         self.modrm_reg(7, by);
+    }
+
+    /// `div r32`: `edx:eax` by the low half of `by`, unsigned, the quotient
+    /// into `eax` and the remainder into `edx`, both zero-extended.
+    fn div32(&mut self, by: u8) {
+        self.rex(false, 0, by);
+        self.byte(0xf7);
+        self.modrm_reg(6, by);
     }
 
     fn push(&mut self, reg: u8) {

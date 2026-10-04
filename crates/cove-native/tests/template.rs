@@ -113,6 +113,11 @@ fn integer_arithmetic_answers_what_the_vm_answers() {
 }
 
 #[test]
+fn division_answers_checked_div_on_both_sides_of_32_bits() {
+    suite::division_answers_checked_div_on_both_sides_of_32_bits::<Template>();
+}
+
+#[test]
 fn every_arithmetic_failure_is_the_vms() {
     suite::every_arithmetic_failure_is_the_vms::<Template>();
 }

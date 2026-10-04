@@ -2026,6 +2026,50 @@ pub fn integer_arithmetic_answers_what_the_vm_answers<A: Arm>() {
     }
 }
 
+/// Division and remainder answer `checked_div` and `checked_rem` on both sides
+/// of the 32-bit path the template takes when both operands are in `0..2^32`:
+/// at its edge, just past it, far past it, negative and mixed. The operands
+/// that fail — by zero, and `i64::MIN / -1` — are
+/// [`every_arithmetic_failure_is_the_vms`]'s.
+pub fn division_answers_checked_div_on_both_sides_of_32_bits<A: Arm>() {
+    const EDGES: [i64; 18] = [
+        0,
+        1,
+        2,
+        7,
+        0x7fff_ffff,
+        0x8000_0000,
+        0xffff_fffe,
+        0xffff_ffff,
+        0x1_0000_0000,
+        0x1_0000_0001,
+        0x1234_5678_9abc,
+        i64::MAX,
+        -1,
+        -7,
+        -0x8000_0000,
+        -0xffff_ffff,
+        -0x1_0000_0000,
+        i64::MIN,
+    ];
+    for op in [ArithOp::Div, ArithOp::Rem] {
+        for a in EDGES {
+            for b in EDGES {
+                let expected = match op {
+                    ArithOp::Div => a.checked_div(b),
+                    _ => a.checked_rem(b),
+                };
+                let Some(expected) = expected else {
+                    continue;
+                };
+                let (answer, words) = arith::<A>(op, a, b);
+                assert_eq!(answer.outcome, Outcome::Returned, "{op:?} {a} {b}");
+                assert_eq!(words[2] as i64, expected, "{op:?} {a} {b}");
+            }
+        }
+    }
+}
+
 /// Every way `int_arith` can fail, and the error it names.
 ///
 /// This is the test the whole slice is worth having. `int_arith`
