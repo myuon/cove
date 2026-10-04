@@ -1,0 +1,309 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1592" height="416" viewBox="0 0 1592 416" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif">
+<rect width="1592" height="416" fill="#fcfcfb"/>
+<text x="24.0" y="28.0" font-size="16" fill="#0b0b0b" text-anchor="start" font-weight="600">p99 latency against offered rate — Cove edge server vs Go net/http, 4 workers / GOMAXPROCS=4</text>
+<text x="24.0" y="48.0" font-size="12" fill="#52514e" text-anchor="start" font-weight="normal">Open loop: latency from each request's intended start (i / rate). Median of 3 runs; whiskers min..max. Both axes log. Dashed line: the server's unthrottled capacity.</text>
+<text x="24.0" y="64.0" font-size="12" fill="#52514e" text-anchor="start" font-weight="normal">The load generator shares the machine and polls every 200 µs: below about 2 ms (p50) and 3 ms (p99) it measures itself, not the servers.</text>
+<line x1="1292.0" y1="24.0" x2="1310.0" y2="24.0" stroke="#2a78d6" stroke-width="2"/>
+<circle cx="1301.0" cy="24.0" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"></circle>
+<text x="1316.0" y="28.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="normal">Cove (edge)</text>
+<line x1="1403.0" y1="24.0" x2="1421.0" y2="24.0" stroke="#eb6834" stroke-width="2"/>
+<circle cx="1412.0" cy="24.0" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"></circle>
+<text x="1427.0" y="28.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="normal">Go (net/http)</text>
+<text x="64.0" y="84.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">hello alone</text>
+<line x1="64.0" y1="346.0" x2="394.0" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="350.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">1</text>
+<line x1="64.0" y1="327.2" x2="394.0" y2="327.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="331.2" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">2</text>
+<line x1="64.0" y1="302.3" x2="394.0" y2="302.3" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="306.3" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">5</text>
+<line x1="64.0" y1="283.5" x2="394.0" y2="283.5" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="287.5" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">10</text>
+<line x1="64.0" y1="264.7" x2="394.0" y2="264.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="268.7" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">20</text>
+<line x1="64.0" y1="239.8" x2="394.0" y2="239.8" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="243.8" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">50</text>
+<line x1="64.0" y1="221.0" x2="394.0" y2="221.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="225.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">100</text>
+<line x1="64.0" y1="202.2" x2="394.0" y2="202.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="206.2" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">200</text>
+<line x1="64.0" y1="177.3" x2="394.0" y2="177.3" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="181.3" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">500</text>
+<line x1="64.0" y1="158.5" x2="394.0" y2="158.5" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="162.5" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">1k</text>
+<line x1="64.0" y1="139.7" x2="394.0" y2="139.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="143.7" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">2k</text>
+<line x1="64.0" y1="114.8" x2="394.0" y2="114.8" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="118.8" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">5k</text>
+<line x1="64.0" y1="96.0" x2="394.0" y2="96.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="58.0" y="100.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">10k</text>
+<line x1="66.7" y1="96.0" x2="66.7" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="66.7" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">2k</text>
+<line x1="130.1" y1="96.0" x2="130.1" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="130.1" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">5k</text>
+<line x1="178.0" y1="96.0" x2="178.0" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="178.0" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">10k</text>
+<line x1="225.9" y1="96.0" x2="225.9" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="225.9" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">20k</text>
+<line x1="289.3" y1="96.0" x2="289.3" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="289.3" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">50k</text>
+<line x1="337.2" y1="96.0" x2="337.2" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="337.2" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">100k</text>
+<line x1="385.1" y1="96.0" x2="385.1" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="385.1" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">200k</text>
+<line x1="64.0" y1="346.0" x2="394.0" y2="346.0" stroke="#b9b8b3" stroke-width="1"/>
+<text x="229.0" y="380.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">offered rate (req/s, log)</text>
+<text transform="rotate(-90 18 221.0)" x="18.0" y="221.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">p99 ms (log)</text>
+<line x1="349.3" y1="96.0" x2="349.3" y2="346.0" stroke="#2a78d6" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="371.2" y1="96.0" x2="371.2" y2="346.0" stroke="#eb6834" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="82.1" y1="316.2" x2="82.1" y2="316.0" stroke="#2a78d6" stroke-width="1"/>
+<line x1="178.0" y1="316.5" x2="178.0" y2="316.3" stroke="#2a78d6" stroke-width="1"/>
+<line x1="241.3" y1="317.3" x2="241.3" y2="316.8" stroke="#2a78d6" stroke-width="1"/>
+<line x1="289.3" y1="316.2" x2="289.3" y2="315.3" stroke="#2a78d6" stroke-width="1"/>
+<line x1="317.3" y1="315.6" x2="317.3" y2="314.4" stroke="#2a78d6" stroke-width="1"/>
+<line x1="337.2" y1="295.7" x2="337.2" y2="278.9" stroke="#2a78d6" stroke-width="1"/>
+<line x1="352.6" y1="168.4" x2="352.6" y2="167.6" stroke="#2a78d6" stroke-width="1"/>
+<polyline points="82.1,316.1 178.0,316.3 241.3,316.9 289.3,315.4 317.3,314.5 337.2,292.4 352.6,168.3" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="82.1" cy="316.1" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 2500 req/s: p99 3.01 ms (3.00..3.02)</title></circle>
+<circle cx="178.0" cy="316.3" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 10000 req/s: p99 2.98 ms (2.97..2.99)</title></circle>
+<circle cx="241.3" cy="316.9" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 25000 req/s: p99 2.92 ms (2.88..2.93)</title></circle>
+<circle cx="289.3" cy="315.4" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 50000 req/s: p99 3.09 ms (2.99..3.10)</title></circle>
+<circle cx="317.3" cy="314.5" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 75000 req/s: p99 3.19 ms (3.07..3.20)</title></circle>
+<circle cx="337.2" cy="292.4" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 100000 req/s: p99 7.20 ms (6.38..11.83)</title></circle>
+<circle cx="352.6" cy="168.3" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 125000 req/s: p99 697.48 ms (695.30..714.73)</title></circle>
+<line x1="82.1" y1="316.5" x2="82.1" y2="316.4" stroke="#eb6834" stroke-width="1"/>
+<line x1="178.0" y1="316.6" x2="178.0" y2="316.5" stroke="#eb6834" stroke-width="1"/>
+<line x1="241.3" y1="317.1" x2="241.3" y2="317.0" stroke="#eb6834" stroke-width="1"/>
+<line x1="289.3" y1="317.1" x2="289.3" y2="316.3" stroke="#eb6834" stroke-width="1"/>
+<line x1="317.3" y1="316.7" x2="317.3" y2="315.2" stroke="#eb6834" stroke-width="1"/>
+<line x1="337.2" y1="316.1" x2="337.2" y2="303.8" stroke="#eb6834" stroke-width="1"/>
+<line x1="352.6" y1="301.0" x2="352.6" y2="242.4" stroke="#eb6834" stroke-width="1"/>
+<line x1="365.2" y1="256.6" x2="365.2" y2="239.3" stroke="#eb6834" stroke-width="1"/>
+<line x1="375.9" y1="173.0" x2="375.9" y2="167.3" stroke="#eb6834" stroke-width="1"/>
+<polyline points="82.1,316.5 178.0,316.5 241.3,317.1 289.3,317.0 317.3,316.6 337.2,315.7 352.6,299.7 365.2,255.5 375.9,169.4" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="82.1" cy="316.5" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 2500 req/s: p99 2.97 ms (2.96..2.98)</title></circle>
+<circle cx="178.0" cy="316.5" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 10000 req/s: p99 2.96 ms (2.95..2.96)</title></circle>
+<circle cx="241.3" cy="317.1" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 25000 req/s: p99 2.90 ms (2.90..2.91)</title></circle>
+<circle cx="289.3" cy="317.0" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 50000 req/s: p99 2.91 ms (2.90..2.98)</title></circle>
+<circle cx="317.3" cy="316.6" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 75000 req/s: p99 2.95 ms (2.94..3.11)</title></circle>
+<circle cx="337.2" cy="315.7" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 100000 req/s: p99 3.05 ms (3.01..4.73)</title></circle>
+<circle cx="352.6" cy="299.7" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 125000 req/s: p99 5.51 ms (5.25..45.45)</title></circle>
+<circle cx="365.2" cy="255.5" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 150000 req/s: p99 28.08 ms (26.90..50.96)</title></circle>
+<circle cx="375.9" cy="169.4" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 175000 req/s: p99 668.78 ms (585.79..722.16)</title></circle>
+<text x="360.6" y="165.8" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Cove</text>
+<text x="383.9" y="179.8" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Go</text>
+<text x="450.0" y="84.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">crunch n=20000 alone</text>
+<line x1="450.0" y1="346.0" x2="780.0" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="350.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">1</text>
+<line x1="450.0" y1="327.2" x2="780.0" y2="327.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="331.2" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">2</text>
+<line x1="450.0" y1="302.3" x2="780.0" y2="302.3" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="306.3" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">5</text>
+<line x1="450.0" y1="283.5" x2="780.0" y2="283.5" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="287.5" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">10</text>
+<line x1="450.0" y1="264.7" x2="780.0" y2="264.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="268.7" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">20</text>
+<line x1="450.0" y1="239.8" x2="780.0" y2="239.8" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="243.8" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">50</text>
+<line x1="450.0" y1="221.0" x2="780.0" y2="221.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="225.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">100</text>
+<line x1="450.0" y1="202.2" x2="780.0" y2="202.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="206.2" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">200</text>
+<line x1="450.0" y1="177.3" x2="780.0" y2="177.3" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="181.3" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">500</text>
+<line x1="450.0" y1="158.5" x2="780.0" y2="158.5" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="162.5" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">1k</text>
+<line x1="450.0" y1="139.7" x2="780.0" y2="139.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="143.7" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">2k</text>
+<line x1="450.0" y1="114.8" x2="780.0" y2="114.8" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="118.8" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">5k</text>
+<line x1="450.0" y1="96.0" x2="780.0" y2="96.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="444.0" y="100.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">10k</text>
+<line x1="470.5" y1="96.0" x2="470.5" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="470.5" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">100</text>
+<line x1="524.8" y1="96.0" x2="524.8" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="524.8" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">200</text>
+<line x1="596.6" y1="96.0" x2="596.6" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="596.6" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">500</text>
+<line x1="650.9" y1="96.0" x2="650.9" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="650.9" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">1k</text>
+<line x1="705.2" y1="96.0" x2="705.2" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="705.2" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">2k</text>
+<line x1="776.9" y1="96.0" x2="776.9" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="776.9" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">5k</text>
+<line x1="450.0" y1="346.0" x2="780.0" y2="346.0" stroke="#b9b8b3" stroke-width="1"/>
+<text x="615.0" y="380.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">offered rate (req/s, log)</text>
+<line x1="640.9" y1="96.0" x2="640.9" y2="346.0" stroke="#2a78d6" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="753.3" y1="96.0" x2="753.3" y2="346.0" stroke="#eb6834" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="470.5" y1="292.3" x2="470.5" y2="290.2" stroke="#2a78d6" stroke-width="1"/>
+<line x1="542.3" y1="293.6" x2="542.3" y2="293.3" stroke="#2a78d6" stroke-width="1"/>
+<line x1="596.6" y1="293.6" x2="596.6" y2="281.0" stroke="#2a78d6" stroke-width="1"/>
+<line x1="628.4" y1="292.6" x2="628.4" y2="291.3" stroke="#2a78d6" stroke-width="1"/>
+<line x1="642.6" y1="200.6" x2="642.6" y2="197.7" stroke="#2a78d6" stroke-width="1"/>
+<line x1="650.9" y1="170.5" x2="650.9" y2="169.0" stroke="#2a78d6" stroke-width="1"/>
+<polyline points="470.5,292.2 542.3,293.4 596.6,291.9 628.4,292.0 642.6,199.1 650.9,169.9" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="470.5" cy="292.2" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 100 req/s: p99 7.25 ms (7.23..7.81)</title></circle>
+<circle cx="542.3" cy="293.4" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 250 req/s: p99 6.95 ms (6.89..6.96)</title></circle>
+<circle cx="596.6" cy="291.9" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 500 req/s: p99 7.34 ms (6.89..10.97)</title></circle>
+<circle cx="628.4" cy="292.0" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 750 req/s: p99 7.31 ms (7.15..7.51)</title></circle>
+<circle cx="642.6" cy="199.1" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 900 req/s: p99 224.13 ms (211.95..235.56)</title></circle>
+<circle cx="650.9" cy="169.9" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 1000 req/s: p99 657.14 ms (642.61..678.81)</title></circle>
+<line x1="470.5" y1="308.9" x2="470.5" y2="307.4" stroke="#eb6834" stroke-width="1"/>
+<line x1="542.3" y1="309.1" x2="542.3" y2="308.4" stroke="#eb6834" stroke-width="1"/>
+<line x1="596.6" y1="311.5" x2="596.6" y2="311.1" stroke="#eb6834" stroke-width="1"/>
+<line x1="628.4" y1="310.0" x2="628.4" y2="309.7" stroke="#eb6834" stroke-width="1"/>
+<line x1="642.6" y1="314.4" x2="642.6" y2="313.1" stroke="#eb6834" stroke-width="1"/>
+<line x1="650.9" y1="315.2" x2="650.9" y2="314.5" stroke="#eb6834" stroke-width="1"/>
+<line x1="682.6" y1="313.9" x2="682.6" y2="312.9" stroke="#eb6834" stroke-width="1"/>
+<line x1="722.6" y1="314.4" x2="722.6" y2="313.6" stroke="#eb6834" stroke-width="1"/>
+<line x1="736.9" y1="313.1" x2="736.9" y2="310.3" stroke="#eb6834" stroke-width="1"/>
+<line x1="749.0" y1="304.7" x2="749.0" y2="297.3" stroke="#eb6834" stroke-width="1"/>
+<line x1="759.5" y1="186.4" x2="759.5" y2="185.2" stroke="#eb6834" stroke-width="1"/>
+<polyline points="470.5,307.6 542.3,308.9 596.6,311.3 628.4,309.9 642.6,313.1 650.9,314.9 682.6,313.8 722.6,313.9 736.9,312.3 749.0,299.5 759.5,186.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="470.5" cy="307.6" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 100 req/s: p99 4.12 ms (3.93..4.15)</title></circle>
+<circle cx="542.3" cy="308.9" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 250 req/s: p99 3.92 ms (3.90..4.00)</title></circle>
+<circle cx="596.6" cy="311.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 500 req/s: p99 3.59 ms (3.57..3.62)</title></circle>
+<circle cx="628.4" cy="309.9" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 750 req/s: p99 3.79 ms (3.76..3.81)</title></circle>
+<circle cx="642.6" cy="313.1" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 900 req/s: p99 3.36 ms (3.20..3.36)</title></circle>
+<circle cx="650.9" cy="314.9" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 1000 req/s: p99 3.14 ms (3.11..3.19)</title></circle>
+<circle cx="682.6" cy="313.8" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 1500 req/s: p99 3.28 ms (3.26..3.39)</title></circle>
+<circle cx="722.6" cy="313.9" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 2500 req/s: p99 3.26 ms (3.21..3.30)</title></circle>
+<circle cx="736.9" cy="312.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 3000 req/s: p99 3.47 ms (3.36..3.73)</title></circle>
+<circle cx="749.0" cy="299.5" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 3500 req/s: p99 5.55 ms (4.58..6.01)</title></circle>
+<circle cx="759.5" cy="186.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 4000 req/s: p99 359.64 ms (357.83..374.36)</title></circle>
+<text x="658.9" y="173.9" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Cove</text>
+<text x="767.5" y="190.3" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Go</text>
+<text x="836.0" y="84.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">aggregate alone (3 x 20–100 ms upstream)</text>
+<line x1="836.0" y1="346.0" x2="1166.0" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="830.0" y="350.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">100</text>
+<line x1="836.0" y1="270.7" x2="1166.0" y2="270.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="830.0" y="274.7" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">200</text>
+<line x1="836.0" y1="171.3" x2="1166.0" y2="171.3" stroke="#e6e5e1" stroke-width="1"/>
+<text x="830.0" y="175.3" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">500</text>
+<line x1="836.0" y1="96.0" x2="1166.0" y2="96.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="830.0" y="100.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">1k</text>
+<line x1="856.0" y1="96.0" x2="856.0" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="856.0" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">1k</text>
+<line x1="908.8" y1="96.0" x2="908.8" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="908.8" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">2k</text>
+<line x1="978.6" y1="96.0" x2="978.6" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="978.6" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">5k</text>
+<line x1="1031.4" y1="96.0" x2="1031.4" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1031.4" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">10k</text>
+<line x1="1084.2" y1="96.0" x2="1084.2" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1084.2" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">20k</text>
+<line x1="1154.0" y1="96.0" x2="1154.0" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1154.0" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">50k</text>
+<line x1="836.0" y1="346.0" x2="1166.0" y2="346.0" stroke="#b9b8b3" stroke-width="1"/>
+<text x="1001.0" y="380.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">offered rate (req/s, log)</text>
+<line x1="1123.5" y1="96.0" x2="1123.5" y2="346.0" stroke="#2a78d6" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="1144.7" y1="96.0" x2="1144.7" y2="346.0" stroke="#eb6834" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="856.0" y1="237.6" x2="856.0" y2="236.5" stroke="#2a78d6" stroke-width="1"/>
+<line x1="925.8" y1="237.5" x2="925.8" y2="236.9" stroke="#2a78d6" stroke-width="1"/>
+<line x1="978.6" y1="238.0" x2="978.6" y2="237.3" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1031.4" y1="237.7" x2="1031.4" y2="237.5" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1084.2" y1="237.0" x2="1084.2" y2="236.9" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1115.1" y1="196.4" x2="1115.1" y2="191.8" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1126.9" y1="197.0" x2="1126.9" y2="181.5" stroke="#2a78d6" stroke-width="1"/>
+<polyline points="856.0,237.3 925.8,237.4 978.6,237.3 1031.4,237.6 1084.2,237.0 1115.1,192.7 1126.9,191.5" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="856.0" cy="237.3" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 1000 req/s: p99 272.16 ms (271.29..274.28)</title></circle>
+<circle cx="925.8" cy="237.4" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 2500 req/s: p99 271.97 ms (271.65..273.17)</title></circle>
+<circle cx="978.6" cy="237.3" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 5000 req/s: p99 272.14 ms (270.44..272.18)</title></circle>
+<circle cx="1031.4" cy="237.6" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 10000 req/s: p99 271.33 ms (271.10..271.59)</title></circle>
+<circle cx="1084.2" cy="237.0" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 20000 req/s: p99 272.99 ms (272.95..273.03)</title></circle>
+<circle cx="1115.1" cy="192.7" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 30000 req/s: p99 410.41 ms (396.67..413.85)</title></circle>
+<circle cx="1126.9" cy="191.5" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 35000 req/s: p99 415.10 ms (394.46..454.78)</title></circle>
+<line x1="856.0" y1="238.8" x2="856.0" y2="238.2" stroke="#eb6834" stroke-width="1"/>
+<line x1="925.8" y1="238.3" x2="925.8" y2="237.9" stroke="#eb6834" stroke-width="1"/>
+<line x1="978.6" y1="238.5" x2="978.6" y2="237.9" stroke="#eb6834" stroke-width="1"/>
+<line x1="1031.4" y1="238.4" x2="1031.4" y2="238.2" stroke="#eb6834" stroke-width="1"/>
+<line x1="1084.2" y1="237.9" x2="1084.2" y2="218.0" stroke="#eb6834" stroke-width="1"/>
+<line x1="1115.1" y1="235.5" x2="1115.1" y2="180.9" stroke="#eb6834" stroke-width="1"/>
+<line x1="1126.9" y1="207.3" x2="1126.9" y2="195.7" stroke="#eb6834" stroke-width="1"/>
+<line x1="1137.0" y1="204.1" x2="1137.0" y2="192.9" stroke="#eb6834" stroke-width="1"/>
+<line x1="1146.0" y1="207.9" x2="1146.0" y2="196.6" stroke="#eb6834" stroke-width="1"/>
+<polyline points="856.0,238.4 925.8,237.9 978.6,238.2 1031.4,238.3 1084.2,237.8 1115.1,192.8 1126.9,198.3 1137.0,203.6 1146.0,206.5" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="856.0" cy="238.4" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 1000 req/s: p99 269.46 ms (268.49..269.84)</title></circle>
+<circle cx="925.8" cy="237.9" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 2500 req/s: p99 270.55 ms (269.70..270.66)</title></circle>
+<circle cx="978.6" cy="238.2" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 5000 req/s: p99 269.92 ms (269.11..270.55)</title></circle>
+<circle cx="1031.4" cy="238.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 10000 req/s: p99 269.61 ms (269.39..269.89)</title></circle>
+<circle cx="1084.2" cy="237.8" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 20000 req/s: p99 270.81 ms (270.69..325.16)</title></circle>
+<circle cx="1115.1" cy="192.8" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 30000 req/s: p99 409.93 ms (276.68..457.38)</title></circle>
+<circle cx="1126.9" cy="198.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 35000 req/s: p99 389.68 ms (358.69..399.22)</title></circle>
+<circle cx="1137.0" cy="203.6" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 40000 req/s: p99 371.29 ms (369.42..409.57)</title></circle>
+<circle cx="1146.0" cy="206.5" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 45000 req/s: p99 361.48 ms (356.84..395.94)</title></circle>
+<text x="1134.9" y="195.5" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Cove</text>
+<text x="1154.0" y="210.5" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Go</text>
+<text x="1222.0" y="84.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">cpu-io mix: hello's latency</text>
+<line x1="1222.0" y1="346.0" x2="1552.0" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="350.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">1</text>
+<line x1="1222.0" y1="320.9" x2="1552.0" y2="320.9" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="324.9" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">2</text>
+<line x1="1222.0" y1="287.8" x2="1552.0" y2="287.8" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="291.8" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">5</text>
+<line x1="1222.0" y1="262.7" x2="1552.0" y2="262.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="266.7" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">10</text>
+<line x1="1222.0" y1="237.6" x2="1552.0" y2="237.6" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="241.6" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">20</text>
+<line x1="1222.0" y1="204.4" x2="1552.0" y2="204.4" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="208.4" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">50</text>
+<line x1="1222.0" y1="179.3" x2="1552.0" y2="179.3" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="183.3" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">100</text>
+<line x1="1222.0" y1="154.2" x2="1552.0" y2="154.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="158.2" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">200</text>
+<line x1="1222.0" y1="121.1" x2="1552.0" y2="121.1" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="125.1" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">500</text>
+<line x1="1222.0" y1="96.0" x2="1552.0" y2="96.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1216.0" y="100.0" font-size="10" fill="#52514e" text-anchor="end" font-weight="normal">1k</text>
+<line x1="1244.1" y1="96.0" x2="1244.1" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1244.1" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">50</text>
+<line x1="1302.3" y1="96.0" x2="1302.3" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1302.3" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">100</text>
+<line x1="1360.6" y1="96.0" x2="1360.6" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1360.6" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">200</text>
+<line x1="1437.6" y1="96.0" x2="1437.6" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1437.6" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">500</text>
+<line x1="1495.9" y1="96.0" x2="1495.9" y2="346.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="1495.9" y="362.0" font-size="10" fill="#52514e" text-anchor="middle" font-weight="normal">1k</text>
+<line x1="1222.0" y1="346.0" x2="1552.0" y2="346.0" stroke="#b9b8b3" stroke-width="1"/>
+<text x="1387.0" y="380.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">offered rate (req/s, log)</text>
+<line x1="1406.9" y1="96.0" x2="1406.9" y2="346.0" stroke="#2a78d6" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="1523.8" y1="96.0" x2="1523.8" y2="346.0" stroke="#eb6834" stroke-width="1" stroke-dasharray="4 3"/>
+<line x1="1244.1" y1="307.5" x2="1244.1" y2="306.9" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1302.3" y1="306.2" x2="1302.3" y2="300.7" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1360.6" y1="278.2" x2="1360.6" y2="268.3" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1379.3" y1="268.8" x2="1379.3" y2="261.8" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1394.7" y1="243.8" x2="1394.7" y2="240.6" stroke="#2a78d6" stroke-width="1"/>
+<line x1="1407.6" y1="224.6" x2="1407.6" y2="217.0" stroke="#2a78d6" stroke-width="1"/>
+<polyline points="1244.1,307.4 1302.3,305.2 1360.6,274.3 1379.3,268.6 1394.7,242.1 1407.6,224.5" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="1244.1" cy="307.4" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 50 req/s: p99 2.91 ms (2.90..2.95)</title></circle>
+<circle cx="1302.3" cy="305.2" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 100 req/s: p99 3.09 ms (3.00..3.50)</title></circle>
+<circle cx="1360.6" cy="274.3" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 200 req/s: p99 7.26 ms (6.51..8.56)</title></circle>
+<circle cx="1379.3" cy="268.6" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 250 req/s: p99 8.49 ms (8.44..10.25)</title></circle>
+<circle cx="1394.7" cy="242.1" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 300 req/s: p99 17.67 ms (16.82..18.39)</title></circle>
+<circle cx="1407.6" cy="224.5" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove (edge) 350 req/s: p99 28.67 ms (28.63..35.32)</title></circle>
+<line x1="1244.1" y1="307.3" x2="1244.1" y2="306.2" stroke="#eb6834" stroke-width="1"/>
+<line x1="1302.3" y1="307.1" x2="1302.3" y2="304.4" stroke="#eb6834" stroke-width="1"/>
+<line x1="1360.6" y1="309.3" x2="1360.6" y2="306.2" stroke="#eb6834" stroke-width="1"/>
+<line x1="1379.3" y1="308.2" x2="1379.3" y2="306.9" stroke="#eb6834" stroke-width="1"/>
+<line x1="1394.7" y1="307.0" x2="1394.7" y2="306.8" stroke="#eb6834" stroke-width="1"/>
+<line x1="1407.6" y1="310.0" x2="1407.6" y2="307.0" stroke="#eb6834" stroke-width="1"/>
+<line x1="1418.8" y1="306.5" x2="1418.8" y2="306.2" stroke="#eb6834" stroke-width="1"/>
+<line x1="1452.9" y1="298.2" x2="1452.9" y2="291.7" stroke="#eb6834" stroke-width="1"/>
+<line x1="1495.9" y1="253.3" x2="1495.9" y2="249.2" stroke="#eb6834" stroke-width="1"/>
+<line x1="1514.6" y1="228.7" x2="1514.6" y2="214.8" stroke="#eb6834" stroke-width="1"/>
+<line x1="1529.9" y1="175.2" x2="1529.9" y2="171.6" stroke="#eb6834" stroke-width="1"/>
+<polyline points="1244.1,306.8 1302.3,305.2 1360.6,307.3 1379.3,308.0 1394.7,306.8 1407.6,308.2 1418.8,306.2 1452.9,293.3 1495.9,252.4 1514.6,228.0 1529.9,174.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="1244.1" cy="306.8" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 50 req/s: p99 2.95 ms (2.91..3.00)</title></circle>
+<circle cx="1302.3" cy="305.2" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 100 req/s: p99 3.09 ms (2.93..3.16)</title></circle>
+<circle cx="1360.6" cy="307.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 200 req/s: p99 2.91 ms (2.76..3.00)</title></circle>
+<circle cx="1379.3" cy="308.0" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 250 req/s: p99 2.86 ms (2.84..2.95)</title></circle>
+<circle cx="1394.7" cy="306.8" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 300 req/s: p99 2.95 ms (2.94..2.96)</title></circle>
+<circle cx="1407.6" cy="308.2" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 350 req/s: p99 2.84 ms (2.70..2.94)</title></circle>
+<circle cx="1418.8" cy="306.2" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 400 req/s: p99 3.00 ms (2.98..3.00)</title></circle>
+<circle cx="1452.9" cy="293.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 600 req/s: p99 4.29 ms (3.75..4.48)</title></circle>
+<circle cx="1495.9" cy="252.4" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 1000 req/s: p99 13.29 ms (12.94..14.53)</title></circle>
+<circle cx="1514.6" cy="228.0" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 1250 req/s: p99 26.06 ms (25.54..37.57)</title></circle>
+<circle cx="1529.9" cy="174.3" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go (net/http) 1500 req/s: p99 114.78 ms (111.98..123.85)</title></circle>
+<text x="1415.6" y="228.5" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Cove</text>
+<text x="1537.9" y="178.3" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Go</text>
+</svg>

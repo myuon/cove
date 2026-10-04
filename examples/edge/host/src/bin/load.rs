@@ -6,7 +6,8 @@
 //!     [--addr 127.0.0.1:8787] [--path /aggregate/] \
 //!     [--concurrency 1000] [--requests 10000] [--threads 8] [--keep-alive] \
 //!     [--mix hello=50,counter=20,aggregate=20,proxy=5,impatient=5 | --mix default | --mix cpu-io] \
-//!     [--timeline-out timeline.json] [--rate 500]
+//!     [--timeline-out timeline.json] [--rate 500 [--from-intended]] \
+//!     [--summary-out run.json]
 //! ```
 //!
 //! `--mix` replaces `--path` with a weighted choice of tenants, made per
@@ -22,6 +23,20 @@
 //! `i / rate` seconds into the run, so arrivals spread over time instead of
 //! all coming at once; a kept-alive connection waits for its next turn
 //! rather than closing.
+//!
+//! **Under `--rate`, the latency is from when the request was sent unless
+//! `--from-intended` is given.** A request whose turn comes while every one
+//! of the `--concurrency` connections is busy waits for one, and measuring
+//! from the send leaves that wait out — coordinated omission: the slower the
+//! server, the fewer requests the generator sends at their time, and the
+//! less of the slowness it records. `--from-intended` measures from request
+//! `i`'s intended start, `i / rate` into the run, which is what an open-loop
+//! arrival process at that rate would see. Either way the generator reports
+//! how late it sent (`send lag`): if the lag is more than a poll interval,
+//! the concurrency cap or the client itself was binding, and a sent-time
+//! latency understates. The sent-time default is kept because the numbers in
+//! `examples/edge/README.md` were measured with it. `--summary-out` writes
+//! the run's figures as JSON, for `compare/sweep.py`.
 //!
 //! std only, and not a thread per request on this side either: each of
 //! `--threads` threads owns its share of the connections, writes each request
@@ -49,7 +64,9 @@ usage: cove-edge-load [--addr 127.0.0.1:8787] [--path /aggregate/]
                       [--keep-alive (reuse each connection)]
                       [--mix NAME=WEIGHT,... | --mix default | --mix cpu-io (instead of --path)]
                       [--timeline-out FILE (dump the server's /_timeline here)]
-                      [--rate N (start at most N requests per second)]";
+                      [--rate N (start at most N requests per second)]
+                      [--from-intended (under --rate: latency from i / rate, not from the send)]
+                      [--summary-out FILE (the run's figures as JSON)]";
 
 /// `--mix default`: every behaviour the server has, in proportions that keep
 /// a 300-request picture legible.
@@ -159,6 +176,11 @@ fn splitmix(mut x: u64) -> u64 {
 /// How long one request may take before it is counted as failed.
 const GIVE_UP: Duration = Duration::from_secs(30);
 
+/// How long a kept-alive connection may wait under `--rate` for its next
+/// request before the generator drops it, measured from its last request's
+/// send: well inside the 5 s idle timeout of the servers it is pointed at.
+const IDLE_DROP: Duration = Duration::from_secs(2);
+
 struct Outcome {
     latencies: Vec<Duration>,
     statuses: Vec<u16>,
@@ -171,6 +193,14 @@ struct Outcome {
     by_tenant: BTreeMap<String, BTreeMap<u16, usize>>,
     /// Per tenant under `--mix`: every latency, as the client saw it.
     tenant_latencies: BTreeMap<String, Vec<Duration>>,
+    /// How late each request was sent after its intended start.
+    lags: Vec<Duration>,
+    /// Every latency from the send, whichever `latencies` holds, so that a
+    /// summary has both: from the intended start is right once the
+    /// generator falls behind, from the send is the server's alone while it
+    /// does not.
+    sent: Vec<Duration>,
+    tenant_sent: BTreeMap<String, Vec<Duration>>,
 }
 
 impl Outcome {
@@ -183,6 +213,9 @@ impl Outcome {
             connections: 0,
             by_tenant: BTreeMap::new(),
             tenant_latencies: BTreeMap::new(),
+            lags: Vec::new(),
+            sent: Vec::new(),
+            tenant_sent: BTreeMap::new(),
         }
     }
 }
@@ -192,6 +225,9 @@ struct Open {
     raw: Vec<u8>,
     /// When the request being waited for was written.
     started: Instant,
+    /// When it was meant to start: `i / rate` into the run under `--rate`,
+    /// and `started` without it.
+    intended: Instant,
     /// The tenant it asked, under `--mix`.
     tenant: String,
     /// Kept alive with no request on it: waiting for `--rate` to allow the
@@ -220,6 +256,15 @@ impl Plan {
             .map(|left| self.requests - left)
     }
 
+    /// When request `index` is meant to start: `index / rate` into the run,
+    /// or `now` when there is no rate.
+    fn intended(&self, index: usize, now: Instant) -> Instant {
+        match self.rate {
+            Some(rate) => self.start + Duration::from_secs_f64(index as f64 / rate),
+            None => now,
+        }
+    }
+
     fn due(&self, index: usize) -> bool {
         self.rate
             .is_none_or(|rate| self.start.elapsed().as_secs_f64() >= index as f64 / rate)
@@ -241,6 +286,8 @@ fn main() {
     let mut mix = None;
     let mut timeline_out: Option<String> = None;
     let mut rate = None;
+    let mut from_intended = false;
+    let mut summary_out: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| fail("a flag takes a value"));
@@ -254,6 +301,8 @@ fn main() {
             "--mix" => mix = Some(value()),
             "--timeline-out" => timeline_out = Some(value()),
             "--rate" => rate = Some(number(&value()) as f64),
+            "--from-intended" => from_intended = true,
+            "--summary-out" => summary_out = Some(value()),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return;
@@ -319,7 +368,15 @@ fn main() {
                         request_bytes("GET", &target, "", keep_alive),
                     )
                 };
-                drive(target, &next, keep_alive, share, &plan, &outcome)
+                drive(
+                    target,
+                    &next,
+                    keep_alive,
+                    from_intended,
+                    share,
+                    &plan,
+                    &outcome,
+                )
             })
         })
         .collect();
@@ -353,6 +410,86 @@ fn main() {
         pct(0.99),
         pct(1.0)
     );
+    let mut lags = std::mem::take(&mut outcome.lags);
+    lags.sort();
+    let lag_at = |p: f64| {
+        lags.get(((lags.len().max(1) - 1) as f64 * p).round() as usize)
+            .map_or(0.0, |d| d.as_secs_f64() * 1e3)
+    };
+    // Late past a millisecond: more than a poll interval (200 us) and a
+    // connect, so the cap or the client was what held it back.
+    let late = lags
+        .iter()
+        .filter(|lag| **lag > Duration::from_millis(1))
+        .count();
+    if rate.is_some() {
+        println!(
+            "  send lag ms: p50 {:.2}  p99 {:.2}  max {:.2}; {late} of {} sent more than 1 ms late; latency measured from {}",
+            lag_at(0.5),
+            lag_at(0.99),
+            lag_at(1.0),
+            lags.len(),
+            if from_intended {
+                "the intended start"
+            } else {
+                "the send"
+            }
+        );
+    }
+    let mut sent = std::mem::take(&mut outcome.sent);
+    sent.sort();
+    let sent_at = |all: &[Duration], p: f64| {
+        all.get(((all.len().max(1) - 1) as f64 * p).round() as usize)
+            .map_or(0.0, |d| d.as_secs_f64() * 1e3)
+    };
+    let mut summary = format!(
+        "{{\"requests\": {requests}, \"concurrency\": {concurrency}, \"rate\": {}, \"from_intended\": {from_intended}, \"keep_alive\": {keep_alive}, \"answered\": {}, \"ok\": {ok}, \"errors\": {}, \"wall_s\": {:.4}, \"throughput\": {:.2}, \"connections\": {}, \"p50_ms\": {:.4}, \"p90_ms\": {:.4}, \"p99_ms\": {:.4}, \"max_ms\": {:.4}, \"lag_p50_ms\": {:.4}, \"lag_p99_ms\": {:.4}, \"lag_max_ms\": {:.4}, \"late\": {late}, \"p50_sent_ms\": {:.4}, \"p99_sent_ms\": {:.4}, \"tenants\": {{",
+        rate.map_or("null".to_string(), |r| r.to_string()),
+        outcome.statuses.len(),
+        outcome.errors.len(),
+        wall.as_secs_f64(),
+        outcome.statuses.len() as f64 / wall.as_secs_f64(),
+        outcome.connections,
+        pct(0.5),
+        pct(0.9),
+        pct(0.99),
+        pct(1.0),
+        lag_at(0.5),
+        lag_at(0.99),
+        lag_at(1.0),
+        sent_at(&sent, 0.5),
+        sent_at(&sent, 0.99),
+    );
+    for (n, (tenant, statuses)) in outcome.by_tenant.iter().enumerate() {
+        let mut latencies = outcome
+            .tenant_latencies
+            .get(tenant)
+            .cloned()
+            .unwrap_or_default();
+        latencies.sort();
+        let at = |p: f64| {
+            latencies
+                .get(((latencies.len().max(1) - 1) as f64 * p).round() as usize)
+                .map_or(0.0, |d| d.as_secs_f64() * 1e3)
+        };
+        let statuses: Vec<String> = statuses
+            .iter()
+            .map(|(status, count)| format!("\"{status}\": {count}"))
+            .collect();
+        let mut from_send = outcome.tenant_sent.get(tenant).cloned().unwrap_or_default();
+        from_send.sort();
+        summary.push_str(&format!(
+            "{}\"{tenant}\": {{\"count\": {}, \"p50_ms\": {:.4}, \"p99_ms\": {:.4}, \"p50_sent_ms\": {:.4}, \"p99_sent_ms\": {:.4}, \"statuses\": {{{}}}}}",
+            if n > 0 { ", " } else { "" },
+            latencies.len(),
+            at(0.5),
+            at(0.99),
+            sent_at(&from_send, 0.5),
+            sent_at(&from_send, 0.99),
+            statuses.join(", ")
+        ));
+    }
+    summary.push_str("}}\n");
     for (tenant, statuses) in &outcome.by_tenant {
         let statuses: Vec<String> = statuses
             .iter()
@@ -387,6 +524,10 @@ fn main() {
         Ok((_, body)) => println!("server /_stats after the run:\n{body}"),
         Err(e) => println!("server /_stats unreadable: {e}"),
     }
+    if let Some(file) = summary_out {
+        std::fs::write(&file, summary)
+            .unwrap_or_else(|e| fail(&format!("cannot write {file}: {e}")));
+    }
     if let Some(file) = timeline_out {
         match get(target, "/_timeline") {
             Ok((200, body)) => match std::fs::write(&file, &body) {
@@ -407,6 +548,7 @@ fn drive(
     target: SocketAddr,
     next: &dyn Fn(usize) -> (String, String),
     keep_alive: bool,
+    from_intended: bool,
     share: usize,
     plan: &Plan,
     outcome: &Mutex<Outcome>,
@@ -419,6 +561,9 @@ fn drive(
     let mut connections = 0;
     let mut by_tenant: BTreeMap<String, BTreeMap<u16, usize>> = BTreeMap::new();
     let mut tenant_latencies: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
+    let mut lags = Vec::new();
+    let mut sent = Vec::new();
+    let mut tenant_sent: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
     let mut chunk = [0u8; 4096];
     loop {
         while open.len() < share {
@@ -427,6 +572,8 @@ fn drive(
             };
             let (tenant, request) = next(index);
             let started = Instant::now();
+            let intended = plan.intended(index, started);
+            lags.push(started.saturating_duration_since(intended));
             connections += 1;
             let opened = TcpStream::connect_timeout(&target, Duration::from_secs(10)).and_then(
                 |mut stream| {
@@ -440,6 +587,7 @@ fn drive(
                     stream,
                     raw: Vec::with_capacity(512),
                     started,
+                    intended,
                     tenant,
                     idle: false,
                 }),
@@ -455,7 +603,10 @@ fn drive(
             if open[at].idle {
                 if let Some(index) = plan.claim() {
                     let (tenant, request) = next(index);
-                    open[at].started = Instant::now();
+                    let now = Instant::now();
+                    open[at].started = now;
+                    open[at].intended = plan.intended(index, now);
+                    lags.push(now.saturating_duration_since(open[at].intended));
                     open[at].tenant = tenant;
                     open[at].idle = false;
                     progressed = true;
@@ -465,7 +616,13 @@ fn drive(
                         open.swap_remove(at);
                         continue;
                     }
-                } else if plan.done() {
+                } else if plan.done() || open[at].started.elapsed() > IDLE_DROP {
+                    // Done, or idle long enough that the server may be about
+                    // to close it (both servers compared close an idle
+                    // connection after 5 s): a request written into that
+                    // close would come back as a failure that is the
+                    // generator's. The loop above opens a fresh one when a
+                    // request is due.
                     reset(&open.swap_remove(at).stream);
                     continue;
                 }
@@ -515,7 +672,15 @@ fn drive(
                 parse_response(&raw)
             }) {
                 Ok((status, body)) => {
-                    latencies.push(open[at].started.elapsed());
+                    let from = if from_intended {
+                        open[at].intended
+                    } else {
+                        open[at].started
+                    };
+                    let took = from.elapsed();
+                    latencies.push(took);
+                    let since_sent = open[at].started.elapsed();
+                    sent.push(since_sent);
                     statuses.push(status);
                     if !open[at].tenant.is_empty() {
                         *by_tenant
@@ -526,7 +691,11 @@ fn drive(
                         tenant_latencies
                             .entry(open[at].tenant.clone())
                             .or_default()
-                            .push(open[at].started.elapsed());
+                            .push(took);
+                        tenant_sent
+                            .entry(open[at].tenant.clone())
+                            .or_default()
+                            .push(since_sent);
                     }
                     if status != 200 && refused.is_none() {
                         refused = Some((status, body));
@@ -549,7 +718,10 @@ fn drive(
             }
             if let Some(index) = claimed {
                 let (tenant, request) = next(index);
-                open[at].started = Instant::now();
+                let now = Instant::now();
+                open[at].started = now;
+                open[at].intended = plan.intended(index, now);
+                lags.push(now.saturating_duration_since(open[at].intended));
                 open[at].tenant = tenant;
                 if let Err(e) = write_all_nonblocking(&mut open[at].stream, request.as_bytes()) {
                     errors.push(format!("write: {e}"));
@@ -571,6 +743,15 @@ fn drive(
     outcome.statuses.extend(statuses);
     outcome.errors.extend(errors);
     outcome.connections += connections;
+    outcome.lags.extend(lags);
+    outcome.sent.extend(sent);
+    for (tenant, latencies) in tenant_sent {
+        outcome
+            .tenant_sent
+            .entry(tenant)
+            .or_default()
+            .extend(latencies);
+    }
     for (tenant, statuses) in by_tenant {
         let into = outcome.by_tenant.entry(tenant).or_default();
         for (status, count) in statuses {

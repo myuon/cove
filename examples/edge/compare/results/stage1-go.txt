@@ -1,0 +1,13 @@
+mode    case              median ns/call   min..max ns/call   calls/batch
+go      crunch n=2000              43690      43616..43831      8192
+go+map  crunch n=2000              44257      43912..44518      8192
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+go      crunch n=20000            997396     996311..998620     512
+go+map  crunch n=20000            998574     997503..999265     512
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+go      crunch n=150000         15545967   15512041..15548849   32
+go+map  crunch n=150000         15532050   15515376..15538270   32
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+go      hello name=Cove               54         54..55         8388608
+go+map  hello name=Cove              217        215..224        2097152
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"

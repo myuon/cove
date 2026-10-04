@@ -18,6 +18,17 @@ path = "src/bin/load.rs"
 name = "cove-edge-timeline"
 path = "src/bin/timeline.rs"
 
+[[bin]]
+name = "cove-edge-compare"
+path = "src/bin/compare.rs"
+
+[features]
+# The native tier's code generator, for `cove-edge-compare` (stage 1 of
+# `compare/README.md`) alone: the server's isolates are `OwnedVm`s, which run
+# encoded, so nothing else here uses it. A workspace build turns it on anyway,
+# through `cove-cli`'s default `template` (ADR 0076).
+native = ["cove-runtime/template"]
+
 [dependencies]
 cove-diag.workspace = true
 cove-ir.workspace = true

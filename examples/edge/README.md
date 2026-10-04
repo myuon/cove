@@ -393,6 +393,14 @@ requests in flight on eight threads. `--keep-alive` makes each of the
 `--concurrency` connections ask its next request as soon as the last is
 answered, instead of opening a connection per request.
 
+Under `--rate`, latency is measured from when a request was written, which
+is what the numbers on this page used. A request that has to wait for a free
+connection then has that wait left out (coordinated omission).
+`--from-intended` measures from request *i*'s intended start instead,
+`--summary-out FILE` writes the run as JSON, and the send lag is always
+printed. [`compare/`](compare/README.md) uses all three to measure this
+server against the same service written in Go.
+
 ### Keep-alive
 
 HTTP/1.1 connections stay open by default: a response says `Connection:
