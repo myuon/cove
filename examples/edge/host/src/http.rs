@@ -260,6 +260,126 @@ fn header(head: &[u8], name: &str) -> Option<String> {
         .map(|(_, value)| value.trim().to_string())
 }
 
+/// An `http://` URL, taken apart: what an outbound fetch connects to and
+/// asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Url {
+    /// The host as written — a name or an address — which is what a
+    /// tenant's allowlist names.
+    pub host: String,
+    pub port: u16,
+    /// The path and query, starting with `/`.
+    pub target: String,
+}
+
+impl std::fmt::Display for Url {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "http://{}:{}{}", self.host, self.port, self.target)
+    }
+}
+
+/// Parses `http://host[:port][/path[?query]]`. Anything else — `https`, which
+/// would need TLS, or no scheme at all — is refused with the reason.
+pub fn parse_url(text: &str) -> Result<Url, String> {
+    let Some(rest) = text.strip_prefix("http://") else {
+        if text.starts_with("https://") {
+            return Err(format!(
+                "cannot fetch `{text}`: https needs TLS, which this server does not speak"
+            ));
+        }
+        return Err(format!("cannot fetch `{text}`: not an `http://` URL"));
+    };
+    let (authority, target) = match rest.find('/') {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (
+            host,
+            port.parse()
+                .map_err(|_| format!("cannot fetch `{text}`: bad port `{port}`"))?,
+        ),
+        None => (authority, 80),
+    };
+    if host.is_empty() || host.contains('@') {
+        return Err(format!("cannot fetch `{text}`: no host"));
+    }
+    Ok(Url {
+        host: host.to_ascii_lowercase(),
+        port,
+        target: target.to_string(),
+    })
+}
+
+/// The most of a fetched response this server reads.
+const MAX_FETCHED: usize = 1024 * 1024;
+
+/// A blocking `GET` of `url`, on a connection of its own: the status and the
+/// body.
+///
+/// `connected` is handed the connection as soon as it is open, before the
+/// request is written — which is how the fetch pool keeps a handle that can
+/// abort a fetch nobody wants any more (`TcpStream::shutdown` from another
+/// thread ends the read below at once). It answers `false` to give up before
+/// anything is sent.
+pub fn fetch(
+    url: &Url,
+    connected: impl FnOnce(&TcpStream) -> bool,
+) -> Result<(u16, String), String> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (url.host.as_str(), url.port)
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve `{}`: {e}", url.host))?
+        .collect();
+    // Every address in turn: `localhost` is `::1` before `127.0.0.1` on
+    // macOS, and a server listening on one of them is still `localhost`.
+    let mut last = format!("`{}` has no address", url.host);
+    let mut connected_to = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)) {
+            Ok(stream) => {
+                connected_to = Some(stream);
+                break;
+            }
+            Err(e) => last = format!("cannot connect to `{url}`: {e}"),
+        }
+    }
+    let mut stream = connected_to.ok_or(last)?;
+    if !connected(&stream) {
+        return Err(format!("the fetch of `{url}` was abandoned"));
+    }
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .map_err(|e| e.to_string())?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: cove-edge\r\nConnection: close\r\n\r\n",
+        url.target, url.host, url.port
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("cannot send to `{url}`: {e}"))?;
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some(length) = response_length(&raw) {
+            raw.truncate(length);
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("reading `{url}`: {e}")),
+        }
+        if raw.len() > MAX_FETCHED {
+            return Err(format!("`{url}` answered more than {MAX_FETCHED} bytes"));
+        }
+    }
+    if raw.is_empty() {
+        return Err(format!("`{url}` closed the connection without answering"));
+    }
+    parse_response(&raw)
+}
+
 /// A client that keeps one connection open across requests, as a browser or
 /// a reverse proxy would: what the tests use to watch keep-alive work.
 pub struct Client {

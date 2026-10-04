@@ -22,6 +22,7 @@ usage: cove-edge [--port 8787] [--host 127.0.0.1] [--workers 4]
                  [--quiet (no `log.info` lines)] [--tenants DIR]
                  [--no-keep-alive] [--idle-timeout MS (default 5000)]
                  [--max-requests N (per connection, default 1000)]
+                 [--fetchers N (threads performing `upstream.fetch`, default 4)]
        cove-edge check [tenant…] [--tenants DIR]
        cove-edge test [tenant…] [--filter TEXT] [--latency MIN..MAX (ms, default 0)]
                       [--tenants DIR]";
@@ -95,6 +96,7 @@ fn serve(args: Vec<String>) -> ExitCode {
     let mut blocking_upstream = false;
     let mut tenants = cove_edge::tenants_root();
     let mut keep_alive = KeepAlive::default();
+    let mut fetchers = 4usize;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -116,6 +118,7 @@ fn serve(args: Vec<String>) -> ExitCode {
                 keep_alive.idle = Duration::from_millis(parse(&value("--idle-timeout")))
             }
             "--max-requests" => keep_alive.max_requests = parse(&value("--max-requests")),
+            "--fetchers" => fetchers = parse(&value("--fetchers")),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -131,6 +134,7 @@ fn serve(args: Vec<String>) -> ExitCode {
         workers,
         isolates,
         keep_alive,
+        fetchers,
         deploy: DeployOptions {
             tenants,
             latency,
@@ -171,10 +175,12 @@ fn serve(args: Vec<String>) -> ExitCode {
                 "hello" => "hello/?name=Cove",
                 "counter" => "counter/home",
                 "aggregate" => "aggregate/",
+                "proxy" => "proxy/?url=http://127.0.0.1:PORT/hello/",
                 _ => "",
             };
             if !example.is_empty() {
-                println!("  curl -s http://{addr}/{example}");
+                let example = example.replace("PORT", &addr.port().to_string());
+                println!("  curl -s 'http://{addr}/{example}'");
             }
         }
     }

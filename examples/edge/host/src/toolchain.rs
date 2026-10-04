@@ -25,9 +25,10 @@
 //! policy rather than the toolchain's: a test is granted what `cove.toml`
 //! grants its tenant, not what its call graph derives, and it runs under the
 //! tenant's limits. The hosts are the server's own (`kv` in memory and empty
-//! per test, `log` silent, `upstream` at the latency asked for), answered
-//! through their blocking path, because a test is run to its end on one
-//! thread.
+//! per test, `log` silent, `upstream.get` at the latency asked for,
+//! `upstream.fetch` a real fetch filtered by the tenant's allowlist),
+//! answered through their blocking path, because a test is run to its end on
+//! one thread.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -115,6 +116,7 @@ fn list(set: &BTreeSet<String>) -> String {
 /// refused.
 pub fn check(root: &Path, only: &[String]) -> Result<Report, String> {
     let config = deploy::read_manifest(root)?;
+    let policy = deploy::read_policy(root, &config)?;
     let selected = select(root, only, &config)?;
     let mut report = Report::default();
     let mut modules: Vec<(String, Result<Compiled, String>)> = Vec::new();
@@ -137,7 +139,7 @@ pub fn check(root: &Path, only: &[String]) -> Result<Report, String> {
 
     let mut refused = 0;
     for (name, run) in &selected {
-        let mut tenant = deploy::describe(name, run);
+        let mut tenant = deploy::describe(name, run, &policy);
         let compiled = modules
             .iter()
             .find(|(module, _)| run.entry.starts_with(&format!("{module}.")))
@@ -174,10 +176,11 @@ pub fn check(root: &Path, only: &[String]) -> Result<Report, String> {
         };
         let open = if tenant.open { " (lower bound)" } else { "" };
         report.out.push_str(&format!(
-            "{:<10} requires [{}]{open}  granted [{}]  {verdict}\n",
+            "{:<10} requires [{}]{open}  granted [{}]{}  {verdict}\n",
             tenant.name,
             list(&tenant.required),
             list(&tenant.granted),
+            tenant.fetch_note(),
         ));
     }
 
@@ -237,6 +240,7 @@ const FAILED: &str = "cove::test::failed";
 /// compile.
 pub fn test(root: &Path, only: &[String], options: &TestOptions) -> Result<Report, String> {
     let config = deploy::read_manifest(root)?;
+    let policy = deploy::read_policy(root, &config)?;
     let selected = select(root, only, &config)?;
     let mut report = Report::default();
     let deploy_options = DeployOptions {
@@ -247,7 +251,7 @@ pub fn test(root: &Path, only: &[String], options: &TestOptions) -> Result<Repor
     };
     let (mut ran, mut failed, mut uncompiled) = (0, 0, 0);
     for (name, run) in &selected {
-        let tenant = deploy::describe(name, run);
+        let tenant = deploy::describe(name, run, &policy);
         let module = run.entry.split_once('.').map_or("", |(m, _)| m);
         let compiled = match deploy::compile(root, module) {
             Ok(compiled) => compiled,

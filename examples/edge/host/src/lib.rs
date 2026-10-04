@@ -25,6 +25,7 @@
 //! [`Step`]: cove_runtime::Step
 
 pub mod deploy;
+pub mod fetch;
 pub mod hosts;
 pub mod http;
 pub mod idle;

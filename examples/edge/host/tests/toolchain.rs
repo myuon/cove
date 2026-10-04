@@ -35,7 +35,7 @@ fn scratch(name: &str, source: &str) -> PathBuf {
 #[test]
 fn check_sees_the_server_s_schemas_and_refuses_what_the_server_refuses() {
     let report = check(&cove_edge::tenants_root(), &[]).unwrap();
-    // `cove check` in `tenants/` warns thirteen times that `edge`, `kv`,
+    // `cove check` in `tenants/` warns nineteen times that `edge`, `kv`,
     // `log` and `upstream` are undescribed; with the schemas, nothing.
     assert_eq!(report.err, "", "no notices against the real schemas");
     assert!(
@@ -57,6 +57,13 @@ fn check_sees_the_server_s_schemas_and_refuses_what_the_server_refuses() {
             "greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant\n"
         ),
         "{}",
+        report.out
+    );
+    assert!(
+        report.out.contains(
+            "proxy      requires [upstream]  granted [upstream]  fetch [127.0.0.1, localhost]  ok\n"
+        ),
+        "the fetch allowlist from edge.toml: {}",
         report.out
     );
     assert!(!report.ok, "a refused tenant fails the check");
@@ -82,6 +89,8 @@ fn test_runs_each_tenant_s_tests_with_the_server_s_hosts() {
         "ok    aggregate  aggregate.aServiceThatIsDownIsOneLineOfTheAnswer",
         // The same module under the other tenant's grant and limits.
         "ok    impatient  aggregate.aServiceThatIsDownIsOneLineOfTheAnswer",
+        // The real `upstream`, filtered by `proxy`'s allowlist.
+        "ok    proxy      proxy.aHostOffTheAllowlistIsRefused",
     ] {
         assert!(report.out.contains(line), "{line}\n{}", report.out);
     }

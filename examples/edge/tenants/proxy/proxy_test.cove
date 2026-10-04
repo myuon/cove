@@ -1,0 +1,27 @@
+use edge
+
+/// `proxy` asked to fetch `url`.
+fn fetching(url: String) -> edge.Response {
+  let query = Map.of(MapEntry(key: "url", value: url))
+  handle(edge.Request(method: "GET", path: "/", query: query, body: ""))
+}
+
+/// A host off the allowlist is refused by the server's `upstream`, before
+/// anything is sent, and the tenant answers the refusal as a 502.
+test fn aHostOffTheAllowlistIsRefused() -> Result<Unit, Error> {
+  let answer = fetching("http://example.com/")
+  assertEqual(answer.status, 502)?
+  assertEqual(
+    answer.body,
+    "`example.com` is not on tenant `proxy`'s fetch allowlist (127.0.0.1, localhost)\n",
+  )?
+  Ok(())
+}
+
+/// `https` would need TLS, which the server does not speak.
+test fn httpsIsRefused() -> Result<Unit, Error> {
+  let answer = fetching("https://127.0.0.1/")
+  assertEqual(answer.status, 502)?
+  assert(answer.body.contains("https needs TLS"))?
+  Ok(())
+}

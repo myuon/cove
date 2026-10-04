@@ -40,6 +40,7 @@ dependencies = [
  "cove-sema",
  "cove-syntax",
  "libc",
+ "toml",
 ]
 
 [[package]]

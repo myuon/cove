@@ -1,11 +1,11 @@
 //! The scheduler: one acceptor, one idle thread, a fixed pool of workers,
-//! one timer.
+//! one parking lot, and a small pool of fetch threads.
 //!
 //! ```text
-//!   acceptor ──▶ idle (poll) ──readable──▶ ┌──────────┐ ◀──Resume── timer (the "upstream")
-//!                    ▲                     │ run queue │                ▲
-//!                    │ kept alive          └──────────┘                │ ParkedVm + due time
-//!                    │              workers × N  ── Step::Parked ───────┘
+//!   acceptor ──▶ idle (poll) ──readable──▶ ┌──────────┐ ◀──Resume── lot ◀──answer── fetch pool × M
+//!                    ▲                     │ run queue │              ▲                 ▲
+//!                    │ kept alive          └──────────┘              │ ParkedVm        │ url
+//!                    │              workers × N  ── Step::Parked ─────┴─────────────────┘
 //!                    └──────────────────────── ── Step::Answered ──▶ response written
 //! ```
 //!
@@ -16,8 +16,11 @@
 //!
 //! A worker takes a job off the queue and runs a tenant's isolate until it
 //! answers or parks. A parked run is a [`ParkedVm`] — `Send`, a few kilobytes
-//! — and it goes to the timer with the socket it owes a response to; no
-//! thread waits on it. When its upstream "answers", the timer puts a resume
+//! — and it goes to the parking lot (the "timer") with the connection it
+//! owes a response to; no thread waits on it. `upstream.get` is simulated,
+//! and the lot answers it itself when its latency is up; `upstream.fetch` is
+//! a real HTTP request, which a fetch-pool thread performs and answers to the
+//! lot under the run's id. When its upstream answers, the lot puts a resume
 //! job on the same queue and whichever worker is free takes it. So the
 //! number of requests in flight is bounded by memory and sockets, not by
 //! threads: the pool is `--workers` threads however many requests are
@@ -45,7 +48,8 @@ use cove_runtime::trace::RunOutcome;
 use cove_runtime::{Budget, OwnedVm, ParkedVm, RuntimeError, Step, Transfer, Value};
 
 use crate::deploy::{deploy_all, request_value, DeployOptions, Deployed, State, Tenant};
-use crate::hosts::{upstream_answer, upstream_latency, UpstreamCall};
+use crate::fetch::{Fetched, Fetcher};
+use crate::hosts::{fetch_answer, result_value, upstream_answer, upstream_latency, UpstreamCall};
 use crate::http::{holds_a_head, read_request, Request, Response};
 use crate::idle::{Conn, Idle};
 use crate::os;
@@ -82,6 +86,8 @@ pub struct ServerOptions {
     pub isolates: Isolates,
     pub deploy: DeployOptions,
     pub keep_alive: KeepAlive,
+    /// How many threads perform `upstream.fetch`es.
+    pub fetchers: usize,
 }
 
 /// Whether, and for how long, a connection is kept open between requests.
@@ -123,7 +129,15 @@ impl Server {
         let listener = TcpListener::bind(&options.listen)
             .map_err(|e| format!("cannot listen on `{}`: {e}", options.listen))?;
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
-        let (timer, timed) = mpsc::channel::<Timed>();
+        let (timer, timed) = mpsc::channel::<Lot>();
+        let fetcher = {
+            let lot = timer.clone();
+            Fetcher::start(options.fetchers, move |id, fetched| {
+                // The lot outlives the pool; a send cannot fail while the
+                // server runs.
+                let _ = lot.send(Lot::Fetched(id, fetched));
+            })
+        };
         let by_name = tenants
             .iter()
             .enumerate()
@@ -137,6 +151,7 @@ impl Server {
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
             timer: Mutex::new(timer),
+            fetcher,
             idle: OnceLock::new(),
             options,
             started: Instant::now(),
@@ -154,7 +169,7 @@ impl Server {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("edge-timer".into())
-                .spawn(move || shared.run_timer(timed))
+                .spawn(move || shared.run_lot(timed))
                 .map_err(|e| e.to_string())?;
         }
         for at in 0..shared.options.workers.max(1) {
@@ -221,26 +236,68 @@ struct Resume {
     flight: Flight,
 }
 
-/// A parked run waiting on the simulated upstream.
+/// What a parked run is waiting for.
+enum Wait {
+    /// `upstream.get`: a simulated service, which the lot answers itself
+    /// when `due`.
+    Service {
+        service: String,
+        latency: Duration,
+        due: Instant,
+    },
+    /// `upstream.fetch`: answered by the fetch pool, under the run's id.
+    Fetch { url: String },
+}
+
+/// A parked run, held by the parking lot until its answer or its deadline.
 struct Timed {
-    due: Instant,
+    /// The run's key in the lot, and its fetch's in the pool.
+    id: u64,
     /// When the run's deadline passes, read off the run as it parked.
     deadline: Option<Instant>,
-    service: String,
-    latency: Duration,
+    wait: Wait,
     parked: ParkedVm,
     flight: Flight,
 }
 
 impl Timed {
-    /// When the timer has to look at this run again: its answer, or its
-    /// deadline if that comes first.
-    fn wake(&self) -> Instant {
-        match self.deadline {
-            Some(deadline) => deadline.min(self.due),
-            None => self.due,
+    /// When the lot has to look at this run again without being told: the
+    /// simulated answer's due time or the deadline, whichever is first. A
+    /// fetch's answer comes by message, so a fetch is woken only by its
+    /// deadline, and one with no deadline is never woken by the clock.
+    fn wake(&self) -> Option<Instant> {
+        match (&self.wait, self.deadline) {
+            (Wait::Service { due, .. }, Some(deadline)) => Some(deadline.min(*due)),
+            (Wait::Service { due, .. }, None) => Some(*due),
+            (Wait::Fetch { .. }, deadline) => deadline,
         }
     }
+
+    /// The resume job for this run: with `answer`, or cancelled if `None`.
+    fn resume(self, answer: Option<Result<Transfer, RuntimeError>>) -> Job {
+        Job::Resume(Box::new(Resume {
+            parked: self.parked,
+            answer,
+            flight: self.flight,
+        }))
+    }
+}
+
+/// What the parking lot is told.
+enum Lot {
+    /// A run parked at an upstream call.
+    Park(Box<Timed>),
+    /// The fetch pool's answer for the fetch with this id.
+    Fetched(u64, Fetched),
+}
+
+/// An answer as the `Transfer` a parked run is resumed with. Built as a
+/// `Value` and then a `Transfer`, because the run is resumed on some other
+/// thread and a `Value` cannot go there.
+fn transfer(result: Result<String, String>) -> Result<Transfer, RuntimeError> {
+    Transfer::of(&result_value(result)).map_err(|unsafe_value| {
+        RuntimeError::new(format!("{} is not task-safe", unsafe_value.type_name))
+    })
 }
 
 struct Shared {
@@ -250,13 +307,16 @@ struct Shared {
     pools: Vec<Mutex<Vec<OwnedVm>>>,
     queue: Mutex<VecDeque<Job>>,
     ready: Condvar,
-    timer: Mutex<mpsc::Sender<Timed>>,
+    timer: Mutex<mpsc::Sender<Lot>>,
+    /// The threads that perform `upstream.fetch`.
+    fetcher: Fetcher,
     /// Where connections wait between requests; set once, at start.
     idle: OnceLock<Idle>,
     stats: Stats,
     options: ServerOptions,
     started: Instant,
-    /// Upstream calls made, which seeds each call's latency.
+    /// Upstream calls made: each one's id in the lot, and the seed of a
+    /// simulated call's latency.
     calls: AtomicU64,
 }
 
@@ -469,21 +529,43 @@ impl Shared {
                 let request = parked.take_request();
                 match request.map(|r| r.downcast::<UpstreamCall>()) {
                     Some(Ok(call)) => {
-                        let seed = self.calls.fetch_add(1, Ordering::Relaxed);
-                        let latency = upstream_latency(&call.service)
-                            .unwrap_or_else(|| self.options.deploy.latency.pick(seed));
+                        let id = self.calls.fetch_add(1, Ordering::Relaxed);
                         let now = Instant::now();
+                        let (wait, fetch) = match *call {
+                            UpstreamCall::Service(service) => {
+                                let latency = upstream_latency(&service)
+                                    .unwrap_or_else(|| self.options.deploy.latency.pick(id));
+                                let due = now + latency;
+                                let wait = Wait::Service {
+                                    service,
+                                    latency,
+                                    due,
+                                };
+                                (wait, None)
+                            }
+                            UpstreamCall::Fetch(url) => {
+                                let wait = Wait::Fetch {
+                                    url: url.to_string(),
+                                };
+                                (wait, Some(url))
+                            }
+                        };
                         let timed = Timed {
-                            due: now + latency,
+                            id,
                             deadline: parked.time_left().map(|left| now + left),
-                            service: call.service,
-                            latency,
+                            wait,
                             parked,
                             flight,
                         };
-                        // The timer outlives every worker; a send cannot fail
-                        // while the server runs.
-                        let _ = self.timer.lock().unwrap().send(timed);
+                        // Parked first and fetched second: the pool answers
+                        // down the same channel, so the answer cannot reach
+                        // the lot before the run it answers. The lot outlives
+                        // every worker; a send cannot fail while the server
+                        // runs.
+                        let _ = self.timer.lock().unwrap().send(Lot::Park(Box::new(timed)));
+                        if let Some(url) = fetch {
+                            self.fetcher.submit(id, url);
+                        }
                     }
                     _ => {
                         let answer = Err(RuntimeError::new(
@@ -500,38 +582,76 @@ impl Shared {
         }
     }
 
-    /// The simulated upstream: every parked run waits here, in a heap
-    /// ordered by when its answer is due, and nowhere else.
-    fn run_timer(&self, timed: mpsc::Receiver<Timed>) {
+    /// The parking lot: every parked run waits here, keyed by its id, and
+    /// nowhere else.
+    ///
+    /// A heap ordered by when each run must be looked at — a simulated
+    /// answer's due time, or a deadline — drives the clock; a fetch's answer
+    /// arrives as a message. Whichever comes first settles the run: its
+    /// answer resumes it, its deadline cancels it, and what comes second
+    /// finds nothing under the id and is dropped.
+    fn run_lot(&self, lot: mpsc::Receiver<Lot>) {
         let mut due: BinaryHeap<Reverse<(Instant, u64)>> = BinaryHeap::new();
         let mut waiting: HashMap<u64, Timed> = HashMap::new();
-        let mut next = 0u64;
         loop {
             let received = match due.peek() {
-                None => timed.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                None => lot.recv().map_err(|_| RecvTimeoutError::Disconnected),
                 Some(Reverse((at, _))) => {
-                    timed.recv_timeout(at.saturating_duration_since(Instant::now()))
+                    lot.recv_timeout(at.saturating_duration_since(Instant::now()))
                 }
             };
+            let mut ready = Vec::new();
             match received {
                 Ok(first) => {
-                    for item in std::iter::once(first).chain(timed.try_iter()) {
-                        due.push(Reverse((item.wake(), next)));
-                        waiting.insert(next, item);
-                        next += 1;
+                    for message in std::iter::once(first).chain(lot.try_iter()) {
+                        match message {
+                            Lot::Park(timed) => {
+                                if let Some(wake) = timed.wake() {
+                                    due.push(Reverse((wake, timed.id)));
+                                }
+                                waiting.insert(timed.id, *timed);
+                            }
+                            Lot::Fetched(id, fetched) => {
+                                // Not waiting: its deadline came first, and
+                                // the run was cancelled without it.
+                                let Some(timed) = waiting.remove(&id) else {
+                                    continue;
+                                };
+                                let Wait::Fetch { url } = &timed.wait else {
+                                    unreachable!("only a fetch is answered by the pool");
+                                };
+                                let answer = transfer(fetch_answer(url, fetched));
+                                ready.push(timed.resume(Some(answer)));
+                            }
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
             let now = Instant::now();
-            let mut ready = Vec::new();
-            while let Some(Reverse((at, key))) = due.peek().copied() {
+            while let Some(Reverse((at, id))) = due.peek().copied() {
                 if at > now {
                     break;
                 }
                 due.pop();
-                ready.push(waiting.remove(&key).expect("every key is waiting"));
+                // Not waiting: a fetch already answered.
+                let Some(timed) = waiting.remove(&id) else {
+                    continue;
+                };
+                // Woken by its deadline rather than its answer: the run is
+                // cancelled on a worker, and the answer never comes.
+                if timed.deadline.is_some_and(|deadline| deadline <= now) {
+                    ready.push(timed.resume(None));
+                    continue;
+                }
+                let answer = match &timed.wait {
+                    Wait::Service {
+                        service, latency, ..
+                    } => transfer(upstream_answer(service, *latency)),
+                    Wait::Fetch { .. } => unreachable!("a fetch wakes only at its deadline"),
+                };
+                ready.push(timed.resume(Some(answer)));
             }
             if ready.is_empty() {
                 continue;
@@ -539,33 +659,7 @@ impl Shared {
             let count = ready.len();
             {
                 let mut queue = self.queue.lock().unwrap();
-                for item in ready {
-                    // Woken by its deadline rather than its answer: the run
-                    // is cancelled on a worker, and the answer never comes.
-                    if item.deadline.is_some_and(|deadline| deadline <= now) {
-                        queue.push_back(Job::Resume(Box::new(Resume {
-                            parked: item.parked,
-                            answer: None,
-                            flight: item.flight,
-                        })));
-                        continue;
-                    }
-                    // The answer is built here, as a `Value` and then a
-                    // `Transfer`, because the parked run is resumed on some
-                    // other thread and a `Value` cannot go there.
-                    let value = match upstream_answer(&item.service, item.latency) {
-                        Ok(text) => Value::ok(Value::string(text)),
-                        Err(message) => Value::err(Value::error(message)),
-                    };
-                    let answer = Some(Transfer::of(&value).map_err(|unsafe_value| {
-                        RuntimeError::new(format!("{} is not task-safe", unsafe_value.type_name))
-                    }));
-                    queue.push_back(Job::Resume(Box::new(Resume {
-                        parked: item.parked,
-                        answer,
-                        flight: item.flight,
-                    })));
-                }
+                queue.extend(ready);
                 self.stats
                     .queue_peak
                     .fetch_max(queue.len() as i64, Ordering::Relaxed);
@@ -619,7 +713,8 @@ impl Shared {
              \"in_flight_peak\": {},\n  \"parked\": {},\n  \"parked_peak\": {},\n  \
              \"parks\": {},\n  \"timeouts\": {},\n  \"queue_peak\": {},\n  \
              \"connections\": {},\n  \"keep_alive_reuses\": {},\n  \"idle_connections\": {},\n  \
-             \"idle_expired\": {},\n  \"live_isolates\": {},\n  \
+             \"idle_expired\": {},\n  \"fetches\": {},\n  \"fetches_aborted\": {},\n  \
+             \"live_isolates\": {},\n  \
              \"pooled_isolates\": {pooled},\n  \"isolate_heap_bytes\": {{\"mean\": {heap_mean}, \"max\": {heap_max}}},\n  \
              \"latency_ms\": {{\"p50\": {:.2}, \"p99\": {:.2}, \"max\": {:.2}, \"samples\": {samples}}},\n  \
              \"rss_kib\": {},\n  \"peak_rss_kib\": {},\n  \"tenants\": {{\n{}\n  }}\n}}\n",
@@ -638,6 +733,9 @@ impl Shared {
             stats.reused.load(Ordering::Relaxed),
             self.idle().stats.idle.load(Ordering::Relaxed),
             self.idle().stats.expired.load(Ordering::Relaxed),
+            self.fetcher.stats().started.load(Ordering::Relaxed),
+            self.fetcher.stats().aborted_queued.load(Ordering::Relaxed)
+                + self.fetcher.stats().aborted_running.load(Ordering::Relaxed),
             in_flight + pooled as i64,
             p50.as_secs_f64() * 1e3,
             p99.as_secs_f64() * 1e3,

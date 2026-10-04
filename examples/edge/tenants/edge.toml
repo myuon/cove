@@ -1,0 +1,12 @@
+# The edge server's own policy for each tenant, beyond what `cove.toml`
+# grants. A file of its own because `cove.toml`'s `[run.<name>]` tables are
+# `cove`'s, and its parser refuses a key it does not know.
+#
+# `fetch` is the hosts a tenant's `upstream.fetch` may reach. The `upstream`
+# capability in `cove.toml` says a tenant may make outbound calls at all;
+# this says to where, and the server's `upstream` host holds every fetch to
+# it at the boundary. A tenant not named here may fetch from nowhere. Hosts
+# are matched as written in the URL, on any port.
+
+[proxy]
+fetch = ["127.0.0.1", "localhost"]

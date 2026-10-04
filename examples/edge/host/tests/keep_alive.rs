@@ -18,6 +18,7 @@ fn start(keep_alive: KeepAlive) -> Server {
         workers: 2,
         isolates: Isolates::PerRequest,
         keep_alive,
+        fetchers: 2,
         deploy: DeployOptions {
             tenants: cove_edge::tenants_root(),
             latency: Latency {

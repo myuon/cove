@@ -73,16 +73,18 @@ counter    requires [kv, log]  granted [kv, log]  ok
 greedy     requires [kv, upstream]  granted [kv]  REFUSED: `greedy.handle` requires `upstream`, which cove.toml does not grant
 hello      requires [-]  granted [-]  ok
 impatient  requires [upstream]  granted [upstream]  ok
-checked 4 module(s), 7 file(s) against the server's schemas; 5 tenant(s), 1 refused
+proxy      requires [upstream]  granted [upstream]  fetch [127.0.0.1, localhost]  ok
+checked 5 module(s), 9 file(s) against the server's schemas; 6 tenant(s), 1 refused
 $ echo $?
 1
 ```
 
-No warnings: `cove check` in the same directory reports thirteen. `test` runs
+No warnings: `cove check` in the same directory reports nineteen. `test` runs
 every `test fn` of each tenant's module the way `cove test` does — lowered
 as an entry, on the VM, an `Err` is a failure pointing at its assertion — but
 with the server's hosts (`kv` in memory, empty per test; `log` silent;
-`upstream` at `--latency`, zero by default), the tenant's grant rather than
+`upstream.get` at `--latency`, zero by default; `upstream.fetch` real and
+filtered by the tenant's allowlist), the tenant's grant rather than
 the test's derived one, and the tenant's limits. `aggregate` and `impatient`
 share a module, so its test runs under each:
 
@@ -93,10 +95,12 @@ ok    counter    counter.countsEachPathApart
 ok    hello      hello.greetsTheWorldWhenNobodyIsNamed
 ok    hello      hello.greetsWhoeverTheQueryNames
 ok    impatient  aggregate.aServiceThatIsDownIsOneLineOfTheAnswer
-ran 5 test(s), 5 passed
+ok    proxy      proxy.aHostOffTheAllowlistIsRefused
+ok    proxy      proxy.httpsIsRefused
+ran 7 test(s), 7 passed
 ```
 
-`cove test` in `tenants/` runs the same four tests and fails all four with
+`cove test` in `tenants/` runs the same six tests and fails all six with
 `cove::test::no_host`. A test that reaches a capability its tenant is not
 granted fails before it runs, naming the grant: ``test `bad.logs` requires
 `log`, which cove.toml does not grant tenant `bad` ``.
@@ -109,13 +113,16 @@ granted fails before it runs, naming the grant: ``test `bad.logs` requires
 | [`counter`](tenants/counter/counter.cove) | `kv`, `log` | state that outlives the isolate lives behind a capability, per tenant |
 | [`aggregate`](tenants/aggregate/aggregate.cove) | `upstream` | three slow calls in a row; the run parks at each; `max_host_calls = 8` per request, however many are in flight |
 | `impatient` | `upstream` | `aggregate`'s code under `deadline = "300ms"`: a request parked at an upstream that has not answered by then is cancelled and answered 504 |
+| [`proxy`](tenants/proxy/proxy.cove) | `upstream`, fetch `127.0.0.1`, `localhost` | `upstream.fetch(?url=)`: a real HTTP request from the fetch pool, to the hosts [`edge.toml`](tenants/edge.toml) allows it; `deadline = "500ms"` |
 | [`greedy`](tenants/greedy/greedy.cove) | `kv` | over-reaches for `upstream` and is not deployed |
 
 The contract is a host module, [`edge`](host/src/hosts.rs), whose schema
 declares `Request { method, path, query: Map<String, String>, body }` and
 `Response { status, contentType, body }` and no operations. It is handed to
 the checker with the other three, so a tenant that misspells a field is
-refused at deploy with the checker's own diagnostic.
+refused at deploy with the checker's own diagnostic. `upstream` has two
+operations, both `Result<String, Error>` and both answered pending: `get`, a
+simulated service by name (what the load tests use), and `fetch`, a real URL.
 
 ## A curl walkthrough
 
@@ -203,6 +210,47 @@ error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
 ```
 
 `/_stats` counts these as `timeouts`.
+
+`proxy` makes a **real** outbound request: `upstream.fetch(url)` is an HTTP/1.1
+`GET` that one of the server's fetch threads (`--fetchers`, default 4;
+[`host/src/fetch.rs`](host/src/fetch.rs)) performs while the run is parked,
+answered `Pending` exactly as `upstream.get` is. Here it asks another tenant
+on the same server — the parked run holds no worker, so a worker is free to
+serve `hello` while `proxy` waits for it:
+
+```console
+$ curl -i 'http://localhost:8787/proxy/?url=http://127.0.0.1:8787/hello/?name=proxy'
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 68
+Connection: keep-alive
+
+http://127.0.0.1:8787/hello/?name=proxy said:
+Hello, proxy! (GET /)
+```
+
+Where it may go is not the tenant's to decide. `cove.toml` grants `upstream`
+— outbound calls at all — and [`tenants/edge.toml`](tenants/edge.toml) names
+the hosts `fetch` may reach; the server's `upstream` host checks every URL
+against that list at the boundary, so a URL the tenant builds at run time
+cannot get past it. Off the list, the call is answered at once with an `Err`,
+before anything is sent and without parking, and `proxy` answers it as it
+answers any failed fetch:
+
+```console
+$ curl -i 'http://localhost:8787/proxy/?url=http://example.com/'
+HTTP/1.1 502 Bad Gateway
+Content-Type: text/plain
+Content-Length: 80
+Connection: keep-alive
+
+`example.com` is not on tenant `proxy`'s fetch allowlist (127.0.0.1, localhost)
+$ curl -s 'http://localhost:8787/proxy/?url=http://localhost:8787/nobody/'
+`http://localhost:8787/nobody/` answered 404: no tenant named `nobody`
+```
+
+`https://` is refused the same way (no TLS here), and a tenant named in no
+`edge.toml` table — `aggregate`, granted `upstream` — may fetch from nowhere.
 
 The refused tenant, and one that does not exist:
 
@@ -420,7 +468,7 @@ The most useful output of this demo. Ordered by how much each cost.
    decision: `cove` will not read a serialized schema, because it would be a
    second description of a module whose first is Rust, and because `cove
    test` would still need the implementation. So `cove check` in `tenants/`
-   still reports thirteen warnings (four `unchecked_host`, nine `host_type`:
+   still reports nineteen warnings (four `unchecked_host`, fifteen `host_type`:
    every `edge.Request` and `edge.Response` unchecked), `cove test` there
    fails every test with `cove::test::no_host` ("requires the `edge`
    capability, which no host module provides"), and `cove run hello` fails
@@ -449,7 +497,14 @@ The most useful output of this demo. Ordered by how much each cost.
    and `RunConfig` already carries `allow`, `fuel`, `deadline` and
    `max_host_calls` — exactly a tenant's grant. But `[run]` means "`cove run`
    can start this", and neither `cove check` nor anything else notices that
-   `hello.handle(request: edge.Request)` is not a runnable entry.
+   `hello.handle(request: edge.Request)` is not a runnable entry. The fetch
+   allowlist then had nowhere to go: `cove_sema::config::parse` rejects a key
+   it does not know in a `[run.<name>]` table — right for `cove run`, whose
+   typo it catches — so an embedder's own per-tenant policy lives in a second
+   file, [`tenants/edge.toml`](tenants/edge.toml), with its own strict parser
+   (an unknown key, or a tenant `cove.toml` does not name, is refused). Two
+   files describing one tenant is the shape a `[run]` table that tolerated an
+   embedder's namespace (`[run.proxy.edge]`, say) would avoid.
 5. **Each tenant re-checks the standard library** — a third of it fixed
    since. A ten-line handler reaches 218–221 functions, and deploying it cost
    14–17 ms of checking, all of it the standard library
@@ -471,11 +526,13 @@ The most useful output of this demo. Ordered by how much each cost.
    loads a whole package root. A "load this directory as module `m`" helper
    would serve both.
 7. **A pending answer is built as a `Value` to become a `Transfer`.**
-   `upstream.get` answers `Result<String, Error>`; the timer thread builds
-   `Value::ok(Value::string(…))` — an `Rc` value on a thread that never runs
-   Cove — only to call `Transfer::of` on it (`host/src/server.rs`, in
-   `run_timer`), because `Transfer` has no constructors for `Ok`/`Err` and its
-   `Enum` case would mean guessing the builtin's type name.
+   `upstream.get` and `upstream.fetch` answer `Result<String, Error>`; the
+   parking lot builds `Value::ok(Value::string(…))` — an `Rc` value on a
+   thread that never runs Cove — only to call `Transfer::of` on it
+   (`transfer` in `host/src/server.rs`), because `Transfer` has no
+   constructors for `Ok`/`Err` and its `Enum` case would mean guessing the
+   builtin's type name. The real fetch made it a second call site, not a
+   different shape.
 8. **A parked run's deadline did not fire while it was parked — fixed
    ([ADR 0082](../../docs/adr/0082-a-parked-run-keeps-its-deadline.md)).**
    `Limits`' deadline bounds the run "parked time included", but nothing woke
@@ -508,9 +565,11 @@ deploy.
   connections cost no thread, but the idle thread's `poll` is O(idle
   connections) per wake-up, which a server with far more than ten thousand
   would replace with `epoll`/`kqueue`.
-- A real outbound fetch: `upstream` is a timer heap that answers after the
-  chosen latency. Swapping it for an I/O thread doing real requests changes
-  `run_timer` and nothing else.
+- The fetch pool is a few blocking threads, so more concurrent fetches than
+  `--fetchers` queue; multiplexing them as the idle thread multiplexes
+  connections would change `host/src/fetch.rs` and nothing else. `http://`
+  only, no redirects, no request body or headers from the tenant, a 1 MiB
+  response cap, and the allowlist matches the host as written on any port.
 - Telling the upstream a timed-out request's call is no longer wanted: the
   timer drops it, and a real upstream would want its request aborted, which
   is between the host and the embedder (ADR 0082 leaves it there).

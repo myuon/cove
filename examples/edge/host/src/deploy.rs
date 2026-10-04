@@ -64,6 +64,8 @@ pub struct Tenant {
     pub entry: String,
     /// What `cove.toml` grants.
     pub granted: BTreeSet<String>,
+    /// The hosts `upstream.fetch` may reach, from `edge.toml`.
+    pub fetch: BTreeSet<String>,
     /// What the checker derived the entry requires, when it checked.
     pub required: BTreeSet<String>,
     /// Whether `required` is a lower bound: the entry makes a call the call
@@ -168,11 +170,25 @@ impl Tenant {
             State::Refused(why) => format!("REFUSED: {why}"),
         };
         format!(
-            "{:<10} requires [{}]{open}  granted [{}]  {verdict}",
+            "{:<10} requires [{}]{open}  granted [{}]{}  {verdict}",
             self.name,
             list(&self.required),
-            list(&self.granted)
+            list(&self.granted),
+            self.fetch_note(),
         )
+    }
+
+    /// `  fetch [hosts]` for a tenant with a fetch allowlist, and nothing for
+    /// one without.
+    pub fn fetch_note(&self) -> String {
+        if self.fetch.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  fetch [{}]",
+                self.fetch.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        }
     }
 
     /// The deployed half, if there is one.
@@ -193,17 +209,82 @@ pub fn read_manifest(root: &Path) -> Result<Config, String> {
     cove_sema::config::parse(&text).map_err(|e| format!("`{}`: {e}", manifest.display()))
 }
 
+/// The server's own policy for each tenant, beyond what `cove.toml` grants:
+/// `tenants/edge.toml`.
+///
+/// A file of its own because `cove.toml` cannot carry it: `cove_sema`'s
+/// parser rejects a key it does not know in a `[run.<name>]` table, which is
+/// right for `cove run` and leaves an embedder nowhere to put a key of its
+/// own (README, "what was awkward").
+///
+/// ```toml
+/// [proxy]
+/// fetch = ["127.0.0.1", "localhost"]   # hosts `upstream.fetch` may reach
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct Policy {
+    /// Per tenant, the hosts `upstream.fetch` may reach; a tenant not named
+    /// may reach none.
+    pub fetch: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Reads `edge.toml` from the tenants directory; no file is no policy.
+///
+/// A tenant `cove.toml` does not name, or a key this server does not know,
+/// is refused rather than skipped: a misspelt allowlist would otherwise be a
+/// tenant silently allowed nothing, or a typo that looks like a grant.
+pub fn read_policy(root: &Path, config: &Config) -> Result<Policy, String> {
+    let path = root.join("edge.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Policy::default());
+    };
+    let shown = path.display();
+    let table: toml::Table = text.parse().map_err(|e| format!("`{shown}`: {e}"))?;
+    let mut policy = Policy::default();
+    for (tenant, value) in table {
+        if !config.runs.contains_key(&tenant) {
+            return Err(format!(
+                "`{shown}` names `{tenant}`, which cove.toml does not"
+            ));
+        }
+        let toml::Value::Table(keys) = value else {
+            return Err(format!("`{shown}`: `{tenant}` is not a table"));
+        };
+        for (key, value) in keys {
+            match (key.as_str(), value) {
+                ("fetch", toml::Value::Array(hosts)) => {
+                    let hosts = hosts
+                        .into_iter()
+                        .map(|host| match host {
+                            toml::Value::String(host) => Ok(host.to_ascii_lowercase()),
+                            other => Err(format!(
+                                "`{shown}`: `{tenant}.fetch` holds `{other:?}`, not a host name"
+                            )),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    policy.fetch.insert(tenant.clone(), hosts);
+                }
+                (key, _) => {
+                    return Err(format!("`{shown}`: unknown key `{tenant}.{key}`"));
+                }
+            }
+        }
+    }
+    Ok(policy)
+}
+
 /// Deploys every tenant `cove.toml` names, refusing the ones that do not
 /// compile or that require more than they are granted.
 ///
 /// A refusal is per tenant: the others deploy. The error is only for a
-/// `cove.toml` that cannot be read at all.
+/// `cove.toml` or an `edge.toml` that cannot be read at all.
 pub fn deploy_all(options: &DeployOptions) -> Result<Vec<Tenant>, String> {
     let config = read_manifest(&options.tenants)?;
+    let policy = read_policy(&options.tenants, &config)?;
     Ok(config
         .runs
         .iter()
-        .map(|(name, run)| deploy(options, name, run))
+        .map(|(name, run)| deploy(options, describe(name, run, &policy)))
         .collect())
 }
 
@@ -220,8 +301,9 @@ pub fn limits_of(run: &RunConfig) -> Limits {
     }
 }
 
-/// A tenant as `cove.toml` describes it, before anything is compiled.
-pub fn describe(name: &str, run: &RunConfig) -> Tenant {
+/// A tenant as `cove.toml` and `edge.toml` describe it, before anything is
+/// compiled.
+pub fn describe(name: &str, run: &RunConfig, policy: &Policy) -> Tenant {
     Tenant {
         name: name.to_string(),
         entry: run.entry.clone(),
@@ -229,6 +311,7 @@ pub fn describe(name: &str, run: &RunConfig) -> Tenant {
         // an `edge.Response` initializes a type the schema declares, which
         // requires no capability, so a tenant that only answers is pure.
         granted: run.allow.iter().cloned().collect(),
+        fetch: policy.fetch.get(name).cloned().unwrap_or_default(),
         required: BTreeSet::new(),
         open: false,
         limits: limits_of(run),
@@ -237,8 +320,7 @@ pub fn describe(name: &str, run: &RunConfig) -> Tenant {
 }
 
 /// Deploys one tenant.
-fn deploy(options: &DeployOptions, name: &str, run: &RunConfig) -> Tenant {
-    let mut tenant = describe(name, run);
+fn deploy(options: &DeployOptions, mut tenant: Tenant) -> Tenant {
     tenant.state = match prepare(options, &mut tenant) {
         Ok(deployed) => State::Deployed(Box::new(deployed)),
         Err(why) => State::Refused(why),
@@ -346,6 +428,8 @@ pub fn registry(tenant: &Tenant, options: &DeployOptions) -> HostRegistry {
     hosts.register(Box::new(Upstream {
         latency: options.latency,
         blocking: options.blocking_upstream,
+        tenant: tenant.name.clone(),
+        allow: Arc::new(tenant.fetch.clone()),
     }));
     hosts
 }
