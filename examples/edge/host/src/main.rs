@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use cove_edge::toolchain::{self, TestOptions};
 use cove_edge::{
-    os, DeployOptions, Discipline, Isolates, KeepAlive, Latency, Recording, Server, ServerOptions,
-    State,
+    os, Backend, DeployOptions, Discipline, Isolates, KeepAlive, Latency, Recording, Server,
+    ServerOptions, State,
 };
 
 const USAGE: &str = "\
@@ -29,6 +29,7 @@ usage: cove-edge [--port 8787] [--host 127.0.0.1] [--workers 4]
                  [--timeline PATH (record every request; GET /_timeline dumps it here)]
                  [--scheduler steal|fifo (default steal: a queue per worker, work stealing)]
                  [--slice MS (ask a run to yield after MS while others wait; default 2, 0 = never)]
+                 [--backend vm|native (the isolates' tier; default vm, native needs --features native)]
        cove-edge check [tenant…] [--tenants DIR]
        cove-edge test [tenant…] [--filter TEXT] [--latency MIN..MAX (ms, default 0)]
                       [--tenants DIR]";
@@ -106,6 +107,7 @@ fn serve(args: Vec<String>) -> ExitCode {
     let mut timeline = None;
     let mut scheduler = Discipline::Stealing;
     let mut slice = Some(Duration::from_millis(2));
+    let mut backend = Backend::Vm;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -146,6 +148,13 @@ fn serve(args: Vec<String>) -> ExitCode {
                 let ms: f64 = parse(&value("--slice"));
                 slice = (ms > 0.0).then(|| Duration::from_secs_f64(ms / 1e3));
             }
+            "--backend" => {
+                backend = match value("--backend").as_str() {
+                    "vm" => Backend::Vm,
+                    "native" => Backend::Native,
+                    other => fail(&format!("`--backend` is `vm` or `native`, not `{other}`")),
+                }
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -170,6 +179,7 @@ fn serve(args: Vec<String>) -> ExitCode {
             latency,
             quiet,
             blocking_upstream,
+            backend,
         },
     })
     .unwrap_or_else(|why| fail(&why));
@@ -180,7 +190,8 @@ fn serve(args: Vec<String>) -> ExitCode {
     let addr = server.addr;
     println!(
         "\nlistening on http://{addr} — {workers} worker thread(s), {isolates}, \
-         upstream latency {}..{} ms ({}), {}, {scheduler}, {}, open-file limit {files}",
+         upstream latency {}..{} ms ({}), {}, {scheduler}, {}, {backend} backend, \
+         open-file limit {files}",
         latency.min.as_millis(),
         latency.max.as_millis(),
         if blocking_upstream {

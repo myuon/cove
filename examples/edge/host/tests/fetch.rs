@@ -8,7 +8,9 @@
 use std::time::Duration;
 
 use cove_edge::http::get;
-use cove_edge::{DeployOptions, Discipline, Isolates, KeepAlive, Latency, Server, ServerOptions};
+use cove_edge::{
+    Backend, DeployOptions, Discipline, Isolates, KeepAlive, Latency, Server, ServerOptions,
+};
 
 fn start() -> Server {
     Server::start(ServerOptions {
@@ -28,6 +30,7 @@ fn start() -> Server {
             },
             quiet: true,
             blocking_upstream: false,
+            backend: Backend::Vm,
         },
     })
     .expect("the server starts")

@@ -676,9 +676,9 @@ to *use* the workers, so there is a tenant that does nothing else.
 [`crunch`](tenants/crunch/crunch.cove) counts the primes up to `?n=` by trial
 division and answers the count and the largest — pure Cove, granted nothing,
 never parked: about 4.5 ms at the default `n=20000`, 15 ms at 50000, 38 ms at
-100000, 66 ms at 150000. **It runs on the VM**: an edge isolate is an
-`OwnedVm`, which has no native tier (that is `cove run --backend native`'s
-alone), so those are encoded-VM times. Its tests, `cove-edge test crunch`,
+100000, 66 ms at 150000. **It runs on the VM**: these are encoded-VM times,
+and this section's server runs encoded (`--backend vm`, the default; see
+[On the native backend](#on-the-native-backend) for the other). Its tests, `cove-edge test crunch`,
 check the prime-counting function at 2, 100, 10000 and 20000 and refuse a
 size that is not a number or is out of range.
 
@@ -934,6 +934,23 @@ What it shows:
   cache; at this run length that is not visible either.
 - **`impatient`'s 504s are unchanged**, 19 of 32, because its deadline is
   spent waiting on an upstream, not on a worker.
+
+### On the native backend
+
+`--backend native` (built with `--features native`, Unix x86-64) deploys each
+tenant with `PreparedProgram::with_native`: compiled once, shared by every
+isolate of the tenant. [ADR
+0085](../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md) is
+what keeps the slice working there — a run yields *inside* compiled code, at
+a backedge, an allocation or a call, leaves its compiled frames standing as
+the VM frames they already are, and is re-entered where it stood on whichever
+worker continues it. Nothing above changes: the same monitor, the same queue,
+the same `yields` in `/_stats`. `crunch` runs about 3.2× faster, so at this
+section's 330 req/s the pool is rarely full and `hello`'s p99 is 3 ms with or
+without a slice; at three times the rate it is 42 ms unsliced and 14 ms with
+the 2 ms slice. The numbers, against Go, are in
+[`compare/README.md`](compare/README.md#the-native-backend-adr-0085). The
+default stays `vm`, because the default build has no code generator.
 
 ## What was awkward
 

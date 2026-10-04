@@ -23,10 +23,12 @@ name = "cove-edge-compare"
 path = "src/bin/compare.rs"
 
 [features]
-# The native tier's code generator, for `cove-edge-compare` (stage 1 of
-# `compare/README.md`) alone: the server's isolates are `OwnedVm`s, which run
-# encoded, so nothing else here uses it. A workspace build turns it on anyway,
-# through `cove-cli`'s default `template` (ADR 0076).
+# The native tier's code generator: what `cove-edge --backend native` runs
+# its isolates on (ADR 0085), and `cove-edge-compare`'s native rows (stage 1
+# of `compare/README.md`). Off by default, as it is in `cove-runtime`, so the
+# default server has no executable-memory dependency and runs encoded. A
+# workspace build turns it on anyway, through `cove-cli`'s default `template`
+# (ADR 0076).
 native = ["cove-runtime/template"]
 
 [dependencies]
@@ -46,3 +48,10 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 # lock file through `cove-native`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The tests compile the native tier whatever the build asked for, so that
+# `tests/server.rs`'s native-backend case runs under `cargo test -p cove-edge`
+# as well as under the workspace's `cargo t` (where `cove-cli` turns it on).
+# A dev-dependency's features reach test builds only.
+[dev-dependencies]
+cove-runtime = { workspace = true, features = ["template"] }

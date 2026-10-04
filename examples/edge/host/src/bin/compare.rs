@@ -17,6 +17,13 @@
 //!   built once and cloned: the encoded VM's time for the call alone.
 //! - `native`: the same, on [`cove_runtime::compile_native`]'s machine code
 //!   (`Vm::with_native`), where this host and build have the tier.
+//! - `edge-n`: `edge` on the server's `--backend native`: the tenant deployed
+//!   with `PreparedProgram::with_native`, compiled once and shared by every
+//!   isolate (ADR 0085).
+//! - `edge+y` and `edge-n+y`: `edge` and `edge-n` with a monitor thread
+//!   raising the run's yield request every 20 µs, and every yield resumed at
+//!   once on the same thread — so that what a yield and a resume cost is the
+//!   difference from the row above, over the yields per call printed beside it.
 //!
 //! A batch is enough calls to last `--min-ms`; the time per call is the
 //! batch's time over its calls, and what is printed is the median of
@@ -31,13 +38,15 @@
 //! `edge.Response` back the way the server's `response_of` does.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cove_edge::deploy::{self, request_value, DeployOptions};
+use cove_edge::deploy::{self, request_value, Backend, DeployOptions};
 use cove_edge::hosts::SCHEMAS;
 use cove_edge::{Latency, State};
 use cove_runtime::{Budget, HostRegistry, Limits, Runtime, Step, Value, Vm};
+use cove_runtime::{Budget, HostRegistry, OwnedVm, Runtime, Step, Value, Vm, YieldRequest};
 use cove_sema::HostSchemas;
 
 const USAGE: &str =
@@ -106,9 +115,18 @@ fn main() {
         },
         quiet: true,
         blocking_upstream: false,
+        backend: Backend::Vm,
     };
     let all = deploy::deploy_all(&options).unwrap_or_else(|e| fail(&e));
+    // The same tenants on the native backend, where this host and build have
+    // it; `None` otherwise, and the `edge-n` rows say so.
+    let native_all = deploy::deploy_all(&DeployOptions {
+        backend: Backend::Native,
+        ..options.clone()
+    })
+    .ok();
     let min = Duration::from_millis(min_ms);
+    let monitor = Monitor::start(Duration::from_micros(20));
 
     println!("mode    case              median ns/call   min..max ns/call   calls/batch");
     for case in &CASES {
@@ -174,6 +192,9 @@ fn main() {
         check(case, "vm", &expected, &reused());
 
         print_row("edge", case, measure(&mut edge, min, batches));
+        sliced(
+            "edge+y", case, deployed, &limits, &query, &expected, &monitor, min, batches,
+        );
         print_row("vm", case, measure(&mut reused, min, batches));
         match &native {
             Some(native) => {
@@ -205,6 +226,38 @@ fn main() {
                     refused.join(", ")
                 }
             );
+        }
+        let native_deployed = native_all.as_ref().and_then(|all| {
+            match &all.iter().find(|t| t.name == case.tenant)?.state {
+                State::Deployed(deployed) => Some(deployed),
+                _ => None,
+            }
+        });
+        match native_deployed {
+            Some(native) => {
+                let mut edge_native = || -> String {
+                    let argument = request_value("GET", case.path, &query, "");
+                    match native.isolate().invoke_within_parkable(
+                        Budget::new(limits.clone()),
+                        module,
+                        function,
+                        vec![argument],
+                    ) {
+                        Step::Answered(_, Ok(value)) => body(&value),
+                        Step::Answered(_, Err(e)) => fail(&format!("{}: {:?}", case.label, e)),
+                        _ => fail("a pure tenant parked or yielded"),
+                    }
+                };
+                check(case, "edge-n", &expected, &edge_native());
+                print_row("edge-n", case, measure(&mut edge_native, min, batches));
+                sliced(
+                    "edge-n+y", case, native, &limits, &query, &expected, &monitor, min, batches,
+                );
+            }
+            None => println!(
+                "edge-n  {:<17} (no native tier on this host or build)",
+                case.label
+            ),
         }
         println!("        {:<17} answer: {:?}", case.label, expected);
         if breakdown && case.tenant != "crunch" {
@@ -292,6 +345,93 @@ fn print_breakdown(
         std::hint::black_box((status, content_type, body));
         String::new()
     });
+}
+
+/// Raises the request of whichever run is being sliced, every `every`.
+struct Monitor {
+    current: Arc<Mutex<Option<YieldRequest>>>,
+    done: Arc<AtomicBool>,
+}
+
+impl Monitor {
+    fn start(every: Duration) -> Monitor {
+        let current: Arc<Mutex<Option<YieldRequest>>> = Arc::new(Mutex::new(None));
+        let done = Arc::new(AtomicBool::new(false));
+        {
+            let current = Arc::clone(&current);
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    std::thread::sleep(every);
+                    if let Some(request) = &*current.lock().unwrap() {
+                        request.request();
+                    }
+                }
+            });
+        }
+        Monitor { current, done }
+    }
+
+    fn watch(&self, vm: &OwnedVm) {
+        *self.current.lock().unwrap() = Some(vm.yield_request());
+    }
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The `edge` row with the monitor asking for a yield every 20 µs, and each
+/// yield resumed at once on this thread. Prints the row and the yields per
+/// call.
+#[allow(clippy::too_many_arguments)]
+fn sliced(
+    mode: &str,
+    case: &Case,
+    deployed: &deploy::Deployed,
+    limits: &cove_runtime::Limits,
+    query: &[(String, String)],
+    expected: &str,
+    monitor: &Monitor,
+    min: Duration,
+    batches: usize,
+) {
+    let yields = AtomicU64::new(0);
+    let calls = AtomicU64::new(0);
+    let mut run = || -> String {
+        let argument = request_value("GET", case.path, query, "");
+        let vm = deployed.isolate();
+        monitor.watch(&vm);
+        calls.fetch_add(1, Ordering::Relaxed);
+        let mut step = vm.invoke_within_parkable(
+            Budget::new(limits.clone()),
+            &deployed.module,
+            &deployed.function,
+            vec![argument],
+        );
+        loop {
+            match step {
+                Step::Answered(_, Ok(value)) => return body(&value),
+                Step::Answered(_, Err(e)) => fail(&format!("{}: {:?}", case.label, e)),
+                Step::Yielded(yielded) => {
+                    yields.fetch_add(1, Ordering::Relaxed);
+                    step = yielded.resume();
+                }
+                Step::Parked(_) => fail("a pure tenant parked"),
+            }
+        }
+    };
+    check(case, mode, expected, &run());
+    let row = measure(&mut run, min, batches);
+    print_row(mode, case, row);
+    let calls = calls.load(Ordering::Relaxed).max(1);
+    println!(
+        "        {:<17} {mode}: {:.1} yields/call",
+        case.label,
+        yields.load(Ordering::Relaxed) as f64 / calls as f64
+    );
 }
 
 /// The `body` field of an `edge.Response`.

@@ -1,0 +1,241 @@
+round=1 side=base bench=covefmt-native load={ 9.63 8.80 7.08 }
+backend: native lower=30.372137ms validate=in-lower execute=5.118900973s instructions=214250 (dispatched by the encoded tier only)
+stats: fuel_spent=2242397663 host_calls=929 irreversible_writes=11 elapsed=5.119401226s wait=67.410341ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=1 side=base bench=covefmt-vm load={ 10.46 8.99 7.15 }
+backend: vm lower=36.479936ms validate=in-lower execute=12.764594118s instructions=2231988228
+stats: fuel_spent=2242397701 host_calls=929 irreversible_writes=11 elapsed=12.764624581s wait=61.86322ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=1 side=base bench=compare load={ 8.74 8.68 7.08 }
+mode    case              median ns/call   min..max ns/call   calls/batch
+edge    crunch n=2000             214764     213209..218411     1024
+vm      crunch n=2000             206409     206060..208874     1024
+native  crunch n=2000              67512      67404..67871      4096
+        crunch n=2000     native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+edge    crunch n=20000           4396266    4394370..4416405    64
+vm      crunch n=20000           4324603    4303984..4367446    64
+native  crunch n=20000           1335292    1330201..1347245    256
+        crunch n=20000    native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+edge    crunch n=150000         69218492   68934968..69837928   4
+vm      crunch n=150000         67759734   67612928..67911971   4
+native  crunch n=150000         20489510   20462384..20543645   16
+        crunch n=150000   native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+edge    hello name=Cove             8603       8590..8714       32768
+vm      hello name=Cove             4175       4172..4178       65536
+native  hello name=Cove             4103       4054..4232       65536
+        hello name=Cove   native: 5 of 5 reachable fn compiled; refused: -
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
+round=1 side=head bench=covefmt-native load={ 7.23 8.34 6.99 }
+backend: native lower=31.110907ms validate=in-lower execute=3.287512553s instructions=214250 (dispatched by the encoded tier only)
+stats: fuel_spent=2242397644 host_calls=929 irreversible_writes=11 elapsed=3.287991697s wait=53.02353ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=1 side=head bench=covefmt-vm load={ 7.23 8.34 6.99 }
+backend: vm lower=28.996191ms validate=in-lower execute=12.496698163s instructions=2231988228
+stats: fuel_spent=2242397701 host_calls=929 irreversible_writes=11 elapsed=12.496739522s wait=51.099808ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=1 side=head bench=compare load={ 6.88 8.21 6.97 }
+mode    case              median ns/call   min..max ns/call   calls/batch
+edge    crunch n=2000             211507     210724..216546     1024
+edge+y  crunch n=2000             216124     213193..218724     1024
+        crunch n=2000     edge+y: 1.3 yields/call
+vm      crunch n=2000             205960     205056..209508     1024
+native  crunch n=2000              67630      67411..67851      4096
+        crunch n=2000     native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=2000              72581      72306..72880      4096
+edge-n+y crunch n=2000              73076      72783..73521      4096
+        crunch n=2000     edge-n+y: 0.4 yields/call
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+edge    crunch n=20000           4369844    4353126..4381744    64
+edge+y  crunch n=20000           4456074    4435617..4728069    64
+        crunch n=20000    edge+y: 30.2 yields/call
+vm      crunch n=20000           4394305    4330644..4408385    64
+native  crunch n=20000           1338597    1335651..1350297    256
+        crunch n=20000    native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=20000           1348555    1342525..1353459    256
+edge-n+y crunch n=20000           1357008    1351203..1362180    256
+        crunch n=20000    edge-n+y: 8.7 yields/call
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+edge    crunch n=150000         68594944   68131946..68835303   4
+edge+y  crunch n=150000         69900897   69357869..70649952   4
+        crunch n=150000   edge+y: 433.2 yields/call
+vm      crunch n=150000         96856448   79975536..104099116   4
+native  crunch n=150000         28038499   23956667..32794519   8
+        crunch n=150000   native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=150000         20736827   20600778..20752258   16
+edge-n+y crunch n=150000         20796737   20650964..21018910   16
+        crunch n=150000   edge-n+y: 131.8 yields/call
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+edge    hello name=Cove             8462       8428..8497       32768
+edge+y  hello name=Cove             8579       8487..8601       32768
+        hello name=Cove   edge+y: 0.0 yields/call
+vm      hello name=Cove             4195       4179..4246       65536
+native  hello name=Cove             4146       4120..4221       65536
+        hello name=Cove   native: 5 of 5 reachable fn compiled; refused: -
+edge-n  hello name=Cove             8697       8655..8732       32768
+edge-n+y hello name=Cove             8844       8731..8904       32768
+        hello name=Cove   edge-n+y: 0.0 yields/call
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
+round=2 side=base bench=covefmt-native load={ 6.20 7.82 6.88 }
+backend: native lower=30.876658ms validate=in-lower execute=4.274656508s instructions=214250 (dispatched by the encoded tier only)
+stats: fuel_spent=2242397644 host_calls=929 irreversible_writes=11 elapsed=4.27549935s wait=50.509754ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=2 side=base bench=covefmt-vm load={ 6.20 7.82 6.88 }
+backend: vm lower=45.361619ms validate=in-lower execute=12.879303951s instructions=2231988228
+stats: fuel_spent=2242397701 host_calls=929 irreversible_writes=11 elapsed=12.879335225s wait=57.917311ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=2 side=base bench=compare load={ 5.70 7.63 6.83 }
+mode    case              median ns/call   min..max ns/call   calls/batch
+edge    crunch n=2000             212538     211482..215333     1024
+vm      crunch n=2000             215972     205556..303839     1024
+native  crunch n=2000              96286      92424..97354      4096
+        crunch n=2000     native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+edge    crunch n=20000           4427245    4401669..4705688    64
+vm      crunch n=20000           4352717    4313838..4389005    64
+native  crunch n=20000           1336699    1333526..1347242    256
+        crunch n=20000    native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+edge    crunch n=150000         68162319   67923208..68543195   4
+vm      crunch n=150000         67982890   67790698..68221547   4
+native  crunch n=150000         20517991   20489142..20565198   16
+        crunch n=150000   native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+edge    hello name=Cove             8719       8635..8871       32768
+vm      hello name=Cove             4244       4225..4407       65536
+native  hello name=Cove             4134       4121..4160       65536
+        hello name=Cove   native: 5 of 5 reachable fn compiled; refused: -
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
+round=2 side=head bench=covefmt-native load={ 5.56 7.49 6.79 }
+backend: native lower=28.988217ms validate=in-lower execute=3.307588969s instructions=214250 (dispatched by the encoded tier only)
+stats: fuel_spent=2242397644 host_calls=929 irreversible_writes=11 elapsed=3.307995433s wait=51.500182ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=2 side=head bench=covefmt-vm load={ 5.35 7.41 6.77 }
+backend: vm lower=31.336957ms validate=in-lower execute=12.32736207s instructions=2231988228
+stats: fuel_spent=2242397701 host_calls=929 irreversible_writes=11 elapsed=12.327394178s wait=50.210337ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=2 side=head bench=compare load={ 4.99 7.27 6.73 }
+mode    case              median ns/call   min..max ns/call   calls/batch
+edge    crunch n=2000             212061     210173..214604     1024
+edge+y  crunch n=2000             213691     211940..216284     1024
+        crunch n=2000     edge+y: 1.3 yields/call
+vm      crunch n=2000             206707     206029..209965     1024
+native  crunch n=2000              67657      67613..68012      4096
+        crunch n=2000     native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=2000              73088      72474..73384      4096
+edge-n+y crunch n=2000              73243      73083..74473      4096
+        crunch n=2000     edge-n+y: 0.4 yields/call
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+edge    crunch n=20000           4335433    4327479..4349444    64
+edge+y  crunch n=20000           4424140    4391986..4430841    64
+        crunch n=20000    edge+y: 27.1 yields/call
+vm      crunch n=20000           4329735    4307244..4371864    64
+native  crunch n=20000           1335192    1333270..1345533    256
+        crunch n=20000    native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=20000           1352238    1347090..1386427    256
+edge-n+y crunch n=20000           1354161    1352944..1360970    256
+        crunch n=20000    edge-n+y: 8.6 yields/call
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+edge    crunch n=150000         68299139   68006392..70010595   4
+edge+y  crunch n=150000         69684657   69133617..72449708   4
+        crunch n=150000   edge+y: 440.5 yields/call
+vm      crunch n=150000         68220488   67862093..68709738   4
+native  crunch n=150000         20531920   20505341..20642325   16
+        crunch n=150000   native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=150000         20616212   20583388..20657121   16
+edge-n+y crunch n=150000         20692406   20648857..20817016   16
+        crunch n=150000   edge-n+y: 126.5 yields/call
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+edge    hello name=Cove             8618       8541..8728       32768
+edge+y  hello name=Cove             8726       8671..8884       32768
+        hello name=Cove   edge+y: 0.0 yields/call
+vm      hello name=Cove             4207       4193..4249       65536
+native  hello name=Cove             4112       4093..4220       65536
+        hello name=Cove   native: 5 of 5 reachable fn compiled; refused: -
+edge-n  hello name=Cove             8841       8776..8922       32768
+edge-n+y hello name=Cove             8917       8794..8934       32768
+        hello name=Cove   edge-n+y: 0.0 yields/call
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
+round=3 side=base bench=covefmt-native load={ 4.02 6.72 6.55 }
+backend: native lower=32.423405ms validate=in-lower execute=3.276417622s instructions=214250 (dispatched by the encoded tier only)
+stats: fuel_spent=2242397644 host_calls=929 irreversible_writes=11 elapsed=3.276861636s wait=49.95033ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=3 side=base bench=covefmt-vm load={ 4.02 6.72 6.55 }
+backend: vm lower=29.49217ms validate=in-lower execute=12.605150717s instructions=2231988228
+stats: fuel_spent=2242397701 host_calls=929 irreversible_writes=11 elapsed=12.60518123s wait=49.564658ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=3 side=base bench=compare load={ 3.64 6.50 6.47 }
+mode    case              median ns/call   min..max ns/call   calls/batch
+edge    crunch n=2000             210614     209437..211306     1024
+vm      crunch n=2000             209683     208699..210328     1024
+native  crunch n=2000              67636      67154..67745      4096
+        crunch n=2000     native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+edge    crunch n=20000           4325791    4315064..4332558    64
+vm      crunch n=20000           4431888    4421718..4445448    64
+native  crunch n=20000           1337190    1331242..1345152    256
+        crunch n=20000    native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+edge    crunch n=150000         67858595   67776911..68392674   4
+vm      crunch n=150000         67751960   67680198..67905160   4
+native  crunch n=150000         20483045   20457557..20537976   16
+        crunch n=150000   native: 8 of 8 reachable fn compiled; refused: -
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+edge    hello name=Cove             8591       8518..8616       32768
+vm      hello name=Cove             4119       4109..4155       65536
+native  hello name=Cove             4015       4013..4067       65536
+        hello name=Cove   native: 5 of 5 reachable fn compiled; refused: -
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
+round=3 side=head bench=covefmt-native load={ 3.65 6.31 6.40 }
+backend: native lower=28.41887ms validate=in-lower execute=3.269941105s instructions=214250 (dispatched by the encoded tier only)
+stats: fuel_spent=2242397644 host_calls=929 irreversible_writes=11 elapsed=3.270407797s wait=49.369194ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=3 side=head bench=covefmt-vm load={ 3.65 6.31 6.40 }
+backend: vm lower=29.770639ms validate=in-lower execute=12.379831303s instructions=2231988228
+stats: fuel_spent=2242397701 host_calls=929 irreversible_writes=11 elapsed=12.379864769s wait=51.45061ms
+memory: heap_words=2063022 heap_bytes=16504176 allocated_words=135957563 allocations=5619855 collections=239
+round=3 side=head bench=compare load={ 3.66 6.18 6.36 }
+mode    case              median ns/call   min..max ns/call   calls/batch
+edge    crunch n=2000             214560     213077..218459     1024
+edge+y  crunch n=2000             212481     211813..212963     1024
+        crunch n=2000     edge+y: 1.2 yields/call
+vm      crunch n=2000             205510     203958..205832     1024
+native  crunch n=2000              67647      67395..68059      4096
+        crunch n=2000     native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=2000              72685      72348..73480      4096
+edge-n+y crunch n=2000              73279      73062..73666      4096
+        crunch n=2000     edge-n+y: 0.4 yields/call
+        crunch n=2000     answer: "303 primes up to 2000, the largest 1999\n"
+edge    crunch n=20000           4415289    4396272..4422302    64
+edge+y  crunch n=20000           4527497    4510626..4666448    64
+        crunch n=20000    edge+y: 28.0 yields/call
+vm      crunch n=20000           4407431    4363889..4519658    64
+native  crunch n=20000           1370112    1346365..1641226    256
+        crunch n=20000    native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=20000           2216759    1531805..2651518    128
+edge-n+y crunch n=20000           2700339    2392274..2907956    256
+        crunch n=20000    edge-n+y: 8.1 yields/call
+        crunch n=20000    answer: "2262 primes up to 20000, the largest 19997\n"
+edge    crunch n=150000         93994707   73987181..161521711   4
+edge+y  crunch n=150000         74676304   71512701..110945996   4
+        crunch n=150000   edge+y: 523.6 yields/call
+vm      crunch n=150000         70465626   69804864..71514352   4
+native  crunch n=150000         20563952   20504843..20580706   16
+        crunch n=150000   native: 8 of 8 reachable fn compiled; refused: -
+edge-n  crunch n=150000         20574487   20569800..20660942   16
+edge-n+y crunch n=150000         20662539   20645365..20703361   16
+        crunch n=150000   edge-n+y: 126.8 yields/call
+        crunch n=150000   answer: "13848 primes up to 150000, the largest 149993\n"
+edge    hello name=Cove             8423       8407..8481       32768
+edge+y  hello name=Cove             8450       8442..8850       32768
+        hello name=Cove   edge+y: 0.0 yields/call
+vm      hello name=Cove             4251       4218..4907       65536
+native  hello name=Cove             4130       4119..4205       65536
+        hello name=Cove   native: 5 of 5 reachable fn compiled; refused: -
+edge-n  hello name=Cove             8731       8645..9067       32768
+edge-n+y hello name=Cove             8741       8702..8792       32768
+        hello name=Cove   edge-n+y: 0.0 yields/call
+        hello name=Cove   answer: "Hello, Cove! (GET /)\n"
+ALLDONE

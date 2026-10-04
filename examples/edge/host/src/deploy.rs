@@ -40,6 +40,34 @@ pub struct DeployOptions {
     pub quiet: bool,
     /// Whether `upstream.get` blocks its worker instead of parking the run.
     pub blocking_upstream: bool,
+    /// Which tier a request's isolate runs on.
+    pub backend: Backend,
+}
+
+/// Which tier the isolates run on: `--backend vm|native`.
+///
+/// `Native` compiles each tenant's program once, at deploy, with
+/// [`PreparedProgram::with_native`], and every isolate of that tenant shares
+/// the machine code. A run on it still parks at `upstream.get` and still
+/// yields at a safepoint when its slice is up — inside compiled code too
+/// (ADR 0085) — so the scheduler is the same one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Backend {
+    /// The encoded VM, which every build and host has.
+    #[default]
+    Vm,
+    /// The native tier, where this build has the code generator (`--features
+    /// native`) and this host runs it (Unix x86-64).
+    Native,
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Backend::Vm => "vm",
+            Backend::Native => "native",
+        })
+    }
 }
 
 /// What a request's run is bounded by when `cove.toml` says nothing.
@@ -112,7 +140,8 @@ pub struct Deployed {
 pub struct DeployCost {
     /// Reading, parsing and checking the tenant and the standard library.
     pub check: Duration,
-    /// Lowering the entry, and [`PreparedProgram::new`].
+    /// Lowering the entry, and [`PreparedProgram::new`] — and, on the native
+    /// backend, compiling it.
     pub prepare: Duration,
     /// How many functions the entry reached.
     pub functions: usize,
@@ -455,6 +484,12 @@ fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, Str
         .map_err(|items| format!("does not lower:\n{}", report(&sources, &items)))?;
     let functions = lowered.functions.len();
     let prepared = PreparedProgram::new(Arc::new(lowered));
+    let prepared = match options.backend {
+        Backend::Vm => prepared,
+        Backend::Native => prepared
+            .with_native()
+            .map_err(|why| format!("`--backend native`: {why}"))?,
+    };
     let prepare = started.elapsed();
 
     let hosts = Arc::new(registry(tenant, options));
