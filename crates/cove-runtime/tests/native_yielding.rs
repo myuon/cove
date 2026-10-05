@@ -245,6 +245,145 @@ export fn mixed() -> Int {
   }
   total
 }
+/// cove-tools' `yieldcopy` (#604): draw cells, copy them into a vector, merge
+/// sort and deduplicate into fresh vectors, freeze, again — `Array.toVector`
+/// and `Vector.freeze` in compiled loops, every turn allocating.
+fn drawCells(turn: Int, size: Int) -> Int {
+  var state = 12345 + turn
+  var cells: Array<Int> = []
+  while cells.length() < size {
+    var drawn = cells.toVector()
+    var more = size - cells.length()
+    while more > 0 {
+      state = state.bitXor(state.shiftLeft(13))
+      state = state.bitXor(state.shiftRightLogical(7))
+      state = state.bitXor(state.shiftLeft(17))
+      drawn.push(state.shiftRightLogical(2) % (size * 300))
+      more -= 1
+    }
+    cells = distinctSorted(drawn.freeze())
+  }
+  cells.length() + cells.get(size / 2).unwrapOr(0) % 1000
+}
+
+/// The distinct values of `values`, ascending, by a merge sort of its own.
+fn distinctSorted(values: Array<Int>) -> Array<Int> {
+  let n = values.length()
+  var from = values.toVector()
+  var into = values.toVector()
+  var width = 1
+  while width < n {
+    var low = 0
+    while low < n {
+      let middle = (low + width).min(n)
+      let high = (low + 2 * width).min(n)
+      var i = low
+      var j = middle
+      var k = low
+      while k < high {
+        let a = from.get(i).unwrapOr(0)
+        let b = from.get(j).unwrapOr(0)
+        if i < middle && (j >= high || a <= b) {
+          into.set(k, a)
+          i += 1
+        } else {
+          into.set(k, b)
+          j += 1
+        }
+        k += 1
+      }
+      low = high
+    }
+    let swap = from
+    from = into
+    into = swap
+    width *= 2
+  }
+  var out = Vector.of()
+  var at = 0
+  while at < n {
+    let value = from.get(at).unwrapOr(0)
+    if at == 0 || value != from.get(at - 1).unwrapOr(0) {
+      out.push(value)
+    }
+    at += 1
+  }
+  out.freeze()
+}
+
+/// A vector grown one element at a time, snapshotted every turn.
+fn snapshots(n: Int) -> Int {
+  var v: Vector<Int> = Vector.of()
+  var total = 0
+  var i = 0
+  while i < n {
+    v.push(i * 7 % 1013)
+    let copy = v.snapshot()
+    total = (total + copy.length() + copy.get(i / 2).unwrapOr(0)) % 1000003
+    i += 1
+  }
+  total + counts(0)
+}
+
+/// A loop of `toVector()` and a length check, and nothing else (#604's third
+/// finding).
+fn regrow(n: Int) -> Int {
+  var cells: Array<Int> = [1, 2, 3]
+  var turns = 0
+  while cells.length() < n {
+    var v = cells.toVector()
+    v.push(turns)
+    cells = v.freeze()
+    turns += 1
+  }
+  turns + counts(0)
+}
+
+/// Strings built and dropped: allocation through the string helpers.
+fn strings(n: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < n {
+    let text = \"cell {i} of {n}\"
+    total = (total + text.byteLength()) % 1000003
+    i += 1
+  }
+  total + counts(0)
+}
+
+export fn copying() -> Int {
+  sched.nudge()
+  var total = 0
+  for turn in 0..<3 {
+    total += drawCells(turn, 3000)
+  }
+  total
+}
+
+export fn snapshotting() -> Int {
+  sched.nudge()
+  snapshots(2500)
+}
+
+export fn regrowing() -> Int {
+  sched.nudge()
+  regrow(3000)
+}
+
+export fn building() -> Int {
+  sched.nudge()
+  strings(40000)
+}
+
+export fn churning() -> Int {
+  sched.nudge()
+  churn(30000)
+}
+
+export fn recursing2() -> Int {
+  sched.nudge()
+  fib(22)
+}
 ";
 
 // ----------------------------------------------------------------- the world
@@ -608,13 +747,15 @@ fn a_yield_leaves_every_compiled_frame_of_the_chain_standing() {
         (1..=2).contains(&frames),
         "spin, and mix if it was in it: {frames}"
     );
-    let mut deepest = frames;
-    let mut next = taken(yielded.resume());
-    while let Taken::Yielded(yielded) = next {
-        deepest = deepest.max(yielded.compiled_frames());
-        next = taken(yielded.resume());
-    }
-    assert_eq!(deepest, 2, "some yield landed inside mix, below spin");
+    drop(yielded);
+    // A request is honoured at the first poll that sees it, and `mix`'s loop
+    // sees one only at a due backedge, so the yields that land inside it are
+    // the ones a storm of requests makes.
+    let run = storm(&world, "long", 3, 5);
+    assert_eq!(
+        run.deepest, 2,
+        "some yield landed inside mix, below spin: {run:?}"
+    );
 }
 
 /// A monitor raising the request on a clock, as a scheduler's would: however
@@ -682,11 +823,12 @@ fn a_request_below_an_encoded_callee_waits_for_it_to_return() {
     );
     assert_eq!(run.finished, expected);
     assert!(run.declined > 0, "the callee crossed safepoints: {run:?}");
-    // One flag, raised four times: every safepoint due between the requests is
-    // inside a callee, so they are one request, honoured in `outer`'s last
-    // `spin` once the third callee has returned.
-    assert_eq!(run.yields, 1, "{run:?}");
-    assert_eq!(run.native_yields, 1, "{run:?}");
+    // Four requests — the entry's and one per callee — each declined inside
+    // the callee and honoured at `outer`'s next poll after it returns: a
+    // request makes compiled code poll early (#604), so it is not left for the
+    // next due stride, which here would have been after the last request.
+    assert_eq!(run.yields, 4, "{run:?}");
+    assert_eq!(run.native_yields, 4, "{run:?}");
 }
 
 /// A fuel limit stops a run yielded inside compiled code where it stops the
@@ -841,4 +983,183 @@ fn isolates_share_compiled_code_and_keep_their_own_state_and_budgets() {
         }
     }
     assert!(sliced > 8, "the monitors landed: {sliced}");
+}
+
+// ------------------------------------------------------------ storms (#604)
+
+/// What a stormed run came to: its answer and accounting, how many yields,
+/// and the longest stretch it ran without one while the storm was blowing.
+#[derive(Debug)]
+struct Stormed {
+    finished: Finished,
+    native_yields: usize,
+    yields: usize,
+    longest: Duration,
+    /// The most compiled frames any one yield left standing.
+    deepest: usize,
+}
+
+/// A splitmix64 step, so a storm's pauses are random and reproducible.
+fn splitmix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// `app.name` with a monitor raising the request after random pauses of up
+/// to `most` microseconds — down to none, which asks at nearly every
+/// safepoint — and every yield resumed at once, every eighth on a thread of
+/// its own.
+fn storm(world: &World, name: &str, seed: u64, most: u64) -> Stormed {
+    storm_on(world.quiet(), name, seed, most)
+}
+
+/// [`storm`] over a machine of the caller's.
+fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
+    let signal = vm.yield_request();
+    let done = Arc::new(AtomicBool::new(false));
+    let monitor = {
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let mut state = seed;
+            while !done.load(Ordering::Relaxed) {
+                let pause = splitmix(&mut state) % (most + 1);
+                let until = std::time::Instant::now() + Duration::from_micros(pause);
+                while std::time::Instant::now() < until {
+                    std::hint::spin_loop();
+                }
+                signal.request();
+            }
+        })
+    };
+    let (mut yields, mut native_yields, mut deepest) = (0, 0, 0);
+    let mut longest = Duration::ZERO;
+    let mut since = std::time::Instant::now();
+    let mut next = taken(vm.invoke_within_parkable(unlimited(), "app", name, Vec::new()));
+    let finished = loop {
+        match next {
+            Taken::Answered(finished, ..) => break finished,
+            Taken::Parked(_) => panic!("nothing here pends"),
+            Taken::Yielded(yielded) => {
+                longest = longest.max(since.elapsed());
+                yields += 1;
+                if yielded.compiled_frames() > 0 {
+                    native_yields += 1;
+                }
+                deepest = deepest.max(yielded.compiled_frames());
+                next = match yields % 8 {
+                    0 => std::thread::spawn(move || taken(yielded.resume()))
+                        .join()
+                        .unwrap(),
+                    _ => taken(yielded.resume()),
+                };
+                since = std::time::Instant::now();
+            }
+        }
+    };
+    longest = longest.max(since.elapsed());
+    done.store(true, Ordering::Relaxed);
+    monitor.join().unwrap();
+    Stormed {
+        finished,
+        native_yields,
+        yields,
+        longest,
+        deepest,
+    }
+}
+
+/// The shapes a storm is run over: copies, snapshots, a `toVector` loop with
+/// a length check, strings, allocation-heavy loops, recursion, and the loops
+/// and calls of the cases above.
+const STORMED: [&str; 8] = [
+    "copying",
+    "snapshotting",
+    "regrowing",
+    "building",
+    "churning",
+    "recursing2",
+    "main",
+    "allocating",
+];
+
+/// **#604, as a property.** However the requests fall — at random, down to
+/// nearly every safepoint — a run yielded and resumed inside compiled code
+/// answers what the uninterrupted run answers, in the same count, for the
+/// same fuel, with the same allocation and collections, on every shape. Before
+/// the fix a run resumed at an allocation read its length through a stale
+/// frame pointer and `copying` failed with "`runCopy` writes … to 0 of a
+/// destination of 0".
+#[test]
+fn a_storm_of_yield_requests_changes_no_answer_and_no_count() {
+    let world = world();
+    for name in STORMED {
+        let expected = world.uninterrupted(name, unlimited());
+        assert!(
+            !expected.answer.starts_with("error"),
+            "{name}: {expected:?}"
+        );
+        for seed in 1..=4u64 {
+            let most = [0, 5, 40, 300][seed as usize - 1];
+            let run = storm(&world, name, seed * 7919, most);
+            assert_eq!(
+                run.finished, expected,
+                "{name}, storm {seed} ({most} µs): {run:?}"
+            );
+            assert!(run.yields > 0, "{name}, storm {seed}: never yielded");
+        }
+    }
+}
+
+/// **#604's third finding.** Under a request raised every few microseconds,
+/// no shape runs long without yielding: a loop whose every turn passes a
+/// helper's safepoint — a copy, a buffer's growth — and never a due backedge
+/// still offers the yield.
+#[test]
+fn no_compiled_shape_runs_long_without_yielding_when_asked() {
+    let world = world();
+    for name in STORMED {
+        let run = storm(&world, name, 17, 20);
+        assert!(
+            run.native_yields > 0,
+            "{name}: no yield inside compiled code: {run:?}"
+        );
+        assert!(
+            run.longest < Duration::from_millis(25),
+            "{name}: ran {:?} without yielding: {run:?}",
+            run.longest
+        );
+    }
+}
+
+/// The same storm on the encoded tier, which has no compiled frames: its
+/// answers and counts are its own uninterrupted run's.
+///
+/// It is not asked to yield promptly. The dispatch loop reads a request only
+/// at a due safepoint (ADR 0084 §2), and a loop whose every turn makes a bulk
+/// charge — `snapshotting` here — takes those inside the instruction and never
+/// finds one due, so it does not yield at all. Polling early there costs the
+/// loop measurably (3–7% on `arith` when tried), so it is left for the issue
+/// that tracks it (#606) rather than done here.
+#[test]
+fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
+    let world = world();
+    let encoded = || {
+        *world.sched.signal.lock().unwrap() = None;
+        OwnedVm::new(
+            Arc::clone(&world.runtime),
+            Arc::clone(&world.hosts),
+            world.encoded.clone(),
+        )
+    };
+    for name in STORMED {
+        let expected =
+            drive(encoded().invoke_within_parkable(unlimited(), "app", name, Vec::new())).finished;
+        for (seed, most) in [(31, 0), (62, 40)] {
+            let run = storm_on(encoded(), name, seed, most);
+            assert_eq!(run.finished, expected, "{name}, storm {seed}: {run:?}");
+        }
+    }
 }
