@@ -167,6 +167,12 @@ const DEFAULT_HEAP_WORDS: usize = 1 << 22;
 pub struct PreparedProgram {
     program: Arc<Program>,
     prepared: exec::Prepared,
+    /// The program's machine code, when it was compiled with
+    /// [`PreparedProgram::with_native`]: compiled once, for every run built
+    /// from this preparation, on any thread ([ADR 0085]).
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    native: Option<Arc<crate::native::NativeProgram>>,
 }
 
 impl PreparedProgram {
@@ -178,12 +184,49 @@ impl PreparedProgram {
     /// pushed.
     pub fn new(program: Arc<Program>) -> PreparedProgram {
         let prepared = exec::Prepared::of(&program);
-        PreparedProgram { program, prepared }
+        PreparedProgram {
+            program,
+            prepared,
+            native: None,
+        }
+    }
+
+    /// This preparation with the program's native tier compiled — once, for
+    /// every [`OwnedVm`] built from it ([ADR 0085]).
+    ///
+    /// [`crate::compile_native`] over the program this holds, so the machine
+    /// code and the encoding are of one program and cannot be paired with
+    /// another's. The code is immutable once compiled and shared by `Arc`: a
+    /// thousand isolates of one tenant hold one copy, and each run's frames,
+    /// counters and budget are its own machine's.
+    ///
+    /// An `OwnedVm` built from the answer calls compiled code where the
+    /// encoded tier would have called a compiled function, and its parkable
+    /// runs yield inside compiled code at a backedge's safepoint as they yield
+    /// in the dispatch loop (ADR 0084), resuming on whatever thread resumes
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`](cove_native::Unavailable) where this host or build has
+    /// no native tier — the capability diagnostic, never a fallback.
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    pub fn with_native(mut self) -> Result<PreparedProgram, cove_native::Unavailable> {
+        let native = crate::native::compile(&self.program)?;
+        self.native = Some(Arc::new(native));
+        Ok(self)
     }
 
     /// The program this prepared.
     pub fn program(&self) -> &Arc<Program> {
         &self.program
+    }
+
+    /// The machine code [`PreparedProgram::with_native`] compiled, if it was
+    /// asked for.
+    pub fn native(&self) -> Option<&crate::native::NativeProgram> {
+        self.native.as_deref()
     }
 }
 

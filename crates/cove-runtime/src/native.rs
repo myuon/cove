@@ -49,7 +49,7 @@
 use std::time::Duration;
 
 use cove_ir::{FunctionId, Program};
-use cove_native::{Unavailable, WindowCode};
+use cove_native::{ResumePoints, Unavailable, WindowCode};
 
 use crate::vm::exec::native::Tiered;
 use crate::NativeEntry;
@@ -74,6 +74,12 @@ pub struct NativeProgram {
     jit: cove_native::template::Jit,
     /// One entry per `FunctionId`, `None` for a function that runs encoded.
     entries: Vec<Option<NativeEntry>>,
+    /// Where each compiled function may be re-entered part-way through, by
+    /// `FunctionId` — what lets a run yield inside compiled code and resume on
+    /// another thread ([ADR 0085]). `None` exactly where `entries` is.
+    ///
+    /// [ADR 0085]: ../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    resumes: Vec<Option<ResumePoints>>,
     /// One row per refused function, in `FunctionId` order.
     refusals: Vec<Refused>,
     reachable: usize,
@@ -201,6 +207,10 @@ impl Tiered for NativeProgram {
 
     fn table(&self) -> Option<&[Option<NativeEntry>]> {
         Some(&self.entries)
+    }
+
+    fn resume(&self, id: FunctionId) -> Option<&ResumePoints> {
+        self.resumes.get(id.index())?.as_ref()
     }
 }
 
@@ -352,13 +362,16 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
     // is ever made writable again while a Cove frame stands on it.
     jit.finalize()?;
     let compile = started.elapsed();
+    let mut resumes = vec![None; program.functions.len()];
     for (id, compiled) in done {
+        resumes[id.index()] = Some(jit.resume_points(compiled));
         entries[id.index()] = Some(jit.entry(compiled));
     }
     Ok(NativeProgram {
         jit,
         compiled: entries.iter().filter(|entry| entry.is_some()).count(),
         entries,
+        resumes,
         refusals,
         reachable: program.functions.len() - stubs,
         stubs,

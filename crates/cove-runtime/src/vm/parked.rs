@@ -83,6 +83,13 @@ impl OwnedVm {
     /// [`Vm::with_prepared`], owning its arguments: the program-wide work was
     /// done once by [`PreparedProgram::new`], and this pays for the run's own
     /// heap, stack and literals.
+    ///
+    /// A preparation made [`with_native`](PreparedProgram::with_native) gives
+    /// the run its native tier: the shared machine code, entered where the
+    /// encoded tier calls a compiled function, as
+    /// [`Vm::with_native`] enters it ([ADR 0085]).
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
     pub fn new(
         runtime: Arc<Runtime>,
         hosts: Arc<HostRegistry>,
@@ -106,6 +113,15 @@ impl OwnedVm {
                 DEFAULT_HEAP_WORDS,
             )
         };
+        if let Some(native) = &prepared.native {
+            // Safety: the table is inside an `Arc` this struct keeps, for the
+            // reason the three references above are sound, and the `Vm` that
+            // holds a pointer to it is dropped first.
+            unsafe {
+                let native: &'static crate::native::NativeProgram = &*Arc::as_ptr(native);
+                vm.machine.install_native(native);
+            }
+        }
         vm.machine
             .install_yield_request(Arc::new(AtomicBool::new(false)));
         OwnedVm {
@@ -195,11 +211,13 @@ impl OwnedVm {
     /// One per machine, for every run it makes; clones share it. Only a
     /// parkable run honours it, and only where it could park (ADR 0080 §2,
     /// less the `Shared` cell clause): inside a host's callback, beside a
-    /// running task, below a compiled frame or under a debugger the request
-    /// stays raised and the run yields at the first safepoint where it can.
-    /// The runtime lowers it when the run yields, parks or answers, and when
-    /// a parkable run begins — a request is about the run that is running
-    /// now. *When* to raise it is the embedder's: the runtime keeps no clock
+    /// running task, below an encoded function that compiled code called, or
+    /// under a debugger the request stays raised and the run yields at the
+    /// first safepoint where it can. Inside compiled code it yields at a
+    /// backedge, an allocation or a call ([ADR 0085](../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md)).
+    /// The runtime lowers it when the run yields, parks or answers, when a
+    /// parkable run begins and when a yielded one resumes — a request is
+    /// about the run that is running now. *When* to raise it is the embedder's: the runtime keeps no clock
     /// for it ([ADR 0084](../../../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md)).
     pub fn yield_request(&self) -> YieldRequest {
         YieldRequest(Arc::clone(
@@ -233,6 +251,19 @@ impl OwnedVm {
     /// [`Vm::allocated_words`].
     pub fn allocated_words(&self) -> u64 {
         self.vm.allocated_words()
+    }
+
+    /// [`Vm::collections`].
+    pub fn collections(&self) -> u64 {
+        self.vm.collections()
+    }
+
+    /// [`Vm::tiers`]: how this machine's calls divided between the encoded
+    /// and the native tier, over every run it has made. All nought for a
+    /// machine built from a preparation without
+    /// [`with_native`](PreparedProgram::with_native).
+    pub fn tiers(&self) -> crate::Tiers {
+        self.vm.tiers()
     }
 
     /// The run, answered, parked or yielded — with its yield request
@@ -292,7 +323,10 @@ impl YieldRequest {
 ///
 /// `Send`, as a [`ParkedVm`] is and for the same reason: it yielded only
 /// where it could have parked — no callback below it, no task running, no
-/// compiled frame — so what it holds is its heap, its stack and its frames.
+/// compiled frame on the native stack — so what it holds is its heap, its
+/// stack and its frames. A run that yielded inside compiled code left its
+/// compiled frames standing as the VM frames they are, and unwound the
+/// native stack ([ADR 0085](../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md)).
 /// It may hold a `Shared` cell, which is the task's and not the thread's
 /// ([ADR 0084](../../../../docs/adr/0084-a-run-may-yield-at-a-safepoint.md)).
 ///
@@ -364,6 +398,14 @@ impl YieldedVm {
     /// [`OwnedVm::yield_request`].
     pub fn yield_request(&self) -> YieldRequest {
         self.vm.yield_request()
+    }
+
+    /// How many compiled frames the run left standing when it yielded: nought
+    /// for a yield the dispatch loop took, and otherwise the frames that
+    /// resuming re-enters, innermost first, before the loop goes on
+    /// ([ADR 0085](../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md)).
+    pub fn compiled_frames(&self) -> usize {
+        self.vm.vm.machine.yielded_compiled_frames()
     }
 }
 

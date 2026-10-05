@@ -80,7 +80,9 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cove_ir::{ArgsId, FunctionId, Inst, LayoutId, Slot, Storage};
-use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp};
+use cove_native::{
+    Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, ResumePoints, RunOp,
+};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
 use crate::budget::Meter;
@@ -137,6 +139,19 @@ pub trait Tiered: Send + Sync {
     /// stay valid, unmoved and unchanged for as long as the table may be asked —
     /// which for a table installed in a machine is until it is taken out again.
     fn table(&self) -> Option<&[Option<Entry>]> {
+        None
+    }
+
+    /// Where `id`'s compiled code may be re-entered part-way through, if it
+    /// may be ([ADR 0085]).
+    ///
+    /// `None` by default, and then a run with a frame of `id` live never yields
+    /// inside compiled code: the safepoint declines, as ADR 0084 declines one
+    /// below a callback, and the run yields at the first safepoint where it
+    /// can. Asked on the yield path and the resume path only — never on a call.
+    ///
+    /// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    fn resume(&self, _id: FunctionId) -> Option<&ResumePoints> {
         None
     }
 }
@@ -336,10 +351,12 @@ pub(crate) struct Tiering {
 //   and the chunks are never unmapped while the space is alive, so the
 //   addresses are as good on the next thread as on this one.
 //
-// What *is* the thread's is a compiled frame on its native stack, and no
-// `Tiering` is moved while one is live: ADR 0080 parks a run only when no
-// compiled frame is on the stack, and a `Vm` cannot be moved while it is
-// running at all, since running borrows it.
+// What *is* the thread's is a compiled frame's half on the native stack — its
+// return address and saved registers — and no `Tiering` is moved while one is
+// live: ADR 0080 parks a run only when no compiled frame is on the stack, a
+// yield inside compiled code unwinds that half first and leaves only the frame
+// records (ADR 0085), and a `Vm` cannot be moved while it is running at all,
+// since running borrows it.
 //
 // Not `Sync`: a `Tiering` is one machine's, written through `&mut` at every
 // call, and nothing shares one.
@@ -398,6 +415,16 @@ impl Tiering {
             true => *start.add(id.index()),
             false => None,
         }
+    }
+
+    /// [`Tiered::resume`] of the installed table.
+    ///
+    /// # Safety
+    ///
+    /// The table installed is still alive, which is [`Tiering::new`]'s contract;
+    /// the answer is valid for as long as it is.
+    unsafe fn resume_points<'t>(&self, id: FunctionId) -> Option<&'t ResumePoints> {
+        (*self.entries).resume(id)
     }
 
     /// Which transitions this run's calls took.
@@ -478,6 +505,13 @@ struct Bridge<'m, 'a> {
     /// [`Raise::Called`], and whoever entered the outermost compiled function
     /// takes it back out.
     left: Option<RuntimeError>,
+    /// How many frames are on the stack below the compiled frame this chain
+    /// was entered at: the index of that frame, which is the bottom of what a
+    /// yield inside the chain leaves standing for [`resume`] to re-enter
+    /// ([ADR 0085]).
+    ///
+    /// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    floor: usize,
 }
 
 impl<'m, 'a> Bridge<'m, 'a> {
@@ -489,11 +523,18 @@ impl<'m, 'a> Bridge<'m, 'a> {
     /// [`Tiering`] outside its allocation; both outlive the bridge.
     unsafe fn over(machine: *mut Machine<'a>, budget: &'m Meter, tier: *mut Tiering) -> Self {
         (*machine).mem.chunk_bases(&mut (*tier).chunks);
+        // The chain's first frame is on top when a bridge is built over it:
+        // `from_encoded` pushes it first.
+        let floor = {
+            let machine = &*machine;
+            machine.frames.len().saturating_sub(1)
+        };
         Bridge {
             machine,
             budget,
             tier,
             left: None,
+            floor,
         }
     }
 
@@ -662,7 +703,14 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
             .last()
             .expect("a native frame is executing")
             .function;
-        machine.safepoint(budget, id, pc as usize).err()
+        // ADR 0085, after ADR 0084: a run asked to give its thread up does so
+        // here, before the safepoint's own work, which it does on resuming.
+        // One load, on a path taken once a stride.
+        match machine.yield_requested() {
+            true => offer_yield(machine, (*host).tier, (*host).floor, Stands::AtBlock)
+                .or_else(|| machine.safepoint(budget, id, pc as usize).err()),
+            false => machine.safepoint(budget, id, pc as usize).err(),
+        }
     };
     match stopped {
         None => {
@@ -674,6 +722,199 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
             false
         }
     }
+}
+
+/// Where the innermost compiled frame of a yield stands, and so how [`resume`]
+/// re-enters it ([ADR 0085]).
+///
+/// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Stands {
+    /// At a backedge's safepoint, before the loop head its `pc` names. The
+    /// safepoint is [`resume`]'s to take, and then the block is entered.
+    AtBlock,
+    /// At the safepoint an allocation or a call takes first, before the
+    /// instruction its `pc` names has done anything. The instruction is run
+    /// again from its first byte and takes the safepoint itself.
+    AtInstruction,
+}
+
+/// A run that yielded inside compiled code: the chain's floor and where its
+/// innermost frame stands. See [`resume`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Yielded {
+    /// The index of the outermost compiled frame the yield left standing.
+    pub(super) floor: usize,
+    pub(super) innermost: Stands,
+}
+
+/// Gives the thread up at a safepoint the innermost compiled frame stands at,
+/// if this run can: the marker the chain leaves by, or `None` with the
+/// refusal counted ([ADR 0085]).
+///
+/// Called with the work since the last safepoint already on `bulk_work` and
+/// the frame synced to `pc` — the loop head a backedge was jumping to, or the
+/// allocation or call whose safepoint this is — and with the safepoint itself
+/// not taken. That is ADR 0084 §4's "stands before the safepoint", in the
+/// native tier's coordinate: the work is the run's, the charge is not made,
+/// and the resumed run makes it first.
+///
+/// It can when [`Machine::yieldable`] says so — no callback, no running task,
+/// no debugger, and no `drive_from` below this chain, so every frame from
+/// `floor` up is compiled and was entered with no Rust caller between them
+/// that is not this chain's — and when every one of those frames has the resume
+/// point it would need: a block start for the innermost, the instant after its
+/// call for each one below it. A table that offers none declines.
+///
+/// # Safety
+///
+/// `tier` is the installed tiering, and the frames from `floor` up are this
+/// chain's.
+///
+/// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+#[cold]
+#[inline(never)]
+unsafe fn offer_yield(
+    machine: &mut Machine<'_>,
+    tier: *const Tiering,
+    floor: usize,
+    innermost: Stands,
+) -> Option<RuntimeError> {
+    let resumable = machine.yieldable()
+        && floor > 0
+        && machine.frames.len() > floor
+        && machine.frames[floor..]
+            .iter()
+            .rev()
+            .enumerate()
+            .all(|(depth, frame)| {
+                (*tier)
+                    .resume_points(frame.function)
+                    .and_then(|points| match (depth, innermost) {
+                        (0, Stands::AtBlock) => points.at_block(frame.pc),
+                        (0, Stands::AtInstruction) => points.at_instruction(frame.pc),
+                        _ => frame.pc.checked_sub(1).and_then(|at| points.after_call(at)),
+                    })
+                    .is_some()
+            });
+    if !resumable {
+        machine.decline_yield();
+        return None;
+    }
+    machine.yield_compiled(Yielded { floor, innermost });
+    // Never seen: `Machine::drive` reads `yielded` before the answer, as it
+    // does for a yield the dispatch loop took.
+    Some(RuntimeError::new("yielded at a safepoint"))
+}
+
+/// A call's poll (ADR 0078): the safepoint if the stride is due, and — where
+/// it is due and a yield has been asked for — the yield instead, with the
+/// call to be made again on resuming ([ADR 0085]). A recursion with no loop
+/// in it polls nowhere else.
+///
+/// # Safety
+///
+/// `host` is the bridge the helper was reached with; `machine` is its machine,
+/// borrowed for this call only.
+///
+/// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+#[inline(always)]
+unsafe fn poll_at_call(
+    machine: &mut Machine<'_>,
+    budget: &Meter,
+    host: *mut Bridge<'_, '_>,
+    id: FunctionId,
+    pc: u32,
+) -> Result<(), RuntimeError> {
+    if !machine.safepoint_due() {
+        return Ok(());
+    }
+    if machine.yield_requested() {
+        if let Some(marker) =
+            offer_yield(machine, (*host).tier, (*host).floor, Stands::AtInstruction)
+        {
+            return Err(marker);
+        }
+    }
+    machine.safepoint(budget, id, pc as usize)
+}
+
+/// Re-enters the compiled frames a yield left standing, innermost first, on
+/// whatever thread this is, until the frame at `floor` has answered into its
+/// encoded caller — or the run stops, raises, or yields again ([ADR 0085]).
+///
+/// The first thing it does is take the safepoint the run yielded at, which is
+/// what the uninterrupted run did next — itself, at a backedge, or by running
+/// the allocation or call that was taking it again. Then each frame is entered through its
+/// resume prologue at the point it stands at, under a fresh context whose
+/// poll threshold is what the machine has left of its stride; and when one
+/// answers, what its caller's call would have done on the way back is done
+/// here — its unpaid work charged, its record and its words taken off — and
+/// its caller is entered after the call. So the work, the safepoints and the
+/// collections of a resumed run are the uninterrupted run's.
+///
+/// Nothing is counted as a tier transition: every call these frames are in
+/// was counted when it was made.
+///
+/// An error leaves the frames standing, as it does in the uninterrupted run,
+/// and is the error that run would have answered: a callee's stays whole, and
+/// a [`Raise`] is named by [`raised`] at the frame that raised it, as [`close`]
+/// or [`enter`] would have named it.
+///
+/// # Safety
+///
+/// The run yielded inside compiled code with `floor` as its chain's floor, and
+/// nothing has changed its frames since; the installed table is the one it
+/// yielded under.
+///
+/// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+pub(super) unsafe fn resume(
+    machine: &mut Machine<'_>,
+    budget: &Meter,
+    yielded: Yielded,
+) -> Result<(), RuntimeError> {
+    let Yielded { floor, innermost } = yielded;
+    if innermost == Stands::AtBlock {
+        let top = *machine.frames.last().expect("a yielded run is in a frame");
+        machine.safepoint(budget, top.function, top.pc as usize)?;
+    }
+    machine.next_check = machine.next_question();
+    let tier: *mut Tiering = machine
+        .tier
+        .as_deref_mut()
+        .expect("a run yields inside compiled code only with a tier installed");
+    let mut stands = Some(innermost);
+    while machine.frames.len() > floor {
+        let len = machine.frames.len();
+        let frame = machine.frames[len - 1];
+        let caller = machine.frames[len - 2];
+        let points = (*tier)
+            .resume_points(frame.function)
+            .expect("the yield checked every frame has its resume points");
+        let at = match stands.take() {
+            Some(Stands::AtBlock) => points.at_block(frame.pc),
+            Some(Stands::AtInstruction) => points.at_instruction(frame.pc),
+            None => points.after_call(frame.pc - 1),
+        }
+        .expect("the yield checked every frame has its resume point");
+        let held: *mut Machine = machine;
+        let mut bridge = Bridge::over(held, budget, tier);
+        bridge.floor = floor;
+        let out: *mut Bridge = &mut bridge;
+        let into = Destination {
+            base: caller.base,
+            slot: frame.dst,
+        };
+        let entry = points.entry;
+        run_frame::<0>(
+            out,
+            frame.function,
+            frame.base,
+            into,
+            |ctx, index, into_index, slot| entry(ctx, index, into_index, slot, at),
+        )?;
+    }
+    Ok(())
 }
 
 /// The allocation helper: one `Inst::Alloc`, handed over whole — or the
@@ -727,14 +968,24 @@ unsafe extern "C" fn alloc(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) 
             .last()
             .expect("a native frame is executing")
             .function;
-        machine
-            .safepoint(budget, id, pc as usize)
-            .and_then(|()| machine.allocate(LayoutId(layout), len))
-            // The span is the *allocating* instruction's, which is what the
-            // encoded arm's `fail!` attaches through its own `sync`. Compiled
-            // code knows the pc and the runtime knows the span, which is the
-            // division every raise here makes.
-            .map_err(|error| error.at(machine.span(id, pc as usize)))
+        // ADR 0085: an allocation's safepoint is where a loop that allocates
+        // every turn polls — its backedge never finds a stride due — so it is
+        // offered the yield too, and the allocation runs again on resuming.
+        let yielded = match machine.yield_requested() {
+            true => offer_yield(machine, (*host).tier, (*host).floor, Stands::AtInstruction),
+            false => None,
+        };
+        match yielded {
+            Some(marker) => Err(marker),
+            None => machine
+                .safepoint(budget, id, pc as usize)
+                .and_then(|()| machine.allocate(LayoutId(layout), len))
+                // The span is the *allocating* instruction's, which is what the
+                // encoded arm's `fail!` attaches through its own `sync`. Compiled
+                // code knows the pc and the runtime knows the span, which is the
+                // division every raise here makes.
+                .map_err(|error| error.at(machine.span(id, pc as usize))),
+        }
     };
     // The allocation may have committed a heap chunk and the safepoint may have
     // grown the stack, so both pointers compiled code cached are stale.
@@ -1475,8 +1726,7 @@ unsafe fn call_body<const MASK: u64>(
         // A poll rather than an unconditional safepoint: ADR 0078. The callee
         // allocates through helpers that sync for themselves, so nothing about
         // a collection depends on this call having been one.
-        machine
-            .safepoint_if_due(budget, caller.function, pc as usize)
+        poll_at_call(machine, budget, host, caller.function, pc)
             .and_then(|()| {
                 super::encoded::open_frame(
                     machine,
@@ -1635,6 +1885,32 @@ unsafe fn enter<const MASK: u64>(
     base: u64,
     into: Destination,
 ) -> Result<(), RuntimeError> {
+    if MASK & ablate::AGAIN_CTX != 0 {
+        again_ctx(host, &mut *(*host).machine, base, into);
+    }
+    run_frame::<MASK>(host, callee, base, into, |ctx, index, into_index, slot| {
+        entry(ctx, index, into_index, slot)
+    })
+}
+
+/// [`enter`]'s body, over whichever way into the code the caller has: the
+/// entry point, or ([ADR 0085]) a resume prologue and the point to resume at.
+/// One body, so that a resumed frame is given the context an entered one is and
+/// settles its outcome the same way.
+///
+/// # Safety
+///
+/// As [`enter`], with `code` calling `callee`'s compiled code.
+///
+/// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+#[inline(always)]
+unsafe fn run_frame<const MASK: u64>(
+    host: *mut Bridge<'_, '_>,
+    callee: FunctionId,
+    base: u64,
+    into: Destination,
+    code: impl FnOnce(*mut NativeCtx, u64, u64, u32) -> Outcome,
+) -> Result<(), RuntimeError> {
     let machine = (*host).machine;
     let index = {
         let machine = &mut *machine;
@@ -1642,9 +1918,6 @@ unsafe fn enter<const MASK: u64>(
         // moves and the index does not. See `cove_native::abi`.
         machine.mem.stack_index(base) as u64
     };
-    if MASK & ablate::AGAIN_CTX != 0 {
-        again_ctx(host, &mut *machine, base, into);
-    }
     let (mut ctx, into_index) = {
         let machine = &mut *machine;
         // What a direct call may do without `open` and `close` (ADR 0079): the
@@ -1680,7 +1953,7 @@ unsafe fn enter<const MASK: u64>(
     // Safety: the context is this call's, the frame at `index` is the callee's,
     // the destination is `into`'s width of words outside that frame, and the code
     // was emitted for exactly `Entry`'s shape.
-    let outcome = entry(&mut ctx, index, into_index, into.slot);
+    let outcome = code(&mut ctx, index, into_index, into.slot);
 
     // The direct calls this entry's code opened without `open`, which is where
     // `open` would have counted them.
@@ -2645,8 +2918,7 @@ unsafe extern "C" fn open(
         // A call is a *poll*, as a backedge is (ADR 0078, after ADR 0060): the
         // safepoint is taken when the stride is reached and not otherwise. The
         // span is looked up only for a refusal that needs one.
-        machine
-            .safepoint_if_due(budget, caller.function, pc as usize)
+        poll_at_call(machine, budget, host, caller.function, pc)
             .and_then(|()| {
                 machine.admit_frame_with(budget, || machine.span(caller.function, pc as usize))
             })
