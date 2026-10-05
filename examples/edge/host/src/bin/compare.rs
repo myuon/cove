@@ -45,8 +45,7 @@ use std::time::{Duration, Instant};
 use cove_edge::deploy::{self, request_value, Backend, DeployOptions};
 use cove_edge::hosts::SCHEMAS;
 use cove_edge::{Latency, State};
-use cove_runtime::{Budget, HostRegistry, Limits, Runtime, Step, Value, Vm};
-use cove_runtime::{Budget, HostRegistry, OwnedVm, Runtime, Step, Value, Vm, YieldRequest};
+use cove_runtime::{Budget, HostRegistry, Limits, OwnedVm, Runtime, Step, Value, Vm, YieldRequest};
 use cove_sema::HostSchemas;
 
 const USAGE: &str =
