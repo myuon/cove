@@ -802,6 +802,7 @@ pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
         call,
+        call_closure: call,
         open,
         close,
         alloc,

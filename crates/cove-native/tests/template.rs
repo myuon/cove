@@ -584,6 +584,7 @@ fn direct_helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
         call,
+        call_closure: shared.call_closure,
         open,
         close,
         // The direct-call cases reach neither, so the suite's doubles are bound

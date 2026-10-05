@@ -1311,6 +1311,27 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     width <= MAX_RUN_WORDS && run(arg.slot, width)
                 })
         }
+        // A function's dense id, stored as a word (#605).
+        Inst::FuncRef { dst, callee } => slot(*dst) && callee.index() < program.functions.len(),
+        // A closure call: [`Inst::Call`]'s rule with the callee in a slot. The
+        // helper reads the object from `closure` and copies the captures, so
+        // only what this frame names is bounded: the object's slot, the
+        // arguments, and the answer at the width the checker settled (#605).
+        Inst::CallClosure {
+            dst,
+            closure,
+            args,
+            result,
+        } => {
+            let answer = program.layout(*result).width();
+            slot(*closure)
+                && answer <= MAX_RUN_WORDS
+                && run(*dst, answer)
+                && program.arg_list(*args).iter().all(|arg| {
+                    let width = program.layout(arg.layout).width();
+                    width <= MAX_RUN_WORDS && run(arg.slot, width)
+                })
+        }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
         // Three slots since ADR 0067, each holding the address of a sentence
         // the standard library may have worded, so there are operands to bound
