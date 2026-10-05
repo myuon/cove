@@ -887,6 +887,46 @@ export fn callsOrdersStrings(which: Int) -> Int {
   ordersStrings(which)
 }
 
+/// Every pair of a few strings put through `!=`, `<`, `<=`, `>` and `>=` —
+/// each as a value and as a branch — one bit of the answer each (issue #605):
+/// the empty string, a prefix chain, a difference late in the bytes, and a
+/// two-byte character, which orders by its bytes.
+export fn comparesStrings(which: Int) -> Int {
+  let words = [\"\", \"a\", \"ab\", \"abcdefghi\", \"abcdefghj\", \"h\u{e9}llo\", \"hello\", \"Z\"]
+  var answer = which
+  var i = 0
+  while i < words.length() {
+    var j = 0
+    while j < words.length() {
+      let x = words.get(i).unwrapOr(\"\")
+      let y = words.get(j).unwrapOr(\"\")
+      let ne = x != y
+      let lt = x < y
+      let le = x <= y
+      let gt = x > y
+      let ge = x >= y
+      var bits = 0
+      if ne { bits += 1 }
+      if lt { bits += 2 }
+      if le { bits += 4 }
+      if gt { bits += 8 }
+      if ge { bits += 16 }
+      if x != y { bits += 32 }
+      if x < y { bits += 64 }
+      answer = (answer * 131 + bits) % 1000000007
+      j += 1
+    }
+    i += 1
+  }
+  answer + counts(0)
+}
+
+/// A refused caller, so the comparisons run in a compiled frame.
+export fn callsComparesStrings(which: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  comparesStrings(which)
+}
+
 /// Allocations from a compiled frame that are **kept**, so the heap runs out.
 ///
 /// Every array goes into the vector, so nothing a collection could reclaim is
@@ -5049,6 +5089,24 @@ fn a_string_order_from_compiled_code_agrees_with_the_vm() {
             both.native, both.vm,
             "which {which}: compiled string orders agree with the VM"
         );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "which {which}: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// **`String` `!=`, `<`, `<=`, `>` and `>=` run as machine code and agree with
+/// the VM** (issue #605): before, any of them kept its function encoded, and
+/// everything compiled below that function could not yield.
+#[test]
+fn every_string_comparison_runs_as_machine_code() {
+    on_each_tier(&["comparesStrings"], &["callsComparesStrings"]);
+    for which in [0i64, 1, 7] {
+        let both = both("callsComparesStrings", vec![Value::int(which)]);
+        assert!(both.vm.is_ok(), "which {which}: {:?}", both.vm);
+        assert_eq!(both.native, both.vm, "which {which}");
         assert!(
             both.tiers.vm_to_native >= 1,
             "which {which}: {:?}",

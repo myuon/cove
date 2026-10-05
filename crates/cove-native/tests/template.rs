@@ -223,8 +223,8 @@ fn a_string_order_is_the_runtimes_leaf() {
 }
 
 #[test]
-fn only_a_strings_order_and_equality_are_in_the_slice() {
-    suite::only_a_strings_order_and_equality_are_in_the_slice::<Template>();
+fn every_string_comparison_is_in_the_slice() {
+    suite::every_string_comparison_is_in_the_slice::<Template>();
 }
 
 #[test]
