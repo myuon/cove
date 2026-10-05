@@ -4049,6 +4049,10 @@ impl<'a> Checker<'a> {
             let key = self.key(name);
             return self.foreign_type(&key, arguments, span);
         }
+        if let Some(host) = self.module.host_items.get(name) {
+            self.host_item_as_type(host, name);
+            return Ty::recovery();
+        }
         self.diagnostics.push(
             Diagnostic::error(
                 UNKNOWN_TYPE,
@@ -4061,6 +4065,52 @@ impl<'a> Checker<'a> {
             )),
         );
         Ty::recovery()
+    }
+
+    /// Reports a name a `use` bound as a host operation and a type position
+    /// then named, once, at the `use`.
+    ///
+    /// `use json.Json` resolves against the package's modules first and the
+    /// host registry second, so when the package has no `json` module the
+    /// import binds a host operation, and no host operation is a type. The
+    /// usual cause is a module directory that is missing or misspelt, and
+    /// the `use` is the one line that says so: reporting each mention would
+    /// say the same thing at every signature that names the type (issue
+    /// #602). The check for an earlier report reads the diagnostics rather
+    /// than a set, because a probe discards what it reported.
+    fn host_item_as_type(&mut self, host: &str, name: &str) {
+        let Some(&at) = self.module.host_item_uses.get(name) else {
+            return;
+        };
+        if self
+            .diagnostics
+            .iter()
+            .any(|d| d.code == UNKNOWN_TYPE && d.primary == Some(at))
+        {
+            return;
+        }
+        let diagnostic = if self.schemas.module(host).is_some() {
+            Diagnostic::error(
+                UNKNOWN_TYPE,
+                format!("`use {host}.{name}` imports an operation of the host module `{host}`, not a type"),
+            )
+            .at(at)
+            .rule("`use` resolves against the package's modules first and the host registry second, and what it imports from a host is an operation.")
+            .help(format!(
+                "write `use {host}` and name the type `{host}.{name}`"
+            ))
+        } else {
+            Diagnostic::error(
+                UNKNOWN_TYPE,
+                format!("`use {host}.{name}` imports `{name}` from `{host}`, which is not a module of this package"),
+            )
+            .at(at)
+            .rule("`use` resolves against the package's modules first and the host registry second, and what it imports from a host is an operation, not a type.")
+            .help(format!(
+                "add the module `{host}` to this package, or correct the path; a type only a host knows is written `{host}.{name}` after `use {host}`"
+            ))
+        };
+        self.diagnostics.push(diagnostic);
     }
 
     /// A type another module declares, named by its canonical key.
@@ -15350,6 +15400,32 @@ export fn main() -> Result<Unit, Error> {
         let error = rejects("fn run(value: Missing) -> Int {\n  1\n}\n");
         assert_eq!(error.code, UNKNOWN_TYPE);
         assert_eq!(error.message, "`Missing` names no type this module can see");
+    }
+
+    /// Issue #602: `use json.Json` with no `json` module in the package falls
+    /// through to the host registry, which binds `Json` as a host operation.
+    /// Every type position naming it used to report the same error; the
+    /// `use` is the one line that is wrong, so it is reported once, there.
+    #[test]
+    fn a_type_imported_from_a_missing_module_is_reported_once_at_the_use() {
+        let source = "\
+use json.Json
+
+fn parse(text: String) -> Json {
+  read(text)
+}
+
+fn read(text: String) -> Json {
+  parse(text)
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, UNKNOWN_TYPE);
+        assert_eq!(error.primary.map(|span| span.start), Some(0));
+        assert_eq!(
+            error.message,
+            "`use json.Json` imports `Json` from `json`, which is not a module of this package"
+        );
     }
 
     #[test]
