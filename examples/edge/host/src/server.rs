@@ -433,9 +433,14 @@ impl Shared {
     /// parked with the idle thread until the next one arrives.
     ///
     /// `written` is the request id the timeline records the write under:
-    /// noted before the connection is closed or handed on, so that a client
-    /// which has read its answer finds it recorded. A pipelined request is
-    /// this worker's own work, so it goes on this worker's queue.
+    /// noted before the first byte is sent, so that a client which has read
+    /// its answer finds it recorded. Noting it after the send was issue 600:
+    /// a keep-alive client could read the answer and ask for `/_timeline`
+    /// before the worker that wrote it got back to note it. The timestamp is
+    /// therefore when the write began, short by one `write` call.
+    ///
+    /// A pipelined request is this worker's own work, so it goes on this
+    /// worker's queue.
     fn finish(
         &self,
         mut conn: Conn,
@@ -444,10 +449,10 @@ impl Shared {
         worker: usize,
         written: Option<u64>,
     ) {
-        let sent = response.send(&mut conn.stream, keep_alive);
         if let Some(id) = written {
             self.note(worker, id, || What::Written { worker });
         }
+        let sent = response.send(&mut conn.stream, keep_alive);
         if sent.is_err() || !keep_alive {
             return;
         }
