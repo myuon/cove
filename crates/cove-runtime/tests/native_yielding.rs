@@ -999,13 +999,8 @@ struct Stormed {
     finished: Finished,
     native_yields: usize,
     yields: usize,
-    longest: Duration,
     /// The most compiled frames any one yield left standing.
     deepest: usize,
-    /// How long the whole run took, yields included.
-    took: Duration,
-    /// How many requests the monitor raised while the run ran.
-    raised: u64,
     /// The most requests the monitor raised between two yields, or between
     /// the last one and the answer: how long, in the monitor's own clock, the
     /// run went on while asked. Unlike a wall-clock gap, a monitor the machine
@@ -1065,18 +1060,13 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
     }
     let (mut yields, mut native_yields, mut deepest) = (0, 0, 0);
     let mut unheeded = 0;
-    let mut longest = Duration::ZERO;
-    let started = std::time::Instant::now();
-    let raised_before = raised.load(Ordering::Relaxed);
-    let mut since = started;
-    let mut raised_since = raised_before;
+    let mut raised_since = raised.load(Ordering::Relaxed);
     let mut next = taken(vm.invoke_within_parkable(unlimited(), "app", name, Vec::new()));
     let finished = loop {
         match next {
             Taken::Answered(finished, ..) => break finished,
             Taken::Parked(_) => panic!("nothing here pends"),
             Taken::Yielded(yielded) => {
-                longest = longest.max(since.elapsed());
                 let now = raised.load(Ordering::Relaxed);
                 unheeded = unheeded.max(now - raised_since);
                 yields += 1;
@@ -1090,25 +1080,18 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
                         .unwrap(),
                     _ => taken(yielded.resume()),
                 };
-                since = std::time::Instant::now();
                 raised_since = raised.load(Ordering::Relaxed);
             }
         }
     };
     unheeded = unheeded.max(raised.load(Ordering::Relaxed) - raised_since);
-    longest = longest.max(since.elapsed());
-    let took = started.elapsed();
-    let raised = raised.load(Ordering::Relaxed) - raised_before;
     done.store(true, Ordering::Relaxed);
     monitor.join().unwrap();
     Stormed {
         finished,
         native_yields,
         yields,
-        longest,
         deepest,
-        took,
-        raised,
         unheeded,
     }
 }
