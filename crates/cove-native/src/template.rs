@@ -418,6 +418,7 @@ struct Helpers {
     safepoint: usize,
     call: usize,
     call_closure: usize,
+    host: usize,
     open: usize,
     close: usize,
     alloc: usize,
@@ -457,6 +458,7 @@ impl Jit {
                 safepoint: helpers.safepoint as usize,
                 call: helpers.call as usize,
                 call_closure: helpers.call_closure as usize,
+                host: helpers.host as usize,
                 open: helpers.open as usize,
                 close: helpers.close as usize,
                 alloc: helpers.alloc as usize,
@@ -674,6 +676,7 @@ struct Emit<'a> {
     safepoint: usize,
     call: usize,
     call_closure: usize,
+    host: usize,
     open: usize,
     close: usize,
     alloc: usize,
@@ -754,6 +757,7 @@ impl<'a> Emit<'a> {
             safepoint: helpers.safepoint,
             call: helpers.call,
             call_closure: helpers.call_closure,
+            host: helpers.host,
             open: helpers.open,
             close: helpers.close,
             alloc: helpers.alloc,
@@ -1325,6 +1329,12 @@ impl<'a> Emit<'a> {
             }
             // `encoded.rs`'s `CALL_CLOSURE`, handed to the runtime whole as a
             // mediated call is (#605); it resumes where a call does.
+            // `encoded.rs`'s `CALL_HOST`, handed to the runtime whole (ADR 0087).
+            // A park resumes the frame after it, where a call's frame resumes.
+            Inst::CallHost { dst, op, args } => {
+                self.mediated(self.host, *dst, op.0, args.0);
+                self.returns[pc] = Some(self.code.len());
+            }
             Inst::CallClosure {
                 dst, closure, args, ..
             } => {
@@ -4323,6 +4333,13 @@ impl<'a> Emit<'a> {
     /// with the closure's slot where the callee would be, to the closure-call
     /// helper, which reads the callee and its captures out of the object.
     fn callee_closure(&mut self, dst: Slot, closure: Slot, args: u32) {
+        self.mediated(self.call_closure, dst, closure, args);
+    }
+
+    /// A helper of [`crate::abi::CallFn`]'s shape, handed this frame, the pc,
+    /// `what`, the argument list and the destination, and its outcome left on.
+    /// The unpaid work is published first, as at every call.
+    fn mediated(&mut self, helper: usize, dst: Slot, what: u32, args: u32) {
         self.store(CTX, OFF_PENDING_WORK, WORK);
         self.xor_rr(WORK, WORK);
 
@@ -4330,10 +4347,10 @@ impl<'a> Emit<'a> {
         self.mov_rr(RSI, BASE_BYTES);
         self.shr_imm8(RSI, 3);
         self.mov_imm32(RDX, self.pc as i32);
-        self.mov_imm32(RCX, closure as i32);
+        self.mov_imm32(RCX, what as i32);
         self.mov_imm32(R8, args as i32);
         self.mov_imm32(R9, dst as i32);
-        self.mov_imm64(RAX, self.call_closure as i64);
+        self.mov_imm64(RAX, helper as i64);
         self.call(RAX);
 
         let on = self.label();

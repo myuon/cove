@@ -1311,6 +1311,18 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     width <= MAX_RUN_WORDS && run(arg.slot, width)
                 })
         }
+        // A host call (ADR 0087): handed to the host helper whole, so what is
+        // bounded is what it reads out of this frame — the arguments — and the
+        // run the answer is written into, at the operation's result width.
+        Inst::CallHost { dst, op, args } => {
+            let answer = program.layout(program.host_op(*op).result).width();
+            answer <= MAX_RUN_WORDS
+                && run(*dst, answer)
+                && program.arg_list(*args).iter().all(|arg| {
+                    let width = program.layout(arg.layout).width();
+                    width <= MAX_RUN_WORDS && run(arg.slot, width)
+                })
+        }
         // A function's dense id, stored as a word (#605).
         Inst::FuncRef { dst, callee } => slot(*dst) && callee.index() < program.functions.len(),
         // A closure call: [`Inst::Call`]'s rule with the callee in a slot. The

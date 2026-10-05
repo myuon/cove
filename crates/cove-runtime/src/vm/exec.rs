@@ -550,6 +550,13 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
     yielded_native: Option<native::Yielded>,
+    /// Where a run parked at a host call made *by compiled code* stands, as
+    /// `yielded_native` for a yield: `Machine::resume` writes the answer and
+    /// re-enters the chain after its calls ([ADR 0087]). `None` for a park the
+    /// dispatch loop made.
+    ///
+    /// [ADR 0087]: ../../../../docs/adr/0087-compiled-code-calls-the-host.md
+    parked_native: Option<native::Yielded>,
     /// How long this run has spent yielded: neither its own work nor a host's,
     /// so an entry's `cpu` leaves it out as it leaves out host wait.
     descheduled: Duration,
@@ -998,6 +1005,7 @@ impl<'a> Machine<'a> {
             yield_request: None,
             yielded: None,
             yielded_native: None,
+            parked_native: None,
             descheduled: Duration::ZERO,
             yields_declined: 0,
             just_resumed: false,
@@ -1085,6 +1093,7 @@ impl<'a> Machine<'a> {
             yield_request: None,
             yielded: None,
             yielded_native: None,
+            parked_native: None,
             descheduled: Duration::ZERO,
             yields_declined: 0,
             just_resumed: false,
@@ -2449,6 +2458,14 @@ impl<'a> Machine<'a> {
     /// and the safepoint has not been taken; `native::resume` takes it first.
     ///
     /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    /// Records that the park just made was made by compiled code, whose chain
+    /// stands from `parked.floor` up ([ADR 0087]).
+    ///
+    /// [ADR 0087]: ../../../../docs/adr/0087-compiled-code-calls-the-host.md
+    fn park_compiled(&mut self, parked: native::Yielded) {
+        self.parked_native = Some(parked);
+    }
+
     fn yield_compiled(&mut self, yielded: native::Yielded) {
         self.clear_yield_request();
         self.yielded = Some(Instant::now());
@@ -2605,6 +2622,9 @@ impl<'a> Machine<'a> {
         let words = match written.and_then(|words| self.code().map(|code| (words, code))) {
             Ok(words) => words,
             Err(error) => {
+                // A park made by compiled code ends here with it: its chain
+                // stands, as it would for the error uninterrupted.
+                self.parked_native = None;
                 let error = self.attach_call_chain(error);
                 self.spend_pending_fuel(budget);
                 return Err(error);
@@ -2622,6 +2642,20 @@ impl<'a> Machine<'a> {
         let base = frame.base;
         for (at, word) in words.iter().enumerate() {
             self.mem.set_slot(base, dst + at as Slot, *word);
+        }
+        if let Some(parked) = self.parked_native.take() {
+            // ADR 0087: parked by compiled code, so the chain is re-entered
+            // after its calls — the innermost after the host call just
+            // answered — before the loop goes on, as for a yield (ADR 0085).
+            //
+            // Safety: the run parked inside compiled code with this floor, and
+            // nothing has touched its frames since but the answer's words.
+            if let Err(error) = unsafe { native::resume(self, budget, parked) } {
+                if self.yielded.is_some() || self.suspended.is_some() {
+                    return Ok(Vec::new());
+                }
+                return Err(self.failed_below(error, parked.floor, budget));
+            }
         }
         self.drive(&code, budget)
     }
