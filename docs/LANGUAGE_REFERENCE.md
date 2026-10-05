@@ -415,7 +415,10 @@ if condition {
   are checked against the surrounding expectation when there is one and
   against each other when there is not, and the `if` is their common type.
   **With no `else`, the `if` is `()`** and the branch is checked against
-  nothing.
+  nothing. **An `if` whose value is discarded** — written as a statement, or
+  as the last expression of a loop body or of a branch that is itself
+  discarded — is not used as an expression: its branches are checked on
+  their own and need not agree, and when they disagree the `if` is `()`.
 - **Evaluates to** the value of the branch that ran — **and `()` when there is
   no `else`**, whichever way the condition went. The branch still runs and its
   effects still happen; only its value is discarded.
@@ -437,7 +440,10 @@ match scrutinee {
 - **Types as**: the scrutinee is checked on its own; each arm's pattern is
   checked against the scrutinee's type and binds into that arm's body; the
   arms are checked against the surrounding expectation when there is one and
-  against each other when there is not. A `match` with no arms is `Never`.
+  against each other when there is not, in either order: an arm that settles
+  a later or an earlier arm's `None` or empty literal counts, as the other
+  branch of an `if` does. A discarded `match` is checked as a discarded `if`
+  is: its arms need not agree. A `match` with no arms is `Never`.
 - **Evaluates to** the body of the first arm whose pattern matches. The
   scrutinee is evaluated once.
 - **Errors**: `cove::resolve::non_exhaustive_match`,

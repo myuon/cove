@@ -2317,6 +2317,11 @@ struct Checker<'a> {
     /// Whether the walk currently running is a `Checker::probe`, whose
     /// diagnostics are discarded.
     probing: bool,
+    /// Whether the expression about to be walked is one whose value is
+    /// discarded: a statement, or the last expression of a loop body or of a
+    /// discarded branch. [`Checker::expr_type`] takes it, so it is only ever
+    /// seen by the one expression [`Checker::discard`] was handed.
+    discarding: bool,
     /// How many diagnostics had been reported when the body being checked
     /// began.
     ///
@@ -2435,6 +2440,7 @@ impl<'a> Checker<'a> {
             program,
             schemas,
             diagnostics: Vec::new(),
+            discarding: false,
             functions: BTreeMap::new(),
             methods: BTreeMap::new(),
             structs: BTreeMap::new(),
@@ -4369,6 +4375,26 @@ impl<'a> Checker<'a> {
     /// binds `a` and `b` to a hole, so the field read off them is a recovery
     /// unknown nothing ever reported — a clean check carrying a type the
     /// checker did in fact know.
+    /// A value whose whole type is an inference variable, read as what an
+    /// earlier use already settled it to.
+    ///
+    /// A binding keeps the variable its initialiser produced until the end
+    /// of the body, so `let a = trail.get(0).unwrapOr(0)` holds the vector's
+    /// element variable even though the `0` settled it to `Int` on that very
+    /// line. A form that dispatches on its operand's type — a method, a
+    /// field, an operator — cannot dispatch on a variable, and used to
+    /// abstain, leaving a type nothing would ever settle in a program that
+    /// checked clean and could not be lowered (issue #602). Only a bare
+    /// variable is read through: a `Vector<a>` still dispatches as a
+    /// `Vector`, and leaving its element open is what lets `push` say what
+    /// it is.
+    fn opened(&self, ty: Ty) -> Ty {
+        match ty {
+            Ty::Unknown(Unknown::Var(_)) => self.bound(ty),
+            other => other,
+        }
+    }
+
     fn bound(&self, ty: Ty) -> Ty {
         if self.vars.is_empty() {
             ty
@@ -4623,6 +4649,36 @@ impl<'a> Checker<'a> {
         ty
     }
 
+    /// Checks an expression whose value nothing reads.
+    ///
+    /// An `if` with an `else` and a `match` are "used as an expression" only
+    /// when something reads their value, so here their branches answer to
+    /// nothing and need not agree (issue #602): `if a { x += 1 } else {
+    /// v.set(i, 0) }` is a statement, and `set` answering an `Option` is no
+    /// reason to refuse it. The lowering already lowers such a form with no
+    /// destination, each branch dropping its own value.
+    fn discard(&mut self, expr: &Expr) -> Ty {
+        self.discarding = true;
+        let ty = self.expr(expr, None);
+        self.discarding = false;
+        ty
+    }
+
+    /// [`Checker::block`] for a block whose value nothing reads: a loop body,
+    /// or a branch of a discarded `if` or `match`.
+    fn discarded_block(&mut self, block: &Block) -> Ty {
+        self.scopes.push(BTreeMap::new());
+        for stmt in &block.statements {
+            self.stmt(stmt);
+        }
+        let ty = match &block.tail {
+            Some(tail) => self.discard(tail),
+            None => Ty::Unit,
+        };
+        self.scopes.pop();
+        ty
+    }
+
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Let {
@@ -4674,7 +4730,7 @@ impl<'a> Checker<'a> {
                 self.declare(&name.node, bound, *is_var);
             }
             StmtKind::Expr(expr) => {
-                self.expr(expr, None);
+                self.discard(expr);
             }
             StmtKind::Item(item) => {
                 // A local `fn` is an ordinary closure the body can call.
@@ -4770,6 +4826,7 @@ impl<'a> Checker<'a> {
 
     fn expr_type(&mut self, expr: &Expr, expected: Option<&Expected>) -> Ty {
         let span = expr.span;
+        let discarded = std::mem::take(&mut self.discarding);
         let ty = match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
@@ -4808,6 +4865,7 @@ impl<'a> Checker<'a> {
             ExprKind::Assign { op, target, value } => self.assign(*op, target, value, span),
             ExprKind::Try(inner) => self.try_expr(inner, span),
             ExprKind::Await(inner) => self.await_expr(inner, span),
+            ExprKind::Block(block) if discarded => return self.discarded_block(block),
             ExprKind::Block(block) => return self.block(block, expected),
             ExprKind::If {
                 condition,
@@ -4820,10 +4878,11 @@ impl<'a> Checker<'a> {
                     else_branch.as_deref(),
                     span,
                     expected,
+                    discarded,
                 )
             }
             ExprKind::Match { scrutinee, arms } => {
-                return self.match_expr(scrutinee, arms, span, expected)
+                return self.match_expr(scrutinee, arms, span, expected, discarded)
             }
             ExprKind::For {
                 binding,
@@ -4832,7 +4891,7 @@ impl<'a> Checker<'a> {
             } => self.for_expr(binding, iterable, body),
             ExprKind::While { condition, body } => {
                 self.condition(condition);
-                self.block(body, None);
+                self.discarded_block(body);
                 Ty::Unit
             }
             ExprKind::Return(value) => {
@@ -5325,6 +5384,12 @@ impl<'a> Checker<'a> {
             }
         }
         let base_ty = self.expr(base, None);
+        let base_ty = self.opened(base_ty);
+        if let Ty::Unknown(Unknown::Var(_)) = base_ty {
+            self.diagnostics
+                .push(not_yet_settled(&format!("`.{}`", name.node), base.span));
+            return Ty::recovery();
+        }
         self.field_of(&base_ty, name, span)
     }
 
@@ -5527,7 +5592,9 @@ impl<'a> Checker<'a> {
 
     fn binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
         let left = self.expr(lhs, None);
+        let left = self.opened(left);
         let right = self.expr(rhs, None);
+        let right = self.opened(right);
         self.binary_result(op, &left, &right, span)
     }
 
@@ -6118,7 +6185,9 @@ impl<'a> Checker<'a> {
         Ty::Bool
     }
 
-    /// An `if` with an `else` is an expression whose branches must agree.
+    /// An `if` with an `else` is an expression whose branches must agree,
+    /// unless its value is `discarded` — then they answer to nothing, and an
+    /// `if` whose branches disagree is `()`.
     ///
     /// An `if` with no `else` is a statement: its type is `()` and the value
     /// of its branch is discarded, because there is no second branch to give
@@ -6130,10 +6199,11 @@ impl<'a> Checker<'a> {
         else_branch: Option<&Expr>,
         span: Span,
         expected: Option<&Expected>,
+        discarded: bool,
     ) -> Ty {
         self.condition(condition);
         let Some(else_branch) = else_branch else {
-            self.block(then_branch, None);
+            self.discarded_block(then_branch);
             if let Some(expected) = expected {
                 self.expect(&Ty::Unit, expected, span);
             }
@@ -6163,6 +6233,17 @@ impl<'a> Checker<'a> {
                 }),
         };
         let hint = expected.or(settled.as_ref());
+        // Branches nothing reads and nothing settled are each checked on
+        // their own, as statements are.
+        if discarded && hint.is_none() {
+            let then_ty = self.discarded_block(then_branch);
+            let else_ty = self.discard(else_branch);
+            return if then_ty.matches(&else_ty) {
+                then_ty.join(&else_ty)
+            } else {
+                Ty::Unit
+            };
+        }
         let then_ty = self.block(then_branch, hint);
         let else_ty = self.expr(else_branch, hint);
         // With an expectation, both branches were already checked against it
@@ -6191,31 +6272,78 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// A `match` is checked the way an `if` with an `else` is: its arms
+    /// against the expectation when there is one, and against each other
+    /// when there is not — including the arm that comes later settling the
+    /// one that came first, so `Some(_) => found()` and `None => None` agree
+    /// in either order (issue #603). An arm the others leave open is
+    /// settled by a probe that walks them all once, reporting nothing, and
+    /// supplies their common type when they agree.
     fn match_expr(
         &mut self,
         scrutinee: &Expr,
         arms: &[MatchArm],
         span: Span,
         expected: Option<&Expected>,
+        discarded: bool,
     ) -> Ty {
         let scrutinee_ty = self.expr(scrutinee, None);
+        let settled = match expected {
+            Some(_) => None,
+            None if self.probing || arms.len() < 2 => None,
+            None => self
+                .probe(|checker| {
+                    let mut common: Option<Ty> = None;
+                    for arm in arms {
+                        checker.scopes.push(BTreeMap::new());
+                        checker.pattern(&arm.pattern, &scrutinee_ty);
+                        let ty = checker.expr(&arm.body, None);
+                        checker.scopes.pop();
+                        common = match common {
+                            None => Some(ty),
+                            Some(previous) if previous.matches(&ty) => Some(previous.join(&ty)),
+                            Some(_) => return None,
+                        };
+                    }
+                    common.filter(|ty| !ty.is_wild())
+                })
+                .map(|ty| {
+                    let label = format!("every arm produces `{ty}`");
+                    Expected::new(ty, span, label)
+                }),
+        };
+        let hint = expected.or(settled.as_ref());
+        if discarded && hint.is_none() {
+            let mut result: Option<Ty> = None;
+            for arm in arms {
+                self.scopes.push(BTreeMap::new());
+                self.pattern(&arm.pattern, &scrutinee_ty);
+                let ty = self.discard(&arm.body);
+                self.scopes.pop();
+                result = Some(match result {
+                    None => ty,
+                    Some(previous) if previous.matches(&ty) => previous.join(&ty),
+                    Some(_) => Ty::Unit,
+                });
+            }
+            return result.unwrap_or(Ty::Never);
+        }
         let mut result: Option<(Ty, Span)> = None;
         for arm in arms {
             self.scopes.push(BTreeMap::new());
             self.pattern(&arm.pattern, &scrutinee_ty);
-            let ty = self.expr(&arm.body, expected);
+            let ty = self.expr(&arm.body, hint);
             self.scopes.pop();
             result = Some(match result {
                 None => (ty, arm.body.span),
                 Some((previous, previous_span)) => {
-                    if expected.is_none() && !previous.matches(&ty) {
+                    if hint.is_none() && !previous.matches(&ty) {
                         self.branches_disagree(previous_span, arm.body.span, &previous, &ty);
                     }
                     (previous.join(&ty), previous_span)
                 }
             });
         }
-        let _ = span;
         match result {
             Some((ty, _)) => ty,
             // A `match` with no arms produces nothing; resolution already
@@ -6441,7 +6569,7 @@ impl<'a> Checker<'a> {
         self.scopes.push(BTreeMap::new());
         let element = self.bound(element);
         self.declare(&binding.node, element, false);
-        self.block(body, None);
+        self.discarded_block(body);
         self.scopes.pop();
         Ty::Unit
     }
@@ -6715,6 +6843,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let receiver = self.expr(base, None);
+                let receiver = self.opened(receiver);
                 self.mutating_receiver(&receiver, name, base, span);
                 // `handle.await()` and `await handle` mean the same thing,
                 // and they unwrap a `Task` through two different paths, so
@@ -9087,6 +9216,15 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Ty {
         match receiver {
+            // Nothing has said what this value is by the time a method is
+            // looked up on it; a later use may, but the lookup cannot wait
+            // for it, so the program is asked to say it here.
+            Ty::Unknown(Unknown::Var(_)) => {
+                self.diagnostics
+                    .push(not_yet_settled(&format!("`.{}()`", name.node), span));
+                self.check_args_freely(args, trailing);
+                return Ty::recovery();
+            }
             Ty::Unknown(_) | Ty::Never => {
                 self.check_args_freely(args, trailing);
                 return receiver.abstain();
@@ -9888,6 +10026,16 @@ fn not_a_value(name: &str, what: Namespace, span: Span) -> Diagnostic {
 /// the program is ready to run. The correction is still always available,
 /// which is what `help` says; what changed is that leaving it uncorrected is
 /// no longer a program.
+/// A method or a field reached on a value whose type only a later use
+/// settles (issue #602).
+fn not_yet_settled(what: &str, span: Span) -> Diagnostic {
+    unconstrained(
+        format!("nothing has said what this value is by the time {what} is reached on it"),
+        "write the type where the value comes from, as in `var items: Vector<Int> = Vector.of()` or `let value: Int = ...`".to_string(),
+        span,
+    )
+}
+
 fn unconstrained(message: String, help: String, span: Span) -> Diagnostic {
     Diagnostic::error(UNCONSTRAINED, message)
         .at(span)
@@ -15916,6 +16064,171 @@ fn run() -> Int {
 ";
         accepts(source);
         assert!(warnings_of(source).is_empty());
+    }
+
+    /// Issue #603: a `match` settles a bare `None` from a sibling arm the
+    /// way an `if` does from the other branch, whichever arm comes first.
+    #[test]
+    fn a_none_another_arm_settles_is_not_reported() {
+        for arms in [
+            "    Some(_) => found()\n    None => None\n",
+            "    None => None\n    Some(_) => found()\n",
+        ] {
+            let source = format!(
+                "\
+fn found() -> Option<Int> {{
+  Some(1)
+}}
+
+fn run(o: Option<Int>) -> Int {{
+  let value = match o {{
+{arms}  }}
+  value.unwrapOr(0)
+}}
+"
+            );
+            accepts(&source);
+        }
+        // Arms that genuinely disagree are still one diagnostic.
+        let error = rejects(
+            "\
+fn run(n: Int) -> Int {
+  let value = match n {
+    0 => 1
+    _ => \"two\"
+  }
+  1
+}
+",
+        );
+        assert_eq!(error.code, BRANCHES);
+    }
+
+    /// Issue #602, from the algo app's SAT solver: a binding taken from an
+    /// open element type, settled on its own line by `unwrapOr(0)`, and then
+    /// used as a receiver. The method used to be looked up on the variable,
+    /// abstain, and leave `bitXor`'s answer unsettled — a clean check the
+    /// lowering then refused.
+    #[test]
+    fn a_receiver_an_earlier_use_settled_dispatches_as_what_it_was_settled_to() {
+        accepts(
+            "\
+fn walk() -> Int {
+  var trail = Vector.of()
+  let assigned = trail.get(0).unwrapOr(0)
+  let falsified = assigned.bitXor(1)
+  let doubled = assigned * 2
+  trail.push(falsified + doubled)
+  falsified
+}
+",
+        );
+    }
+
+    /// The other half: a receiver nothing has settled *yet*, whose type only a
+    /// later use would say, is refused where the method is looked up rather
+    /// than passed to a backend as a hole.
+    #[test]
+    fn a_receiver_only_a_later_use_settles_is_refused_where_it_is_used() {
+        let error = rejects(
+            "\
+fn walk() -> Int {
+  var trail = Vector.of()
+  let falsified = match trail.pop() {
+    Some(assigned) => assigned.bitXor(1)
+    None => 0
+  }
+  trail.push(3)
+  falsified
+}
+",
+        );
+        assert_eq!(error.code, UNCONSTRAINED);
+        assert_eq!(
+            error.message,
+            "nothing has said what this value is by the time `.bitXor()` is reached on it"
+        );
+    }
+
+    /// Issue #603 item 3, as the ledger app wrote it: a `var` with a written
+    /// type, reassigned to an empty `Vector.of()` inside a `match` arm inside
+    /// a loop. The assigned place's type is the expectation the value is
+    /// checked against, so nothing is left unconstrained.
+    #[test]
+    fn reassigning_a_typed_var_to_an_empty_vector_is_settled_by_its_type() {
+        accepts(
+            "\
+fn split(slots: Array<Option<Int>>) -> Int {
+  var segments = Vector.of()
+  var current: Vector<String> = Vector.of()
+  for slot in slots {
+    match slot {
+      Some(point) => {
+        current.push(\"{point}\")
+      }
+      None => {
+        if current.length() > 0 {
+          segments.push(current.toArray())
+          current = Vector.of()
+        }
+      }
+    }
+  }
+  segments.length()
+}
+",
+        );
+    }
+
+    /// Issue #602: an `if` or a `match` whose value is discarded — a
+    /// statement, or the last expression of a loop body — is not "used as an
+    /// expression", so its branches answer to nothing and need not agree.
+    #[test]
+    fn branches_whose_value_is_discarded_need_not_agree() {
+        accepts(
+            "\
+fn run(var v: Vector<Int>, b: Bool) -> Int {
+  if b {
+    v.set(0, 1)
+  } else {
+    v.push(2)
+  }
+  match b {
+    true => v.set(0, 1)
+    false => v.push(1)
+  }
+  for x in [1, 2] {
+    if b {
+      v.set(0, x)
+    } else if x > 1 {
+      v.push(x)
+    } else {
+      \"three\"
+    }
+  }
+  while b {
+    match b {
+      _ => if b { 1 } else { v.push(1) }
+    }
+  }
+  v.length()
+}
+",
+        );
+        // A value that is used still has to be one type.
+        let error = rejects(
+            "\
+fn run(var v: Vector<Int>, b: Bool) -> Int {
+  let x = if b {
+    v.set(0, 1)
+  } else {
+    v.push(2)
+  }
+  1
+}
+",
+        );
+        assert_eq!(error.code, BRANCHES);
     }
 
     /// Branches that genuinely disagree are still one diagnostic, not one

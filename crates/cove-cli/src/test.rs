@@ -241,21 +241,27 @@ fn run_test(
         ) {
             Ok(ir) => Some(Arc::new(ir)),
             Err(items) => {
-                return Some(
-                    Diagnostic::error(
-                        FAILED,
-                        format!(
-                            "test `{}` could not be lowered: {}",
-                            test.qualified_name(),
-                            items
-                                .iter()
-                                .map(|item| item.message.clone())
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        ),
-                    )
-                    .at(test.entry.decl.name.span),
+                // Each gap points where it was found, so a reader is not left
+                // with a message and no location (issue #602).
+                let mut diagnostic = Diagnostic::error(
+                    FAILED,
+                    format!(
+                        "test `{}` could not be lowered: {}",
+                        test.qualified_name(),
+                        items
+                            .iter()
+                            .map(|item| item.message.clone())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
                 )
+                .at(test.entry.decl.name.span);
+                for item in &items {
+                    if let Some(span) = item.primary {
+                        diagnostic = diagnostic.label(span, item.message.clone());
+                    }
+                }
+                return Some(diagnostic);
             }
         },
     };
