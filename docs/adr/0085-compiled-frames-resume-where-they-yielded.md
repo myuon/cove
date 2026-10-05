@@ -311,13 +311,14 @@ unrequested, paired by round — 60, 76 and 88 µs more over 126.5–131.8 yield
 a call (0.47–0.69 µs each), with two compiled frames re-entered each time.
 
 **`examples/edge` on `--backend native`**
-(`examples/edge/compare/README.md`, "The native backend"): `crunch` is
-**1.35× Go** at the server (2,707 against 3,649 req/s at 16 in flight; 4.2×
-on the VM), 1.33–1.36× in-process from `n` = 20,000 up, and the `cpu-io` mix
-1.06–1.28× Go. Under the mix, unsliced native `hello` has a p99 of **41.9 ms**
-at 990 req/s, and **14.1 ms** with the 2 ms slice — the level #588 measured
-on the VM (15.6 ms, here 14.8) at three times its rate; at #588's own 330
-req/s the native pool is idle enough that `hello` is 3 ms either way.
+(`examples/edge/compare/README.md`, "The native backend", measured
+2026-10-05 at load average 2.2–6.7): `crunch` is **1.34× Go** at the server
+(2,783 against 3,720 req/s at 16 in flight; 4.1× on the VM), 1.33–1.36×
+in-process from `n` = 20,000 up, and the `cpu-io` mix 1.05–1.31× Go. Under the
+mix, unsliced native `hello` has a p99 of **46.7 ms** at 990 req/s, and
+**13.5 ms** with the 2 ms slice — the level #588 measured on the VM (15.6 ms,
+here 14.9) at three times its rate; at #588's own 330 req/s the native pool
+is idle enough that `hello` is 3 ms either way.
 
 **Correctness.** `crates/cove-runtime/tests/native_yielding.rs`: twenty
 yields inside a compiled loop, each resumed on a new thread, with the

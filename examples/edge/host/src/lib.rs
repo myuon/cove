@@ -39,7 +39,7 @@ pub mod server;
 pub mod timeline;
 pub mod toolchain;
 
-pub use deploy::{DeployOptions, State, Tenant};
+pub use deploy::{Backend, DeployOptions, State, Tenant};
 pub use hosts::Latency;
 pub use runq::Discipline;
 pub use server::{Isolates, KeepAlive, Server, ServerOptions};

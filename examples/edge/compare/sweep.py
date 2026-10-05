@@ -7,6 +7,12 @@ load generator and appends what it measured to results/*.jsonl.
     python3 examples/edge/compare/sweep.py connections [--reps 3] [--rate 10000] [--pools 64 ...]
     python3 examples/edge/compare/sweep.py waiting [--reps 3]
 
+`--servers cove cove-native go` picks the servers (default `cove go`), and
+`--results DIR` where the rows go (default `results/`).
+`cove-native` is the edge server with `--backend native` (ADR 0085), which
+needs `cargo build --release -p cove-edge --features native`; its rows are
+recorded under that name.
+
 Expects `cargo build --release -p cove-edge` and `go build -o edge-go .` in
 compare/go to have been run (README.md, "Reproducing"). Each run starts the
 server it measures, alone, with 4 workers / GOMAXPROCS=4, and stops it
@@ -22,6 +28,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +37,9 @@ LOAD = os.path.join(ROOT, "target", "release", "cove-edge-load")
 EDGE = os.path.join(ROOT, "target", "release", "cove-edge")
 GO = os.path.join(HERE, "go", "edge-go")
 RESULTS = os.path.join(HERE, "results")
-PORT = {"cove": 8787, "go": 8788}
+PORT = {"cove": 8787, "cove-native": 8787, "go": 8788}
+# `--port N` moves every server to N (one runs at a time), so that a sweep can
+# keep clear of anything else on the machine that uses the defaults.
 
 # What each scenario asks for: a `cove-edge-load` target (a path, or a mix).
 SCENARIOS = {
@@ -81,10 +90,26 @@ def capacities():
     return found
 
 
+def port_answers(port):
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1).read()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
 def start(server, latency=None):
     port = PORT[server]
-    if server == "cove":
+    # Refuse rather than measure somebody else's server: a port that already
+    # answers is not ours.
+    if port_answers(port):
+        raise SystemExit(f"port {port} already answers; another server is using it")
+    if server in ("cove", "cove-native"):
         cmd = [EDGE, "--quiet", "--port", str(port), "--workers", "4"]
+        if server == "cove-native":
+            cmd += ["--backend", "native"]
         if latency:
             cmd += ["--latency", latency]
         env = None
@@ -93,11 +118,6 @@ def start(server, latency=None):
         if latency:
             cmd += ["-latency", latency]
         env = dict(os.environ, GOMAXPROCS="4")
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/_stats", timeout=0.5).read()
-        raise SystemExit(f"port {port} is already answered by another process")
-    except OSError:
-        pass
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     atexit.register(lambda: proc.poll() is None and proc.kill())
     deadline = time.time() + 30
@@ -171,6 +191,7 @@ def run_load(server, args, sample_rss_of=None):
         raise SystemExit(f"cove-edge-load failed: {' '.join(cmd)}")
     with open(out) as f:
         summary = json.load(f)
+    os.remove(out)
     if proc:
         summary["server_cpu_s"] = cpu_seconds(proc.pid) - cpu_before
         summary["rss_before_kib"] = rss_before
@@ -210,7 +231,7 @@ def capacity(args):
             for concurrency, requests in plans[scenario]:
                 if args.concurrency and concurrency not in args.concurrency:
                     continue
-                for server in ["cove", "go"]:
+                for server in args.servers:
                     proc = start(server)
                     warm(server)
                     load = ["--keep-alive", "--concurrency", str(concurrency), "--requests", str(requests)]
@@ -218,7 +239,7 @@ def capacity(args):
                     stop(proc)
                     row = dict(s, server=server, scenario=scenario, rep=rep)
                     append("capacity.jsonl", row)
-                    print(f"capacity {scenario:<9} {server:<4} c={concurrency:<5} {s['throughput']:>9.0f} req/s  "
+                    print(f"capacity {scenario:<9} {server:<11} c={concurrency:<5} {s['throughput']:>9.0f} req/s  "
                           f"p50 {s['p50_ms']:.1f} p99 {s['p99_ms']:.1f} ms  cpu {row['server_cpu_s']:.2f}s  "
                           f"errors {s['errors']}  load {s['load_before']:.1f}", flush=True)
 
@@ -227,7 +248,7 @@ def sweep(args):
     caps = capacities()
     for rep in range(args.reps):
         for scenario in args.scenario:
-            for server in ["cove", "go"]:
+            for server in args.servers:
                 cap = caps.get((server, scenario))
                 proc = start(server)
                 warm(server)
@@ -250,7 +271,7 @@ def sweep(args):
                     s = run_load(server, SCENARIOS[scenario] + load, sample_rss_of=proc)
                     row = dict(s, server=server, scenario=scenario, rep=rep, offered=rate)
                     append("sweep.jsonl", row)
-                    print(f"sweep {scenario:<9} {server:<4} rate {rate:>6} -> {s['throughput']:>8.0f} req/s  "
+                    print(f"sweep {scenario:<9} {server:<11} rate {rate:>6} -> {s['throughput']:>8.0f} req/s  "
                           f"p50 {s['p50_ms']:>8.2f} p99 {s['p99_ms']:>9.2f} ms  lag p99 {s['lag_p99_ms']:.2f} "
                           f"late {s['late']}  err {s['errors']}  cpu/req {1e6 * row['server_cpu_s'] / max(1, s['answered']):.0f} us  "
                           f"load {s['load_before']:.1f}", flush=True)
@@ -263,7 +284,7 @@ def connections(args):
     the same arrivals, spread thinner."""
     for rep in range(args.reps):
         for pool in args.pools:
-            for server in ["cove", "go"]:
+            for server in args.servers:
                 proc = start(server)
                 warm(server)
                 rate = args.rate
@@ -282,7 +303,7 @@ def connections(args):
 def waiting(args):
     for rep in range(args.reps):
         for n in args.inflight:
-            for server in ["cove", "go"]:
+            for server in args.servers:
                 proc = start(server, latency="1000..1000")
                 warm(server)
                 time.sleep(1)
@@ -299,6 +320,7 @@ def waiting(args):
 
 
 def main():
+    global RESULTS
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ["capacity", "sweep", "connections", "waiting"]:
@@ -310,7 +332,15 @@ def main():
         p.add_argument("--pools", type=int, nargs="*", default=[64, 256, 1000, 4000, 10000])
         p.add_argument("--rate", type=int, default=10000)
         p.add_argument("--inflight", type=int, nargs="*", default=[1000, 10000])
+        p.add_argument("--servers", nargs="*", default=["cove", "go"], choices=list(PORT))
+        p.add_argument("--results", default=RESULTS, help="the directory the *.jsonl go to")
+        p.add_argument("--port", type=int, default=None, help="every server on this port")
     args = parser.parse_args()
+    RESULTS = os.path.abspath(args.results)
+    os.makedirs(RESULTS, exist_ok=True)
+    if args.port:
+        for server in PORT:
+            PORT[server] = args.port
     for binary in [LOAD, EDGE, GO]:
         if not os.path.exists(binary):
             raise SystemExit(f"missing {binary}; see README.md, Reproducing")

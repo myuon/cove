@@ -87,8 +87,10 @@ minute, and each measured the other's server. Those rows were thrown away;
 page. It starts each server alone for each scenario, with `--workers 4` or
 `GOMAXPROCS=4`, warms every endpoint once, and stops it afterwards. The edge
 server and the Go server take turns, so if the machine's load changes it
-lands on both. `--features native` matters only to `cove-edge-compare`. The
-server's isolates are `OwnedVm`s, which run encoded.
+lands on both. `--features native` matters to `cove-edge-compare` and to
+`cove-edge --backend native` (`sweep.py --servers cove-native`, [below](#the-native-backend-adr-0085));
+without `--backend native` the server's isolates run encoded, as every row
+above this section's does.
 
 The Go module is not part of the Cargo workspace and nothing in the gate
 builds it. `go/edge-go` is ignored by git.
@@ -584,7 +586,8 @@ of three interleaved rounds that the machine's load left alone; the third,
 at load 9–12, ran everything 2.5× slower.) That puts the native tier
 **below Go** on this benchmark, which says more about the benchmark than
 about either compiler: LLVM takes this path and Go does not. It is not in
-the edge server's numbers, whose isolates run encoded.
+the edge server's numbers: the VM's run encoded, and
+[the native backend's](#the-native-backend-adr-0085) were measured before it.
 
 **Written up, not implemented.**
 
@@ -852,9 +855,9 @@ resolution*, not equal.
 | claim | label | evidence, or what is missing |
 | --- | --- | --- |
 | `crunch` is 4.2× Go on the encoded VM, in Stage 1 and at the server | observed | Stage 1 4.23 / 1.00 ms; server CPU 4,560 / 1,078 µs per request |
-| the native tier is 1.3× Go on `crunch` | observed, in-process only | Stage 1; this pass: `primesUpTo` alone is 1.33× too, spread over several costs; 0.70× with the 32-bit division (item 1) |
+| the native tier is 1.3× Go on `crunch` | observed, in-process; **now also at the server** | Stage 1; this pass: `primesUpTo` alone is 1.33× too, spread over several costs; 0.70× with the 32-bit division (item 1); at the server with `--backend native`, 1.33–1.34× (without the division path, [below](#the-native-backend-adr-0085)) |
 | the remaining 1.3× is the template compiler's code quality | estimated — **now observed** | item 1: no call, no boxing; polling, checks, a stored comparison, memory operands around one `idivq` both loops share |
-| a native tier for `OwnedVm` would move `crunch` and the `cpu-io` mix to about 1.3× | **predicted** | `OwnedVm` has no native tier; nothing ran it |
+| a native tier for `OwnedVm` would move `crunch` and the `cpu-io` mix to about 1.3× | predicted — **now observed** | measured after this pass, with ADR 0085's `--backend native` ([below](#the-native-backend-adr-0085)): `crunch` 1.33–1.34× Go in capacity, the `cpu-io` mix 1.05–1.31× |
 | a fresh isolate adds nothing measurable to a 0.2 ms call | observed | edge and reused VM within 4%, either order |
 | `hello`: about 4 µs isolate + request + budget, 3 µs empty invoke, 0.9 µs handler | estimated, by differences | measured directly in item 2: isolate built and dropped 1.97, request value 0.79, budget 0.14 (2.9 together, not 3.7–4.2); the run 4.2–5.0 µs |
 | about 26–33 µs of `hello`'s 41 µs is the host's HTTP, queue and hand-off | estimated (a remainder) — **now observed** | item 2's profile: 73% of the sampled CPU, 29 µs scaled to `ps` |
@@ -871,6 +874,189 @@ resolution*, not equal.
 | waiting requests: CPU per request equal, 140–150 µs | observed: indistinguishable at `ps`'s resolution | 10 ms granularity over 1–10 s runs; ranges overlap |
 | waiting requests: p50 3.29–3.46 s against 3.00 s, the timer's overshoot | observed; cause now observed | item 3: 3.45 → 3.00 s with the timer fixed |
 
+## The native backend (ADR 0085)
+
+[ADR 0085](../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md)
+gave `OwnedVm` a native tier that can still be sliced: `PreparedProgram::with_native`
+compiles a tenant once at deploy, every isolate shares the machine code, and a
+run yields inside compiled code (at a backedge, an allocation or a call) and
+resumes on another worker. `cove-edge --backend native` uses it; the scheduler,
+the slice and the monitor are unchanged. The rest of the page is the VM,
+except [Verifying the diagnosis](#verifying-the-diagnosis)'s item 1, which is
+the native tier in-process. **These rows predate the 32-bit division path**
+of that item (`perf/native-div32`), which roughly halves `crunch`'s native
+time in-process; they were not re-measured with it, so `crunch`'s 1.33–1.34×
+here is the template compiler before that change.
+
+Every figure in this section is **observed** — a median of runs, with the
+runs in the raw files — except where a row says **estimated**, which is a
+difference of two observations. Stage 1 was measured on 2026-10-04 (load
+average 3.6–10, other agents' builds running). Stage 2 was measured on
+2026-10-05 from 02:09 to 02:22, with the machine otherwise idle: **load
+average 2.2–6.7**, most of it this load generator and these servers (each
+row's load is in its raw file).
+
+Stage 2 was measured once before, on 2026-10-04, and those runs are not used:
+for about two minutes another agent's benchmark used the same port and the
+same summary file as `sweep.py`, so they may have measured each other's
+server. They are kept in [`results/native/suspect-2026-10-04/`](results/native/suspect-2026-10-04/)
+with a note. `sweep.py` now takes `--port`, refuses a port that already
+answers, and writes its summary to a per-process file; `cpuio.sh` does the
+same on port 8813. The re-measured numbers agree with the suspect ones to
+within a few per cent and move no conclusion (the last table here).
+
+```console
+$ cargo build --release -p cove-edge --features native
+$ python3 examples/edge/compare/sweep.py capacity --reps 3 --scenario crunch cpu-io --concurrency 16 64 256 \
+    --servers cove cove-native go --port 8811 --results examples/edge/compare/results/native
+$ python3 examples/edge/compare/sweep.py sweep --reps 3 --scenario crunch \
+    --servers cove cove-native go --port 8811 --results examples/edge/compare/results/native
+$ PORT=8813 examples/edge/compare/results/native/cpuio.sh 3 cpuio.txt   # the #588 mix, below
+$ python3 examples/edge/compare/charts_native.py                         # the three SVGs here
+```
+
+Raw data: [`results/native/`](results/native/) — `capacity.jsonl`,
+`sweep.jsonl` (and their console logs), `cpuio.txt`, `run.log` (start, end
+and load), and `hotpath.txt` for Stage 1, with the scripts and parsers that
+made and read them.
+
+### Stage 1 again: the edge path on the native backend
+
+`cove-edge-compare` has three new rows: `edge-n`, the server's per-request
+path on the native backend (a fresh isolate over the shared code, the
+request value, the budget); and `edge+y` / `edge-n+y`, the same with a
+monitor raising the run's yield request every 20 µs and each yield resumed
+at once on the same thread. Observed: medians of three interleaved rounds of 5
+batches (`results/native/hotpath.txt`); Go's column is the one above.
+
+| case | edge (VM) | **edge-n** | native, reused `Vm` | Go | **edge-n / Go** | edge-n+y | yields per call |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `crunch n=2000` | 212.1 µs | 72.7 µs | 67.7 µs | 43.69 µs | **1.66×** | 73.2 µs | 0.4 |
+| `crunch n=20000` | 4.37 ms | 1.35 ms | 1.34 ms | 997.40 µs | **1.36×** | 1.36 ms | 8.6 |
+| `crunch n=150000` | 68.59 ms | 20.62 ms | 20.56 ms | 15.55 ms | **1.33×** | 20.69 ms | 127 |
+| `hello name=Cove` | 8.46 µs | 8.73 µs | 4.13 µs | 54 ns | 162× | 8.84 µs | 0 |
+
+- **The isolate costs the native tier nothing it did not cost the VM.**
+  `edge-n` is within 1% of a reused native `Vm` from `n` = 20,000 up, as
+  `edge` is of a reused VM: compiling is once per tenant, at deploy.
+- **A yield and a resume cost about 0.6 µs** on the native tier
+  (**estimated**: `edge-n+y − edge-n` over the yields per call, paired by
+  round — 60, 76 and 88 µs over 126.5–131.8 yields, 0.47–0.69 µs each). That
+  is the unwinding, the safepoint taken on resuming, and the re-entry of two
+  compiled frames (`primesUpTo` and `isOddPrime`) through their resume
+  prologues, on one thread with a warm cache. On another worker add the cold
+  cache (the server's own yields below).
+- `hello` gains nothing, as before: its time is not in compiled code.
+
+### Capacity
+
+Closed loop, as above; observed, median of 3 runs (range in parentheses).
+
+![Capacity: crunch at 16 and 64 in flight, cpu-io at 64 and 256, for Cove on the VM, Cove native and Go](native-capacity.svg)
+
+| scenario | in flight | Cove VM | **Cove native** | Go | Go / native | native CPU µs/req | native p50 / p99 ms | Go p50 / p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| crunch | 16 | 907 (903–913) | 2,783 (2,770–2,784) | 3,720 (3,683–3,741) | **1.34** | 1,453 | 5.6 / 8.8 | 4.0 / 10.2 |
+| crunch | 64 | 909 (904–918) | 2,778 (2,776–2,791) | 3,695 (3,619–3,722) | **1.33** | 1,458 | 22.4 / 35.9 | 15.2 / 44.9 |
+| cpu-io | 64 | 348 (343–348) | 768 (766–768) | 804 (802–805) | **1.05** | 3,545 | 15.1 / 307.8 | 10.2 / 302.3 |
+| cpu-io | 256 | 362 (356–363) | 1,044 (1,019–1,056) | 1,364 (1,345–1,371) | **1.31** | 3,570 | 244.5 / 493.9 | 105.0 / 494.5 |
+
+**`crunch` goes from 4.1× Go on the VM to 1.33–1.34×**, the same ratio as
+Stage 1's: the server still adds nothing to a CPU-heavy run, and what is
+left is the template compiler's code against Go's — division plus the costs
+[item 1](#1-crunch-on-the-native-tier-133-go-and-where-it-goes) prices. CPU per request (`ps`,
+10 ms resolution) is 1.45 ms native against 4.4 ms on the VM and 1.07 ms for
+Go. The `cpu-io` mix follows, to 1.05–1.31× Go from 2.3–3.8× on the VM, at
+3.5–3.6 ms of CPU a request against 11.1 ms on the VM and 2.6 ms for Go.
+
+### Latency against a fixed rate: `crunch`
+
+`--rate` with `--from-intended`; observed, median p50 / p99 (ms) of 3
+repetitions per rate (`results/native/sweep.jsonl`).
+
+![crunch p99 latency against offered rate: the VM saturates near 900 req/s, native near 2,800, Go near 3,700](native-crunch-p99.svg)
+
+| offered req/s | Cove VM p50 / p99 | **Cove native p50 / p99** | Go p50 / p99 |
+| ---: | ---: | ---: | ---: |
+| 100 | 5.3 / 7.3 | 2.6 / 4.4 | 2.1 / 4.0 |
+| 500 | 5.2 / 6.7 | 2.3 / 4.1 | 1.9 / 3.6 |
+| 750 | 5.3 / 6.8 | 2.2 / 3.9 | 1.9 / 3.6 |
+| 900 | 29.1 / 113.4 | 2.2 / 3.9 | 1.6 / 3.3 |
+| 1,000 | saturated (240 / 495) | 2.2 / 4.0 | 1.6 / 3.2 |
+| 1,500 | – | 2.2 / 3.9 | 1.8 / 3.2 |
+| 2,500 | – | 2.5 / 4.5 | 1.8 / 3.3 |
+| 3,000 | – | saturated (196 / 394) | 1.8 / 3.5 |
+| 3,500 | – | – | 2.3 / 12.3 |
+| 4,000 | – | – | saturated (187 / 386) |
+
+Below saturation the native backend's p50 is 0.4–0.6 ms above Go's, which is
+the 1.35 ms run against Go's 1.0 ms, and its p99 is 0.3–1.2 ms above Go's.
+It saturates between 2,500 and 3,000 req/s (capacity 2,780) where Go
+saturates between 3,500 and 4,000 (capacity 3,700): the capacity ratio again.
+
+### The `cpu-io` mix: does slicing still work?
+
+The question for a native tier is whether it can still be interrupted, so
+this is the edge README's #588 measurement — `--mix cpu-io --requests 500
+--concurrency 200 --keep-alive --rate 330`, four workers, the stealing
+scheduler — with `--backend` and `--slice` varied, the configurations
+interleaved within each of three repetitions, latency from the intended start
+(`results/native/cpuio.txt`; the same runs without `--from-intended` are in
+the file and agree). Observed, medians of 3 (range in parentheses).
+
+![hello's p99 under the cpu-io mix: 96 ms on the VM unsliced, 15 ms sliced; 3 ms native at the #588 rate either way; at three times the rate 47 ms native unsliced and 13.5 ms sliced](native-cpu-io.svg)
+
+| backend, slice | rate | `hello` p50 / **p99** | `crunch` p50 / p99 | `aggregate` p50 | yields per run |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| VM, none | 330 | 15.3 / **95.7** ms (91.1–96.0) | 45.2 / 147 ms | 271 ms | 0 |
+| VM, 2 ms | 330 | 3.9 / **14.9** ms (14.1–16.5) | 41.5 / 187 ms | 210 ms | 1,232–1,260 |
+| native, none | 330 | 1.5 / **3.0** ms (2.8–3.1) | 6.7 / 23.2 ms | 202 ms | 0 |
+| native, 2 ms | 330 | 1.5 / **2.9** ms (2.9–3.0) | 7.1 / 23.0 ms | 203 ms | 17–24 |
+| native, none | 990 | 4.0 / **46.7** ms (38.8–57.9) | 13.8 / 59.7 ms | 208 ms | 0 |
+| native, 2 ms | 990 | 2.9 / **13.5** ms (12.9–15.2) | 13.9 / 68.2 ms | 197 ms | 1,010–1,060 |
+
+- **At the #588 rate the native pool is no longer busy enough to block.** A
+  `crunch` takes about 7 ms instead of 30, so `hello` rarely finds every
+  worker taken: 3.0 ms p99 with no slice, 2.9 ms with one, and the monitor
+  asks for a yield 17 to 24 times a run. Faster code removed most of the
+  head-of-line blocking by itself.
+- **At three times the rate the blocking comes back, and slicing removes
+  it.** With the pool as busy as the VM was at 330, unsliced native `hello`
+  has a p99 of **46.7 ms** (38.8–57.9); with a 2 ms slice it is **13.5 ms**
+  (12.9–15.2), the #588 level (15.6 ms then, 14.9 on the VM here) at three
+  times its throughput. The yields happen inside compiled code, about a
+  thousand a run, and `crunch`'s p99 pays for `hello`'s, 59.7 → 68.2 ms, as
+  it did on the VM.
+- So a native isolate that could not be interrupted would have been a
+  regression for the interactive tenant at the load the native tier makes
+  affordable, and it is not one.
+
+### Re-measured against the suspect runs
+
+Medians. "suspect" is 2026-10-04 (load 5–10, possibly crossed with another
+benchmark's server); "now" is the table above.
+
+| figure | suspect | now |
+| --- | ---: | ---: |
+| `crunch` capacity, 16 / 64 in flight: VM | 867 / 880 | 907 / 909 |
+| `crunch` capacity, 16 / 64: native | 2,707 / 2,647 | 2,783 / 2,778 |
+| `crunch` capacity, 16 / 64: Go | 3,649 / 3,638 | 3,720 / 3,695 |
+| `crunch` Go / native | 1.35 / 1.37 | 1.34 / 1.33 |
+| `cpu-io` capacity, 64 / 256: VM | 311 / 342 | 348 / 362 |
+| `cpu-io` capacity, 64 / 256: native | 754 / 1,014 | 768 / 1,044 |
+| `cpu-io` capacity, 64 / 256: Go | 798 / 1,297 | 804 / 1,364 |
+| `cpu-io` Go / native | 1.06 / 1.28 | 1.05 / 1.31 |
+| `crunch` p99 at 1,500 req/s: native / Go | 4.0 / 3.2 ms | 3.9 / 3.2 ms |
+| `crunch` p99 at 2,500 req/s: native / Go | 26.9 / 3.4 ms | 4.5 / 3.3 ms |
+| `hello` p99, cpu-io 330 req/s: VM none / 2 ms | 99.4 / 14.8 ms | 95.7 / 14.9 ms |
+| `hello` p99, cpu-io 330 req/s: native none / 2 ms | 2.9 / 3.0 ms | 3.0 / 2.9 ms |
+| `hello` p99, cpu-io 990 req/s: native none / 2 ms | 41.9 / 14.1 ms | 46.7 / 13.5 ms |
+
+Everything is a few per cent higher now, on both servers, which is the
+quieter machine. The one figure that moved by more is native `crunch`'s p99
+at 2,500 req/s (26.9 → 4.5 ms). At the old, lower capacity 2,500 was nearer
+saturation, and one of the two old runs had a p99 of 49 ms.
+
 ## Diagnosis: where to work next
 
 Ranked by how much of the gap each item explains for the work that has it.
@@ -884,16 +1070,21 @@ evidence is in [Verifying the diagnosis](#verifying-the-diagnosis).
    not cost throughput (*observed*, at `ps`'s resolution; the edge README
    measured the slice too). **The native tier already closes it to 1.3×**
    (*observed*, in-process), but an edge isolate is an `OwnedVm` over a
-   `PreparedProgram`, which has no native tier. The first piece of work is
+   `PreparedProgram`, which has no native tier. (Done since: [ADR
+   0085](../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md)
+   and `--backend native`, measured [above](#the-native-backend-adr-0085) —
+   `crunch` at 1.33–1.34× Go and the mix at 1.05–1.31×, still sliceable.) The first piece of work was
    the native tier for the embedding API (`PreparedProgram` →
-   `NativeProgram` once per tenant, used by every `OwnedVm`). That would move
-   `crunch`, and the `cpu-io` mix with it, from 4.2× to about the native
-   tier's ratio, and the mix's interactive latency with it (*predicted*: not
-   run). The native tier's own 1.3× is division plus the template
+   `NativeProgram` once per tenant, used by every `OwnedVm`). That was
+   predicted to move `crunch`, and the `cpu-io` mix with it, from 4.2× to
+   about the native tier's ratio, and the mix's interactive latency with it;
+   it is now *observed* to: 1.33–1.34× in capacity, the mix's `hello` p99
+   3 ms at the #588 rate. The native tier's own 1.3× is division plus the template
    compiler's code quality, spread over polling, checked arithmetic, a
    stored comparison and memory operands (*observed*, item 1); a 32-bit
-   division path (branch `perf/native-div32`) takes `crunch` below Go's time,
-   because Go does not take that path.
+   division path (`perf/native-div32`, merged) takes `crunch` below Go's time
+   in-process, because Go does not take that path. The native backend's
+   server rows predate it and were not re-measured with it.
 2. **Light work: a fixed per-request cost, and most of it is the host, not
    the isolate.** `hello` costs 41 µs of server CPU against Go's 23 µs, so
    capacity is 1.37–1.46× Go's (*observed*). Of the CPU the profiler sampled

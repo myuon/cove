@@ -1,0 +1,2101 @@
+=== rep1-588 backend=vm slice=2 rate=330  load={ 4.79 4.80 4.88 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.89 s: 264 req/s
+  connections opened: 200
+  latency ms: p50 80.7  p90 250.3  p99 323.2  max 433.7
+  send lag ms: p50 0.38  p99 1.34  max 1.45; 59 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               80.9 req/s  p50  212.9 ms  p99  402.8 ms
+  crunch     180 x 200               95.1 req/s  p50   43.7 ms  p99  198.4 ms
+  hello      83 x 200                43.9 req/s  p50    4.2 ms  p99   16.6 ms
+  impatient  13 x 200, 19 x 504      16.9 req/s  p50  307.1 ms  p99  417.4 ms
+  proxy      52 x 200                27.5 req/s  p50    9.6 ms  p99   28.5 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.8,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 41,
+  "parked": 0,
+  "parked_peak": 35,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 145,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1342,
+  "yields": 1342,
+  "steals": 13,
+  "stolen": 31,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 41.80, "p99": 319.96, "max": 432.38, "samples": 552},
+  "rss_kib": 34464,
+  "peak_rss_kib": 34464,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 1342,
+  "yields": 1342,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-588-intended backend=vm slice=2 rate=330 --from-intended load={ 4.79 4.80 4.88 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.86 s: 268 req/s
+  connections opened: 200
+  latency ms: p50 71.1  p90 243.0  p99 317.3  max 373.3
+  send lag ms: p50 0.32  p99 1.36  max 1.44; 62 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               82.1 req/s  p50  213.3 ms  p99  322.1 ms
+  crunch     180 x 200               96.6 req/s  p50   42.6 ms  p99  187.4 ms
+  hello      83 x 200                44.5 req/s  p50    4.3 ms  p99   14.1 ms
+  impatient  13 x 200, 19 x 504      17.2 req/s  p50  307.4 ms  p99  317.4 ms
+  proxy      52 x 200                27.9 req/s  p50   10.5 ms  p99   28.3 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 39,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 151,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1247,
+  "yields": 1247,
+  "steals": 5,
+  "stolen": 5,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 41.11, "p99": 314.78, "max": 372.36, "samples": 552},
+  "rss_kib": 32616,
+  "peak_rss_kib": 32616,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 1247,
+  "yields": 1247,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-588 backend=native slice=2 rate=330  load={ 5.61 4.97 4.93 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.94 s: 258 req/s
+  connections opened: 200
+  latency ms: p50 12.8  p90 243.8  p99 330.5  max 467.9
+  send lag ms: p50 0.39  p99 1.43  max 1.61; 72 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               79.1 req/s  p50  201.5 ms  p99  383.6 ms
+  crunch     180 x 200               93.0 req/s  p50    6.2 ms  p99   22.9 ms
+  hello      83 x 200                42.9 req/s  p50    1.3 ms  p99    2.1 ms
+  impatient  13 x 200, 19 x 504      16.5 req/s  p50  301.2 ms  p99  323.6 ms
+  proxy      52 x 200                26.9 req/s  p50    1.4 ms  p99    2.9 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.8,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 35,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 136,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 21,
+  "yields": 21,
+  "steals": 10,
+  "stolen": 11,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.85, "p99": 322.46, "max": 467.51, "samples": 552},
+  "rss_kib": 30200,
+  "peak_rss_kib": 30200,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 21,
+  "yields": 21,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-588-intended backend=native slice=2 rate=330 --from-intended load={ 5.72 5.00 4.95 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.98 s: 253 req/s
+  connections opened: 200
+  latency ms: p50 13.1  p90 238.6  p99 315.8  max 463.4
+  send lag ms: p50 0.37  p99 1.42  max 1.49; 63 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               77.4 req/s  p50  202.6 ms  p99  336.9 ms
+  crunch     180 x 200               91.1 req/s  p50    6.6 ms  p99   22.8 ms
+  hello      83 x 200                42.0 req/s  p50    1.7 ms  p99    3.0 ms
+  impatient  13 x 200, 19 x 504      16.2 req/s  p50  301.8 ms  p99  330.9 ms
+  proxy      52 x 200                26.3 req/s  p50    2.0 ms  p99    3.3 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.5,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 35,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 56,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 17,
+  "yields": 17,
+  "steals": 7,
+  "stolen": 7,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.83, "p99": 312.42, "max": 462.28, "samples": 552},
+  "rss_kib": 32264,
+  "peak_rss_kib": 32264,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 17,
+  "yields": 17,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-588 backend=native slice=0 rate=330  load={ 5.50 4.97 4.93 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.84 s: 271 req/s
+  connections opened: 200
+  latency ms: p50 12.4  p90 231.8  p99 356.7  max 380.2
+  send lag ms: p50 0.34  p99 1.46  max 1.64; 71 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               82.9 req/s  p50  197.1 ms  p99  362.0 ms
+  crunch     180 x 200               97.6 req/s  p50    6.6 ms  p99   22.6 ms
+  hello      83 x 200                45.0 req/s  p50    1.3 ms  p99    2.0 ms
+  impatient  13 x 200, 19 x 504      17.3 req/s  p50  301.6 ms  p99  371.7 ms
+  proxy      52 x 200                28.2 req/s  p50    1.5 ms  p99    2.4 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 33,
+  "parked": 0,
+  "parked_peak": 33,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 122,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 5,
+  "stolen": 5,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.85, "p99": 330.81, "max": 379.14, "samples": 552},
+  "rss_kib": 32984,
+  "peak_rss_kib": 32984,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-588-intended backend=native slice=0 rate=330 --from-intended load={ 5.30 4.93 4.92 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.91 s: 262 req/s
+  connections opened: 200
+  latency ms: p50 12.8  p90 235.7  p99 307.9  max 423.6
+  send lag ms: p50 0.30  p99 1.45  max 1.59; 46 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               80.2 req/s  p50  201.9 ms  p99  327.5 ms
+  crunch     180 x 200               94.3 req/s  p50    6.7 ms  p99   23.1 ms
+  hello      83 x 200                43.5 req/s  p50    1.4 ms  p99    3.1 ms
+  impatient  13 x 200, 19 x 504      16.8 req/s  p50  301.1 ms  p99  324.4 ms
+  proxy      52 x 200                27.2 req/s  p50    1.9 ms  p99    2.5 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.8,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 37,
+  "parked": 0,
+  "parked_peak": 37,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 114,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 8,
+  "stolen": 8,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.80, "p99": 305.00, "max": 422.43, "samples": 552},
+  "rss_kib": 33356,
+  "peak_rss_kib": 33356,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-588 backend=vm slice=0 rate=330  load={ 5.30 4.93 4.92 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.86 s: 268 req/s
+  connections opened: 200
+  latency ms: p50 66.0  p90 307.2  p99 371.8  max 434.5
+  send lag ms: p50 0.42  p99 1.48  max 1.67; 75 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               82.0 req/s  p50  253.9 ms  p99  372.9 ms
+  crunch     180 x 200               96.5 req/s  p50   44.9 ms  p99  138.5 ms
+  hello      83 x 200                44.5 req/s  p50   13.4 ms  p99   98.5 ms
+  impatient  13 x 200, 19 x 504      17.2 req/s  p50  320.7 ms  p99  391.8 ms
+  proxy      52 x 200                27.9 req/s  p50    7.6 ms  p99  136.3 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 42,
+  "parked": 0,
+  "parked_peak": 39,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 119,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 30,
+  "stolen": 36,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 54.56, "p99": 367.95, "max": 434.31, "samples": 552},
+  "rss_kib": 33876,
+  "peak_rss_kib": 33876,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-588-intended backend=vm slice=0 rate=330 --from-intended load={ 5.28 4.93 4.92 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.88 s: 266 req/s
+  connections opened: 200
+  latency ms: p50 70.7  p90 313.4  p99 382.5  max 472.4
+  send lag ms: p50 0.37  p99 1.46  max 1.66; 62 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               81.3 req/s  p50  270.5 ms  p99  401.3 ms
+  crunch     180 x 200               95.6 req/s  p50   43.8 ms  p99  147.3 ms
+  hello      83 x 200                44.1 req/s  p50   14.2 ms  p99   96.0 ms
+  impatient  13 x 200, 19 x 504      17.0 req/s  p50  325.5 ms  p99  422.8 ms
+  proxy      52 x 200                27.6 req/s  p50    8.8 ms  p99  185.6 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 44,
+  "parked": 0,
+  "parked_peak": 42,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 103,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 22,
+  "stolen": 25,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 59.50, "p99": 378.75, "max": 471.35, "samples": 552},
+  "rss_kib": 31536,
+  "peak_rss_kib": 31536,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep1-x3 backend=native slice=2 rate=990 --from-intended load={ 5.42 4.97 4.93 }
+1500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 1500 (1461 with 200), 0 failed to connect or read, in 1.85 s: 809 req/s
+  connections opened: 200
+  latency ms: p50 18.0  p90 227.4  p99 308.1  max 357.3
+  send lag ms: p50 0.30  p99 1.43  max 1.77; 138 of 1500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  451 x 200              243.3 req/s  p50  198.0 ms  p99  305.9 ms
+  crunch     535 x 200              288.6 req/s  p50   13.8 ms  p99   68.2 ms
+  hello      285 x 200              153.8 req/s  p50    2.9 ms  p99   12.9 ms
+  impatient  45 x 200, 39 x 504      45.3 req/s  p50  178.1 ms  p99  312.9 ms
+  proxy      145 x 200               78.2 req/s  p50    4.7 ms  p99   29.2 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 1648,
+  "errors": 39,
+  "in_flight": 0,
+  "in_flight_peak": 92,
+  "parked": 0,
+  "parked_peak": 84,
+  "parks": 1669,
+  "timeouts": 39,
+  "queue_peak": 105,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1011,
+  "yields": 1010,
+  "steals": 33,
+  "stolen": 33,
+  "connections": 351,
+  "keep_alive_reuses": 1300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 145,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 782, "max": 1648},
+  "latency_ms": {"p50": 12.60, "p99": 306.26, "max": 355.88, "samples": 1645},
+  "rss_kib": 33272,
+  "peak_rss_kib": 33272,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+  }
+}
+
+  "errors": 39,
+  "yield_requests": 1011,
+  "yields": 1010,
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+=== rep1-x3 backend=native slice=0 rate=990 --from-intended load={ 5.38 4.97 4.93 }
+1500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 1500 (1461 with 200), 0 failed to connect or read, in 1.85 s: 811 req/s
+  connections opened: 200
+  latency ms: p50 21.7  p90 238.4  p99 314.4  max 371.6
+  send lag ms: p50 0.33  p99 1.41  max 1.71; 134 of 1500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  451 x 200              244.0 req/s  p50  208.1 ms  p99  301.3 ms
+  crunch     535 x 200              289.4 req/s  p50   13.7 ms  p99   59.7 ms
+  hello      285 x 200              154.2 req/s  p50    3.9 ms  p99   57.9 ms
+  impatient  45 x 200, 39 x 504      45.4 req/s  p50  194.1 ms  p99  366.7 ms
+  proxy      145 x 200               78.4 req/s  p50    3.6 ms  p99   56.9 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 1648,
+  "errors": 39,
+  "in_flight": 0,
+  "in_flight_peak": 93,
+  "parked": 0,
+  "parked_peak": 89,
+  "parks": 1669,
+  "timeouts": 39,
+  "queue_peak": 91,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 65,
+  "stolen": 75,
+  "connections": 351,
+  "keep_alive_reuses": 1300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 145,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 782, "max": 1648},
+  "latency_ms": {"p50": 16.35, "p99": 313.64, "max": 370.82, "samples": 1645},
+  "rss_kib": 35292,
+  "peak_rss_kib": 35292,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+  }
+}
+
+  "errors": 39,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+=== rep2-588 backend=vm slice=2 rate=330  load={ 5.38 4.97 4.93 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.88 s: 266 req/s
+  connections opened: 200
+  latency ms: p50 76.3  p90 258.0  p99 329.0  max 425.1
+  send lag ms: p50 0.33  p99 1.43  max 1.80; 55 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               81.3 req/s  p50  214.9 ms  p99  415.9 ms
+  crunch     180 x 200               95.7 req/s  p50   43.7 ms  p99  306.5 ms
+  hello      83 x 200                44.1 req/s  p50    5.6 ms  p99   20.7 ms
+  impatient  13 x 200, 19 x 504      17.0 req/s  p50  308.7 ms  p99  320.7 ms
+  proxy      52 x 200                27.6 req/s  p50    8.8 ms  p99   34.1 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 49,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 172,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1346,
+  "yields": 1346,
+  "steals": 7,
+  "stolen": 7,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 42.83, "p99": 327.23, "max": 424.92, "samples": 552},
+  "rss_kib": 32892,
+  "peak_rss_kib": 32892,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 1346,
+  "yields": 1346,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-588-intended backend=vm slice=2 rate=330 --from-intended load={ 5.99 5.10 4.98 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.81 s: 276 req/s
+  connections opened: 200
+  latency ms: p50 71.5  p90 246.1  p99 315.4  max 341.7
+  send lag ms: p50 0.31  p99 1.36  max 1.62; 39 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               84.3 req/s  p50  209.8 ms  p99  310.9 ms
+  crunch     180 x 200               99.2 req/s  p50   40.1 ms  p99  194.9 ms
+  hello      83 x 200                45.7 req/s  p50    3.9 ms  p99   14.9 ms
+  impatient  13 x 200, 19 x 504      17.6 req/s  p50  306.8 ms  p99  341.7 ms
+  proxy      52 x 200                28.7 req/s  p50    8.8 ms  p99   33.1 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 39,
+  "parked": 0,
+  "parked_peak": 35,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 115,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1260,
+  "yields": 1260,
+  "steals": 9,
+  "stolen": 10,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 39.29, "p99": 312.29, "max": 339.45, "samples": 552},
+  "rss_kib": 32104,
+  "peak_rss_kib": 32104,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 1260,
+  "yields": 1260,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-588 backend=native slice=2 rate=330  load={ 5.99 5.12 4.99 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.84 s: 272 req/s
+  connections opened: 200
+  latency ms: p50 12.6  p90 236.9  p99 311.6  max 371.4
+  send lag ms: p50 0.28  p99 1.37  max 1.76; 40 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               83.4 req/s  p50  202.4 ms  p99  322.7 ms
+  crunch     180 x 200               98.1 req/s  p50    6.5 ms  p99   22.7 ms
+  hello      83 x 200                45.2 req/s  p50    1.2 ms  p99    1.8 ms
+  impatient  13 x 200, 19 x 504      17.4 req/s  p50  300.9 ms  p99  323.1 ms
+  proxy      52 x 200                28.3 req/s  p50    1.4 ms  p99    3.0 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 36,
+  "parked": 0,
+  "parked_peak": 33,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 116,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 21,
+  "yields": 21,
+  "steals": 6,
+  "stolen": 6,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.94, "p99": 307.09, "max": 370.94, "samples": 552},
+  "rss_kib": 31956,
+  "peak_rss_kib": 31956,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 21,
+  "yields": 21,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-588-intended backend=native slice=2 rate=330 --from-intended load={ 5.67 5.07 4.97 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 2.01 s: 249 req/s
+  connections opened: 200
+  latency ms: p50 12.9  p90 234.0  p99 353.2  max 523.6
+  send lag ms: p50 0.41  p99 1.38  max 1.72; 49 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               76.2 req/s  p50  198.1 ms  p99  368.4 ms
+  crunch     180 x 200               89.6 req/s  p50    7.2 ms  p99   23.0 ms
+  hello      83 x 200                41.3 req/s  p50    1.5 ms  p99    2.9 ms
+  impatient  13 x 200, 19 x 504      15.9 req/s  p50  301.5 ms  p99  350.1 ms
+  proxy      52 x 200                25.9 req/s  p50    1.7 ms  p99    2.8 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.8,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 35,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 104,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 17,
+  "yields": 17,
+  "steals": 3,
+  "stolen": 3,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.83, "p99": 349.05, "max": 521.93, "samples": 552},
+  "rss_kib": 32376,
+  "peak_rss_kib": 32376,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 17,
+  "yields": 17,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-588 backend=native slice=0 rate=330  load={ 5.46 5.03 4.96 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.81 s: 276 req/s
+  connections opened: 200
+  latency ms: p50 12.6  p90 230.7  p99 304.3  max 340.5
+  send lag ms: p50 0.38  p99 1.45  max 1.75; 42 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               84.3 req/s  p50  198.4 ms  p99  287.4 ms
+  crunch     180 x 200               99.2 req/s  p50    6.1 ms  p99   22.5 ms
+  hello      83 x 200                45.7 req/s  p50    1.3 ms  p99    2.1 ms
+  impatient  13 x 200, 19 x 504      17.6 req/s  p50  300.9 ms  p99  340.5 ms
+  proxy      52 x 200                28.7 req/s  p50    1.5 ms  p99    2.5 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 35,
+  "parked": 0,
+  "parked_peak": 33,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 112,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 7,
+  "stolen": 7,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.83, "p99": 303.21, "max": 340.14, "samples": 552},
+  "rss_kib": 33044,
+  "peak_rss_kib": 33044,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-588-intended backend=native slice=0 rate=330 --from-intended load={ 5.46 5.03 4.96 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.85 s: 271 req/s
+  connections opened: 200
+  latency ms: p50 13.0  p90 240.3  p99 363.2  max 383.6
+  send lag ms: p50 0.41  p99 1.45  max 1.58; 45 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               82.8 req/s  p50  201.6 ms  p99  378.3 ms
+  crunch     180 x 200               97.4 req/s  p50    6.6 ms  p99   23.2 ms
+  hello      83 x 200                44.9 req/s  p50    1.5 ms  p99    2.8 ms
+  impatient  13 x 200, 19 x 504      17.3 req/s  p50  301.7 ms  p99  375.3 ms
+  proxy      52 x 200                28.1 req/s  p50    1.9 ms  p99    3.5 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 34,
+  "parked": 0,
+  "parked_peak": 33,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 92,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 8,
+  "stolen": 8,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.86, "p99": 358.93, "max": 383.27, "samples": 552},
+  "rss_kib": 32828,
+  "peak_rss_kib": 32828,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-588 backend=vm slice=0 rate=330  load={ 5.42 5.03 4.96 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.96 s: 255 req/s
+  connections opened: 200
+  latency ms: p50 69.9  p90 317.3  p99 397.3  max 478.7
+  send lag ms: p50 0.27  p99 1.42  max 1.64; 67 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               78.0 req/s  p50  266.9 ms  p99  400.7 ms
+  crunch     180 x 200               91.8 req/s  p50   43.8 ms  p99  134.9 ms
+  hello      83 x 200                42.3 req/s  p50   14.3 ms  p99  100.0 ms
+  impatient  13 x 200, 19 x 504      16.3 req/s  p50  314.5 ms  p99  433.3 ms
+  proxy      52 x 200                26.5 req/s  p50   11.8 ms  p99  147.5 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.8,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 46,
+  "parked": 0,
+  "parked_peak": 43,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 116,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 18,
+  "stolen": 20,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 58.80, "p99": 394.51, "max": 476.73, "samples": 552},
+  "rss_kib": 30336,
+  "peak_rss_kib": 30336,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-588-intended backend=vm slice=0 rate=330 --from-intended load={ 5.79 5.11 4.99 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.87 s: 268 req/s
+  connections opened: 200
+  latency ms: p50 70.6  p90 318.2  p99 395.3  max 449.0
+  send lag ms: p50 0.34  p99 1.33  max 1.44; 31 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               81.9 req/s  p50  276.1 ms  p99  415.6 ms
+  crunch     180 x 200               96.4 req/s  p50   45.2 ms  p99  147.8 ms
+  hello      83 x 200                44.4 req/s  p50   18.1 ms  p99   91.1 ms
+  impatient  13 x 200, 19 x 504      17.1 req/s  p50  324.1 ms  p99  395.3 ms
+  proxy      52 x 200                27.8 req/s  p50   12.1 ms  p99  130.0 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 43,
+  "parked": 0,
+  "parked_peak": 39,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 132,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 21,
+  "stolen": 23,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 61.29, "p99": 392.85, "max": 447.41, "samples": 552},
+  "rss_kib": 30520,
+  "peak_rss_kib": 30520,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep2-x3 backend=native slice=2 rate=990 --from-intended load={ 5.48 5.06 4.97 }
+1500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 1500 (1461 with 200), 0 failed to connect or read, in 1.88 s: 796 req/s
+  connections opened: 200
+  latency ms: p50 19.8  p90 224.5  p99 307.9  max 396.6
+  send lag ms: p50 0.28  p99 1.42  max 1.84; 134 of 1500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  451 x 200              239.3 req/s  p50  195.8 ms  p99  289.9 ms
+  crunch     535 x 200              283.9 req/s  p50   13.9 ms  p99   66.2 ms
+  hello      285 x 200              151.2 req/s  p50    2.8 ms  p99   13.5 ms
+  impatient  45 x 200, 39 x 504      44.6 req/s  p50  182.3 ms  p99  380.5 ms
+  proxy      145 x 200               76.9 req/s  p50    4.5 ms  p99   30.3 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 1648,
+  "errors": 39,
+  "in_flight": 0,
+  "in_flight_peak": 92,
+  "parked": 0,
+  "parked_peak": 82,
+  "parks": 1669,
+  "timeouts": 39,
+  "queue_peak": 95,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1055,
+  "yields": 1053,
+  "steals": 37,
+  "stolen": 38,
+  "connections": 351,
+  "keep_alive_reuses": 1300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 145,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 782, "max": 1648},
+  "latency_ms": {"p50": 12.99, "p99": 306.16, "max": 394.34, "samples": 1645},
+  "rss_kib": 34452,
+  "peak_rss_kib": 34452,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+  }
+}
+
+  "errors": 39,
+  "yield_requests": 1055,
+  "yields": 1053,
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+=== rep2-x3 backend=native slice=0 rate=990 --from-intended load={ 5.12 4.99 4.95 }
+1500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 1500 (1461 with 200), 0 failed to connect or read, in 1.84 s: 813 req/s
+  connections opened: 200
+  latency ms: p50 24.2  p90 252.8  p99 320.7  max 363.9
+  send lag ms: p50 0.28  p99 1.41  max 1.70; 128 of 1500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  451 x 200              244.5 req/s  p50  217.0 ms  p99  327.2 ms
+  crunch     535 x 200              290.1 req/s  p50   15.8 ms  p99   66.7 ms
+  hello      285 x 200              154.5 req/s  p50    4.3 ms  p99   46.7 ms
+  impatient  45 x 200, 39 x 504      45.5 req/s  p50  218.7 ms  p99  356.1 ms
+  proxy      145 x 200               78.6 req/s  p50    9.2 ms  p99  114.5 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 1648,
+  "errors": 39,
+  "in_flight": 0,
+  "in_flight_peak": 96,
+  "parked": 0,
+  "parked_peak": 93,
+  "parks": 1669,
+  "timeouts": 39,
+  "queue_peak": 123,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 43,
+  "stolen": 63,
+  "connections": 351,
+  "keep_alive_reuses": 1300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 145,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 782, "max": 1648},
+  "latency_ms": {"p50": 20.90, "p99": 319.39, "max": 362.41, "samples": 1645},
+  "rss_kib": 35016,
+  "peak_rss_kib": 35016,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+  }
+}
+
+  "errors": 39,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+=== rep3-588 backend=vm slice=2 rate=330  load={ 5.12 4.99 4.95 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.78 s: 281 req/s
+  connections opened: 200
+  latency ms: p50 73.1  p90 248.9  p99 312.4  max 343.8
+  send lag ms: p50 0.33  p99 1.37  max 1.50; 40 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               85.9 req/s  p50  213.9 ms  p99  299.5 ms
+  crunch     180 x 200              101.0 req/s  p50   41.5 ms  p99  188.0 ms
+  hello      83 x 200                46.6 req/s  p50    3.4 ms  p99   16.0 ms
+  impatient  13 x 200, 19 x 504      18.0 req/s  p50  305.9 ms  p99  343.8 ms
+  proxy      52 x 200                29.2 req/s  p50    8.5 ms  p99   26.6 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 40,
+  "parked": 0,
+  "parked_peak": 36,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 145,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1218,
+  "yields": 1217,
+  "steals": 4,
+  "stolen": 4,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 41.39, "p99": 309.06, "max": 342.20, "samples": 552},
+  "rss_kib": 32116,
+  "peak_rss_kib": 32116,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 1218,
+  "yields": 1217,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-588-intended backend=vm slice=2 rate=330 --from-intended load={ 4.87 4.94 4.93 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.89 s: 264 req/s
+  connections opened: 200
+  latency ms: p50 71.9  p90 241.2  p99 315.0  max 378.3
+  send lag ms: p50 0.41  p99 1.37  max 1.52; 56 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               80.9 req/s  p50  209.4 ms  p99  315.0 ms
+  crunch     180 x 200               95.2 req/s  p50   41.5 ms  p99  186.4 ms
+  hello      83 x 200                43.9 req/s  p50    3.3 ms  p99   16.5 ms
+  impatient  13 x 200, 19 x 504      16.9 req/s  p50  305.3 ms  p99  322.0 ms
+  proxy      52 x 200                27.5 req/s  p50    9.6 ms  p99   31.6 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.8,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 39,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 110,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1232,
+  "yields": 1232,
+  "steals": 7,
+  "stolen": 7,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 38.88, "p99": 311.70, "max": 378.01, "samples": 552},
+  "rss_kib": 29944,
+  "peak_rss_kib": 29944,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 1232,
+  "yields": 1232,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-588 backend=native slice=2 rate=330  load={ 4.64 4.89 4.91 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.78 s: 281 req/s
+  connections opened: 200
+  latency ms: p50 12.5  p90 238.1  p99 306.3  max 321.1
+  send lag ms: p50 0.33  p99 1.44  max 1.58; 74 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               86.1 req/s  p50  202.0 ms  p99  293.8 ms
+  crunch     180 x 200              101.3 req/s  p50    6.5 ms  p99   22.4 ms
+  hello      83 x 200                46.7 req/s  p50    1.2 ms  p99    1.8 ms
+  impatient  13 x 200, 19 x 504      18.0 req/s  p50  300.8 ms  p99  313.9 ms
+  proxy      52 x 200                29.3 req/s  p50    1.3 ms  p99    2.4 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.5,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 34,
+  "parked": 0,
+  "parked_peak": 33,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 111,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 17,
+  "yields": 17,
+  "steals": 8,
+  "stolen": 8,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.93, "p99": 304.40, "max": 319.50, "samples": 552},
+  "rss_kib": 32376,
+  "peak_rss_kib": 32376,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 17,
+  "yields": 17,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-588-intended backend=native slice=2 rate=330 --from-intended load={ 4.43 4.84 4.89 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.87 s: 267 req/s
+  connections opened: 200
+  latency ms: p50 13.3  p90 233.8  p99 384.0  max 424.6
+  send lag ms: p50 0.37  p99 1.40  max 1.68; 52 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               81.8 req/s  p50  205.0 ms  p99  399.1 ms
+  crunch     180 x 200               96.2 req/s  p50    7.1 ms  p99   23.8 ms
+  hello      83 x 200                44.4 req/s  p50    1.5 ms  p99    2.9 ms
+  impatient  13 x 200, 19 x 504      17.1 req/s  p50  301.9 ms  p99  396.0 ms
+  proxy      52 x 200                27.8 req/s  p50    2.0 ms  p99    3.6 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 35,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 132,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 24,
+  "yields": 24,
+  "steals": 5,
+  "stolen": 5,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 5.58, "p99": 380.08, "max": 422.70, "samples": 552},
+  "rss_kib": 30948,
+  "peak_rss_kib": 30948,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 24,
+  "yields": 24,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-588 backend=native slice=0 rate=330  load={ 4.43 4.84 4.89 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.78 s: 281 req/s
+  connections opened: 200
+  latency ms: p50 12.8  p90 237.3  p99 306.9  max 321.8
+  send lag ms: p50 0.37  p99 1.35  max 1.57; 39 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               85.9 req/s  p50  194.3 ms  p99  305.8 ms
+  crunch     180 x 200              101.1 req/s  p50    6.2 ms  p99   23.2 ms
+  hello      83 x 200                46.6 req/s  p50    1.2 ms  p99    2.8 ms
+  impatient  13 x 200, 19 x 504      18.0 req/s  p50  300.6 ms  p99  321.8 ms
+  proxy      52 x 200                29.2 req/s  p50    1.2 ms  p99    1.7 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 36,
+  "parked": 0,
+  "parked_peak": 35,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 130,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 8,
+  "stolen": 8,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.81, "p99": 305.11, "max": 320.95, "samples": 552},
+  "rss_kib": 31480,
+  "peak_rss_kib": 31480,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-588-intended backend=native slice=0 rate=330 --from-intended load={ 4.56 4.86 4.90 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.84 s: 272 req/s
+  connections opened: 200
+  latency ms: p50 13.1  p90 244.7  p99 354.5  max 384.8
+  send lag ms: p50 0.42  p99 1.47  max 1.76; 78 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               83.1 req/s  p50  202.2 ms  p99  370.9 ms
+  crunch     180 x 200               97.8 req/s  p50    7.2 ms  p99   23.2 ms
+  hello      83 x 200                45.1 req/s  p50    1.5 ms  p99    3.0 ms
+  impatient  13 x 200, 19 x 504      17.4 req/s  p50  302.4 ms  p99  368.0 ms
+  proxy      52 x 200                28.2 req/s  p50    1.8 ms  p99    3.0 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 37,
+  "parked": 0,
+  "parked_peak": 34,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 142,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 10,
+  "stolen": 10,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 4.86, "p99": 351.20, "max": 383.81, "samples": 552},
+  "rss_kib": 32588,
+  "peak_rss_kib": 32588,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-588 backend=vm slice=0 rate=330  load={ 4.59 4.87 4.90 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.86 s: 269 req/s
+  connections opened: 200
+  latency ms: p50 68.5  p90 312.5  p99 378.3  max 446.4
+  send lag ms: p50 0.44  p99 1.43  max 1.74; 52 of 500 sent more than 1 ms late; latency measured from the send
+  aggregate  153 x 200               82.2 req/s  p50  257.2 ms  p99  395.7 ms
+  crunch     180 x 200               96.8 req/s  p50   41.1 ms  p99  140.2 ms
+  hello      83 x 200                44.6 req/s  p50   13.3 ms  p99  125.8 ms
+  impatient  13 x 200, 19 x 504      17.2 req/s  p50  312.5 ms  p99  386.6 ms
+  proxy      52 x 200                28.0 req/s  p50    9.2 ms  p99  137.9 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 43,
+  "parked": 0,
+  "parked_peak": 40,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 118,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 23,
+  "stolen": 28,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 57.09, "p99": 373.25, "max": 445.31, "samples": 552},
+  "rss_kib": 33256,
+  "peak_rss_kib": 33256,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-588-intended backend=vm slice=0 rate=330 --from-intended load={ 4.38 4.82 4.88 }
+500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 500 (481 with 200), 0 failed to connect or read, in 1.97 s: 253 req/s
+  connections opened: 200
+  latency ms: p50 72.0  p90 313.8  p99 391.5  max 478.8
+  send lag ms: p50 0.28  p99 1.36  max 1.65; 37 of 500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  153 x 200               77.5 req/s  p50  268.3 ms  p99  412.2 ms
+  crunch     180 x 200               91.2 req/s  p50   48.4 ms  p99  137.7 ms
+  hello      83 x 200                42.1 req/s  p50   15.3 ms  p99   95.7 ms
+  impatient  13 x 200, 19 x 504      16.2 req/s  p50  315.7 ms  p99  412.2 ms
+  proxy      52 x 200                26.4 req/s  p50   10.6 ms  p99  148.1 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.6,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 555,
+  "errors": 19,
+  "in_flight": 0,
+  "in_flight_peak": 42,
+  "parked": 0,
+  "parked_peak": 39,
+  "parks": 578,
+  "timeouts": 19,
+  "queue_peak": 141,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 29,
+  "stolen": 33,
+  "connections": 258,
+  "keep_alive_reuses": 300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 52,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 788, "max": 1648},
+  "latency_ms": {"p50": 62.47, "p99": 375.08, "max": 476.33, "samples": 552},
+  "rss_kib": 32052,
+  "peak_rss_kib": 32052,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+  }
+}
+
+  "errors": 19,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 154, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 181, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 136, "errors": 0},
+    "impatient": {"state": "deployed", "served": 32, "errors": 19},
+    "proxy": {"state": "deployed", "served": 52, "errors": 0}
+=== rep3-x3 backend=native slice=2 rate=990 --from-intended load={ 4.11 4.75 4.86 }
+1500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 1500 (1461 with 200), 0 failed to connect or read, in 1.81 s: 830 req/s
+  connections opened: 200
+  latency ms: p50 21.8  p90 224.9  p99 308.0  max 319.3
+  send lag ms: p50 0.26  p99 1.35  max 1.63; 122 of 1500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  451 x 200              249.5 req/s  p50  196.6 ms  p99  294.8 ms
+  crunch     535 x 200              296.0 req/s  p50   14.4 ms  p99   77.7 ms
+  hello      285 x 200              157.7 req/s  p50    3.1 ms  p99   15.2 ms
+  impatient  45 x 200, 39 x 504      46.5 req/s  p50  190.1 ms  p99  316.5 ms
+  proxy      145 x 200               80.2 req/s  p50    7.4 ms  p99   33.9 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 1648,
+  "errors": 39,
+  "in_flight": 0,
+  "in_flight_peak": 91,
+  "parked": 0,
+  "parked_peak": 85,
+  "parks": 1669,
+  "timeouts": 39,
+  "queue_peak": 125,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": 2,
+  "yield_requests": 1062,
+  "yields": 1060,
+  "steals": 35,
+  "stolen": 36,
+  "connections": 351,
+  "keep_alive_reuses": 1300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 145,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 782, "max": 1648},
+  "latency_ms": {"p50": 14.28, "p99": 306.57, "max": 316.80, "samples": 1645},
+  "rss_kib": 35908,
+  "peak_rss_kib": 35908,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+  }
+}
+
+  "errors": 39,
+  "yield_requests": 1062,
+  "yields": 1060,
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+=== rep3-x3 backend=native slice=0 rate=990 --from-intended load={ 4.11 4.75 4.86 }
+1500 requests to a mix of crunch=35,aggregate=30,proxy=10,hello=20,impatient=5, 200 in flight, 8 client thread(s), connections kept alive
+  answered 1500 (1461 with 200), 0 failed to connect or read, in 1.82 s: 824 req/s
+  connections opened: 200
+  latency ms: p50 21.8  p90 234.9  p99 322.3  max 396.3
+  send lag ms: p50 0.31  p99 1.45  max 1.68; 124 of 1500 sent more than 1 ms late; latency measured from the intended start
+  aggregate  451 x 200              247.8 req/s  p50  205.0 ms  p99  351.0 ms
+  crunch     535 x 200              294.0 req/s  p50   13.8 ms  p99   53.2 ms
+  hello      285 x 200              156.6 req/s  p50    4.0 ms  p99   38.8 ms
+  impatient  45 x 200, 39 x 504      46.2 req/s  p50  193.2 ms  p99  374.2 ms
+  proxy      145 x 200               79.7 req/s  p50    3.7 ms  p99   64.8 ms
+  first non-200 (504): error[cove::runtime]: execution stopped: wall-clock deadline of 300ms exceeded
+  --> aggregate/aggregate.cove:17:11
+   |
+17 |     match upstream.get(service) {
+   |           ^^^^^^^^^^^^^^^^^^^^^
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+server /_stats after the run:
+{
+  "uptime_s": 2.7,
+  "workers": 4,
+  "isolates": "a fresh isolate per request",
+  "served": 1648,
+  "errors": 39,
+  "in_flight": 0,
+  "in_flight_peak": 87,
+  "parked": 0,
+  "parked_peak": 84,
+  "parks": 1669,
+  "timeouts": 39,
+  "queue_peak": 89,
+  "scheduler": "a run queue per worker, with work stealing",
+  "slice_ms": null,
+  "yield_requests": 0,
+  "yields": 0,
+  "steals": 50,
+  "stolen": 57,
+  "connections": 351,
+  "keep_alive_reuses": 1300,
+  "idle_connections": 0,
+  "idle_expired": 0,
+  "fetches": 145,
+  "fetches_aborted": 0,
+  "live_isolates": 0,
+  "pooled_isolates": 0,
+  "isolate_heap_bytes": {"mean": 782, "max": 1648},
+  "latency_ms": {"p50": 16.92, "p99": 319.46, "max": 396.07, "samples": 1645},
+  "rss_kib": 36252,
+  "peak_rss_kib": 36252,
+  "tenants": {
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+  }
+}
+
+  "errors": 39,
+  "yield_requests": 0,
+  "yields": 0,
+    "aggregate": {"state": "deployed", "served": 452, "errors": 0},
+    "counter": {"state": "deployed", "served": 0, "errors": 0},
+    "crunch": {"state": "deployed", "served": 536, "errors": 0},
+    "greedy": {"state": "refused", "served": 0, "errors": 0},
+    "hello": {"state": "deployed", "served": 431, "errors": 0},
+    "impatient": {"state": "deployed", "served": 84, "errors": 39},
+    "proxy": {"state": "deployed", "served": 145, "errors": 0}
+ALLDONE

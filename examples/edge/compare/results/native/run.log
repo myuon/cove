@@ -1,0 +1,4 @@
+start Mon Oct  5 02:09:26 JST 2026 load { 2.22 3.46 4.62 }
+capacity done Mon Oct  5 02:12:12 JST 2026 load { 6.67 4.89 4.99 }
+sweep done Mon Oct  5 02:20:11 JST 2026 load { 4.86 4.81 4.88 }
+end rc=0 Mon Oct  5 02:22:09 JST 2026 load { 4.18 4.76 4.86 }

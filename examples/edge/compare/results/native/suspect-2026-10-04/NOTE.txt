@@ -1,0 +1,17 @@
+These are the first native-backend runs (2026-10-04, about 23:17 to 23:40),
+kept and not used.
+
+capacity.jsonl and sweep.jsonl (and their .log files): from about 23:18 to
+23:20 another agent's A/B runs used the same port, 8787, and the same
+summary file, /tmp/edge-compare-summary.json, as `sweep.py`. So any row here
+may have measured the other agent's server, or read its summary. The rows
+look plausible, and that does not make them trustworthy.
+
+cpuio.txt: used its own port (8790) and no shared summary file, so it is
+not known to be contaminated. But it ran while the machine was loaded by the
+same runs, so it was measured again as well.
+
+The replacements are one directory up. `sweep.py` now takes `--port`,
+refuses a port that already answers, and writes its summary to a
+per-process file in the results directory. `cpuio.sh` does the same, on
+port 8813.

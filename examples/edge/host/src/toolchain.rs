@@ -39,7 +39,7 @@ use cove_runtime::{Budget, Runtime, Value, Vm};
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::{HostSchemas, RunConfig};
 
-use crate::deploy::{self, Compiled, DeployOptions, Tenant};
+use crate::deploy::{self, Backend, Compiled, DeployOptions, Tenant};
 use crate::hosts::{Latency, SCHEMAS};
 
 /// What a command printed, and whether it succeeded.
@@ -248,6 +248,7 @@ pub fn test(root: &Path, only: &[String], options: &TestOptions) -> Result<Repor
         latency: options.latency,
         quiet: true,
         blocking_upstream: true,
+        backend: Backend::Vm,
     };
     let (mut ran, mut failed, mut uncompiled) = (0, 0, 0);
     for (name, run) in &selected {

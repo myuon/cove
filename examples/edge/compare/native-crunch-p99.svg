@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif">
+<rect width="760" height="420" fill="#fcfcfb"/>
+<text x="24.0" y="30.0" font-size="15" fill="#0b0b0b" text-anchor="start" font-weight="600">crunch (n = 20,000) at a fixed rate: p99 latency from the intended start</text>
+<line x1="24.0" y1="50.0" x2="42.0" y2="50.0" stroke="#2a78d6" stroke-width="2"/>
+<circle cx="33.0" cy="50.0" r="4.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"></circle>
+<text x="48.0" y="54.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="normal">Cove, VM</text>
+<line x1="114.0" y1="50.0" x2="132.0" y2="50.0" stroke="#1baf7a" stroke-width="2"/>
+<circle cx="123.0" cy="50.0" r="4.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"></circle>
+<text x="138.0" y="54.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="normal">Cove, native</text>
+<line x1="232.0" y1="50.0" x2="250.0" y2="50.0" stroke="#eb6834" stroke-width="2"/>
+<circle cx="241.0" cy="50.0" r="4.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"></circle>
+<text x="256.0" y="54.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="normal">Go</text>
+<line x1="70.0" y1="370.0" x2="650.0" y2="370.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="374.0" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">2 ms</text>
+<line x1="70.0" y1="330.2" x2="650.0" y2="330.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="334.2" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">5 ms</text>
+<line x1="70.0" y1="300.1" x2="650.0" y2="300.1" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="304.1" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">10 ms</text>
+<line x1="70.0" y1="270.0" x2="650.0" y2="270.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="274.0" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">20 ms</text>
+<line x1="70.0" y1="230.2" x2="650.0" y2="230.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="234.2" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">50 ms</text>
+<line x1="70.0" y1="200.1" x2="650.0" y2="200.1" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="204.1" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">100 ms</text>
+<line x1="70.0" y1="170.0" x2="650.0" y2="170.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="174.0" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">200 ms</text>
+<line x1="70.0" y1="130.2" x2="650.0" y2="130.2" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="134.2" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">500 ms</text>
+<line x1="70.0" y1="100.1" x2="650.0" y2="100.1" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="104.1" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">1k ms</text>
+<line x1="70.0" y1="70.0" x2="650.0" y2="70.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="62.0" y="74.0" font-size="11" fill="#52514e" text-anchor="end" font-weight="normal">2k ms</text>
+<text x="70.0" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">0</text>
+<text x="142.5" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">500</text>
+<text x="215.0" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">1,000</text>
+<text x="287.5" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">1,500</text>
+<text x="360.0" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">2,000</text>
+<text x="432.5" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">2,500</text>
+<text x="505.0" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">3,000</text>
+<text x="577.5" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">3,500</text>
+<text x="650.0" y="388.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">4,000</text>
+<text x="360.0" y="410.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">offered requests per second</text>
+<line x1="70.0" y1="370.0" x2="650.0" y2="370.0" stroke="#b9b8b3" stroke-width="1"/>
+<polyline points="84.5,313.9 106.2,316.5 142.5,317.5 178.8,316.5 200.5,194.6 215.0,130.7" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="84.5" cy="313.9" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove, VM at 100 req/s: p99 7.3 ms</title></circle>
+<circle cx="106.2" cy="316.5" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove, VM at 250 req/s: p99 6.9 ms</title></circle>
+<circle cx="142.5" cy="317.5" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove, VM at 500 req/s: p99 6.7 ms</title></circle>
+<circle cx="178.8" cy="316.5" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove, VM at 750 req/s: p99 6.8 ms</title></circle>
+<circle cx="200.5" cy="194.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove, VM at 900 req/s: p99 113.4 ms</title></circle>
+<circle cx="215.0" cy="130.7" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Cove, VM at 1,000 req/s: p99 494.6 ms</title></circle>
+<text x="223.0" y="134.7" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Cove, VM</text>
+<polyline points="84.5,335.3 106.2,336.6 142.5,338.7 178.8,340.7 200.5,340.9 215.0,340.2 287.5,341.5 432.5,334.7 505.0,140.6" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="84.5" cy="335.3" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 100 req/s: p99 4.4 ms</title></circle>
+<circle cx="106.2" cy="336.6" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 250 req/s: p99 4.3 ms</title></circle>
+<circle cx="142.5" cy="338.7" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 500 req/s: p99 4.1 ms</title></circle>
+<circle cx="178.8" cy="340.7" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 750 req/s: p99 3.9 ms</title></circle>
+<circle cx="200.5" cy="340.9" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 900 req/s: p99 3.9 ms</title></circle>
+<circle cx="215.0" cy="340.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 1,000 req/s: p99 4.0 ms</title></circle>
+<circle cx="287.5" cy="341.5" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 1,500 req/s: p99 3.9 ms</title></circle>
+<circle cx="432.5" cy="334.7" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 2,500 req/s: p99 4.5 ms</title></circle>
+<circle cx="505.0" cy="140.6" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>Cove, native at 3,000 req/s: p99 393.6 ms</title></circle>
+<text x="513.0" y="144.6" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Cove, native</text>
+<polyline points="84.5,339.6 106.2,342.7 142.5,344.6 178.8,344.7 200.5,348.0 215.0,349.8 287.5,349.5 432.5,348.1 505.0,345.6 577.5,291.2 650.0,141.4" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="84.5" cy="339.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 100 req/s: p99 4.0 ms</title></circle>
+<circle cx="106.2" cy="342.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 250 req/s: p99 3.7 ms</title></circle>
+<circle cx="142.5" cy="344.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 500 req/s: p99 3.6 ms</title></circle>
+<circle cx="178.8" cy="344.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 750 req/s: p99 3.6 ms</title></circle>
+<circle cx="200.5" cy="348.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 900 req/s: p99 3.3 ms</title></circle>
+<circle cx="215.0" cy="349.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 1,000 req/s: p99 3.2 ms</title></circle>
+<circle cx="287.5" cy="349.5" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 1,500 req/s: p99 3.2 ms</title></circle>
+<circle cx="432.5" cy="348.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 2,500 req/s: p99 3.3 ms</title></circle>
+<circle cx="505.0" cy="345.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 3,000 req/s: p99 3.5 ms</title></circle>
+<circle cx="577.5" cy="291.2" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 3,500 req/s: p99 12.3 ms</title></circle>
+<circle cx="650.0" cy="141.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Go at 4,000 req/s: p99 386.4 ms</title></circle>
+<text x="658.0" y="145.4" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="600">Go</text>
+</svg>
