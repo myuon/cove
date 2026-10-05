@@ -95,6 +95,27 @@ impl OwnedVm {
         hosts: Arc<HostRegistry>,
         prepared: PreparedProgram,
     ) -> OwnedVm {
+        OwnedVm::with_heap_words(runtime, hosts, prepared, DEFAULT_HEAP_WORDS)
+    }
+
+    /// [`OwnedVm::new`], over a heap that may grow only to `heap_words` words
+    /// — the capacity [`OwnedVm::heap_words`] is measured against.
+    ///
+    /// The heap's capacity, named as what it is rather than as a memory limit
+    /// ([ADR 0088]): a run that needs more than this fails its allocation
+    /// with the runtime's out-of-memory error, before the heap grows past it,
+    /// and what a host holds outside the heap is not counted. When a run
+    /// collects is unchanged ([ADR 0081]): it collects when it has allocated
+    /// its allowance, and also when an allocation does not fit this capacity.
+    ///
+    /// [ADR 0081]: ../../../../docs/adr/0081-a-run-collects-when-it-has-allocated-its-allowance.md
+    /// [ADR 0088]: ../../../../docs/adr/0088-an-embedder-sizes-the-heap-and-is-told-of-a-cancellation.md
+    pub fn with_heap_words(
+        runtime: Arc<Runtime>,
+        hosts: Arc<HostRegistry>,
+        prepared: PreparedProgram,
+        heap_words: usize,
+    ) -> OwnedVm {
         // Safety: each reference is to the inside of an `Arc` this struct
         // keeps, so it stays valid and unmoved for as long as the struct
         // lives, wherever the struct itself is moved to — an `Arc`'s contents
@@ -110,7 +131,7 @@ impl OwnedVm {
                 hosts_ref,
                 program,
                 &prepared.prepared,
-                DEFAULT_HEAP_WORDS,
+                heap_words,
             )
         };
         if let Some(native) = &prepared.native {
@@ -258,6 +279,13 @@ impl OwnedVm {
         self.vm.collections()
     }
 
+    /// [`Vm::assertion_failure`]: where the last failed `assert` of the last
+    /// run was, and its message, for a test runner reporting at the
+    /// assertion rather than at the test.
+    pub fn assertion_failure(&self) -> Option<(cove_diag::Span, &str)> {
+        self.vm.assertion_failure()
+    }
+
     /// [`Vm::tiers`]: how this machine's calls divided between the encoded
     /// and the native tier, over every run it has made. All nought for a
     /// machine built from a preparation without
@@ -398,6 +426,18 @@ impl YieldedVm {
     /// [`OwnedVm::yield_request`].
     pub fn yield_request(&self) -> YieldRequest {
         self.vm.yield_request()
+    }
+
+    /// [`OwnedVm::heap_words`]: the heap as the run left it at the safepoint
+    /// it yielded at — where a host enforcing a heap limit of its own looks
+    /// between two slices.
+    pub fn heap_words(&self) -> u64 {
+        self.vm.heap_words()
+    }
+
+    /// [`OwnedVm::yields_declined`], up to the safepoint it yielded at.
+    pub fn yields_declined(&self) -> u64 {
+        self.vm.yields_declined()
     }
 
     /// How many compiled frames the run left standing when it yielded: nought
@@ -543,5 +583,17 @@ impl ParkedVm {
     /// once this run is resumed and has had its slice.
     pub fn yield_request(&self) -> YieldRequest {
         self.vm.yield_request()
+    }
+
+    /// [`OwnedVm::heap_words`]: the heap as the run left it at the call it is
+    /// parked at — where a host enforcing a heap limit of its own looks
+    /// before it answers.
+    pub fn heap_words(&self) -> u64 {
+        self.vm.heap_words()
+    }
+
+    /// [`OwnedVm::yields_declined`], up to the call it is parked at.
+    pub fn yields_declined(&self) -> u64 {
+        self.vm.yields_declined()
     }
 }

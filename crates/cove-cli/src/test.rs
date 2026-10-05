@@ -38,25 +38,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use cove_diag::{render, Diagnostic, SourceMap, Span};
+use cove_diag::{render, Diagnostic, SourceMap};
 use cove_runtime::clock::{Clock, VirtualTime};
 use cove_runtime::database::Database;
 use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::http::Http;
-use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
-use cove_runtime::runtime::Runtime;
-use cove_runtime::value::Value;
-use cove_runtime::Vm;
+use cove_runtime::testing::{TestBackend, TestFailure, TestRun};
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::HostSchemas;
 
 use crate::{load, Backend, CliError};
 
-/// The diagnostic a failing test is reported as.
-const FAILED: &str = "cove::test::failed";
 /// The diagnostic a test that needs a capability no host provides is
 /// reported as.
 const NO_HOST: &str = "cove::test::no_host";
@@ -210,99 +205,33 @@ fn run_test(
         );
     }
 
-    // A test is an entry, so it is lowered as one: this names the test as
-    // the root and the lowering works out what it reaches. Selecting a root
-    // is all a command does; reachability lives in `cove_ir`, which is
-    // where the fixed point that closes a slice against what the lowering
-    // emits already is.
-    //
-    // One root per lowering rather than the whole suite in one, and that is
-    // the decision rather than an omission. `cove_ir::lower_roots` takes as
-    // many roots as a caller has, but its answer is one answer for the set:
-    // the gaps come back together with no telling which root each belongs
-    // to, so a suite lowered in one call would turn one unlowerable test
-    // into every test's refusal. Lowering per test is what keeps a construct
-    // a backend cannot run from refusing the tests that do not reach it, and
-    // lowering runs once per test against an execution that runs for as long
-    // as the test does, which is the ratio ADR 0019 allows the lowering to be
-    // slow on.
-    //
-    // The failure is reported as this test's rather than as the command's,
-    // for the same reason: the other tests still ran, and a suite that
-    // stopped at the first unlowerable test would report nothing about them.
-    let lowered = match backend {
-        Backend::Ast => None,
-        Backend::Vm | Backend::Native => match cove_ir::lower_entry(
-            program,
-            sources,
-            &HostSchemas::new(),
-            test.module,
-            test.name,
-        ) {
-            Ok(ir) => Some(Arc::new(ir)),
-            Err(items) => {
-                return Some(
-                    Diagnostic::error(
-                        FAILED,
-                        format!(
-                            "test `{}` could not be lowered: {}",
-                            test.qualified_name(),
-                            items
-                                .iter()
-                                .map(|item| item.message.clone())
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        ),
-                    )
-                    .at(test.entry.decl.name.span),
-                )
-            }
+    // A test is an entry, so it is lowered as one, one root per lowering, and
+    // its outcome is reported by the rules every Cove test fails by: both are
+    // `cove_runtime::testing`'s, shared with an embedder's own runner. What
+    // is this command's is the policy above — what a test is granted and by
+    // which hosts — and the note below.
+    let run = TestRun {
+        program,
+        sources,
+        schemas: &HostSchemas::new(),
+        backend: match backend {
+            Backend::Ast => TestBackend::Ast,
+            Backend::Vm | Backend::Native => TestBackend::Vm,
         },
+        limits: None,
     };
-
-    let runtime = Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts));
-    let (outcome, assertion) = match &lowered {
-        Some(ir) => {
-            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
-            let outcome = vm.run_entry(test.module, test.name, Vec::new());
-            let assertion = vm
-                .assertion_failure()
-                .map(|(span, message)| (span, message.to_string()));
-            (outcome, assertion)
-        }
-        None => {
-            let mut interpreter = Interpreter::new(&runtime);
-            let outcome = interpreter.run_entry(test.module, test.name, Vec::new());
-            let assertion = interpreter
-                .assertion_failure()
-                .map(|(span, message)| (span, message.to_string()));
-            (outcome, assertion)
-        }
-    };
-
-    match outcome {
-        Ok(value) => {
-            let message = failure_message(&value)?;
-            Some(failure(test, &message, assertion))
-        }
-        // A `RuntimeError` is a broken invariant, an ungranted capability, or
-        // a limit — not an expected failure. It already points at source and
-        // states its own rule, so it is reported as it stands, with the test
-        // it came from named.
-        Err(error) => {
-            let mut diagnostic = error.to_diagnostic();
-            diagnostic.message =
-                format!("test `{}` failed: {}", test.qualified_name(), error.message);
-            if error.denied_capability.is_some() && test.entry.is_capability_open() {
-                let note = capability_open_help(test);
-                diagnostic.help = Some(match diagnostic.help {
-                    Some(help) => format!("{help}; {note}"),
-                    None => note,
-                });
-            }
-            Some(diagnostic)
-        }
+    let TestFailure {
+        mut diagnostic,
+        denied_capability,
+    } = run.run(test, hosts)?;
+    if denied_capability.is_some() && test.entry.is_capability_open() {
+        let note = capability_open_help(test);
+        diagnostic.help = Some(match diagnostic.help {
+            Some(help) => format!("{help}; {note}"),
+            None => note,
+        });
     }
+    Some(diagnostic)
 }
 
 /// What a capability-open test owes a refusal at the Host boundary.
@@ -316,38 +245,6 @@ fn capability_open_help(test: &DeclaredTest) -> String {
         "`cove test` grants what the call graph derives, and `{}` is capability-open ({}), so the derived set is a floor rather than the whole of what it needs; call the host operation somewhere the call graph can follow, or exercise this path through `cove run` with an explicit `allow`",
         test.qualified_name(),
         open_reasons(&test.entry.open_calls)
-    )
-}
-
-/// The message a test's returned value reports, or `None` when it passed.
-fn failure_message(value: &Value) -> Option<String> {
-    Some(
-        value
-            .err_payload()?
-            .first()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    )
-}
-
-/// The diagnostic one failed test is reported as.
-///
-/// It points at the assertion that failed when the error is that assertion's,
-/// and at the test itself otherwise: an `Err` carries a message and no source
-/// position, so the runner uses the position the evaluator recorded only when
-/// the message it recorded is the one being reported.
-fn failure(test: &DeclaredTest, message: &str, assertion: Option<(Span, String)>) -> Diagnostic {
-    let span = match assertion {
-        Some((span, recorded)) if recorded == message => span,
-        _ => test.entry.decl.name.span,
-    };
-    Diagnostic::error(
-        FAILED,
-        format!("test `{}` failed: {message}", test.qualified_name()),
-    )
-    .at(span)
-    .rule(
-        "A test reports failure as an `Err`, the way every Cove function reports expected failure.",
     )
 }
 

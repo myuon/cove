@@ -626,3 +626,43 @@ fn a_yielded_run_keeps_its_deadline() {
     );
     assert_eq!(error.outcome, RunOutcome::Deadline);
 }
+
+/// Issue 601: a yielded run says what its heap holds and how many safepoints
+/// declined, where a host enforcing limits of its own looks between slices —
+/// and the declined count is the one the machine reports once it answers.
+#[test]
+fn a_yielded_run_reports_its_heap_and_its_declined_yields() {
+    let world = world();
+    let yielded = first_yield(&world, "inCallback", unlimited());
+    let declined = yielded.yields_declined();
+    assert!(declined > 0, "the callback crossed safepoints first");
+    assert!(
+        yielded.heap_words() > 0,
+        "the callback's closure is on the heap"
+    );
+    let run = drive(yielded.resume());
+    assert_eq!(run.declined, declined, "nothing declined after the yield");
+}
+
+/// A run stopped through the `Cancellation` it was given tells whoever
+/// registered with the flag — which is how a host learns to cancel a run it
+/// is holding yielded, without a token of its own.
+#[test]
+fn a_host_is_told_when_a_yielded_run_s_flag_is_raised() {
+    let world = world();
+    let cancellation = cove_runtime::Cancellation::new();
+    let budget = Budget::with_cancellation(Limits::default(), cancellation.clone());
+    let yielded = first_yield(&world, "main", budget);
+    let (told, heard) = std::sync::mpsc::channel();
+    yielded
+        .meter()
+        .cancellation()
+        .on_cancel(move || told.send(()).unwrap());
+    assert!(heard.try_recv().is_err(), "nothing raised yet");
+    std::thread::spawn(move || cancellation.cancel());
+    heard
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the callback ran");
+    let (_, error) = yielded.cancel();
+    assert_eq!(error.outcome, RunOutcome::Cancelled);
+}

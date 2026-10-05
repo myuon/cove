@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod schema;
 pub mod shared;
 pub mod task;
+pub mod testing;
 pub mod trace;
 pub mod value;
 mod vm;

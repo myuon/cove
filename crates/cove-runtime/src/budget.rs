@@ -9,7 +9,7 @@
 //! the cost of enforcement is bounded and predictable.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::error::RuntimeError;
@@ -107,25 +107,120 @@ impl Stopped {
 ///
 /// Cloning shares the same underlying flag: cancelling one handle cancels
 /// every clone, including ones already handed to a [`Budget`].
-#[derive(Clone, Debug, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+///
+/// # Being told
+///
+/// A running run notices at its next safepoint, which reads the flag. A run
+/// that is not running — parked at a host call, or yielded and waiting in a
+/// queue — reads nothing, and the embedder holding it is the one that has to
+/// notice and call [`ParkedVm::cancel`](crate::ParkedVm::cancel). So the flag
+/// also tells whoever asked: [`Cancellation::on_cancel`] runs a callback when
+/// it is raised, which is how an async host wakes the task awaiting the run
+/// (store a `Waker`, wake it in the callback), and
+/// [`Cancellation::wait_timeout`] blocks a thread until it is raised. Neither
+/// costs a safepoint anything: the flag it reads is the same one word
+/// ([ADR 0088](../../../docs/adr/0088-an-embedder-sizes-the-heap-and-is-told-of-a-cancellation.md)).
+#[derive(Clone, Default)]
+pub struct Cancellation(Arc<Flag>);
+
+/// What every clone of one [`Cancellation`] shares.
+#[derive(Default)]
+struct Flag {
+    /// The flag a safepoint reads: one load, with nothing else on the path.
+    raised: AtomicBool,
+    /// Who is waiting to be told, and whether they have been.
+    waiting: Mutex<Waiting>,
+    /// Signalled once, when the flag is raised, for
+    /// [`Cancellation::wait_timeout`].
+    told: Condvar,
+}
+
+/// The callbacks registered and not yet run, and whether the flag has been
+/// raised under the lock — which is what decides whether a callback
+/// registered now runs now or later.
+#[derive(Default)]
+struct Waiting {
+    raised: bool,
+    callbacks: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+impl std::fmt::Debug for Cancellation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Cancellation")
+            .field(&self.is_cancelled())
+            .finish()
+    }
+}
 
 impl Cancellation {
     /// A fresh, not-yet-cancelled flag.
     pub fn new() -> Self {
-        Cancellation(Arc::new(AtomicBool::new(false)))
+        Cancellation::default()
     }
 
     /// Requests cancellation. Idempotent: cancelling twice is the same as
     /// cancelling once.
+    ///
+    /// The first call runs every [`Cancellation::on_cancel`] callback, on
+    /// this thread, after the flag is raised and outside any lock, and wakes
+    /// every [`Cancellation::wait_timeout`].
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.raised.store(true, Ordering::SeqCst);
+        let callbacks = {
+            let mut waiting = self.waiting();
+            if waiting.raised {
+                return;
+            }
+            waiting.raised = true;
+            std::mem::take(&mut waiting.callbacks)
+        };
+        self.0.told.notify_all();
+        for callback in callbacks {
+            callback();
+        }
     }
 
     /// Whether [`Cancellation::cancel`] has been called on this flag or any
     /// clone of it.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.raised.load(Ordering::SeqCst)
+    }
+
+    /// Runs `callback` once, when the flag is raised: on the thread that
+    /// raises it, or on this one, now, if it already has been.
+    ///
+    /// A callback is kept until the flag is raised or the last clone is
+    /// dropped, and there is no taking one back: register once per waiter,
+    /// not once per poll. It should be short — a `Waker::wake`, a send on a
+    /// channel — because the thread cancelling runs it before `cancel`
+    /// returns.
+    pub fn on_cancel(&self, callback: impl FnOnce() + Send + 'static) {
+        {
+            let mut waiting = self.waiting();
+            if !waiting.raised {
+                waiting.callbacks.push(Box::new(callback));
+                return;
+            }
+        }
+        callback();
+    }
+
+    /// Blocks until the flag is raised or `timeout` has passed, and answers
+    /// whether it was raised.
+    pub fn wait_timeout(&self, timeout: Duration) -> bool {
+        let (waiting, _) = self
+            .0
+            .told
+            .wait_timeout_while(self.waiting(), timeout, |waiting| !waiting.raised)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        waiting.raised
+    }
+
+    fn waiting(&self) -> MutexGuard<'_, Waiting> {
+        self.0
+            .waiting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -268,6 +363,13 @@ impl Meter {
     /// is where those two are read.
     pub fn is_cancelled(&self) -> bool {
         self.state.cancellation.is_cancelled()
+    }
+
+    /// The run's [`Cancellation`], shared: what a host holding a parked or
+    /// yielded run registers [`Cancellation::on_cancel`] on, without having
+    /// kept the one it built the [`Budget`] with.
+    pub fn cancellation(&self) -> Cancellation {
+        self.state.cancellation.clone()
     }
 
     /// Checks cancellation, the deadline, and fuel in one call. Both backends
@@ -655,6 +757,67 @@ impl Budget {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// A callback registered before the flag is raised runs once, on the
+    /// raising thread, however many times it is raised; one registered after
+    /// runs at once, on the registering thread.
+    #[test]
+    fn a_cancellation_tells_each_callback_once() {
+        let cancellation = Cancellation::new();
+        let runs = Arc::new(AtomicU64::new(0));
+        for _ in 0..3 {
+            let runs = Arc::clone(&runs);
+            cancellation.on_cancel(move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        let clone = cancellation.clone();
+        thread::spawn(move || {
+            clone.cancel();
+            clone.cancel();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+        let late = Arc::clone(&runs);
+        cancellation.on_cancel(move || {
+            late.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(runs.load(Ordering::SeqCst), 4, "ran at once");
+        cancellation.cancel();
+        assert_eq!(runs.load(Ordering::SeqCst), 4, "and not again");
+    }
+
+    /// A callback may itself touch the flag — cancelling, registering — since
+    /// it runs outside the lock.
+    #[test]
+    fn a_cancellation_callback_may_use_the_flag() {
+        let cancellation = Cancellation::new();
+        let inner = cancellation.clone();
+        let (told, heard) = std::sync::mpsc::channel();
+        cancellation.on_cancel(move || {
+            inner.cancel();
+            inner.on_cancel(move || told.send(()).unwrap());
+        });
+        cancellation.cancel();
+        heard
+            .try_recv()
+            .expect("registered from inside, and run at once");
+    }
+
+    /// `wait_timeout` answers `false` when the time passes first and `true`
+    /// once another thread raises the flag.
+    #[test]
+    fn a_thread_waits_for_a_cancellation() {
+        let cancellation = Cancellation::new();
+        assert!(!cancellation.wait_timeout(Duration::from_millis(5)));
+        let clone = cancellation.clone();
+        let waiter = thread::spawn(move || clone.wait_timeout(Duration::from_secs(30)));
+        cancellation.cancel();
+        assert!(waiter.join().unwrap());
+        assert!(cancellation.wait_timeout(Duration::ZERO), "already raised");
+    }
 
     #[test]
     fn fuel_limit_fires_when_exhausted() {

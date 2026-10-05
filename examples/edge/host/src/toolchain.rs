@@ -34,8 +34,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use cove_diag::{render, Diagnostic, Severity, Span};
-use cove_runtime::{Budget, Runtime, Value, Vm};
+use cove_diag::{render, Diagnostic, Severity};
+use cove_runtime::testing::{TestBackend, TestRun, FAILED};
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::{HostSchemas, RunConfig};
 
@@ -80,7 +80,7 @@ fn select<'a>(
 /// leads with. A failure that is not a diagnostic — a directory that cannot
 /// be read — is named with its module.
 fn diagnostics_of(module: &str, why: &str) -> String {
-    for stage in ["does not parse:\n", "does not check:\n"] {
+    for stage in ["does not load:\n", "does not check:\n"] {
         if let Some(rendered) = why.strip_prefix(stage) {
             return rendered.to_string();
         }
@@ -229,9 +229,6 @@ pub struct TestOptions {
     pub filter: Option<String>,
 }
 
-/// The diagnostic a failing test is reported as — `cove test`'s.
-const FAILED: &str = "cove::test::failed";
-
 /// `cove-edge test [tenant…]`.
 ///
 /// Runs every `test fn` in each selected tenant's module, once per tenant:
@@ -302,6 +299,9 @@ pub fn test(root: &Path, only: &[String], options: &TestOptions) -> Result<Repor
 
 /// Runs one test as `cove test` would, with the tenant's grant, hosts and
 /// limits; the diagnostic to report when it failed.
+///
+/// The grant is the server's policy, so it is checked here; lowering, running
+/// and reporting are `cove test`'s own, from [`cove_runtime::testing`].
 fn run_test(
     test: &DeclaredTest,
     tenant: &Tenant,
@@ -329,85 +329,13 @@ fn run_test(
             .rule("`cove-edge test` grants a test what the server grants its tenant."),
         );
     }
-    let lowered = match cove_ir::lower_entry(
+    let run = TestRun {
         program,
         sources,
-        &HostSchemas::only(SCHEMAS),
-        test.module,
-        test.name,
-    ) {
-        Ok(ir) => ir,
-        Err(items) => {
-            return Some(
-                Diagnostic::error(
-                    FAILED,
-                    format!(
-                        "test `{}` could not be lowered: {}",
-                        test.qualified_name(),
-                        items
-                            .iter()
-                            .map(|item| item.message.clone())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ),
-                )
-                .at(test.entry.decl.name.span),
-            )
-        }
+        schemas: &HostSchemas::only(SCHEMAS),
+        backend: TestBackend::Vm,
+        limits: Some(tenant.limits.clone()),
     };
-    let runtime = Runtime::new(
-        Arc::clone(program),
-        Arc::clone(sources),
-        Arc::new(deploy::registry(tenant, options)),
-    );
-    let mut vm = Vm::new(&runtime, runtime.hosts(), &lowered);
-    let outcome = vm.run_entry_within(
-        Budget::new(tenant.limits.clone()),
-        test.module,
-        test.name,
-        Vec::new(),
-    );
-    let assertion = vm
-        .assertion_failure()
-        .map(|(span, message)| (span, message.to_string()));
-    match outcome {
-        Ok(value) => {
-            let message = failure_message(&value)?;
-            Some(failure(test, &message, assertion))
-        }
-        Err(error) => {
-            let mut diagnostic = error.to_diagnostic();
-            diagnostic.message =
-                format!("test `{}` failed: {}", test.qualified_name(), error.message);
-            Some(diagnostic)
-        }
-    }
-}
-
-/// The message a test's returned value reports, or `None` when it passed.
-fn failure_message(value: &Value) -> Option<String> {
-    Some(
-        value
-            .err_payload()?
-            .first()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-    )
-}
-
-/// The diagnostic one failed test is reported as: at the assertion that
-/// failed when the error is that assertion's, at the test otherwise.
-fn failure(test: &DeclaredTest, message: &str, assertion: Option<(Span, String)>) -> Diagnostic {
-    let span = match assertion {
-        Some((span, recorded)) if recorded == message => span,
-        _ => test.entry.decl.name.span,
-    };
-    Diagnostic::error(
-        FAILED,
-        format!("test `{}` failed: {message}", test.qualified_name()),
-    )
-    .at(span)
-    .rule(
-        "A test reports failure as an `Err`, the way every Cove function reports expected failure.",
-    )
+    run.run(test, deploy::registry(tenant, options))
+        .map(|failure| failure.diagnostic)
 }
