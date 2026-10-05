@@ -1050,20 +1050,23 @@ The most useful output of this demo. Ordered by how much each cost.
    later tenant links against them, which makes the same deploy about 3.9 ms
    (compile 9.5 → 2.6 ms). What is left of the compile is the package-wide
    passes, still run over the library's modules and the tenant's together.
-6. **Composing a one-module package by hand is copied code.**
-   `host/src/deploy.rs`'s `load` is the same walk as
-   `examples/rules/host/src/lib.rs:913` (`collect`), for the same reason: an
+6. **Composing a one-module package by hand was copied code — fixed
+   (issue 601).** `host/src/deploy.rs` had a `load` that was the same walk as
+   `examples/rules/host/src/lib.rs`'s `collect`, for the same reason: an
    embedder decides what is in its package, and `cove_sema::package::load`
-   loads a whole package root. A "load this directory as module `m`" helper
-   would serve both.
-7. **A pending answer is built as a `Value` to become a `Transfer`.**
-   `upstream.get` and `upstream.fetch` answer `Result<String, Error>`; the
-   parking lot builds `Value::ok(Value::string(…))` — an `Rc` value on a
-   thread that never runs Cove — only to call `Transfer::of` on it
-   (`transfer` in `host/src/server.rs`), because `Transfer` has no
-   constructors for `Ok`/`Err` and its `Enum` case would mean guessing the
-   builtin's type name. The real fetch made it a second call site, not a
-   different shape.
+   loads a whole package root. `cove_sema::package::load_module(root, name,
+   sources)` now loads the `.cove` files directly in `root/<name>` as module
+   `name`, with the standard library, naming each file relative to `root`;
+   `deploy::compile` calls it.
+7. **A pending answer was built as a `Value` to become a `Transfer` —
+   fixed (issue 601).** `upstream.get` and `upstream.fetch` answer
+   `Result<String, Error>`; the parking lot built `Value::ok(Value::string(…))`
+   — an `Rc` value on a thread that never runs Cove — only to call
+   `Transfer::of` on it, because `Transfer` had no constructors for `Ok`/`Err`
+   and its `Enum` case meant guessing the builtin's type name. `Transfer` now
+   has `ok`, `err`, `some`, `none`, `error`, `string`, `structure` and
+   `enumeration`, each the `Transfer` of the `Value` constructor of the same
+   name, and `transfer` in `host/src/server.rs` builds the answer directly.
 8. **A parked run's deadline did not fire while it was parked — fixed
    ([ADR 0082](../../docs/adr/0082-a-parked-run-keeps-its-deadline.md)).**
    `Limits`' deadline bounds the run "parked time included", but nothing woke
@@ -1085,17 +1088,20 @@ The most useful output of this demo. Ordered by how much each cost.
    `kv.get` then `kv.put` is a lost update under concurrency, which is the
    host's to fix (`kv.increment`), and Cove has no way to say "these two host
    calls are one transaction".
-10. **An embedder's test runner copies `cove test`'s reporting, and cannot
-    run a test parked.** `cove-cli`'s runner is a binary's private module, so
-    `cove-edge test` re-states its failure rules — an `Err` is a failure, the
-    assertion's span if the message is the assertion's, the lowering error as
-    the test's own — in about eighty lines of `host/src/toolchain.rs`; a
-    library "run this `DeclaredTest` on this registry" would serve `cove
-    test`, `cove-edge test` and the rules example's missing half alike. And
-    `assertion_failure` is on `Vm` but not on `OwnedVm`, so a test that wants
-    its assertion's span runs on a borrowed `Vm` through the hosts' blocking
-    path (`HostApi::call`); the parked path (`call_parkable`, the server's)
-    is exercised by the server's tests and not by any `test fn`.
+10. **An embedder's test runner copied `cove test`'s reporting — fixed
+    (issue 601) — and cannot run a test parked.** `cove-cli`'s runner was a
+    binary's private module, so `cove-edge test` re-stated its failure rules —
+    an `Err` is a failure, the assertion's span if the message is the
+    assertion's, the lowering error as the test's own — in about eighty lines
+    of `host/src/toolchain.rs`. They are `cove_runtime::testing` now:
+    `TestRun { program, sources, schemas, backend, limits }.run(test,
+    registry)` lowers, runs and reports one `DeclaredTest`, and `cove test`
+    and `cove-edge test` both call it, each keeping only its own policy (what
+    a test is granted). `testing::report` turns an outcome the caller got some
+    other way into the same diagnostic, and `OwnedVm::assertion_failure` now
+    exists for it. Running a `test fn` parked, through `call_parkable`, is
+    still not done here: the server's tests exercise that path, and no
+    `test fn` does.
 
 What worked without friction is worth a line too: `Step`/`ParkedVm` did
 exactly what ADR 0080 says, across threads, with no change to the tenant's

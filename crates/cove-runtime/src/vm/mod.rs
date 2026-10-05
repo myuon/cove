@@ -352,11 +352,11 @@ impl<'a> Vm<'a> {
     /// naming `heap_words` beside `fuel` and `max_host_calls` would still
     /// promise a bound this number cannot back.
     ///
-    /// What this constructor is for is what `mem::STACK_WORDS` already is
-    /// — an implementation choice a test may need to name to provoke the
-    /// behaviour it bounds, not a knob an embedder is invited to reach for.
-    /// Prefer [`Vm::new`] unless the caller is deliberately forcing a small
-    /// heap so a collection has something to be tested against.
+    /// So it is a constructor argument, the heap's capacity named as what it
+    /// is. A test reaches for it to force a small heap so a collection has
+    /// something to be tested against; an embedder running many isolates
+    /// reaches for [`OwnedVm::with_heap_words`](crate::OwnedVm::with_heap_words)
+    /// to size each one ([ADR 0088](../../../../docs/adr/0088-an-embedder-sizes-the-heap-and-is-told-of-a-cancellation.md)).
     pub fn with_heap_words(
         runtime: &'a Runtime,
         hosts: &'a HostRegistry,

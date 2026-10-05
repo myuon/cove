@@ -76,6 +76,97 @@ pub fn load(root: &Path, sources: &mut SourceMap) -> Result<Package, Vec<Diagnos
     }
 }
 
+/// Loads one directory as the one module `name`, with the standard library
+/// beside it: a package an embedder assembles, rather than one a `cove.toml`
+/// describes.
+///
+/// The module is the `.cove` files directly in `root/<name>` — a dotted name
+/// is a path below `root`, as [`load`] derives it — in file-name order, and
+/// nothing beside them is read: a host serving several tenants from one
+/// directory loads each as a package of its own, so no tenant's package holds
+/// another's code. Each file is named in `sources` relative to `root`, so a
+/// diagnostic or a runtime error points at `hello/hello.cove:23` rather than at
+/// wherever the host is installed. The package's configuration is the default:
+/// what a run is granted is the embedder's to decide, not a manifest's.
+///
+/// What `examples/edge` and other embedders used to copy (issue 601). Every
+/// failure is a diagnostic, and every file is read and parsed before any is
+/// reported, as [`load`] does.
+pub fn load_module(
+    root: &Path,
+    name: &str,
+    sources: &mut SourceMap,
+) -> Result<Package, Vec<Diagnostic>> {
+    if let Some(invalid) = name.split('.').find(|part| !is_valid_identifier(part)) {
+        return Err(vec![Diagnostic::error(
+            "cove::package::module_name",
+            format!("`{invalid}` is not a valid module name component in `{name}`"),
+        )
+        .rule("A module name is a dotted path of Cove identifiers.")]);
+    }
+    let dir = name
+        .split('.')
+        .fold(root.to_path_buf(), |dir, part| dir.join(part));
+    let entries = std::fs::read_dir(&dir).map_err(|e| {
+        vec![Diagnostic::error(
+            "cove::package::io",
+            format!("cannot read `{}`: {e}", dir.display()),
+        )]
+    })?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("cove"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(vec![Diagnostic::error(
+            "cove::package::empty_module",
+            format!("`{}` holds no `.cove` file", dir.display()),
+        )]);
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut units = Vec::new();
+    for path in files {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error(
+                    "cove::package::io",
+                    format!("cannot read `{}`: {e}", path.display()),
+                ));
+                continue;
+            }
+        };
+        let shown = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        let file = sources.add(shown, text);
+        match cove_syntax::parse_file(sources, file) {
+            Ok(ast) => units.push(Unit { file, path, ast }),
+            Err(errs) => diagnostics.extend(errs),
+        }
+    }
+    let mut modules = BTreeMap::from([(
+        name.to_string(),
+        Module {
+            name: name.to_string(),
+            dir,
+            units,
+        },
+    )]);
+    if let Err(errs) = stdlib::install(sources, &mut modules) {
+        diagnostics.extend(errs);
+    }
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    Ok(Package {
+        root: root.to_path_buf(),
+        config: Config::default(),
+        modules,
+    })
+}
+
 /// Recursively visits `dir`, turning every directory with `.cove` files
 /// directly inside it into a module.
 ///
@@ -420,5 +511,67 @@ mod tests {
         let package = load(&root, &mut sources).expect("examples package loads");
         assert!(package.modules.contains_key("hello"));
         assert!(package.modules.contains_key("server"));
+    }
+
+    #[test]
+    fn load_module_reads_one_directory_as_one_module() {
+        let dir = TempDir::new("one-module");
+        write(
+            dir.path(),
+            "hello/b.cove",
+            FN_MAIN.replace("main", "second").as_str(),
+        );
+        write(dir.path(), "hello/a.cove", FN_MAIN);
+        // Beside it and below it, and neither is read.
+        write(dir.path(), "other/main.cove", "this does not parse");
+        write(dir.path(), "hello/inner/main.cove", "nor does this");
+        write(dir.path(), "shop/cart/main.cove", FN_MAIN);
+
+        let mut sources = SourceMap::new();
+        let package = load_module(dir.path(), "hello", &mut sources).expect("loads");
+        let own: Vec<&String> = package
+            .modules
+            .keys()
+            .filter(|name| !stdlib::module_names().contains(&name.as_str()))
+            .collect();
+        assert_eq!(own, vec!["hello"]);
+        let hello = &package.modules["hello"];
+        let shown: Vec<_> = hello
+            .units
+            .iter()
+            .map(|unit| sources.path(unit.file).to_path_buf())
+            .collect();
+        assert_eq!(
+            shown,
+            vec![Path::new("hello/a.cove"), Path::new("hello/b.cove")],
+            "in file-name order, named relative to the root"
+        );
+        assert!(package.config.runs.is_empty());
+
+        let nested = load_module(dir.path(), "shop.cart", &mut sources).expect("loads");
+        assert!(nested.modules.contains_key("shop.cart"));
+    }
+
+    #[test]
+    fn load_module_refuses_an_empty_directory_and_a_bad_name() {
+        let dir = TempDir::new("no-module");
+        std::fs::create_dir_all(dir.path().join("empty")).unwrap();
+        let mut sources = SourceMap::new();
+        let errs = load_module(dir.path(), "empty", &mut sources).unwrap_err();
+        assert_eq!(errs[0].code, "cove::package::empty_module");
+        let errs = load_module(dir.path(), "missing", &mut sources).unwrap_err();
+        assert_eq!(errs[0].code, "cove::package::io");
+        let errs = load_module(dir.path(), "../escape", &mut sources).unwrap_err();
+        assert_eq!(errs[0].code, "cove::package::module_name");
+    }
+
+    #[test]
+    fn load_module_reports_every_file_that_does_not_parse() {
+        let dir = TempDir::new("bad-module");
+        write(dir.path(), "bad/a.cove", "export fn {");
+        write(dir.path(), "bad/b.cove", "export fn {");
+        let mut sources = SourceMap::new();
+        let errs = load_module(dir.path(), "bad", &mut sources).unwrap_err();
+        assert!(errs.len() >= 2, "{errs:?}");
     }
 }

@@ -208,6 +208,16 @@ export fn inLock() -> Int {
   })
   held + fetch.get(5)
 }
+
+/// One get, and then `n` numbers kept on the heap.
+export fn grow(n: Int) -> Int {
+  let first = fetch.get(1)
+  var items = Vector.of(0)
+  for i in 0..<n {
+    items.push(i)
+  }
+  items.length() + first
+}
 ";
 
 /// Everything a run is built over, built once.
@@ -1028,4 +1038,117 @@ fn a_parked_run_whose_flag_was_raised_is_cancelled_when_resumed() {
         panic!("a cancelled run does not take its answer");
     };
     assert_eq!(error.outcome, cove_runtime::trace::RunOutcome::Cancelled);
+}
+
+// ------------------------------------------------------- what an embedder asks (601)
+
+/// A machine built with a small heap runs out of it where the default one
+/// does not: the capacity is the embedder's to set, and a run that needs more
+/// fails its allocation with the runtime's own error.
+#[test]
+fn a_machine_built_with_a_small_heap_runs_out_of_it() {
+    let world = world();
+    let big = || vec![Value::int(100_000)];
+    let mut roomy = world.vm();
+    assert_eq!(shown(roomy.invoke("app", "grow", big())), "100003");
+    let mut small = OwnedVm::with_heap_words(
+        Arc::clone(&world.runtime),
+        Arc::clone(&world.hosts),
+        world.prepared.clone(),
+        1 << 14,
+    );
+    assert_eq!(
+        shown(small.invoke("app", "grow", big())),
+        "error: this run has no memory left"
+    );
+    assert!(small.heap_words() <= 1 << 14, "{}", small.heap_words());
+    // The same machine still runs what fits.
+    assert_eq!(
+        shown(small.invoke("app", "grow", vec![Value::int(10)])),
+        "13"
+    );
+}
+
+/// A parked run says what its heap holds and how many safepoints declined to
+/// yield, so a host can enforce a heap limit of its own before it answers.
+#[test]
+fn a_parked_run_reports_its_heap_and_its_declined_yields() {
+    let world = world();
+    let mut parked = match world
+        .vm()
+        .invoke_parkable("app", "grow", vec![Value::int(10_000)])
+    {
+        Step::Parked(parked) => parked,
+        _ => panic!("the get parks"),
+    };
+    let before = parked.heap_words();
+    assert_eq!(parked.yields_declined(), 0);
+    let request = parked
+        .take_request()
+        .unwrap()
+        .downcast::<Request>()
+        .unwrap();
+    let Step::Answered(vm, answer) = parked.resume(Ok(Transfer::Int(reply(&request)))) else {
+        panic!("one get, then it answers");
+    };
+    assert_eq!(shown(answer), "10003");
+    assert!(
+        vm.heap_words() > before + 10_000,
+        "{} after, {before} parked",
+        vm.heap_words()
+    );
+}
+
+/// A host is told when a parked run's flag is raised, on whatever thread
+/// raises it, and needs no token of its own to cancel the run it is holding.
+#[test]
+fn a_host_is_told_when_a_parked_run_s_flag_is_raised() {
+    let world = world();
+    let (budget, cancellation) = within(None);
+    let parked = parked_within(&world, budget);
+    let (told, heard) = std::sync::mpsc::channel();
+    parked
+        .meter()
+        .cancellation()
+        .on_cancel(move || told.send(()).unwrap());
+    assert!(heard.try_recv().is_err(), "nothing raised yet");
+    std::thread::spawn(move || cancellation.cancel())
+        .join()
+        .unwrap();
+    heard
+        .try_recv()
+        .expect("the callback ran before cancel returned");
+    let (_, error) = parked.cancel();
+    assert_eq!(error.outcome, cove_runtime::trace::RunOutcome::Cancelled);
+}
+
+/// The `Transfer` constructors build what `Transfer::of` makes of the `Value`
+/// constructor of the same name — so a host answers without an `Rc`.
+#[test]
+fn a_transfer_is_built_as_the_value_it_stands_for() {
+    let same = |built: Transfer, value: Value| {
+        assert_eq!(
+            format!("{built:?}"),
+            format!("{:?}", Transfer::of(&value).unwrap())
+        );
+        assert_eq!(built.into_value().to_string(), value.to_string());
+    };
+    same(
+        Transfer::ok(Transfer::string("hi")),
+        Value::ok(Value::string("hi")),
+    );
+    same(
+        Transfer::err(Transfer::error("no")),
+        Value::err(Value::error("no")),
+    );
+    same(Transfer::some(Transfer::Int(3)), Value::some(Value::int(3)));
+    same(Transfer::none(), Value::none());
+    same(
+        Transfer::structure("fetch.Page", [("status", Transfer::Int(200))]),
+        Value::structure("fetch.Page", [("status", Value::int(200))]),
+    );
+    same(
+        Transfer::enumeration("fetch.Kind", "Slow", [Transfer::Int(1)]),
+        Value::enumeration("fetch.Kind", "Slow", [Value::int(1)]),
+    );
 }

@@ -41,6 +41,10 @@ use crate::value::{
     Closure, ClosureBody, DynValue, EnumValue, HostFnValue, MapKey, Repr, StructValue, Value,
 };
 use crate::wallclock::Instant;
+use cove_schema::builtins::{
+    BuiltinSchema, CaseSchema, ERROR, ERR_CASE, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT,
+    SOME_CASE,
+};
 
 /// What a task thread hands back to the task that spawned it: the value the
 /// body produced, in the form that may cross the boundary, or why it stopped.
@@ -746,6 +750,90 @@ pub struct TransferClosure {
     pub body: ClosureBody,
     pub module: String,
     pub captures: Vec<(String, Transfer)>,
+}
+
+/// The values a host builds to answer a parked run, built where its work
+/// finished — usually a thread that never runs Cove, where a [`Value`] would
+/// be an `Rc` made only to be converted. Each is the `Transfer` that
+/// [`Transfer::of`] answers for the [`Value`] constructor of the same name,
+/// and [`Transfer::into_value`] gives that value back.
+impl Transfer {
+    /// A `String`.
+    pub fn string(text: impl Into<String>) -> Transfer {
+        Transfer::Str(text.into())
+    }
+
+    /// `Ok(value)`, as [`Value::ok`] builds it.
+    pub fn ok(value: Transfer) -> Transfer {
+        Transfer::builtin_case(&RESULT, &OK_CASE, vec![value])
+    }
+
+    /// `Err(error)`, as [`Value::err`] builds it.
+    pub fn err(error: Transfer) -> Transfer {
+        Transfer::builtin_case(&RESULT, &ERR_CASE, vec![error])
+    }
+
+    /// `Some(value)`, as [`Value::some`] builds it.
+    pub fn some(value: Transfer) -> Transfer {
+        Transfer::builtin_case(&OPTION, &SOME_CASE, vec![value])
+    }
+
+    /// `None`, as [`Value::none`] builds it.
+    pub fn none() -> Transfer {
+        Transfer::builtin_case(&OPTION, &NONE_CASE, Vec::new())
+    }
+
+    /// The builtin `Error` struct, as [`Value::error`] builds it.
+    pub fn error(message: impl Into<String>) -> Transfer {
+        Transfer::Struct {
+            type_name: ERROR.name.to_string(),
+            fields: vec![(
+                MESSAGE_FIELD.name.to_string(),
+                Transfer::Str(message.into()),
+            )],
+            opaque: false,
+        }
+    }
+
+    /// A value of the declared struct type `type_name` — a host-declared one
+    /// such as `edge.Response`, or a package's — carrying `fields` in
+    /// declaration order, as [`Value::structure`] builds it.
+    pub fn structure<N: Into<String>>(
+        type_name: impl Into<String>,
+        fields: impl IntoIterator<Item = (N, Transfer)>,
+    ) -> Transfer {
+        Transfer::Struct {
+            type_name: type_name.into(),
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+            opaque: false,
+        }
+    }
+
+    /// A value of the declared enum type `type_name` in the case `case`,
+    /// carrying `payload` in the order the case declares it, as
+    /// [`Value::enumeration`] builds it.
+    pub fn enumeration(
+        type_name: impl Into<String>,
+        case: impl Into<String>,
+        payload: impl IntoIterator<Item = Transfer>,
+    ) -> Transfer {
+        Transfer::Enum {
+            type_name: type_name.into(),
+            case: case.into(),
+            payload: payload.into_iter().collect(),
+        }
+    }
+
+    fn builtin_case(ty: &BuiltinSchema, case: &CaseSchema, payload: Vec<Transfer>) -> Transfer {
+        Transfer::Enum {
+            type_name: ty.name.to_string(),
+            case: case.name.to_string(),
+            payload,
+        }
+    }
 }
 
 impl Transfer {

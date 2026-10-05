@@ -121,6 +121,24 @@ pub struct FnEntry {
     /// capability-open too, because the requirement it cannot see is one its
     /// own callers cannot see either.
     pub open_calls: BTreeSet<OpenCall>,
+    /// Whether this function's own body opens a task `scope`.
+    pub direct_spawns: bool,
+    /// Whether calling this function can spawn a task: it opens a `scope`,
+    /// or calls a declaration that can.
+    ///
+    /// A task is spawned only into a scope, and a scope's handle is a type
+    /// the language gives no name to, so no declaration can be handed one as
+    /// a parameter or keep one in a field: whatever spawns runs inside a
+    /// `scope` some function on the call stack opened. So this is "reaches a
+    /// `scope`", propagated over the same call graph as
+    /// [`FnEntry::required_capabilities`] and with the same caveat — it is a
+    /// lower bound when [`FnEntry::is_capability_open`], since a call the
+    /// graph cannot follow may reach a scope it cannot see. A scope that
+    /// spawns nothing counts; it is the one over-approximation.
+    ///
+    /// What a host that refuses concurrency reads at `check`, before
+    /// lowering: an entry with this `false` and no open calls cannot spawn.
+    pub can_spawn: bool,
 }
 
 impl FnEntry {
@@ -754,7 +772,7 @@ fn resolve_module(
                         continue;
                     }
                     missing_doc(warnings, item, &decl.name.node, decl.name.span);
-                    let (capabilities, calls, open) = analyze_body(
+                    let (capabilities, calls, open, spawns) = analyze_body(
                         decl,
                         &resolved.host_uses,
                         &resolved.host_items,
@@ -775,6 +793,8 @@ fn resolve_module(
                             required_capabilities: BTreeSet::new(),
                             direct_open_calls: open,
                             open_calls: BTreeSet::new(),
+                            direct_spawns: spawns,
+                            can_spawn: false,
                         },
                     );
                 }
@@ -1065,7 +1085,7 @@ fn resolve_module(
                     }
                     method_spans.insert(key.clone(), decl.name.span);
                     missing_doc(warnings, inner, &decl.name.node, decl.name.span);
-                    let (capabilities, calls, open) = analyze_body(
+                    let (capabilities, calls, open, spawns) = analyze_body(
                         decl,
                         &resolved.host_uses,
                         &resolved.host_items,
@@ -1092,6 +1112,8 @@ fn resolve_module(
                             required_capabilities: BTreeSet::new(),
                             direct_open_calls: open,
                             open_calls: BTreeSet::new(),
+                            direct_spawns: spawns,
+                            can_spawn: false,
                         },
                     );
                 }
@@ -2031,7 +2053,7 @@ fn record_method(
         return;
     }
     method_spans.insert(key.clone(), decl.name.span);
-    let (capabilities, calls, open) = analyze_body(
+    let (capabilities, calls, open, spawns) = analyze_body(
         &decl,
         &resolved.host_uses,
         &resolved.host_items,
@@ -2056,6 +2078,8 @@ fn record_method(
             required_capabilities: BTreeSet::new(),
             direct_open_calls: open,
             open_calls: BTreeSet::new(),
+            direct_spawns: spawns,
+            can_spawn: false,
         },
     );
 }
@@ -2305,7 +2329,12 @@ fn analyze_body(
     host_items: &BTreeMap<String, String>,
     opaque_fields: &OpaqueFields,
     schemas: &HostSchemas,
-) -> (BTreeSet<Capability>, Vec<CallShape>, BTreeSet<OpenCall>) {
+) -> (
+    BTreeSet<Capability>,
+    Vec<CallShape>,
+    BTreeSet<OpenCall>,
+    bool,
+) {
     let generics: BTreeSet<String> = decl
         .generics
         .iter()
@@ -2327,6 +2356,7 @@ fn analyze_body(
         opaque: BTreeSet::new(),
         containers: BTreeSet::new(),
         open: BTreeSet::new(),
+        opens_scope: false,
     };
     // `self` is a value the caller supplied, not a declaration this module
     // can be called through, so binding it keeps a body that merely reads it
@@ -2334,7 +2364,7 @@ fn analyze_body(
     walk.bind_value("self");
     walk.bind_params(&decl.params);
     walk_block(&decl.body, &mut walk);
-    (walk.capabilities, walk.calls, walk.open)
+    (walk.capabilities, walk.calls, walk.open, walk.opens_scope)
 }
 
 /// Which [`Opacity`] a value of type `ty` has, for a declaration binding
@@ -2651,6 +2681,7 @@ fn check_body(
         opaque: BTreeSet::new(),
         containers: BTreeSet::new(),
         open: BTreeSet::new(),
+        opens_scope: false,
     };
     walk_block(body, &mut walk);
     errors.extend(walk.errors);
@@ -2714,6 +2745,8 @@ struct BodyWalk<'a> {
     containers: BTreeSet<String>,
     /// Why what this walk derived is a lower bound; see [`OpenCall`].
     open: BTreeSet<OpenCall>,
+    /// Whether the body opens a task `scope`; see [`FnEntry::can_spawn`].
+    opens_scope: bool,
 }
 
 /// The names one lexical scope of a body binds.
@@ -3042,7 +3075,10 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
             walk.pop_scope();
             walk.loop_depth = outer_depth;
         }
-        ExprKind::Scope { body, .. } => walk_block(body, walk),
+        ExprKind::Scope { body, .. } => {
+            walk.opens_scope = true;
+            walk_block(body, walk);
+        }
         ExprKind::Range { start, end, .. } => {
             walk_expr(start, walk);
             walk_expr(end, walk);
@@ -3892,6 +3928,9 @@ fn declaring_module(
 /// The graph is the package's, not one module's: a function that reaches
 /// `console.println` only through an imported helper requires `console`.
 ///
+/// [`FnEntry::can_spawn`] travels the same graph: a declaration that calls
+/// one that can spawn can spawn.
+///
 /// The same round carries [`FnEntry::open_calls`] outward: a declaration
 /// that calls a capability-open one is capability-open too, since the
 /// requirement its callee could not see is one it cannot see either. Both
@@ -3909,10 +3948,14 @@ fn propagate_capabilities(
 ) {
     let mut required: BTreeMap<Node, BTreeSet<Capability>> = BTreeMap::new();
     let mut open: BTreeMap<Node, BTreeSet<OpenCall>> = BTreeMap::new();
+    let mut spawns: BTreeSet<Node> = BTreeSet::new();
     for (module, resolved) in &program.modules {
         for (name, entry) in &resolved.functions {
             let node = (module.clone(), FnKey::Fn(name.clone()));
             required.insert(node.clone(), entry.direct_capabilities.clone());
+            if entry.direct_spawns {
+                spawns.insert(node.clone());
+            }
             open.insert(node, entry.direct_open_calls.clone());
         }
         for ((type_name, method_name), entry) in &resolved.methods {
@@ -3921,6 +3964,9 @@ fn propagate_capabilities(
                 FnKey::Method(type_name.clone(), method_name.clone()),
             );
             required.insert(node.clone(), entry.direct_capabilities.clone());
+            if entry.direct_spawns {
+                spawns.insert(node.clone());
+            }
             open.insert(node, entry.direct_open_calls.clone());
         }
     }
@@ -3937,7 +3983,9 @@ fn propagate_capabilities(
             // a floor, and the declaration that could not be followed says
             // which form it was.
             let mut reached_open = false;
+            let mut reached_spawn = false;
             for callee in callees.keys() {
+                reached_spawn |= spawns.contains(callee);
                 if let Some(callee_open) = open.get(callee) {
                     reached_open |= !callee_open.is_empty();
                 }
@@ -3957,6 +4005,9 @@ fn propagate_capabilities(
             if reached_open && open.get_mut(key).unwrap().insert(OpenCall::ReachedOpenCall) {
                 changed = true;
             }
+            if reached_spawn && spawns.insert(key.clone()) {
+                changed = true;
+            }
         }
         if !changed {
             break;
@@ -3968,6 +4019,7 @@ fn propagate_capabilities(
             let node = (module.clone(), FnKey::Fn(name.clone()));
             entry.required_capabilities = required.remove(&node).unwrap_or_default();
             entry.open_calls = open.remove(&node).unwrap_or_default();
+            entry.can_spawn = spawns.contains(&node);
         }
         for ((type_name, method_name), entry) in resolved.methods.iter_mut() {
             let node = (
@@ -3976,6 +4028,7 @@ fn propagate_capabilities(
             );
             entry.required_capabilities = required.remove(&node).unwrap_or_default();
             entry.open_calls = open.remove(&node).unwrap_or_default();
+            entry.can_spawn = spawns.contains(&node);
         }
     }
 }
@@ -5082,6 +5135,32 @@ impl Show for B {
         assert!(main
             .required_capabilities
             .contains(&Capability::new("console")));
+    }
+
+    /// Issue 601: whether an entry can spawn is a check-time fact, carried
+    /// over the call graph the way a capability is — across a module, and
+    /// through a lambda the `scope` is written in.
+    #[test]
+    fn can_spawn_crosses_a_module_boundary_and_a_lambda() {
+        let program = resolve_ok(&[
+            (
+                "work",
+                "/// Fans out.\nexport fn fanOut() {\n  scope tasks {\n    tasks.spawn { 1 }\n  }\n}\n\n/// Fans out from inside a lambda.\nexport fn later() -> fn() -> Unit {\n  fn() {\n    scope tasks {\n      tasks.spawn { 2 }\n    }\n  }\n}\n\n/// Does not.\nexport fn plain() -> Int {\n  1\n}\n",
+            ),
+            (
+                "app",
+                "use work\n\n/// Spawns through `work`.\nexport fn main() {\n  work.fanOut()\n}\n\n/// Spawns nothing.\nexport fn quiet() -> Int {\n  work.plain()\n}\n\n/// Calls itself, and spawns nothing.\nexport fn loops(n: Int) -> Int {\n  if n == 0 { 0 } else { loops(n - 1) }\n}\n",
+            ),
+        ]);
+        let work = &program.modules["work"].functions;
+        assert!(work["fanOut"].direct_spawns && work["fanOut"].can_spawn);
+        assert!(work["later"].direct_spawns && work["later"].can_spawn);
+        assert!(!work["plain"].direct_spawns && !work["plain"].can_spawn);
+        let app = &program.modules["app"].functions;
+        assert!(!app["main"].direct_spawns);
+        assert!(app["main"].can_spawn, "reached through a call");
+        assert!(!app["quiet"].can_spawn);
+        assert!(!app["loops"].can_spawn);
     }
 
     #[test]

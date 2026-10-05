@@ -74,7 +74,7 @@ use cove_runtime::{
 
 use crate::deploy::{deploy_all, request_value, DeployOptions, Deployed, State, Tenant};
 use crate::fetch::{Fetched, Fetcher};
-use crate::hosts::{fetch_answer, result_value, upstream_answer, upstream_latency, UpstreamCall};
+use crate::hosts::{fetch_answer, upstream_answer, upstream_latency, UpstreamCall};
 use crate::http::{holds_a_head, read_request, Request, Response};
 use crate::idle::{Conn, Idle};
 use crate::inbox::{inbox, Inbox, Outbox};
@@ -376,12 +376,13 @@ enum Lot {
     Fetched(u64, Fetched),
 }
 
-/// An answer as the `Transfer` a parked run is resumed with. Built as a
-/// `Value` and then a `Transfer`, because the run is resumed on some other
-/// thread and a `Value` cannot go there.
+/// An answer as the `Transfer` a parked run is resumed with: built as one
+/// directly, on whichever thread the answer arrived, because the run is
+/// resumed on some other thread and a `Value` cannot go there.
 fn transfer(result: Result<String, String>) -> Result<Transfer, RuntimeError> {
-    Transfer::of(&result_value(result)).map_err(|unsafe_value| {
-        RuntimeError::new(format!("{} is not task-safe", unsafe_value.type_name))
+    Ok(match result {
+        Ok(text) => Transfer::ok(Transfer::string(text)),
+        Err(message) => Transfer::err(Transfer::error(message)),
     })
 }
 

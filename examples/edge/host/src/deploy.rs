@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use cove_diag::{render, Diagnostic, Severity, SourceMap};
 use cove_runtime::{Grants, HostRegistry, Limits, OwnedVm, PreparedProgram, Runtime, Value};
-use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program;
 use cove_sema::{Compiler, Config, HostSchemas, RunConfig};
 
@@ -371,11 +370,18 @@ pub struct Compiled {
 /// the hosts answer [`cove_runtime::HostApi::module_schema`] with, not a copy
 /// of them.
 ///
-/// The `Err` is rendered, after the stage that refused it: `does not parse`
+/// The module is the `.cove` files directly in `tenants/<module>/`, loaded
+/// with the standard library as a package of its own by
+/// [`cove_sema::package::load_module`]: nothing beside it is read, so no
+/// tenant's package holds another's code.
+///
+/// The `Err` is rendered, after the stage that refused it: `does not load`
 /// or `does not check`, then the diagnostics as `cove check` renders them.
 pub fn compile(root: &Path, module: &str) -> Result<Compiled, String> {
     let started = Instant::now();
-    let (sources, package) = load(root, module)?;
+    let mut sources = SourceMap::new();
+    let package = cove_sema::package::load_module(root, module, &mut sources)
+        .map_err(|items| format!("does not load:\n{}", report(&sources, &items)))?;
     let program = Compiler::new()
         .with_schemas(HostSchemas::only(SCHEMAS))
         .compile(&package)
@@ -520,54 +526,6 @@ fn prepare(options: &DeployOptions, tenant: &mut Tenant) -> Result<Deployed, Str
     }
     deployed.cost.isolate = started.elapsed() / 100;
     Ok(deployed)
-}
-
-/// The tenant's module and the standard library, as a package of their own.
-///
-/// The module is the `.cove` files directly in `tenants/<module>/`; nothing
-/// beside it is read, so no tenant's package holds another's code.
-pub fn load(root: &Path, module: &str) -> Result<(SourceMap, Package), String> {
-    let dir = root.join(module);
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("cove"))
-        .collect();
-    paths.sort();
-    if paths.is_empty() {
-        return Err(format!("`{}` holds no `.cove` file", dir.display()));
-    }
-    let mut sources = SourceMap::new();
-    let mut units = Vec::new();
-    for path in paths {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-        // Named relative to the tenants directory, so that a runtime error
-        // a response carries points at `hello/hello.cove:23` rather than at
-        // wherever the server happens to be checked out.
-        let shown = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        let file = sources.add(shown, &text);
-        let ast = cove_syntax::parse_file(&sources, file)
-            .map_err(|items| format!("does not parse:\n{}", report(&sources, &items)))?;
-        units.push(Unit { file, path, ast });
-    }
-    let mut modules = BTreeMap::from([(
-        module.to_string(),
-        Module {
-            name: module.to_string(),
-            dir,
-            units,
-        },
-    )]);
-    cove_sema::stdlib::install(&mut sources, &mut modules)
-        .map_err(|items| report(&sources, &items))?;
-    let package = Package {
-        root: root.to_path_buf(),
-        config: Config::default(),
-        modules,
-    };
-    Ok((sources, package))
 }
 
 /// Diagnostics, rendered the way `cove check` renders them.
