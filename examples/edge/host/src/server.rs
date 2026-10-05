@@ -62,7 +62,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -77,6 +77,7 @@ use crate::fetch::{Fetched, Fetcher};
 use crate::hosts::{fetch_answer, result_value, upstream_answer, upstream_latency, UpstreamCall};
 use crate::http::{holds_a_head, read_request, Request, Response};
 use crate::idle::{Conn, Idle};
+use crate::inbox::{inbox, Inbox, Outbox};
 use crate::os;
 use crate::runq::{Discipline, Queued, RunQueue, Taker};
 use crate::timeline::{By, Recorder, Recording, What};
@@ -164,7 +165,7 @@ impl Server {
         let listener = TcpListener::bind(&options.listen)
             .map_err(|e| format!("cannot listen on `{}`: {e}", options.listen))?;
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
-        let (timer, timed) = mpsc::channel::<Lot>();
+        let (timer, timed) = inbox::<Lot>().map_err(|e| e.to_string())?;
         let fetcher = {
             let lot = timer.clone();
             Fetcher::start(options.fetchers, move |id, fetched| {
@@ -194,7 +195,7 @@ impl Server {
             slices: (0..options.workers.max(1))
                 .map(|_| Mutex::new(None))
                 .collect(),
-            timer: Mutex::new(timer),
+            timer,
             fetcher,
             idle: OnceLock::new(),
             options,
@@ -392,7 +393,7 @@ struct Shared {
     runq: RunQueue<Job>,
     /// Per worker, the run it is running now, if any.
     slices: Vec<Mutex<Option<Slice>>>,
-    timer: Mutex<mpsc::Sender<Lot>>,
+    timer: Outbox<Lot>,
     /// The threads that perform `upstream.fetch`.
     fetcher: Fetcher,
     /// Where connections wait between requests; set once, at start.
@@ -809,7 +810,7 @@ impl Shared {
                         // the lot before the run it answers. The lot outlives
                         // every worker; a send cannot fail while the server
                         // runs.
-                        let _ = self.timer.lock().unwrap().send(Lot::Park(Box::new(timed)));
+                        let _ = self.timer.send(Lot::Park(Box::new(timed)));
                         if let Some(url) = fetch {
                             self.fetcher.submit(id, url);
                         }
@@ -851,17 +852,14 @@ impl Shared {
     /// arrives as a message. Whichever comes first settles the run: its
     /// answer resumes it, its deadline cancels it, and what comes second
     /// finds nothing under the id and is dropped.
-    fn run_lot(&self, lot: mpsc::Receiver<Lot>) {
+    fn run_lot(&self, lot: Inbox<Lot>) {
         let mut due: BinaryHeap<Reverse<(Instant, u64)>> = BinaryHeap::new();
         let mut waiting: HashMap<u64, Timed> = HashMap::new();
         let lot_shard = self.timeline.as_ref().map_or(0, Recorder::lot);
         loop {
-            let received = match due.peek() {
-                None => lot.recv().map_err(|_| RecvTimeoutError::Disconnected),
-                Some(Reverse((at, _))) => {
-                    lot.recv_timeout(at.saturating_duration_since(Instant::now()))
-                }
-            };
+            // Not on a condition variable on macOS: see `crate::inbox` for
+            // what the timed wait it replaced overslept by.
+            let received = lot.recv_deadline(due.peek().map(|Reverse((at, _))| *at));
             let mut ready = Vec::new();
             match received {
                 Ok(first) => {
