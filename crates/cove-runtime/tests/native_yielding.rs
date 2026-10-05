@@ -997,6 +997,8 @@ struct Stormed {
     longest: Duration,
     /// The most compiled frames any one yield left standing.
     deepest: usize,
+    /// How long the whole run took, yields included.
+    took: Duration,
 }
 
 /// A splitmix64 step, so a storm's pauses are random and reproducible.
@@ -1020,10 +1022,13 @@ fn storm(world: &World, name: &str, seed: u64, most: u64) -> Stormed {
 fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
     let signal = vm.yield_request();
     let done = Arc::new(AtomicBool::new(false));
+    let blowing = Arc::new(AtomicBool::new(false));
     let monitor = {
         let done = Arc::clone(&done);
+        let blowing = Arc::clone(&blowing);
         std::thread::spawn(move || {
             let mut state = seed;
+            blowing.store(true, Ordering::Relaxed);
             while !done.load(Ordering::Relaxed) {
                 let pause = splitmix(&mut state) % (most + 1);
                 let until = std::time::Instant::now() + Duration::from_micros(pause);
@@ -1034,9 +1039,15 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
             }
         })
     };
+    // The run starts once the storm is blowing: a thread can take longer to
+    // start than a short shape takes to run.
+    while !blowing.load(Ordering::Relaxed) {
+        std::thread::yield_now();
+    }
     let (mut yields, mut native_yields, mut deepest) = (0, 0, 0);
     let mut longest = Duration::ZERO;
-    let mut since = std::time::Instant::now();
+    let started = std::time::Instant::now();
+    let mut since = started;
     let mut next = taken(vm.invoke_within_parkable(unlimited(), "app", name, Vec::new()));
     let finished = loop {
         match next {
@@ -1060,6 +1071,7 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
         }
     };
     longest = longest.max(since.elapsed());
+    let took = started.elapsed();
     done.store(true, Ordering::Relaxed);
     monitor.join().unwrap();
     Stormed {
@@ -1068,6 +1080,7 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
         yields,
         longest,
         deepest,
+        took,
     }
 }
 
@@ -1117,6 +1130,10 @@ fn a_storm_of_yield_requests_changes_no_answer_and_no_count() {
 /// no shape runs long without yielding: a loop whose every turn passes a
 /// helper's safepoint — a copy, a buffer's growth — and never a due backedge
 /// still offers the yield.
+///
+/// "Long" is relative, so a slow or shared machine does not fail it: no
+/// stretch without a yield may be a quarter of the run. A shape that could not
+/// yield runs whole without one; before the fix, `building` did.
 #[test]
 fn no_compiled_shape_runs_long_without_yielding_when_asked() {
     let world = world();
@@ -1127,9 +1144,10 @@ fn no_compiled_shape_runs_long_without_yielding_when_asked() {
             "{name}: no yield inside compiled code: {run:?}"
         );
         assert!(
-            run.longest < Duration::from_millis(25),
-            "{name}: ran {:?} without yielding: {run:?}",
-            run.longest
+            run.longest * 4 < run.took,
+            "{name}: ran {:?} of {:?} without yielding: {run:?}",
+            run.longest,
+            run.took
         );
     }
 }
