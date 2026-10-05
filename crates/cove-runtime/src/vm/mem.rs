@@ -3944,41 +3944,85 @@ mod tests {
     /// on a `Shared` cell: the waiter published its roots when it began
     /// waiting and will not poll again until it is woken, and the task that
     /// would wake it is the one trying to collect.
+    ///
+    /// The waiter is inside its wait before the collection begins — the
+    /// interleaving is forced, not hoped for. The test after this one is the
+    /// other order.
     #[test]
     fn a_collection_does_not_wait_for_a_blocked_task() {
+        a_collection_beside_a_waiting_task(Arrival::BeforeTheCollection);
+    }
+
+    /// A task that begins to wait after a collection has asked the world to
+    /// stop counts as arrived from that moment, and the collection finishes
+    /// without it running another instruction.
+    #[test]
+    fn a_task_that_blocks_after_a_collection_began_lets_it_finish() {
+        a_collection_beside_a_waiting_task(Arrival::AfterTheCollectionBegan);
+    }
+
+    /// Which side of the collection's start the waiting task enters its wait.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Arrival {
+        BeforeTheCollection,
+        AfterTheCollectionBegan,
+    }
+
+    /// One task collects while the other waits on a word only the collector
+    /// writes, and only after collecting.
+    ///
+    /// Issue 576: this used to hang about one run in forty. The word waited on
+    /// was the first payload word of an array of length *zero* — the word past
+    /// its end, which is the header of the next object allocated. The wait
+    /// could therefore end as soon as `lost` existed, before the collection,
+    /// and the thread finished; but its `Memory` was borrowed rather than
+    /// moved in, so its party stayed live and unarrived, and the collection
+    /// waited for a task that would never reach a safepoint again. A real task
+    /// cannot do that — its memory is dropped, and the party detached, when
+    /// its thread ends — so the bug was in the test. Both are fixed here: the
+    /// gate has a word of its own, and the memory moves in as a task's does.
+    fn a_collection_beside_a_waiting_task(arrival: Arrival) {
         let mut table = Table::new();
         let array = leaf(&mut table);
         let mut first = Memory::new(1 << 14);
         let mut second = first.for_task().unwrap();
+        let party = second.at as usize;
+        let space = Arc::clone(&first.space);
 
         let theirs = alloc(&mut second, &table, array, 4);
-        let gate = alloc(&mut first, &table, array, 0);
+        let gate = alloc(&mut first, &table, array, 1);
         let word = first.payload_addr(gate, 0);
-        let waiting = Barrier::new(2);
+        let lost = alloc(&mut first, &table, array, 4);
+        assert_ne!(word, lost, "the word waited on is the gate's own");
 
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                waiting.wait();
+            let space = &space;
+            scope.spawn(move || {
+                // Moved in, as a task's memory is: when this thread is done,
+                // so is its party.
+                let mem = second;
+                if arrival == Arrival::AfterTheCollectionBegan {
+                    while !space.pending.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                }
                 // Blocks until the other task writes the word, publishing its
                 // roots for the whole wait.
-                second.wait(word, 0, &Held(vec![theirs]));
+                mem.wait(word, 0, &Held(vec![theirs]));
             });
-            waiting.wait();
-            // Give the other thread a chance to be inside the wait. Whether it
-            // is or not, the collection below must terminate: a task that has
-            // not arrived yet is one this task waits for, and a task that is
-            // blocked is one it does not.
-            std::thread::yield_now();
+            if arrival == Arrival::BeforeTheCollection {
+                while space.world().parties[party].at.is_none() {
+                    std::thread::yield_now();
+                }
+            }
 
-            let lost = alloc(&mut first, &table, array, 4);
             first.collect(table.layouts(), &Held(vec![gate]));
             assert_eq!(first.object_layout(lost), LayoutId::FREE);
 
             first.release_word(word, 1);
             first.wake(word);
         });
-        // Whatever the interleaving, the blocked task's object was published
-        // and survived.
+        // The blocked task's object was published and survived.
         assert_eq!(first.object_layout(theirs), array);
     }
 

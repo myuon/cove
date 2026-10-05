@@ -82,7 +82,8 @@ pub enum What {
         host_calls: u64,
         heap_bytes: u64,
     },
-    /// Its response was written to the socket.
+    /// Its response was complete and its write to the socket began: noted
+    /// before sending, so a client holding the answer finds it recorded.
     Written { worker: usize },
     /// Its run had its slice and yielded at a safepoint on this worker
     /// (ADR 0084); it went to the back of the global run queue.

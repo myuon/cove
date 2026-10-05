@@ -209,9 +209,11 @@ fn failure(test: &DeclaredTest, message: &str, assertion: Option<(Span, String)>
     )
 }
 
-/// A test the lowering refused, as that test's failure.
+/// A test the lowering refused, as that test's failure, with each gap
+/// labelled where it was found, so a reader is not left with a message and no
+/// location (issue #602).
 fn unlowered(test: &DeclaredTest, items: &[Diagnostic]) -> Diagnostic {
-    Diagnostic::error(
+    let mut diagnostic = Diagnostic::error(
         FAILED,
         format!(
             "test `{}` could not be lowered: {}",
@@ -223,5 +225,11 @@ fn unlowered(test: &DeclaredTest, items: &[Diagnostic]) -> Diagnostic {
                 .join("; ")
         ),
     )
-    .at(test.entry.decl.name.span)
+    .at(test.entry.decl.name.span);
+    for item in items {
+        if let Some(span) = item.primary {
+            diagnostic = diagnostic.label(span, item.message.clone());
+        }
+    }
+    diagnostic
 }

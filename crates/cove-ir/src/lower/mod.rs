@@ -561,6 +561,12 @@ fn finish(
     schemas: &HostSchemas,
 ) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
+        // A refusal says what it refused. An embedder that renders only the
+        // messages had nothing to show for one once (issue #602).
+        debug_assert!(
+            errors.iter().all(|error| !error.message.trim().is_empty()),
+            "the lowering refused with a diagnostic that says nothing: {errors:?}"
+        );
         return Err(only_once(errors));
     }
 

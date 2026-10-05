@@ -107,6 +107,10 @@ type's name and its exported methods and associated functions, withholding
 the fields and the labeled constructor they synthesize (see Opaque structs,
 below). `test fn` sits where `export` sits and excludes it.
 `impl Trait for Type` is the only way a conformance is declared.
+A builtin type's name — `Unit`, `Int`, `Option`, and the rest of
+`docs/BUILTINS.md` — means the builtin in every type position, so no struct,
+enum, or type alias may be declared under one
+(`cove::resolve::builtin_type_name`).
 
 A declaration's parameters are written rather than inferred, and each may
 carry a `var` marking, a default, or a `...` that makes it variadic. A
@@ -121,6 +125,7 @@ parameters its function type names, and a function type names a fixed list of
 them, so a `...` on a lambda is `cove::type::variadic_lambda`.
 
 Declaration-level errors: `cove::resolve::duplicate_declaration`,
+`cove::resolve::builtin_type_name`,
 `cove::resolve::unknown_trait`, `cove::resolve::unknown_impl_type`,
 `cove::resolve::foreign_inherent_impl`, `cove::resolve::duplicate_conformance`,
 `cove::resolve::orphan_conformance`, `cove::resolve::unknown_trait_method`,
@@ -410,7 +415,10 @@ if condition {
   are checked against the surrounding expectation when there is one and
   against each other when there is not, and the `if` is their common type.
   **With no `else`, the `if` is `()`** and the branch is checked against
-  nothing.
+  nothing. **An `if` whose value is discarded** — written as a statement, or
+  as the last expression of a loop body or of a branch that is itself
+  discarded — is not used as an expression: its branches are checked on
+  their own and need not agree, and when they disagree the `if` is `()`.
 - **Evaluates to** the value of the branch that ran — **and `()` when there is
   no `else`**, whichever way the condition went. The branch still runs and its
   effects still happen; only its value is discarded.
@@ -432,7 +440,10 @@ match scrutinee {
 - **Types as**: the scrutinee is checked on its own; each arm's pattern is
   checked against the scrutinee's type and binds into that arm's body; the
   arms are checked against the surrounding expectation when there is one and
-  against each other when there is not. A `match` with no arms is `Never`.
+  against each other when there is not, in either order: an arm that settles
+  a later or an earlier arm's `None` or empty literal counts, as the other
+  branch of an `if` does. A discarded `match` is checked as a discarded `if`
+  is: its arms need not agree. A `match` with no arms is `Never`.
 - **Evaluates to** the body of the first arm whose pattern matches. The
   scrutinee is evaluated once.
 - **Errors**: `cove::resolve::non_exhaustive_match`,
