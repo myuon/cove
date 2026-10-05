@@ -927,6 +927,40 @@ export fn callsComparesStrings(which: Int) -> Int {
   comparesStrings(which)
 }
 
+/// Closures made and called in a compiled frame (#605): a sort by a capturing
+/// comparator, a map by a capturing function, and a closure handed to another
+/// compiled function and called there, two words captured.
+export fn sortsByKey(n: Int, k: Int) -> Int {
+  var xs: Vector<Int> = Vector.of()
+  var i = 0
+  while i < n {
+    xs.push((i * 7919 + k) % 1009)
+    i += 1
+  }
+  let sorted = xs.sorted(by: fn(a, b) { (a * k) % 97 < (b * k) % 97 || ((a * k) % 97 == (b * k) % 97 && a < b) })
+  let mapped = sorted.map(fn(x) { x + k })
+  let label = \"k\"
+  var total = 0
+  var at = 0
+  while at < mapped.length() {
+    let weighed = applies(fn(x) { x * k + label.byteLength() }, mapped.get(at).unwrapOr(0))
+    total = (total * 31 + weighed) % 1000000007
+    at += 1
+  }
+  total + counts(0)
+}
+
+/// Calls the closure it is handed.
+fn applies(f: fn(x: Int) -> Int, x: Int) -> Int {
+  f(x) + counts(0)
+}
+
+/// A refused caller, so the closures run in compiled frames.
+export fn callsSortsByKey(n: Int, k: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  sortsByKey(n, k)
+}
+
 /// Allocations from a compiled frame that are **kept**, so the heap runs out.
 ///
 /// Every array goes into the vector, so nothing a collection could reclaim is
@@ -5094,6 +5128,20 @@ fn a_string_order_from_compiled_code_agrees_with_the_vm() {
             "which {which}: {:?}",
             both.tiers
         );
+    }
+}
+
+/// **A closure is made and called in machine code, and agrees with the VM**
+/// (#605): before, a function that wrote a lambda or called one stayed encoded,
+/// and everything compiled below it could not yield.
+#[test]
+fn a_closure_is_made_and_called_in_machine_code() {
+    on_each_tier(&["sortsByKey", "applies"], &["callsSortsByKey"]);
+    for (n, k) in [(0i64, 3i64), (1, 5), (300, 7), (1000, 11)] {
+        let both = both("callsSortsByKey", vec![Value::int(n), Value::int(k)]);
+        assert!(both.vm.is_ok(), "{n} {k}: {:?}", both.vm);
+        assert_eq!(both.native, both.vm, "{n} {k}");
+        assert!(both.tiers.vm_to_native >= 1, "{n} {k}: {:?}", both.tiers);
     }
 }
 

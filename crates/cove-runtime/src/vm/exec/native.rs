@@ -1651,7 +1651,29 @@ unsafe extern "C" fn call(
     args: u32,
     dst: u32,
 ) -> u32 {
-    call_body::<0>(ctx, base, pc, callee, args, dst)
+    call_body::<0>(ctx, base, pc, callee, args, dst, None)
+}
+
+/// The closure-call helper: one `Inst::CallClosure`, handed over whole (#605).
+///
+/// [`call`] with the callee and its captures read from the closure object in
+/// `closure`, the caller's slot — after the poll, as the encoded tier reads them
+/// at its instruction — and opened by the same `open_frame`, which copies the
+/// captures into the slots after the parameters. The callee runs on whichever
+/// tier it is on, and answers into `dst` as any call does.
+///
+/// # Safety
+///
+/// As [`call`].
+unsafe extern "C" fn call_closure(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    closure: u32,
+    args: u32,
+    dst: u32,
+) -> u32 {
+    call_body::<0>(ctx, base, pc, 0, args, dst, Some(closure))
 }
 
 /// The call helper's body, over a compile-time mask of *extra* work.
@@ -1692,6 +1714,7 @@ unsafe fn call_body<const MASK: u64>(
     callee: u32,
     args: u32,
     dst: u32,
+    closure: Option<u32>,
 ) -> u32 {
     let host = (*ctx).host.cast::<Bridge>();
     let machine = (*host).machine;
@@ -1750,7 +1773,21 @@ unsafe fn call_body<const MASK: u64>(
         // allocates through helpers that sync for themselves, so nothing about
         // a collection depends on this call having been one.
         poll_at_call(machine, budget, host, caller.function, pc)
-            .and_then(|()| {
+            .and_then(|()| match closure {
+                None => Ok((callee, None)),
+                // A closure call (#605): the callee and its captures are the
+                // object's, read after the poll as `encoded.rs`'s
+                // `CALL_CLOSURE` reads them at its instruction, and a null or
+                // foreign word is that arm's refusal at this instruction.
+                Some(slot) => {
+                    let object = machine.mem.word_at(base as usize + slot as usize);
+                    machine
+                        .callee_of(object)
+                        .map(|callee| (callee, Some(object)))
+                        .map_err(|error| error.at(span))
+                }
+            })
+            .and_then(|(callee, captures)| {
                 super::encoded::open_frame(
                     machine,
                     budget,
@@ -1758,12 +1795,12 @@ unsafe fn call_body<const MASK: u64>(
                     span,
                     callee,
                     ArgsId(args),
-                    None,
+                    captures,
                 )
+                .map(|callee_base| (caller.base, callee_base, callee))
             })
-            .map(|callee_base| (caller.base, callee_base))
     };
-    let (caller_base, callee_base) = match opened {
+    let (caller_base, callee_base, callee) = match opened {
         Ok(bases) => bases,
         Err(error) => {
             if MASK & ablate::CENSUS != 0 {
@@ -2518,6 +2555,7 @@ pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
         call,
+        call_closure,
         open,
         close,
         alloc,
@@ -2550,6 +2588,7 @@ pub fn helpers_counting() -> NativeHelpers {
     NativeHelpers {
         safepoint: counted_safepoint,
         call: counted_call,
+        call_closure: counted_call_closure,
         open: counted_open,
         close: counted_close,
         alloc: counted_alloc,
@@ -2614,6 +2653,23 @@ unsafe extern "C" fn counted_call(
     charge(ctx, |calls| calls.call += 1);
     charge_callee(ctx, callee);
     call(ctx, base, pc, callee, args, dst)
+}
+
+/// [`call_closure`], counted as a call.
+///
+/// # Safety
+///
+/// As [`call`].
+unsafe extern "C" fn counted_call_closure(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    closure: u32,
+    args: u32,
+    dst: u32,
+) -> u32 {
+    charge(ctx, |calls| calls.call += 1);
+    call_closure(ctx, base, pc, closure, args, dst)
 }
 
 /// [`open`], counted, and the callee charged if it is the standard library's.
@@ -2818,6 +2874,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
     NativeHelpers {
         safepoint,
         call: call_ablated::<MASK>,
+        call_closure,
         open,
         close,
         alloc,
@@ -2843,7 +2900,7 @@ unsafe extern "C" fn call_ablated<const MASK: u64>(
     args: u32,
     dst: u32,
 ) -> u32 {
-    call_body::<MASK>(ctx, base, pc, callee, args, dst)
+    call_body::<MASK>(ctx, base, pc, callee, args, dst, None)
 }
 
 /// The open half of a direct call: [ADR 0055]'s "Direct native-to-native calls",

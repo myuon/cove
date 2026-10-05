@@ -417,6 +417,7 @@ pub struct Jit {
 struct Helpers {
     safepoint: usize,
     call: usize,
+    call_closure: usize,
     open: usize,
     close: usize,
     alloc: usize,
@@ -455,6 +456,7 @@ impl Jit {
             helpers: Helpers {
                 safepoint: helpers.safepoint as usize,
                 call: helpers.call as usize,
+                call_closure: helpers.call_closure as usize,
                 open: helpers.open as usize,
                 close: helpers.close as usize,
                 alloc: helpers.alloc as usize,
@@ -671,6 +673,7 @@ struct Emit<'a> {
     function: &'a Function,
     safepoint: usize,
     call: usize,
+    call_closure: usize,
     open: usize,
     close: usize,
     alloc: usize,
@@ -750,6 +753,7 @@ impl<'a> Emit<'a> {
             function,
             safepoint: helpers.safepoint,
             call: helpers.call,
+            call_closure: helpers.call_closure,
             open: helpers.open,
             close: helpers.close,
             alloc: helpers.alloc,
@@ -1314,6 +1318,21 @@ impl<'a> Emit<'a> {
                 index,
                 storage: Storage::PackedBytes,
             } => self.byte_at(*dst, *run, *index),
+            // `encoded.rs`'s `FUNC_REF`: the callee's dense id, one store (#605).
+            Inst::FuncRef { dst, callee } => {
+                self.mov_imm64(RAX, i64::from(callee.0));
+                self.store_slot(*dst, RAX);
+            }
+            // `encoded.rs`'s `CALL_CLOSURE`, handed to the runtime whole as a
+            // mediated call is (#605); it resumes where a call does.
+            Inst::CallClosure {
+                dst, closure, args, ..
+            } => {
+                self.frame_live = false;
+                self.insts[pc] = Some(self.code.len());
+                self.callee_closure(*dst, *closure, args.0);
+                self.returns[pc] = Some(self.code.len());
+            }
             Inst::Call { dst, callee, args } => {
                 // Where this frame resumes if the call's poll yields (ADR 0085):
                 // the template from its first byte, which takes the poll again.
@@ -4297,6 +4316,31 @@ impl<'a> Emit<'a> {
         self.bind(on);
         // The helper is allowed to have grown the stack, so the frame pointer
         // derived before the call is not to be used after it.
+        self.frame_live = false;
+    }
+
+    /// [`Inst::CallClosure`](cove_ir::Inst::CallClosure): [`Emit::callee_mediated`]
+    /// with the closure's slot where the callee would be, to the closure-call
+    /// helper, which reads the callee and its captures out of the object.
+    fn callee_closure(&mut self, dst: Slot, closure: Slot, args: u32) {
+        self.store(CTX, OFF_PENDING_WORK, WORK);
+        self.xor_rr(WORK, WORK);
+
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, BASE_BYTES);
+        self.shr_imm8(RSI, 3);
+        self.mov_imm32(RDX, self.pc as i32);
+        self.mov_imm32(RCX, closure as i32);
+        self.mov_imm32(R8, args as i32);
+        self.mov_imm32(R9, dst as i32);
+        self.mov_imm64(RAX, self.call_closure as i64);
+        self.call(RAX);
+
+        let on = self.label();
+        self.test_rr32(RAX, RAX);
+        self.jcc(CC_E, Target::Label(on));
+        self.leave_answered();
+        self.bind(on);
         self.frame_live = false;
     }
 

@@ -1460,6 +1460,11 @@ pub struct NativeHelpers {
     pub safepoint: SafepointFn,
     /// See [`CallFn`].
     pub call: CallFn,
+    /// [`CallFn`]'s shape for an [`Inst::CallClosure`](cove_ir::Inst::CallClosure):
+    /// the fourth argument is the caller's slot holding the closure object
+    /// rather than a callee, which the helper reads out of the object — with
+    /// its captures — after its poll, as the encoded tier does (#605).
+    pub call_closure: CallFn,
     /// See [`OpenFn`]. A code generator that makes no direct call binds it and
     /// never reaches it.
     pub open: OpenFn,
