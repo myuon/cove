@@ -236,7 +236,9 @@ equal counts between the encoded VM and the native tier.
   collection that the resumed safepoint or the re-run allocation triggers
   walks the standing compiled frames as it walks encoded ones.
 - **Park and yield coexist.** A host call is made only by encoded code, so a
-  run parks only where it did (ADR 0080 §2); it yields in either tier.
+  run parks only where it did (ADR 0080 §2); it yields in either tier. (Since
+  [ADR 0087](0087-compiled-code-calls-the-host.md) compiled code calls the
+  host too, and a run parks in either tier.)
 - **Unsupported boundaries decline.** Below a host's callback, beside a
   running task, under a debugger, below an encoded callee of compiled code,
   or over a table without resume points, the request waits. A spawned task

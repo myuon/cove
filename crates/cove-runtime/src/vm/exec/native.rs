@@ -752,6 +752,11 @@ pub(super) enum Stands {
     /// At a backedge's poll made early because a yield was asked for, with
     /// no safepoint due (#604): the block is entered and nothing is taken.
     BeforeBlock,
+    /// Parked at a host call its `pc` is one past, whose answer has been
+    /// written ([ADR 0087]): entered after the call, as the frames below it are.
+    ///
+    /// [ADR 0087]: ../../../../../docs/adr/0087-compiled-code-calls-the-host.md
+    AfterCall,
 }
 
 /// A run that yielded inside compiled code: the chain's floor and where its
@@ -813,6 +818,7 @@ unsafe fn offer_yield(
                     .and_then(|points| match (depth, innermost) {
                         (0, Stands::AtBlock | Stands::BeforeBlock) => points.at_block(frame.pc),
                         (0, Stands::AtInstruction) => points.at_instruction(frame.pc),
+                        (0, Stands::AfterCall) => points.after_call(frame.pc),
                         _ => frame.pc.checked_sub(1).and_then(|at| points.after_call(at)),
                     })
                     .is_some()
@@ -917,7 +923,7 @@ pub(super) unsafe fn resume(
         let at = match stands.take() {
             Some(Stands::AtBlock | Stands::BeforeBlock) => points.at_block(frame.pc),
             Some(Stands::AtInstruction) => points.at_instruction(frame.pc),
-            None => points.after_call(frame.pc - 1),
+            Some(Stands::AfterCall) | None => points.after_call(frame.pc - 1),
         }
         .expect("the yield checked every frame has its resume point");
         let held: *mut Machine = machine;
@@ -938,6 +944,111 @@ pub(super) unsafe fn resume(
         )?;
     }
     Ok(())
+}
+
+/// The host-call helper: one `Inst::CallHost`, handed over whole ([ADR 0087]).
+///
+/// `encoded.rs`'s `CALL_HOST` arm: the frame synced, `Machine::call_host` —
+/// the arguments materialised, the registry's grant, budget, schema and trace,
+/// the wait — and the answer's words written at `dst`. A host call is a Rust
+/// frame a callback may run Cove under, so it gets a thread scope of its own,
+/// as `drive_from` does.
+///
+/// Where the run may park, it may park **here**, with this chain standing: the
+/// host is offered the parkable call when the run is parkable and quiescent —
+/// the chain's frames are on no Rust frame that matters, as for a yield — and
+/// every frame from the chain's floor up can be re-entered after its call. The
+/// marker the park answers is carried out as a yield's is, and
+/// `Machine::resume` writes the answer and re-enters the frames after their
+/// calls (`Stands::AfterCall`). Where some frame cannot be re-entered, the host
+/// is called the blocking way, as it is wherever a run cannot park.
+///
+/// # Safety
+///
+/// As [`call`].
+///
+/// [ADR 0087]: ../../../../../docs/adr/0087-compiled-code-calls-the-host.md
+unsafe extern "C" fn host(
+    ctx: *mut NativeCtx,
+    _base: u64,
+    pc: u32,
+    op: u32,
+    args: u32,
+    dst: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+    let tier = (*host).tier;
+    let floor = (*host).floor;
+
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+
+    let answered = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let caller = *machine.frames.last().expect("a native frame is executing");
+        let span = machine.span(caller.function, pc as usize);
+        // Parkable here only if the chain could be re-entered after it.
+        let resumable = floor > 0
+            && machine.frames.len() > floor
+            && machine.frames[floor..]
+                .iter()
+                .rev()
+                .enumerate()
+                .all(|(depth, frame)| {
+                    (*tier)
+                        .resume_points(frame.function)
+                        .and_then(|points| match depth {
+                            0 => points.after_call(frame.pc),
+                            _ => frame.pc.checked_sub(1).and_then(|at| points.after_call(at)),
+                        })
+                        .is_some()
+                });
+        let parking = machine.parking;
+        machine.parking = parking && resumable;
+        let called = std::thread::scope(|threads| {
+            let mut running = machine.no_handles();
+            let called = machine.call_host(
+                caller.base,
+                cove_ir::HostOpId(op),
+                ArgsId(args),
+                budget,
+                span,
+                threads,
+                &mut running,
+            );
+            machine.stop_all(&mut running);
+            called
+        });
+        machine.parking = parking;
+        match called {
+            Ok(words) => {
+                for (at, word) in words.iter().enumerate() {
+                    machine.mem.set_slot(caller.base, dst + at as u32, *word);
+                }
+                Ok(())
+            }
+            Err(marker) if machine.suspended.is_some() => {
+                machine.park_compiled(Yielded {
+                    floor,
+                    innermost: Stands::AfterCall,
+                });
+                Err(marker)
+            }
+            Err(error) => Err(error.at(span)),
+        }
+    };
+    republish(ctx, host);
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
 }
 
 /// The allocation helper: one `Inst::Alloc`, handed over whole — or the
@@ -2556,6 +2667,7 @@ pub fn helpers() -> NativeHelpers {
         safepoint,
         call,
         call_closure,
+        host,
         open,
         close,
         alloc,
@@ -2589,6 +2701,7 @@ pub fn helpers_counting() -> NativeHelpers {
         safepoint: counted_safepoint,
         call: counted_call,
         call_closure: counted_call_closure,
+        host,
         open: counted_open,
         close: counted_close,
         alloc: counted_alloc,
@@ -2875,6 +2988,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         safepoint,
         call: call_ablated::<MASK>,
         call_closure,
+        host,
         open,
         close,
         alloc,

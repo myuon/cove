@@ -1465,6 +1465,13 @@ pub struct NativeHelpers {
     /// rather than a callee, which the helper reads out of the object — with
     /// its captures — after its poll, as the encoded tier does (#605).
     pub call_closure: CallFn,
+    /// [`CallFn`]'s shape for an [`Inst::CallHost`](cove_ir::Inst::CallHost):
+    /// the fourth argument is the `HostOpId`. The helper makes the host call
+    /// as the encoded tier does — and where the run may park, parks it with
+    /// this frame standing ([ADR 0087]) — and writes the answer into `dst`.
+    ///
+    /// [ADR 0087]: ../../../../docs/adr/0087-compiled-code-calls-the-host.md
+    pub host: CallFn,
     /// See [`OpenFn`]. A code generator that makes no direct call binds it and
     /// never reaches it.
     pub open: OpenFn,

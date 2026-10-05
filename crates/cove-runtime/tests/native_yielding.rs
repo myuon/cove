@@ -212,11 +212,35 @@ export fn recursing() -> Int {
   total
 }
 
-/// Encoded, because of its host call, and called from compiled code: a
-/// request it raises is below a `drive_from`, where nothing can yield.
+/// Encoded — `Shared.lock` keeps it there, a host call no longer does (ADR
+/// 0087) — and called from compiled code: a request it raises is below a
+/// `drive_from`, where nothing can yield.
 fn nudged(n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
   sched.nudge()
   spin(n)
+}
+
+/// Compiled, with a host call in it (ADR 0087): parks at `wait` with its own
+/// frame and `spin`'s caller chain standing, and yields in `spin` below it.
+fn waits(n: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < n {
+    total += sched.wait(i)
+    total = (total + spin(20000)) % 1000003
+    i += 1
+  }
+  total
+}
+
+/// cove-tools' `algo.timed` (#605): a host call around a long compiled call,
+/// in one compiled function, so the call below it can yield.
+fn timed(n: Int) -> Int {
+  sched.nudge()
+  let answer = spin(n)
+  sched.nudge()
+  answer
 }
 
 /// Compiled, calling an encoded function that calls a compiled one.
@@ -383,6 +407,16 @@ export fn buildingLong() -> Int {
 export fn churning() -> Int {
   sched.nudge()
   churn(30000)
+}
+
+export fn waiting() -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  waits(6)
+}
+
+export fn timing() -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  timed(30000)
 }
 
 export fn recursing2() -> Int {
@@ -696,7 +730,15 @@ fn the_loops_are_compiled_and_the_entries_are_not() {
             "{compiled} is refused: {refused:?}"
         );
     }
-    for entry in ["main", "nudged"] {
+    for compiled in ["waits", "timed"] {
+        assert!(
+            !refused
+                .iter()
+                .any(|name| name.ends_with(&format!(".{compiled}"))),
+            "{compiled} makes a host call and is compiled (ADR 0087): {refused:?}"
+        );
+    }
+    for entry in ["nudged", "waiting", "timing"] {
         assert!(
             refused
                 .iter()
@@ -1065,7 +1107,15 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
     let finished = loop {
         match next {
             Taken::Answered(finished, ..) => break finished,
-            Taken::Parked(_) => panic!("nothing here pends"),
+            Taken::Parked(mut parked) => {
+                let asked = *parked
+                    .take_request()
+                    .expect("wait's request")
+                    .downcast::<i64>()
+                    .expect("an Int");
+                next = taken(parked.resume(Ok(Transfer::Int(asked + 1))));
+                raised_since = raised.load(Ordering::Relaxed);
+            }
             Taken::Yielded(yielded) => {
                 let now = raised.load(Ordering::Relaxed);
                 unheeded = unheeded.max(now - raised_since);
@@ -1099,7 +1149,9 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
 /// The shapes a storm is run over: copies, snapshots, a `toVector` loop with
 /// a length check, strings, allocation-heavy loops, recursion, and the loops
 /// and calls of the cases above.
-const STORMED: [&str; 8] = [
+const STORMED: [&str; 10] = [
+    "waiting",
+    "timing",
     "copying",
     "snapshotting",
     "regrowing",
@@ -1194,4 +1246,46 @@ fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
             assert_eq!(run.finished, expected, "{name}, storm {seed}: {run:?}");
         }
     }
+}
+
+/// **A host call from compiled code parks with the chain standing** (ADR
+/// 0087): `waits` is compiled, parks at each `wait`, is resumed on another
+/// thread after the call with its answer, and answers as the run that called
+/// the host the blocking way does, in the same count for the same fuel.
+#[test]
+fn a_host_call_in_compiled_code_parks_and_resumes_after_it() {
+    let world = world();
+    let blocking = {
+        let mut vm = world.quiet();
+        let answer = vm.invoke_within(unlimited(), "app", "waiting", Vec::new());
+        finished(&vm, &answer)
+    };
+    let run = drive(world.quiet().invoke_within_parkable(
+        unlimited(),
+        "app",
+        "waiting",
+        Vec::new(),
+    ));
+    assert_eq!(run.parks, 6, "{run:?}");
+    assert_eq!(run.finished, blocking);
+    assert_eq!(blocking.answer, world.encoded_answer("waiting"));
+}
+
+/// **cove-tools' `timed` shape yields** (#605): a clock read around a long
+/// call no longer keeps the function encoded, so the call below it yields at
+/// once when asked, and nothing is declined.
+#[test]
+fn a_host_call_around_a_long_call_no_longer_blocks_its_yields() {
+    let world = world();
+    let expected = world.uninterrupted("timing", unlimited());
+    let run = drive(
+        world
+            .vm()
+            .invoke_within_parkable(unlimited(), "app", "timing", Vec::new()),
+    );
+    assert_eq!(run.finished, expected);
+    // The first nudge is honoured in `spin`; the second is after it, with
+    // nothing left to poll before the run answers.
+    assert_eq!(run.native_yields, 1, "{run:?}");
+    assert_eq!(run.declined, 0, "{run:?}");
 }
