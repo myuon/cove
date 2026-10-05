@@ -4280,10 +4280,11 @@ pub fn a_string_order_is_the_runtimes_leaf<A: Arm>() {
     forget_ordered();
 }
 
-/// A `String`'s order and its equality are the only `String` comparisons in the
-/// slice: `!=` and the ordered forms `cmp_str!` answers still refuse the
-/// function, until something asks for them.
-pub fn only_a_strings_order_and_equality_are_in_the_slice<A: Arm>() {
+/// Every `String` comparison is in the slice: its order and its equality since
+/// #494, and `!=` and the ordered forms `cmp_str!` answers since #605, which
+/// read the same leaf's order. That they answer what the VM answers is
+/// `cove-runtime`'s `every_string_comparison_runs_as_machine_code`.
+pub fn every_string_comparison_is_in_the_slice<A: Arm>() {
     assert!(compiles::<A>(&ordering_strings()));
     assert!(compiles::<A>(&equating(Compare::Str)));
     for op in [CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
@@ -4301,7 +4302,7 @@ pub fn only_a_strings_order_and_equality_are_in_the_slice<A: Arm>() {
                 Inst::Return { src: 2 },
             ],
         ));
-        assert!(!compiles::<A>(&held), "`Str` {op:?} is outside the slice");
+        assert!(compiles::<A>(&held), "`Str` {op:?} is in the slice");
     }
 }
 

@@ -193,14 +193,19 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// inside with `Identity` (issue #493), and refusing it kept every vector of
 /// such a value on the encoded machine, two crossings a node.
 ///
-/// Everything else — `Float`'s order, and `Str` but for its equality and its
-/// order — is outside the slice.
+/// [`Str`](Compare::Str) takes every comparison: its order is one leaf helper
+/// call, and `!=`, `<`, `<=`, `>` and `>=` read that order as `==` does. They
+/// were left out until code asked — a `String` `!=` in an ordinary function
+/// kept the whole function encoded, and with it everything compiled below it
+/// unpreemptible (issue #605).
+///
+/// Everything else — `Float`'s three-way order — is outside the slice.
 fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     match on {
         Compare::Int => true,
         Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Order),
         Compare::Identity => matches!(op, CmpOp::Eq | CmpOp::Ne),
-        Compare::Str => matches!(op, CmpOp::Eq | CmpOp::Order),
+        Compare::Str => true,
         Compare::Float => op != CmpOp::Order,
     }
 }
@@ -1788,15 +1793,27 @@ mod tests {
         }
     }
 
-    /// `String` equality is in the slice beside its order — what ADR 0068's
-    /// pair comparison asks (issue #494), and not a comparison more — and
-    /// every `Float` comparison but the three-way order the VM refuses, which
-    /// is what `std.float.renderInto` asks (issue #501).
+    /// Every `String` comparison is in the slice — equality and the order since
+    /// issue #494, the other five since #605 — and every `Float` comparison but
+    /// the three-way order the VM refuses, which is what `std.float.renderInto`
+    /// asks (issue #501).
     #[test]
     fn a_string_and_a_float_are_compared_as_far_as_asked() {
         use cove_ir::{CmpOp, Compare};
         for (on, admitted) in [
-            (Compare::Str, [CmpOp::Eq, CmpOp::Order].as_slice()),
+            (
+                Compare::Str,
+                [
+                    CmpOp::Eq,
+                    CmpOp::Ne,
+                    CmpOp::Lt,
+                    CmpOp::Le,
+                    CmpOp::Gt,
+                    CmpOp::Ge,
+                    CmpOp::Order,
+                ]
+                .as_slice(),
+            ),
             (
                 Compare::Float,
                 [

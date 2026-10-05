@@ -375,6 +375,11 @@ export fn building() -> Int {
   strings(40000)
 }
 
+export fn buildingLong() -> Int {
+  sched.nudge()
+  strings(400000)
+}
+
 export fn churning() -> Int {
   sched.nudge()
   churn(30000)
@@ -994,11 +999,14 @@ struct Stormed {
     finished: Finished,
     native_yields: usize,
     yields: usize,
-    longest: Duration,
     /// The most compiled frames any one yield left standing.
     deepest: usize,
-    /// How long the whole run took, yields included.
-    took: Duration,
+    /// The most requests the monitor raised between two yields, or between
+    /// the last one and the answer: how long, in the monitor's own clock, the
+    /// run went on while asked. Unlike a wall-clock gap, a monitor the machine
+    /// did not run raises nothing, so this does not grow with the machine's
+    /// load.
+    unheeded: u64,
 }
 
 /// A splitmix64 step, so a storm's pauses are random and reproducible.
@@ -1015,7 +1023,10 @@ fn splitmix(state: &mut u64) -> u64 {
 /// safepoint — and every yield resumed at once, every eighth on a thread of
 /// its own.
 fn storm(world: &World, name: &str, seed: u64, most: u64) -> Stormed {
-    storm_on(world.quiet(), name, seed, most)
+    // `nudge` raises this run's request too, so every shape is asked at least
+    // once, whenever the monitor gets a core: on a loaded two-core runner a
+    // short shape can finish before it does.
+    storm_on(world.vm(), name, seed, most)
 }
 
 /// [`storm`] over a machine of the caller's.
@@ -1023,9 +1034,11 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
     let signal = vm.yield_request();
     let done = Arc::new(AtomicBool::new(false));
     let blowing = Arc::new(AtomicBool::new(false));
+    let raised = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let monitor = {
         let done = Arc::clone(&done);
         let blowing = Arc::clone(&blowing);
+        let raised = Arc::clone(&raised);
         std::thread::spawn(move || {
             let mut state = seed;
             blowing.store(true, Ordering::Relaxed);
@@ -1036,6 +1049,7 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
                     std::hint::spin_loop();
                 }
                 signal.request();
+                raised.fetch_add(1, Ordering::Relaxed);
             }
         })
     };
@@ -1045,16 +1059,16 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
         std::thread::yield_now();
     }
     let (mut yields, mut native_yields, mut deepest) = (0, 0, 0);
-    let mut longest = Duration::ZERO;
-    let started = std::time::Instant::now();
-    let mut since = started;
+    let mut unheeded = 0;
+    let mut raised_since = raised.load(Ordering::Relaxed);
     let mut next = taken(vm.invoke_within_parkable(unlimited(), "app", name, Vec::new()));
     let finished = loop {
         match next {
             Taken::Answered(finished, ..) => break finished,
             Taken::Parked(_) => panic!("nothing here pends"),
             Taken::Yielded(yielded) => {
-                longest = longest.max(since.elapsed());
+                let now = raised.load(Ordering::Relaxed);
+                unheeded = unheeded.max(now - raised_since);
                 yields += 1;
                 if yielded.compiled_frames() > 0 {
                     native_yields += 1;
@@ -1066,21 +1080,19 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
                         .unwrap(),
                     _ => taken(yielded.resume()),
                 };
-                since = std::time::Instant::now();
+                raised_since = raised.load(Ordering::Relaxed);
             }
         }
     };
-    longest = longest.max(since.elapsed());
-    let took = started.elapsed();
+    unheeded = unheeded.max(raised.load(Ordering::Relaxed) - raised_since);
     done.store(true, Ordering::Relaxed);
     monitor.join().unwrap();
     Stormed {
         finished,
         native_yields,
         yields,
-        longest,
         deepest,
-        took,
+        unheeded,
     }
 }
 
@@ -1131,26 +1143,23 @@ fn a_storm_of_yield_requests_changes_no_answer_and_no_count() {
 /// helper's safepoint — a copy, a buffer's growth — and never a due backedge
 /// still offers the yield.
 ///
-/// "Long" is relative, so a slow or shared machine does not fail it: no
-/// stretch without a yield may be a quarter of the run, unless it is shorter
-/// than a scheduler's hiccup (5 ms) — a shape that runs a millisecond or two
-/// is measured against the machine as much as against itself. A shape that
-/// could not yield runs whole without one; before the fix, `building` ran
-/// 22 ms so.
+/// "Long" is counted in the monitor's requests, not in time, so a loaded
+/// machine does not fail it: a run that heeds its requests yields within a
+/// few of them, and one that cannot goes on through all the monitor raises —
+/// `buildingLong`, before the fix, through about ten thousand.
 #[test]
 fn no_compiled_shape_runs_long_without_yielding_when_asked() {
     let world = world();
-    for name in STORMED {
+    for name in STORMED.iter().chain(&["buildingLong"]) {
         let run = storm(&world, name, 17, 20);
         assert!(
             run.native_yields > 0,
             "{name}: no yield inside compiled code: {run:?}"
         );
         assert!(
-            run.longest * 4 < run.took || run.longest < Duration::from_millis(5),
-            "{name}: ran {:?} of {:?} without yielding: {run:?}",
-            run.longest,
-            run.took
+            run.unheeded < 2_000,
+            "{name}: went on through {} requests without yielding: {run:?}",
+            run.unheeded
         );
     }
 }
@@ -1179,7 +1188,9 @@ fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
         let expected =
             drive(encoded().invoke_within_parkable(unlimited(), "app", name, Vec::new())).finished;
         for (seed, most) in [(31, 0), (62, 40)] {
-            let run = storm_on(encoded(), name, seed, most);
+            let vm = encoded();
+            *world.sched.signal.lock().unwrap() = Some(vm.yield_request());
+            let run = storm_on(vm, name, seed, most);
             assert_eq!(run.finished, expected, "{name}, storm {seed}: {run:?}");
         }
     }

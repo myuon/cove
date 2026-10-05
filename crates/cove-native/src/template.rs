@@ -1541,6 +1541,15 @@ impl<'a> Emit<'a> {
                 a,
                 b,
             } => self.str_equal(*dst, *a, *b),
+            // `encoded.rs`'s `NE_STR`, `LT_STR`, `LE_STR`, `GT_STR` and
+            // `GE_STR`: the same order, read the other five ways (#605).
+            Inst::Cmp {
+                on: Compare::Str,
+                op,
+                dst,
+                a,
+                b,
+            } => self.str_compare(*op, *dst, *a, *b),
             Inst::Cmp {
                 on: Compare::Float,
                 op,
@@ -1588,6 +1597,17 @@ impl<'a> Emit<'a> {
                 target,
             } => {
                 self.str_equal(*dst, *a, *b);
+                self.branch_when_false(pc, *target);
+            }
+            Inst::CmpBranch {
+                on: Compare::Str,
+                op,
+                dst,
+                a,
+                b,
+                target,
+            } => {
+                self.str_compare(*op, *dst, *a, *b);
                 self.branch_when_false(pc, *target);
             }
             Inst::CmpBranch {
@@ -3965,6 +3985,23 @@ impl<'a> Emit<'a> {
         self.movzx_eax_al();
         self.store_slot(dst, RAX);
         self.test_rr(RAX, RAX);
+    }
+
+    /// `encoded.rs`'s `cmp_str!` for `!=`, `<`, `<=`, `>` and `>=`:
+    /// [`Emit::order_str`]'s call, and its `-1`, `0` or `1` compared with
+    /// nought by [`Emit::compare`] — `compare(op, order_strings(x, y).cmp(&0))`,
+    /// which is the arm. The helper is a leaf and clobbers `RCX`, so nought is
+    /// put there after it returns; [`FRAME`] survives it, as in
+    /// [`Emit::str_equal`]. Leaves the flags [`Emit::compare`] leaves, for a
+    /// fused branch.
+    fn str_compare(&mut self, op: CmpOp, dst: Slot, a: Slot, b: Slot) {
+        self.load_slot(RSI, a);
+        self.load_slot(RDX, b);
+        self.mov_rr(RDI, CTX);
+        self.mov_imm64(RAX, self.order_str as i64);
+        self.call(RAX);
+        self.xor_rr(RCX, RCX);
+        self.compare(op, dst);
     }
 
     /// `encoded.rs`'s six `cmp_float!` arms: IEEE 754's `==`, `!=`, `<`, `<=`,
