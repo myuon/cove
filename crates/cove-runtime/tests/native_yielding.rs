@@ -1132,8 +1132,11 @@ fn a_storm_of_yield_requests_changes_no_answer_and_no_count() {
 /// still offers the yield.
 ///
 /// "Long" is relative, so a slow or shared machine does not fail it: no
-/// stretch without a yield may be a quarter of the run. A shape that could not
-/// yield runs whole without one; before the fix, `building` did.
+/// stretch without a yield may be a quarter of the run, unless it is shorter
+/// than a scheduler's hiccup (5 ms) — a shape that runs a millisecond or two
+/// is measured against the machine as much as against itself. A shape that
+/// could not yield runs whole without one; before the fix, `building` ran
+/// 22 ms so.
 #[test]
 fn no_compiled_shape_runs_long_without_yielding_when_asked() {
     let world = world();
@@ -1144,7 +1147,7 @@ fn no_compiled_shape_runs_long_without_yielding_when_asked() {
             "{name}: no yield inside compiled code: {run:?}"
         );
         assert!(
-            run.longest * 4 < run.took,
+            run.longest * 4 < run.took || run.longest < Duration::from_millis(5),
             "{name}: ran {:?} of {:?} without yielding: {run:?}",
             run.longest,
             run.took
