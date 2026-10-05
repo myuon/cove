@@ -36,6 +36,10 @@ pub struct Conn {
     pub served: u32,
     /// When it was accepted, which the request timeline records.
     pub opened: std::time::Instant,
+    /// Whether the socket holds the options a worker reads it with (its read
+    /// timeout and `TCP_NODELAY`). They outlive a request, so a worker sets
+    /// them once rather than per request; whatever changes one clears this.
+    pub configured: bool,
 }
 
 impl Conn {
@@ -45,6 +49,7 @@ impl Conn {
             buffer: Vec::new(),
             served: 0,
             opened: std::time::Instant::now(),
+            configured: false,
         }
     }
 }
@@ -255,7 +260,10 @@ mod imp {
                 Arc::clone(&self.stats),
             );
             std::thread::spawn(move || {
+                let mut conn = conn;
                 let _ = conn.stream.set_read_timeout(Some(timeout));
+                // The idle wait's timeout is not the one a worker reads with.
+                conn.configured = false;
                 let mut byte = [0u8; 1];
                 let woke = conn.stream.peek(&mut byte).is_ok();
                 stats.idle.fetch_sub(1, Ordering::Relaxed);

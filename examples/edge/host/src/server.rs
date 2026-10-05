@@ -571,9 +571,17 @@ impl Shared {
     /// The connection is readable when it gets here, so the read waits only
     /// for the rest of a request that has started arriving — at most five
     /// seconds, for a client that sends half a head and stops.
+    ///
+    /// Both socket options are the socket's, not the request's, so they are
+    /// set once per connection: two `setsockopt(2)`s on every request were
+    /// about 5% of a `hello` request's server CPU (compare/README.md,
+    /// "Stage 2", the profile).
     fn serve(&self, mut conn: Conn, accepted: Instant, worker: usize) {
-        let _ = conn.stream.set_read_timeout(Some(Duration::from_secs(5)));
-        let _ = conn.stream.set_nodelay(true);
+        if !conn.configured {
+            let _ = conn.stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = conn.stream.set_nodelay(true);
+            conn.configured = true;
+        }
         let request = match read_request(&mut conn.stream, &mut conn.buffer) {
             Ok(Some(request)) => request,
             // Closed by the client between requests: nothing is owed.
