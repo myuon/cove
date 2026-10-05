@@ -108,7 +108,7 @@ mod imp {
     use std::io::{ErrorKind, Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
@@ -120,6 +120,11 @@ mod imp {
         /// One byte written here wakes the thread out of `poll` to take what
         /// was sent.
         waker: UnixStream,
+        /// Whether a byte is already on its way: set by the park that writes
+        /// one, cleared by the thread once it has drained the byte and before
+        /// it takes what was sent, so a park between the two needs no write
+        /// of its own.
+        pending: Arc<AtomicBool>,
     }
 
     impl Idle {
@@ -132,12 +137,15 @@ mod imp {
             let (waker, woken) = UnixStream::pair()?;
             waker.set_nonblocking(true)?;
             woken.set_nonblocking(true)?;
+            let pending = Arc::new(AtomicBool::new(false));
+            let cleared = Arc::clone(&pending);
             std::thread::Builder::new()
                 .name("edge-idle".into())
-                .spawn(move || run(timeout, received, woken, ready, stats))?;
+                .spawn(move || run(timeout, received, woken, cleared, ready, stats))?;
             Ok(Idle {
                 sender: Mutex::new(sender),
                 waker,
+                pending,
             })
         }
 
@@ -145,8 +153,13 @@ mod imp {
             // The thread outlives every sender; a send cannot fail while the
             // server runs.
             let _ = self.sender.lock().unwrap().send(conn);
-            // A full pipe means a wake-up is already pending.
-            let _ = (&self.waker).write(&[1]);
+            // Sent before the flag is read. A thread that clears the flag after
+            // this swap reads this swap's value, so it sees the connection; if
+            // it cleared the flag before, this swap finds it clear and writes.
+            if !self.pending.swap(true, Ordering::AcqRel) {
+                // A full pipe means a wake-up is already pending.
+                let _ = (&self.waker).write(&[1]);
+            }
         }
     }
 
@@ -154,6 +167,7 @@ mod imp {
         timeout: Duration,
         received: Receiver<Conn>,
         mut woken: UnixStream,
+        pending: Arc<AtomicBool>,
         ready: Ready,
         stats: Arc<IdleStats>,
     ) {
@@ -198,7 +212,14 @@ mod imp {
                 eprintln!("edge-idle: poll: {}", std::io::Error::last_os_error());
             }
             if fds[0].revents != 0 {
+                // Cleared after the drain and before the next `try_iter`: a
+                // park after the clear writes a byte the next `poll` sees, and
+                // one before it — which wrote nothing, seeing the flag still
+                // set — is taken at the top of the loop. Cleared before the
+                // drain, a byte written in between would be drained with the
+                // flag left set, and no park would write again.
                 while matches!(woken.read(&mut drain), Ok(n) if n > 0) {}
+                pending.swap(false, Ordering::AcqRel);
             }
             let now = Instant::now();
             let mut readable = Vec::new();
