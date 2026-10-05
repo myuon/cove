@@ -146,8 +146,10 @@ the function's mapping:
 | after a call | the end of an `Inst::Call`'s template | every other compiled frame: it is waiting on the call above it |
 
 At each of these points nothing but the frame, the context and the
-prologue's registers is live — the code generator already re-derives its
-frame pointer there — and the work accumulator is nought in an uninterrupted
+prologue's registers is live — the code generator re-derives its frame
+pointer there (at an instruction's start only since [ADR
+0086](0086-a-yield-request-makes-compiled-code-poll.md), which issue #604
+found wanting) — and the work accumulator is nought in an uninterrupted
 run (a backedge's safepoint clears it before the jump; a call and an
 allocation publish and clear it before the hand-over). So entering at one,
 from the prologue, is the uninterrupted run's state exactly.

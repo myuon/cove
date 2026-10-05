@@ -1317,6 +1317,10 @@ impl<'a> Emit<'a> {
             Inst::Call { dst, callee, args } => {
                 // Where this frame resumes if the call's poll yields (ADR 0085):
                 // the template from its first byte, which takes the poll again.
+                // Entered from the resume prologue, which derives no frame
+                // pointer, so the template must not trust one a predecessor in
+                // the block left (#604).
+                self.frame_live = false;
                 self.insts[pc] = Some(self.code.len());
                 self.callee(*dst, callee.0, args.0);
                 // Where a frame waiting on this call resumes (ADR 0085):
@@ -1426,7 +1430,13 @@ impl<'a> Emit<'a> {
             } => self.run_copy(args.0, RunOp::FindBytes, 0),
             Inst::Alloc { dst, layout, len } => {
                 // Where this frame resumes if the allocation's safepoint yields
-                // (ADR 0085): the template from its first byte.
+                // (ADR 0085): the template from its first byte. The resume
+                // prologue derives no frame pointer, and a `Len::Slot` count is
+                // read through one before the helper is called — through the
+                // one the previous instruction left, until #604, which on a
+                // resume was whatever the register held: a count of nought, and
+                // a `RunCopy` into a store of none.
+                self.frame_live = false;
                 self.insts[pc] = Some(self.code.len());
                 self.allocate(*dst, layout.0, *len);
             }

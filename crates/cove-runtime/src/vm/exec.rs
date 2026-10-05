@@ -559,6 +559,21 @@ pub(crate) struct Machine<'a> {
     /// no resume point. The request stays raised, and
     /// the run yields at the first safepoint where it can.
     yields_declined: u64,
+    /// Whether this run has been resumed from a yield and has not yet taken
+    /// the safepoint it stood before. While it is, a request is not honoured:
+    /// a run that yielded again there would have done nothing since it was
+    /// resumed, and one whose request is raised as fast as it is lowered would
+    /// never move. [`Machine::safepoint`] lowers it, so it costs the request
+    /// one stride at most.
+    just_resumed: bool,
+    /// Whether compiled code has been offered a yield since the last
+    /// safepoint and declined it. While a request is raised, compiled code is
+    /// told its next poll is due ([`Machine::native_poll_at`]) so that a loop
+    /// whose every turn passes a helper's safepoint still reaches a backedge
+    /// that can yield (#604); once that has been declined, the poll waits for
+    /// the stride again, so a run that cannot yield pays one early poll a
+    /// stride and not one a turn. [`Machine::safepoint`] lowers it.
+    declined_this_stride: bool,
     /// Which task this machine is running, for a trace and for the way back
     /// a host is offered.
     task: u64,
@@ -985,6 +1000,8 @@ impl<'a> Machine<'a> {
             yielded_native: None,
             descheduled: Duration::ZERO,
             yields_declined: 0,
+            just_resumed: false,
+            declined_this_stride: false,
             task: ENTRY_TASK,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1070,6 +1087,8 @@ impl<'a> Machine<'a> {
             yielded_native: None,
             descheduled: Duration::ZERO,
             yields_declined: 0,
+            just_resumed: false,
+            declined_this_stride: false,
             task,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1409,6 +1428,8 @@ impl<'a> Machine<'a> {
     /// then the collector, which must see a frame this caller has already
     /// `sync`ed.
     fn safepoint(&mut self, budget: &Meter, id: FunctionId, pc: usize) -> Result<(), RuntimeError> {
+        self.just_resumed = false;
+        self.declined_this_stride = false;
         stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
         let gathered = self.work() - self.charged_work;
         self.charged_work = self.work();
@@ -1456,6 +1477,32 @@ impl<'a> Machine<'a> {
     #[inline]
     pub(crate) fn poll_budget(&self) -> u64 {
         SAFEPOINT_STRIDE.saturating_sub(self.work().saturating_sub(self.charged_work))
+    }
+
+    /// The threshold compiled code is given: [`Machine::poll_budget`], or
+    /// nought while a yield is asked for and has not been declined this stride.
+    ///
+    /// Nought makes compiled code's next poll call the safepoint helper, which
+    /// offers the yield without taking a safepoint that is not due (#604).
+    /// Without it, a loop whose every turn passes a helper that takes a
+    /// safepoint and cannot yield — a copy, a buffer's growth, a string's
+    /// text — would never find its backedge due, and would neither yield nor
+    /// decline however long it ran. One `bool` test for a run that is not
+    /// parkable, and one relaxed load for one that is.
+    #[inline]
+    pub(crate) fn native_poll_at(&self) -> u64 {
+        match self.yield_wanted() {
+            true => 0,
+            false => self.poll_budget(),
+        }
+    }
+
+    /// Whether a yield is asked for that this run has not declined this
+    /// stride and is not just back from: the request both tiers poll early
+    /// for (#604).
+    #[inline]
+    fn yield_wanted(&self) -> bool {
+        self.yield_requested() && !self.declined_this_stride && !self.just_resumed
     }
 
     /// Whether a safepoint is due: the stride has been reached since the last
@@ -2365,8 +2412,11 @@ impl<'a> Machine<'a> {
     #[cold]
     #[inline(never)]
     pub(super) fn offer_yield(&mut self) -> Result<(), RuntimeError> {
+        if self.just_resumed {
+            return Ok(());
+        }
         if !self.yieldable() {
-            self.yields_declined += 1;
+            self.decline_yield();
             return Ok(());
         }
         self.clear_yield_request();
@@ -2387,6 +2437,7 @@ impl<'a> Machine<'a> {
     /// Counts a safepoint at which a requested yield could not be honoured.
     fn decline_yield(&mut self) {
         self.yields_declined += 1;
+        self.declined_this_stride = true;
     }
 
     /// Gives the thread up at a safepoint inside compiled code, whose chain's
@@ -2448,8 +2499,11 @@ impl<'a> Machine<'a> {
         // Left raised, it would be honoured at the very safepoint the run
         // stands before — the first thing a resumed run reaches — and a run
         // resumed with its flag up would yield again having done nothing, as
-        // often as it was resumed (ADR 0085).
+        // often as it was resumed (ADR 0085). And one raised again before the
+        // run reaches that safepoint is held until it has taken it, for the
+        // same reason (#604): `just_resumed`.
         self.clear_yield_request();
+        self.just_resumed = true;
         if let Some(yielded) = self.yielded_native.take() {
             // ADR 0085: the compiled frames first, each re-entered where it
             // stands, down to the one the encoded tier called; then the loop,

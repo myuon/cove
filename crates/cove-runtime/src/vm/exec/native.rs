@@ -670,7 +670,7 @@ unsafe fn republish(ctx: *mut NativeCtx, host: *mut Bridge<'_, '_>) {
     (*machine).mem.chunk_bases(&mut (*tier).chunks);
     (*ctx).words = (*machine).mem.words_ptr();
     (*ctx).chunks = (*tier).chunks.as_ptr();
-    (*ctx).poll_at = (*machine).poll_budget();
+    (*ctx).poll_at = (*machine).native_poll_at();
 }
 
 /// The safepoint helper: [ADR 0040]'s three steps, in that order, and none of
@@ -705,11 +705,23 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
             .function;
         // ADR 0085, after ADR 0084: a run asked to give its thread up does so
         // here, before the safepoint's own work, which it does on resuming.
-        // One load, on a path taken once a stride.
-        match machine.yield_requested() {
-            true => offer_yield(machine, (*host).tier, (*host).floor, Stands::AtBlock)
-                .or_else(|| machine.safepoint(budget, id, pc as usize).err()),
-            false => machine.safepoint(budget, id, pc as usize).err(),
+        // One load, on a path taken once a stride. The poll may also have been
+        // made early, with no safepoint due, because a request is raised
+        // (`Machine::native_poll_at`, #604): then there is only the yield to
+        // offer, and the run resumes at the loop head without a safepoint.
+        let due = machine.safepoint_due();
+        let stands = match due {
+            true => Stands::AtBlock,
+            false => Stands::BeforeBlock,
+        };
+        let offered = match machine.yield_requested() {
+            true => offer_yield(machine, (*host).tier, (*host).floor, stands),
+            false => None,
+        };
+        match (offered, due) {
+            (Some(marker), _) => Some(marker),
+            (None, true) => machine.safepoint(budget, id, pc as usize).err(),
+            (None, false) => None,
         }
     };
     match stopped {
@@ -737,6 +749,9 @@ pub(super) enum Stands {
     /// instruction its `pc` names has done anything. The instruction is run
     /// again from its first byte and takes the safepoint itself.
     AtInstruction,
+    /// At a backedge's poll made early because a yield was asked for, with
+    /// no safepoint due (#604): the block is entered and nothing is taken.
+    BeforeBlock,
 }
 
 /// A run that yielded inside compiled code: the chain's floor and where its
@@ -780,6 +795,11 @@ unsafe fn offer_yield(
     floor: usize,
     innermost: Stands,
 ) -> Option<RuntimeError> {
+    // A run resumed and not yet past the safepoint it stood before has done
+    // nothing to yield for; the request waits a stride (`Machine::just_resumed`).
+    if machine.just_resumed {
+        return None;
+    }
     let resumable = machine.yieldable()
         && floor > 0
         && machine.frames.len() > floor
@@ -791,7 +811,7 @@ unsafe fn offer_yield(
                 (*tier)
                     .resume_points(frame.function)
                     .and_then(|points| match (depth, innermost) {
-                        (0, Stands::AtBlock) => points.at_block(frame.pc),
+                        (0, Stands::AtBlock | Stands::BeforeBlock) => points.at_block(frame.pc),
                         (0, Stands::AtInstruction) => points.at_instruction(frame.pc),
                         _ => frame.pc.checked_sub(1).and_then(|at| points.after_call(at)),
                     })
@@ -826,15 +846,18 @@ unsafe fn poll_at_call(
     id: FunctionId,
     pc: u32,
 ) -> Result<(), RuntimeError> {
-    if !machine.safepoint_due() {
-        return Ok(());
-    }
+    // Offered whether or not a safepoint is due: compiled code polls early
+    // while a request is raised (`Machine::native_poll_at`, #604), and the
+    // call is run again on resuming, taking whatever is due then.
     if machine.yield_requested() {
         if let Some(marker) =
             offer_yield(machine, (*host).tier, (*host).floor, Stands::AtInstruction)
         {
             return Err(marker);
         }
+    }
+    if !machine.safepoint_due() {
+        return Ok(());
     }
     machine.safepoint(budget, id, pc as usize)
 }
@@ -892,7 +915,7 @@ pub(super) unsafe fn resume(
             .resume_points(frame.function)
             .expect("the yield checked every frame has its resume points");
         let at = match stands.take() {
-            Some(Stands::AtBlock) => points.at_block(frame.pc),
+            Some(Stands::AtBlock | Stands::BeforeBlock) => points.at_block(frame.pc),
             Some(Stands::AtInstruction) => points.at_instruction(frame.pc),
             None => points.after_call(frame.pc - 1),
         }
@@ -1944,7 +1967,7 @@ unsafe fn run_frame<const MASK: u64>(
         // with whatever the encoded tier has run and not yet charged, and
         // compiled code's poll has to land where the dispatch loop's own would
         // have. See `Machine::poll_budget` and `NativeCtx::poll_at`.
-        .polling_at(machine.poll_budget());
+        .polling_at(machine.native_poll_at());
         // The destination as the callee is given it: a word index, taken *after*
         // the frame was pushed and stable whatever a later `push_frame` does to
         // the `Vec`. This is the line ADR 0057's "never pointers" is about.
@@ -3003,7 +3026,7 @@ unsafe extern "C" fn close(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u3
     (*ctx).pending_work = 0;
     // The charge above moved the machine's unpaid total and nothing polled for
     // it, so what is left of the stride is smaller than the caller was given.
-    (*ctx).poll_at = machine.poll_budget();
+    (*ctx).poll_at = machine.native_poll_at();
     if outcome == Outcome::Returned.abi() {
         // The answer is already where it belongs: the callee wrote it before it
         // returned, so all that is left is to take its frame away.
