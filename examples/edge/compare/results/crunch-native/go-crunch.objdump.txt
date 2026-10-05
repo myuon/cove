@@ -1,0 +1,176 @@
+TEXT main.crunch(SB) examples/edge/compare/go/handlers.go
+  handlers.go:20	0x127c340		493b6610		CMPQ SP, 0x10(R14)			
+  handlers.go:20	0x127c344		0f8626020000		JBE 0x127c570				
+  handlers.go:20	0x127c34a		55			PUSHQ BP				
+  handlers.go:20	0x127c34b		4889e5			MOVQ SP, BP				
+  handlers.go:20	0x127c34e		4883ec68		SUBQ $0x68, SP				
+  handlers.go:21	0x127c352		4889c3			MOVQ AX, BX				
+  handlers.go:21	0x127c355		488d0d9c350800		LEAQ runtime.gcbits.*+56(SB), CX	
+  handlers.go:21	0x127c35c		bf01000000		MOVL $0x1, DI				
+  handlers.go:21	0x127c361		488d05f8b80b00		LEAQ _type:*+203864(SB), AX		
+  handlers.go:21	0x127c368		e8f3c2deff		CALL runtime.mapaccess2_faststr(SB)	
+  handlers.go:21	0x127c36d		488b10			MOVQ 0(AX), DX				
+  handlers.go:21	0x127c370		488b7008		MOVQ 0x8(AX), SI			
+  handlers.go:25	0x127c374		440fb6c3		MOVZX BL, R8				
+  handlers.go:25	0x127c378		4d85c0			TESTQ R8, R8				
+  handlers.go:25	0x127c37b		bb05000000		MOVL $0x5, BX				
+  handlers.go:25	0x127c380		480f45de		CMOVNE SI, BX				
+  handlers.go:25	0x127c384		488d0547380000		LEAQ go:string.*+914(SB), AX		
+  handlers.go:25	0x127c38b		480f45c2		CMOVNE DX, AX				
+  handlers.go:25	0x127c38f		b90a000000		MOVL $0xa, CX				
+  handlers.go:25	0x127c394		bf40000000		MOVL $0x40, DI				
+  handlers.go:25	0x127c399		e8a2fadfff		CALL strconv.ParseInt(SB)		
+  handlers.go:26	0x127c39e		4885db			TESTQ BX, BX				
+  handlers.go:29	0x127c3a1		48c7c2ffffffff		MOVQ $-0x1, DX				
+  handlers.go:29	0x127c3a8		480f45c2		CMOVNE DX, AX				
+  handlers.go:29	0x127c3ac		488d50fe		LEAQ -0x2(AX), DX			
+  handlers.go:29	0x127c3b0		4881fa3e0d0300		CMPQ DX, $0x30d3e			
+  handlers.go:22	0x127c3b7		770c			JA 0x127c3c5				
+  handlers.go:32	0x127c3b9		b903000000		MOVL $0x3, CX				
+  handlers.go:32	0x127c3be		ba01000000		MOVL $0x1, DX				
+  handlers.go:41	0x127c3c3		eb21			JMP 0x127c3e6				
+  handlers.go:30	0x127c3c5		b890010000		MOVL $0x190, AX				
+  handlers.go:30	0x127c3ca		488d1d84290100		LEAQ go:string.*+62741(SB), BX		
+  handlers.go:30	0x127c3d1		b92c000000		MOVL $0x2c, CX				
+  handlers.go:30	0x127c3d6		4883c468		ADDQ $0x68, SP				
+  handlers.go:30	0x127c3da		5d			POPQ BP					
+  handlers.go:30	0x127c3db		c3			RET					
+  handlers.go:45	0x127c3dc		4883c102		ADDQ $0x2, CX				
+  handlers.go:41	0x127c3e0		4889d8			MOVQ BX, AX				
+  handlers.go:43	0x127c3e3		4889fa			MOVQ DI, DX				
+  handlers.go:41	0x127c3e6		4839c1			CMPQ CX, AX				
+  handlers.go:41	0x127c3e9		7f17			JG 0x127c402				
+  handlers.go:42	0x127c3eb		bb03000000		MOVL $0x3, BX				
+  handlers.go:67	0x127c3f0		e937010000		JMP 0x127c52c				
+  handlers.go:43	0x127c3f5		48ffc2			INCQ DX					
+  handlers.go:41	0x127c3f8		4889c3			MOVQ AX, BX				
+  handlers.go:43	0x127c3fb		4889d7			MOVQ DX, DI				
+  handlers.go:43	0x127c3fe		6690			NOPW					
+  handlers.go:43	0x127c400		ebda			JMP 0x127c3dc				
+  handlers.go:29	0x127c402		4889442430		MOVQ AX, 0x30(SP)			
+  handlers.go:53	0x127c407		4889c1			MOVQ AX, CX				
+  handlers.go:53	0x127c40a		48c1e83f		SHRQ $0x3f, AX				
+  handlers.go:53	0x127c40e		488d1c08		LEAQ 0(AX)(CX*1), BX			
+  handlers.go:53	0x127c412		4883e3fe		ANDQ $-0x2, BX				
+  handlers.go:53	0x127c416		4889ce			MOVQ CX, SI				
+  handlers.go:53	0x127c419		4829d9			SUBQ BX, CX				
+  handlers.go:53	0x127c41c		488d0c31		LEAQ 0(CX)(SI*1), CX			
+  handlers.go:53	0x127c420		488d49ff		LEAQ -0x1(CX), CX			
+  handlers.go:54	0x127c424		eb07			JMP 0x127c42d				
+  handlers.go:58	0x127c426		4883c1fe		ADDQ $-0x2, CX				
+  handlers.go:34	0x127c42a		4889fa			MOVQ DI, DX				
+  handlers.go:54	0x127c42d		4883f902		CMPQ CX, $0x2				
+  handlers.go:54	0x127c431		7e0a			JLE 0x127c43d				
+  handlers.go:55	0x127c433		b803000000		MOVL $0x3, AX				
+  handlers.go:67	0x127c438		e9af000000		JMP 0x127c4ec				
+  handlers.go:67	0x127c43d		b802000000		MOVL $0x2, AX				
+  handlers.go:33	0x127c442		4889442428		MOVQ AX, 0x28(SP)			
+  handlers.go:34	0x127c447		440f117c2438		MOVUPS X15, 0x38(SP)			
+  handlers.go:34	0x127c44d		440f117c2448		MOVUPS X15, 0x48(SP)			
+  handlers.go:34	0x127c453		440f117c2458		MOVUPS X15, 0x58(SP)			
+  handlers.go:34	0x127c459		4889d0			MOVQ DX, AX				
+  handlers.go:34	0x127c45c		0f1f4000		NOPL 0(AX)				
+  handlers.go:34	0x127c460		e83b90deff		CALL runtime.convT64(SB)		
+  handlers.go:34	0x127c465		488d0d14a10a00		LEAQ _type:*+132472(SB), CX		
+  handlers.go:34	0x127c46c		48894c2438		MOVQ CX, 0x38(SP)			
+  handlers.go:34	0x127c471		4889442440		MOVQ AX, 0x40(SP)			
+  handlers.go:34	0x127c476		488b442430		MOVQ 0x30(SP), AX			
+  handlers.go:34	0x127c47b		0f1f440000		NOPL 0(AX)(AX*1)			
+  handlers.go:34	0x127c480		e81b90deff		CALL runtime.convT64(SB)		
+  handlers.go:34	0x127c485		488d0df4a00a00		LEAQ _type:*+132472(SB), CX		
+  handlers.go:34	0x127c48c		48894c2448		MOVQ CX, 0x48(SP)			
+  handlers.go:34	0x127c491		4889442450		MOVQ AX, 0x50(SP)			
+  handlers.go:34	0x127c496		488b442428		MOVQ 0x28(SP), AX			
+  handlers.go:34	0x127c49b		0f1f440000		NOPL 0(AX)(AX*1)			
+  handlers.go:34	0x127c4a0		e8fb8fdeff		CALL runtime.convT64(SB)		
+  handlers.go:34	0x127c4a5		488d0dd4a00a00		LEAQ _type:*+132472(SB), CX		
+  handlers.go:34	0x127c4ac		48894c2458		MOVQ CX, 0x58(SP)			
+  handlers.go:34	0x127c4b1		4889442460		MOVQ AX, 0x60(SP)			
+  handlers.go:34	0x127c4b6		488d05e2ed0000		LEAQ go:string.*+47711(SB), AX		
+  handlers.go:34	0x127c4bd		bb23000000		MOVL $0x23, BX				
+  handlers.go:34	0x127c4c2		488d4c2438		LEAQ 0x38(SP), CX			
+  handlers.go:34	0x127c4c7		bf03000000		MOVL $0x3, DI				
+  handlers.go:34	0x127c4cc		4889fe			MOVQ DI, SI				
+  handlers.go:34	0x127c4cf		e86c00e4ff		CALL fmt.Sprintf(SB)			
+  handlers.go:34	0x127c4d4		4889d9			MOVQ BX, CX				
+  handlers.go:34	0x127c4d7		4889c3			MOVQ AX, BX				
+  handlers.go:34	0x127c4da		b8c8000000		MOVL $0xc8, AX				
+  handlers.go:34	0x127c4df		4883c468		ADDQ $0x68, SP				
+  handlers.go:34	0x127c4e3		5d			POPQ BP					
+  handlers.go:34	0x127c4e4		c3			RET					
+  handlers.go:71	0x127c4e5		488d4302		LEAQ 0x2(BX), AX			
+  handlers.go:34	0x127c4e9		4889fa			MOVQ DI, DX				
+  handlers.go:67	0x127c4ec		4889c3			MOVQ AX, BX				
+  handlers.go:67	0x127c4ef		480fafc0		IMULQ AX, AX				
+  handlers.go:67	0x127c4f3		4839c1			CMPQ CX, AX				
+  handlers.go:67	0x127c4f6		7c1a			JL 0x127c512				
+  handlers.go:68	0x127c4f8		4885db			TESTQ BX, BX				
+  handlers.go:68	0x127c4fb		741d			JE 0x127c51a				
+  handlers.go:68	0x127c4fd		4889c8			MOVQ CX, AX				
+  handlers.go:43	0x127c500		4889d7			MOVQ DX, DI				
+  handlers.go:68	0x127c503		4899			CQO					
+  handlers.go:68	0x127c505		48f7fb			IDIVQ BX				
+  handlers.go:68	0x127c508		4885d2			TESTQ DX, DX				
+  handlers.go:68	0x127c50b		75d8			JNE 0x127c4e5				
+  handlers.go:68	0x127c50d		e914ffffff		JMP 0x127c426				
+  handlers.go:33	0x127c512		4889c8			MOVQ CX, AX				
+  handlers.go:33	0x127c515		e928ffffff		JMP 0x127c442				
+  handlers.go:68	0x127c51a		e80165dbff		CALL runtime.panicdivide(SB)		
+  handlers.go:71	0x127c51f		4883c602		ADDQ $0x2, SI				
+  handlers.go:41	0x127c523		4889d8			MOVQ BX, AX				
+  handlers.go:43	0x127c526		4889fa			MOVQ DI, DX				
+  handlers.go:67	0x127c529		4889f3			MOVQ SI, BX				
+  handlers.go:67	0x127c52c		4889de			MOVQ BX, SI				
+  handlers.go:67	0x127c52f		480fafdb		IMULQ BX, BX				
+  handlers.go:67	0x127c533		4839d9			CMPQ CX, BX				
+  handlers.go:67	0x127c536		0f8cb9feffff		JL 0x127c3f5				
+  handlers.go:67	0x127c53c		0f1f4000		NOPL 0(AX)				
+  handlers.go:68	0x127c540		4885f6			TESTQ SI, SI				
+  handlers.go:68	0x127c543		7425			JE 0x127c56a				
+  handlers.go:29	0x127c545		4889c3			MOVQ AX, BX				
+  handlers.go:68	0x127c548		4889c8			MOVQ CX, AX				
+  handlers.go:43	0x127c54b		4889d7			MOVQ DX, DI				
+  handlers.go:68	0x127c54e		4883feff		CMPQ SI, $-0x1				
+  handlers.go:68	0x127c552		7507			JNE 0x127c55b				
+  handlers.go:68	0x127c554		48f7d8			NEGQ AX					
+  handlers.go:68	0x127c557		31d2			XORL DX, DX				
+  handlers.go:68	0x127c559		eb05			JMP 0x127c560				
+  handlers.go:68	0x127c55b		4899			CQO					
+  handlers.go:68	0x127c55d		48f7fe			IDIVQ SI				
+  handlers.go:68	0x127c560		4885d2			TESTQ DX, DX				
+  handlers.go:68	0x127c563		75ba			JNE 0x127c51f				
+  handlers.go:68	0x127c565		e972feffff		JMP 0x127c3dc				
+  handlers.go:68	0x127c56a		e8b164dbff		CALL runtime.panicdivide(SB)		
+  handlers.go:68	0x127c56f		90			NOPL					
+  handlers.go:20	0x127c570		4889442408		MOVQ AX, 0x8(SP)			
+  handlers.go:20	0x127c575		e82644dfff		CALL runtime.morestack_noctxt.abi0(SB)	
+  handlers.go:20	0x127c57a		488b442408		MOVQ 0x8(SP), AX			
+  handlers.go:20	0x127c57f		90			NOPL					
+  handlers.go:20	0x127c580		e9bbfdffff		JMP main.crunch(SB)			
+  :-1			0x127c585		cc			INT $0x3				
+  :-1			0x127c586		cc			INT $0x3				
+  :-1			0x127c587		cc			INT $0x3				
+  :-1			0x127c588		cc			INT $0x3				
+  :-1			0x127c589		cc			INT $0x3				
+  :-1			0x127c58a		cc			INT $0x3				
+  :-1			0x127c58b		cc			INT $0x3				
+  :-1			0x127c58c		cc			INT $0x3				
+  :-1			0x127c58d		cc			INT $0x3				
+  :-1			0x127c58e		cc			INT $0x3				
+  :-1			0x127c58f		cc			INT $0x3				
+  :-1			0x127c590		cc			INT $0x3				
+  :-1			0x127c591		cc			INT $0x3				
+  :-1			0x127c592		cc			INT $0x3				
+  :-1			0x127c593		cc			INT $0x3				
+  :-1			0x127c594		cc			INT $0x3				
+  :-1			0x127c595		cc			INT $0x3				
+  :-1			0x127c596		cc			INT $0x3				
+  :-1			0x127c597		cc			INT $0x3				
+  :-1			0x127c598		cc			INT $0x3				
+  :-1			0x127c599		cc			INT $0x3				
+  :-1			0x127c59a		cc			INT $0x3				
+  :-1			0x127c59b		cc			INT $0x3				
+  :-1			0x127c59c		cc			INT $0x3				
+  :-1			0x127c59d		cc			INT $0x3				
+  :-1			0x127c59e		cc			INT $0x3				
+  :-1			0x127c59f		cc			INT $0x3				

@@ -1,0 +1,19 @@
+   0 Int { dst: 2, value: 1 }
+   1 Int { dst: 3, value: 3 }
+   2 CmpBranch { on: Int, op: Le, dst: 4, a: 3, b: 0, target: 17 }
+   3 Int { dst: 6, value: 3 }
+   4 Arith { num: Int, op: Mul, dst: 7, a: 6, b: 6 }
+   5 CmpBranch { on: Int, op: Le, dst: 8, a: 7, b: 3, target: 12 }
+   6 Arith { num: Int, op: Rem, dst: 7, a: 3, b: 6 }
+   7 CmpImmBranch { op: Eq, dst: 8, a: 7, value: 0, target: 10 }
+   8 Bool { dst: 4, value: false }
+   9 Jump { to: 13 }
+  10 ArithImm { op: Add, dst: 6, a: 6, value: 2 }
+  11 Jump { to: 4 }
+  12 Bool { dst: 4, value: true }
+  13 BranchFalse { cond: 4, to: 15 }
+  14 ArithImm { op: Add, dst: 2, a: 2, value: 1 }
+  15 ArithImm { op: Add, dst: 3, a: 3, value: 2 }
+  16 Jump { to: 2 }
+  17 Copy { dst: 1, src: 2, layout: LayoutId(4) }
+  18 Return { src: 1 }
