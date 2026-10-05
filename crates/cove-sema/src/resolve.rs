@@ -221,6 +221,9 @@ pub struct ResolvedModule {
     pub host_uses: BTreeSet<String>,
     /// Names imported unqualified by `use`, such as `println` -> `console`.
     pub host_items: BTreeMap<String, String>,
+    /// The `use` that imported each of [`ResolvedModule::host_items`], for a
+    /// diagnostic that belongs on the import rather than on every mention.
+    pub host_item_uses: BTreeMap<String, Span>,
     /// Declarations imported from another module of the package, mapping the
     /// name they are visible under — the `use` path's last segment, which is
     /// the declaration's own name — to the module that declares them.
@@ -718,6 +721,7 @@ fn resolve_module(
         name: name.to_string(),
         host_uses: uses.host_uses.clone(),
         host_items: uses.host_items.clone(),
+        host_item_uses: uses.host_item_uses.clone(),
         imports: uses.imports.clone(),
         module_imports: uses.module_imports.clone(),
         ..ResolvedModule::default()
@@ -775,6 +779,10 @@ fn resolve_module(
                     );
                 }
                 ItemKind::Struct(decl) => {
+                    if let Some(diagnostic) = builtin_type_name(&decl.name.node, decl.name.span) {
+                        errors.push(diagnostic);
+                        continue;
+                    }
                     if let Some(existing) =
                         duplicate(&mut struct_spans, &decl.name.node, decl.name.span)
                     {
@@ -798,6 +806,10 @@ fn resolve_module(
                     );
                 }
                 ItemKind::Enum(decl) => {
+                    if let Some(diagnostic) = builtin_type_name(&decl.name.node, decl.name.span) {
+                        errors.push(diagnostic);
+                        continue;
+                    }
                     if let Some(existing) =
                         duplicate(&mut enum_spans, &decl.name.node, decl.name.span)
                     {
@@ -854,6 +866,10 @@ fn resolve_module(
                     );
                 }
                 ItemKind::TypeAlias(decl) => {
+                    if let Some(diagnostic) = builtin_type_name(&decl.name.node, decl.name.span) {
+                        errors.push(diagnostic);
+                        continue;
+                    }
                     if let Some(existing) =
                         duplicate(&mut alias_spans, &decl.name.node, decl.name.span)
                     {
@@ -1229,6 +1245,7 @@ struct ModuleUses {
     module_imports: BTreeMap<String, String>,
     host_uses: BTreeSet<String>,
     host_items: BTreeMap<String, String>,
+    host_item_uses: BTreeMap<String, Span>,
     /// One edge per `use` that names a module of this package, for the
     /// cycle check.
     edges: Vec<ImportEdge>,
@@ -1383,6 +1400,7 @@ fn resolve_uses(
                         span,
                         errors,
                     );
+                    uses.host_item_uses.entry(last.to_string()).or_insert(span);
                     uses.host_items.insert(last.to_string(), host);
                 }
                 _ => errors.push(unknown_use(&path, &segments, surfaces, span)),
@@ -2065,6 +2083,28 @@ fn duplicate(spans: &mut BTreeMap<String, Span>, name: &str, span: Span) -> Opti
     }
     spans.insert(name.to_string(), span);
     None
+}
+
+/// Refuses a struct, enum, or type alias named after a builtin type.
+///
+/// A builtin's name is read before the module's own declarations in every
+/// type position, so such a declaration could be constructed by name and
+/// never written as a type: `fn make() -> Unit` meant `()`, and the mistake
+/// surfaced as a mismatch at each use rather than here (issue #603). Letting
+/// the declaration win instead would make `Result<Unit, Error>` mean
+/// something different in one module from every other, so the name is
+/// reserved.
+fn builtin_type_name(name: &str, span: Span) -> Option<Diagnostic> {
+    cove_schema::builtin(name)?;
+    Some(
+        Diagnostic::error(
+            "cove::resolve::builtin_type_name",
+            format!("`{name}` is the name of a builtin type"),
+        )
+        .at(span)
+        .rule("A builtin type's name means the builtin in every type position, so a module cannot declare a type of that name.")
+        .help(format!("rename this declaration; `{name}` would still mean the builtin `{name}` wherever it is written as a type")),
+    )
 }
 
 fn duplicate_declaration(module: &str, name: &str, span: Span, first: Span) -> Diagnostic {
@@ -4215,6 +4255,25 @@ mod tests {
         assert!(errs
             .iter()
             .any(|d| d.code == "cove::resolve::duplicate_declaration"));
+    }
+
+    /// Issue #603: a builtin type's name wins in every type position, so a
+    /// `struct Unit` was unreachable by name and every mention of it meant
+    /// `()`. The mistake is reported once, where the name is declared.
+    #[test]
+    fn a_type_named_after_a_builtin_is_refused_where_it_is_declared() {
+        for source in [
+            "struct Unit {\n  name: String\n}\n",
+            "enum Option {\n  Nothing\n}\n",
+            "type Int = String\n",
+        ] {
+            let error = resolve_err(&[("ledger", source)], "cove::resolve::builtin_type_name");
+            assert_eq!(
+                error.primary.map(|span| span.start as usize),
+                source.find(char::is_uppercase),
+                "{source}"
+            );
+        }
     }
 
     #[test]

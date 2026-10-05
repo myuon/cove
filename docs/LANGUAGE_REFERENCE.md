@@ -107,6 +107,10 @@ type's name and its exported methods and associated functions, withholding
 the fields and the labeled constructor they synthesize (see Opaque structs,
 below). `test fn` sits where `export` sits and excludes it.
 `impl Trait for Type` is the only way a conformance is declared.
+A builtin type's name — `Unit`, `Int`, `Option`, and the rest of
+`docs/BUILTINS.md` — means the builtin in every type position, so no struct,
+enum, or type alias may be declared under one
+(`cove::resolve::builtin_type_name`).
 
 A declaration's parameters are written rather than inferred, and each may
 carry a `var` marking, a default, or a `...` that makes it variadic. A
@@ -121,6 +125,7 @@ parameters its function type names, and a function type names a fixed list of
 them, so a `...` on a lambda is `cove::type::variadic_lambda`.
 
 Declaration-level errors: `cove::resolve::duplicate_declaration`,
+`cove::resolve::builtin_type_name`,
 `cove::resolve::unknown_trait`, `cove::resolve::unknown_impl_type`,
 `cove::resolve::foreign_inherent_impl`, `cove::resolve::duplicate_conformance`,
 `cove::resolve::orphan_conformance`, `cove::resolve::unknown_trait_method`,
