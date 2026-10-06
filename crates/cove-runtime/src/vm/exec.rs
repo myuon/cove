@@ -581,6 +581,27 @@ pub(crate) struct Machine<'a> {
     /// the stride again, so a run that cannot yield pays one early poll a
     /// stride and not one a turn. [`Machine::safepoint`] lowers it.
     declined_this_stride: bool,
+    /// The work since the last charge at which the dispatch loop's slow path
+    /// takes a safepoint: [`SAFEPOINT_STRIDE`], or nought for the one
+    /// instruction after a bulk operation took the stride's safepoint inside
+    /// itself while a yield was wanted and could be honoured (#606).
+    ///
+    /// The encoded tier's analogue of [`Machine::native_poll_at`]'s nought,
+    /// moved off the per-instruction path. A loop whose every turn makes a
+    /// bulk charge takes its safepoints *inside* the instruction — ADR 0052's
+    /// chunked charge — so the loop's own stride test never finds one due
+    /// and, since ADR 0084 reads a request only there, the run never yielded.
+    /// Polling for the request in the loop instead cost rows that never ask
+    /// (#606). So the bulk path, which already took the safepoint and is out
+    /// of line, lowers this and `next_check` together, and the next
+    /// instruction's slow path offers the yield with the safepoint's
+    /// bookkeeping already done; [`Machine::offer_yield`] puts both back, so
+    /// the resumed run does not take a safepoint the uninterrupted run did not.
+    /// The dispatch loop's fast path is untouched: its one increment and one
+    /// comparison against `next_check` are what they were, and the slow path
+    /// compares against this field where it compared against the constant.
+    /// [`Machine::safepoint`] restores it.
+    stride: u64,
     /// Which task this machine is running, for a trace and for the way back
     /// a host is offered.
     task: u64,
@@ -1010,6 +1031,7 @@ impl<'a> Machine<'a> {
             yields_declined: 0,
             just_resumed: false,
             declined_this_stride: false,
+            stride: SAFEPOINT_STRIDE,
             task: ENTRY_TASK,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1098,6 +1120,7 @@ impl<'a> Machine<'a> {
             yields_declined: 0,
             just_resumed: false,
             declined_this_stride: false,
+            stride: SAFEPOINT_STRIDE,
             task,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1439,6 +1462,7 @@ impl<'a> Machine<'a> {
     fn safepoint(&mut self, budget: &Meter, id: FunctionId, pc: usize) -> Result<(), RuntimeError> {
         self.just_resumed = false;
         self.declined_this_stride = false;
+        self.stride = SAFEPOINT_STRIDE;
         stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
         let gathered = self.work() - self.charged_work;
         self.charged_work = self.work();
@@ -1448,6 +1472,35 @@ impl<'a> Machine<'a> {
         let live = Live(self);
         self.mem.poll(&live);
         Ok(())
+    }
+
+    /// What a bulk operation does after the safepoint it took inside an
+    /// instruction: moves the loop's next question to where the charge left
+    /// it, and — when a yield is wanted and this run could give its thread up
+    /// — to the very next instruction, with the slow path's stride lowered to
+    /// nought, so that the yield is offered there (#606).
+    ///
+    /// Gated on [`Machine::yieldable`] as well as the request so that the
+    /// lowered slow path always yields: one that declined would go on to take
+    /// a safepoint the uninterrupted run does not, and a fuel limit would stop
+    /// it somewhere else (ADR 0084 §4). Nothing between here and the next
+    /// instruction's check can change the answer — the instruction that took
+    /// the safepoint finishes, and the request is lowered only by a yield.
+    #[inline]
+    pub(super) fn after_bulk_safepoint(&mut self) {
+        self.next_check = self.next_question();
+        if self.yield_wanted() && self.yieldable() {
+            self.offer_yield_next();
+        }
+    }
+
+    /// [`Machine::after_bulk_safepoint`]'s lowering, out of line: it runs
+    /// only while a yield is asked for.
+    #[cold]
+    #[inline(never)]
+    fn offer_yield_next(&mut self) {
+        self.stride = 0;
+        self.next_check = self.instructions + 1;
     }
 
     #[inline]
@@ -2374,8 +2427,11 @@ impl<'a> Machine<'a> {
     }
 
     /// Whether the embedder has asked this run to yield, read where a
-    /// safepoint is already due: a parkable run only, since no other has a
-    /// caller that could do anything with a yielded machine.
+    /// safepoint is already due — or, on the dispatch loop, at the instruction
+    /// after a bulk operation took the due one inside itself
+    /// ([ADR 0089](../../../../docs/adr/0089-a-bulk-safepoint-offers-the-yield-at-the-next-instruction.md)):
+    /// a parkable run only, since no other has a caller that could do
+    /// anything with a yielded machine.
     #[inline]
     pub(super) fn yield_requested(&self) -> bool {
         self.parking
@@ -2430,6 +2486,14 @@ impl<'a> Machine<'a> {
         }
         self.clear_yield_request();
         self.instructions -= 1;
+        if self.stride == 0 {
+            // Offered after a bulk operation's own safepoint (#606): the
+            // stride's safepoint has been taken, so the resumed run must not
+            // take it again. The question goes back to a stride past that
+            // charge, where the uninterrupted run had it.
+            self.stride = SAFEPOINT_STRIDE;
+            self.next_check = self.next_question();
+        }
         self.yielded = Some(Instant::now());
         // Never seen: `Machine::drive` reads `yielded` before the answer, as
         // it reads `suspended` for a park, and for the same measured reason.
@@ -10848,6 +10912,47 @@ pub(crate) mod tests {
             !machine.work().is_multiple_of(SAFEPOINT_STRIDE),
             "and 2500 is not a multiple of the stride, which is the bug"
         );
+    }
+
+    /// **#606: a yield wanted after a bulk operation's own safepoint is
+    /// offered at the next instruction, and a yield taken there leaves the
+    /// schedule where the uninterrupted run has it.**
+    ///
+    /// The arithmetic `tests/yielding.rs` cannot see: a resumed run that took
+    /// the stride's safepoint a second time would answer the same and charge
+    /// the same in total, and only a fuel limit falling inside that one
+    /// instruction's work would tell.
+    #[test]
+    fn a_yield_after_a_bulk_safepoint_is_offered_at_the_next_instruction() {
+        let program = Build::default().done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        machine.instructions = 300;
+        machine.bulk_work = 5000;
+        machine.charged_work = machine.work();
+
+        // Nobody asks: the question is a stride of work past the charge.
+        machine.after_bulk_safepoint();
+        assert_eq!(machine.stride, SAFEPOINT_STRIDE);
+        assert_eq!(machine.next_check, 300 + SAFEPOINT_STRIDE);
+
+        // A parkable run asked to yield: the next instruction asks, and its
+        // slow path finds the lowered stride due with nothing done since.
+        machine.parking = true;
+        machine.yield_request = Some(Arc::new(AtomicBool::new(true)));
+        machine.after_bulk_safepoint();
+        assert_eq!(machine.stride, 0);
+        assert_eq!(machine.next_check, 301);
+        machine.instructions += 1;
+        assert!(machine.instructions >= machine.next_check);
+        assert!(machine.work() - machine.charged_work >= machine.stride);
+
+        // Yielding there takes the count back and puts the question back a
+        // stride past the charge the bulk operation made.
+        assert!(machine.offer_yield().is_err());
+        assert_eq!(machine.instructions, 300);
+        assert_eq!(machine.stride, SAFEPOINT_STRIDE);
+        assert_eq!(machine.next_check, 300 + SAFEPOINT_STRIDE);
+        assert!(!machine.yield_requested(), "the request is honoured");
     }
 
     /// **What compiled code is allowed to do before it polls is what is left

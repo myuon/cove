@@ -1217,14 +1217,15 @@ fn no_compiled_shape_runs_long_without_yielding_when_asked() {
 }
 
 /// The same storm on the encoded tier, which has no compiled frames: its
-/// answers and counts are its own uninterrupted run's.
+/// answers and counts are its own uninterrupted run's, and no shape runs long
+/// without yielding.
 ///
-/// It is not asked to yield promptly. The dispatch loop reads a request only
-/// at a due safepoint (ADR 0084 §2), and a loop whose every turn makes a bulk
-/// charge — `snapshotting` here — takes those inside the instruction and never
-/// finds one due, so it does not yield at all. Polling early there costs the
-/// loop measurably (3–7% on `arith` when tried), so it is left for the issue
-/// that tracks it (#606) rather than done here.
+/// The second half is #606. The dispatch loop reads a request only at a due
+/// safepoint (ADR 0084 §2), and a loop whose every turn makes a bulk charge —
+/// `snapshotting` and `regrowing` here — takes those inside the instruction,
+/// so before the fix it never found one due: nought yields, through 67,152
+/// and 101,907 of the monitor's requests. A bulk operation's safepoint now
+/// offers the yield at the next instruction while one is wanted.
 #[test]
 fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
     let world = world();
@@ -1244,6 +1245,12 @@ fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
             *world.sched.signal.lock().unwrap() = Some(vm.yield_request());
             let run = storm_on(vm, name, seed, most);
             assert_eq!(run.finished, expected, "{name}, storm {seed}: {run:?}");
+            assert!(run.yields > 0, "{name}, storm {seed}: never yielded");
+            assert!(
+                run.unheeded < 2_000,
+                "{name}, storm {seed}: went on through {} requests without yielding: {run:?}",
+                run.unheeded
+            );
         }
     }
 }
