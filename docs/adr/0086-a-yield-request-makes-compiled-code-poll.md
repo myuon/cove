@@ -1,6 +1,8 @@
 # ADR 0086: A yield request makes compiled code poll
 
 - Status: Accepted
+- Superseded in part by [ADR 0090](0090-a-host-call-s-charge-begins-a-stride-for-a-yield-too.md), for §2: a host
+  call's charge also lowers `just_resumed`
 - Date: 2026-10-05
 - Refers to:
   [ADR 0085](0085-compiled-frames-resume-where-they-yielded.md), whose resume

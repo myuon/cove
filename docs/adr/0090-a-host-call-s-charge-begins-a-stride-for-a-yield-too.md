@@ -12,8 +12,10 @@
   [ADR 0030](0030-a-host-call-asks-the-fuel-limit.md), the charge at a host
   boundary;
   [issue #618](https://github.com/myuon/cove/issues/618)
-- Supersedes: nothing. It contradicts none of the decisions above: it adds a
-  place where the same rules apply
+- Supersedes: [ADR 0086](0086-a-yield-request-makes-compiled-code-poll.md)'s "a run resumed from a yield
+  takes the safepoint it stood before before it may yield again" (§2), in
+  part: a host call's charge now also lowers `just_resumed`, so a resumed run
+  may yield again after a host call without having taken that safepoint
 - Decides: that a host call's charge lowers the two flags a safepoint lowers;
   and that on the dispatch loop, after a host call returns, a yield that is
   wanted and can be honoured is offered at the next instruction once a stride
