@@ -704,7 +704,7 @@ fn in_chunks<'a>(
         done += take;
         if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
             machine.safepoint(budget, id, pc)?;
-            machine.next_check = machine.next_question();
+            machine.after_bulk_safepoint();
         }
     }
     Ok(())
@@ -1419,7 +1419,7 @@ fn find_in_runs(
             return Ok(answer);
         }
         machine.safepoint(budget, id, pc)?;
-        machine.next_check = machine.next_question();
+        machine.after_bulk_safepoint();
     }
 }
 
@@ -2696,7 +2696,10 @@ pub(super) fn dispatch<'s, 'a>(
             // moved steps *over* the multiple it would have landed on, and
             // the old condition then answered false, losing the cancellation
             // check, the fuel accounting and the collector's poll together.
-            if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
+            // `stride` is `SAFEPOINT_STRIDE` but for the one instruction after
+            // a bulk operation's own safepoint while a yield is wanted, where
+            // it is nought so the yield is offered (#606).
+            if machine.work() - machine.charged_work >= machine.stride {
                 // ADR 0084: a run asked to give its thread up does so here,
                 // before the safepoint's own work, which it does on resuming.
                 // A load once a stride, inside a branch taken once a stride.

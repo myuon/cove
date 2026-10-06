@@ -171,6 +171,55 @@ export fn inLock() -> Int {
   })
   held + spin(10)
 }
+
+/// A vector grown one element at a time and snapshotted every turn: each
+/// turn's copy is longer than a stride, so every safepoint the loop reaches
+/// is one the copy takes inside itself (#606).
+fn snapshots(n: Int) -> Int {
+  var v: Vector<Int> = Vector.of()
+  var total = 0
+  var i = 0
+  while i < n {
+    v.push(i * 7 % 1013)
+    let copy = v.snapshot()
+    total = (total + copy.length() + copy.get(i / 2).unwrapOr(0)) % 1000003
+    i += 1
+  }
+  total
+}
+
+/// A loop of `toVector()` and a length check, and nothing else (#606).
+fn regrow(n: Int) -> Int {
+  var cells: Array<Int> = [1, 2, 3]
+  var turns = 0
+  while cells.length() < n {
+    var v = cells.toVector()
+    v.push(turns)
+    cells = v.freeze()
+    turns += 1
+  }
+  turns
+}
+
+/// Twenty rounds, each asking to yield and then snapshotting.
+export fn snapshotting() -> Int {
+  var total = 0
+  for round in 0..<20 {
+    sched.nudge()
+    total = (total + snapshots(round + 1500)) % 1000003
+  }
+  total
+}
+
+/// Twenty rounds, each asking to yield and then regrowing.
+export fn regrowing() -> Int {
+  var total = 0
+  for round in 0..<20 {
+    sched.nudge()
+    total = (total + regrow(round + 1500)) % 1000003
+  }
+  total
+}
 ";
 
 // ----------------------------------------------------------------- the world
@@ -665,4 +714,55 @@ fn a_host_is_told_when_a_yielded_run_s_flag_is_raised() {
         .expect("the callback ran");
     let (_, error) = yielded.cancel();
     assert_eq!(error.outcome, RunOutcome::Cancelled);
+}
+
+/// **#606.** A loop whose every safepoint is taken inside a bulk copy — a
+/// `snapshot` or a `toVector` every turn — yields once for every request, as
+/// a loop of ordinary instructions does, and answers as the uninterrupted run
+/// in the same count for the same fuel. Before the fix the dispatch loop's
+/// own stride test never found a safepoint due, and both ran to the end
+/// without yielding once.
+#[test]
+fn a_loop_whose_every_safepoint_is_inside_a_bulk_copy_yields_when_asked() {
+    let world = world();
+    for name in ["snapshotting", "regrowing"] {
+        let expected = world.uninterrupted(name, unlimited());
+        assert!(
+            !expected.answer.starts_with("error"),
+            "{name}: {expected:?}"
+        );
+        let run = drive(
+            world
+                .vm()
+                .invoke_within_parkable(unlimited(), "app", name, Vec::new()),
+        );
+        assert_eq!(run.finished, expected, "{name}");
+        assert_eq!(run.yields, 20, "{name}: one yield for every nudge");
+        assert_eq!(run.declined, 0, "{name}: nothing stood in the way");
+    }
+}
+
+/// The yield a bulk copy's safepoint offers is taken *after* that safepoint,
+/// so the resumed run must not take it again: a fuel limit stops the yielded
+/// run where it stops the uninterrupted one, at the same charge.
+#[test]
+fn a_fuel_limit_stops_a_run_yielded_after_a_bulk_copy_where_it_stops_the_uninterrupted_one() {
+    let world = world();
+    for name in ["snapshotting", "regrowing"] {
+        let fuel = || {
+            Budget::new(Limits {
+                fuel: Some(3_000_000),
+                ..Limits::default()
+            })
+        };
+        let expected = world.uninterrupted(name, fuel());
+        assert!(expected.answer.contains("fuel"), "{name}: {expected:?}");
+        let run = drive(
+            world
+                .vm()
+                .invoke_within_parkable(fuel(), "app", name, Vec::new()),
+        );
+        assert!(run.yields > 0, "{name}");
+        assert_eq!(run.finished, expected, "{name}");
+    }
 }
