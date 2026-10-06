@@ -584,7 +584,9 @@ pub(crate) struct Machine<'a> {
     /// The work since the last charge at which the dispatch loop's slow path
     /// takes a safepoint: [`SAFEPOINT_STRIDE`], or nought for the one
     /// instruction after a bulk operation took the stride's safepoint inside
-    /// itself while a yield was wanted and could be honoured (#606).
+    /// itself while a yield was wanted and could be honoured (#606) — or
+    /// after a host call that ended a stride's work the same way
+    /// ([`Machine::after_host_call`], #618).
     ///
     /// The encoded tier's analogue of [`Machine::native_poll_at`]'s nought,
     /// moved off the per-instruction path. A loop whose every turn makes a
@@ -602,6 +604,17 @@ pub(crate) struct Machine<'a> {
     /// compares against this field where it compared against the constant.
     /// [`Machine::safepoint`] restores it.
     stride: u64,
+    /// [`Machine::work`] at the last safepoint, or at the last yield the
+    /// dispatch loop took after a charge: where the stride a host call's
+    /// charge cannot end began (#618).
+    ///
+    /// A host call charges at its boundary and moves `charged_work`, so in a
+    /// loop that calls the host every turn the loop's own stride test never
+    /// finds a stride gathered. This is the coordinate that still counts one:
+    /// [`Machine::after_host_call`] offers a wanted yield once a stride of
+    /// work has passed since it, which is where the same loop without its host
+    /// calls would have reached its safepoint.
+    safepoint_work: u64,
     /// Which task this machine is running, for a trace and for the way back
     /// a host is offered.
     task: u64,
@@ -1032,6 +1045,7 @@ impl<'a> Machine<'a> {
             just_resumed: false,
             declined_this_stride: false,
             stride: SAFEPOINT_STRIDE,
+            safepoint_work: 0,
             task: ENTRY_TASK,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1121,6 +1135,7 @@ impl<'a> Machine<'a> {
             just_resumed: false,
             declined_this_stride: false,
             stride: SAFEPOINT_STRIDE,
+            safepoint_work: 0,
             task,
             cell_tag: cell::new_tag(),
             next_task: 1,
@@ -1466,6 +1481,7 @@ impl<'a> Machine<'a> {
         stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
         let gathered = self.work() - self.charged_work;
         self.charged_work = self.work();
+        self.safepoint_work = self.work();
         if let Err(stopped) = budget.safepoint(gathered) {
             return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
         }
@@ -1494,7 +1510,35 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// [`Machine::after_bulk_safepoint`]'s lowering, out of line: it runs
+    /// What the dispatch loop does after a host call returned an answer.
+    ///
+    /// The call charged at its boundary ([`Machine::charge_at_host_boundary`])
+    /// and so moved the loop's stride along, which in a loop that calls the
+    /// host every turn means the loop never reaches a safepoint and never
+    /// reads a request (#618). So once a stride of work has passed since the
+    /// last safepoint ([`Machine::safepoint_work`]) — where that loop without
+    /// its host calls would have stopped to ask — a yield wanted now is offered
+    /// at the next instruction, exactly as [`Machine::after_bulk_safepoint`]
+    /// offers it (ADR 0089) and under the same gate. Not sooner: a host call
+    /// is not a safepoint, and a run asked to yield should not leave at the
+    /// first call it makes rather than where it would have been asked.
+    /// Asked after the call rather than at its boundary, because the call
+    /// itself may be what raised the request.
+    ///
+    /// `next_check` is left alone otherwise: it is at or before where the
+    /// next safepoint falls, and the loop recomputes it when it gets there.
+    #[inline]
+    pub(super) fn after_host_call(&mut self) {
+        if self.yield_wanted()
+            && self.work() - self.safepoint_work >= SAFEPOINT_STRIDE
+            && self.yieldable()
+        {
+            self.offer_yield_next();
+        }
+    }
+
+    /// [`Machine::after_bulk_safepoint`]'s and [`Machine::after_host_call`]'s
+    /// lowering, out of line: it runs
     /// only while a yield is asked for.
     #[cold]
     #[inline(never)]
@@ -1903,9 +1947,24 @@ impl<'a> Machine<'a> {
     /// rendezvous poll, and putting one in front of every Host call would
     /// make an unpredictable sweep part of the cost of reaching the outside
     /// world, for a reason the budget never asked for.
+    ///
+    /// # A charge begins a stride, for a yield too
+    ///
+    /// It moves `charged_work` as a safepoint does, so a loop whose every turn
+    /// makes a host call and is shorter than a stride never finds one due at
+    /// the dispatch loop, nor at a compiled backedge (#618). So it lowers the
+    /// two flags a safepoint lowers: `just_resumed`, since a run that reached
+    /// a host call has done something since it was resumed and may yield
+    /// again; and `declined_this_stride`, since the stride it counted is the
+    /// one this charge ends. Without the first, such a loop yields once and
+    /// then never again; compiled code's early poll reads both
+    /// ([`Machine::native_poll_at`]). The encoded tier's offer is made after
+    /// the call returns, by [`Machine::after_host_call`].
     fn charge_at_host_boundary(&mut self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
         let pending = self.work() - self.charged_work;
         self.charged_work = self.work();
+        self.just_resumed = false;
+        self.declined_this_stride = false;
         if let Err(stopped) = budget.safepoint(pending) {
             return Err(budget.to_runtime_error(stopped).at(span));
         }
@@ -2428,7 +2487,8 @@ impl<'a> Machine<'a> {
 
     /// Whether the embedder has asked this run to yield, read where a
     /// safepoint is already due — or, on the dispatch loop, at the instruction
-    /// after a bulk operation took the due one inside itself
+    /// after a bulk operation took the due one inside itself, or after a host
+    /// call whose charge ended a stride (#618)
     /// ([ADR 0089](../../../../docs/adr/0089-a-bulk-safepoint-offers-the-yield-at-the-next-instruction.md)):
     /// a parkable run only, since no other has a caller that could do
     /// anything with a yielded machine.
@@ -2487,12 +2547,16 @@ impl<'a> Machine<'a> {
         self.clear_yield_request();
         self.instructions -= 1;
         if self.stride == 0 {
-            // Offered after a bulk operation's own safepoint (#606): the
-            // stride's safepoint has been taken, so the resumed run must not
-            // take it again. The question goes back to a stride past that
+            // Offered after a bulk operation's own safepoint (#606) or a host
+            // call's charge (#618): the stride's charge has been made, so the
+            // resumed run must not make it again. The question goes back to a stride past that
             // charge, where the uninterrupted run had it.
             self.stride = SAFEPOINT_STRIDE;
             self.next_check = self.next_question();
+            // And the next stride a host call's charge cannot end begins
+            // here, so a loop of host calls asked again yields a stride on
+            // rather than at its next call (#618).
+            self.safepoint_work = self.work();
         }
         self.yielded = Some(Instant::now());
         // Never seen: `Machine::drive` reads `yielded` before the answer, as
@@ -10953,6 +11017,41 @@ pub(crate) mod tests {
         assert_eq!(machine.stride, SAFEPOINT_STRIDE);
         assert_eq!(machine.next_check, 300 + SAFEPOINT_STRIDE);
         assert!(!machine.yield_requested(), "the request is honoured");
+    }
+
+    /// **#618: after a host call, a wanted yield is offered once a stride of
+    /// work has passed since the last safepoint, and not sooner.**
+    ///
+    /// The host call's charge moved `charged_work`, so the loop's own stride
+    /// test cannot say this. Yielding there starts the next stride.
+    #[test]
+    fn a_yield_after_a_host_call_waits_for_a_stride_since_the_last_safepoint() {
+        let program = Build::default().done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        machine.parking = true;
+        machine.yield_request = Some(Arc::new(AtomicBool::new(true)));
+        let before = machine.next_check;
+
+        // Less than a stride since the last safepoint: nothing moves.
+        machine.instructions = SAFEPOINT_STRIDE - 1;
+        machine.charged_work = machine.work();
+        machine.after_host_call();
+        assert_eq!(machine.stride, SAFEPOINT_STRIDE);
+        assert_eq!(machine.next_check, before);
+
+        // A stride: the next instruction asks, and finds the stride due.
+        machine.instructions = SAFEPOINT_STRIDE;
+        machine.charged_work = machine.work();
+        machine.after_host_call();
+        assert_eq!(machine.stride, 0);
+        assert_eq!(machine.next_check, SAFEPOINT_STRIDE + 1);
+        machine.instructions += 1;
+        assert!(machine.offer_yield().is_err());
+
+        // The yield restored the schedule and began the next stride.
+        assert_eq!(machine.stride, SAFEPOINT_STRIDE);
+        assert_eq!(machine.next_check, 2 * SAFEPOINT_STRIDE);
+        assert_eq!(machine.safepoint_work, SAFEPOINT_STRIDE);
     }
 
     /// **What compiled code is allowed to do before it polls is what is left
