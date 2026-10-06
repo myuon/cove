@@ -1,6 +1,6 @@
 # ADR 0089: A bulk safepoint offers the yield at the next instruction
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-06
 - Refers to:
   [ADR 0084](0084-a-run-may-yield-at-a-safepoint.md), whose "the request is

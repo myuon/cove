@@ -1,6 +1,6 @@
 # ADR 0083: The standard library is checked once per process
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Refers to:
   [issue 569](https://github.com/myuon/cove/issues/569), whose staged plan

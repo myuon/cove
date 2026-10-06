@@ -1,6 +1,6 @@
 # ADR 0086: A yield request makes compiled code poll
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 - Refers to:
   [ADR 0085](0085-compiled-frames-resume-where-they-yielded.md), whose resume
