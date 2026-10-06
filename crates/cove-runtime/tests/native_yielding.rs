@@ -59,13 +59,17 @@ const SCHED: ModuleSchema = ModuleSchema {
     operations: &[
         op("nudge", &[], HostType::Unit),
         op("wait", &[HostType::Int], HostType::Int),
+        op("tick", &[HostType::Int], HostType::Int),
+        op("prod", &[HostType::Int], HostType::Int),
     ],
     types: &[],
     resources: &[],
 };
 
 /// `nudge` raises the yield request of the run the test installed; `wait`
-/// answers its argument plus one, pending where the run can park.
+/// answers its argument plus one, pending where the run can park; `tick`
+/// answers its argument plus one at once, `Ready` even where it could pend;
+/// `prod` is `tick` that raises the request too.
 #[derive(Default)]
 struct Sched {
     signal: Mutex<Option<YieldRequest>>,
@@ -85,6 +89,13 @@ impl HostApi for Sched {
                 Ok(Value::unit())
             }
             "wait" => Ok(Value::int(args[0].as_int().expect("an Int") + 1)),
+            "tick" => Ok(Value::int(args[0].as_int().expect("an Int") + 1)),
+            "prod" => {
+                if let Some(signal) = &*self.signal.lock().unwrap() {
+                    signal.request();
+                }
+                Ok(Value::int(args[0].as_int().expect("an Int") + 1))
+            }
             _ => unreachable!("{op}"),
         }
     }
@@ -363,6 +374,18 @@ fn regrow(n: Int) -> Int {
   turns + counts(0)
 }
 
+/// A host call every turn and turns far shorter than a stride, so every
+/// charge the loop makes is a host boundary's (#618). Compiled (ADR 0087).
+fn ticks(n: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < n {
+    total = (total + sched.tick(i)) % 1000003
+    i += 1
+  }
+  total
+}
+
 /// Strings built and dropped: allocation through the string helpers.
 fn strings(n: Int) -> Int {
   var total = 0
@@ -392,6 +415,28 @@ export fn snapshotting() -> Int {
 export fn regrowing() -> Int {
   sched.nudge()
   regrow(3000)
+}
+
+/// `ticks` with every call asking to yield: a request raised at every turn,
+/// deterministically.
+fn prods(n: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < n {
+    total = (total + sched.prod(i)) % 1000003
+    i += 1
+  }
+  total
+}
+
+export fn prodding() -> Int {
+  sched.nudge()
+  prods(3000)
+}
+
+export fn ticking() -> Int {
+  sched.nudge()
+  ticks(60000)
 }
 
 export fn building() -> Int {
@@ -730,7 +775,7 @@ fn the_loops_are_compiled_and_the_entries_are_not() {
             "{compiled} is refused: {refused:?}"
         );
     }
-    for compiled in ["waits", "timed"] {
+    for compiled in ["waits", "timed", "ticks", "prods"] {
         assert!(
             !refused
                 .iter()
@@ -1147,10 +1192,11 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
 }
 
 /// The shapes a storm is run over: copies, snapshots, a `toVector` loop with
-/// a length check, strings, allocation-heavy loops, recursion, and the loops
-/// and calls of the cases above.
-const STORMED: [&str; 10] = [
+/// a length check, a host call every turn, strings, allocation-heavy loops,
+/// recursion, and the loops and calls of the cases above.
+const STORMED: [&str; 11] = [
     "waiting",
+    "ticking",
     "timing",
     "copying",
     "snapshotting",
@@ -1226,6 +1272,11 @@ fn no_compiled_shape_runs_long_without_yielding_when_asked() {
 /// so before the fix it never found one due: nought yields, through 67,152
 /// and 101,907 of the monitor's requests. A bulk operation's safepoint now
 /// offers the yield at the next instruction while one is wanted.
+///
+/// And #618: `ticking` makes a host call every turn, whose charge moved the
+/// stride along as a safepoint's does, so it never yielded either. A host
+/// call now offers the yield once a stride of work has passed since the last
+/// safepoint.
 #[test]
 fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
     let world = world();
@@ -1246,6 +1297,20 @@ fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
             let run = storm_on(vm, name, seed, most);
             assert_eq!(run.finished, expected, "{name}, storm {seed}: {run:?}");
             assert!(run.yields > 0, "{name}, storm {seed}: never yielded");
+            if name == "ticking" {
+                // Asked without a pause, it yields once a stride of work:
+                // the most the dispatch loop runs between two questions. In
+                // requests that is more than other shapes go on through,
+                // because a host call is one unit of work and many times one
+                // instruction's time.
+                if most == 0 {
+                    assert!(
+                        run.yields as u64 * 2 * SAFEPOINT_STRIDE >= run.finished.fuel,
+                        "{name}, storm {seed}: fewer than one yield in two strides: {run:?}"
+                    );
+                }
+                continue;
+            }
             assert!(
                 run.unheeded < 2_000,
                 "{name}, storm {seed}: went on through {} requests without yielding: {run:?}",
@@ -1254,6 +1319,9 @@ fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
         }
     }
 }
+
+/// The stride the encoded tier's yield schedule is stated in.
+const SAFEPOINT_STRIDE: u64 = cove_runtime::SAFEPOINT_STRIDE;
 
 /// **A host call from compiled code parks with the chain standing** (ADR
 /// 0087): `waits` is compiled, parks at each `wait`, is resumed on another
@@ -1295,4 +1363,52 @@ fn a_host_call_around_a_long_call_no_longer_blocks_its_yields() {
     // nothing left to poll before the run answers.
     assert_eq!(run.native_yields, 1, "{run:?}");
     assert_eq!(run.declined, 0, "{run:?}");
+}
+
+/// **#618, deterministically, on both tiers.** A loop that makes a host call
+/// every turn, each call asking to yield: compiled code polls at its next
+/// backedge after each call (ADR 0086), so it yields at nearly every turn;
+/// the dispatch loop asks once a stride of work has passed since its last
+/// safepoint (ADR 0089's rule at a host call), so it yields once a stride.
+/// Before the fix compiled code yielded once — a host call's charge moved the
+/// stride along and nothing lowered `just_resumed` — and the dispatch loop
+/// never.
+#[test]
+fn a_loop_of_host_calls_each_asking_to_yield_yields_on_both_tiers() {
+    let world = world();
+    let expected = world.uninterrupted("prodding", unlimited());
+    let run = drive(
+        world
+            .vm()
+            .invoke_within_parkable(unlimited(), "app", "prodding", Vec::new()),
+    );
+    assert_eq!(run.finished, expected);
+    assert!(
+        run.native_yields >= 1_500,
+        "compiled: {} yields over 3000 calls: {run:?}",
+        run.native_yields
+    );
+
+    let encoded = || {
+        OwnedVm::new(
+            Arc::clone(&world.runtime),
+            Arc::clone(&world.hosts),
+            world.encoded.clone(),
+        )
+    };
+    *world.sched.signal.lock().unwrap() = None;
+    let expected =
+        drive(encoded().invoke_within_parkable(unlimited(), "app", "prodding", Vec::new()))
+            .finished;
+    let vm = encoded();
+    *world.sched.signal.lock().unwrap() = Some(vm.yield_request());
+    let run = drive(vm.invoke_within_parkable(unlimited(), "app", "prodding", Vec::new()));
+    assert_eq!(run.finished, expected);
+    assert_eq!(run.native_yields, 0);
+    assert!(
+        run.yields as u64 * 2 * SAFEPOINT_STRIDE >= run.finished.fuel,
+        "encoded: {} yields for {} work: {run:?}",
+        run.yields,
+        run.finished.fuel
+    );
 }

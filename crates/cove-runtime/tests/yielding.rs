@@ -49,14 +49,16 @@ const SCHED: ModuleSchema = ModuleSchema {
     capability: "sched",
     operations: &[
         op("nudge", &[], HostType::Unit),
+        op("tick", &[HostType::Int], HostType::Int),
         op("run", &[HostType::Any], HostType::Int),
     ],
     types: &[],
     resources: &[],
 };
 
-/// `nudge` raises the yield request of the run the test installed; `run`
-/// runs a callback, which is where a run cannot yield.
+/// `nudge` raises the yield request of the run the test installed; `tick`
+/// answers its argument plus one at once; `run` runs a callback, which is
+/// where a run cannot yield.
 #[derive(Default)]
 struct Sched {
     signal: Mutex<Option<YieldRequest>>,
@@ -67,7 +69,10 @@ impl HostApi for Sched {
         SCHED
     }
 
-    fn call(&self, op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        if op == "tick" {
+            return Ok(Value::int(args[0].as_int().expect("an Int") + 1));
+        }
         assert_eq!(op, "nudge");
         if let Some(signal) = &*self.signal.lock().unwrap() {
             signal.request();
@@ -209,6 +214,55 @@ export fn snapshotting() -> Int {
     total = (total + snapshots(round + 1500)) % 1000003
   }
   total
+}
+
+/// A host call every turn, and turns far shorter than a stride: every charge
+/// the loop makes is a host boundary's (#618).
+fn ticks(n: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < n {
+    total = (total + sched.tick(i)) % 1000003
+    i += 1
+  }
+  total
+}
+
+/// Twenty rounds, each asking to yield and then ticking.
+export fn ticking() -> Int {
+  var total = 0
+  for round in 0..<20 {
+    sched.nudge()
+    total = (total + ticks(round + 3000)) % 1000003
+  }
+  total
+}
+
+/// Asked beside a running task, so the request waits for the task; once it
+/// is joined, every safepoint the run reaches is inside a copy of two
+/// thousand words, so the yield is offered after one.
+export fn copyingAfterChild() -> Int {
+  var cells: Array<Int> = [1, 2, 3]
+  while cells.length() < 2000 {
+    var v = cells.toVector()
+    v.push(cells.length())
+    cells = v.freeze()
+  }
+  var total = 0
+  scope work {
+    let child = work.spawn {
+      spin(10)
+    }
+    sched.nudge()
+    total = spin(10)
+    total += await child
+  }
+  while cells.length() < 2100 {
+    var v = cells.toVector()
+    v.push(total)
+    cells = v.freeze()
+  }
+  cells.length() + total
 }
 
 /// Twenty rounds, each asking to yield and then regrowing.
@@ -716,16 +770,17 @@ fn a_host_is_told_when_a_yielded_run_s_flag_is_raised() {
     assert_eq!(error.outcome, RunOutcome::Cancelled);
 }
 
-/// **#606.** A loop whose every safepoint is taken inside a bulk copy — a
-/// `snapshot` or a `toVector` every turn — yields once for every request, as
-/// a loop of ordinary instructions does, and answers as the uninterrupted run
-/// in the same count for the same fuel. Before the fix the dispatch loop's
-/// own stride test never found a safepoint due, and both ran to the end
+/// **#606 and #618.** A loop whose every safepoint is taken inside a bulk
+/// copy — a `snapshot` or a `toVector` every turn — or whose every charge is a
+/// host call's — `tick` every turn — yields once for every request, as a loop
+/// of ordinary instructions does, and answers as the uninterrupted run in the
+/// same count for the same fuel. Before the fixes the dispatch loop's own
+/// stride test never found a safepoint due, and all three ran to the end
 /// without yielding once.
 #[test]
-fn a_loop_whose_every_safepoint_is_inside_a_bulk_copy_yields_when_asked() {
+fn a_loop_whose_every_charge_is_a_bulk_copy_or_a_host_call_yields_when_asked() {
     let world = world();
-    for name in ["snapshotting", "regrowing"] {
+    for name in ["snapshotting", "regrowing", "ticking"] {
         let expected = world.uninterrupted(name, unlimited());
         assert!(
             !expected.answer.starts_with("error"),
@@ -742,16 +797,18 @@ fn a_loop_whose_every_safepoint_is_inside_a_bulk_copy_yields_when_asked() {
     }
 }
 
-/// The yield a bulk copy's safepoint offers is taken *after* that safepoint,
-/// so the resumed run must not take it again: a fuel limit stops the yielded
-/// run where it stops the uninterrupted one, at the same charge.
+/// The yield a bulk copy's safepoint or a host call's charge offers is taken
+/// *after* that charge, so the resumed run must not charge there again: a
+/// fuel limit stops the yielded run where it stops the uninterrupted one, at
+/// the same charge.
 #[test]
-fn a_fuel_limit_stops_a_run_yielded_after_a_bulk_copy_where_it_stops_the_uninterrupted_one() {
+fn a_fuel_limit_stops_a_run_yielded_after_a_charge_where_it_stops_the_uninterrupted_one() {
     let world = world();
-    for name in ["snapshotting", "regrowing"] {
+    for name in ["snapshotting", "regrowing", "ticking"] {
+        let half = world.uninterrupted(name, unlimited()).fuel / 2;
         let fuel = || {
             Budget::new(Limits {
-                fuel: Some(3_000_000),
+                fuel: Some(half),
                 ..Limits::default()
             })
         };
@@ -763,6 +820,42 @@ fn a_fuel_limit_stops_a_run_yielded_after_a_bulk_copy_where_it_stops_the_uninter
                 .invoke_within_parkable(fuel(), "app", name, Vec::new()),
         );
         assert!(run.yields > 0, "{name}");
+        assert_eq!(run.finished, expected, "{name}");
+    }
+}
+
+/// **The schedule after a yield that stood after a charge is the
+/// uninterrupted run's, position by position** (#606, #618).
+///
+/// A yield offered after a bulk operation's safepoint (`copyingAfterChild`)
+/// or a host call's charge (`ticking`) stands after a charge the run has
+/// already made. The resumed run
+/// must not charge there again: an extra safepoint answers the same and
+/// charges the same in total, so no test of totals sees it. A fuel limit one
+/// past the charge the run yielded after does: the extra charge would reach
+/// it at once, where the uninterrupted run reaches it at its next charge,
+/// some instructions on.
+#[test]
+fn a_run_yielded_after_a_charge_reaches_its_next_charge_where_the_uninterrupted_run_does() {
+    let world = world();
+    for name in ["copyingAfterChild", "ticking"] {
+        let yielded = first_yield(&world, name, unlimited());
+        let charged = yielded.meter().fuel_spent();
+        let _ = yielded.cancel();
+        let fuel = || {
+            Budget::new(Limits {
+                fuel: Some(charged + 1),
+                ..Limits::default()
+            })
+        };
+        let expected = world.uninterrupted(name, fuel());
+        assert!(expected.answer.contains("fuel"), "{name}: {expected:?}");
+        let run = drive(
+            world
+                .vm()
+                .invoke_within_parkable(fuel(), "app", name, Vec::new()),
+        );
+        assert_eq!(run.yields, 1, "{name}: it yields where it did, once");
         assert_eq!(run.finished, expected, "{name}");
     }
 }

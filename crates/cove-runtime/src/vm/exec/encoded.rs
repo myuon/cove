@@ -3443,6 +3443,7 @@ pub(super) fn dispatch<'s, 'a>(
                                 .mem
                                 .set_word_at(base_at + (dst + at as u32) as usize, *word);
                         }
+                        machine.after_host_call();
                     }
                     Err(error) => fail!(error),
                 }
@@ -3469,6 +3470,7 @@ pub(super) fn dispatch<'s, 'a>(
                                 .mem
                                 .set_word_at(base_at + (dst + at as u32) as usize, *word);
                         }
+                        machine.after_host_call();
                     }
                     Err(error) => fail!(error),
                 }
