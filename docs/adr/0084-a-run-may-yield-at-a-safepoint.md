@@ -1,6 +1,6 @@
 # ADR 0084: A run may yield at a safepoint
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Refers to:
   [ADR 0080](0080-a-host-call-may-answer-pending.md), whose quiescence rule,

@@ -1,6 +1,6 @@
 # ADR 0088: An embedder sizes the heap, and is told of a cancellation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-06
 - Issue: [#601](https://github.com/myuon/cove/issues/601)
 - Refers to:

@@ -1,6 +1,6 @@
 # ADR 0085: Compiled frames resume where they yielded
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-04
 - Refers to:
   [ADR 0084](0084-a-run-may-yield-at-a-safepoint.md), whose §6 left
