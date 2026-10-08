@@ -226,8 +226,15 @@ impl OwnedVm {
         self.vm.instructions()
     }
 
-    /// [`Vm::work`].
-    pub fn work(&self) -> u64 {
+    /// The machine underneath, for this crate's tests.
+    #[cfg(test)]
+    pub(crate) fn inner(&mut self) -> &mut Vm<'static> {
+        &mut self.vm
+    }
+
+    /// [`Vm::work`], for this crate's tests.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> u64 {
         self.vm.work()
     }
 
@@ -423,9 +430,17 @@ impl YieldedVm {
         self.vm.instructions()
     }
 
-    /// [`Vm::work`], up to the instruction it stands before.
-    pub fn work(&self) -> u64 {
+    /// [`Vm::work`], up to the instruction it stands before, for this
+    /// crate's tests.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> u64 {
         self.vm.work()
+    }
+
+    /// The trips its machine has raised, for this crate's tests.
+    #[cfg(test)]
+    pub(crate) fn raised(&self) -> Vec<(crate::vm::exec::Trip, u64)> {
+        self.vm.vm.raised().to_vec()
     }
 
     /// [`Vm::meter`]: the run's accounting so far.
@@ -581,11 +596,6 @@ impl ParkedVm {
     /// [`Vm::instructions`], up to the call it is parked at.
     pub fn instructions(&self) -> u64 {
         self.vm.instructions()
-    }
-
-    /// [`Vm::work`], up to the call it is parked at.
-    pub fn work(&self) -> u64 {
-        self.vm.work()
     }
 
     /// [`Vm::meter`]: the parked run's accounting, up to the call it is

@@ -3,7 +3,7 @@
 //!
 //! The contract, from the embedder's side. A run that yields and is resumed
 //! answers what the same run answers uninterrupted, in the same number of
-//! instructions, doing the same work, with the same trace; a run asked to
+//! instructions, with the same trace; a run asked to
 //! yield where it cannot — inside a host's callback, beside a running task —
 //! declines and goes on, and yields at the first safepoint where it can; a
 //! yielded run can be cancelled and keeps its deadline; and what an embedder
@@ -389,14 +389,12 @@ fn shown(answer: &Result<Value, RuntimeError>) -> String {
 struct Finished {
     answer: String,
     instructions: u64,
-    work: u64,
 }
 
 fn finished(vm: &OwnedVm, answer: &Result<Value, RuntimeError>) -> Finished {
     Finished {
         answer: shown(answer),
         instructions: vm.instructions(),
-        work: vm.work(),
     }
 }
 
@@ -500,8 +498,8 @@ fn what_an_embedder_moves_between_threads_is_send() {
 }
 
 /// The whole of the contract: twenty yields, each run on from a thread of its
-/// own, and the same answer in the same instructions for the same work as the
-/// run nothing interrupted.
+/// own, and the same answer in the same instructions as the run nothing
+/// interrupted.
 #[test]
 fn a_yielded_run_resumed_on_other_threads_answers_as_the_uninterrupted_run_does() {
     let world = world();
@@ -751,7 +749,7 @@ fn a_host_is_told_when_a_yielded_run_s_flag_is_raised() {
 /// copy — a `snapshot` or a `toVector` every turn — or whose every charge is a
 /// host call's — `tick` every turn — yields once for every request, as a loop
 /// of ordinary instructions does, and answers as the uninterrupted run in the
-/// same count for the same work. Before the fixes the dispatch loop's own
+/// same count. Before the fixes the dispatch loop's own
 /// stride test never found a safepoint due, and all three ran to the end
 /// without yielding once.
 #[test]
@@ -775,11 +773,7 @@ fn a_loop_whose_every_charge_is_a_bulk_copy_or_a_host_call_yields_when_asked() {
 }
 
 // Tests stood in this file that held a yielded run to the uninterrupted run's
-// schedule by putting a fuel limit where the two would part: one past the
-// charge a run yielded after (#606, #618), half its work, or a fixed figure.
-// ADR 0091 removed the instrument with the allowance. The arithmetic they
-// guarded — that a resumed run does not take the stride's safepoint again —
-// is held by `crate::vm::exec`'s
-// `a_yield_after_a_bulk_safepoint_is_offered_at_the_next_instruction` and
-// `a_yield_after_a_host_call_waits_for_a_stride_since_the_last_safepoint`, and
-// the totals by every case above.
+// schedule by putting a fuel limit where the two would part. ADR 0091 removed
+// the instrument with the allowance; what they guarded is measured inside the
+// crate now, where the machine's work and a stop raised at a chosen point of it
+// can be read: `crate::vm::stops`.

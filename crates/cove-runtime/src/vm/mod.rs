@@ -126,6 +126,8 @@ pub mod profile;
 pub(crate) mod render;
 pub(crate) mod report;
 mod sequences;
+#[cfg(test)]
+mod stops;
 
 pub use parked::{OwnedVm, ParkedVm, Step, YieldRequest, YieldedVm};
 
@@ -769,16 +771,33 @@ impl<'a> Vm<'a> {
     /// The work this machine has done, in the units its safepoint stride
     /// counts: one per instruction dispatched, one per word a bulk operation
     /// moved, and the IR work compiled code counted statically and paid at its
-    /// polls.
-    ///
-    /// A diagnostic, as [`Vm::instructions`] is, and like it cumulative over
-    /// every run this machine has made and the entry task's own: the
-    /// coordinate ADR 0040's stop bounds and ADR 0084's yields are stated in,
-    /// readable so that a test can measure them. Nothing is limited by it —
-    /// [ADR 0091](../../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)
-    /// removed the fuel allowance this used to be reported as.
-    pub fn work(&self) -> u64 {
+    /// polls — the coordinate ADR 0040's stop bounds and ADR 0084's yields are
+    /// stated in. A test measurement and not an API: cumulative over every
+    /// run this machine has made, and the entry task's own.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> u64 {
         self.machine.work()
+    }
+
+    /// Arms [`crate::vm::exec::Trips`] on this machine, for a test.
+    #[cfg(test)]
+    /// It also starts the log of the work at every safepoint the machine
+    /// takes ([`Vm::safepoints`]).
+    pub(crate) fn set_trips(&mut self, trips: Vec<(u64, crate::vm::exec::Trip)>) {
+        self.machine.set_trips(trips);
+        self.machine.trips.logging = true;
+    }
+
+    /// The trips raised so far, with the work at which each was.
+    #[cfg(test)]
+    pub(crate) fn raised(&self) -> &[(crate::vm::exec::Trip, u64)] {
+        &self.machine.trips.raised
+    }
+
+    /// The work at every safepoint this machine has taken.
+    #[cfg(test)]
+    pub(crate) fn safepoints(&self) -> &[u64] {
+        &self.machine.trips.safepoints
     }
 
     /// Words the heap region occupies, free blocks included.

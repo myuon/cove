@@ -21,8 +21,11 @@
 //! the same source operation. `docs/adr/0024-a-stop-is-a-bound-not-a-point.md`
 //! is where that is decided.
 //!
-//! The work bounds are measured on `Vm`, in [`Vm::work`] — the units its
-//! safepoint stride counts. The tree walk has no such count: it used to be
+//! The work bounds are measured on `Vm`, in its instruction count. None of
+//! the programs here makes a bulk operation or runs compiled code, so that is
+//! exactly the work its safepoint stride counts; the bounds that do involve
+//! either, and stops raised at chosen points of a run, are measured inside the
+//! crate (`crate::vm::stops`). The tree walk has no such count: it used to be
 //! measured in the fuel it charged at every safepoint, and
 //! `docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md`
 //! removed fuel. Its safepoints are every back edge, call and `await`, so
@@ -290,8 +293,9 @@ struct Run {
     stopped: bool,
     /// The one terminal classification the run's trace carries.
     outcome: RunOutcome,
-    /// What `Vm`'s entry task did, in the units its safepoint stride counts,
-    /// which is `None` on the tree walk because a tree walk has no such count.
+    /// The instructions `Vm`'s entry task ran — for these programs, the work
+    /// its safepoint stride counts — which is `None` on the tree walk because
+    /// a tree walk has no such count.
     work: Option<u64>,
     /// Host calls the run's budget was charged, refused ones included.
     host_calls: u64,
@@ -401,7 +405,11 @@ fn go(source: &str, limits: Limits, backend: Backend) -> Run {
             };
             let mut machine = Vm::new(&runtime, &hosts, &program);
             let answer = machine.run_entry("m", "main", Vec::new());
-            (described(&answer), answer.is_err(), Some(machine.work()))
+            (
+                described(&answer),
+                answer.is_err(),
+                Some(machine.instructions()),
+            )
         }
         Backend::Ast => {
             let answer = Interpreter::new(&runtime).run_entry("m", "main", Vec::new());

@@ -230,6 +230,10 @@ struct Accounting {
     cancellation: Cancellation,
     started_at: Instant,
     host_calls: AtomicU64,
+    /// Whether a test has made the deadline pass now, rather than waiting for
+    /// the clock: [`Meter::expire_for_test`].
+    #[cfg(test)]
+    expired: AtomicBool,
     /// How many spawned tasks are alive right now: charged before a task is
     /// given a thread and released when the task that spawned it observes
     /// its end.
@@ -324,6 +328,8 @@ impl Meter {
                 cancellation,
                 started_at: Instant::now(),
                 host_calls: AtomicU64::new(0),
+                #[cfg(test)]
+                expired: AtomicBool::new(false),
                 live_tasks: AtomicU64::new(0),
             }),
         }
@@ -380,10 +386,8 @@ impl Meter {
         if state.cancellation.is_cancelled() {
             return Err(Stopped::Cancelled);
         }
-        if let Some(deadline) = state.limits.deadline {
-            if state.started_at.elapsed() >= deadline {
-                return Err(Stopped::Deadline);
-            }
+        if self.past_deadline() {
+            return Err(Stopped::Deadline);
         }
         let made = state
             .host_calls
@@ -486,8 +490,27 @@ impl Meter {
         if self.state.cancellation.is_cancelled() {
             return Some(Stopped::Cancelled);
         }
-        let deadline = self.state.limits.deadline?;
-        (self.state.started_at.elapsed() >= deadline).then_some(Stopped::Deadline)
+        self.past_deadline().then_some(Stopped::Deadline)
+    }
+
+    /// Whether the run has a deadline and it has passed.
+    fn past_deadline(&self) -> bool {
+        let Some(deadline) = self.state.limits.deadline else {
+            return false;
+        };
+        #[cfg(test)]
+        if self.state.expired.load(Ordering::Relaxed) {
+            return true;
+        }
+        self.state.started_at.elapsed() >= deadline
+    }
+
+    /// Makes a run that has a deadline past it from now on, as if the clock
+    /// had reached it: the instrument this crate's bound tests raise a
+    /// deadline with at a point they choose.
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self) {
+        self.state.expired.store(true, Ordering::Relaxed);
     }
 
     /// Converts why execution stopped into a [`RuntimeError`] naming the

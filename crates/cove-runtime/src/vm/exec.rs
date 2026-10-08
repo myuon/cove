@@ -694,6 +694,10 @@ pub(crate) struct Machine<'a> {
     /// something was writing the question itself into the loop, which is why
     /// [`Machine::ask`] is a call. [`crate::vm::debug`] has the table.
     next_check: u64,
+    /// Stops this crate's own tests raise at chosen points of [`Machine::work`].
+    /// See [`Trips`]; nothing outside a test build has it.
+    #[cfg(test)]
+    pub(crate) trips: Trips,
     /// The [`Machine::work`] at which the run last asked its [`Meter`]
     /// whether it may continue: the start of the current stride.
     ///
@@ -1057,6 +1061,8 @@ impl<'a> Machine<'a> {
             assertion_failure: None,
             debugger: None,
             next_check: SAFEPOINT_STRIDE,
+            #[cfg(test)]
+            trips: Trips::default(),
             // The preparation's, not this machine's own: encoded and
             // verified once per program by [`Prepared::of`], before this
             // constructor was called, so a refusal is in hand before any
@@ -1147,6 +1153,8 @@ impl<'a> Machine<'a> {
             assertion_failure: None,
             debugger: None,
             next_check: SAFEPOINT_STRIDE,
+            #[cfg(test)]
+            trips: Trips::default(),
             // The parent's, not a second encoding of the same program: a run
             // executes one form, and encoding again per spawn would be a
             // second pass over the whole program for a pointer's worth of
@@ -1473,6 +1481,10 @@ impl<'a> Machine<'a> {
     /// run that was asked to stop is reported cancelled; then the collector,
     /// which must see a frame this caller has already `sync`ed.
     fn safepoint(&mut self, budget: &Meter, id: FunctionId, pc: usize) -> Result<(), RuntimeError> {
+        #[cfg(test)]
+        if self.trips.logging {
+            self.trips.safepoints.push(self.work());
+        }
         self.just_resumed = false;
         self.declined_this_stride = false;
         self.stride = SAFEPOINT_STRIDE;
@@ -1484,6 +1496,10 @@ impl<'a> Machine<'a> {
         }
         let live = Live(self);
         self.mem.poll(&live);
+        // A stop raised just after a safepoint has answered is the furthest a
+        // stop can be from the next one, which is what a bound is tested at.
+        #[cfg(test)]
+        self.spring_trips(budget);
         Ok(())
     }
 
@@ -1546,7 +1562,7 @@ impl<'a> Machine<'a> {
 
     #[inline]
     fn next_question(&self) -> u64 {
-        match self.debugger {
+        let question = match self.debugger {
             Some(_) => self.instructions + 1,
             // Instruction coordinates, because that is what the loop
             // compares: the count at which `work()` will have reached a
@@ -1554,7 +1570,10 @@ impl<'a> Machine<'a> {
             // can already have passed it, and a check that is due now is
             // exactly what zero asks for.
             None => (self.checked_work + SAFEPOINT_STRIDE).saturating_sub(self.bulk_work),
-        }
+        };
+        #[cfg(test)]
+        let question = question.min(self.trip_question());
+        question
     }
 
     /// How much more work may be done before a safepoint is due — the
@@ -11311,4 +11330,88 @@ pub(crate) mod tests {
     // with it the last caller of `Machine::take_scratch` — so what those cases
     // watched is not there to watch. The note was `vm::intrinsics::text`'s,
     // a module issue #432 deleted with its last arm.
+}
+
+/// A stop a test raises at a chosen point of a run's work.
+///
+/// The instrument the fuel limit used to be for the bound tests (ADR 0091
+/// removed fuel): a stop that becomes true at a point the test chose, and a
+/// record of the [`Machine::work`] at which it did, so that how far the run
+/// went before it noticed is a subtraction. Compiled into this crate's test
+/// build only.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trip {
+    /// Raise the run's cancellation.
+    Cancel,
+    /// Make the run's deadline have passed.
+    Expire,
+    /// Raise the machine's yield request.
+    Yield,
+    /// Raise nothing: look where a trip would, so that a run can be compared
+    /// with one that raised something there.
+    Mark,
+}
+
+/// The [`Trip`]s still to raise, by the work they fall due at, and those
+/// raised with the work at which each was.
+///
+/// A trip is raised at the first point the machine looks after its work
+/// reaches it: between two instructions of the dispatch loop, which lowers its
+/// next question to the trip so that it does look there, or straight after a
+/// safepoint has answered, which is where a bulk operation or compiled code
+/// looks. Either way the record is the work at the raising, not the work asked
+/// for, so a bound measured from it is measured from when the stop was true.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Trips {
+    pending: std::collections::VecDeque<(u64, Trip)>,
+    /// `(trip, work when raised)`, in the order they were raised.
+    pub(crate) raised: Vec<(Trip, u64)>,
+    /// The work at every safepoint the machine has taken, in order: the
+    /// schedule a yielded and resumed run is held to, position by position.
+    /// Kept only while `logging`, because a test that counts the run's
+    /// allocations would otherwise count the log's.
+    pub(crate) safepoints: Vec<u64>,
+    pub(crate) logging: bool,
+}
+
+#[cfg(test)]
+impl Machine<'_> {
+    /// Arms `trips`, each at the work it names, replacing any armed before.
+    pub(crate) fn set_trips(&mut self, mut trips: Vec<(u64, Trip)>) {
+        trips.sort_by_key(|(at, _)| *at);
+        self.trips.pending = trips.into();
+        self.trips.raised.clear();
+        self.next_check = self.next_check.min(self.trip_question());
+    }
+
+    /// The instruction count at which the next trip falls due.
+    fn trip_question(&self) -> u64 {
+        self.trips
+            .pending
+            .front()
+            .map_or(u64::MAX, |(at, _)| at.saturating_sub(self.bulk_work))
+    }
+
+    /// Raises every trip whose work has been reached.
+    pub(super) fn spring_trips(&mut self, budget: &Meter) {
+        while let Some(&(at, trip)) = self.trips.pending.front() {
+            if self.work() < at {
+                break;
+            }
+            self.trips.pending.pop_front();
+            match trip {
+                Trip::Cancel => budget.cancellation().cancel(),
+                Trip::Expire => budget.expire_for_test(),
+                Trip::Yield => {
+                    if let Some(flag) = &self.yield_request {
+                        flag.store(true, atomic::Ordering::Relaxed);
+                    }
+                }
+                Trip::Mark => {}
+            }
+            self.trips.raised.push((trip, self.work()));
+        }
+    }
 }

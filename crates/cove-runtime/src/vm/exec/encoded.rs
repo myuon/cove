@@ -2691,6 +2691,8 @@ pub(super) fn dispatch<'s, 'a>(
             if machine.debugger.is_some() {
                 machine.ask(id, pc)?;
             }
+            #[cfg(test)]
+            machine.spring_trips(budget);
             // Elapsed work since the last charge, not equality with a
             // multiple of it: an instruction that charges for the words it
             // moved steps *over* the multiple it would have landed on, and
@@ -5131,6 +5133,157 @@ mod tests {
         assert!(
             spent < words,
             "and it must not have copied the whole {words} words first"
+        );
+    }
+
+    // --- a stop raised anywhere in a bulk operation (ADR 0040, ADR 0091) -----
+    //
+    // Fuel stopped a run at a figure the test chose; a [`Trip`] raises a stop
+    // at one. Each case below raises a cancellation, and then a deadline, at a
+    // spread of points across the whole of one long bulk operation, and holds
+    // the work the run did after the raising to one stride and one chunk.
+
+    /// A budget whose deadline is an hour away, so that [`Trip::Expire`] has
+    /// one to make pass.
+    fn far() -> crate::budget::Budget {
+        crate::budget::Budget::new(crate::budget::Limits {
+            deadline: Some(std::time::Duration::from_secs(3600)),
+            ..crate::budget::Limits::default()
+        })
+    }
+
+    /// How a run of `entry` with `trip` armed at `at` ended: its outcome, the
+    /// work at which the trip was raised, and the machine's work at the end —
+    /// or, with no trip, the work of the whole run.
+    fn tripped(
+        program: &Program,
+        heap: usize,
+        entry: FunctionId,
+        prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
+        trip: Option<(u64, crate::vm::exec::Trip)>,
+        inspect: &dyn Fn(&Machine<'_>, &[u64]),
+    ) -> (Option<crate::trace::RunOutcome>, u64, u64) {
+        let budget = far();
+        let mut machine = Machine::new(program, heap);
+        let args = prepare(&mut machine);
+        machine.set_trips(trip.into_iter().collect());
+        let outcome = machine
+            .run(entry, &args, &budget.meter())
+            .err()
+            .map(|e| e.outcome);
+        inspect(&machine, &args);
+        let raised = machine.trips.raised.first().map_or(0, |(_, work)| *work);
+        (outcome, raised, machine.work())
+    }
+
+    /// `tripped` at a dozen points across the whole run, for a cancellation
+    /// and a deadline, holding each stop to `bound` work after its raising.
+    fn stops_anywhere_within(
+        what: &str,
+        program: &Program,
+        heap: usize,
+        entry: FunctionId,
+        prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
+        inspect: &dyn Fn(&Machine<'_>, &[u64]),
+        bound: u64,
+    ) {
+        use crate::vm::exec::Trip;
+        let (finished, _, whole) = tripped(program, heap, entry, prepare, None, inspect);
+        assert_eq!(finished, None, "{what}: answers with nothing raised");
+        assert!(
+            whole > 20 * SAFEPOINT_STRIDE,
+            "{what}: long enough to stop inside"
+        );
+        for (trip, want) in [
+            (Trip::Cancel, crate::trace::RunOutcome::Cancelled),
+            (Trip::Expire, crate::trace::RunOutcome::Deadline),
+        ] {
+            for k in 1..=12u64 {
+                let at = whole * k / 13;
+                let (outcome, raised, work) =
+                    tripped(program, heap, entry, prepare, Some((at, trip)), inspect);
+                assert_eq!(outcome, Some(want), "{what}: {trip:?} at {at}");
+                // Raised at the first point the run looked after `at`, which
+                // inside a bulk operation is its next chunk's safepoint: so
+                // this is the bound too, from the other side, and an
+                // operation that did not look while it ran fails here.
+                assert!(
+                    raised >= at && raised - at <= bound,
+                    "{what}: {trip:?} at {at} raised at {raised}"
+                );
+                assert!(
+                    work - raised <= bound,
+                    "{what}: {trip:?} raised at {raised} (asked at {at}) and the run did \
+                     {} more work, past the bound of {bound}; the whole run is {whole}",
+                    work - raised
+                );
+            }
+        }
+    }
+
+    /// **A megabyte's copy is stopped within one stride and one chunk of a
+    /// cancellation or a deadline raised anywhere in it.**
+    #[test]
+    fn a_bulk_copy_is_stopped_within_one_chunk_of_a_stop_raised_anywhere_in_it() {
+        const BYTES: i64 = 1 << 20;
+        let (program, entry) = one_big_copy(BYTES);
+        stops_anywhere_within(
+            "a byte copy",
+            &program,
+            1 << 22,
+            entry,
+            &|_| vec![BYTES as u64],
+            &|_, _| (),
+            SAFEPOINT_STRIDE + BULK_CHUNK_WORDS + 8,
+        );
+    }
+
+    /// **The same for a megabyte's append to a growable run**, which commits
+    /// nothing however far it got: the length word is unchanged at every stop.
+    #[test]
+    fn a_bulk_append_is_stopped_within_one_chunk_of_a_stop_raised_anywhere_in_it() {
+        let (program, entry) = one_big_append();
+        stops_anywhere_within(
+            "an append",
+            &program,
+            1 << 22,
+            entry,
+            &|machine| vec![machine.alloc_buffer(0).expect("an empty buffer fits")],
+            &|machine, args| {
+                if machine.trips.raised.is_empty() {
+                    return;
+                }
+                assert_eq!(
+                    machine.payload(args[0], runs::GROWABLE_LEN),
+                    0,
+                    "a stopped append committed nothing"
+                );
+            },
+            SAFEPOINT_STRIDE + BULK_CHUNK_WORDS + 8,
+        );
+    }
+
+    /// **A search is stopped within one step of a stop raised anywhere in it**
+    /// — in the preparation of a long needle and in the scan alike, the step
+    /// being one stride of units in both (ADR 0065's Decision 4).
+    #[test]
+    fn a_run_find_is_stopped_within_one_step_of_a_stop_raised_anywhere_in_it() {
+        const M: usize = SAFEPOINT_STRIDE as usize * 8 + 5;
+        const N: usize = SAFEPOINT_STRIDE as usize * 40;
+        let (program, entry) = find_fixture();
+        let (haystack, needle) = straight_scan(M, N);
+        stops_anywhere_within(
+            "a search",
+            &program,
+            1 << 20,
+            entry,
+            &|machine| {
+                let hay = run_of(machine, &haystack);
+                let sought = run_of(machine, &needle);
+                vec![hay, sought, 0]
+            },
+            &|_, _| (),
+            2 * SAFEPOINT_STRIDE + 8,
         );
     }
 
@@ -9131,30 +9284,29 @@ mod tests {
             instructions: u64,
             work: u64,
             collections: u64,
+            /// The stop a test raised, and the work at which it was raised.
+            raised: Vec<(crate::vm::exec::Trip, u64)>,
         }
 
-        /// One run of `entry`, fused or not, optionally under a deadline that has
-        /// already passed, with its boundary counted.
+        /// One run of `entry`, fused or not, optionally with a stop raised once
+        /// its work reaches a chosen point, with its boundary counted.
         #[allow(clippy::too_many_arguments)]
         fn ran<T>(
             program: &Program,
             entry: FunctionId,
             fused: bool,
             heap: usize,
-            expired: bool,
+            stop: Option<(u64, crate::vm::exec::Trip)>,
             prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
             inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
         ) -> (Ran<T>, crate::vm::report::BoundaryReport, u64) {
-            let limits = crate::budget::Limits {
-                deadline: expired.then_some(std::time::Duration::ZERO),
-                ..crate::budget::Limits::default()
-            };
-            let budget = crate::budget::Budget::new(limits);
+            let budget = far();
             let mut machine = Machine::new(program, heap);
             if !fused {
                 unfused(&mut machine);
             }
             let args = prepare(&mut machine);
+            machine.set_trips(stop.into_iter().collect());
             machine.count_boundary(native::Tiers::default());
             let result = machine.run(entry, &args, &budget.meter());
             let report = machine.boundary(None).expect("the run was counted");
@@ -9164,6 +9316,7 @@ mod tests {
                 instructions: machine.instructions(),
                 work: machine.work(),
                 collections: machine.collected().collections,
+                raised: machine.trips.raised.clone(),
             };
             let fast = report.windows.fast.iter().sum::<u64>();
             (ran, report, fast)
@@ -9183,13 +9336,12 @@ mod tests {
             program: &Program,
             entry: FunctionId,
             heap: usize,
-            expired: bool,
+            stop: Option<(u64, crate::vm::exec::Trip)>,
             prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
             inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
         ) -> (Ran<T>, crate::vm::report::BoundaryReport, u64) {
-            let (fused, report, fast) = ran(program, entry, true, heap, expired, prepare, inspect);
-            let (rows, unreport, unfast) =
-                ran(program, entry, false, heap, expired, prepare, inspect);
+            let (fused, report, fast) = ran(program, entry, true, heap, stop, prepare, inspect);
+            let (rows, unreport, unfast) = ran(program, entry, false, heap, stop, prepare, inspect);
             assert_eq!(fused, rows, "{what}");
             assert_eq!(
                 (unreport.fusions, unreport.encoded_dispatches, unfast),
@@ -9265,7 +9417,7 @@ mod tests {
                     &f.program,
                     f.push_int,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9323,7 +9475,7 @@ mod tests {
                     &f.program,
                     f.push_int,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9343,7 +9495,7 @@ mod tests {
                     &f.program,
                     f.push_pair,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9384,7 +9536,7 @@ mod tests {
                 &f.program,
                 f.push_int,
                 256,
-                false,
+                None,
                 &collects,
                 &inspect,
             );
@@ -9404,7 +9556,7 @@ mod tests {
                 &f.program,
                 f.push_int,
                 128,
-                false,
+                None,
                 &refuses,
                 &inspect,
             );
@@ -9459,7 +9611,7 @@ mod tests {
                     &f.program,
                     f.push_byte,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9526,7 +9678,7 @@ mod tests {
                     &f.program,
                     f.append_text,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9580,7 +9732,7 @@ mod tests {
                     &f.program,
                     f.append_pairs,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9647,7 +9799,7 @@ mod tests {
                     &f.program,
                     f.append_run,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9709,7 +9861,7 @@ mod tests {
                 &f.program,
                 f.append_run,
                 1 << 16,
-                false,
+                None,
                 &prepare,
                 &inspect,
             );
@@ -9751,7 +9903,7 @@ mod tests {
                     &f.program,
                     f.append_run,
                     1 << 16,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9787,7 +9939,7 @@ mod tests {
                 &f.program,
                 f.append_run,
                 1 << 16,
-                false,
+                None,
                 &prepare,
                 &inspect,
             );
@@ -9876,7 +10028,7 @@ mod tests {
                     &f.program,
                     f.append_texts,
                     heap,
-                    false,
+                    None,
                     &prepare,
                     &inspect,
                 );
@@ -9951,7 +10103,7 @@ mod tests {
                 &f.program,
                 f.append_text,
                 256,
-                false,
+                None,
                 &collects,
                 &inspect,
             );
@@ -9971,7 +10123,7 @@ mod tests {
                 &f.program,
                 f.append_text,
                 128,
-                false,
+                None,
                 &refuses,
                 &inspect,
             );
@@ -10095,7 +10247,7 @@ mod tests {
             let prepare = |_: &mut Machine<'_>| Vec::new();
             let inspect = |_: &Machine<'_>, _: &[u64]| ();
             let (fused, report, _) =
-                fuses_as_unfused("whole", &program, entry, 320, false, &prepare, &inspect);
+                fuses_as_unfused("whole", &program, entry, 320, None, &prepare, &inspect);
             assert!(fused.said.starts_with("Ok("), "{}", fused.said);
             assert!(fused.collections > 0, "a growth collected");
             let windows = report.fusions[PUSH_BYTE];
@@ -10119,16 +10271,38 @@ mod tests {
                 report.encoded_dispatches,
                 report.encoded_instructions - 6 * windows
             );
-            let (stopped, ..) = fuses_as_unfused(
-                "under an expired deadline",
-                &program,
-                entry,
-                320,
-                true,
-                &prepare,
-                &inspect,
-            );
-            assert!(stopped.said.contains("deadline"), "{}", stopped.said);
+            // A cancellation and a deadline raised at points across the run —
+            // inside windows, between them, inside a growth: the fused run
+            // stops where the rows stop, in the same words at the same span
+            // with the same work done and the stop raised at the same point,
+            // and within one stride and one chunk of the raising.
+            for (trip, word) in [
+                (crate::vm::exec::Trip::Cancel, "cancelled"),
+                (crate::vm::exec::Trip::Expire, "deadline"),
+            ] {
+                for k in 1..=10u64 {
+                    // Far enough from the end that a stride and a chunk are
+                    // left for the run to notice in: a stop raised nearer the
+                    // end may be outrun by the answer, which is no fault.
+                    let at = fused.work.saturating_sub(2 * SAFEPOINT_STRIDE + 8) * k / 11;
+                    let (stopped, ..) = fuses_as_unfused(
+                        &format!("{trip:?} at {at}"),
+                        &program,
+                        entry,
+                        320,
+                        Some((at, trip)),
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(stopped.said.contains(word), "{at}: {}", stopped.said);
+                    let (_, raised) = stopped.raised[0];
+                    assert!(
+                        raised >= at && stopped.work - raised <= 2 * SAFEPOINT_STRIDE + 8,
+                        "{trip:?} at {at}: raised at {raised}, stopped at {}",
+                        stopped.work
+                    );
+                }
+            }
         }
 
         /// The same thing for **word** appends: a hundred and seventy of them in
@@ -10270,7 +10444,7 @@ mod tests {
                 (len, held)
             };
             let (fused, report, fast) =
-                fuses_as_unfused("whole", &program, entry, HEAP, false, &prepare, &inspect);
+                fuses_as_unfused("whole", &program, entry, HEAP, None, &prepare, &inspect);
             assert!(fused.said.starts_with("Ok("), "{}", fused.said);
             assert!(fused.collections > 0, "a growth collected");
             let want: Vec<u64> = (0..WINDOWS as u64)
@@ -10302,16 +10476,38 @@ mod tests {
                 report.encoded_dispatches,
                 report.encoded_instructions - 5 * windows
             );
-            let (stopped, ..) = fuses_as_unfused(
-                "under an expired deadline",
-                &program,
-                entry,
-                HEAP,
-                true,
-                &prepare,
-                &inspect,
-            );
-            assert!(stopped.said.contains("deadline"), "{}", stopped.said);
+            // A cancellation and a deadline raised at points across the run —
+            // inside windows, between them, inside a growth: the fused run
+            // stops where the rows stop, in the same words at the same span
+            // with the same work done and the stop raised at the same point,
+            // and within one stride and one chunk of the raising.
+            for (trip, word) in [
+                (crate::vm::exec::Trip::Cancel, "cancelled"),
+                (crate::vm::exec::Trip::Expire, "deadline"),
+            ] {
+                for k in 1..=10u64 {
+                    // Far enough from the end that a stride and a chunk are
+                    // left for the run to notice in: a stop raised nearer the
+                    // end may be outrun by the answer, which is no fault.
+                    let at = fused.work.saturating_sub(2 * SAFEPOINT_STRIDE + 8) * k / 11;
+                    let (stopped, ..) = fuses_as_unfused(
+                        &format!("{trip:?} at {at}"),
+                        &program,
+                        entry,
+                        HEAP,
+                        Some((at, trip)),
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(stopped.said.contains(word), "{at}: {}", stopped.said);
+                    let (_, raised) = stopped.raised[0];
+                    assert!(
+                        raised >= at && stopped.work - raised <= 2 * SAFEPOINT_STRIDE + 8,
+                        "{trip:?} at {at}: raised at {raised}, stopped at {}",
+                        stopped.work
+                    );
+                }
+            }
         }
 
         /// **A run that did not ask for the census is the run it was.** Every

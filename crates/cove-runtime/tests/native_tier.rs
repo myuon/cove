@@ -2152,10 +2152,9 @@ fn a_deep_native_recursion_returns_through_a_reallocation() {
     );
 }
 
-/// What one bounded native run of `callsCounts` answered, and what it spent.
+/// What one bounded native run of `callsCounts` answered, and which tiers it crossed.
 struct Bounded {
     error: cove_runtime::RuntimeError,
-    work: u64,
     tiers: cove_runtime::Tiers,
 }
 
@@ -2199,89 +2198,13 @@ fn bounded_counts(deep: i64, limits: cove_runtime::Limits, cancelled: bool) -> B
         .expect_err("the bounded run stops");
     Bounded {
         error,
-        work: vm.work(),
         tiers: vm.tiers(),
     }
 }
 
-/// **A loop-free native recursion stops at an expired deadline within one
-/// stride.**
-///
-/// The descent of `counts` is direct native-to-native calls and nothing else, so
-/// every poll in it is a call's. Each call is a poll ([ADR 0078]), the work
-/// between two of them is one level of the recursion, and the work before the
-/// first safepoint is therefore at most `SAFEPOINT_STRIDE` plus one level —
-/// ADR 0040's `S + T`. A call that did not poll at all would run the whole
-/// descent, a million units of work, before anything noticed; a bound of
-/// `S + T` is what says it polls.
-///
-/// [ADR 0078]: ../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
-#[test]
-fn a_loop_free_native_recursion_stops_at_an_expired_deadline_within_one_stride() {
-    const DEEP: i64 = 100_000;
-    // One level of `counts` is a compare, a branch, a subtraction and the call:
-    // well inside this, and the bound is what a level costs rather than a figure
-    // anybody chose.
-    const TURN: u64 = 64;
-    let run = bounded_counts(
-        DEEP,
-        cove_runtime::Limits {
-            deadline: Some(std::time::Duration::ZERO),
-            ..cove_runtime::Limits::default()
-        },
-        false,
-    );
-    assert!(
-        run.error.message.contains("deadline"),
-        "the run says its deadline passed: {}",
-        run.error.message
-    );
-    assert!(
-        run.tiers.native_to_native_direct > 0,
-        "the stop was taken inside the compiled descent: {:?}",
-        run.tiers
-    );
-    // ADR 0079: the descent's polls were the inline path's compare, which sends
-    // a call to `open` only once the stride is reached.
-    assert!(
-        run.tiers.native_to_native_inline > 0,
-        "and the descent's frames were opened in emitted code: {:?}",
-        run.tiers
-    );
-    assert!(
-        run.work >= cove_runtime::SAFEPOINT_STRIDE,
-        "nothing stops a run short of its first safepoint: did {}",
-        run.work
-    );
-    assert!(
-        run.work <= cove_runtime::SAFEPOINT_STRIDE + TURN,
-        "and the first safepoint is at most one stride and one level in: did {}",
-        run.work
-    );
-}
-
-/// **A cancelled loop-free native recursion stops within one stride.**
-///
-/// The first of ADR 0040's three steps, reached through a call's poll rather than
-/// a backedge's. The flag is set before the run begins, so the first safepoint
-/// the descent takes is the one that stops it, and that is at most a stride and a
-/// level into the run.
-#[test]
-fn a_cancelled_loop_free_native_recursion_stops_within_one_stride() {
-    const DEEP: i64 = 100_000;
-    const TURN: u64 = 64;
-    let run = bounded_counts(DEEP, cove_runtime::Limits::default(), true);
-    assert!(
-        run.error.message.contains("cancel"),
-        "the run says it was cancelled: {}",
-        run.error.message
-    );
-    assert!(
-        run.work <= cove_runtime::SAFEPOINT_STRIDE + TURN,
-        "and it stopped at the first safepoint the descent took: did {}",
-        run.work
-    );
-}
+// The bounds on a loop-free native recursion (ADR 0078: a call is a poll) are
+// measured inside the crate, where the machine's work and a stop raised at a
+// chosen point of it can be read: `crate::vm::stops`.
 
 // --- ADR 0079: a direct call opens its frame in emitted code -----------------
 //
