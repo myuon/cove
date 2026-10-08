@@ -2034,7 +2034,37 @@ fn both(name: &str, args: Vec<Value>) -> Both {
 /// the *first* segment's encoded answer as well — and moving it says the thing a
 /// differential case on one tier could not: that the encoded arms resolve an
 /// address the same way wherever the task's words begin.
+///
+/// Both runs are made on the stack the runtime gives every thread it evaluates
+/// Cove on ([`cove_runtime::on_cove_stack`]) rather than on the test thread's.
+/// A crossing between the tiers nests the dispatch loop on the Rust stack, and
+/// the cases that cross hundreds of times overflowed a test thread's default
+/// stack once Rust 1.99 grew the loop's frame.
 fn both_on(segment: Segment, name: &str, args: Vec<Value>) -> Both {
+    let args = Carried(args);
+    // `into_inner` and not a pattern: a closure that destructured the wrapper
+    // would capture the vector inside it, and the vector is not `Send`.
+    cove_runtime::on_cove_stack(move || both_here(segment, name, args.into_inner()))
+        .expect("a thread to run Cove on")
+}
+
+/// Arguments built on the test thread and handed whole to the thread that runs
+/// them.
+struct Carried(Vec<Value>);
+
+impl Carried {
+    fn into_inner(self) -> Vec<Value> {
+        self.0
+    }
+}
+
+// Safety: a `Value` is not `Send` because its `Rc`s may be shared with others
+// on the thread that built it. These were built by the caller for this call
+// alone and are moved, so no clone of any of them is left behind.
+unsafe impl Send for Carried {}
+
+/// [`both_on`]'s two runs, on whatever thread calls this.
+fn both_here(segment: Segment, name: &str, args: Vec<Value>) -> Both {
     let (sources, program) = checked();
     let lowered = Arc::new(
         cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
