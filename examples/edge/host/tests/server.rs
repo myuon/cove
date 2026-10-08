@@ -113,7 +113,13 @@ fn each_tenant_answers_and_the_over_reaching_one_is_refused() {
     // Stopped by its deadline, which the server answers as a gateway timeout.
     assert_eq!(status, 504);
     assert!(body.contains("deadline of 200ms exceeded"), "{body}");
-    assert!(body.contains("hello/hello.cove:23"), "{body}");
+    // Inside `spin`'s loop: which of its two lines depends on where the
+    // safepoint that read the clock fell, and a deadline is a time, not a
+    // count of work, so either may be the one.
+    assert!(
+        body.contains("hello/hello.cove:23") || body.contains("hello/hello.cove:24"),
+        "{body}"
+    );
 
     let (status, body) = get(server.addr, "/greedy/").unwrap();
     assert_eq!(status, 503);
