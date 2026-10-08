@@ -143,9 +143,9 @@ pub const TRACE_FORMAT_VERSION: u32 = 4;
 /// already stamps on every build costs nothing.
 ///
 /// A replay identity needs one more thing this crate can answer and this
-/// constant does not carry: which backend ran the program. Fuel is not
-/// portable between [`Vm`](crate::Vm) and the tree-walking interpreter, so a
-/// version without a backend does not pin down a run. [`RecordingBackend`]
+/// constant does not carry: which backend ran the program. What a run
+/// executes is not portable between [`Vm`](crate::Vm) and the tree-walking
+/// interpreter, so a version without a backend does not pin down a run. [`RecordingBackend`]
 /// is that other half — already public, already spelled the way `--backend`
 /// accepts — and a replay identity built from the embedding API is this
 /// constant plus one of its variants, not a new string invented to match
@@ -188,8 +188,8 @@ pub enum RecordingBackend {
     /// The native tier of [ADR 0055], explicitly selected.
     ///
     /// A name of its own rather than `Vm` with a note, because a native run is
-    /// not the same run: it dispatches fewer instructions, reports a different
-    /// `fuel_spent` — ADR 0040 makes fuel backend-specific — and mixes two tiers.
+    /// not the same run: it dispatches fewer instructions, reaches its
+    /// safepoints at different points, and mixes two tiers.
     /// ADR 0026's reason for the field at all is that a reader must not have to
     /// infer which evaluator wrote a file, and inferring "native" from "vm" is
     /// exactly that.
@@ -374,8 +374,6 @@ pub enum RunOutcome {
     /// an operation that does not exist, or an argument or a result the
     /// operation's own schema does not admit.
     HostBoundary,
-    /// The fuel budget was exhausted.
-    Fuel,
     /// The wall-clock deadline was exceeded.
     Deadline,
     /// The run was cancelled from outside.
@@ -403,7 +401,6 @@ impl RunOutcome {
             RunOutcome::Error => "error",
             RunOutcome::Invariant => "invariant",
             RunOutcome::HostBoundary => "host_boundary",
-            RunOutcome::Fuel => "fuel",
             RunOutcome::Deadline => "deadline",
             RunOutcome::Cancelled => "cancelled",
             RunOutcome::CallDepth => "call_depth",
@@ -420,7 +417,6 @@ impl RunOutcome {
             RunOutcome::Error,
             RunOutcome::Invariant,
             RunOutcome::HostBoundary,
-            RunOutcome::Fuel,
             RunOutcome::Deadline,
             RunOutcome::Cancelled,
             RunOutcome::CallDepth,
@@ -1553,7 +1549,6 @@ mod tests {
             (RunOutcome::Error, "error"),
             (RunOutcome::Invariant, "invariant"),
             (RunOutcome::HostBoundary, "host_boundary"),
-            (RunOutcome::Fuel, "fuel"),
             (RunOutcome::Deadline, "deadline"),
             (RunOutcome::Cancelled, "cancelled"),
             (RunOutcome::CallDepth, "call_depth"),
@@ -1566,6 +1561,8 @@ mod tests {
             assert_eq!(RunOutcome::parse(name), Some(outcome));
         }
         assert_eq!(RunOutcome::parse("stopped"), None);
+        // ADR 0091 removed the fuel allowance, and the outcome with it.
+        assert_eq!(RunOutcome::parse("fuel"), None);
     }
 
     /// A redacted trace carries no value the program built, and the `Error` a
@@ -1587,11 +1584,11 @@ mod tests {
             record_with(
                 ValueCapture::Redacted,
                 TraceEvent::RunEnded {
-                    outcome: RunOutcome::Fuel,
-                    message: Some("execution stopped: fuel budget of 10 exhausted".to_string()),
+                    outcome: RunOutcome::HostCalls,
+                    message: Some("execution stopped: host-call limit of 10 exceeded".to_string()),
                 }
             ),
-            r#"{"event":"run_ended","outcome":"fuel","message":"execution stopped: fuel budget of 10 exhausted"}"#
+            r#"{"event":"run_ended","outcome":"host_calls","message":"execution stopped: host-call limit of 10 exceeded"}"#
         );
     }
 

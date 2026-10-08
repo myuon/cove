@@ -59,14 +59,16 @@ section kept below.
 - **The safepoint list**, cited by ADR 0028:647 and [ADR 0033](adr/0033-an-identity-is-not-a-vm-heap-object.md):225,
   enumerated where the deleted backend's `Vm::collect_if_due` could safely
   run a collection — entering the entry, every call, every return, every
-  back edge with enough fuel gathered, the per-block charge past
+  back edge with enough work gathered, the per-block charge past
   `SAFEPOINT_INTERVAL`, an `await`, and a `?` that failed — and the
   argument, that nothing outside the runtime holds a view into the heap at
   one of those points, for a `Vm` that has been deleted.
 - **The table of bounds**, cited by [ADR 0024](adr/0024-a-stop-is-a-bound-not-a-point.md):28,148
   and [ADR 0030](adr/0030-a-host-call-asks-the-fuel-limit.md):139, gave a
   maximum amount of work each stop mode — the run's cancellation, a task's
-  own, a bounded call's flag, the deadline, fuel, `max_host_calls`,
+  own, a bounded call's flag, the deadline, the fuel allowance (since
+  removed by [ADR 0091](adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)),
+  `max_host_calls`,
   `max_call_depth`, the concurrency limit — could let run past it on the
   deleted backend, in units of one gathering (`G`) and one turn (`T`) of a
   loop. The bound's *shape* changed with the replacement, and
@@ -96,12 +98,12 @@ section kept below, verbatim.
 ## What the measurement itself costs
 
 [Issue #123](https://github.com/myuon/cove/issues/123) asks for one workload
-under five configurations — production; instruction statistics off with fuel
-unchanged; both off, for attribution only; a sampling profiler attached; and
+under five configurations — production; instruction statistics off with the
+work counter unchanged; both off, for attribution only; a sampling profiler attached; and
 trace off against trace on — and for wall-time distributions rather than
 single runs. Two of those five did not exist when it asked, and the reason is
-the thing being measured. `Vm::charge` adds a block's length to `self.fuel`
-and to `self.instructions` in the same two lines, which is most of why
+the thing being measured. `Vm::charge` then added a block's length to `self.fuel`
+(the work counter that was an allowance's meter then) and to `self.instructions` in the same two lines, which is most of why
 charging by the block is cheap, so there was no configuration in which one of
 them was off and the other was on.
 
@@ -162,7 +164,7 @@ build was measured on both sides of the study: it read 84.6 ms and 84.8 ms on
 | removed                                                 | `arith` | `field` | `call` |
 | ------------------------------------------------------- | ------: | ------: | -----: |
 | the block instruction counter                            |   +0.7% |   +1.4% |  +0.2% |
-| fuel accumulation and its interval compare               |   +4.7% |   +2.8% |  −2.1% |
+| work accumulation and its interval compare               |   +4.7% |   +2.8% |  −2.1% |
 | both of those — configuration 3                          |   +4.6% |   +4.2% |  −2.6% |
 | the back edge's whole check                              |  +11.4% |   +7.0% |  +1.4% |
 | the safepoint at every call and every return             |   −0.9% |   +0.9% | +38.7% |
@@ -192,7 +194,7 @@ the useful half of a result that looks like nonsense.
 
 **Configuration 3 is not the floor and does not sum.** Removing the charge
 entirely also stops the back edge from ever firing, because what a back edge
-reads is the fuel the charge accumulates — so the third row should be at least
+reads is the work the charge accumulates — so the third row should be at least
 the fourth and it is less than half of it. `arith` is superadditive in the
 other direction too, as a section since deleted recorded. No subset of
 these rows adds up to another one, and the table should be read as eight
@@ -270,8 +272,9 @@ The section below is what became of it.
 
 [Issue #182](https://github.com/myuon/cove/issues/182) asked what the mutex was
 protecting, and the answer was: nothing that needed a mutex. Per safepoint a
-`Budget` adds to `fuel_spent`, reads the run's cancellation, compares against a
-fuel limit fixed before the run began, and every `DEADLINE_CHECK_INTERVAL`th
+`Budget` then added to `fuel_spent`, read the run's cancellation, compared against a
+fuel limit fixed before the run began (the stride, cancellation and deadline checks
+are what remain of that after ADR 0091), and every `DEADLINE_CHECK_INTERVAL`th
 time reads a clock that started before the run began. The cancellation was
 already an atomic flag. `limits` and `started_at` are immutable for a run.
 `fuel_spent` and the deadline tick were plain integers *because the struct
@@ -291,8 +294,8 @@ charges that are not per-instruction (a host call, a spawn).
 `SAFEPOINT_FUEL` and `DEADLINE_CHECK_INTERVAL` are unchanged, which matters
 because ADR 0024 states each stop as a bound in those constants' arithmetic. The
 order of the three questions inside a safepoint is unchanged, so which stop is
-reported is unchanged. Fuel is still counted before anything can refuse, which
-is ADR 0024's "pending fuel is never lost". A Host call is still a stop point
+reported is unchanged. Work was still counted before anything could refuse, which
+was ADR 0024's "pending fuel is never lost". A Host call is still a stop point
 for all three flags and for the deadline and `max_host_calls`, which is the
 other half of the same decision — issue #120 found real faults in both of those
 and `crates/cove-runtime/tests/responsiveness.rs` still measures them.
@@ -337,7 +340,7 @@ of it.
 **`field` moved 2.0%, where the ceiling was 5.8%.** `field`'s loop calls
 nothing, so the two acquisitions a call and a return cost were never its to
 save; what it has is back edges, and a back edge already waited for
-`BACK_EDGE_FUEL` to gather. That the interval excludes zero at all is the
+`BACK_EDGE_FUEL` of work to gather. That the interval excludes zero at all is the
 useful part, and the size of it is inside the band this document records for
 layout alone.
 
@@ -779,7 +782,7 @@ second time with **one `Inst` variant added that no lowering emits, no program
 reaches, and `Vm::execute` matches only with an `unreachable!` body**. Both
 profiles got that pair, so there are four binaries; all four are byte-identical
 across a reboot and across `-j 16`, `-j 4` and `-j 2`, so nothing below is
-nondeterministic codegen. `fuel_spent` is identical on every row of all four —
+nondeterministic codegen. `fuel_spent` (then reported by `--stats`) was identical on every row of all four —
 every benchmark ran exactly the instructions it ran before.
 
 Six `cove-bench --iterations 15` suites and six `--matrix --iterations 15`

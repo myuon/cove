@@ -226,6 +226,18 @@ impl OwnedVm {
         self.vm.instructions()
     }
 
+    /// The machine underneath, for this crate's tests.
+    #[cfg(test)]
+    pub(crate) fn inner(&mut self) -> &mut Vm<'static> {
+        &mut self.vm
+    }
+
+    /// [`Vm::work`], for this crate's tests.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> u64 {
+        self.vm.work()
+    }
+
     /// The handle another thread raises to ask this machine's run to give its
     /// thread up at its next safepoint, answering [`Step::Yielded`].
     ///
@@ -418,6 +430,19 @@ impl YieldedVm {
         self.vm.instructions()
     }
 
+    /// [`Vm::work`], up to the instruction it stands before, for this
+    /// crate's tests.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> u64 {
+        self.vm.work()
+    }
+
+    /// The trips its machine has raised, for this crate's tests.
+    #[cfg(test)]
+    pub(crate) fn raised(&self) -> Vec<(crate::vm::exec::Trip, u64)> {
+        self.vm.vm.raised().to_vec()
+    }
+
     /// [`Vm::meter`]: the run's accounting so far.
     pub fn meter(&self) -> &Meter {
         self.vm.meter()
@@ -528,7 +553,7 @@ impl ParkedVm {
     ///
     /// A parked run holds nothing else to give back: it is quiescent (ADR
     /// 0080 §2), so it has no task running, no `Shared` cell held and no
-    /// callback below it, and its pending fuel was spent before the call. The
+    /// callback below it, and its stride was checked before the call. The
     /// host's request, if it was not taken, is dropped.
     ///
     /// The machine comes back with the error, ready for its next run, as an

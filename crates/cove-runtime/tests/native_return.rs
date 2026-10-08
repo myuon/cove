@@ -2033,21 +2033,22 @@ fn a_raise_crosses_a_vm_to_native_call() {
     });
 }
 
-/// Exhausted fuel stops a run with a VM-to-native call in flight, and stops it
-/// where the VM stops it.
+/// An expired deadline stops a run with a VM-to-native call in flight, and stops
+/// it where the VM stops it.
 ///
-/// [ADR 0040] makes fuel backend-specific — a native run does not promise the same
-/// `fuel_spent` — and promises the same *stop outcome*. So this asserts the
-/// outcome and the sentence and deliberately not the number: the safepoint a
-/// native call takes is `Machine::safepoint`, the same three steps in the same
-/// order, and what differs is how much work had accumulated before it.
+/// [ADR 0040] makes the work done before a stop backend-specific — a native run
+/// does not promise the same instruction count — and promises the same *stop
+/// outcome*. So this asserts the outcome and the sentence and deliberately not
+/// the number: the safepoint a native call takes is `Machine::safepoint`, the
+/// same three steps in the same order, and what differs is how much work had
+/// accumulated before it.
 ///
 /// [ADR 0040]: ../../../docs/adr/0040-a-bound-outlives-its-backend.md
 #[test]
-fn fuel_runs_out_under_a_vm_to_native_call() {
+fn an_expired_deadline_stops_a_run_under_a_vm_to_native_call() {
     const DEEP: i64 = 20_000;
     let limits = Limits {
-        fuel: Some(2_000),
+        deadline: Some(std::time::Duration::ZERO),
         ..Limits::default()
     };
     with_limited_vm(ORDINARY_HEAP_WORDS, limits, |vm, lowered| {
@@ -2056,7 +2057,7 @@ fn fuel_runs_out_under_a_vm_to_native_call() {
             .expect("the session opens");
         let stopped = session
             .call(&NothingCompiled, &[DEEP as u64])
-            .expect_err("the vm runs out of fuel");
+            .expect_err("the vm stops at its deadline");
         let tier = hand(lowered, &["counts"]);
         let crossed = session
             .call(&tier, &[DEEP as u64])
@@ -2066,7 +2067,7 @@ fn fuel_runs_out_under_a_vm_to_native_call() {
             "the same terminal outcome, which is what ADR 0040 promises across tiers"
         );
         assert!(
-            crossed.message.contains("fuel"),
+            crossed.message.contains("deadline"),
             "and it says what stopped it: {}",
             crossed.message
         );
@@ -2081,7 +2082,7 @@ fn fuel_runs_out_under_a_vm_to_native_call() {
 ///
 /// The first of ADR 0040's three safepoint steps, taken by the same
 /// `Machine::safepoint` an encoded run takes it with — cancellation is checked
-/// before fuel and before the collector rendezvous, in compiled code as in
+/// before the deadline and before the collector rendezvous, in compiled code as in
 /// dispatched code, because neither of the three is emitted.
 #[test]
 fn cancellation_stops_a_vm_to_native_call() {

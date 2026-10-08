@@ -73,8 +73,8 @@ trap 'rm -rf "$work"' EXIT
 # `--no-default-features` build or a host the code generator cannot serve does
 # not. See the same check, and the longer reason, in `covefmt-tiers.sh`.
 if (cd "$root/tools/covefmt" && "$binary" run covefmtBench --files-root "$root" \
-  --backend native --fuel 1 >/dev/null 2>"$work/probe"); then
-  echo "covefmt-profile.sh: the native tier answered a run it should have run out of fuel on" >&2
+  --backend native --deadline 0ms >/dev/null 2>"$work/probe"); then
+  echo "covefmt-profile.sh: the native tier answered a run it should have stopped at an expired deadline on" >&2
   exit 1
 fi
 if grep -q "native execution is unavailable" "$work/probe"; then

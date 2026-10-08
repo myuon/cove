@@ -126,6 +126,8 @@ pub mod profile;
 pub(crate) mod render;
 pub(crate) mod report;
 mod sequences;
+#[cfg(test)]
+mod stops;
 
 pub use parked::{OwnedVm, ParkedVm, Step, YieldRequest, YieldedVm};
 
@@ -349,7 +351,7 @@ impl<'a> Vm<'a> {
     /// heap is a fuller account of a run's Cove-owned values than the old
     /// per-task heap ever was, per ADR 0034, but a Host's own allocations,
     /// open resources and each task's stack region still sit outside it, so
-    /// naming `heap_words` beside `fuel` and `max_host_calls` would still
+    /// naming `heap_words` beside `deadline` and `max_host_calls` would still
     /// promise a bound this number cannot back.
     ///
     /// So it is a constructor argument, the heap's capacity named as what it
@@ -710,7 +712,7 @@ impl<'a> Vm<'a> {
     }
 
     /// The accounting of this run — or of the last one, once it has
-    /// answered: what it spent in fuel and host calls, and how long it took.
+    /// answered: the host calls it made, and how long it took.
     ///
     /// This is where an embedder reads what an [`Vm::invoke_within`] spent.
     /// A backend built over a registry with a budget installed by
@@ -764,6 +766,38 @@ impl<'a> Vm<'a> {
     /// How many instructions this run has executed.
     pub fn instructions(&self) -> u64 {
         self.machine.instructions()
+    }
+
+    /// The work this machine has done, in the units its safepoint stride
+    /// counts: one per instruction dispatched, one per word a bulk operation
+    /// moved, and the IR work compiled code counted statically and paid at its
+    /// polls — the coordinate ADR 0040's stop bounds and ADR 0084's yields are
+    /// stated in. A test measurement and not an API: cumulative over every
+    /// run this machine has made, and the entry task's own.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> u64 {
+        self.machine.work()
+    }
+
+    /// Arms [`crate::vm::exec::Trips`] on this machine, for a test.
+    #[cfg(test)]
+    /// It also starts the log of the work at every safepoint the machine
+    /// takes ([`Vm::safepoints`]).
+    pub(crate) fn set_trips(&mut self, trips: Vec<(u64, crate::vm::exec::Trip)>) {
+        self.machine.set_trips(trips);
+        self.machine.trips.logging = true;
+    }
+
+    /// The trips raised so far, with the work at which each was.
+    #[cfg(test)]
+    pub(crate) fn raised(&self) -> &[(crate::vm::exec::Trip, u64)] {
+        &self.machine.trips.raised
+    }
+
+    /// The work at every safepoint this machine has taken.
+    #[cfg(test)]
+    pub(crate) fn safepoints(&self) -> &[u64] {
+        &self.machine.trips.safepoints
     }
 
     /// Words the heap region occupies, free blocks included.

@@ -10,7 +10,7 @@
 #
 # It writes one section per workload: three runs each of the two
 # 100,000-record transformations, then the same run traced and untraced. Wall
-# time, fuel, and the managed heap come from `cove run --stats`; resident
+# time, instructions, and the managed heap come from `cove run --stats`; resident
 # memory is `/usr/bin/time -l`'s, and is the whole process rather than the
 # collector's heap. The README says why both are reported.
 #

@@ -78,17 +78,17 @@ trap 'rm -rf "$work"' EXIT
 # silently replaced, and this measurement once died fourteen rounds in with
 # "exited 1" for that reason. The hazard is now only a
 # `--no-default-features` build, or a host the code generator cannot serve, so
-# the question is still asked: one cheap run with a fuel limit of one, before
-# anything is timed. An unavailable tier is a diagnostic on stderr, and a
-# `native` that works reaches its fuel limit instead.
+# the question is still asked: one cheap run under an already-expired deadline,
+# before anything is timed. An unavailable tier is a diagnostic on stderr, and
+# a `native` that works reaches its deadline instead.
 #
-# `--fuel 1` and not `--help`, because what has to be established is that this
+# `--deadline 0ms` and not `--help`, because what has to be established is that this
 # build's `--backend native` can *compile and enter* the tier on this host, which
 # is three separate ways to be unavailable (no feature, not x86-64, no executable
 # mapping) and none of them is visible in a usage message.
 if (cd "$root/tools/covefmt" && "$binary" run covefmtBench --files-root "$root" \
-  --backend native --fuel 1 >/dev/null 2>"$work/probe"); then
-  echo "covefmt-tiers.sh: the native tier answered a run it should have run out of fuel on" >&2
+  --backend native --deadline 0ms >/dev/null 2>"$work/probe"); then
+  echo "covefmt-tiers.sh: the native tier answered a run it should have stopped at an expired deadline on" >&2
   exit 1
 fi
 if grep -q "native execution is unavailable" "$work/probe"; then

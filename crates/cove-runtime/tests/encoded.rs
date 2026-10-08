@@ -5,8 +5,8 @@
 //! fixed-width form the only thing a run executes and deleted the `Inst`
 //! dispatch loop that had stood beside it. Phase 3 asked for a comparison of
 //! *values and errors, source spans, instruction and fuel counts, and
-//! trace/replay*; each of the four is a test here rather than a paragraph in
-//! a report, because a paragraph is true of the tree somebody measured and a
+//! trace/replay* (fuel since removed by ADR 0091); each of the four is a test
+//! here rather than a paragraph in a report, because a paragraph is true of the tree somebody measured and a
 //! test is true of the tree somebody pushed.
 //!
 //! **The program is the benchmark itself**, `include_str!`d out of
@@ -24,13 +24,11 @@
 //!   was always the stronger comparison — two loops agreeing with each other
 //!   and not with the language would have passed the old one — and
 //!   `crates/cove-cli/tests/differential.rs` applies it to the whole corpus.
-//! - **Instruction and fuel counts** are held to *each other* and to a
-//!   pinned figure. `fuel_spent` and `instructions` are asserted **equal**,
-//!   not merely plausible: ADR 0041's encoding is 1:1, so one encoded
-//!   instruction has to be one instruction and one unit of fuel, and
-//!   fourteen million of each agreeing exactly is what
+//! - **Instruction counts** are held to a pinned figure. ADR 0041's encoding
+//!   is 1:1, so one encoded instruction is one instruction and one unit of
+//!   the safepoint stride's work, which is what
 //!   [ADR 0040](../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
-//!   bounds are stated in. The oracle cannot answer this — it counts no
+//!   bounds are stated in; the machine's own tests hold the stride to that. The oracle cannot answer this — it counts no
 //!   instructions — so the number itself is pinned, and a lowering change
 //!   that halved the work has to say so here.
 //!
@@ -80,18 +78,12 @@ fn arith_answers_what_the_benchmark_asserts() {
     assert_eq!(described(&ran.answer), "Ok(Ok(()))");
 }
 
-/// Instruction and fuel counts: exactly equal, and the figure itself.
+/// The instruction count: the figure itself.
 #[test]
-fn one_encoded_instruction_is_one_unit_of_fuel() {
+fn the_instruction_count_is_the_figure_pinned() {
     let ran = run(ARITH);
-    // The accounting ADR 0024 and the immediate forms of #244 are both stated
-    // against. Asserted rather than inferred, because it is the property the
-    // 1:1 encoding has to preserve and nothing else in this crate checks that
-    // an *encoded* instruction costs one.
-    assert_eq!(ran.fuel_spent, ran.instructions);
-    // And the figure itself, so that a lowering change that halved the work
-    // is not silently accepted by a test comparing two counters that would
-    // move together. Two instructions below what #244 left it at: `arith`
+    // The figure itself, so that a lowering change that halved the work is
+    // not silently accepted. Two instructions below what #244 left it at: `arith`
     // executes four clears in its whole life, one of them stood before a
     // `return` and one zeroed a slot this frame had never written, and the
     // lowering emits neither.
@@ -194,7 +186,7 @@ fn the_run_writes_the_recording_a_run_writes() {
     // than placed (#403 again), and "` is not an Int" is fifteen bytes, so a
     // header and two payload words. **This is also the three words
     // `examples/cq` gains**, which is worth reading the two rows together for:
-    // cq never calls the operation and its instruction, dispatch and fuel
+    // cq never calls the operation and its instruction and dispatch
     // counts do not move at all, and it still allocates one more object,
     // because a literal is placed by the program that *emitted* the body and
     // not by the run that reached it.
@@ -392,9 +384,7 @@ export fn main() -> Result<Unit, Error> {
 /// One program rather than three, because what is being checked is not that
 /// each instruction works — `differential.rs` runs the whole corpus for that —
 /// but that a run mixing allocation, field access, element access and a
-/// closure call reaches the answer the oracle reaches, having charged itself
-/// one unit of fuel per instruction while doing it — and one per word its one
-/// bulk copy moved, which ADR 0058 charges in proportion rather than as one.
+/// closure call reaches the answer the oracle reaches.
 #[test]
 fn the_heap_and_a_closure_answer_what_the_oracle_answers() {
     let source = "\
@@ -425,11 +415,6 @@ export fn main() -> Result<Unit, Error> {
     let ran = run(source);
     assert_eq!(described(&ran.answer), described(&on_the_oracle(source)));
     assert_eq!(described(&ran.answer), "Ok(Ok(()))");
-    // One unit per instruction, and one per word a bulk copy moved: `map`
-    // walks a snapshot of the vector, and since ADR 0058 that snapshot is a
-    // `run-copy` of 64 two-word `Point`s, charged the 128 words it moves
-    // rather than the one `intrinsic-call` it used to hide them behind.
-    assert_eq!(ran.fuel_spent, ran.instructions + 64 * 2);
 }
 
 /// A failure inside a call points at the place the oracle points at.
@@ -996,7 +981,6 @@ fn tasks_that_allocate_at_once_collect_on_pace_together() {
 struct Ran {
     answer: Result<Value, RuntimeError>,
     instructions: u64,
-    fuel_spent: u64,
     events: Vec<TraceEvent>,
 }
 
@@ -1021,14 +1005,10 @@ fn run(source: &str) -> Ran {
     let mut vm = Vm::new(&runtime, &hosts, &lowered);
     let answer = vm.run_entry("m", "main", Vec::new());
     let instructions = vm.instructions();
-    let fuel_spent = hosts
-        .with_budget(|budget| budget.fuel_spent())
-        .expect("a budget was installed");
     let events = recorded.0.lock().unwrap().clone();
     Ran {
         answer,
         instructions,
-        fuel_spent,
         events,
     }
 }
@@ -1038,8 +1018,8 @@ fn run(source: &str) -> Ran {
 ///
 /// The comparison the two loops used to make of each other is made here
 /// instead, against the thing that decides. It is only ever asked about the
-/// small fixtures: the oracle counts no instructions and charges fuel on its
-/// own schedule, so the counts are pinned rather than compared, and running
+/// small fixtures: the oracle counts no instructions and takes safepoints on
+/// its own schedule, so the counts are pinned rather than compared, and running
 /// `arith`'s fourteen million instructions through a tree walker would buy
 /// nothing this file does not already assert.
 fn on_the_oracle(source: &str) -> Result<Value, RuntimeError> {

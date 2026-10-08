@@ -996,17 +996,12 @@ fn every_run_records_how_it_ended() {
     // A limit the program cannot get past, an entry that returns `Err`, and a
     // capability the run was not granted: one of each family the
     // classification names.
-    let cases: [(&str, &[&str], &str); 4] = [
+    let cases: [(&str, &[&str], &str); 3] = [
         ("success", &["run", "hello"], "\"outcome\":\"success\""),
         (
             "deadline",
             &["run", "restricted", "--deadline", "1ns"],
             "\"outcome\":\"deadline\"",
-        ),
-        (
-            "fuel",
-            &["run", "restricted", "--fuel", "5"],
-            "\"outcome\":\"fuel\"",
         ),
         (
             "host-calls",

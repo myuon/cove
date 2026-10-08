@@ -122,7 +122,6 @@ pub struct Req {
     pub status: Option<u16>,
     pub ended: Option<f64>,
     pub written: Option<f64>,
-    pub fuel: u64,
     pub host_calls: u64,
     pub heap_bytes: u64,
 }
@@ -207,7 +206,6 @@ pub fn read(text: &str) -> Result<Trace, String> {
             status: None,
             ended: None,
             written: None,
-            fuel: 0,
             host_calls: 0,
             heap_bytes: 0,
         };
@@ -311,7 +309,6 @@ pub fn read(text: &str) -> Result<Trace, String> {
                     close(&mut req, Ended::Answer);
                     req.ended = Some(t);
                     req.status = Some(num(e, "status") as u16);
-                    req.fuel = num(e, "fuel") as u64;
                     req.host_calls = num(e, "host_calls") as u64;
                     req.heap_bytes = num(e, "heap_bytes") as u64;
                 }

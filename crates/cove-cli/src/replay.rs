@@ -628,7 +628,6 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // with its boundary answered from a file.
     hosts.set_budget(Budget::with_cancellation(
         Limits {
-            fuel: run.fuel,
             deadline: run.deadline,
             max_host_calls: run.max_host_calls,
             max_call_depth: None,

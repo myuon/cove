@@ -249,7 +249,7 @@ names instead of two names and a loop.
 ## Isolation: what a refusal is for
 
 Issue #91 asks that a broken creature not be able to stop the others. In an
-embedding that is a fuel limit; here it is the world's own rule, and it is
+embedding that is a deadline or a host-call limit; here it is the world's own rule, and it is
 checkable in Cove:
 
 ```cove
@@ -290,7 +290,7 @@ $ cove run life --backend vm --stats -- --seed 7 --ticks 10000 --every 2500
 tick 10000  alive  11  forager  7  predator  0  scavenger  4  food  309  energy   302  hash 306035650
 cove-life: 10000 tick(s), 15 birth(s), 12 death(s), 0 refusal(s), hash 306035650
 backend: vm lower=5.973906ms validate=1.257522ms execute=58.390550527s instructions=486139975
-stats: fuel_spent=513901036 host_calls=8 irreversible_writes=7 elapsed=58.390698213s wait=249.802µs
+stats: host_calls=8 irreversible_writes=7 elapsed=58.390698213s wait=249.802µs
 heap: allocated=170445 allocated_bytes=8181360 collections=2542 freed=0 live_bytes=0 peak_bytes=23323 pause=299.608068ms
 ```
 
@@ -390,7 +390,7 @@ directory is `life/` and the run is `[run.life]`.
 Issue #91's V0 is a headless simulation *embedded in a host*. This is the Cove
 half of it: the model, the species, the schemas, the determinism, and the
 bounded state. What is deliberately not here is everything that is about the
-embedding rather than about the language — per-creature fuel budgets and
+embedding rather than about the language — per-creature deadlines and
 compiled-module caching (`cove_runtime::embed`'s job, not a Cove program's),
 `cove trace`-linked per-tick attribution, a `replay` subcommand, and tick-time
 percentiles. Each of those measures the runtime, and this example measures

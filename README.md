@@ -5,9 +5,9 @@ boundary a host controls.
 
 A Cove program can only touch the outside world — the console, files, the
 network, the clock — through capabilities the host grants it, and a run can be
-bounded by fuel, deadlines and other limits. Inside that boundary it aims to be
-an ordinary general-purpose language: familiar to read, quick to compile and
-run, and explicit about what it depends on.
+bounded by deadlines, cancellation and other limits. Inside that boundary it
+aims to be an ordinary general-purpose language: familiar to read, quick to
+compile and run, and explicit about what it depends on.
 
 It is in the design and MVP stage. Syntax is provisional and may change.
 

@@ -248,12 +248,23 @@ impl Plan {
     /// Claims the next request, and its index among all of them — if there
     /// is one left and it is due.
     fn claim(&self) -> Option<usize> {
-        self.remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n > 0 && self.due(self.requests - n)).then(|| n - 1)
-            })
-            .ok()
-            .map(|left| self.requests - left)
+        // A compare-and-swap loop rather than `fetch_update`, which Rust 1.99
+        // deprecated for a `try_update` earlier toolchains do not have.
+        let mut left = self.remaining.load(Ordering::Relaxed);
+        loop {
+            if left == 0 || !self.due(self.requests - left) {
+                return None;
+            }
+            match self.remaining.compare_exchange_weak(
+                left,
+                left - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(self.requests - left),
+                Err(seen) => left = seen,
+            }
+        }
     }
 
     /// When request `index` is meant to start: `index / rate` into the run,

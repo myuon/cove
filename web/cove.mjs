@@ -56,12 +56,12 @@ class Cove {
 
   /// Checks, lowers and runs `source`.
   ///
-  /// Answers `{ok, diagnostics, outcome, stdout, stderr, answer, instructions,
-  /// fuel}`. `fuel` and `deadlineMs` of zero mean the module's own defaults,
-  /// which are bounds and not the absence of them.
-  run(source, { fuel = 0, deadlineMs = 0 } = {}) {
+  /// Answers `{ok, diagnostics, outcome, stdout, stderr, answer,
+  /// instructions}`. A `deadlineMs` of zero means the module's own default,
+  /// which is a bound and not the absence of one.
+  run(source, { deadlineMs = 0 } = {}) {
     return this.#call(
-      (ptr, len) => this.#exports.cove_run(ptr, len, fuel, deadlineMs),
+      (ptr, len) => this.#exports.cove_run(ptr, len, deadlineMs),
       source,
     );
   }
@@ -125,9 +125,9 @@ class Cove {
   /// before every instruction -- so a program that finished inside the
   /// default deadline may not finish inside it here. It is reported as a
   /// `deadline` outcome beside the recording of everything up to it.
-  debug(source, { fuel = 0, deadlineMs = 0, moments = 0 } = {}) {
+  debug(source, { deadlineMs = 0, moments = 0 } = {}) {
     return this.#call(
-      (ptr, len) => this.#exports.cove_debug(ptr, len, fuel, deadlineMs, moments),
+      (ptr, len) => this.#exports.cove_debug(ptr, len, deadlineMs, moments),
       source,
     );
   }

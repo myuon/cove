@@ -1,6 +1,8 @@
 # ADR 0030: A Host call asks the fuel limit
 
-- Status: Accepted
+- Status: Superseded by [ADR 0091](0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md), which removes the fuel limit this ADR requires a
+  Host call to ask. The checks a Host call makes of cancellation, the
+  deadline and `max_host_calls` were never this ADR's and stand
 - Date: 2026-08-31
 - Supersedes: [ADR 0024](0024-a-stop-is-a-bound-not-a-point.md)'s decision
   "A Host call is a stop point for every flag and for no budget", in the one

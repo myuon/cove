@@ -222,7 +222,7 @@ fn a_cpu_and_io_mix_draws_the_concurrency_strips() {
                     (200, "303 primes up to 2000, the largest 1999\n")
                 )
             }
-            // The cap, within the tenant's fuel.
+            // The cap, within the tenant's deadline.
             "/crunch/?n=200000" => assert_eq!(
                 (status, body.as_str()),
                 (200, "17984 primes up to 200000, the largest 199999\n")

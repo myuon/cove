@@ -68,14 +68,14 @@
 //! # It is the same machine
 //!
 //! Nothing here is a second implementation of anything a program can
-//! observe. The fuel accounting, the safepoint, the debugger question, the
+//! observe. The stride accounting, the safepoint, the debugger question, the
 //! collector poll and the span lookup are [`Machine`]'s own lines in
 //! [`Machine`]'s own order; the arithmetic is [`super::int_arith`],
 //! [`super::float_arith`] and [`super::compare`]; a call pushes
 //! [`super::Frame`] onto the stack, a host call is [`Machine::call_host`], a
 //! spawn is [`Machine::spawn`], and a scope is left by
 //! [`Machine::leave_scope`]. **One encoded instruction is one instruction
-//! and one unit of fuel**, which is what
+//! and one unit of stride work**, which is what
 //! [ADR 0040](../../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
 //! bounds are stated in and `crates/cove-runtime/tests/responsiveness.rs`
 //! measures.
@@ -630,7 +630,7 @@ fn words_of_bytes(bytes: i64) -> u64 {
 /// One [`SAFEPOINT_STRIDE`] of work, so a chunk costs exactly the stride and
 /// the poll that follows it is due. This is the `T` of
 /// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
-/// `S + T` for a bulk operation: a cancelled or out-of-fuel run gets no
+/// `S + T` for a bulk operation: a cancelled or out-of-time run gets no
 /// further than one chunk past the bound, whatever the length it was asked
 /// to copy.
 ///
@@ -654,7 +654,7 @@ const BULK_CHUNK_BYTES: i64 = (BULK_CHUNK_WORDS * 8) as i64;
 ///
 /// The chunking is the correctness argument rather than a refinement of it.
 /// One copy may move far more than a stride of work, and charging for all of
-/// it afterwards would let a cancelled or out-of-fuel run copy the whole range
+/// it afterwards would let a cancelled or out-of-time run copy the whole range
 /// first — [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)
 /// promises `S + T` of Cove work once a bound becomes true, not `S + T` plus
 /// the length of the copy.
@@ -702,7 +702,7 @@ fn in_chunks<'a>(
         };
         machine.bulk_work += piece(machine, offset, take);
         done += take;
-        if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
+        if machine.work() - machine.checked_work >= SAFEPOINT_STRIDE {
             machine.safepoint(budget, id, pc)?;
             machine.after_bulk_safepoint();
         }
@@ -1213,7 +1213,7 @@ pub(super) fn run_slice_bytes(
 /// `haystack_len - from` answers -1 — both before any preparation begins,
 /// because there is no needle to prepare in the first and nothing to search in
 /// the second, and neither examines a unit. The instruction's own single unit
-/// of fuel is unchanged, so a fast path is one fuel and nothing else. That is
+/// of work is unchanged, so a fast path is one unit and nothing else. That is
 /// the accounting `std.string.endsWith`' length refusal already has.
 ///
 /// # The steps, and what they are charged
@@ -1228,14 +1228,14 @@ pub(super) fn run_slice_bytes(
 /// `S + T` for this instruction.
 ///
 /// **The charge is an upper bound on the work done, not an equality**, which
-/// is what a fuel bound asks for and is what the intrinsic this replaces
+/// is what a stop bound asks for and is what the intrinsic this replaces
 /// charged too — "the receiver's whole length as an upper bound", because
 /// `str::find` does not report how far it got. Here it is a count of
 /// comparisons, and `crate::find` derives the bound it obeys from the
 /// algorithm: `5m + 2(n - from)`.
 ///
 /// The poll is unconditional rather than [`in_chunks`]' `work() -
-/// charged_work >= SAFEPOINT_STRIDE`, and the difference is the phase change.
+/// checked_work >= SAFEPOINT_STRIDE`, and the difference is the phase change.
 /// A step may spend part of its turns finishing the needle and the rest
 /// starting the search, so the units a step consumes are not a fixed chunk and
 /// a test against a fixed chunk would let two short steps run back to back. A
@@ -1609,7 +1609,7 @@ fn fused_window(
 ///
 /// # What it counts
 ///
-/// `Machine::instructions` rises by the rows it ran, so fuel counts semantic
+/// `Machine::instructions` rises by the rows it ran, so the count is of semantic
 /// instructions whichever way a window ran. That is sound only because no
 /// question falls inside: this runs only when `instructions + WINDOW_TAIL` is
 /// short of `next_check`, and the longest tail rather than this window's is the
@@ -2113,7 +2113,7 @@ fn fused_append_bytes(
         |run: &[std::sync::atomic::AtomicU64], bytes: usize| run.len() > bytes.div_ceil(8);
     if count > BULK_CHUNK_BYTES as usize
         || machine.instructions + window as u64 + machine.bulk_work + words
-            >= machine.charged_work + SAFEPOINT_STRIDE
+            >= machine.checked_work + SAFEPOINT_STRIDE
         || !reaches(text, from + count)
     {
         // Three reasons in one test, and the test stays one: it short-circuits
@@ -2123,7 +2123,7 @@ fn fused_append_bytes(
             let why = if count > BULK_CHUNK_BYTES as usize {
                 Decline::Bulk
             } else if machine.instructions + window as u64 + machine.bulk_work + words
-                >= machine.charged_work + SAFEPOINT_STRIDE
+                >= machine.checked_work + SAFEPOINT_STRIDE
             {
                 Decline::Charge
             } else {
@@ -2417,7 +2417,7 @@ fn fused_append_words(
     // The chunk bound is [`run_copy_words`]' — whole elements, and at least
     // one — and it is stated here as well as implied by the charge beside it,
     // so that the rule a reader has to know is `in_chunks`' rather than an
-    // argument about when `charged_work` was last moved.
+    // argument about when `checked_work` was last moved.
     let (at, from, count) = (len as usize, from as usize, count as usize);
     let words = (count * stride) as u64;
     let reaches = |held: &[std::sync::atomic::AtomicU64], units: usize| {
@@ -2427,7 +2427,7 @@ fn fused_append_words(
     };
     if count > (BULK_CHUNK_WORDS as usize / stride).max(1)
         || machine.instructions + window as u64 + machine.bulk_work + words
-            >= machine.charged_work + SAFEPOINT_STRIDE
+            >= machine.checked_work + SAFEPOINT_STRIDE
         || !reaches(run, from + count)
     {
         // Three reasons in one test, told apart here and not there, for
@@ -2437,7 +2437,7 @@ fn fused_append_words(
             let why = if count > (BULK_CHUNK_WORDS as usize / stride).max(1) {
                 Decline::Bulk
             } else if machine.instructions + window as u64 + machine.bulk_work + words
-                >= machine.charged_work + SAFEPOINT_STRIDE
+                >= machine.checked_work + SAFEPOINT_STRIDE
             {
                 Decline::Charge
             } else {
@@ -2524,7 +2524,7 @@ fn fused_append_words(
 /// at its span, the ensure, the commit and the byte store go through
 /// [`buffer_window`] after a sync, and a copy through [`run_copy_bytes`] or
 /// [`run_copy_words`]. So a window that fails fails at the pc, with the
-/// sentence, the frame and the fuel the unfused rows would have, and an ensure
+/// sentence, the frame and the work the unfused rows would have, and an ensure
 /// that grows is synced to its own pc before its allocation can collect.
 ///
 /// It stops **before** a row whose count would reach `next_check`. The arm's
@@ -2691,15 +2691,17 @@ pub(super) fn dispatch<'s, 'a>(
             if machine.debugger.is_some() {
                 machine.ask(id, pc)?;
             }
+            #[cfg(test)]
+            machine.spring_trips(budget);
             // Elapsed work since the last charge, not equality with a
             // multiple of it: an instruction that charges for the words it
             // moved steps *over* the multiple it would have landed on, and
             // the old condition then answered false, losing the cancellation
-            // check, the fuel accounting and the collector's poll together.
+            // check, the deadline and the collector's poll together.
             // `stride` is `SAFEPOINT_STRIDE` but for the one instruction after
             // a bulk operation's own safepoint while a yield is wanted, where
             // it is nought so the yield is offered (#606).
-            if machine.work() - machine.charged_work >= machine.stride {
+            if machine.work() - machine.checked_work >= machine.stride {
                 // ADR 0084: a run asked to give its thread up does so here,
                 // before the safepoint's own work, which it does on resuming.
                 // A load once a stride, inside a branch taken once a stride.
@@ -4618,17 +4620,19 @@ mod tests {
         (vec![b'B'; n], vec![b'A'; m])
     }
 
-    /// The machine and the budget a bound case runs one search under.
-    fn under_fuel(
+    /// One search run under a deadline that has already passed, so the first
+    /// safepoint the run reaches is the one that stops it: what it has done by
+    /// then is the bound under test. Answers the bulk work charged, the
+    /// machine's whole work, and the outcome.
+    fn under_an_expired_deadline(
         program: &Program,
         entry: FunctionId,
         haystack: &[u8],
         needle: &[u8],
         from: i64,
-        fuel: u64,
     ) -> (u64, u64, crate::trace::RunOutcome) {
         let budget = crate::budget::Budget::new(crate::budget::Limits {
-            fuel: Some(fuel),
+            deadline: Some(std::time::Duration::ZERO),
             ..crate::budget::Limits::default()
         });
         let mut machine = Machine::new(program, 1 << 20);
@@ -4636,12 +4640,12 @@ mod tests {
         let sought = run_of(&mut machine, needle);
         let error = machine
             .run(entry, &[hay, sought, from as u64], &budget.meter())
-            .expect_err("a search past its fuel is stopped");
-        (machine.bulk_work, budget.fuel_spent(), error.outcome)
+            .expect_err("a search past its deadline is stopped");
+        (machine.bulk_work, machine.work(), error.outcome)
     }
 
-    /// **A needle far longer than one step is prepared in steps, and a fuel
-    /// bound stops the run *during the preparation*.**
+    /// **A needle far longer than one step is prepared in steps, and a stop
+    /// is answered *during the preparation*.**
     ///
     /// This is the case the window rule got wrong and the reason ADR 0065's
     /// Decision 4 was rewritten: a rule stated over a window of
@@ -4655,39 +4659,37 @@ mod tests {
         const N: usize = SAFEPOINT_STRIDE as usize * 20;
         let (program, entry) = find_fixture();
         let (haystack, needle) = straight_scan(M, N);
-        for fuel in [1u64, 1_500, 3_000] {
-            let (charged, spent, outcome) =
-                under_fuel(&program, entry, &haystack, &needle, 0, fuel);
-            assert_eq!(outcome, crate::trace::RunOutcome::Fuel);
-            assert!(
-                charged < M as u64,
-                "a fuel limit of {fuel} left {charged} unit(s) charged, which is the whole \
-                 {M}-unit preparation or past it"
-            );
-            assert!(
-                spent <= fuel + 2 * SAFEPOINT_STRIDE,
-                "a fuel limit of {fuel} spent {spent}, past one step of units and the stride \
-                 the loop gathers before it looks"
-            );
-        }
+        let (charged, spent, outcome) =
+            under_an_expired_deadline(&program, entry, &haystack, &needle, 0);
+        assert_eq!(outcome, crate::trace::RunOutcome::Deadline);
+        assert!(
+            charged < M as u64,
+            "an expired deadline left {charged} unit(s) charged, which is the whole \
+             {M}-unit preparation or past it"
+        );
+        assert!(
+            spent <= 2 * SAFEPOINT_STRIDE,
+            "an expired deadline let the run do {spent} work, past one step of units \
+             and the stride the loop gathers before it looks"
+        );
     }
 
-    /// **With fuel enough to finish preparing and not to search, the run
-    /// stops during the first stretch of the search** — and within the same
-    /// bound, because the step is the same step whichever phase it is in.
+    /// **With a needle short enough to be prepared before the first poll, the
+    /// run stops during the first stretch of the search** — and within the
+    /// same bound, because the step is the same step whichever phase it is in.
     #[test]
     fn a_run_find_stops_inside_the_first_stretch_of_the_search() {
-        // Not a multiple of the stride, so the step that finishes the needle
-        // is also the step that starts the search: the budget is one span of
-        // turns whichever phase it is spent in, which is the property that
-        // makes the bound hold at the phase change too.
-        const M: usize = SAFEPOINT_STRIDE as usize * 5 + 5;
+        // Not a multiple of the stride and shorter than one, so the step that
+        // finishes the needle is also the step that starts the search: the
+        // stride is one span of turns whichever phase it is spent in, which is
+        // the property that makes the bound hold at the phase change too.
+        const M: usize = SAFEPOINT_STRIDE as usize / 2 + 5;
         const N: usize = SAFEPOINT_STRIDE as usize * 20;
         let (program, entry) = find_fixture();
         let (haystack, needle) = straight_scan(M, N);
-        let fuel = M as u64 + SAFEPOINT_STRIDE / 8;
-        let (charged, spent, outcome) = under_fuel(&program, entry, &haystack, &needle, 0, fuel);
-        assert_eq!(outcome, crate::trace::RunOutcome::Fuel);
+        let (charged, spent, outcome) =
+            under_an_expired_deadline(&program, entry, &haystack, &needle, 0);
+        assert_eq!(outcome, crate::trace::RunOutcome::Deadline);
         assert!(
             charged >= M as u64,
             "{charged} unit(s) charged, so the needle was not finished"
@@ -4697,8 +4699,8 @@ mod tests {
             "{charged} unit(s) charged, which is past the first stretch of the search"
         );
         assert!(
-            spent <= fuel + 2 * SAFEPOINT_STRIDE,
-            "a fuel limit of {fuel} spent {spent}"
+            spent <= 2 * SAFEPOINT_STRIDE,
+            "an expired deadline let the run do {spent} work"
         );
     }
 
@@ -4714,7 +4716,7 @@ mod tests {
     /// exceeds a stride — and invisibly, because a Rust-side allocation is
     /// what `--boundary`'s `allocs` column does not count (#442).
     ///
-    /// Fuel is an upper bound on work done and not an equality. The intrinsic
+    /// The charge is an upper bound on work done and not an equality. The intrinsic
     /// this instruction replaces charged "the receiver's whole length as an
     /// upper bound" and said so. So the charge is the comparisons the matcher
     /// made, and `crate::find` derives what those are bounded by from the
@@ -4779,7 +4781,7 @@ mod tests {
         }
     }
 
-    /// **A cancellation stops a search the way a fuel bound does**, at the
+    /// **A cancellation stops a search the way a deadline does**, at the
     /// next poll rather than at the end of the haystack.
     #[test]
     fn a_cancelled_run_find_stops_at_a_poll() {
@@ -4839,7 +4841,7 @@ mod tests {
     /// in the charge, which is what makes the zero a statement rather than a
     /// rounding: an empty needle answers `from` and an over-long needle
     /// answers -1, both before any preparation begins. The instruction's own
-    /// single unit of fuel is unchanged, so a fast path is one fuel and
+    /// single unit of work is unchanged, so a fast path is one unit and
     /// nothing else.
     #[test]
     fn the_two_fast_paths_charge_no_bulk_work() {
@@ -5094,45 +5096,195 @@ mod tests {
         (build.done(), entry)
     }
 
-    /// **A copy is charged for the words it moves, and overspends its fuel by
-    /// less than one chunk plus one stride — not by the length of the copy.**
+    /// **A copy is charged for the words it moves, and does less than one
+    /// chunk plus one stride of work past an expired deadline — not the length
+    /// of the copy.**
     ///
     /// This is `responsiveness.rs`'s
-    /// `an_exhausted_fuel_budget_is_overspent_by_less_than_one_gathering`
-    /// for an instruction no Cove source can reach yet, and it is the
-    /// assertion that makes the proportional charge honest. Asserting only
-    /// that the run *stops* would pass just as well for a copy that ran to
-    /// the end of a megabyte first, which is what ADR 0040's `S + T` forbids.
+    /// `an_expired_deadline_stops_at_the_first_safepoint` for an instruction
+    /// no Cove source can reach yet, and it is the assertion that makes the
+    /// proportional charge honest. Asserting only that the run *stops* would
+    /// pass just as well for a copy that ran to the end of a megabyte first,
+    /// which is what ADR 0040's `S + T` forbids.
     #[test]
-    fn a_bulk_copy_overspends_its_fuel_by_less_than_one_chunk() {
+    fn a_bulk_copy_overruns_an_expired_deadline_by_less_than_one_chunk() {
         const BYTES: i64 = 1 << 20;
         let (program, entry) = one_big_copy(BYTES);
         let words = (BYTES as u64).div_ceil(8);
-        for limit in [1_024u64, 8_192, 40_000] {
-            let budget = crate::budget::Budget::new(crate::budget::Limits {
-                fuel: Some(limit),
-                ..crate::budget::Limits::default()
-            });
-            let mut machine = Machine::new(&program, 1 << 22);
-            let error = machine
-                .run(entry, &[BYTES as u64], &budget.meter())
-                .expect_err("a copy past its fuel is stopped");
-            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
+        let budget = crate::budget::Budget::new(crate::budget::Limits {
+            deadline: Some(std::time::Duration::ZERO),
+            ..crate::budget::Limits::default()
+        });
+        let mut machine = Machine::new(&program, 1 << 22);
+        let error = machine
+            .run(entry, &[BYTES as u64], &budget.meter())
+            .expect_err("a copy past its deadline is stopped");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Deadline);
 
-            // The bound: one chunk of work, plus the stride the loop may
-            // gather before it looks. Emphatically not `words`.
-            let bound = limit + words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
-            let spent = budget.fuel_spent();
-            assert!(
-                spent <= bound,
-                "a {BYTES}-byte copy under a fuel limit of {limit} spent {spent}, \
-                 past the bound of {bound}; the whole copy would have been {words}"
-            );
-            assert!(
-                spent < words,
-                "and it must not have copied the whole {words} words first"
-            );
+        // The bound: one chunk of work, plus the stride the loop may gather
+        // before it looks. Emphatically not `words`.
+        let bound = words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+        let spent = machine.work();
+        assert!(
+            spent <= bound,
+            "a {BYTES}-byte copy past an expired deadline did {spent} work, \
+             past the bound of {bound}; the whole copy would have been {words}"
+        );
+        assert!(
+            spent < words,
+            "and it must not have copied the whole {words} words first"
+        );
+    }
+
+    // --- a stop raised anywhere in a bulk operation (ADR 0040, ADR 0091) -----
+    //
+    // Fuel stopped a run at a figure the test chose; a [`Trip`] raises a stop
+    // at one. Each case below raises a cancellation, and then a deadline, at a
+    // spread of points across the whole of one long bulk operation, and holds
+    // the work the run did after the raising to one stride and one chunk.
+
+    /// A budget whose deadline is an hour away, so that [`Trip::Expire`] has
+    /// one to make pass.
+    fn far() -> crate::budget::Budget {
+        crate::budget::Budget::new(crate::budget::Limits {
+            deadline: Some(std::time::Duration::from_secs(3600)),
+            ..crate::budget::Limits::default()
+        })
+    }
+
+    /// How a run of `entry` with `trip` armed at `at` ended: its outcome, the
+    /// work at which the trip was raised, and the machine's work at the end —
+    /// or, with no trip, the work of the whole run.
+    fn tripped(
+        program: &Program,
+        heap: usize,
+        entry: FunctionId,
+        prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
+        trip: Option<(u64, crate::vm::exec::Trip)>,
+        inspect: &dyn Fn(&Machine<'_>, &[u64]),
+    ) -> (Option<crate::trace::RunOutcome>, u64, u64) {
+        let budget = far();
+        let mut machine = Machine::new(program, heap);
+        let args = prepare(&mut machine);
+        machine.set_trips(trip.into_iter().collect());
+        let outcome = machine
+            .run(entry, &args, &budget.meter())
+            .err()
+            .map(|e| e.outcome);
+        inspect(&machine, &args);
+        let raised = machine.trips.raised.first().map_or(0, |(_, work)| *work);
+        (outcome, raised, machine.work())
+    }
+
+    /// `tripped` at a dozen points across the whole run, for a cancellation
+    /// and a deadline, holding each stop to `bound` work after its raising.
+    fn stops_anywhere_within(
+        what: &str,
+        program: &Program,
+        heap: usize,
+        entry: FunctionId,
+        prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
+        inspect: &dyn Fn(&Machine<'_>, &[u64]),
+        bound: u64,
+    ) {
+        use crate::vm::exec::Trip;
+        let (finished, _, whole) = tripped(program, heap, entry, prepare, None, inspect);
+        assert_eq!(finished, None, "{what}: answers with nothing raised");
+        assert!(
+            whole > 20 * SAFEPOINT_STRIDE,
+            "{what}: long enough to stop inside"
+        );
+        for (trip, want) in [
+            (Trip::Cancel, crate::trace::RunOutcome::Cancelled),
+            (Trip::Expire, crate::trace::RunOutcome::Deadline),
+        ] {
+            for k in 1..=12u64 {
+                let at = whole * k / 13;
+                let (outcome, raised, work) =
+                    tripped(program, heap, entry, prepare, Some((at, trip)), inspect);
+                assert_eq!(outcome, Some(want), "{what}: {trip:?} at {at}");
+                // Raised at the first point the run looked after `at`, which
+                // inside a bulk operation is its next chunk's safepoint: so
+                // this is the bound too, from the other side, and an
+                // operation that did not look while it ran fails here.
+                assert!(
+                    raised >= at && raised - at <= bound,
+                    "{what}: {trip:?} at {at} raised at {raised}"
+                );
+                assert!(
+                    work - raised <= bound,
+                    "{what}: {trip:?} raised at {raised} (asked at {at}) and the run did \
+                     {} more work, past the bound of {bound}; the whole run is {whole}",
+                    work - raised
+                );
+            }
         }
+    }
+
+    /// **A megabyte's copy is stopped within one stride and one chunk of a
+    /// cancellation or a deadline raised anywhere in it.**
+    #[test]
+    fn a_bulk_copy_is_stopped_within_one_chunk_of_a_stop_raised_anywhere_in_it() {
+        const BYTES: i64 = 1 << 20;
+        let (program, entry) = one_big_copy(BYTES);
+        stops_anywhere_within(
+            "a byte copy",
+            &program,
+            1 << 22,
+            entry,
+            &|_| vec![BYTES as u64],
+            &|_, _| (),
+            SAFEPOINT_STRIDE + BULK_CHUNK_WORDS + 8,
+        );
+    }
+
+    /// **The same for a megabyte's append to a growable run**, which commits
+    /// nothing however far it got: the length word is unchanged at every stop.
+    #[test]
+    fn a_bulk_append_is_stopped_within_one_chunk_of_a_stop_raised_anywhere_in_it() {
+        let (program, entry) = one_big_append();
+        stops_anywhere_within(
+            "an append",
+            &program,
+            1 << 22,
+            entry,
+            &|machine| vec![machine.alloc_buffer(0).expect("an empty buffer fits")],
+            &|machine, args| {
+                if machine.trips.raised.is_empty() {
+                    return;
+                }
+                assert_eq!(
+                    machine.payload(args[0], runs::GROWABLE_LEN),
+                    0,
+                    "a stopped append committed nothing"
+                );
+            },
+            SAFEPOINT_STRIDE + BULK_CHUNK_WORDS + 8,
+        );
+    }
+
+    /// **A search is stopped within one step of a stop raised anywhere in it**
+    /// — in the preparation of a long needle and in the scan alike, the step
+    /// being one stride of units in both (ADR 0065's Decision 4).
+    #[test]
+    fn a_run_find_is_stopped_within_one_step_of_a_stop_raised_anywhere_in_it() {
+        const M: usize = SAFEPOINT_STRIDE as usize * 8 + 5;
+        const N: usize = SAFEPOINT_STRIDE as usize * 40;
+        let (program, entry) = find_fixture();
+        let (haystack, needle) = straight_scan(M, N);
+        stops_anywhere_within(
+            "a search",
+            &program,
+            1 << 20,
+            entry,
+            &|machine| {
+                let hay = run_of(machine, &haystack);
+                let sought = run_of(machine, &needle);
+                vec![hay, sought, 0]
+            },
+            &|_, _| (),
+            2 * SAFEPOINT_STRIDE + 8,
+        );
     }
 
     /// **A cancelled run stops inside a large copy rather than after it.**
@@ -5607,15 +5759,15 @@ mod tests {
         }
     }
 
-    /// **A word copy is charged for the words it moves and overspends its fuel
-    /// by less than one chunk plus one stride.**
+    /// **A word copy is charged for the words it moves and does less than one
+    /// chunk plus one stride of work past an expired deadline.**
     ///
-    /// `a_bulk_copy_overspends_its_fuel_by_less_than_one_chunk` for the other
+    /// `a_bulk_copy_overruns_an_expired_deadline_by_less_than_one_chunk` for the other
     /// storage. The two share one chunk loop, and this is what holds the word
     /// arm to it: a copy that charged per *element*, or that made one chunk of
     /// the whole range, passes every agreement test above and fails here.
     #[test]
-    fn a_word_copy_overspends_its_fuel_by_less_than_one_chunk() {
+    fn a_word_copy_overruns_an_expired_deadline_by_less_than_one_chunk() {
         const ELEMENTS: i64 = 1 << 17;
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
@@ -5653,24 +5805,22 @@ mod tests {
         );
         let program = build.done();
         let words = ELEMENTS as u64;
-        for limit in [1_024u64, 8_192, 40_000] {
-            let budget = crate::budget::Budget::new(crate::budget::Limits {
-                fuel: Some(limit),
-                ..crate::budget::Limits::default()
-            });
-            let mut machine = Machine::new(&program, 1 << 20);
-            let error = machine
-                .run(entry, &[ELEMENTS as u64], &budget.meter())
-                .expect_err("a copy past its fuel is stopped");
-            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
-            let bound = limit + BULK_CHUNK_WORDS + SAFEPOINT_STRIDE;
-            let spent = budget.fuel_spent();
-            assert!(
-                spent <= bound && spent < words,
-                "a {ELEMENTS}-element copy under a fuel limit of {limit} spent {spent}, \
-                 past the bound of {bound}; the whole copy would have been {words}"
-            );
-        }
+        let budget = crate::budget::Budget::new(crate::budget::Limits {
+            deadline: Some(std::time::Duration::ZERO),
+            ..crate::budget::Limits::default()
+        });
+        let mut machine = Machine::new(&program, 1 << 20);
+        let error = machine
+            .run(entry, &[ELEMENTS as u64], &budget.meter())
+            .expect_err("a copy past its deadline is stopped");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Deadline);
+        let bound = BULK_CHUNK_WORDS + SAFEPOINT_STRIDE;
+        let spent = machine.work();
+        assert!(
+            spent <= bound && spent < words,
+            "a {ELEMENTS}-element copy past an expired deadline did {spent} work, \
+             past the bound of {bound}; the whole copy would have been {words}"
+        );
     }
 
     /// **References copied into a run are traced from it: a collection with a
@@ -7268,58 +7418,56 @@ mod tests {
         (build.done(), entry)
     }
 
-    /// **A bulk append is charged for the words it moves, and overspends its
-    /// fuel by less than one chunk plus one stride — not by the length of the
-    /// append.**
+    /// **A bulk append is charged for the words it moves, and does less than
+    /// one chunk plus one stride of work past an expired deadline — not the
+    /// length of the append.**
     ///
-    /// `a_bulk_copy_overspends_its_fuel_by_less_than_one_chunk` for the
+    /// `a_bulk_copy_overruns_an_expired_deadline_by_less_than_one_chunk` for the
     /// growable path. Asserting only that the run *stops* would pass just as
     /// well for an append that ran to the end of a megabyte first, which is what
     /// ADR 0040's `S + T` forbids and what an unchunked append would do.
     #[test]
-    fn a_bulk_append_overspends_its_fuel_by_less_than_one_chunk() {
+    fn a_bulk_append_overruns_an_expired_deadline_by_less_than_one_chunk() {
         const BYTES: u64 = 1 << 20;
         let (program, entry) = one_big_append();
         let words = BYTES.div_ceil(8);
-        for limit in [1_024u64, 8_192, 40_000] {
-            let budget = crate::budget::Budget::new(crate::budget::Limits {
-                fuel: Some(limit),
-                ..crate::budget::Limits::default()
-            });
-            let mut machine = Machine::new(&program, 1 << 22);
-            let owner = machine.alloc_buffer(0).expect("an empty buffer fits");
-            let error = machine
-                .run(entry, &[owner], &budget.meter())
-                .expect_err("an append past its fuel is stopped");
-            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
+        let budget = crate::budget::Budget::new(crate::budget::Limits {
+            deadline: Some(std::time::Duration::ZERO),
+            ..crate::budget::Limits::default()
+        });
+        let mut machine = Machine::new(&program, 1 << 22);
+        let owner = machine.alloc_buffer(0).expect("an empty buffer fits");
+        let error = machine
+            .run(entry, &[owner], &budget.meter())
+            .expect_err("an append past its deadline is stopped");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Deadline);
 
-            // The ensure happened and the commit did not: the store was grown
-            // for the whole range up front, and the length word still says
-            // nothing was appended, so the bytes a stopped copy did move are
-            // spare room rather than value.
-            assert_eq!(
-                machine.payload(owner, runs::GROWABLE_LEN),
-                0,
-                "a {BYTES}-byte append stopped at a fuel limit of {limit} committed nothing"
-            );
-            let store = machine.payload(owner, runs::GROWABLE_STORE);
-            assert!(
-                u64::from(machine.object_len(store)) >= BYTES,
-                "and its store was grown for the whole range before the first chunk"
-            );
+        // The ensure happened and the commit did not: the store was grown
+        // for the whole range up front, and the length word still says
+        // nothing was appended, so the bytes a stopped copy did move are
+        // spare room rather than value.
+        assert_eq!(
+            machine.payload(owner, runs::GROWABLE_LEN),
+            0,
+            "a {BYTES}-byte append stopped at an expired deadline committed nothing"
+        );
+        let store = machine.payload(owner, runs::GROWABLE_STORE);
+        assert!(
+            u64::from(machine.object_len(store)) >= BYTES,
+            "and its store was grown for the whole range before the first chunk"
+        );
 
-            let bound = limit + words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
-            let spent = budget.fuel_spent();
-            assert!(
-                spent <= bound,
-                "a {BYTES}-byte append under a fuel limit of {limit} spent {spent}, \
-                 past the bound of {bound}; the whole append would have been {words}"
-            );
-            assert!(
-                spent < words,
-                "and it must not have appended the whole {words} words first"
-            );
-        }
+        let bound = words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+        let spent = machine.work();
+        assert!(
+            spent <= bound,
+            "a {BYTES}-byte append past an expired deadline did {spent} work, \
+             past the bound of {bound}; the whole append would have been {words}"
+        );
+        assert!(
+            spent < words,
+            "and it must not have appended the whole {words} words first"
+        );
     }
 
     /// [`cove_native::RunCopyFn`], differentially: each fixture above with a caller
@@ -7928,14 +8076,13 @@ mod tests {
             }
         }
 
-        /// **A copy longer than a chunk, in compiled code, is stopped by fuel within
-        /// ADR 0040's bound and by cancellation before it has done a chunk's work.**
+        /// **A copy longer than a chunk, in compiled code, is stopped by an expired
+        /// deadline and by cancellation within ADR 0040's bound.**
         ///
         /// The objects are the test's own, so the callee is the copy and nothing
-        /// else: the first safepoint a native run reaches is the helper's. A
-        /// cancellation is answered there, before a byte is copied; fuel is gathered
-        /// there and then spent chunk by chunk, so the overspend is the chunk loop's
-        /// — one chunk plus one stride, as on the dispatch loop, and emphatically
+        /// else: the first safepoint a native run reaches is the helper's, and the
+        /// chunk loop polls between chunks, so the overrun is the chunk loop's —
+        /// one chunk plus one stride, as on the dispatch loop, and emphatically
         /// not the length of the copy.
         #[test]
         fn a_compiled_copy_longer_than_a_chunk_stops_within_its_bound() {
@@ -7954,36 +8101,33 @@ mod tests {
             };
             let nothing = |_: &Machine<'_>, _: &[u64]| ();
 
-            for limit in [1_024u64, 8_192, 40_000] {
-                let bound = limit + words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
-                for tier in [None, Some(&native)] {
-                    let budget = crate::budget::Budget::new(crate::budget::Limits {
-                        fuel: Some(limit),
-                        ..crate::budget::Limits::default()
-                    });
-                    let (said, (), tiers, _) = on(
-                        &program,
-                        tier,
-                        1 << 22,
-                        &budget.meter(),
-                        entry,
-                        &prepare,
-                        &nothing,
-                    );
-                    let (.., outcome) = said.expect_err("a copy past its fuel is stopped");
-                    assert_eq!(outcome, crate::trace::RunOutcome::Fuel);
-                    if tier.is_some() {
-                        assert!(tiers.vm_to_native >= 1, "{tiers:?}");
-                    }
-                    let spent = budget.fuel_spent();
-                    assert!(
-                        spent <= bound && spent < words,
-                        "a {BYTES}-byte copy under a fuel limit of {limit} spent {spent} \
-                         (native: {}), past the bound of {bound}; the whole copy would have \
-                         been {words}",
-                        tier.is_some()
-                    );
+            let bound = words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+            for tier in [None, Some(&native)] {
+                let budget = crate::budget::Budget::new(crate::budget::Limits {
+                    deadline: Some(std::time::Duration::ZERO),
+                    ..crate::budget::Limits::default()
+                });
+                let (said, (), tiers, spent) = on(
+                    &program,
+                    tier,
+                    1 << 22,
+                    &budget.meter(),
+                    entry,
+                    &prepare,
+                    &nothing,
+                );
+                let (.., outcome) = said.expect_err("a copy past its deadline is stopped");
+                assert_eq!(outcome, crate::trace::RunOutcome::Deadline);
+                if tier.is_some() {
+                    assert!(tiers.vm_to_native >= 1, "{tiers:?}");
                 }
+                assert!(
+                    spent <= bound && spent < words,
+                    "a {BYTES}-byte copy past an expired deadline did {spent} work \
+                     (native: {}), past the bound of {bound}; the whole copy would have \
+                     been {words}",
+                    tier.is_some()
+                );
             }
 
             for tier in [None, Some(&native)] {
@@ -9138,32 +9282,31 @@ mod tests {
             /// What the test reads of the heap afterwards.
             heap: T,
             instructions: u64,
-            fuel: u64,
+            work: u64,
             collections: u64,
+            /// The stop a test raised, and the work at which it was raised.
+            raised: Vec<(crate::vm::exec::Trip, u64)>,
         }
 
-        /// One run of `entry`, fused or not, under an optional fuel limit, with
-        /// its boundary counted.
+        /// One run of `entry`, fused or not, optionally with a stop raised once
+        /// its work reaches a chosen point, with its boundary counted.
         #[allow(clippy::too_many_arguments)]
         fn ran<T>(
             program: &Program,
             entry: FunctionId,
             fused: bool,
             heap: usize,
-            fuel: Option<u64>,
+            stop: Option<(u64, crate::vm::exec::Trip)>,
             prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
             inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
         ) -> (Ran<T>, crate::vm::report::BoundaryReport, u64) {
-            let limits = crate::budget::Limits {
-                fuel,
-                ..crate::budget::Limits::default()
-            };
-            let budget = crate::budget::Budget::new(limits);
+            let budget = far();
             let mut machine = Machine::new(program, heap);
             if !fused {
                 unfused(&mut machine);
             }
             let args = prepare(&mut machine);
+            machine.set_trips(stop.into_iter().collect());
             machine.count_boundary(native::Tiers::default());
             let result = machine.run(entry, &args, &budget.meter());
             let report = machine.boundary(None).expect("the run was counted");
@@ -9171,8 +9314,9 @@ mod tests {
                 said: format!("{result:?}"),
                 heap: inspect(&machine, &args),
                 instructions: machine.instructions(),
-                fuel: budget.fuel_spent(),
+                work: machine.work(),
                 collections: machine.collected().collections,
+                raised: machine.trips.raised.clone(),
             };
             let fast = report.windows.fast.iter().sum::<u64>();
             (ran, report, fast)
@@ -9180,7 +9324,7 @@ mod tests {
 
         /// **A fused window is the rows it stands for**: the same answer or the
         /// same refusal at the same span, the same heap, the same instructions,
-        /// fuel and collections. Answers the fused run, its report — which says
+        /// work and collections. Answers the fused run, its report — which says
         /// how many windows fused and how many dispatches they took — and how
         /// many windows a fused head's own fast path ran whole, which is
         /// `BoundaryReport::windows`' `fast` row summed over the patterns and
@@ -9192,12 +9336,12 @@ mod tests {
             program: &Program,
             entry: FunctionId,
             heap: usize,
-            fuel: Option<u64>,
+            stop: Option<(u64, crate::vm::exec::Trip)>,
             prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
             inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
         ) -> (Ran<T>, crate::vm::report::BoundaryReport, u64) {
-            let (fused, report, fast) = ran(program, entry, true, heap, fuel, prepare, inspect);
-            let (rows, unreport, unfast) = ran(program, entry, false, heap, fuel, prepare, inspect);
+            let (fused, report, fast) = ran(program, entry, true, heap, stop, prepare, inspect);
+            let (rows, unreport, unfast) = ran(program, entry, false, heap, stop, prepare, inspect);
             assert_eq!(fused, rows, "{what}");
             assert_eq!(
                 (unreport.fusions, unreport.encoded_dispatches, unfast),
@@ -9367,7 +9511,7 @@ mod tests {
         /// growth is where a push allocates: so one whose allocation collects
         /// first, and one the heap has no room for at all, must still be the
         /// rows — the same collections, and the same refusal at the ensure's
-        /// span with the same instructions and fuel spent.
+        /// span with the same instructions and work done.
         #[test]
         fn a_fused_push_that_grows_collects_and_refuses_as_the_rows_do() {
             let f = framed();
@@ -9615,7 +9759,7 @@ mod tests {
         /// extend's shape — is the rows it stands for: into room, an empty one,
         /// one that grows, the whole source, and every way the range can be
         /// wrong. Each refusal is the row's own, at the row's span, with the
-        /// frame and the fuel the rows would have left.
+        /// frame and the work the rows would have left.
         #[test]
         fn a_fused_word_append_over_a_chosen_range_is_the_rows_it_stands_for() {
             let f = framed();
@@ -9917,7 +10061,7 @@ mod tests {
         /// and the rest of its window runs as `fused_tail` runs it: so one whose
         /// growth collects first, and one the heap has no room for at all, must
         /// still be the rows — the same collections, the same bytes, and the same
-        /// refusal at the ensure's span with the same instructions and fuel.
+        /// refusal at the ensure's span with the same instructions and work.
         #[test]
         fn a_fused_append_that_grows_collects_and_refuses_as_the_rows_do() {
             let f = framed();
@@ -9995,8 +10139,8 @@ mod tests {
 
         /// Three hundred byte windows in one function, with garbage between them
         /// on a heap small enough that growing the store collects: **the fused run
-        /// is the unfused one** in its answer, its heap, its fuel and its
-        /// collections — and under fuel limits that stop it part way, in the span
+        /// is the unfused one** in its answer, its heap, its work and its
+        /// collections — and under a deadline that stops it part way, in the span
         /// it stops at. Some windows straddle a safepoint and run unfused, which is
         /// the arm declining; the rest fuse, through a growth or not.
         #[test]
@@ -10127,25 +10271,45 @@ mod tests {
                 report.encoded_dispatches,
                 report.encoded_instructions - 6 * windows
             );
-            for limit in [1u64, 700, 1_000, 1_500, 2_000] {
-                let (stopped, ..) = fuses_as_unfused(
-                    &format!("under {limit} fuel"),
-                    &program,
-                    entry,
-                    320,
-                    Some(limit),
-                    &prepare,
-                    &inspect,
-                );
-                assert!(stopped.said.contains("fuel"), "{}", stopped.said);
+            // A cancellation and a deadline raised at points across the run —
+            // inside windows, between them, inside a growth: the fused run
+            // stops where the rows stop, in the same words at the same span
+            // with the same work done and the stop raised at the same point,
+            // and within one stride and one chunk of the raising.
+            for (trip, word) in [
+                (crate::vm::exec::Trip::Cancel, "cancelled"),
+                (crate::vm::exec::Trip::Expire, "deadline"),
+            ] {
+                for k in 1..=10u64 {
+                    // Far enough from the end that a stride and a chunk are
+                    // left for the run to notice in: a stop raised nearer the
+                    // end may be outrun by the answer, which is no fault.
+                    let at = fused.work.saturating_sub(2 * SAFEPOINT_STRIDE + 8) * k / 11;
+                    let (stopped, ..) = fuses_as_unfused(
+                        &format!("{trip:?} at {at}"),
+                        &program,
+                        entry,
+                        320,
+                        Some((at, trip)),
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(stopped.said.contains(word), "{at}: {}", stopped.said);
+                    let (_, raised) = stopped.raised[0];
+                    assert!(
+                        raised >= at && stopped.work - raised <= 2 * SAFEPOINT_STRIDE + 8,
+                        "{trip:?} at {at}: raised at {raised}, stopped at {}",
+                        stopped.work
+                    );
+                }
             }
         }
 
         /// The same thing for **word** appends: a hundred and seventy of them in
         /// one function, three elements a window, with garbage between them on a
         /// heap small enough that growing the store collects. The fused run is
-        /// the unfused one in its answer, its heap, its fuel and its
-        /// collections, and so it is under fuel limits that stop it part way.
+        /// the unfused one in its answer, its heap, its work and its
+        /// collections, and so it is under a deadline that stops it part way.
         ///
         /// It is where both halves of a word window are reached by one program:
         /// the fast path for the copies the store has room for, and
@@ -10312,17 +10476,37 @@ mod tests {
                 report.encoded_dispatches,
                 report.encoded_instructions - 5 * windows
             );
-            for limit in [1u64, 500, 1_000] {
-                let (stopped, ..) = fuses_as_unfused(
-                    &format!("under {limit} fuel"),
-                    &program,
-                    entry,
-                    HEAP,
-                    Some(limit),
-                    &prepare,
-                    &inspect,
-                );
-                assert!(stopped.said.contains("fuel"), "{limit}: {}", stopped.said);
+            // A cancellation and a deadline raised at points across the run —
+            // inside windows, between them, inside a growth: the fused run
+            // stops where the rows stop, in the same words at the same span
+            // with the same work done and the stop raised at the same point,
+            // and within one stride and one chunk of the raising.
+            for (trip, word) in [
+                (crate::vm::exec::Trip::Cancel, "cancelled"),
+                (crate::vm::exec::Trip::Expire, "deadline"),
+            ] {
+                for k in 1..=10u64 {
+                    // Far enough from the end that a stride and a chunk are
+                    // left for the run to notice in: a stop raised nearer the
+                    // end may be outrun by the answer, which is no fault.
+                    let at = fused.work.saturating_sub(2 * SAFEPOINT_STRIDE + 8) * k / 11;
+                    let (stopped, ..) = fuses_as_unfused(
+                        &format!("{trip:?} at {at}"),
+                        &program,
+                        entry,
+                        HEAP,
+                        Some((at, trip)),
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(stopped.said.contains(word), "{at}: {}", stopped.said);
+                    let (_, raised) = stopped.raised[0];
+                    assert!(
+                        raised >= at && stopped.work - raised <= 2 * SAFEPOINT_STRIDE + 8,
+                        "{trip:?} at {at}: raised at {raised}, stopped at {}",
+                        stopped.work
+                    );
+                }
             }
         }
 
@@ -10330,7 +10514,7 @@ mod tests {
         /// count the census takes is behind an `Option` test on a path that had
         /// already decided what to do — a `return`, a growth, a window's last
         /// line — so an uncounted run takes the same path, leaves the same heap
-        /// and spends the same fuel as a counted one.
+        /// and does the same work as a counted one.
         ///
         /// That is `ablate::CENSUS`'s discipline asked of this tier: the fast
         /// paths are the same function bodies whether or not anything is
@@ -10365,7 +10549,7 @@ mod tests {
                     said,
                     store_words(&machine, owner, 1),
                     machine.instructions(),
-                    budget.fuel_spent(),
+                    machine.work(),
                     machine.collected().collections,
                 )
             };
@@ -10399,7 +10583,7 @@ mod tests {
                     said,
                     (machine.payload(owner, runs::GROWABLE_LEN), bytes),
                     machine.instructions(),
-                    budget.fuel_spent(),
+                    machine.work(),
                     machine.collected().collections,
                 )
             };
@@ -10640,7 +10824,7 @@ mod tests {
         /// installed: **a window compiled as one fast path is the rows the
         /// dispatch loop runs**, fused and unfused — the same frame answered or
         /// the same refusal in the same words at the same span, the same heap,
-        /// the same fuel and the same collections. Each case is reached through a
+        /// the same work and the same collections. Each case is reached through a
         /// `call`, which is the crossing, and asserts it crossed.
         #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
         mod tiered {
@@ -10685,7 +10869,7 @@ mod tests {
                 /// outcome.
                 said: String,
                 heap: T,
-                fuel: u64,
+                work: u64,
                 collections: u64,
             }
 
@@ -10717,7 +10901,7 @@ mod tests {
                 let left = Left {
                     said: format!("{said:?}"),
                     heap: inspect(&machine, &args),
-                    fuel: budget.fuel_spent(),
+                    work: machine.work(),
                     collections: machine.collected().collections,
                 };
                 (left, machine.tiers().vm_to_native)
@@ -10744,8 +10928,8 @@ mod tests {
                 // dispatch loop never reached — every row, not only a window's.
                 // A run that finished has paid for exactly what ran.
                 if !compiled.said.starts_with("Ok(") {
-                    assert!(compiled.fuel >= rows.fuel, "{what}: {compiled:?}");
-                    rows.fuel = compiled.fuel;
+                    assert!(compiled.work >= rows.work, "{what}: {compiled:?}");
+                    rows.work = compiled.work;
                 }
                 assert_eq!(compiled, rows, "{what}: compiled and the rows");
                 assert!(crossed >= 1, "{what}: the window ran in compiled code");

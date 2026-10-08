@@ -1,9 +1,9 @@
 // Written to be measured rather than to be read.
 //
 // It prints nothing. What it has to show is on the status line beside
-// **Run**: the instructions the VM retired and the fuel they cost. Two
+// **Run**: the instructions the VM retired. Two
 // million turns of this loop are about 22 million instructions, and they fit
-// inside this page's 200,000,000 fuel and five seconds, so the numbers are a
+// inside this page's five seconds, so the numbers are a
 // real workload's and not a scaled-down one's.
 //
 // The IR pane is the other half. The loop is a handful of instructions; the

@@ -5,7 +5,7 @@
 //! and the payload as a table index without asking whether either is in
 //! range, because this asked. What stays a run-time question stays one —
 //! division by zero, an object's layout against the layout the instruction
-//! names, element bounds, fuel, deadlines, cancellation, host failure.
+//! names, element bounds, deadlines, cancellation, host failure.
 //!
 //! # This is not [`mod@crate::verify`], and the difference is the point
 //!

@@ -1272,7 +1272,7 @@ module server
   /// Runs the HTTP server.
   ///
   /// The loop belongs to the program rather than to the host: `handle` answers
-  /// one request and returns, so the run's fuel, deadline, and cancellation
+  /// one request and returns, so the run's deadline and cancellation
   /// reach a server exactly as they reach any other Cove code. It ends when the
   /// listener has nothing more to serve.
   export fn main() -> Result<Unit, Error>

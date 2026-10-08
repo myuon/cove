@@ -17,7 +17,7 @@
 //! - **encoded instructions** are what the dispatch loop ran, which is
 //!   `Machine::instructions` and not a second counter beside it. Since
 //!   [ADR 0062] fused a window's rows behind its head that is a count of
-//!   *semantic* instructions — fuel's — and the report says apart how many
+//!   *semantic* instructions — the safepoint stride's — and the report says apart how many
 //!   dispatches they took and how many windows of each pattern ran fused;
 //! - **tier crossings** are [`Tiers`], unchanged;
 //! - **native-to-runtime calls** are one counter per [`NativeHelpers`] field.
@@ -526,7 +526,7 @@ pub struct BoundaryReport {
     /// The program, counted statically.
     pub emitted: Emitted,
     /// Instructions the encoded dispatch loop ran while counting: semantic
-    /// instructions, a fused window's rows each counted, as fuel counts them.
+    /// instructions, a fused window's rows each counted, as the stride counts them.
     pub encoded_instructions: u64,
     /// Turns of the dispatch loop those instructions took: fewer by every row a
     /// fused head ran after itself.

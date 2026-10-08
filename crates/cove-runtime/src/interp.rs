@@ -236,18 +236,6 @@ pub fn on_cove_stack<T: Send>(body: impl FnOnce() -> T + Send) -> std::io::Resul
 /// how many times the multiplier applies.
 pub(crate) const MAX_REENTRY_DEPTH: usize = 8;
 
-/// Fuel charged at every safepoint: a loop back edge, a function call, or an
-/// `await`.
-///
-/// ADR 0001 is explicit that fuel is a coarse runtime control, not a modeled
-/// instruction count — real safepoints vary enormously in the CPU work they
-/// guard, so no constant here would make fuel mean "instructions executed."
-/// A flat per-safepoint cost keeps that honest: fuel measures how many
-/// safepoints a run passed through, which is exactly what bounds a
-/// non-terminating loop or an unbounded recursion, and nothing more precise
-/// than that is claimed.
-pub const SAFEPOINT_FUEL: u64 = 10;
-
 /// Non-local control flow raised while evaluating an expression.
 enum Control {
     Error(RuntimeError),
@@ -576,11 +564,11 @@ impl Tasking for Interpreter<'_> {
 ///
 /// The `Budget` is owned by the [`HostRegistry`] this interpreter borrows,
 /// not by `Interpreter` itself: a host installs it once with
-/// `HostRegistry::set_budget`, and every task thread charges that one budget
+/// `HostRegistry::set_budget`, and every task thread asks that one budget
 /// at its own safepoints, through a [`crate::budget::Meter`] taken from it
-/// where the run begins. ADR 0008 draws a task's fuel from the run's budget,
-/// so there is exactly one authoritative count of what the run spent,
-/// whichever thread spent it. Call depth is the exception and is counted
+/// where the run begins. ADR 0008 makes a task's limits the run's, so there
+/// is exactly one authoritative count of what the run took, whichever thread
+/// took it. Call depth is the exception and is counted
 /// here, because a task has a stack of its own.
 pub struct Interpreter<'a> {
     pub program: &'a Program,
@@ -862,8 +850,8 @@ impl<'a> Interpreter<'a> {
     /// An interpreter for the body of the spawned task `id`, which stops when
     /// `cancellation` is raised.
     ///
-    /// `budget` is the run's, handed over by the `spawn`: ADR 0008 draws a
-    /// task's fuel from the run's budget, and the run's budget is the one
+    /// `budget` is the run's, handed over by the `spawn`: ADR 0008 makes a
+    /// task's limits the run's, and the run's budget is the one
     /// its entry was given, not whatever the registry holds (issue #577).
     fn for_task(
         runtime: &'a Runtime,
@@ -1000,7 +988,7 @@ impl<'a> Interpreter<'a> {
     ///
     /// A [`Budget`] used to belong to the [`HostRegistry`]: `set_budget` needs
     /// `&mut HostRegistry`, a backend holds the registry by shared reference
-    /// for as long as it exists, and so every limit it carried — `fuel`, the
+    /// for as long as it exists, and so every limit it carried — the
     /// deadline, `max_host_calls`, `max_tasks` — was spent over the whole life
     /// of the backend. For a `cove run` that is exactly right, because a run
     /// is one invocation and `[run.<name>]`'s limits bound it. For an
@@ -1012,8 +1000,8 @@ impl<'a> Interpreter<'a> {
     ///
     /// A budget belongs to an invocation, and it lives with the invocation:
     /// this interpreter holds it, and a `spawn` hands it to the task thread
-    /// it starts, so ADR 0008's rule that a task's fuel is drawn from the
-    /// run's budget still holds. It used to be installed in the registry for
+    /// it starts, so ADR 0008's rule that a task's limits are the run's
+    /// still holds. It used to be installed in the registry for
     /// the length of the call, which made it one slot every run over that
     /// registry shared — issue #577. `budget` bounds everything the
     /// invocation and its tasks do, and is left behind afterwards, readable
@@ -1033,7 +1021,7 @@ impl<'a> Interpreter<'a> {
     /// that does not
     ///
     /// ADR 0024 states each way a run can be stopped as a bound that holds
-    /// over the run, in that backend's own fuel. A budget that could be
+    /// over the run, in that backend's own units. A budget that could be
     /// replaced while the run it bounds was executing would make every one of
     /// those bounds a claim about something that had changed underneath it,
     /// and the ADR's argument would have to be revisited to say what a bound
@@ -1458,8 +1446,8 @@ impl<'a> Interpreter<'a> {
 
     // ------------------------------------------------------------- budget
 
-    /// Charges [`SAFEPOINT_FUEL`] and checks the deadline and cancellation
-    /// flag, at a loop back edge, a function call, or an `await`.
+    /// Checks the cancellation flags and the deadline, and collects if a
+    /// collection is due, at a loop back edge, a function call, or an `await`.
     ///
     /// A stop surfaces as the ordinary [`RuntimeError`] `Budget` already
     /// produces, pointing at `span` — the loop, call, or await that hit the
@@ -1467,10 +1455,10 @@ impl<'a> Interpreter<'a> {
     /// it propagates through `Control::Error` and cannot be caught by `?` or
     /// `match` in Cove source, so it terminates the run rather than failing
     /// one function of it.
-    fn charge_safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
+    fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         if let Some(budget) = &self.budget {
-            if let Err(stopped) = budget.safepoint(SAFEPOINT_FUEL) {
+            if let Err(stopped) = budget.safepoint() {
                 return Err(budget.to_runtime_error(stopped).at(span));
             }
         }
@@ -1491,27 +1479,12 @@ impl<'a> Interpreter<'a> {
     /// [`Timing`] context, so `EntryExit` and `TaskCompleted` can separate
     /// CPU work from time spent waiting on the host.
     ///
-    /// # Why there is no fuel flush here
-    ///
-    /// [ADR 0030](../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)
-    /// decides that no Host call begins once the fuel a run has been charged
-    /// has reached its limit, and the periodic safepoint the linear-memory
-    /// backend runs every [`crate::SAFEPOINT_STRIDE`] instructions is what
-    /// makes that true there, at the granularity fuel is charged at on that
-    /// backend. This one needs nothing,
-    /// and could do nothing: [`Interpreter::charge_safepoint`] hands
-    /// [`SAFEPOINT_FUEL`] to the shared budget in the same call that charges
-    /// it, so there is never a charge standing between two safepoints and the
-    /// run's charged total cannot move while a straight line runs. A
-    /// safepoint that reaches the limit stops the run there; nothing after it
-    /// is dispatched.
-    ///
-    /// What that costs is the other half of ADR 0024, which ADR 0030 leaves
-    /// standing: a straight line reaches no safepoint on this backend at all,
-    /// so a limit that lets a body in lets every Host call in it through.
-    /// The property is the same sentence on both backends and the number it
-    /// admits is not, which is why a fuel limit is not portable between them
-    /// and why `max_host_calls` is the control that bounds effects exactly.
+    /// The boundary asks the run's budget itself, in
+    /// [`HostRegistry`]'s `charge_host_call`: cancellation, the deadline and
+    /// `max_host_calls` are read there before the call is dispatched, which
+    /// is what bounds a straight line of Host calls that reaches no safepoint
+    /// on this backend. `max_host_calls` is the control that bounds effects
+    /// exactly.
     fn call_host(
         &mut self,
         module: &str,
@@ -1691,9 +1664,8 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        // Every call is also a safepoint, so the fuel charge counts the call
-        // itself.
-        self.charge_safepoint(span)?;
+        // Every call is also a safepoint.
+        self.safepoint(span)?;
 
         self.depth += 1;
         self.call_sites.push(span);
@@ -2158,7 +2130,7 @@ impl<'a> Interpreter<'a> {
             }
             ExprKind::Await(inner) => {
                 let value = self.eval(env, inner)?;
-                self.charge_safepoint(span)?;
+                self.safepoint(span)?;
                 Ok(self.settle_value(value, span)?)
             }
             ExprKind::Scope { name, body } => self.eval_scope(env, name, body),
@@ -2226,7 +2198,7 @@ impl<'a> Interpreter<'a> {
                     // Once per iteration, at the back edge: this is the
                     // safepoint that bounds a `for` over an unbounded
                     // iterable, since Cove does not prove termination.
-                    self.charge_safepoint(span)?;
+                    self.safepoint(span)?;
                     env.push();
                     env.declare(binding.node.as_str().into(), Place::binding(item));
                     let result = self.eval_block(env, body);
@@ -2263,7 +2235,7 @@ impl<'a> Interpreter<'a> {
                 // Once per iteration, at the back edge: this is the
                 // safepoint that bounds a non-terminating `while`, which is
                 // otherwise unbounded by anything the type system proves.
-                self.charge_safepoint(span)?;
+                self.safepoint(span)?;
                 match self.eval_block(env, body) {
                     Ok(_) => {}
                     // A `while` can reach its end without breaking, so it is
@@ -2468,7 +2440,7 @@ impl<'a> Interpreter<'a> {
             }
             (Value(Repr::Task(task)), "await") => {
                 expect_no_arguments("await", &values, span)?;
-                self.charge_safepoint(span)?;
+                self.safepoint(span)?;
                 Ok(self.settle(task, span)?)
             }
             (Value(Repr::Task(task)), "cancel") => {
@@ -2482,7 +2454,7 @@ impl<'a> Interpreter<'a> {
                 Ok(Value(Repr::Unit))
             }
             (_, "await") => {
-                self.charge_safepoint(span)?;
+                self.safepoint(span)?;
                 Ok(self.settle_value(receiver.clone(), span)?)
             }
             (other, _) => Err(RuntimeError::new(format!(
@@ -4544,7 +4516,7 @@ impl Reentry for Callback<'_, '_> {
         result
     }
 
-    /// Everything [`Interpreter::charge_safepoint`] would stop on, asked from
+    /// Everything [`Interpreter::safepoint`] would stop on, asked from
     /// outside the interpreter.
     ///
     /// A host that is waiting is standing where a safepoint would be, so it
@@ -8302,16 +8274,6 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(
             stopped(
                 Limits {
-                    fuel: Some(100),
-                    ..Limits::default()
-                },
-                &looping
-            ),
-            RunOutcome::Fuel
-        );
-        assert_eq!(
-            stopped(
-                Limits {
                     deadline: Some(Duration::from_millis(1)),
                     ..Limits::default()
                 },
@@ -8646,10 +8608,10 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(run.output, "1 2\n");
     }
 
-    /// A task draws its fuel from the run's budget, so exhausting it inside a
-    /// task stops the run exactly as exhausting it in the entry would.
+    /// A task's limits are the run's, so a deadline that passes while a task
+    /// is running stops the run exactly as it would in the entry.
     #[test]
-    fn a_budget_exhausted_inside_a_task_stops_the_run() {
+    fn a_deadline_passed_inside_a_task_stops_the_run() {
         let source = r#"
 export fn main() -> Result<Unit, Error> {
   scope tasks {
@@ -8669,21 +8631,15 @@ export fn main() -> Result<Unit, Error> {
         let mut hosts = HostRegistry::new(Grants::new(["console"]));
         hosts.register(Box::new(Console::new(Buffer::default(), Buffer::default())));
         hosts.set_budget(Budget::new(Limits {
-            fuel: Some(10_000),
+            deadline: Some(Duration::from_millis(20)),
             ..Limits::default()
         }));
         let runtime = Runtime::new(program, sources, Arc::new(hosts));
         let error = Interpreter::new(&runtime)
             .run_entry("test", "main", Vec::new())
-            .expect_err("the fuel budget stops the run");
-        assert!(error.message.contains("fuel budget"), "{}", error.message);
-        assert!(
-            runtime
-                .hosts()
-                .with_budget(|budget| budget.fuel_spent())
-                .unwrap_or_default()
-                >= 10_000
-        );
+            .expect_err("the deadline stops the run");
+        assert!(error.message.contains("deadline"), "{}", error.message);
+        assert_eq!(error.outcome, RunOutcome::Deadline);
     }
 
     // -------------------------------------------------- leaving a scope
@@ -9387,12 +9343,12 @@ export fn main() -> Result<Unit, Error> {{
         assert_eq!(stop(in_a_task), expected);
     }
 
-    /// Fuel is the run's, and a callback is the run's work: the interpreter
-    /// that charges a safepoint inside a callback is the one that charged the
-    /// statement that made the host call, so a body handed to a host cannot
-    /// buy a program more of anything.
+    /// The deadline is the run's, and a callback is the run's work: the
+    /// interpreter that takes a safepoint inside a callback asks the budget of
+    /// the run that made the host call, so a body handed to a host cannot buy
+    /// a program more time than its own limit, whatever the host allows.
     #[test]
-    fn work_a_callback_does_is_charged_to_the_budget_that_made_the_host_call() {
+    fn work_a_callback_does_is_bounded_by_the_budget_that_made_the_host_call() {
         let source = r#"
 use clock.timeout
 
@@ -9410,21 +9366,22 @@ export fn main() -> Result<Unit, Error> {
         let (run, _, _) = run_traced_under(
             source,
             Limits {
-                fuel: Some(10_000),
+                deadline: Some(Duration::from_millis(20)),
                 ..Limits::default()
             },
         );
         assert_eq!(
             run.error().message,
-            "execution stopped: fuel budget of 10000 exhausted"
+            "execution stopped: wall-clock deadline of 20ms exceeded"
         );
     }
 
     /// A host may run its callback as many times as its operation means, and
-    /// every one of them is a round the run pays for: fuel is charged inside
-    /// the body exactly as it is charged outside, so a timer cannot outlive
-    /// the budget by hiding its work behind a host call. The output shows the
-    /// rounds that were affordable, and the stop names the limit.
+    /// every one of them is a round the run pays for: the host calls a round
+    /// makes are charged to the run exactly as they are outside it, so a timer
+    /// cannot outlive the budget by hiding its work behind a host call. The
+    /// output shows the rounds that were affordable, and the stop names the
+    /// limit.
     #[test]
     fn every_round_of_a_repeated_callback_is_charged_to_the_run() {
         let source = r#"
@@ -9442,14 +9399,14 @@ export fn main() -> Result<Unit, Error> {
         let (run, _, _) = run_traced_under(
             source,
             Limits {
-                fuel: Some(500),
+                max_host_calls: Some(5),
                 ..Limits::default()
             },
         );
         let rounds = run.output.lines().count();
         assert_eq!(
             run.error().message,
-            "execution stopped: fuel budget of 500 exhausted"
+            "execution stopped: host-call limit of 5 exceeded"
         );
         assert!(
             rounds > 1,

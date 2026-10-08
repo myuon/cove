@@ -306,7 +306,6 @@
           <button id="debug-run">Run &amp; record</button>
           <button id="compile">Compile only</button>
           <button id="stop" disabled>Stop</button>
-          <label>fuel <input id="fuel" type="number" min="0" step="1000000" value="200000000" /></label>
           <label>ms <input id="deadline" type="number" min="0" step="100" value="5000" /></label>
           <label>moments <input id="moments" type="number" min="0" max="16384" step="128" value="1024" /></label>
           <span id="status">starting…</span>
@@ -982,7 +981,7 @@
         status.textContent =
           answer.outcome === null
             ? "did not compile"
-            : `${answer.outcome} · ${answer.instructions ?? "?"} instructions · ${answer.fuel ?? "?"} fuel${kept}`;
+            : `${answer.outcome} · ${answer.instructions ?? "?"} instructions${kept}`;
         if (kind === "debug") record(answer, asked);
       }
 
@@ -1025,16 +1024,15 @@
           // `>>> 0` and not `| 0`: these fields are `u32` on the other side,
           // and `| 0` is signed, so anything past two billion would arrive as
           // a negative number.
-          fuel: Number(el("fuel").value) >>> 0,
           deadlineMs: Number(el("deadline").value) >>> 0,
           moments: Number(el("moments").value) >>> 0,
         });
       }
 
-      // Terminating is the only way to stop wasm from outside it. The fuel
-      // and deadline bounds are the mechanisms that stop a run from *inside*,
-      // and they are what a reader should reach for first: they report why
-      // the run stopped, and this does not.
+      // Terminating is the only way to stop wasm from outside it. The
+      // deadline is the mechanism that stops a run from *inside*, and it is
+      // what a reader should reach for first: it reports why the run stopped,
+      // and this does not.
       el("stop").onclick = () => {
         worker.terminate();
         worker = null;
@@ -1046,7 +1044,7 @@
         status.textContent = "stopped";
         el("diagnostics").textContent =
           "stopped from outside, so the run has nothing to say about why. " +
-          "Lower the fuel or the deadline to be told instead.";
+          "Lower the deadline to be told instead.";
         el("diagnostics").className = "stopped";
       };
       el("run").onclick = () => ask("run");

@@ -237,8 +237,8 @@ impl Clock {
             )));
         }
         // Before the loop rather than inside it: a real timer whose `sleep`
-        // refuses would otherwise run its body as fast as the fuel budget
-        // allowed, which is not the period it was asked for.
+        // refuses would otherwise run its body as fast as the run allowed,
+        // which is not the period it was asked for.
         #[cfg(target_arch = "wasm32")]
         if self.is_real() {
             return Ok(Value::err(Value::error(CANNOT_WAIT)));

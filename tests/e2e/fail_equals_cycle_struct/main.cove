@@ -16,7 +16,7 @@ fn looped() -> Node {
 }
 
 /// Comparing it is refused on the `==`, on every evaluator, rather than
-/// answered or run until fuel stops it.
+/// answered or run until something stops it.
 export fn main() -> Result<Unit, Error> {
   let node = looped()
   println("about to compare a node that contains itself")?

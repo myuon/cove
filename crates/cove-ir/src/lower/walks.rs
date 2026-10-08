@@ -210,7 +210,7 @@ impl Body<'_> {
     ///
     /// `cove_runtime::builtins::merge_sort` is the oracle and gives both
     /// halves of the reason. `by` is a Cove closure, so it can fail, be
-    /// cancelled or run out of fuel — and a builtin that called it would be
+    /// cancelled or run past its deadline — and a builtin that called it would be
     /// the re-entry `docs/LINEAR_VM.md` asks this backend not to make. And
     /// `by` can contradict itself: the schema says an ordering where `by(a,b)`
     /// and `by(b,a)` are both true gets *some* permutation and no promise

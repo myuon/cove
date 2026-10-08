@@ -1,6 +1,11 @@
 # ADR 0040: A bound outlives its backend
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0091](0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md), which removes the fuel-exhaustion and pending-fuel accounting
+  contracts — the fuel rows of the table of bounds and the hand-over of
+  pending fuel at a Host call and at a run's end — with the fuel allowance
+  itself. The other rows, and the safepoint stride they are stated in, stand
 - Date: 2026-09-03
 - Supersedes: [ADR 0024](0024-a-stop-is-a-bound-not-a-point.md)'s placement of
   the table of bounds — its first consequence, "`docs/VM_ARCHITECTURE.md`

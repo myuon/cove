@@ -494,8 +494,8 @@ Three properties are what the split is for.
   rather than only against this encoder's output. What it buys the loop is
   the right to read `a()` as a frame slot without a bound and `lo()` as a
   `LayoutId` without a lookup that could fail.
-- **One instruction is one instruction.** One encoded instruction is one unit
-  of fuel and one step of `SAFEPOINT_STRIDE`, which is what lets
+- **One instruction is one instruction.** One encoded instruction is one step
+  of `SAFEPOINT_STRIDE`, which is what lets
   [ADR 0040](adr/0040-a-bound-outlives-its-backend.md) state a stop's bounds
   in instructions and `responsiveness.rs` measure them.
 
@@ -804,7 +804,7 @@ path exactly as `Clear` is. Three things follow, and all three are the reason:
 
 - `builtins` stays a library over words with no reentry and no knowledge of
   frames. Nothing in it can call anything.
-- The closure's calls are frames like any other, so depth, fuel, cancellation
+- The closure's calls are frames like any other, so depth, cancellation, the deadline
   and the collector's roots all work without a second story for them.
 - The element binding gets the same `Clear` discipline a `for` gets, because
   it *is* the same lowering.

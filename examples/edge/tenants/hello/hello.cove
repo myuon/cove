@@ -2,8 +2,8 @@ use edge
 
 /// Greets whoever `?name=` names, and reaches nothing outside the run.
 ///
-/// `/spin` never answers on its own: it loops until the fuel the host grants
-/// each request runs out, which is what a tenant's bug looks like to every
+/// `/spin` never answers on its own: it loops until the deadline the host grants
+/// each request passes, which is what a tenant's bug looks like to every
 /// other tenant on the server — one failed request, and nothing else.
 export fn handle(request: edge.Request) -> edge.Response {
   if request.path == "/spin" {

@@ -2034,7 +2034,37 @@ fn both(name: &str, args: Vec<Value>) -> Both {
 /// the *first* segment's encoded answer as well — and moving it says the thing a
 /// differential case on one tier could not: that the encoded arms resolve an
 /// address the same way wherever the task's words begin.
+///
+/// Both runs are made on the stack the runtime gives every thread it evaluates
+/// Cove on ([`cove_runtime::on_cove_stack`]) rather than on the test thread's.
+/// A crossing between the tiers nests the dispatch loop on the Rust stack, and
+/// the cases that cross hundreds of times overflowed a test thread's default
+/// stack once Rust 1.99 grew the loop's frame.
 fn both_on(segment: Segment, name: &str, args: Vec<Value>) -> Both {
+    let args = Carried(args);
+    // `into_inner` and not a pattern: a closure that destructured the wrapper
+    // would capture the vector inside it, and the vector is not `Send`.
+    cove_runtime::on_cove_stack(move || both_here(segment, name, args.into_inner()))
+        .expect("a thread to run Cove on")
+}
+
+/// Arguments built on the test thread and handed whole to the thread that runs
+/// them.
+struct Carried(Vec<Value>);
+
+impl Carried {
+    fn into_inner(self) -> Vec<Value> {
+        self.0
+    }
+}
+
+// Safety: a `Value` is not `Send` because its `Rc`s may be shared with others
+// on the thread that built it. These were built by the caller for this call
+// alone and are moved, so no clone of any of them is left behind.
+unsafe impl Send for Carried {}
+
+/// [`both_on`]'s two runs, on whatever thread calls this.
+fn both_here(segment: Segment, name: &str, args: Vec<Value>) -> Both {
     let (sources, program) = checked();
     let lowered = Arc::new(
         cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
@@ -2152,10 +2182,9 @@ fn a_deep_native_recursion_returns_through_a_reallocation() {
     );
 }
 
-/// What one bounded native run of `callsCounts` answered, and what it spent.
+/// What one bounded native run of `callsCounts` answered, and which tiers it crossed.
 struct Bounded {
     error: cove_runtime::RuntimeError,
-    fuel_spent: u64,
     tiers: cove_runtime::Tiers,
 }
 
@@ -2199,91 +2228,13 @@ fn bounded_counts(deep: i64, limits: cove_runtime::Limits, cancelled: bool) -> B
         .expect_err("the bounded run stops");
     Bounded {
         error,
-        fuel_spent: hosts
-            .with_budget(|budget| budget.fuel_spent())
-            .expect("the run has a budget"),
         tiers: vm.tiers(),
     }
 }
 
-/// **A loop-free native recursion runs out of fuel within one stride of its
-/// limit.**
-///
-/// The descent of `counts` is direct native-to-native calls and nothing else, so
-/// every poll in it is a call's. Each call is a poll ([ADR 0078]), the work
-/// between two of them is one level of the recursion, and the overspend is
-/// therefore at most `SAFEPOINT_STRIDE` plus one level — ADR 0040's `S + T`. A
-/// call that did not poll at all would run the whole descent, a million units of
-/// work, before anything noticed; a bound of `S + T` is what says it polls.
-///
-/// [ADR 0078]: ../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
-#[test]
-fn a_loop_free_native_recursion_runs_out_of_fuel_within_one_stride() {
-    const DEEP: i64 = 100_000;
-    const LIMIT: u64 = 5_000;
-    // One level of `counts` is a compare, a branch, a subtraction and the call:
-    // well inside this, and the bound is what a level costs rather than a figure
-    // anybody chose.
-    const TURN: u64 = 64;
-    let run = bounded_counts(
-        DEEP,
-        cove_runtime::Limits {
-            fuel: Some(LIMIT),
-            ..cove_runtime::Limits::default()
-        },
-        false,
-    );
-    assert!(
-        run.error.message.contains("fuel"),
-        "the run says it ran out of fuel: {}",
-        run.error.message
-    );
-    assert!(
-        run.tiers.native_to_native_direct > 0,
-        "the stop was taken inside the compiled descent: {:?}",
-        run.tiers
-    );
-    // ADR 0079: the descent's polls were the inline path's compare, which sends
-    // a call to `open` only once the stride is reached.
-    assert!(
-        run.tiers.native_to_native_inline > 0,
-        "and the descent's frames were opened in emitted code: {:?}",
-        run.tiers
-    );
-    assert!(
-        run.fuel_spent >= LIMIT,
-        "nothing stops a run short of its limit: spent {}",
-        run.fuel_spent
-    );
-    assert!(
-        run.fuel_spent - LIMIT <= cove_runtime::SAFEPOINT_STRIDE + TURN,
-        "the overspend is at most one stride and one level: spent {} against {LIMIT}",
-        run.fuel_spent
-    );
-}
-
-/// **A cancelled loop-free native recursion stops within one stride.**
-///
-/// The first of ADR 0040's three steps, reached through a call's poll rather than
-/// a backedge's. The flag is set before the run begins, so the first safepoint
-/// the descent takes is the one that stops it, and that is at most a stride and a
-/// level into the run.
-#[test]
-fn a_cancelled_loop_free_native_recursion_stops_within_one_stride() {
-    const DEEP: i64 = 100_000;
-    const TURN: u64 = 64;
-    let run = bounded_counts(DEEP, cove_runtime::Limits::default(), true);
-    assert!(
-        run.error.message.contains("cancel"),
-        "the run says it was cancelled: {}",
-        run.error.message
-    );
-    assert!(
-        run.fuel_spent <= cove_runtime::SAFEPOINT_STRIDE + TURN,
-        "and it stopped at the first safepoint the descent took: spent {}",
-        run.fuel_spent
-    );
-}
+// The bounds on a loop-free native recursion (ADR 0078: a call is a poll) are
+// measured inside the crate, where the machine's work and a stop raised at a
+// chosen point of it can be read: `crate::vm::stops`.
 
 // --- ADR 0079: a direct call opens its frame in emitted code -----------------
 //

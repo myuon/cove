@@ -9,7 +9,7 @@
 //! two compiled frames standing, and is run on from a thread of its own.
 //!
 //! What has to hold is what holds for the encoded tier: the same answer, the
-//! same instruction count, the same fuel, the same allocation and the same
+//! same instruction count, the same allocation and the same
 //! collections as the run nothing interrupted **on the same tier**. (Not the
 //! encoded tier's counts: the two tiers count work differently, and ADR 0040's
 //! cross-backend bound is the contract between them. The answers agree.)
@@ -557,7 +557,6 @@ fn shown(answer: &Result<Value, RuntimeError>) -> String {
 struct Finished {
     answer: String,
     instructions: u64,
-    fuel: u64,
     allocated: u64,
     collections: u64,
 }
@@ -566,7 +565,6 @@ fn finished(vm: &OwnedVm, answer: &Result<Value, RuntimeError>) -> Finished {
     Finished {
         answer: shown(answer),
         instructions: vm.instructions(),
-        fuel: vm.meter().fuel_spent(),
         allocated: vm.allocated_words(),
         collections: vm.collections(),
     }
@@ -808,7 +806,7 @@ fn native_code_is_compiled_once_per_preparation() {
 
 /// The whole of the contract: twenty yields inside a compiled loop, each run on
 /// from a thread of its own, and the run nothing interrupted's answer, count,
-/// fuel, allocation and collections.
+/// allocation and collections.
 #[test]
 fn a_run_yielded_inside_compiled_code_answers_as_the_uninterrupted_run_does() {
     let world = world();
@@ -923,28 +921,6 @@ fn a_request_below_an_encoded_callee_waits_for_it_to_return() {
     assert_eq!(run.native_yields, 4, "{run:?}");
 }
 
-/// A fuel limit stops a run yielded inside compiled code where it stops the
-/// uninterrupted one, at the same charge.
-#[test]
-fn a_fuel_limit_stops_a_yielded_compiled_run_where_it_stops_the_uninterrupted_one() {
-    let world = world();
-    let fuel = || {
-        Budget::new(Limits {
-            fuel: Some(150_000),
-            ..Limits::default()
-        })
-    };
-    let expected = world.uninterrupted("main", fuel());
-    assert!(expected.answer.contains("fuel"), "{expected:?}");
-    let run = drive(
-        world
-            .vm()
-            .invoke_within_parkable(fuel(), "app", "main", Vec::new()),
-    );
-    assert!(run.native_yields > 0, "{run:?}");
-    assert_eq!(run.finished, expected);
-}
-
 /// Cancelled while yielded: the budget's error, and the machine back for its
 /// next run, which answers.
 #[test]
@@ -1031,20 +1007,21 @@ fn a_run_parks_and_yields_inside_compiled_code_in_turn() {
 }
 
 /// Many isolates over one compiled program at once, each sliced by its own
-/// monitor and some under a fuel limit: the code is shared and nothing else
-/// is, so each answers what it answers alone.
+/// monitor and some under a host-call limit of their own: the code is shared
+/// and nothing else is, so each answers what it answers alone — and a limit
+/// that were shared would have stopped the second of them to call.
 #[test]
 fn isolates_share_compiled_code_and_keep_their_own_state_and_budgets() {
     let world = Arc::new(world());
     let limited = || {
         Budget::new(Limits {
-            fuel: Some(1_000_000),
+            max_host_calls: Some(1),
             ..Limits::default()
         })
     };
     let alone = world.uninterrupted("long", unlimited());
     let alone_limited = world.uninterrupted("long", limited());
-    assert!(alone_limited.answer.contains("fuel"));
+    assert_eq!(alone_limited, alone, "one call is all `long` makes");
     let runs: Vec<_> = (0..8)
         .map(|n| {
             let world = Arc::clone(&world);
@@ -1211,7 +1188,7 @@ const STORMED: [&str; 11] = [
 /// **#604, as a property.** However the requests fall — at random, down to
 /// nearly every safepoint — a run yielded and resumed inside compiled code
 /// answers what the uninterrupted run answers, in the same count, for the
-/// same fuel, with the same allocation and collections, on every shape. Before
+/// with the same allocation and collections, on every shape. Before
 /// the fix a run resumed at an allocation read its length through a stale
 /// frame pointer and `copying` failed with "`runCopy` writes … to 0 of a
 /// destination of 0".
@@ -1302,10 +1279,11 @@ fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
                 // the most the dispatch loop runs between two questions. In
                 // requests that is more than other shapes go on through,
                 // because a host call is one unit of work and many times one
-                // instruction's time.
+                // instruction's time. On the encoded tier and with no bulk
+                // operation in it, its work is its instruction count.
                 if most == 0 {
                     assert!(
-                        run.yields as u64 * 2 * SAFEPOINT_STRIDE >= run.finished.fuel,
+                        run.yields as u64 * 2 * SAFEPOINT_STRIDE >= run.finished.instructions,
                         "{name}, storm {seed}: fewer than one yield in two strides: {run:?}"
                     );
                 }
@@ -1326,7 +1304,7 @@ const SAFEPOINT_STRIDE: u64 = cove_runtime::SAFEPOINT_STRIDE;
 /// **A host call from compiled code parks with the chain standing** (ADR
 /// 0087): `waits` is compiled, parks at each `wait`, is resumed on another
 /// thread after the call with its answer, and answers as the run that called
-/// the host the blocking way does, in the same count for the same fuel.
+/// the host the blocking way does, in the same count.
 #[test]
 fn a_host_call_in_compiled_code_parks_and_resumes_after_it() {
     let world = world();
@@ -1406,9 +1384,9 @@ fn a_loop_of_host_calls_each_asking_to_yield_yields_on_both_tiers() {
     assert_eq!(run.finished, expected);
     assert_eq!(run.native_yields, 0);
     assert!(
-        run.yields as u64 * 2 * SAFEPOINT_STRIDE >= run.finished.fuel,
-        "encoded: {} yields for {} work: {run:?}",
+        run.yields as u64 * 2 * SAFEPOINT_STRIDE >= run.finished.instructions,
+        "encoded: {} yields for {} instructions: {run:?}",
         run.yields,
-        run.finished.fuel
+        run.finished.instructions
     );
 }

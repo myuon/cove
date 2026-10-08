@@ -153,7 +153,6 @@ pub(crate) fn cmd_debug(args: &[String]) -> Result<(), CliError> {
         allow_exec: flags.allow_exec.clone(),
     });
     let limits = Limits {
-        fuel: flags.fuel.or(run.fuel),
         deadline: flags.deadline.or(run.deadline),
         max_host_calls: flags.max_host_calls.or(run.max_host_calls),
         max_call_depth: None,
@@ -208,7 +207,6 @@ pub(crate) fn cmd_debug(args: &[String]) -> Result<(), CliError> {
 /// run nobody is interrupting. What is left is the two budgets and the two
 /// pieces of authority a `cove.toml` cannot express.
 struct Flags {
-    fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
     max_tasks: Option<u64>,
@@ -222,7 +220,6 @@ struct Flags {
 /// argument, anything unrecognised a program argument too.
 fn parse_debug_flags(args: &[String]) -> Result<Flags, CliError> {
     let mut flags = Flags {
-        fuel: None,
         deadline: None,
         max_host_calls: None,
         max_tasks: None,
@@ -240,14 +237,7 @@ fn parse_debug_flags(args: &[String]) -> Result<Flags, CliError> {
         }
         match args[i].as_str() {
             "--" => passthrough = true,
-            "--fuel" => {
-                let value = flag_value(args, &mut i, "--fuel")?;
-                flags.fuel = Some(value.parse().map_err(|_| {
-                    CliError::Message(format!(
-                        "`--fuel` must be a non-negative integer, found `{value}`"
-                    ))
-                })?);
-            }
+            "--fuel" => return Err(crate::removed_fuel_flag()),
             "--deadline" => {
                 let value = flag_value(args, &mut i, "--deadline")?;
                 flags.deadline = Some(
@@ -1517,8 +1507,6 @@ mod tests {
     #[test]
     fn a_debug_session_takes_the_run_flags_that_mean_something_to_a_stopped_run() {
         let flags = parsed(&[
-            "--fuel",
-            "500",
             "report",
             "--deadline",
             "5s",
@@ -1531,7 +1519,6 @@ mod tests {
             "--",
             "--fuel",
         ]);
-        assert_eq!(flags.fuel, Some(500));
         assert_eq!(flags.deadline, Some(Duration::from_secs(5)));
         assert_eq!(flags.max_host_calls, Some(3));
         assert_eq!(flags.max_tasks, Some(2));
@@ -1541,6 +1528,24 @@ mod tests {
             vec!["report".to_string(), "--fuel".to_string()],
             "after `--`, a flag is an argument"
         );
+    }
+
+    /// **`--fuel` is refused with ADR 0091's migration diagnostic** rather than
+    /// taken for a program argument, which is what an unrecognised flag would
+    /// otherwise become.
+    #[test]
+    fn fuel_is_refused_with_a_migration_diagnostic() {
+        let args: Vec<String> = ["--fuel", "500", "report"]
+            .iter()
+            .map(|a| (*a).to_string())
+            .collect();
+        match parse_debug_flags(&args) {
+            Err(CliError::Message(message)) => {
+                assert!(message.contains("removed by ADR 0091"), "{message}");
+            }
+            Err(_) => panic!("refused with a message"),
+            Ok(_) => panic!("`--fuel` must be refused"),
+        }
     }
 
     /// **`--backend` is refused rather than ignored.**

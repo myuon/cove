@@ -40,7 +40,7 @@
 //! - **No real clock host.** `clock` is [`VirtualTime`], which is what makes
 //!   `clock.sleep` finish at once and a program that measures itself
 //!   deterministic. The *run's* clock is a different thing and is real: see
-//!   [`RUN_LIMITS`].
+//!   [`RUN_DEADLINE_MS`].
 //! - **No tasks.** `spawn` is refused, with a span, in the runtime. A Cove
 //!   task is a thread (ADR 0008) and one Web Worker is one thread; the
 //!   alternative was to run a task's body inline, which would make this
@@ -97,20 +97,21 @@ const PATH: &str = "playground/main.cove";
 /// capability rather than being told the module does not exist.
 pub const GRANTS: [&str; 5] = ["console", "clock", "env", "files", "documents"];
 
-/// What bounds a run that the page did not bound itself.
+/// The deadline, in milliseconds, that bounds a run the page did not bound
+/// itself.
 ///
-/// A page can pass its own fuel and deadline; this is what it gets when it
-/// passes neither. Both are set, and deliberately: a tab that is running a
-/// Cove program is a tab that is not repainting, and the two bounds fail
-/// differently — fuel is deterministic and portable within one backend, and
-/// the deadline is what catches a program that spends its time inside one
-/// long host call rather than in a loop.
+/// A page can pass its own deadline; this is what it gets when it passes
+/// none. There is always one, and deliberately: a tab that is running a Cove
+/// program is a tab that is not repainting, and the deadline catches a loop
+/// and a program that spends its time inside one long host call alike. The
+/// fuel allowance that used to sit beside it went with
+/// [ADR 0091](../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md).
 ///
 /// The deadline is enforced against the clock the embedder imports, which is
 /// `performance.now()` in a page and under node. It is a real bound and not a
 /// decoration: `cove_runtime`'s `wallclock` module says why the import is
 /// required rather than defaulted.
-pub const RUN_LIMITS: (u64, u64) = (200_000_000, 5_000);
+pub const RUN_DEADLINE_MS: u64 = 5_000;
 
 /// Bytes a Cove program printed, readable after the run.
 ///
@@ -410,7 +411,7 @@ pub fn lex_ir_json(text: &str) -> String {
 /// ```json
 /// {"ok":bool,"diagnostics":[...],"ir":string|null,"outcome":string|null,
 ///  "stdout":string,"stderr":string,"answer":value|null,
-///  "instructions":int|null,"fuel":int|null}
+///  "instructions":int|null}
 /// ```
 ///
 /// `ir` is [`compile_json`]'s, repeated here so that one call fills every
@@ -428,11 +429,11 @@ pub fn lex_ir_json(text: &str) -> String {
 /// `diagnostics` [`compile_json`] would have given: a page can call this one
 /// function and get both halves.
 ///
-/// `fuel` and `deadline_ms` are `None` for "use [`RUN_LIMITS`]", not for "no
+/// `deadline_ms` is `None` for "use [`RUN_DEADLINE_MS`]", not for "no
 /// bound". A playground that could be asked for an unbounded run would be a
 /// page with a hang button.
-pub fn run_json(source: &str, fuel: Option<u64>, deadline_ms: Option<u64>) -> String {
-    execute(source, fuel, deadline_ms, None)
+pub fn run_json(source: &str, deadline_ms: Option<u64>) -> String {
+    execute(source, deadline_ms, None)
 }
 
 /// Runs `source` as [`run_json`] does, watched by a [`record::Recorder`],
@@ -476,13 +477,8 @@ pub fn run_json(source: &str, fuel: Option<u64>, deadline_ms: Option<u64>) -> St
 /// from growing without limit is [`record::BYTES`], and a bound is a better
 /// answer to "this could be huge" than an ABI that hands over a huge thing
 /// slowly.
-pub fn debug_json(
-    source: &str,
-    fuel: Option<u64>,
-    deadline_ms: Option<u64>,
-    moments: usize,
-) -> String {
-    execute(source, fuel, deadline_ms, Some(moments))
+pub fn debug_json(source: &str, deadline_ms: Option<u64>, moments: usize) -> String {
+    execute(source, deadline_ms, Some(moments))
 }
 
 /// Checks, lowers and runs `source`, recording it when `moments` is `Some`.
@@ -491,12 +487,7 @@ pub fn debug_json(
 /// same run: the same hosts, the same grants, the same limits, the same
 /// classification of how it ended. A second copy of this setup would be a
 /// second playground that agreed with the first until it did not.
-fn execute(
-    source: &str,
-    fuel: Option<u64>,
-    deadline_ms: Option<u64>,
-    moments: Option<usize>,
-) -> String {
+fn execute(source: &str, deadline_ms: Option<u64>, moments: Option<usize>) -> String {
     let recording = moments.is_some();
     let front = front(source);
     let Some((checked, program)) = front.lowered else {
@@ -512,7 +503,6 @@ fn execute(
             ("stderr", json::string("")),
             ("answer", "null".to_string()),
             ("instructions", "null".to_string()),
-            ("fuel", "null".to_string()),
         ];
         if recording {
             fields.push(("debug", "null".to_string()));
@@ -541,8 +531,9 @@ fn execute(
     hosts.set_grant_source(cove_runtime::GrantSource::Sealed);
 
     let limits = Limits {
-        fuel: Some(fuel.unwrap_or(RUN_LIMITS.0)),
-        deadline: Some(Duration::from_millis(deadline_ms.unwrap_or(RUN_LIMITS.1))),
+        deadline: Some(Duration::from_millis(
+            deadline_ms.unwrap_or(RUN_DEADLINE_MS),
+        )),
         max_host_calls: None,
         max_call_depth: None,
         // Refused in the runtime and refused again here, because the two say
@@ -558,17 +549,14 @@ fn execute(
 
     let program_disassembly = disassembly(&program);
     let recorder = moments.map(|moments| record::Recorder::new(Arc::clone(&sources), moments));
-    let (answer, instructions, fuel_spent) = {
+    let (answer, instructions) = {
         let mut vm = match &recorder {
             Some(recorder) => Vm::debugged(&runtime, runtime.hosts(), &program, recorder),
             None => Vm::new(&runtime, runtime.hosts(), &program),
         };
         let answer = vm.run_entry(MODULE, ENTRY, Vec::<Rc<str>>::new());
         let instructions = vm.instructions();
-        let spent = runtime
-            .hosts()
-            .with_budget(|budget| budget.meter().fuel_spent());
-        (answer, instructions, spent)
+        (answer, instructions)
     };
 
     let outcome = match &answer {
@@ -598,10 +586,6 @@ fn execute(
             ),
         ),
         ("instructions", instructions.to_string()),
-        (
-            "fuel",
-            json::or_null(fuel_spent.map(|spent| spent.to_string())),
-        ),
     ];
     if let Some(recorder) = &recorder {
         fields.push(("debug", recorder.json()));
@@ -647,7 +631,7 @@ mod tests {
     /// rendered diagnostic like any other rather than a blank answer.
     #[test]
     fn a_source_without_the_entry_is_refused_by_name() {
-        let json = run_json("export fn other() -> Int { 1 }", None, None);
+        let json = run_json("export fn other() -> Int { 1 }", None);
         assert!(says(&json, r#""ok":false"#), "{json}");
         assert!(
             says(&json, "this package does not declare `playground.main`"),
@@ -657,7 +641,7 @@ mod tests {
 
     #[test]
     fn a_run_answers_what_the_entry_produced() {
-        let json = run_json("export fn main() -> Int { 21 * 2 }", None, None);
+        let json = run_json("export fn main() -> Int { 21 * 2 }", None);
         assert!(says(&json, r#""outcome":"success""#), "{json}");
         assert!(
             says(&json, r#""answer":{"type":"int","value":42}"#),
@@ -677,7 +661,6 @@ export fn main() -> Result<Unit, Error> {
   Ok(())
 }"#,
             None,
-            None,
         );
         assert!(says(&json, r#""outcome":"success""#), "{json}");
         assert!(says(&json, r#""stdout":"hello from the tab\n""#), "{json}");
@@ -685,15 +668,15 @@ export fn main() -> Result<Unit, Error> {
 
     /// The bound a page can put on a loop, doing what it says.
     #[test]
-    fn a_run_past_its_fuel_is_stopped_and_classified() {
+    fn a_run_past_its_deadline_is_stopped_and_classified() {
         let json = run_json(
             "export fn main() -> Int {\n  var n = 0\n  while true { n = n + 1 }\n  n\n}",
-            Some(10_000),
-            None,
+            Some(20),
         );
-        assert!(says(&json, r#""outcome":"fuel""#), "{json}");
+        assert!(says(&json, r#""outcome":"deadline""#), "{json}");
         assert!(says(&json, r#""ok":false"#), "{json}");
-        assert!(says(&json, "fuel budget of 10000 exhausted"), "{json}");
+        assert!(says(&json, "deadline of 20ms exceeded"), "{json}");
+        assert!(!json.contains("fuel"), "ADR 0091: no fuel field\n{json}");
     }
 
     /// A capability the playground does not grant is refused at the boundary,
@@ -706,7 +689,6 @@ export fn main() -> Result<Unit, Error> {
     fn an_ungranted_capability_is_refused_at_the_boundary() {
         let json = run_json(
             "use http\n\nexport fn main() -> Result<http.Response, Error> {\n  http.fetch(\"http://example.com\")\n}",
-            None,
             None,
         );
         assert!(says(&json, r#""outcome":"host_boundary""#), "{json}");
@@ -728,7 +710,6 @@ export fn main() -> Result<Unit, Error> {
     t.await()
   }
 }"#,
-            None,
             None,
         );
         assert!(says(&json, r#""outcome":"concurrency""#), "{json}");
@@ -779,7 +760,7 @@ export fn main() -> Int {
     /// the order it ran them.
     #[test]
     fn a_recording_holds_the_moments_the_program_ran_in_order() {
-        let json = debug_json(WALKED, None, None, 0);
+        let json = debug_json(WALKED, None, 0);
         assert!(says(&json, r#""outcome":"success""#), "{json}");
 
         // `why` appears once per moment and nowhere else in the answer.
@@ -854,7 +835,7 @@ export fn main() -> Int {
     /// both moments would mean the recording was not per-moment at all.
     #[test]
     fn a_local_holds_what_it_held_at_that_moment() {
-        let json = debug_json(WALKED, None, None, 0);
+        let json = debug_json(WALKED, None, 0);
         let moments: Vec<&str> = json.split(r#"{"at":"#).collect();
         let inside = moments
             .iter()
@@ -875,7 +856,6 @@ export fn main() -> Int {
     fn a_local_that_names_an_object_carries_it() {
         let json = debug_json(
             "export fn main() -> Int {\n  let greeting = \"hello\"\n  greeting.length()\n}",
-            None,
             None,
             0,
         );
@@ -901,7 +881,7 @@ export fn main() -> Int {
     #[test]
     fn a_moment_carries_the_span_the_page_marks() {
         let source = "// an \u{2014} dash\nexport fn main() -> Int {\n  21 * 2\n}\n";
-        let json = debug_json(source, None, None, 0);
+        let json = debug_json(source, None, 0);
         let units: Vec<u16> = source.encode_utf16().collect();
         let read = |key| -> Vec<usize> {
             every(&json, key)
@@ -939,7 +919,7 @@ export fn main() -> Int {
     fn a_recording_past_its_bound_says_so_and_the_run_goes_on() {
         let counting =
             "export fn main() -> Int {\n  var n = 0\n  while n < 100 {\n    n = n + 1\n  }\n  n\n}";
-        let json = debug_json(counting, None, None, 4);
+        let json = debug_json(counting, None, 4);
         assert!(says(&json, r#""truncated":"moments""#), "{json}");
         assert!(says(&json, r#""kept":4"#), "{json}");
         assert!(says(&json, r#""limit":4"#), "{json}");
@@ -954,7 +934,7 @@ export fn main() -> Int {
     /// A caller cannot ask for an unbounded recording.
     #[test]
     fn a_recording_is_bounded_however_much_is_asked_for() {
-        let json = debug_json("export fn main() -> Int { 1 }", None, None, usize::MAX);
+        let json = debug_json("export fn main() -> Int { 1 }", None, usize::MAX);
         assert!(
             says(&json, &format!(r#""limit":{}"#, record::MOST_MOMENTS)),
             "{json}"
@@ -971,8 +951,8 @@ export fn main() -> Result<Int, Error> {
   println("watched")?
   Ok(21 * 2)
 }"#;
-        let plain = run_json(source, None, None);
-        let watched = debug_json(source, None, None, 0);
+        let plain = run_json(source, None);
+        let watched = debug_json(source, None, 0);
         for fragment in [
             r#""outcome":"success""#,
             r#""stdout":"watched\n""#,
@@ -991,7 +971,7 @@ export fn main() -> Result<Int, Error> {
     /// one that reads as a program which did nothing.
     #[test]
     fn a_program_that_does_not_compile_has_no_recording() {
-        let json = debug_json("export fn main() -> Int { 1 +", None, None, 0);
+        let json = debug_json("export fn main() -> Int { 1 +", None, 0);
         assert!(says(&json, r#""debug":null"#), "{json}");
     }
 
@@ -999,7 +979,7 @@ export fn main() -> Result<Int, Error> {
     /// `web/check.mjs` and CI depend on it.
     #[test]
     fn a_plain_run_carries_no_recording() {
-        let json = run_json("export fn main() -> Int { 1 }", None, None);
+        let json = run_json("export fn main() -> Int { 1 }", None);
         assert!(!json.contains("\"debug\""), "{json}");
         let json = compile_json("export fn main() -> Int { 1 }");
         assert!(!json.contains("\"debug\""), "{json}");
@@ -1013,7 +993,7 @@ export fn main() -> Result<Int, Error> {
             "export fn main() -> Int { 1 +",
             "",
         ] {
-            for json in [compile_json(source), run_json(source, None, None)] {
+            for json in [compile_json(source), run_json(source, None)] {
                 assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
                 assert_eq!(json.matches("\"ok\":").count(), 1, "{json}");
             }

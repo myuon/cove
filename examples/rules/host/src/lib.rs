@@ -1062,7 +1062,7 @@ impl Session<'_> {
     /// rule package is not the application's code: it can loop, and an
     /// application would rather be told which request went wrong than stop
     /// serving. `invoke_within` installs a `Budget` built from `limits` as the
-    /// invocation is entered, so the fuel, the deadline and the host-call
+    /// invocation is entered, so the deadline and the host-call
     /// limit are this request's -- and the next request gets its own, on the
     /// same `Vm`, with none of the 168 allocations that rebuilding a backend
     /// per request costs.
@@ -1108,7 +1108,7 @@ impl Session<'_> {
     /// The counterpart of [`Session::evaluate_within`] for the way in that
     /// makes host calls, and the reason it is here as well as that one: ADR
     /// 0024 says `max_host_calls` is the control that bounds *effects*
-    /// exactly, where fuel bounds work only to within a straight line. An
+    /// exactly, where a deadline bounds time and not what is done in it. An
     /// application that wants to cap what one request may do to the outside
     /// world sets it, and until issue #152 it could only set it for the life
     /// of the session.

@@ -12,7 +12,7 @@
 // 127.0.0.1 and localhost, under 500 ms), and /_stats, which cove-edge-load
 // resets before a run and prints after it.
 //
-// What is not here, on purpose: no isolate per request, no fuel, no
+// What is not here, on purpose: no isolate per request, no
 // host-call budget, no capability check, no record/replay, no preemption
 // other than the Go runtime's own. Those are the differences the comparison
 // is about; see the conditions table in ../README.md.

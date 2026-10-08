@@ -115,32 +115,25 @@ pub unsafe extern "C" fn cove_compile(source: *const u8, len: usize) -> *mut u8 
 /// Checks, lowers and runs `source`, and answers what it printed, what it
 /// produced and how it ended. See [`crate::run_json`].
 ///
-/// `fuel` and `deadline_ms` are the two bounds a page can put on a run; zero
-/// means "whatever [`crate::RUN_LIMITS`] says", which is a bound and not the
-/// absence of one. A deadline is enforced against the imported clock, so it
-/// does what it says.
+/// `deadline_ms` is the bound a page can put on a run; zero means "whatever
+/// [`crate::RUN_DEADLINE_MS`] says", which is a bound and not the absence of
+/// one. A deadline is enforced against the imported clock, so it does what it
+/// says. There used to be a `fuel` parameter before it, which went with
+/// [ADR 0091](../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md).
 ///
-/// They are `u32` and not `u64` although [`cove_runtime::Limits`] counts fuel
-/// in `u64`, because a `u64` parameter is a wasm `i64`, and a wasm `i64`
-/// reaches JavaScript as a `BigInt`: every caller would have to write `10n`
-/// where it means ten. Four billion units of fuel is far past what a tab
-/// should spend before a page decides it has hung, and forty-nine days is
-/// past what a deadline in a browser can mean, so nothing is lost that the
-/// awkwardness would buy back.
+/// It is a `u32` and not a `u64`, because a `u64` parameter is a wasm `i64`,
+/// and a wasm `i64` reaches JavaScript as a `BigInt`: every caller would have
+/// to write `10n` where it means ten. Forty-nine days is past what a deadline
+/// in a browser can mean, so nothing is lost that the awkwardness would buy
+/// back.
 ///
 /// # Safety
 ///
 /// As [`cove_compile`].
 #[no_mangle]
-pub unsafe extern "C" fn cove_run(
-    source: *const u8,
-    len: usize,
-    fuel: u32,
-    deadline_ms: u32,
-) -> *mut u8 {
+pub unsafe extern "C" fn cove_run(source: *const u8, len: usize, deadline_ms: u32) -> *mut u8 {
     answer(run_json(
         &read(source, len),
-        (fuel != 0).then_some(u64::from(fuel)),
         (deadline_ms != 0).then_some(u64::from(deadline_ms)),
     ))
 }
@@ -148,7 +141,7 @@ pub unsafe extern "C" fn cove_run(
 /// Checks, lowers and runs `source` under a recording debugger, and answers
 /// what [`cove_run`] answers plus the recording. See [`crate::debug_json`].
 ///
-/// `fuel` and `deadline_ms` are [`cove_run`]'s, meaning the same things. A
+/// `deadline_ms` is [`cove_run`]'s, meaning the same thing. A
 /// debugged run is slower than a run — the machine asks the recorder before
 /// every instruction — so a program that finished inside the default
 /// deadline may not finish inside it here. That is reported as a `deadline`
@@ -167,13 +160,11 @@ pub unsafe extern "C" fn cove_run(
 pub unsafe extern "C" fn cove_debug(
     source: *const u8,
     len: usize,
-    fuel: u32,
     deadline_ms: u32,
     moments: u32,
 ) -> *mut u8 {
     answer(debug_json(
         &read(source, len),
-        (fuel != 0).then_some(u64::from(fuel)),
         (deadline_ms != 0).then_some(u64::from(deadline_ms)),
         moments as usize,
     ))

@@ -56,8 +56,8 @@ use std.stringbuilder
 /// a vector inside that struct, and the value has no end. Comparing it is
 /// **refused**, on the line of the `==` — not answered `false`, which would be a
 /// claim about two values nobody finished comparing, and not left to run until
-/// fuel or a deadline stops it, which would make a limit part of what `==` means
-/// (issue #493).
+/// a deadline or cancellation stops it, which would make a limit part of what
+/// `==` means (issue #493).
 ///
 /// What is refused is a cycle **on the path being walked**, and nothing else.
 /// The walk keeps the pairs of vectors it is inside — one from each side,

@@ -51,7 +51,7 @@ export fn length(text: String) -> Int {
 /// frame slots the temporaries land in are renumbered; the function's total
 /// is 31,232,910 instructions either way. Whole programs say the same: covefmt
 /// is 831,921,093 instructions, 4,098,232 allocations and 51,338,466 allocated
-/// words on both sides, and cq 264,229,256 and 272,100,121 fuel on both. The
+/// words on both sides, and cq 264,229,256 and 272,100,121 work units on both. The
 /// inliner expands this into [`length`] and [`length`] into its callers, so
 /// the shared body costs a call at no site at all. `matchesAt` was refused in
 /// the [`startsWith`] round on the same rule, for +2,178 instructions at
