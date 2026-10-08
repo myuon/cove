@@ -1,7 +1,7 @@
 # edge against Go: what the isolates cost
 
 [`examples/edge`](../README.md) serves each request in a fresh Cove isolate on
-four worker threads, under fuel, a deadline and a host-call budget, with
+four worker threads, under a deadline and a host-call budget, with
 capabilities checked at deploy and at the boundary. This directory asks what
 that costs against **the same service written the ordinary way in Go** —
 `net/http`, a goroutine per connection, `time.Timer` for the simulated
@@ -108,7 +108,7 @@ builds it. `go/edge-go` is ignored by git.
 | scheduling | a run queue per worker, work stealing, a 2 ms slice at VM safepoints (ADR 0084) | Go's scheduler: per-P queues, work stealing, async preemption at 10 ms |
 | keep-alive | idle 5 s, 1,000 requests per connection | `IdleTimeout` 5 s, no per-connection cap |
 | **isolation** | a fresh isolate (`OwnedVm`) per request, with its own heap. A tenant cannot see another's memory | none: one address space, shared heap |
-| **budgets** | fuel per request (`crunch` 30 M, `hello` 2 M), a host-call limit, a wall-clock deadline, all enforced by the runtime | none. `/hello/spin` is not ported, because an ordinary Go handler has nothing that stops a loop |
+| **budgets** | a wall-clock deadline per request (`crunch` 5 s, `hello` 200 ms), a host-call limit, all enforced by the runtime | none. `/hello/spin` is not ported, because an ordinary Go handler has nothing that stops a loop |
 | **capabilities** | checked at deploy from the call graph (`greedy` is refused), and at the boundary on every host call | none |
 | **record/replay, timeline** | host calls are recordable, and `--timeline` is available (off in these runs) | none |
 | **yield** | a long run gives its worker up at a safepoint when others wait | the Go runtime preempts goroutines; there is nothing to opt into |
@@ -563,7 +563,7 @@ What it says:
   the instruction it names.
 - So the first pass's "the remaining 1.3× is the template compiler's own
   code quality" is right in size and in kind (*observed* now), and has
-  parts: polling and fuel 3–4%, checked arithmetic 3–5%, the stored
+  parts: polling and its work counter 3–4%, checked arithmetic 3–5%, the stored
   comparison 5–8%, memory operands for every value the rest.
 
 **Implemented: a 32-bit division path** (branch `perf/native-div32`). When

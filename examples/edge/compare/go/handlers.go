@@ -76,7 +76,7 @@ func isOddPrime(candidate int64) bool {
 // ---------------------------------------------------------------- hello
 
 // hello is tenants/hello/hello.cove's handle, without `/spin`: an ordinary
-// Go handler has no fuel to stop a loop with, so the endpoint whose only
+// Go handler has nothing to stop a loop with, so the endpoint whose only
 // purpose is to show a budget stopping one is not ported.
 func hello(method, path string, query map[string]string) string {
 	name, ok := query["name"]

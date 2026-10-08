@@ -6,7 +6,7 @@ use edge
 /// It reaches nothing outside the run and never parks: what it costs is
 /// worker time alone — the CPU-heavy tenant of the `cpu-io` load mix,
 /// beside `aggregate`'s waits. `n` is capped so that no request can ask for
-/// more than its fuel.
+/// more than its deadline allows.
 export fn handle(request: edge.Request) -> edge.Response {
   let asked = Int.parse(request.query.get("n").unwrapOr("20000")).unwrapOr(-1)
   if asked < 2 || asked > 200000 {

@@ -25,7 +25,7 @@ fn looped() -> dyn Shape {
 }
 
 /// Two distinct groups that each contain themselves. Before issue #493 the
-/// Cove walk went round this for as long as fuel lasted, in constant memory.
+/// Cove walk went round this until something stopped it, in constant memory.
 export fn main() -> Result<Unit, Error> {
   let left = looped()
   let right = looped()

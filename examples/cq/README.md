@@ -196,7 +196,7 @@ os     macOS 26.5.2 (x86_64)
 rustc  1.93.1 (01f6ddf75 2026-02-11)
 ```
 
-Wall time, fuel, and heap are what `cove run --stats` reports; resident memory
+Wall time, instructions, and heap are what `cove run --stats` reports; resident memory
 is `/usr/bin/time -l`'s.
 
 Generate the input first — it is not checked in, because seventeen megabytes is
@@ -273,7 +273,7 @@ Host I/O is not the cost: reading 17 MB a line at a time takes 0.59 s, which is
 calls. The cost is the interpreted per-character loop, and it is 99% of the run.
 
 Checking JSON's number grammar rather than delegating it to `Float.parse` is
-part of that 99% and costs about 2.5% of the run's fuel — which is what
+part of that 99% and costs about 2.5% of the run's work — which is what
 refusing `01` and `1e999` is worth paying, and cheap next to what the scanner
 was already spending.
 
@@ -510,8 +510,9 @@ The floor, measured directly — 1.95 million characters through
 
 Two things follow. Reaching a character costs about 1.4 µs because every access
 allocates an `Option` and every character is a heap `Rc<str>` — the plain
-arithmetic loop `total += i % 7` runs at 32 M fuel/s and this runs at 7.5 M
-fuel/s, so `fuel_spent` is not tracking what is expensive. And **calling a
+arithmetic loop `total += i % 7` runs at 32 M work units/s and this runs at 7.5 M
+units/s, so the work count `cove run --stats` once reported as `fuel_spent`
+was not tracking what is expensive. And **calling a
 method on a struct receiver doubles the cost of the loop it is in**, because
 `self` is passed by value and a struct copy is an allocation. `cq.json`'s
 scanner is written the natural way, with `peek()` and `take()` on a `Scanner`,

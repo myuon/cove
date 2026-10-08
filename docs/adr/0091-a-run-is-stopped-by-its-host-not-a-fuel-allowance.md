@@ -19,7 +19,7 @@
   cancellation, deadlines and yielding remain independent of fuel
 - Decides: remove the fuel allowance and its public contract; retain the
   mechanisms needed to interrupt and schedule execution
-- Implementation status: not implemented by this ADR
+- Implementation status: implemented on branch `feat/remove-fuel` (the pull request that removes fuel)
 
 ## Context
 

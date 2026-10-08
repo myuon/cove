@@ -226,7 +226,7 @@ grants it nothing.
 ### What bounds one request
 
 ```rust
-session.evaluate_within(Limits { fuel: Some(1_200), ..Limits::default() },
+session.evaluate_within(Limits { deadline: Some(Duration::from_millis(50)), ..Limits::default() },
                         "rules.embedded", "evaluate", pr)
 ```
 
@@ -236,8 +236,8 @@ the ordinary thing to want is a limit on a *request*, and until
 [issue #152](https://github.com/myuon/cove/issues/152) an embedding could not
 ask for one: a `Budget` belonged to the `HostRegistry`, `set_budget` needs
 `&mut`, and a backend holds the registry by shared reference for as long as it
-exists. Every limit was therefore spent over the whole session — the fuel for
-the first decision came out of the same pot as the fuel for the ten-thousandth
+exists. Every limit was therefore spent over the whole session — the host calls
+for the first decision came out of the same pot as those for the ten-thousandth
 — and the only way to get a per-request bound was to build a registry, a
 `Runtime` and a backend per request, which is 167 allocations of table
 rebuilding against a request's own 237 and is the thing compiling once was for
@@ -246,7 +246,7 @@ not doing.
 **A budget belongs to an invocation.** `invoke_within` and `run_entry_within`
 take one, install it as the call is entered, and leave it behind holding what
 that invocation spent. It still lives on the registry, because ADR 0008 draws
-a spawned task's fuel from the run's budget and a task thread reaches it
+a spawned task's limits from the run's budget and a task thread reaches it
 through the `Runtime` it carries; a task's charges are still its request's.
 The deadline runs from the moment the invocation starts rather than from
 wherever the `Limits` were written, which is what makes a per-request deadline
@@ -256,20 +256,17 @@ mean the request.
 is still right for the limits that are about the process. The two are
 different questions and the example asks both:
 `a_budget_on_the_registry_is_spent_over_every_invocation` is the session, and
-`fuel_handed_to_one_invocation_bounds_that_invocation_alone` is the request —
+`a_host_call_limit_handed_to_one_invocation_bounds_that_invocation_alone` is the request —
 the same three decisions, differing in one call, where the session runs out on
 the second and the requests each answer.
 
-Which limit to reach for is ADR 0024's and ADR 0030's, not this example's.
-**`max_host_calls` is the control that bounds effects exactly**; fuel bounds
-work, and how many effects a fuel limit admits still depends on what the
-program does between them. ADR 0030 settles only the far end of that — no Host
-call begins once the fuel a run has been charged has reached its limit — and
-leaves the near end where ADR 0024 put it: a fuel limit is not portable
-between the two backends. So `decide_within` is the case written against
-`max_host_calls` — one decision makes two calls, `pull` and `record` — and it
-is the one asserted on both backends, because a call is a call on either and a
-unit of fuel is not.
+Which limit to reach for is ADR 0024's and ADR 0091's, not this example's.
+**`max_host_calls` is the control that bounds effects exactly**; a deadline
+bounds time, and how many effects a deadline admits still depends on how fast
+the program and its host get through them. So `decide_within` is the case
+written against `max_host_calls` — one decision makes two calls, `pull` and
+`record` — and it is the one asserted on both backends, because a call is a
+call on either and a stretch of wall clock is not.
 
 There is no way to install a budget that does not take `&mut self` on a
 backend. ADR 0024 states each stop as a bound that holds over a run, and a

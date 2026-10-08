@@ -126,12 +126,12 @@ granted fails before it runs, naming the grant: ``test `bad.logs` requires
 
 | tenant | grant | what it shows |
 | --- | --- | --- |
-| [`hello`](tenants/hello/hello.cove) | — | pure; `/hello/spin` loops until the tenant's `fuel = 2000000` stops it |
+| [`hello`](tenants/hello/hello.cove) | — | pure; `/hello/spin` loops until the tenant's `deadline = "200ms"` stops it |
 | [`counter`](tenants/counter/counter.cove) | `kv`, `log` | state that outlives the isolate lives behind a capability, per tenant |
 | [`aggregate`](tenants/aggregate/aggregate.cove) | `upstream` | three slow calls in a row; the run parks at each; `max_host_calls = 8` per request, however many are in flight |
 | `impatient` | `upstream` | `aggregate`'s code under `deadline = "300ms"`: a request parked at an upstream that has not answered by then is cancelled and answered 504 |
 | [`proxy`](tenants/proxy/proxy.cove) | `upstream`, fetch `127.0.0.1`, `localhost` | `upstream.fetch(?url=)`: a real HTTP request from the fetch pool, to the hosts [`edge.toml`](tenants/edge.toml) allows it; `deadline = "500ms"` |
-| [`crunch`](tenants/crunch/crunch.cove) | — | CPU-heavy and never parks: the primes up to `?n=` (default 20000, about 4.5 ms on the VM; capped at 200000) by trial division, under `fuel = 30000000`; see [CPU-heavy and I/O-bound together](#cpu-heavy-and-io-bound-together) |
+| [`crunch`](tenants/crunch/crunch.cove) | — | CPU-heavy and never parks: the primes up to `?n=` (default 20000, about 4.5 ms on the VM; capped at 200000) by trial division, under `deadline = "5s"`; see [CPU-heavy and I/O-bound together](#cpu-heavy-and-io-bound-together) |
 | [`greedy`](tenants/greedy/greedy.cove) | `kv` | over-reaches for `upstream` and is not deployed |
 
 The contract is a host module, [`edge`](host/src/hosts.rs), whose schema
@@ -168,12 +168,12 @@ diagnostic, with the tenant's source line:
 
 ```console
 $ curl -i 'http://localhost:8787/hello/spin'
-HTTP/1.1 500 Internal Server Error
+HTTP/1.1 504 Gateway Timeout
 Content-Type: text/plain
-Content-Length: 365
+Content-Length: 370
 Connection: keep-alive
 
-error[cove::runtime]: execution stopped: fuel budget of 2000000 exhausted
+error[cove::runtime]: execution stopped: wall-clock deadline of 200ms exceeded
   --> hello/hello.cove:23:3
    |
 23 |   while turns >= 0 {
@@ -532,7 +532,7 @@ was accepted and queued, which worker started its run, where it parked and
 at which host call, who answered (`timer` for a simulated `upstream.get`,
 `fetcher` for a real `upstream.fetch`, `deadline` for a run cancelled at its
 deadline), which worker resumed it, and when its response was written —
-timestamps in microseconds since the server started, plus the run's fuel,
+timestamps in microseconds since the server started, plus the run's
 host calls and heap at `run_end` (`OwnedVm::meter`). `GET /_timeline` dumps
 it (and rewrites `PATH`); `GET /_timeline?reset` forgets it.
 [`host/src/timeline.rs`](host/src/timeline.rs) has one buffer per worker and
@@ -785,7 +785,7 @@ What it shows:
   three times per `aggregate` — so `aggregate`'s median went from 186 ms to
   267 ms. Nothing here is a bug; it is what a FIFO queue in front of
   run-to-completion workers does. A cure would be a scheduler's, not a
-  tenant's: a quantum on long runs (the VM's fuel safepoint is a natural
+  tenant's: a quantum on long runs (the VM's safepoint is a natural
   place to yield), a queue per cost class, or a worker kept for short work.
   The first is what [the next section](#slicing-long-runs-at-safepoints)
   does — and since it is now the default, the server commands above
@@ -808,7 +808,7 @@ embedder ask a run to give its thread up at its next safepoint — the VM takes
 one every 1,024 instructions, at loop backedges and calls alike — and hands
 the run back as a `YieldedVm` that any thread can `resume()`, no answer
 needed. A yielded run answers what an uninterrupted one answers, in the same
-instructions, for the same fuel, with the same trace. The policy is all in
+instructions, with the same trace. The policy is all in
 [`host/src/server.rs`](host/src/server.rs) and
 [`host/src/runq.rs`](host/src/runq.rs), and it is Go's, cut down:
 
@@ -1022,7 +1022,7 @@ The most useful output of this demo. Ordered by how much each cost.
    the same `DynamicBoundary` a field read on that value already gets.
 4. **`[run.<name>]` is the only grant table, so it was borrowed.**
    `tenants/cove.toml` reuses it because `cove_sema::config::parse` is public
-   and `RunConfig` already carries `allow`, `fuel`, `deadline` and
+   and `RunConfig` already carries `allow`, `deadline` and
    `max_host_calls` — exactly a tenant's grant. But `[run]` means "`cove run`
    can start this", and neither `cove check` nor anything else notices that
    `hello.handle(request: edge.Request)` is not a runnable entry. The fetch
