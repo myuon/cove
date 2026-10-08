@@ -25,26 +25,16 @@ use crate::wallclock::Instant;
 pub(crate) const RULE: &str =
     "ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.";
 
-/// How many [`Budget::safepoint`] calls pass between checks of the wall clock
-/// when a deadline is set.
-///
-/// `Instant::now()` reads a monotonic clock, which on most platforms is a
-/// system call or vDSO trap — several orders of magnitude slower than
-/// decrementing an integer. Checking it at every safepoint would tax
-/// fuel-heavy loops for a bound that fuel usually enforces anyway. Every
-/// [`DEADLINE_CHECK_INTERVAL`]th call keeps the wasted overrun bounded to a
-/// small, fixed number of safepoints without paying the clock's cost on every
-/// one. When no fuel limit is set, nothing else bounds the run, so the clock
-/// is consulted on every call regardless of this constant.
-pub const DEADLINE_CHECK_INTERVAL: u64 = 64;
-
 /// Limits a host imposes on one run.
 ///
 /// A `None` field imposes nothing: `Limits::default()` never stops a run.
+///
+/// There is no work allowance among them.
+/// [ADR 0091](../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)
+/// removed the fuel budget: a host bounds a run's time with
+/// [`Limits::deadline`] or stops it with a [`Cancellation`].
 #[derive(Clone, Debug, Default)]
 pub struct Limits {
-    /// The total fuel a run may spend before it is stopped.
-    pub fuel: Option<u64>,
     /// The wall-clock duration a run may take before it is stopped.
     pub deadline: Option<Duration>,
     /// The total number of host calls a run may make before it is stopped.
@@ -58,7 +48,7 @@ pub struct Limits {
     /// So this limit is charged where the taking happens: `spawn` charges it
     /// before a thread exists, and a `spawn` past the limit stops the run
     /// rather than waiting for a sibling to finish, because waiting would be
-    /// a scheduling policy and ADR 0008 has none. Like fuel and host calls,
+    /// a scheduling policy and ADR 0008 has none. Like the host-call limit,
     /// it bounds the *run*: every task alive anywhere in it counts, so
     /// a program cannot stay under the limit by spreading its tasks over more
     /// scopes.
@@ -68,8 +58,6 @@ pub struct Limits {
 /// Why execution was stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stopped {
-    /// The fuel budget was exhausted.
-    Fuel,
     /// The wall-clock deadline was exceeded.
     Deadline,
     /// The run was cancelled from outside.
@@ -88,12 +76,11 @@ impl Stopped {
     ///
     /// One [`RunOutcome`] per [`Stopped`], because each of these is a
     /// different control and a reader deciding what to do about a stopped run
-    /// wants to know which one: a run out of fuel and a run past its deadline
+    /// wants to know which one: a cancelled run and a run past its deadline
     /// are not the same report, however alike the two stops look from inside
     /// the budget.
     pub fn outcome(self) -> RunOutcome {
         match self {
-            Stopped::Fuel => RunOutcome::Fuel,
             Stopped::Deadline => RunOutcome::Deadline,
             Stopped::Cancelled => RunOutcome::Cancelled,
             Stopped::CallDepth => RunOutcome::CallDepth,
@@ -224,14 +211,14 @@ impl Cancellation {
     }
 }
 
-/// One run's accounting: what it was limited to, when it started, and what
-/// it has spent so far.
+/// One run's accounting: what it was limited to, when it started, and the
+/// host calls and tasks it has taken so far.
 ///
-/// One allocation, reached by every thread of the run at once. ADR 0008 draws
-/// a task's fuel from the run's budget rather than giving each task one of
-/// its own, so there is exactly one of these per run however many tasks it
-/// has, and every counter in it is an atomic rather than a field behind a
-/// lock — see [`Meter`] for why that is the shape.
+/// One allocation, reached by every thread of the run at once. ADR 0008 makes
+/// a task's limits the run's rather than giving each task some of its own,
+/// so there is exactly one of these per run however many tasks it has, and
+/// every counter in it is an atomic rather than a field behind a lock — see
+/// [`Meter`] for why that is the shape.
 ///
 /// `limits`, `cancellation` and `started_at` do not change while a run lasts.
 /// A run that starts over gets a fresh one of these rather than having this
@@ -242,14 +229,7 @@ struct Accounting {
     limits: Limits,
     cancellation: Cancellation,
     started_at: Instant,
-    fuel_spent: AtomicU64,
     host_calls: AtomicU64,
-    /// How many safepoints have been taken while a deadline was set, which is
-    /// what picks every [`DEADLINE_CHECK_INTERVAL`]th one to read the clock
-    /// at. It counts up and is never reset: a counter that were reset would
-    /// lose the increments of every thread that raced the reset, and how long
-    /// a run may go without reading the clock is a bound ADR 0024 states.
-    safepoints_under_deadline: AtomicU64,
     /// How many spawned tasks are alive right now: charged before a task is
     /// given a thread and released when the task that spawned it observes
     /// its end.
@@ -268,9 +248,9 @@ struct Accounting {
 /// `pthread_mutex_lock` plus `pthread_mutex_unlock` were 36% of the run
 /// against the predecessor's `execute` at 46%.
 ///
-/// The lock was not protecting anything that needed one. A safepoint adds to
-/// `fuel_spent`, reads an atomic flag, compares against a limit fixed before
-/// the run, and every so often reads a clock that started before the run.
+/// The lock was not protecting anything that needed one. A safepoint reads an
+/// atomic flag and a clock that started before the run, and a host call adds
+/// to a counter and compares it against a limit fixed before the run.
 /// None of that is a multi-field invariant two threads could tear; the
 /// counters were plain integers because the struct holding them happened to
 /// be reached by `&mut`, not because anything wanted them to be. So they are
@@ -281,7 +261,7 @@ struct Accounting {
 ///
 /// [`crate::host::HostRegistry::with_budget`] still exists and still locks. It
 /// is how a budget installed by `set_budget` is read back — how `cove run
-/// --stats` reads what a run spent. It used to be how the charges that are
+/// --stats` reads the host calls a run made. It used to be how the charges that are
 /// not per-instruction were made as well — a host call, a spawn, a task that
 /// ended — and they are this type's now, for a reason that is not speed.
 ///
@@ -318,10 +298,10 @@ pub struct Meter {
 ///
 /// A `Budget` is not `Clone`: it is one run's, and a second one would be a
 /// second run. What is shared instead is [`Meter`], the view of the same
-/// accounting that a safepoint charges through, and every task thread of the
-/// run holds one — ADR 0008 draws a task's fuel from the run's budget rather
-/// than giving each task one of its own, so there is still exactly one
-/// authoritative count of what the run spent. Share a [`Cancellation`] when
+/// accounting that a safepoint asks through, and every task thread of the
+/// run holds one — ADR 0008 makes a task's limits the run's rather than
+/// giving each task some of its own, so there is still exactly one
+/// authoritative count of what the run took. Share a [`Cancellation`] when
 /// another thread needs to stop the run.
 ///
 /// `max_call_depth` is the one limit a budget does not itself enforce. Call
@@ -343,9 +323,7 @@ impl Meter {
                 limits,
                 cancellation,
                 started_at: Instant::now(),
-                fuel_spent: AtomicU64::new(0),
                 host_calls: AtomicU64::new(0),
-                safepoints_under_deadline: AtomicU64::new(0),
                 live_tasks: AtomicU64::new(0),
             }),
         }
@@ -372,91 +350,19 @@ impl Meter {
         self.state.cancellation.clone()
     }
 
-    /// Checks cancellation, the deadline, and fuel in one call. Both backends
-    /// call this at their safepoints. `fuel` is the cost of the work performed
-    /// since the last one.
+    /// Checks cancellation and then the deadline. Both backends call this at
+    /// their safepoints, and the encoded machine at a Host-call boundary too.
     ///
-    /// The order the three questions are asked in is the whole of what a
-    /// caller can observe about this, and it is the order they were asked in
-    /// when a mutex was held across all three.
-    pub fn safepoint(&self, fuel: u64) -> Result<(), Stopped> {
-        // Counted before anything can refuse, because `fuel` is work the run
-        // has already done and a stop does not un-do it. Reading the
-        // cancellation flag first and returning would have thrown away
-        // whatever the caller had gathered since its last safepoint, which
-        // on a backend that charges in batches is most of what it did.
-        // Nothing about *which* stop is reported moves: the limit is still
-        // checked after the flag, so a cancelled run is still cancelled and
-        // not out of fuel.
-        let spent = self.add_fuel(fuel);
-        if self.state.cancellation.is_cancelled() {
-            return Err(Stopped::Cancelled);
-        }
-
-        if let Some(limit) = self.state.limits.fuel {
-            if spent >= limit {
-                return Err(Stopped::Fuel);
-            }
-        }
-
-        if let Some(deadline) = self.state.limits.deadline {
-            // With no fuel limit nothing else bounds the run, so the clock is
-            // read at every safepoint. Otherwise one safepoint in
-            // `DEADLINE_CHECK_INTERVAL` reads it, chosen off a counter that
-            // only ever counts up rather than one reset at each check: a reset
-            // would discard whatever another task added between the check and
-            // the reset, and this interval is a bound rather than a heuristic.
-            let must_check_clock = self.state.limits.fuel.is_none()
-                || self
-                    .state
-                    .safepoints_under_deadline
-                    .fetch_add(1, Ordering::Relaxed)
-                    % DEADLINE_CHECK_INTERVAL
-                    == DEADLINE_CHECK_INTERVAL - 1;
-            if must_check_clock && self.state.started_at.elapsed() >= deadline {
-                return Err(Stopped::Deadline);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Adds `fuel` to the run's total without asking whether the run may
-    /// continue.
+    /// The clock is read at every call while a deadline is set, because
+    /// nothing else bounds how much work a run does
+    /// ([ADR 0091](../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)).
+    /// The backends call this once per stride of work rather than per
+    /// instruction, which is what keeps that affordable.
     ///
-    /// A backend that charges fuel in batches holds some between two
-    /// safepoints, and the safepoint is where that holding is spent. A run
-    /// that ends anywhere else — by raising, by being stopped, by a task
-    /// thread finishing — reaches no further safepoint, so what it had
-    /// gathered would simply not be counted, and `fuel_spent` would report
-    /// less work than the run did. This is where the last of it is put back,
-    /// and it decides nothing: the run is already over, and a second stop
-    /// raised here would be answering a question nobody asked.
-    pub fn spend(&self, fuel: u64) {
-        self.add_fuel(fuel);
-    }
-
-    /// Adds `fuel` to the run's total and answers what the total is now.
-    ///
-    /// Saturating rather than wrapping, which is what it was when the total
-    /// was a plain field behind a lock: a run that has spent more fuel than a
-    /// `u64` can name has passed any limit that could have been set on it, and
-    /// wrapping would hand it a fresh budget. The correction is a second store
-    /// rather than a compare-and-swap loop because the branch is never taken,
-    /// and a safepoint is not a place to pay for a case that cannot arise.
-    fn add_fuel(&self, fuel: u64) -> u64 {
-        let before = self.state.fuel_spent.fetch_add(fuel, Ordering::Relaxed);
-        let after = before.wrapping_add(fuel);
-        if after < before {
-            self.state.fuel_spent.store(u64::MAX, Ordering::Relaxed);
-            return u64::MAX;
-        }
-        after
-    }
-
-    /// Total fuel spent so far, for reporting.
-    pub fn fuel_spent(&self) -> u64 {
-        self.state.fuel_spent.load(Ordering::Relaxed)
+    /// The order is the whole of what a caller can observe about this: a run
+    /// that was cancelled and is past its deadline is reported cancelled.
+    pub fn safepoint(&self) -> Result<(), Stopped> {
+        self.interrupted().map_or(Ok(()), Err)
     }
 
     /// Charges one host call against the run, failing before the call is
@@ -467,9 +373,8 @@ impl Meter {
     /// puts the controls at "loop back edges, calls, and `await`", and a run
     /// whose work is waiting on a host reaches none of the other three: a
     /// deadline checked only in Cove code would not bound a program that
-    /// spends its time inside calls. The clock is read on every call rather
-    /// than every `DEADLINE_CHECK_INTERVAL`th, because a host call already
-    /// costs far more than reading it does.
+    /// spends its time inside calls. The clock is read on every call, because
+    /// a host call already costs far more than reading it does.
     pub fn charge_host_call(&self) -> Result<(), Stopped> {
         let state = &self.state;
         if state.cancellation.is_cancelled() {
@@ -498,7 +403,7 @@ impl Meter {
     /// Every other limit stops a run for work it has already done. This one
     /// refuses work that has not started, because a thread is taken rather
     /// than spent: by the time a safepoint could observe it, the resource is
-    /// already held. A refusal stops the run the way exhausted fuel does; a
+    /// already held. A refusal stops the run the way a deadline does; a
     /// `spawn` that waited for a sibling to finish would be a scheduler, and
     /// ADR 0008 deliberately has no scheduling policy.
     ///
@@ -572,11 +477,10 @@ impl Meter {
     /// [`Stopped::Cancelled`] if its flag is raised, [`Stopped::Deadline`] if
     /// its deadline has passed, and `None` otherwise.
     ///
-    /// The two questions [`Meter::safepoint`] asks without spending anything,
-    /// in the order it asks them, with the clock read every time. Fuel, the
-    /// host-call limit and the concurrency limit are not among them: each is
-    /// charged for work, and a run that is not executing is doing none. This
-    /// is what a parked run is asked as it is resumed
+    /// The two questions [`Meter::safepoint`] asks, in the order it asks
+    /// them. The host-call limit and the concurrency limit are not among
+    /// them: each is charged for work, and a run that is not executing is
+    /// doing none. This is what a parked run is asked as it is resumed
     /// ([ADR 0082](../../../docs/adr/0082-a-parked-run-keeps-its-deadline.md)).
     pub fn interrupted(&self) -> Option<Stopped> {
         if self.state.cancellation.is_cancelled() {
@@ -591,10 +495,6 @@ impl Meter {
     /// are runtime controls rather than termination proofs.
     pub fn to_runtime_error(&self, stopped: Stopped) -> RuntimeError {
         let message = match stopped {
-            Stopped::Fuel => format!(
-                "execution stopped: fuel budget of {} exhausted",
-                self.state.limits.fuel.unwrap_or_default()
-            ),
             Stopped::Deadline => format!(
                 "execution stopped: wall-clock deadline of {:?} exceeded",
                 self.state.limits.deadline.unwrap_or_default()
@@ -687,23 +587,15 @@ impl Budget {
         self.meter.limits()
     }
 
-    /// Checks cancellation, the deadline, and fuel in one call. The
-    /// interpreter calls this at safepoints: loop back edges, calls, and
-    /// `await`. `fuel` is the cost of the work performed since the last
-    /// safepoint.
+    /// Checks cancellation and the deadline. The interpreter calls this at
+    /// safepoints: loop back edges, calls, and `await`.
     ///
     /// [`Meter::safepoint`] is the whole of it. A backend on a per-instruction
     /// path holds a [`Meter`] and calls that instead of reaching a `Budget`
     /// through the registry's lock; this is here for a caller that has a
-    /// `Budget` in hand and charges once.
-    pub fn safepoint(&self, fuel: u64) -> Result<(), Stopped> {
-        self.meter.safepoint(fuel)
-    }
-
-    /// Adds `fuel` to the run's total without asking whether the run may
-    /// continue. [`Meter::spend`] says when that is what a backend wants.
-    pub fn spend(&self, fuel: u64) {
-        self.meter.spend(fuel);
+    /// `Budget` in hand and asks once.
+    pub fn safepoint(&self) -> Result<(), Stopped> {
+        self.meter.safepoint()
     }
 
     /// Charges one host call against the budget. [`Meter::charge_host_call`]
@@ -727,11 +619,6 @@ impl Budget {
     /// How many spawned tasks are alive right now.
     pub fn live_tasks(&self) -> u64 {
         self.meter.live_tasks()
-    }
-
-    /// Total fuel spent so far, for reporting.
-    pub fn fuel_spent(&self) -> u64 {
-        self.meter.fuel_spent()
     }
 
     /// Total host calls charged so far, including any that were then
@@ -820,52 +707,31 @@ mod tests {
     }
 
     #[test]
-    fn fuel_limit_fires_when_exhausted() {
-        let budget = Budget::new(Limits {
-            fuel: Some(10),
-            ..Limits::default()
-        });
-        assert_eq!(budget.safepoint(5), Ok(()));
-        assert_eq!(budget.safepoint(4), Ok(()));
-        assert_eq!(budget.safepoint(1), Err(Stopped::Fuel));
-        assert_eq!(budget.fuel_spent(), 10);
-    }
-
-    #[test]
-    fn fuel_limit_absent_never_stops() {
-        let budget = Budget::new(Limits::default());
-        for _ in 0..1_000 {
-            assert_eq!(budget.safepoint(u64::MAX / 2000), Ok(()));
-        }
-    }
-
-    #[test]
     fn deadline_fires_when_exceeded() {
         let budget = Budget::new(Limits {
             deadline: Some(Duration::from_millis(1)),
             ..Limits::default()
         });
         thread::sleep(Duration::from_millis(20));
-        assert_eq!(budget.safepoint(0), Err(Stopped::Deadline));
+        assert_eq!(budget.safepoint(), Err(Stopped::Deadline));
     }
 
     #[test]
     fn deadline_absent_never_stops() {
         let budget = Budget::new(Limits::default());
         thread::sleep(Duration::from_millis(5));
-        assert_eq!(budget.safepoint(0), Ok(()));
+        assert_eq!(budget.safepoint(), Ok(()));
     }
 
     #[test]
     fn deadline_alone_is_observed_on_the_first_safepoint() {
-        // With no fuel limit, the clock must be consulted every call, not
-        // merely every `DEADLINE_CHECK_INTERVAL`th one.
+        // The clock is consulted at every call, not merely at some of them.
         let budget = Budget::new(Limits {
             deadline: Some(Duration::from_millis(1)),
             ..Limits::default()
         });
         thread::sleep(Duration::from_millis(20));
-        assert_eq!(budget.safepoint(0), Err(Stopped::Deadline));
+        assert_eq!(budget.safepoint(), Err(Stopped::Deadline));
     }
 
     #[test]
@@ -913,7 +779,7 @@ mod tests {
         });
         handle.join().unwrap();
 
-        assert_eq!(budget.safepoint(0), Err(Stopped::Cancelled));
+        assert_eq!(budget.safepoint(), Err(Stopped::Cancelled));
     }
 
     /// The deadline bounds a run whose work is host calls, which reaches no
@@ -1013,71 +879,6 @@ mod tests {
         assert!(error.rule.is_some());
     }
 
-    /// Every task of a run charges the one budget, so what it reports is the
-    /// sum of what they all did and not the last writer's share of it. A
-    /// counter that were read, added to, and written back would lose most of
-    /// this; a `fetch_add` loses none of it.
-    #[test]
-    fn nothing_is_lost_when_every_thread_charges_at_once() {
-        const THREADS: u64 = 8;
-        const EACH: u64 = 20_000;
-
-        let budget = Arc::new(Budget::new(Limits::default()));
-        let meters: Vec<_> = (0..THREADS).map(|_| budget.meter()).collect();
-        let handles: Vec<_> = meters
-            .into_iter()
-            .map(|meter| {
-                thread::spawn(move || {
-                    for _ in 0..EACH {
-                        assert_eq!(meter.safepoint(1), Ok(()));
-                    }
-                })
-            })
-            .collect();
-        for handle in handles {
-            handle.join().unwrap();
-        }
-        assert_eq!(budget.fuel_spent(), THREADS * EACH);
-    }
-
-    /// The fuel limit bounds the *run*, so it is the total across every task
-    /// that reaches it, and every task that asks after it has been reached is
-    /// told so. ADR 0008 draws a task's fuel from the run's budget and this is
-    /// what that means when the tasks are actually concurrent.
-    #[test]
-    fn a_fuel_limit_stops_every_thread_that_shares_the_run() {
-        const THREADS: u64 = 8;
-        const LIMIT: u64 = 10_000;
-
-        let budget = Arc::new(Budget::new(Limits {
-            fuel: Some(LIMIT),
-            ..Limits::default()
-        }));
-        let handles: Vec<_> = (0..THREADS)
-            .map(|_| budget.meter())
-            .map(|meter| {
-                thread::spawn(move || {
-                    // Every thread runs until the run refuses it, which it
-                    // must: the limit is the run's, so one thread spending it
-                    // stops the others too.
-                    let mut charged = 0u64;
-                    loop {
-                        charged += 1;
-                        if meter.safepoint(1) == Err(Stopped::Fuel) {
-                            return charged;
-                        }
-                        assert!(charged <= LIMIT, "a thread outran the run's whole budget");
-                    }
-                })
-            })
-            .collect();
-        let charged: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        // Nothing is spent twice and nothing is dropped: what the budget
-        // reports is exactly what the threads between them charged.
-        assert_eq!(budget.fuel_spent(), charged);
-        assert!(budget.fuel_spent() >= LIMIT);
-    }
-
     /// A place under the concurrency limit is taken by one `spawn` or the
     /// other and never by both. The mutex the registry holds used to make the
     /// check and the taking one step; this holds without it, which is what
@@ -1131,19 +932,6 @@ mod tests {
         assert_eq!(budget.host_calls(), THREADS * EACH);
     }
 
-    /// Fuel saturates rather than wrapping, so a run that has spent more than
-    /// a `u64` can name cannot come back under a limit it has passed.
-    #[test]
-    fn fuel_saturates_rather_than_wrapping() {
-        let budget = Budget::new(Limits {
-            fuel: Some(u64::MAX),
-            ..Limits::default()
-        });
-        budget.spend(u64::MAX - 1);
-        assert_eq!(budget.safepoint(1_000), Err(Stopped::Fuel));
-        assert_eq!(budget.fuel_spent(), u64::MAX);
-    }
-
     /// A restart is fresh accounting rather than counters written back to
     /// zero, so a [`Meter`] taken before one keeps charging the run it was
     /// taken from. Both backends take theirs where a run begins for exactly
@@ -1152,18 +940,18 @@ mod tests {
     fn a_meter_taken_before_a_restart_belongs_to_the_run_that_ended() {
         let mut budget = Budget::new(Limits::default());
         let before = budget.meter();
-        before.spend(100);
-        assert_eq!(budget.fuel_spent(), 100);
+        assert_eq!(before.charge_host_call(), Ok(()));
+        assert_eq!(budget.host_calls(), 1);
 
         budget.restart();
-        assert_eq!(budget.fuel_spent(), 0);
+        assert_eq!(budget.host_calls(), 0);
 
-        before.spend(7);
-        assert_eq!(budget.fuel_spent(), 0, "the new run is charged nothing");
-        assert_eq!(before.fuel_spent(), 107, "the old run kept its own total");
+        assert_eq!(before.charge_host_call(), Ok(()));
+        assert_eq!(budget.host_calls(), 0, "the new run is charged nothing");
+        assert_eq!(before.host_calls(), 2, "the old run kept its own total");
 
-        budget.meter().spend(7);
-        assert_eq!(budget.fuel_spent(), 7);
+        assert_eq!(budget.meter().charge_host_call(), Ok(()));
+        assert_eq!(budget.host_calls(), 1);
     }
 
     /// A restart keeps the flag for the reason `restart` gives, and it keeps
@@ -1175,18 +963,18 @@ mod tests {
         let mut budget = Budget::with_cancellation(Limits::default(), cancellation.clone());
         cancellation.cancel();
         budget.restart();
-        assert_eq!(budget.safepoint(0), Err(Stopped::Cancelled));
+        assert_eq!(budget.safepoint(), Err(Stopped::Cancelled));
         assert!(budget.cancellation().is_cancelled());
     }
 
     #[test]
     fn to_runtime_error_names_the_configured_value() {
         let budget = Budget::new(Limits {
-            fuel: Some(42),
+            max_host_calls: Some(42),
             ..Limits::default()
         });
-        let error = budget.to_runtime_error(Stopped::Fuel);
-        assert!(error.message.contains('4') && error.message.contains('2'));
+        let error = budget.to_runtime_error(Stopped::HostCalls);
+        assert!(error.message.contains("42"), "{}", error.message);
         assert!(error.rule.is_some());
     }
 }

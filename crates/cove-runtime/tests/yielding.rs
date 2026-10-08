@@ -3,7 +3,7 @@
 //!
 //! The contract, from the embedder's side. A run that yields and is resumed
 //! answers what the same run answers uninterrupted, in the same number of
-//! instructions, charged the same fuel, with the same trace; a run asked to
+//! instructions, doing the same work, with the same trace; a run asked to
 //! yield where it cannot — inside a host's callback, beside a running task —
 //! declines and goes on, and yields at the first safepoint where it can; a
 //! yielded run can be cancelled and keeps its deadline; and what an embedder
@@ -389,14 +389,14 @@ fn shown(answer: &Result<Value, RuntimeError>) -> String {
 struct Finished {
     answer: String,
     instructions: u64,
-    fuel: u64,
+    work: u64,
 }
 
 fn finished(vm: &OwnedVm, answer: &Result<Value, RuntimeError>) -> Finished {
     Finished {
         answer: shown(answer),
         instructions: vm.instructions(),
-        fuel: vm.meter().fuel_spent(),
+        work: vm.work(),
     }
 }
 
@@ -500,7 +500,7 @@ fn what_an_embedder_moves_between_threads_is_send() {
 }
 
 /// The whole of the contract: twenty yields, each run on from a thread of its
-/// own, and the same answer in the same instructions for the same fuel as the
+/// own, and the same answer in the same instructions for the same work as the
 /// run nothing interrupted.
 #[test]
 fn a_yielded_run_resumed_on_other_threads_answers_as_the_uninterrupted_run_does() {
@@ -535,29 +535,6 @@ fn a_yielded_run_is_traced_as_the_uninterrupted_run() {
         20
     );
     assert_eq!(yielded, expected);
-}
-
-/// The safepoint a run yielded at is taken when it resumes, so a fuel limit
-/// stops a yielded run where it stops an uninterrupted one, at the same
-/// charge.
-#[test]
-fn a_fuel_limit_stops_a_yielded_run_where_it_stops_the_uninterrupted_one() {
-    let world = world();
-    let fuel = || {
-        Budget::new(Limits {
-            fuel: Some(20_000),
-            ..Limits::default()
-        })
-    };
-    let expected = world.uninterrupted("main", fuel());
-    assert!(expected.answer.contains("fuel"), "{expected:?}");
-    let run = drive(
-        world
-            .vm()
-            .invoke_within_parkable(fuel(), "app", "main", Vec::new()),
-    );
-    assert!(run.yields > 0);
-    assert_eq!(run.finished, expected);
 }
 
 /// A blocking run is never asked: the request is raised and nothing reads it.
@@ -774,7 +751,7 @@ fn a_host_is_told_when_a_yielded_run_s_flag_is_raised() {
 /// copy — a `snapshot` or a `toVector` every turn — or whose every charge is a
 /// host call's — `tick` every turn — yields once for every request, as a loop
 /// of ordinary instructions does, and answers as the uninterrupted run in the
-/// same count for the same fuel. Before the fixes the dispatch loop's own
+/// same count for the same work. Before the fixes the dispatch loop's own
 /// stride test never found a safepoint due, and all three ran to the end
 /// without yielding once.
 #[test]
@@ -797,65 +774,12 @@ fn a_loop_whose_every_charge_is_a_bulk_copy_or_a_host_call_yields_when_asked() {
     }
 }
 
-/// The yield a bulk copy's safepoint or a host call's charge offers is taken
-/// *after* that charge, so the resumed run must not charge there again: a
-/// fuel limit stops the yielded run where it stops the uninterrupted one, at
-/// the same charge.
-#[test]
-fn a_fuel_limit_stops_a_run_yielded_after_a_charge_where_it_stops_the_uninterrupted_one() {
-    let world = world();
-    for name in ["snapshotting", "regrowing", "ticking"] {
-        let half = world.uninterrupted(name, unlimited()).fuel / 2;
-        let fuel = || {
-            Budget::new(Limits {
-                fuel: Some(half),
-                ..Limits::default()
-            })
-        };
-        let expected = world.uninterrupted(name, fuel());
-        assert!(expected.answer.contains("fuel"), "{name}: {expected:?}");
-        let run = drive(
-            world
-                .vm()
-                .invoke_within_parkable(fuel(), "app", name, Vec::new()),
-        );
-        assert!(run.yields > 0, "{name}");
-        assert_eq!(run.finished, expected, "{name}");
-    }
-}
-
-/// **The schedule after a yield that stood after a charge is the
-/// uninterrupted run's, position by position** (#606, #618).
-///
-/// A yield offered after a bulk operation's safepoint (`copyingAfterChild`)
-/// or a host call's charge (`ticking`) stands after a charge the run has
-/// already made. The resumed run
-/// must not charge there again: an extra safepoint answers the same and
-/// charges the same in total, so no test of totals sees it. A fuel limit one
-/// past the charge the run yielded after does: the extra charge would reach
-/// it at once, where the uninterrupted run reaches it at its next charge,
-/// some instructions on.
-#[test]
-fn a_run_yielded_after_a_charge_reaches_its_next_charge_where_the_uninterrupted_run_does() {
-    let world = world();
-    for name in ["copyingAfterChild", "ticking"] {
-        let yielded = first_yield(&world, name, unlimited());
-        let charged = yielded.meter().fuel_spent();
-        let _ = yielded.cancel();
-        let fuel = || {
-            Budget::new(Limits {
-                fuel: Some(charged + 1),
-                ..Limits::default()
-            })
-        };
-        let expected = world.uninterrupted(name, fuel());
-        assert!(expected.answer.contains("fuel"), "{name}: {expected:?}");
-        let run = drive(
-            world
-                .vm()
-                .invoke_within_parkable(fuel(), "app", name, Vec::new()),
-        );
-        assert_eq!(run.yields, 1, "{name}: it yields where it did, once");
-        assert_eq!(run.finished, expected, "{name}");
-    }
-}
+// Tests stood in this file that held a yielded run to the uninterrupted run's
+// schedule by putting a fuel limit where the two would part: one past the
+// charge a run yielded after (#606, #618), half its work, or a fixed figure.
+// ADR 0091 removed the instrument with the allowance. The arithmetic they
+// guarded — that a resumed run does not take the stride's safepoint again —
+// is held by `crate::vm::exec`'s
+// `a_yield_after_a_bulk_safepoint_is_offered_at_the_next_instruction` and
+// `a_yield_after_a_host_call_waits_for_a_stride_since_the_last_safepoint`, and
+// the totals by every case above.

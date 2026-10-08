@@ -21,8 +21,8 @@
 //! # Two backends
 //!
 //! [ADR 0019](../../../docs/adr/0019-executable-ir-and-vm.md) says every
-//! number this harness reports must say which backend produced it, because a
-//! `fuel_spent` or an `instructions` figure carries no meaning on its own --
+//! number this harness reports must say which backend produced it, because an
+//! `instructions` figure carries no meaning on its own --
 //! it is only ever a fact about the backend that produced it. So every
 //! measurement below carries a `backend`, and every benchmark is measured on
 //! all of them.
@@ -65,7 +65,7 @@
 //! ```text
 //! {"benchmark":"pure","kind":"lowering","backend":"vm","iterations":<u32>,"wall_ns":<series>,"functions":<usize>,"ok":<bool>}
 //! ... and one `vm` lowering line for each of the other benchmarks
-//! {"benchmark":"pure","kind":"interpreter","backend":"ast","iterations":<u32>,"wall_ns":<series>,"fuel_spent":<u64>,"fuel_per_sec":<f64>,"heap_peak_bytes":<summary>,"host_calls":<u64>,"irreversible_writes":<u64>,"instructions":<u64|null>,"ok":<bool>}
+//! {"benchmark":"pure","kind":"interpreter","backend":"ast","iterations":<u32>,"wall_ns":<series>,"heap_peak_bytes":<summary>,"host_calls":<u64>,"irreversible_writes":<u64>,"instructions":<u64|null>,"ok":<bool>}
 //! {"benchmark":"pure","kind":"vm","backend":"vm", ...the same fields...}
 //! {"benchmark":"pure","kind":"trace_overhead","backend":"ast","untraced_wall_ns":<u64>,"traced_wall_ns":<u64>,"overhead_ratio":<f64>}
 //! {"benchmark":"pure","kind":"trace_overhead","backend":"vm", ...the same fields...}
@@ -271,10 +271,8 @@
 //! unaffected.
 //!
 //! Reading one backend against another is what the output is arranged for:
-//! the `wall_ns` medians of one benchmark are the comparison, and the
-//! `fuel_spent` beside them is not, because ADR 0019 makes fuel
-//! backend-specific and says so. `instructions` is not either, for a simpler
-//! reason: it is `null` on `ast`, which has none, so with only `ast` and
+//! the `wall_ns` medians of one benchmark are the comparison. `instructions`
+//! is not, for a simple reason: it is `null` on `ast`, which has none, so with only `ast` and
 //! `vm` left there is no second lowered backend's count to divide `vm`'s
 //! by. It stays beside `wall_ns` anyway, for the reason given above -- an
 //! exact count is worth reading run over run even with nothing beside it to
@@ -572,7 +570,7 @@ fn bench() -> ExitCode {
 /// Which backend produced a number.
 ///
 /// ADR 0019 requires every number this harness reports to say so, because the
-/// two are not interchangeable: `fuel_spent` is defined per backend, and a
+/// two are not interchangeable: `instructions` is defined per backend, and a
 /// wall-clock figure that did not name its backend would be a comparison
 /// missing half of itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1308,7 +1306,6 @@ fn fake_hosts(allow: Vec<String>) -> HostRegistry {
 /// What one run of a benchmark's entry measured.
 struct RunMeasurement {
     wall: Duration,
-    fuel_spent: u64,
     host_calls: u64,
     irreversible_writes: u64,
     heap: HeapStats,
@@ -1393,10 +1390,10 @@ fn finish(
     instructions: Option<u64>,
     outcome: Result<Value, cove_runtime::RuntimeError>,
 ) -> RunMeasurement {
-    let (fuel_spent, host_calls) = runtime
+    let host_calls = runtime
         .hosts()
-        .with_budget(|budget| (budget.fuel_spent(), budget.host_calls()))
-        .unwrap_or((0, 0));
+        .with_budget(|budget| budget.host_calls())
+        .unwrap_or(0);
     let irreversible_writes = runtime.hosts().irreversible_writes();
 
     let failure = match outcome {
@@ -1406,7 +1403,6 @@ fn finish(
 
     RunMeasurement {
         wall,
-        fuel_spent,
         host_calls,
         irreversible_writes,
         heap,
@@ -1427,21 +1423,20 @@ fn entry_err_message(value: &Value) -> Option<String> {
     )
 }
 
-/// One benchmark's execution report on one backend: wall time, fuel spent,
-/// and the heap's peak live bytes.
+/// One benchmark's execution report on one backend: wall time, the heap's
+/// peak live bytes, and the counts the run made.
 ///
-/// `fuel_spent` is the backend's own normalized work counter, unaffected by
+/// `instructions` is the lowered backend's own work count, unaffected by
 /// machine noise and comparable only against itself: ADR 0019 says an
 /// instruction is not an AST node and there is no honest mapping between
-/// them, so the two backends' fuel figures are two measurements and not one
-/// comparison. `wall_ns` is what compares them.
+/// them. `wall_ns` is what compares the backends. It used to sit beside a
+/// `fuel_spent` and a `fuel_per_sec`, which went with the fuel allowance
+/// ([ADR 0091](../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)).
 struct ExecutionReport {
     benchmark: &'static str,
     backend: Backend,
     iterations: u32,
     wall_ns: Stats,
-    fuel_spent: u64,
-    fuel_per_sec: f64,
     /// The largest live set a collection measured, on the backends that
     /// collect an object heap.
     ///
@@ -1463,14 +1458,12 @@ struct ExecutionReport {
 impl ExecutionReport {
     fn to_json(&self) -> String {
         format!(
-            "{{\"benchmark\":\"{}\",\"kind\":\"{}\",\"backend\":\"{}\",\"iterations\":{},\"wall_ns\":{},\"fuel_spent\":{},\"fuel_per_sec\":{:.1},\"heap_peak_bytes\":{},\"host_calls\":{},\"irreversible_writes\":{},\"instructions\":{},\"ok\":{}}}",
+            "{{\"benchmark\":\"{}\",\"kind\":\"{}\",\"backend\":\"{}\",\"iterations\":{},\"wall_ns\":{},\"heap_peak_bytes\":{},\"host_calls\":{},\"irreversible_writes\":{},\"instructions\":{},\"ok\":{}}}",
             self.benchmark,
             self.backend.kind(),
             self.backend,
             self.iterations,
             self.wall_ns.to_json_with_samples(),
-            self.fuel_spent,
-            self.fuel_per_sec,
             self.heap_peak_bytes.to_json(),
             self.host_calls,
             self.irreversible_writes,
@@ -1500,7 +1493,6 @@ struct Row<'a> {
     ir: Option<&'a Arc<cove_ir::Program>>,
     wall_ns: Vec<u64>,
     heap_peak: Vec<u64>,
-    fuel_spent: u64,
     host_calls: u64,
     irreversible_writes: u64,
     instructions: Option<u64>,
@@ -1526,7 +1518,6 @@ impl<'a> Row<'a> {
             ir,
             wall_ns: Vec::new(),
             heap_peak: Vec::new(),
-            fuel_spent: 0,
             host_calls: 0,
             irreversible_writes: 0,
             instructions: None,
@@ -1539,7 +1530,7 @@ impl<'a> Row<'a> {
     /// The counters are assignments rather than accumulations because they
     /// are exact and every run produces the same ones: a benchmark that ran a
     /// different number of instructions on its ninth sample than on its first
-    /// would be a different benchmark, and that is what `fuel_spent` being
+    /// would be a different benchmark, and that is what `instructions` being
     /// identical across a table is there to prove.
     fn sample(&mut self, program: &Arc<Program>, sources: &Arc<SourceMap>) {
         let measurement = run_once(
@@ -1554,7 +1545,6 @@ impl<'a> Row<'a> {
         );
         self.wall_ns.push(measurement.wall.as_nanos() as u64);
         self.heap_peak.push(measurement.heap.peak_bytes);
-        self.fuel_spent = measurement.fuel_spent;
         self.host_calls = measurement.host_calls;
         self.irreversible_writes = measurement.irreversible_writes;
         self.instructions = measurement.instructions;
@@ -1570,18 +1560,11 @@ impl<'a> Row<'a> {
     /// What the row measured, once every sample of it has been taken.
     fn report(&self, iterations: u32) -> ExecutionReport {
         let wall = Stats::of(&self.wall_ns);
-        let fuel_per_sec = if wall.mean() > 0 {
-            self.fuel_spent as f64 / (wall.mean() as f64 / 1e9)
-        } else {
-            0.0
-        };
         ExecutionReport {
             benchmark: self.name,
             backend: self.backend,
             iterations,
             wall_ns: wall,
-            fuel_spent: self.fuel_spent,
-            fuel_per_sec,
             heap_peak_bytes: Stats::of(&self.heap_peak),
             host_calls: self.host_calls,
             irreversible_writes: self.irreversible_writes,

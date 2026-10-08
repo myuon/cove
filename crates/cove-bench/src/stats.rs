@@ -799,7 +799,7 @@ mod tests {
         let samples = vec![7u64, 3, 5, 9];
         let stats = Stats::of(&samples);
         let line = format!(
-            "{{\"benchmark\":\"field\",\"kind\":\"vm\",\"backend\":\"vm\",\"iterations\":4,\"wall_ns\":{},\"fuel_spent\":1,\"ok\":true}}",
+            "{{\"benchmark\":\"field\",\"kind\":\"vm\",\"backend\":\"vm\",\"iterations\":4,\"wall_ns\":{},\"instructions\":1,\"ok\":true}}",
             stats.to_json_with_samples()
         );
         let baseline = Baseline::parse(&line).expect("the line parses");

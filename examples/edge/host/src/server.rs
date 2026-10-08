@@ -735,7 +735,6 @@ impl Shared {
                 self.note(worker, flight.id, || What::RunEnd {
                     worker,
                     status: response.status,
-                    fuel: vm.meter().fuel_spent(),
                     host_calls: vm.meter().host_calls(),
                     heap_bytes,
                 });

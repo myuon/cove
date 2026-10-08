@@ -2155,7 +2155,7 @@ fn a_deep_native_recursion_returns_through_a_reallocation() {
 /// What one bounded native run of `callsCounts` answered, and what it spent.
 struct Bounded {
     error: cove_runtime::RuntimeError,
-    fuel_spent: u64,
+    work: u64,
     tiers: cove_runtime::Tiers,
 }
 
@@ -2199,28 +2199,26 @@ fn bounded_counts(deep: i64, limits: cove_runtime::Limits, cancelled: bool) -> B
         .expect_err("the bounded run stops");
     Bounded {
         error,
-        fuel_spent: hosts
-            .with_budget(|budget| budget.fuel_spent())
-            .expect("the run has a budget"),
+        work: vm.work(),
         tiers: vm.tiers(),
     }
 }
 
-/// **A loop-free native recursion runs out of fuel within one stride of its
-/// limit.**
+/// **A loop-free native recursion stops at an expired deadline within one
+/// stride.**
 ///
 /// The descent of `counts` is direct native-to-native calls and nothing else, so
 /// every poll in it is a call's. Each call is a poll ([ADR 0078]), the work
-/// between two of them is one level of the recursion, and the overspend is
-/// therefore at most `SAFEPOINT_STRIDE` plus one level — ADR 0040's `S + T`. A
-/// call that did not poll at all would run the whole descent, a million units of
-/// work, before anything noticed; a bound of `S + T` is what says it polls.
+/// between two of them is one level of the recursion, and the work before the
+/// first safepoint is therefore at most `SAFEPOINT_STRIDE` plus one level —
+/// ADR 0040's `S + T`. A call that did not poll at all would run the whole
+/// descent, a million units of work, before anything noticed; a bound of
+/// `S + T` is what says it polls.
 ///
 /// [ADR 0078]: ../../../docs/adr/0078-a-native-call-tests-the-stride-before-it-takes-a-safepoint.md
 #[test]
-fn a_loop_free_native_recursion_runs_out_of_fuel_within_one_stride() {
+fn a_loop_free_native_recursion_stops_at_an_expired_deadline_within_one_stride() {
     const DEEP: i64 = 100_000;
-    const LIMIT: u64 = 5_000;
     // One level of `counts` is a compare, a branch, a subtraction and the call:
     // well inside this, and the bound is what a level costs rather than a figure
     // anybody chose.
@@ -2228,14 +2226,14 @@ fn a_loop_free_native_recursion_runs_out_of_fuel_within_one_stride() {
     let run = bounded_counts(
         DEEP,
         cove_runtime::Limits {
-            fuel: Some(LIMIT),
+            deadline: Some(std::time::Duration::ZERO),
             ..cove_runtime::Limits::default()
         },
         false,
     );
     assert!(
-        run.error.message.contains("fuel"),
-        "the run says it ran out of fuel: {}",
+        run.error.message.contains("deadline"),
+        "the run says its deadline passed: {}",
         run.error.message
     );
     assert!(
@@ -2251,14 +2249,14 @@ fn a_loop_free_native_recursion_runs_out_of_fuel_within_one_stride() {
         run.tiers
     );
     assert!(
-        run.fuel_spent >= LIMIT,
-        "nothing stops a run short of its limit: spent {}",
-        run.fuel_spent
+        run.work >= cove_runtime::SAFEPOINT_STRIDE,
+        "nothing stops a run short of its first safepoint: did {}",
+        run.work
     );
     assert!(
-        run.fuel_spent - LIMIT <= cove_runtime::SAFEPOINT_STRIDE + TURN,
-        "the overspend is at most one stride and one level: spent {} against {LIMIT}",
-        run.fuel_spent
+        run.work <= cove_runtime::SAFEPOINT_STRIDE + TURN,
+        "and the first safepoint is at most one stride and one level in: did {}",
+        run.work
     );
 }
 
@@ -2279,9 +2277,9 @@ fn a_cancelled_loop_free_native_recursion_stops_within_one_stride() {
         run.error.message
     );
     assert!(
-        run.fuel_spent <= cove_runtime::SAFEPOINT_STRIDE + TURN,
-        "and it stopped at the first safepoint the descent took: spent {}",
-        run.fuel_spent
+        run.work <= cove_runtime::SAFEPOINT_STRIDE + TURN,
+        "and it stopped at the first safepoint the descent took: did {}",
+        run.work
     );
 }
 

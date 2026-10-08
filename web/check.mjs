@@ -268,7 +268,7 @@ for (const sample of SAMPLES) {
       also.instructions,
     );
     check(
-      `and it is a real workload: ${outcome.instructions} instructions, ${outcome.fuel} fuel`,
+      `and it is a real workload: ${outcome.instructions} instructions`,
       outcome.instructions > 1_000_000,
       true,
     );
@@ -300,7 +300,6 @@ check("answered", ran.answer, (held) =>
   isDeepStrictEqual(held, SAMPLES[0].expect.answer),
 );
 check("counted instructions", ran.instructions > 0, true);
-check("counted fuel", ran.fuel > 0, true);
 check("answered the disassembly too", ran.ir, compiled.ir);
 console.log(`\n  --- the disassembly the page shows ---\n${compiled.ir.trimEnd()}\n  ---\n`);
 
@@ -522,26 +521,21 @@ check(
 );
 console.log(`\n${spawned.diagnostics[0].rendered.trimEnd()}\n`);
 
-// ---- the two bounds ----------------------------------------------------
+// ---- the bound ---------------------------------------------------------
 
-console.log("a run past its fuel:");
 const looping = `export fn main() -> Int {
   var n = 0
   while true { n = n + 1 }
   n
 }
 `;
-const burnt = cove.run(looping, { fuel: 50_000 });
-check("stopped", burnt.outcome, "fuel");
-check("names the limit", burnt.diagnostics[0].message, (held) => held.includes("50000"));
 
 // The deadline is the check that the imported clock is load-bearing. With a
-// clock that never advanced this case would run until its fuel ran out and
-// report `fuel`, so `deadline` here is the evidence that `performance.now()`
-// is being read and compared.
+// clock that never advanced this case would never stop, so `deadline` here is
+// the evidence that `performance.now()` is being read and compared.
 console.log("\na run past its deadline:");
 const started = performance.now();
-const late = cove.run(looping, { fuel: 4_000_000_000, deadlineMs: 50 });
+const late = cove.run(looping, { deadlineMs: 50 });
 const took = performance.now() - started;
 check("stopped", late.outcome, "deadline");
 check("stopped near the deadline", took, (held) => held >= 40 && held < 5_000);

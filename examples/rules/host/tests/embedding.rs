@@ -5,7 +5,7 @@
 //! [`cove_rules::REVIEWS`] schema — and then asks one question of it. Between
 //! them they cover what issue #90 asks an embedding to demonstrate: a valid
 //! result, a schema mismatch caught before anything runs, a mismatch caught at
-//! the boundary, a host that fails, a run that spends its fuel, a capability
+//! the boundary, a host that fails, a run stopped by its limits, a capability
 //! that was not granted, a request identifier that links an invocation to
 //! every host call it made, and an additive and a breaking schema change.
 //!
@@ -23,6 +23,7 @@
 //! thread's stack is not one it chose.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cove_rules::{
     embedding, package_root, Decision, Fault, PullRequest, Recorded, ReviewPolicy, Reviews,
@@ -624,7 +625,7 @@ fn a_failed_invocation_leaves_the_session_serving() {
 /// This is what a `cove run` gets and it is right for what a `cove run` is,
 /// which is one invocation. For an application that decides one pull request
 /// per request it is a limit on the *process*: the first decision is inside
-/// it, and by the third there is no fuel left for anybody. Held here because
+/// it, and by the third there are no host calls left for anybody. Held here because
 /// it is still the behaviour of `embedding(..., limits)`, and because it is
 /// the control the case below is read against.
 #[test]
@@ -636,10 +637,9 @@ fn a_budget_on_the_registry_is_spent_over_every_invocation() {
             Reviews::new(cove_rules::samples()),
             &["reviews"],
             Limits {
-                // One decision spends about 735 instructions, and fuel is
-                // charged by the block, so this is enough for the first and
-                // not for three.
-                fuel: Some(1_200),
+                // One decision makes two host calls, `pull` and `record`, so
+                // this is enough for the first and not for three.
+                max_host_calls: Some(3),
                 ..Limits::default()
             },
         );
@@ -664,18 +664,18 @@ fn a_budget_on_the_registry_is_spent_over_every_invocation() {
         .iter()
         .filter_map(|outcome| outcome.as_ref().err())
         .next()
-        .expect("the fuel runs out before the third invocation");
-    assert!(exhausted.contains("fuel"), "{exhausted}");
+        .expect("the host calls run out before the third invocation");
+    assert!(exhausted.contains("host-call limit"), "{exhausted}");
 }
 
-/// **The same fuel, handed to each invocation, bounds each invocation.**
+/// **The same deadline, handed to each invocation, bounds each invocation.**
 ///
-/// The case above and this one differ in one call — `evaluate` against
-/// `evaluate_within` — and in nothing else: one compiled package, one
-/// `Runtime`, one `Vm`, one registry. Three requests that each fit the limit
-/// all answer, where three requests sharing it did not, and the fourth here
-/// is a request too big for its own limit, which stops and leaves the session
-/// serving the fifth.
+/// One compiled package, one `Runtime`, one `Vm`, one registry, and a limit
+/// handed to each `evaluate_within`: three requests that each fit it all
+/// answer, the fourth is a request too big for its own limit — a deadline
+/// already passed — which stops and leaves the session serving the fifth.
+/// The case below is the same shape for `max_host_calls`, which is the one
+/// the session-wide case above is read against.
 ///
 /// That is the whole of issue #152. An application running somebody else's
 /// rules wants to be told when a rule loops rather than to stop serving, and
@@ -685,14 +685,13 @@ fn a_budget_on_the_registry_is_spent_over_every_invocation() {
 /// that costs 237.
 /// A pull request too big to evaluate inside one safepoint stride.
 ///
-/// A fuel limit is a bound and not a point — ADR 0024, and ADR 0040 for the
-/// arithmetic of this backend — so a run is charged
-/// [`cove_runtime::SAFEPOINT_STRIDE`] instructions at a time and **no** limit,
-/// however small, stops a run that finishes inside the first stride. `req-2`
-/// used to sit a little over that line and sits a little under it since the
-/// lowering stopped emitting the clears a `return` made pointless: the same
-/// program spends less fuel, which is a lowering change moving a bound rather
-/// than a bound being broken.
+/// A stop is a bound and not a point — ADR 0024, and ADR 0040 for the
+/// arithmetic of this backend — so a run is asked whether it may continue
+/// every [`cove_runtime::SAFEPOINT_STRIDE`] instructions and **no** deadline,
+/// however short, stops a run that finishes inside the first stride. `req-2`
+/// sits a little under that line since the lowering stopped emitting the
+/// clears a `return` made pointless, which is a lowering change moving where
+/// a bound falls rather than a bound being broken.
 ///
 /// So the request that is too big for its own limit is built to be too big.
 /// Two hundred files and a hundred labels are several strides of rules,
@@ -706,7 +705,7 @@ fn oversized() -> PullRequest {
 }
 
 #[test]
-fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
+fn a_deadline_handed_to_one_invocation_bounds_that_invocation_alone() {
     let (generous, mean, after) = cove_runtime::on_cove_stack(|| {
         let package = compiled();
         let lowering = package
@@ -728,7 +727,7 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
                 .map(|request| {
                     each(
                         Limits {
-                            fuel: Some(1_200),
+                            deadline: Some(Duration::from_secs(60)),
                             ..Limits::default()
                         },
                         &samples[request],
@@ -737,7 +736,7 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
                 .collect();
             let mean = each(
                 Limits {
-                    fuel: Some(50),
+                    deadline: Some(Duration::ZERO),
                     ..Limits::default()
                 },
                 &oversized(),
@@ -746,7 +745,7 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
             // the request that ran out.
             let after = each(
                 Limits {
-                    fuel: Some(1_200),
+                    deadline: Some(Duration::from_secs(60)),
                     ..Limits::default()
                 },
                 &samples["req-3"],
@@ -758,12 +757,12 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
 
     assert!(
         generous.iter().all(Result::is_ok),
-        "each request has its own fuel: {generous:?}"
+        "each request has its own deadline: {generous:?}"
     );
     assert!(
         mean.as_ref()
             .expect_err("a request under its own limit stops")
-            .contains("fuel"),
+            .contains("deadline"),
         "{mean:?}"
     );
     assert_eq!(
@@ -777,8 +776,8 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
 /// A host-call limit belongs to a request the same way, and is the control
 /// that bounds what one request may do to the outside world.
 ///
-/// ADR 0024: `max_host_calls` bounds effects exactly, where fuel bounds work
-/// and bounds effects only to within a straight line. So this is the limit an
+/// ADR 0024: `max_host_calls` bounds effects exactly, where a deadline bounds
+/// time and not what is done in it. So this is the limit an
 /// application actually reaches for, and it is per request or it is not much
 /// use — one decision makes two calls, `pull` and `record`, and a limit of two
 /// spent over a session is a limit that permits one request ever.
@@ -832,9 +831,10 @@ fn a_host_call_limit_handed_to_one_invocation_bounds_that_invocation_alone() {
 /// The same limit per invocation on both backends.
 ///
 /// A budget is not a backend's, so the interpreter and `Vm` answer it the
-/// same way. What they do not owe each other is the *number*: ADR 0024 makes a
-/// fuel limit non-portable, so this uses `max_host_calls`, which counts calls
-/// and not work and therefore means the same thing on both.
+/// same way. What they do not owe each other is the *point* a stop falls at:
+/// ADR 0024 makes work non-portable between them, so this uses
+/// `max_host_calls`, which counts calls and not work and therefore means the
+/// same thing on both.
 #[test]
 fn both_backends_bound_one_invocation_the_same_way() {
     for vm in [false, true] {

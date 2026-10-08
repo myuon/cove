@@ -1212,7 +1212,7 @@ pub enum Inst {
     /// The copy is made in bounded chunks with a safepoint between them, and
     /// that is not a refinement of the charge but the thing that makes it
     /// sound. A charge taken only *after* an arbitrarily large copy would let
-    /// one instruction run arbitrarily far past a fuel or cancellation bound
+    /// one instruction run arbitrarily far past a deadline or cancellation bound
     /// before anything looked, which
     /// [ADR 0040](../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
     /// `S + T` forbids. One chunk is one stride of work in either storage — a
@@ -1397,8 +1397,8 @@ pub enum Inst {
     ///
     /// Two answers are reached before any of it and charge no bulk work,
     /// because neither examines a unit: an empty needle, and a needle longer
-    /// than `haystack_len - from`. The instruction's own single unit of fuel is
-    /// unchanged, so a fast path is one fuel and nothing else — the accounting
+    /// than `haystack_len - from`. The instruction's own single unit of work is
+    /// unchanged, so a fast path is one unit and nothing else — the accounting
     /// `std.string.endsWith`'s length refusal already has.
     ///
     /// Otherwise the needle is prepared and the haystack consumed in steps of

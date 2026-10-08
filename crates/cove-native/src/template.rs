@@ -2686,7 +2686,7 @@ impl<'a> Emit<'a> {
     /// allocates, so nothing here can collect. The words the copy moves are added
     /// to [`WORK`] instead, which is where every other unit of compiled work
     /// waits for the next poll: the same `words_of_bytes(count)` the chunk loop
-    /// charges, landing in the same `bulk_work` when it is paid. Fuel is the same
+    /// charges, landing in the same `bulk_work` when it is paid. Work is the same
     /// sum; what moves is only *which* poll sees it, by at most
     /// `SHORT_COPY_BYTES / 8` words — ADR 0040's `T`, as for any straight-line
     /// instruction.
@@ -4188,7 +4188,7 @@ impl<'a> Emit<'a> {
     ///
     /// ADR 0060 is the decision and [`NativeCtx::poll_at`] is the contract: the
     /// threshold is what is *left* of the machine's stride, so this compare is
-    /// `encoded::dispatch`'s `work() - charged_work >= SAFEPOINT_STRIDE` asked
+    /// `encoded::dispatch`'s `work() - checked_work >= SAFEPOINT_STRIDE` asked
     /// in the coordinate compiled code keeps.
     fn safepoint(&mut self, pc: u32) {
         let through = self.label();

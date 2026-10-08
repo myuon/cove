@@ -30,10 +30,10 @@
 //!
 //! # What this does not charge
 //!
-//! A growth copies the live prefix and is not charged fuel for it, which is
+//! A growth copies the live prefix and is not charged work for it, which is
 //! what both families did before they shared this. ADR 0052 says a growth copy
-//! is proportional work; charging it changes the `fuel_spent` a program
-//! observes, and that is a decision of its own (issue #378, Q13) rather than a
+//! is proportional work; charging it moves the safepoint schedule a program
+//! runs on, and that is a decision of its own (issue #378, Q13) rather than a
 //! side effect of moving the code.
 
 use std::sync::Arc;

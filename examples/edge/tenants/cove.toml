@@ -3,7 +3,7 @@
 # A package of its own, so that `examples/`'s `cove check` and API snapshot do
 # not take these modules in: they name host modules (`edge`, `kv`, `upstream`,
 # `log`) that only the edge server registers. The tables reuse the format
-# `cove run` reads — `entry`, `allow`, `fuel`, `deadline`, `max_host_calls` —
+# `cove run` reads — `entry`, `allow`, `deadline`, `max_host_calls` —
 # because what an edge server grants a tenant is what `cove run` grants a
 # program. `cove run` itself cannot start them: each entry takes an
 # `edge.Request`, which only the server can supply.
@@ -14,7 +14,8 @@
 [run.hello]
 entry = "hello.handle"
 allow = []
-fuel = 2000000
+# `/spin` never answers on its own; the deadline is what stops it.
+deadline = "200ms"
 
 [run.counter]
 entry = "counter.handle"
@@ -53,13 +54,13 @@ max_host_calls = 4
 
 # CPU-heavy on purpose: the primes up to `?n=` counted by trial division,
 # milliseconds of VM time per request and never parked — about 4.5 ms at the
-# default `n=20000`, 65 ms at 150000. Pure, so granted nothing; fuel is what
-# bounds it. `n=150000` spends 14.6 million and the cap, 200000, about 22
-# million, so 30 million admits every size the tenant accepts.
+# default `n=20000`, 65 ms at 150000. Pure, so granted nothing; the deadline is
+# what bounds it. The cap, 200000, takes well under a second on the VM, so five
+# seconds admits every size the tenant accepts.
 [run.crunch]
 entry = "crunch.handle"
 allow = []
-fuel = 30000000
+deadline = "5s"
 
 # Over-reaching on purpose: its entry requires `upstream` as well.
 [run.greedy]

@@ -135,7 +135,6 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
 
     let mut entry = None;
     let mut allow = Vec::new();
-    let mut fuel = None;
     let mut deadline = None;
     let mut max_host_calls = None;
     let mut max_tasks = None;
@@ -162,9 +161,11 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
                     allow.push(item.to_string());
                 }
             }
-            "fuel" => {
-                fuel = Some(parse_non_negative_integer(name, "fuel", value)?);
-            }
+            // ADR 0091 removed the fuel allowance. A table that still sets
+            // one is refused by name rather than read as an unknown key or,
+            // worse, ignored: a run that used to be bounded must not quietly
+            // become an unbounded one.
+            "fuel" => return Err(removed_fuel(name)),
             "deadline" => {
                 let text = value
                     .as_str()
@@ -199,7 +200,6 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
     Ok(RunConfig {
         entry,
         allow,
-        fuel,
         deadline,
         max_host_calls,
         max_tasks,
@@ -237,7 +237,18 @@ fn parse_generates_path(name: &str, text: &str) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
-/// Parses a non-negative integer key, such as `fuel` or `max_host_calls`.
+/// The diagnostic for a `[run.<name>]` table that still sets `fuel`.
+///
+/// Public so that a caller holding a `--fuel` flag can say the same thing in
+/// the same words.
+pub fn removed_fuel(name: &str) -> String {
+    format!(
+        "run `{name}`: `fuel` was removed by ADR 0091; bound the run with `deadline`, \
+         or have its host cancel it"
+    )
+}
+
+/// Parses a non-negative integer key, such as `max_tasks` or `max_host_calls`.
 fn parse_non_negative_integer(name: &str, key: &str, value: &toml::Value) -> Result<u64, String> {
     let int = value
         .as_integer()
@@ -284,8 +295,6 @@ pub struct RunConfig {
     pub entry: String,
     /// Coarse capabilities granted to this run.
     pub allow: Vec<String>,
-    /// The total fuel this run may spend before the runtime stops it.
-    pub fuel: Option<u64>,
     /// The wall-clock deadline this run may take before the runtime stops
     /// it, parsed from a duration string such as `"500ms"`.
     pub deadline: Option<Duration>,
@@ -392,29 +401,25 @@ mod tests {
     fn a_run_table_with_no_resource_keys_still_parses() {
         let config = parse("[run.hello]\nentry = \"hello.main\"\n").unwrap();
         let hello = &config.runs["hello"];
-        assert_eq!(hello.fuel, None);
         assert_eq!(hello.deadline, None);
         assert_eq!(hello.max_host_calls, None);
         assert_eq!(hello.max_tasks, None);
         assert_eq!(hello.trace, None);
     }
 
+    /// ADR 0091: a table that still sets `fuel` is refused with a diagnostic
+    /// that names the removal and what to use instead, whatever the value.
     #[test]
-    fn parses_fuel() {
-        let config = parse("[run.hello]\nentry = \"hello.main\"\nfuel = 1000\n").unwrap();
-        assert_eq!(config.runs["hello"].fuel, Some(1000));
-    }
-
-    #[test]
-    fn rejects_non_integer_fuel() {
-        let err = parse("[run.hello]\nentry = \"hello.main\"\nfuel = \"1000\"\n").unwrap_err();
-        assert_eq!(err, "run `hello`: `fuel` must be an integer");
-    }
-
-    #[test]
-    fn rejects_negative_fuel() {
-        let err = parse("[run.hello]\nentry = \"hello.main\"\nfuel = -1\n").unwrap_err();
-        assert_eq!(err, "run `hello`: `fuel` must not be negative");
+    fn a_fuel_key_is_refused_with_a_migration_diagnostic() {
+        for value in ["1000", "\"1000\"", "-1"] {
+            let err = parse(&format!(
+                "[run.hello]\nentry = \"hello.main\"\nfuel = {value}\n"
+            ))
+            .unwrap_err();
+            assert_eq!(err, removed_fuel("hello"));
+            assert!(err.contains("removed by ADR 0091"), "{err}");
+            assert!(err.contains("`deadline`"), "{err}");
+        }
     }
 
     #[test]

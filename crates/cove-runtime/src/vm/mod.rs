@@ -349,7 +349,7 @@ impl<'a> Vm<'a> {
     /// heap is a fuller account of a run's Cove-owned values than the old
     /// per-task heap ever was, per ADR 0034, but a Host's own allocations,
     /// open resources and each task's stack region still sit outside it, so
-    /// naming `heap_words` beside `fuel` and `max_host_calls` would still
+    /// naming `heap_words` beside `deadline` and `max_host_calls` would still
     /// promise a bound this number cannot back.
     ///
     /// So it is a constructor argument, the heap's capacity named as what it
@@ -710,7 +710,7 @@ impl<'a> Vm<'a> {
     }
 
     /// The accounting of this run — or of the last one, once it has
-    /// answered: what it spent in fuel and host calls, and how long it took.
+    /// answered: the host calls it made, and how long it took.
     ///
     /// This is where an embedder reads what an [`Vm::invoke_within`] spent.
     /// A backend built over a registry with a budget installed by
@@ -764,6 +764,21 @@ impl<'a> Vm<'a> {
     /// How many instructions this run has executed.
     pub fn instructions(&self) -> u64 {
         self.machine.instructions()
+    }
+
+    /// The work this machine has done, in the units its safepoint stride
+    /// counts: one per instruction dispatched, one per word a bulk operation
+    /// moved, and the IR work compiled code counted statically and paid at its
+    /// polls.
+    ///
+    /// A diagnostic, as [`Vm::instructions`] is, and like it cumulative over
+    /// every run this machine has made and the entry task's own: the
+    /// coordinate ADR 0040's stop bounds and ADR 0084's yields are stated in,
+    /// readable so that a test can measure them. Nothing is limited by it —
+    /// [ADR 0091](../../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)
+    /// removed the fuel allowance this used to be reported as.
+    pub fn work(&self) -> u64 {
+        self.machine.work()
     }
 
     /// Words the heap region occupies, free blocks included.

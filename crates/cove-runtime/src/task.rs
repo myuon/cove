@@ -415,7 +415,7 @@ pub(crate) fn spawn_into<H: Tasking>(
     // Charged before this task is given an id, an event, or a thread: a
     // thread that has started is a resource already taken, which no later
     // safepoint could refuse. A run past its concurrency limit is stopped
-    // here the way an exhausted fuel budget stops one, rather than made to
+    // here the way an expired deadline stops one, rather than made to
     // wait for a sibling to end, because waiting would be a scheduling
     // policy and ADR 0008 has none.
     if let Some(Err(error)) = host.budget().map(|budget| {

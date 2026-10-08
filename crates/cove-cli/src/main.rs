@@ -178,7 +178,7 @@ commands from stdin: `break`, `continue`, `step`, `next`, `stepi`, `finish`,
 `object`, `quit`. `help` at the prompt lists them and `help limits` says what
 `step` and `break` get wrong, which is worth reading once: spans are
 per-instruction and expression-level, so `one source line` is a rule with
-edges rather than a fact the program records. It takes `--fuel`, `--deadline`,
+edges rather than a fact the program records. It takes `--deadline`,
 `--max-host-calls`, `--max-tasks`, `--files-root` and `--allow-exec`, and no
 `--backend`: a debugger is a feature of the linear-memory machine and that is
 the only backend it runs on. A `--deadline` keeps elapsing while you stand at
@@ -186,14 +186,13 @@ the prompt, which is what a deadline means.
 
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):
-  --fuel <n>            stop the run after <n> fuel is spent
   --deadline <duration>  stop the run after <duration> has elapsed, e.g. `500ms`, `5s`, `1h`
   --max-host-calls <n>  stop the run after <n> host calls
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
   --backend <ast|vm|native>  which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle, or `native`, ADR 0055's experimental native tier — compiled machine code for the functions it can lower and the `vm` for the rest, reporting which was which. `native` needs a build with `--features template` and an x86-64 host, and says so rather than falling back when it does not have one
-  --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
+  --stats               print the backend's lowering and execution times and the instructions it executed, then host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
   --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
   --profile-rows <n|all>  how many rows each table of `--profile` prints, 40 by default; `all` prints every one, which is the per-site reading a script aggregates. Needs `--profile`
@@ -1381,7 +1380,6 @@ pub(crate) fn execute_entry(
     });
 
     let limits = Limits {
-        fuel: flags.fuel.or(run.fuel),
         deadline: flags.deadline.or(run.deadline),
         max_host_calls: flags.max_host_calls.or(run.max_host_calls),
         max_call_depth: None,
@@ -2249,7 +2247,7 @@ fn print_backend_stats(
     }
 }
 
-/// A `--backend`, `--fuel`, `--deadline`, `--max-host-calls`, `--trace`,
+/// A `--backend`, `--deadline`, `--max-host-calls`, `--trace`,
 /// `--stats`, `--files-root`, or `--allow-exec` flag to `cove run`, parsed
 /// from anywhere after the run name.
 ///
@@ -2274,7 +2272,6 @@ pub(crate) struct RunFlags {
     /// with this one. `ast` remains what a disagreement is decided by, which
     /// is a different job from running a program.
     backend: Backend,
-    fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
     /// The tasks the run may hold alive at once, across the whole run,
@@ -2312,7 +2309,6 @@ impl RunFlags {
     pub(crate) fn none() -> RunFlags {
         RunFlags {
             backend: Backend::default_for_a_run(),
-            fuel: None,
             deadline: None,
             max_host_calls: None,
             max_tasks: None,
@@ -2364,8 +2360,8 @@ pub(crate) enum Backend {
     ///
     /// It is a third variant rather than a modifier on `Vm`, and the reason is
     /// what a reader of a `--stats` line or a trace header needs: a native run
-    /// dispatches fewer instructions, reports a different `fuel_spent` — ADR 0040
-    /// makes fuel backend-specific — and is a *mixture* of two tiers. None of
+    /// dispatches fewer instructions, reaches its safepoints at different
+    /// points, and is a *mixture* of two tiers. None of
     /// those is `vm` with a flag set.
     ///
     /// What it is not is a third *semantics*. A function the code generator
@@ -2563,7 +2559,6 @@ impl TraceTarget {
 fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
     let mut flags = RunFlags {
         backend: Backend::default_for_a_run(),
-        fuel: None,
         deadline: None,
         max_host_calls: None,
         max_tasks: None,
@@ -2588,14 +2583,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         }
         match args[i].as_str() {
             "--" => passthrough = true,
-            "--fuel" => {
-                let value = flag_value(args, &mut i, "--fuel")?;
-                flags.fuel = Some(value.parse().map_err(|_| {
-                    CliError::Message(format!(
-                        "`--fuel` must be a non-negative integer, found `{value}`"
-                    ))
-                })?);
-            }
+            "--fuel" => return Err(crate::removed_fuel_flag()),
             "--deadline" => {
                 let value = flag_value(args, &mut i, "--deadline")?;
                 flags.deadline = Some(
@@ -2696,6 +2684,19 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
 /// Consumes and returns the value following the flag at `args[*i]`,
 /// advancing `*i` to point at it so the caller's loop increment lands on the
 /// next unconsumed argument.
+/// What `--fuel` answers on `cove run`, `cove debug` and `cove build`.
+///
+/// [ADR 0091](../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)
+/// removed the fuel allowance. The flag is refused by name rather than
+/// dropped, or taken for a program argument: a command that used to bound its
+/// run must not quietly become one that does not.
+pub(crate) fn removed_fuel_flag() -> CliError {
+    CliError::Message(
+        "`--fuel` was removed by ADR 0091; bound the run with `--deadline`, or cancel it from outside"
+            .to_string(),
+    )
+}
+
 pub(crate) fn flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, CliError> {
     let value = args
         .get(*i + 1)
@@ -2774,8 +2775,8 @@ impl TraceSink for CompositeSink {
     }
 }
 
-/// Prints fuel spent, host calls, elapsed time, host-call wait, and the heap
-/// to stderr, for `--stats`.
+/// Prints host calls, elapsed time, host-call wait, and the heap to stderr,
+/// for `--stats`.
 ///
 /// `irreversible_writes` is the count of calls whose Host API schema declares
 /// them irreversible: how much of what this run did cannot be taken back. The
@@ -2785,12 +2786,10 @@ impl TraceSink for CompositeSink {
 /// so a run whose tasks collected at the same time can report more pause than
 /// it took wall-clock time.
 fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, memory: &Memory) {
-    let counters =
-        hosts.with_budget(|budget| (budget.fuel_spent(), budget.host_calls(), budget.elapsed()));
-    if let Some((fuel_spent, host_calls, elapsed)) = counters {
+    let counters = hosts.with_budget(|budget| (budget.host_calls(), budget.elapsed()));
+    if let Some((host_calls, elapsed)) = counters {
         eprintln!(
-            "stats: fuel_spent={} host_calls={} irreversible_writes={} elapsed={:?} wait={:?}",
-            fuel_spent,
+            "stats: host_calls={} irreversible_writes={} elapsed={:?} wait={:?}",
             host_calls,
             hosts.irreversible_writes(),
             elapsed,
@@ -3534,6 +3533,18 @@ module auth
             parse_run_flags(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).is_err()
         };
         assert!(refused(&["--profile-rows", "7"]), "no profile to shape");
+        // ADR 0091: `--fuel` is refused by name, not taken for a program
+        // argument, and the refusal says what to use instead.
+        assert!(refused(&["--fuel", "5"]));
+        match parse_run_flags(&["--fuel".to_string(), "5".to_string()]) {
+            Err(CliError::Message(message)) => {
+                assert!(message.contains("removed by ADR 0091"), "{message}");
+                assert!(message.contains("--deadline"), "{message}");
+            }
+            _ => panic!("`--fuel` must be refused with a message"),
+        }
+        // After `--` it is the program's, as every flag is.
+        assert_eq!(flags(&["--", "--fuel"]).program_args, ["--fuel"]);
         assert!(refused(&["--profile", "--profile-rows", "many"]));
         assert!(refused(&["--profile", "--profile-rows"]));
     }

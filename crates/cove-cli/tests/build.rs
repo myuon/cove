@@ -114,11 +114,11 @@ fn a_cove_toml_beside_a_built_binary_changes_nothing() {
     let program = dir.install(built_hello());
 
     // Every line of this would change the run if it were read: a different
-    // entry, a capability `[run.hello]` never granted, and a fuel limit no
+    // entry, a capability `[run.hello]` never granted, and a deadline no
     // program can finish under. `cove run` would honour all three.
     std::fs::write(
         dir.path().join("cove.toml"),
-        "[run.hello]\nentry = \"hello.greeting\"\nallow = [\"console\", \"files\", \"process\"]\nfuel = 1\n",
+        "[run.hello]\nentry = \"hello.greeting\"\nallow = [\"console\", \"files\", \"process\"]\ndeadline = \"1ns\"\n",
     )
     .expect("the config is written");
 

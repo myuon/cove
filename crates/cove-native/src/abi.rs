@@ -434,7 +434,7 @@ pub enum Outcome {
     Raised = 1,
     /// A safepoint helper answered "stop".
     ///
-    /// Why — cancellation, a deadline, exhausted fuel — is a question the
+    /// Why — cancellation, a deadline, a task-local stop — is a question the
     /// helper already knows the answer to, so it is not repeated here. The
     /// caller resumes its own stop path.
     Stopped = 2,
@@ -602,7 +602,7 @@ impl Raise {
 ///
 /// `false` means stop. The helper is where [ADR 0040]'s three-step order
 /// lives, in that order and not this crate's: cancellation and task-local
-/// stops, then fuel and deadline accounting, then the collector rendezvous.
+/// stops, then the run's cancellation and deadline, then the collector rendezvous.
 /// None of those three is implemented in compiled code, and none of them
 /// should be — they are Rust the runtime already has, and ADR 0055's
 /// "Runtime operations whose correctness already lives in Rust … remain
@@ -1688,8 +1688,8 @@ pub struct NativeCtx {
     /// answered.
     ///
     /// It is a count of *IR instructions*, statically accumulated per basic
-    /// block, and it is therefore not the encoded tier's `fuel_spent` and
-    /// must never be reported as it. ADR 0055 says so twice: fuel is
+    /// block, and it is therefore not the encoded tier's instruction count and
+    /// must never be reported as it. ADR 0055 says so twice: work is
     /// backend-specific, and "aggregated static IR-work counts … are a
     /// different metric with a different name".
     pub pending_work: u64,
@@ -1714,7 +1714,7 @@ pub struct NativeCtx {
     ///   already done and not yet charged. The runtime publishes what is left
     ///   of the stride — `SAFEPOINT_STRIDE - (work - charged)` — so that the
     ///   poll compiled code takes lands at the same coordinate the dispatch
-    ///   loop's own `work() - charged_work >= SAFEPOINT_STRIDE` would have
+    ///   loop's own `work() - checked_work >= SAFEPOINT_STRIDE` would have
     ///   landed at. A constant here would let a compiled call gather a whole
     ///   second stride on top of an encoded one, which is a *looser* bound
     ///   than [ADR 0040] states.

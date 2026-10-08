@@ -110,8 +110,9 @@ fn each_tenant_answers_and_the_over_reaching_one_is_refused() {
     assert_eq!(stat(&server, "parks") - parks_before, 3);
 
     let (status, body) = get(server.addr, "/hello/spin").unwrap();
-    assert_eq!(status, 500);
-    assert!(body.contains("fuel budget of 2000000 exhausted"), "{body}");
+    // Stopped by its deadline, which the server answers as a gateway timeout.
+    assert_eq!(status, 504);
+    assert!(body.contains("deadline of 200ms exceeded"), "{body}");
     assert!(body.contains("hello/hello.cove:23"), "{body}");
 
     let (status, body) = get(server.addr, "/greedy/").unwrap();

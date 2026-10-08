@@ -1203,44 +1203,33 @@ export fn main() -> Int {
     /// loop's one comparison may not move the schedule by a single
     /// instruction.
     ///
-    /// The instrument is the fuel limit, because a safepoint is the only
-    /// place fuel is charged: a run whose budget cannot survive its first
-    /// charge stops at exactly the instruction the first safepoint is at,
-    /// and one that can survive that but not the second stops at the second.
+    /// The instrument is an expired deadline, because a safepoint is where
+    /// the deadline is asked and the clock is read at every one: a run whose
+    /// deadline has already passed stops at exactly the instruction the first
+    /// safepoint is at. The later safepoints' counts are the arithmetic
+    /// `crate::vm::exec`'s `the_next_question_is_a_stride_of_work_past_the_last_charge`
+    /// proves.
     #[test]
     fn the_safepoint_fires_at_the_same_counts_as_it_did_before() {
         let world = World::new(LOOP);
-        for (fuel, expected) in [
-            (1, SAFEPOINT_STRIDE),
-            (SAFEPOINT_STRIDE + 1, 2 * SAFEPOINT_STRIDE),
-        ] {
-            let limits = Limits {
-                fuel: Some(fuel),
-                ..Limits::default()
-            };
-            let mut vm = world.plain();
-            let error = vm
-                .run_entry_within(Budget::new(limits.clone()), "m", "main", Vec::new())
-                .expect_err("a run out of fuel does not answer");
-            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
-            assert_eq!(
-                vm.instructions(),
-                expected,
-                "unwatched, under a fuel limit of {fuel}"
-            );
+        let limits = Limits {
+            deadline: Some(std::time::Duration::ZERO),
+            ..Limits::default()
+        };
+        let mut vm = world.plain();
+        let error = vm
+            .run_entry_within(Budget::new(limits.clone()), "m", "main", Vec::new())
+            .expect_err("a run past its deadline does not answer");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Deadline);
+        assert_eq!(vm.instructions(), SAFEPOINT_STRIDE, "unwatched");
 
-            let seen = Seen::default();
-            let mut vm = world.watched(&seen);
-            let error = vm
-                .run_entry_within(Budget::new(limits), "m", "main", Vec::new())
-                .expect_err("a run out of fuel does not answer");
-            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
-            assert_eq!(
-                vm.instructions(),
-                expected,
-                "watched, under a fuel limit of {fuel}"
-            );
-        }
+        let seen = Seen::default();
+        let mut vm = world.watched(&seen);
+        let error = vm
+            .run_entry_within(Budget::new(limits), "m", "main", Vec::new())
+            .expect_err("a run past its deadline does not answer");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Deadline);
+        assert_eq!(vm.instructions(), SAFEPOINT_STRIDE, "watched");
     }
 
     /// **A stop reads the frame the machine is really in, not the one it was

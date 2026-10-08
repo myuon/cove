@@ -913,13 +913,11 @@ impl Fakes {
 
 /// The budgets a case runs under.
 ///
-/// Everything `[run.<name>]` sets except fuel and the deadline, for
-/// `differential.rs`'s reason: fuel is backend-specific — an instruction is
-/// not an AST node — and a deadline is wall-clock, so either would make the
+/// Everything `[run.<name>]` sets except the deadline, for
+/// `differential.rs`'s reason: a deadline is wall-clock, so it would make the
 /// two sides stop at different points by construction rather than by fault.
 fn limits(run: &RunConfig) -> Limits {
     Limits {
-        fuel: None,
         deadline: None,
         max_host_calls: run.max_host_calls,
         max_call_depth: None,

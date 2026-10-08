@@ -64,7 +64,6 @@ neither, which is why it stays the way programs are iterated on.
 flags:
   --out <path>          where to write the executable; defaults to
                         `target/<name>` in the package root
-  --fuel <n>            bake in a limit of <n> fuel
   --deadline <duration>  bake in a deadline, e.g. `500ms`, `5s`, `1h`
   --max-host-calls <n>  bake in a limit of <n> host calls
   --max-tasks <n>       bake in a limit of <n> tasks alive at once
@@ -127,7 +126,6 @@ pub(crate) fn cmd_build(args: &[String]) -> Result<(), CliError> {
 struct BuildFlags {
     name: String,
     out: Option<PathBuf>,
-    fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
     max_tasks: Option<u64>,
@@ -146,7 +144,6 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
     let mut flags = BuildFlags {
         name: String::new(),
         out: None,
-        fuel: None,
         deadline: None,
         max_host_calls: None,
         max_tasks: None,
@@ -158,14 +155,7 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
     while i < args.len() {
         match args[i].as_str() {
             "--out" => flags.out = Some(PathBuf::from(flag_value(args, &mut i, "--out")?)),
-            "--fuel" => {
-                let value = flag_value(args, &mut i, "--fuel")?;
-                flags.fuel = Some(value.parse().map_err(|_| {
-                    CliError::Message(format!(
-                        "`--fuel` must be a non-negative integer, found `{value}`"
-                    ))
-                })?);
-            }
+            "--fuel" => return Err(crate::removed_fuel_flag()),
             "--deadline" => {
                 let value = flag_value(args, &mut i, "--deadline")?;
                 flags.deadline = Some(
@@ -262,7 +252,6 @@ pub(crate) struct BuildPlan {
     /// The fully qualified entry function, such as `hello.main`.
     pub(crate) entry: String,
     pub(crate) allow: Vec<String>,
-    pub(crate) fuel: Option<u64>,
     pub(crate) deadline: Option<Duration>,
     pub(crate) max_host_calls: Option<u64>,
     pub(crate) max_tasks: Option<u64>,
@@ -350,7 +339,6 @@ fn plan(
         name: name.clone(),
         entry: run.entry.clone(),
         allow: run.allow.clone(),
-        fuel: flags.fuel.or(run.fuel),
         deadline: flags.deadline.or(run.deadline),
         max_host_calls: flags.max_host_calls.or(run.max_host_calls),
         max_tasks: flags.max_tasks.or(run.max_tasks),
@@ -576,7 +564,6 @@ fn main() -> std::process::ExitCode {{
             name: {name_literal},
             entry: {entry},
             allow: &[{allow}],
-            fuel: {fuel},
             deadline_nanos: {deadline},
             max_host_calls: {max_host_calls},
             max_tasks: {max_tasks},
@@ -593,7 +580,6 @@ fn main() -> std::process::ExitCode {{
         name_literal = rust_string(&plan.name),
         entry = rust_string(&plan.entry),
         allow = rust_list(plan.allow.iter().map(String::as_str)),
-        fuel = rust_option(plan.fuel.map(|f| f.to_string())),
         deadline = rust_option(plan.deadline.map(|d| format!("{}", d.as_nanos()))),
         max_host_calls = rust_option(plan.max_host_calls.map(|n| n.to_string())),
         max_tasks = rust_option(plan.max_tasks.map(|n| n.to_string())),
@@ -724,9 +710,6 @@ fn install(plan: &BuildPlan, artifact: &Path) -> Result<(), CliError> {
 /// What `cove build` prints when it has written an executable.
 pub(crate) fn build_summary(plan: &BuildPlan) -> String {
     let mut limits = Vec::new();
-    if let Some(fuel) = plan.fuel {
-        limits.push(format!("fuel {fuel}"));
-    }
     if let Some(deadline) = plan.deadline {
         limits.push(format!("deadline {deadline:?}"));
     }
@@ -787,7 +770,6 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         BuildFlags {
             name: name.to_string(),
             out: None,
-            fuel: None,
             deadline: None,
             max_host_calls: None,
             max_tasks: None,
@@ -817,13 +799,12 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         let dir = TempDir::new("build-plan");
         fixture(
             dir.path(),
-            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\nfuel = 1000\ndeadline = \"5s\"\nmax_host_calls = 3\nmax_tasks = 4\n",
+            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\ndeadline = \"5s\"\nmax_host_calls = 3\nmax_tasks = 4\n",
         );
 
         let plan = plan_ok(dir.path(), &flags("app"));
         assert_eq!(plan.entry, "app.main");
         assert_eq!(plan.allow, ["console"]);
-        assert_eq!(plan.fuel, Some(1000));
         assert_eq!(plan.deadline, Some(Duration::from_secs(5)));
         assert_eq!(plan.max_host_calls, Some(3));
         assert_eq!(plan.max_tasks, Some(4));
@@ -843,15 +824,15 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         let dir = TempDir::new("build-limits");
         fixture(
             dir.path(),
-            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\nfuel = 1000\n",
+            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\ndeadline = \"5s\"\n",
         );
 
         let mut flags = flags("app");
-        flags.fuel = Some(7);
+        flags.deadline = Some(Duration::from_millis(7));
         flags.max_host_calls = Some(2);
         flags.max_tasks = Some(6);
         let plan = plan_ok(dir.path(), &flags);
-        assert_eq!(plan.fuel, Some(7));
+        assert_eq!(plan.deadline, Some(Duration::from_millis(7)));
         assert_eq!(plan.max_host_calls, Some(2));
         assert_eq!(plan.max_tasks, Some(6));
     }
@@ -959,7 +940,10 @@ export fn main() -> Result<Unit, Error> {
         assert!(main.contains("entry: \"app.main\""), "{main}");
         assert!(main.contains("allow: &[\"console\"]"), "{main}");
         assert!(main.contains("deadline_nanos: Some(5000000000)"), "{main}");
-        assert!(main.contains("fuel: None"), "{main}");
+        assert!(
+            !main.contains("fuel"),
+            "ADR 0091: no fuel is baked in\n{main}"
+        );
         assert!(
             main.contains("include_str!(\"embedded/app/main.cove\")"),
             "{main}"
@@ -978,7 +962,7 @@ export fn main() -> Result<Unit, Error> {
         let dir = TempDir::new("build-summary");
         fixture(
             dir.path(),
-            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\nfuel = 10\n",
+            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\nmax_host_calls = 10\n",
         );
         let plan = plan_ok(dir.path(), &flags("app"));
         let summary = build_summary(&plan);
@@ -989,7 +973,39 @@ export fn main() -> Result<Unit, Error> {
         assert!(summary.contains("entry:   app.main"), "{summary}");
         assert!(summary.contains("backend: vm"), "{summary}");
         assert!(summary.contains("grants:  console"), "{summary}");
-        assert!(summary.contains("limits:  fuel 10"), "{summary}");
+        assert!(summary.contains("limits:  max host calls 10"), "{summary}");
+    }
+
+    /// ADR 0091: `--fuel` is refused with the migration diagnostic rather than
+    /// baked in or ignored, and so is a `[run.<name>]` table that still sets
+    /// `fuel`.
+    #[test]
+    fn fuel_is_refused_with_a_migration_diagnostic() {
+        let refused =
+            match parse_build_flags(&["app".to_string(), "--fuel".to_string(), "10".to_string()]) {
+                Err(CliError::Message(message)) => message,
+                Err(_) => panic!("refused with a message"),
+                Ok(_) => panic!("`--fuel` must be refused"),
+            };
+        assert!(refused.contains("removed by ADR 0091"), "{refused}");
+        assert!(refused.contains("--deadline"), "{refused}");
+
+        let dir = TempDir::new("build-fuel");
+        fixture(
+            dir.path(),
+            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\nfuel = 10\n",
+        );
+        let message = match plan_for(dir.path(), &flags("app")) {
+            Err(CliError::Message(message)) => message,
+            Err(CliError::Diagnostics { items, .. }) => items
+                .iter()
+                .map(|item| item.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(_) => panic!("refused with a message"),
+            Ok(_) => panic!("a table that sets `fuel` must be refused"),
+        };
+        assert!(message.contains("removed by ADR 0091"), "{message}");
     }
 
     #[test]

@@ -37,8 +37,8 @@
 //!
 //! - **a safepoint** — [`safepoint`] below, which is
 //!   [`Machine::safepoint`] and therefore [ADR 0040]'s three-step order in that
-//!   order: cancellation and task-local stops, then fuel and deadline
-//!   accounting, then the collector rendezvous;
+//!   order: cancellation and task-local stops, then the run's cancellation and
+//!   deadline, then the collector rendezvous;
 //! - **a call** — [`call`] below, which opens the callee's frame with
 //!   `encoded::open_frame` and runs it on whichever tier it is on. Compiled code
 //!   does not open a frame, copy an argument or choose a tier;
@@ -681,7 +681,7 @@ unsafe fn republish(ctx: *mut NativeCtx, host: *mut Bridge<'_, '_>) {
 /// `Machine::instructions`, which is ADR 0055's "It must not silently label
 /// statically counted IR in native blocks as dispatched instructions": the
 /// opcode counter stays a count of opcodes the dispatch loop dispatched, and
-/// what fuel is stated in is `Machine::work`, which is the sum.
+/// what the safepoint stride is stated in is `Machine::work`, which is the sum.
 ///
 /// # Safety
 ///
@@ -3038,7 +3038,7 @@ unsafe extern "C" fn call_ablated<const MASK: u64>(
 /// 2. the frame's program counter is synchronised, so a collection walks a
 ///    current frame;
 /// 3. the stride is tested, and when it has been reached — and only then — the
-///    safepoint is taken: cancellation, then fuel and the deadline, then the
+///    safepoint is taken: cancellation, then the deadline, then the
 ///    collector rendezvous. That is [ADR 0078], which makes a call a poll as
 ///    ADR 0060 made a backedge one. Before it every call took the safepoint,
 ///    and on `examples/cq` that was 16.8% of the native run spent being told
@@ -3495,7 +3495,7 @@ unsafe fn mediation_again(
     let budget = (*host).budget;
     let opened = {
         let machine = &mut *machine;
-        // The charge itself is not repeated: `bulk_work` is fuel, and doubling a
+        // The charge itself is not repeated: `bulk_work` is stride work, and doubling a
         // charge would move a safepoint rather than cost one add.
         machine.sync(pc as usize);
         let caller = machine

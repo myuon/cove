@@ -49,7 +49,7 @@ use crate::wallclock::Instant;
 /// # An operation that blocks
 ///
 /// A host call is a hole in the run's safepoint chain. The interpreter checks
-/// fuel, the deadline, and cancellation at loop back edges, calls, and
+/// the deadline and cancellation at loop back edges, calls, and
 /// `await`, and a program sitting inside a host reaches none of the three;
 /// [`Budget::charge_host_call`] checks the deadline and the cancellation flag
 /// once more before dispatch, but that bounds when a call *starts*, not how
@@ -336,8 +336,8 @@ pub enum HostAnswer {
 /// arrived. Nothing here counts invocations and nothing makes the second one
 /// cheaper than the first.
 ///
-/// Each one is a call the run pays for in full. Fuel is charged at the
-/// callback's own safepoints, its calls count against the run's call-depth
+/// Each one is a call the run pays for in full. The run's stops are asked at
+/// the callback's own safepoints, its calls count against the run's call-depth
 /// limit while it is on the stack, and the run's deadline and cancellation
 /// stop it wherever they would stop any other Cove code. A host that loops
 /// therefore does not have to police the run: a body that would overrun the
@@ -421,7 +421,7 @@ pub trait Reentry {
     ///
     /// The call runs to completion before this returns, on this thread. An
     /// `Err` is what the callback failed with, or what stopped the run while
-    /// it was running — exhausted fuel, an expired deadline, a raised
+    /// it was running — an expired deadline, a raised
     /// cancellation, a depth limit — and a host that receives one has nothing
     /// useful to add: pass it on, so the reason the run stopped reaches the
     /// caller as the runtime wrote it.

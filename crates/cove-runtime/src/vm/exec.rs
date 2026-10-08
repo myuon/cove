@@ -608,7 +608,7 @@ pub(crate) struct Machine<'a> {
     /// dispatch loop took after a charge: where the stride a host call's
     /// charge cannot end began (#618).
     ///
-    /// A host call charges at its boundary and moves `charged_work`, so in a
+    /// A host call charges at its boundary and moves `checked_work`, so in a
     /// loop that calls the host every turn the loop's own stride test never
     /// finds a stride gathered. This is the coordinate that still counts one:
     /// [`Machine::after_host_call`] offers a wanted yield once a stride of
@@ -661,7 +661,7 @@ pub(crate) struct Machine<'a> {
     /// add to it, one per payload word they move, which is that ADR's
     /// "charged proportionally to the bytes or words examined".
     /// [`Machine::work`] is `instructions + bulk_work` and is the coordinate
-    /// fuel, the safepoint schedule and every stop bound are stated in.
+    /// the safepoint schedule and every stop bound are stated in.
     ///
     /// It is an *offset* rather than a parallel counter for one measured
     /// reason: the dispatch loop must keep exactly the one increment and the
@@ -694,30 +694,28 @@ pub(crate) struct Machine<'a> {
     /// something was writing the question itself into the loop, which is why
     /// [`Machine::ask`] is a call. [`crate::vm::debug`] has the table.
     next_check: u64,
-    /// How many of [`Machine::instructions`] have been handed to the run's
-    /// [`Meter`].
+    /// The [`Machine::work`] at which the run last asked its [`Meter`]
+    /// whether it may continue: the start of the current stride.
     ///
-    /// The two counters differ by the work this machine has done and not yet
-    /// paid for, and every place that pays hands over exactly that difference
-    /// and sets this to the count it paid up to. There is no second
-    /// accumulator to keep in step with the instruction count, which is what
-    /// makes "the run is charged for every instruction it dispatched" a
-    /// subtraction rather than a claim about the paths somebody remembered.
+    /// The difference between it and `work()` is the work done since that
+    /// question, and the next periodic safepoint is due when the difference
+    /// reaches [`SAFEPOINT_STRIDE`]. There is no second accumulator to keep in
+    /// step with the instruction count, which is what makes "a run goes no
+    /// more than a stride without being asked" a subtraction rather than a
+    /// claim about the paths somebody remembered.
     ///
-    /// Three places move it, and between them they cover every way work can
-    /// be done. The periodic safepoint in [`encoded::dispatch`] is the
-    /// ordinary one. [`Machine::charge_at_host_boundary`] is
-    /// [ADR 0030](../../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)'s:
-    /// the fuel a run has been charged has to be current before a Host call
-    /// asks whether it may begin. [`Machine::spend_pending_fuel`] is the last
-    /// one, at the end of a run or of a spawned task's thread, because a run
-    /// that raised, ran out of budget, was cancelled or was abandoned by the
-    /// host that bounded it leaves through Rust's `?` rather than through an
-    /// instruction and reaches no further safepoint —
-    /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
-    /// says pending fuel is never lost, and this is the counter that makes
-    /// that checkable.
-    charged_work: u64,
+    /// Three places move it. The periodic safepoint in [`encoded::dispatch`]
+    /// is the ordinary one. [`Machine::check_at_host_boundary`] asks the
+    /// meter before a Host call is dispatched and so begins a stride too,
+    /// which is why a loop of host calls offers its yields through
+    /// [`Machine::after_host_call`] (#618). [`Machine::close_stride`] is the
+    /// last one, at the end of a run or of a spawned task's thread, so the
+    /// next run on this machine begins with a whole stride.
+    ///
+    /// It used to be called `charged_work` and to hand the difference over as
+    /// fuel; [ADR 0091](../../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)
+    /// removed the allowance and kept the stride.
+    checked_work: u64,
     /// How long this machine has spent inside host calls.
     ///
     /// The oracle charges the same measurement against every open timing
@@ -1050,7 +1048,7 @@ impl<'a> Machine<'a> {
             cell_tag: cell::new_tag(),
             next_task: 1,
             instructions: 0,
-            charged_work: 0,
+            checked_work: 0,
             bulk_work: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
@@ -1140,7 +1138,7 @@ impl<'a> Machine<'a> {
             cell_tag: cell::new_tag(),
             next_task: 1,
             instructions: 0,
-            charged_work: 0,
+            checked_work: 0,
             bulk_work: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
@@ -1444,7 +1442,7 @@ impl<'a> Machine<'a> {
     /// What this run has been charged for: one per instruction, plus the
     /// words the bulk operations moved.
     #[inline]
-    fn work(&self) -> u64 {
+    pub(crate) fn work(&self) -> u64 {
         self.instructions + self.bulk_work
     }
 
@@ -1459,7 +1457,7 @@ impl<'a> Machine<'a> {
         self.bulk_work
     }
 
-    /// Cancellation, fuel and the collector's rendezvous, at `pc`.
+    /// Cancellation, the deadline and the collector's rendezvous, at `pc`.
     ///
     /// Lifted out of [`crate::vm::exec::encoded`]'s loop so that a bulk
     /// operation can reach one *while it is running*. That is
@@ -1467,22 +1465,21 @@ impl<'a> Machine<'a> {
     /// requirement and
     /// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
     /// arithmetic: a copy that charged for a megabyte only when it had
-    /// finished copying it would overshoot a fuel or cancellation bound by a
-    /// megabyte, however promptly the loop polled afterwards.
+    /// finished copying it would overshoot a deadline or cancellation bound by
+    /// a megabyte, however promptly the loop polled afterwards.
     ///
-    /// The order is the loop's order and may not be rearranged — cancellation
-    /// before fuel, because a run that was asked to stop is not out of fuel;
-    /// then the collector, which must see a frame this caller has already
-    /// `sync`ed.
+    /// The order is the loop's order and may not be rearranged — the task's
+    /// own stops, then the run's cancellation before its deadline, because a
+    /// run that was asked to stop is reported cancelled; then the collector,
+    /// which must see a frame this caller has already `sync`ed.
     fn safepoint(&mut self, budget: &Meter, id: FunctionId, pc: usize) -> Result<(), RuntimeError> {
         self.just_resumed = false;
         self.declined_this_stride = false;
         self.stride = SAFEPOINT_STRIDE;
         stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
-        let gathered = self.work() - self.charged_work;
-        self.charged_work = self.work();
+        self.checked_work = self.work();
         self.safepoint_work = self.work();
-        if let Err(stopped) = budget.safepoint(gathered) {
+        if let Err(stopped) = budget.safepoint() {
             return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
         }
         let live = Live(self);
@@ -1498,8 +1495,8 @@ impl<'a> Machine<'a> {
     ///
     /// Gated on [`Machine::yieldable`] as well as the request so that the
     /// lowered slow path always yields: one that declined would go on to take
-    /// a safepoint the uninterrupted run does not, and a fuel limit would stop
-    /// it somewhere else (ADR 0084 §4). Nothing between here and the next
+    /// a safepoint the uninterrupted run does not, and would ask its stops on
+    /// a different schedule (ADR 0084 §4). Nothing between here and the next
     /// instruction's check can change the answer — the instruction that took
     /// the safepoint finishes, and the request is lowered only by a yield.
     #[inline]
@@ -1512,7 +1509,7 @@ impl<'a> Machine<'a> {
 
     /// What the dispatch loop does after a host call returned an answer.
     ///
-    /// The call charged at its boundary ([`Machine::charge_at_host_boundary`])
+    /// The call charged at its boundary ([`Machine::check_at_host_boundary`])
     /// and so moved the loop's stride along, which in a loop that calls the
     /// host every turn means the loop never reaches a safepoint and never
     /// reads a request (#618). So once a stride of work has passed since the
@@ -1556,7 +1553,7 @@ impl<'a> Machine<'a> {
             // stride past the last charge. It saturates because a bulk charge
             // can already have passed it, and a check that is due now is
             // exactly what zero asks for.
-            None => (self.charged_work + SAFEPOINT_STRIDE).saturating_sub(self.bulk_work),
+            None => (self.checked_work + SAFEPOINT_STRIDE).saturating_sub(self.bulk_work),
         }
     }
 
@@ -1564,7 +1561,7 @@ impl<'a> Machine<'a> {
     /// compiled tier's [`next_question`](Machine::next_question).
     ///
     /// The same question [`crate::vm::exec::encoded`]'s loop asks with
-    /// `work() - charged_work >= SAFEPOINT_STRIDE`, answered in the one
+    /// `work() - checked_work >= SAFEPOINT_STRIDE`, answered in the one
     /// coordinate compiled code keeps: `NativeCtx::pending_work`, which counts
     /// from nought at every native safepoint. Subtracting what the machine has
     /// already done and not charged is what makes the two the same question —
@@ -1582,7 +1579,7 @@ impl<'a> Machine<'a> {
     /// compiled instruction a question. See `crate::vm::debug`.
     #[inline]
     pub(crate) fn poll_budget(&self) -> u64 {
-        SAFEPOINT_STRIDE.saturating_sub(self.work().saturating_sub(self.charged_work))
+        SAFEPOINT_STRIDE.saturating_sub(self.work().saturating_sub(self.checked_work))
     }
 
     /// The threshold compiled code is given: [`Machine::poll_budget`], or
@@ -1768,8 +1765,8 @@ impl<'a> Machine<'a> {
     /// Runs the frame on top of the stack until the stack is back to `floor`.
     ///
     /// [`Machine::drive`] without the things that belong to the *end of a run*:
-    /// no cells are given back, no scope is stopped, and no pending fuel is
-    /// spent, because this is a call inside a run and the run is still going.
+    /// no cells are given back, no scope is stopped, and no stride is closed,
+    /// because this is a call inside a run and the run is still going.
     /// What it shares is the thread scope, which has to be opened around any
     /// dispatch because a `spawn` starts its children in one.
     ///
@@ -1822,10 +1819,9 @@ impl<'a> Machine<'a> {
             let mut answer = encoded::dispatch(self, code, budget, threads, &mut running, 0);
             // A run that yielded left through the failure exit too, and has
             // even less to do: it was quiescent, so nothing is running and no
-            // callback is below it, and what it has dispatched and not paid
-            // for stays pending — the safepoint it yielded at has not run
-            // yet, and runs when it resumes, so the run is charged in the
-            // strides an uninterrupted one is. A cell it holds stays held: the
+            // callback is below it, and its stride stays open — the safepoint
+            // it yielded at has not run yet, and runs when it resumes, so the
+            // run is asked in the strides an uninterrupted one is. A cell it holds stays held: the
             // lock word names the task, not this thread (ADR 0084 §3).
             if self.yielded.is_some() {
                 return Ok(Vec::new());
@@ -1854,81 +1850,46 @@ impl<'a> Machine<'a> {
             self.give_cells_back(0);
             self.stop_all(&mut running);
             // Last, after the answer is settled and after the children are
-            // joined, so that what is put back is everything this thread
-            // dispatched and nothing is added to the run's total once the
-            // total has been read.
-            //
-            // [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
-            // says pending fuel is never lost, and a loop that lost it would
-            // report a `fuel_spent` below the instructions it dispatched.
-            self.spend_pending_fuel(budget);
+            // joined.
+            self.close_stride();
             answer
         })
     }
 
-    /// Hands the run's [`Meter`] whatever this thread has dispatched and not
-    /// yet paid for, at the end of a run or of a spawned task's thread.
+    /// Closes the current stride at the end of a run or of a spawned task's
+    /// thread, so that the next run on this machine begins a whole one.
     ///
-    /// The ordinary way out of a body pays on its way: a run long enough to
-    /// reach a periodic safepoint has handed over every whole stride of it,
-    /// and a Host call has handed over the part of the stride that preceded
-    /// it. What pays for nothing is the remainder — the instructions after
-    /// the last hand-over — and every way a run can end without dispatching
-    /// another instruction is a way that remainder would be dropped with the
-    /// stacks: a raised error, an exhausted budget, a cancelled task, a
-    /// bounded call the host abandoned. Each of those leaves through Rust's
-    /// `?` rather than through an instruction.
-    ///
-    /// The work was really done, so the run is charged for it.
-    /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
-    /// decides that pending fuel is never lost, and a `fuel_spent` below the
-    /// instructions the run dispatched is the observable form of losing it.
-    ///
-    /// [`Meter::spend`] rather than [`Meter::safepoint`], and the difference
-    /// is the whole reason this is its own function: this runs after the
-    /// answer is settled, and a stop raised here would replace the reason the
-    /// run actually ended. A run that raised would report that it was out of
-    /// fuel.
-    ///
-    /// A spawned task's thread reaches this through its own [`Machine::drive`]
-    /// and pays into the same accounting, because ADR 0008 draws a task's
-    /// fuel from the run's budget rather than giving each task one of its
-    /// own.
-    fn spend_pending_fuel(&mut self, budget: &Meter) {
-        let pending = self.work() - self.charged_work;
-        if pending != 0 {
-            self.charged_work = self.work();
-            budget.spend(pending);
-        }
+    /// Nothing is asked and nothing is charged: the run is already over, and
+    /// a stop raised here would replace the reason it actually ended. This
+    /// used to hand the stride's remainder to the run's budget as fuel, so
+    /// that a run's reported total was never below the instructions it
+    /// dispatched; [ADR 0091](../../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)
+    /// removed the total and kept the stride, and with it the schedule a
+    /// reused machine's next run is asked on.
+    fn close_stride(&mut self) {
+        self.checked_work = self.work();
     }
 
-    /// Hands over what this thread has dispatched and not yet paid for, and
-    /// asks the run's accounting whether it may continue — at a Host call,
-    /// before the call is dispatched.
+    /// Asks the run's accounting whether it may continue — at a Host call,
+    /// before the call is dispatched — and begins a stride.
     ///
     /// # The contract
     ///
-    /// **No Host call begins once the fuel a run has been charged has reached
-    /// its limit.**
-    /// [ADR 0030](../../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)
-    /// decides that, and it is a statement about the bound rather than about
-    /// the count: what the two backends share is the property, not the number
-    /// that satisfies it. The oracle satisfies it by holding no pending fuel
-    /// at all — `Interpreter::charge_safepoint` hands `SAFEPOINT_FUEL` over in
-    /// the same call that charges it, so its charged total cannot move while
-    /// a straight line runs. This machine holds pending fuel by construction,
-    /// because it charges on a fixed instruction stride, so it satisfies it
-    /// the other way ADR 0030 allows: by flushing here.
+    /// The cancellation and the deadline are asked before the call goes out,
+    /// so no Host call begins once the run was cancelled or its deadline
+    /// passed. The registry's own `charge_host_call` asks them again with
+    /// `max_host_calls`, which is what bounds effects exactly; this one is
+    /// the machine's, and it is what makes the boundary begin a stride.
     ///
-    /// Without this, a Host call is just another instruction the stride
-    /// counts, and a straight line of them shorter than one
-    /// [`SAFEPOINT_STRIDE`] is not stopped at any fuel limit whatever —
-    /// forty effects under a limit of one, which is the shape ADR 0030 was
-    /// written to refuse.
+    /// It used to be [ADR 0030](../../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)'s
+    /// boundary as well: the fuel the run had gathered was handed over here,
+    /// so that a straight line of Host calls shorter than one stride could
+    /// not outrun a fuel limit. [ADR 0091](../../../../docs/adr/0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md)
+    /// removed the limit; the check and the stride it begins remain.
     ///
     /// # Why this is not a safepoint
     ///
-    /// It asks the budget and nothing else. The two flags a thread owns are
+    /// It asks the meter and nothing else. The two flags a thread owns are
     /// read by the caller one line above, so repeating them here would be
     /// asking a question that has just been answered.
     ///
@@ -1948,24 +1909,23 @@ impl<'a> Machine<'a> {
     /// make an unpredictable sweep part of the cost of reaching the outside
     /// world, for a reason the budget never asked for.
     ///
-    /// # A charge begins a stride, for a yield too
+    /// # A check begins a stride, for a yield too
     ///
-    /// It moves `charged_work` as a safepoint does, so a loop whose every turn
+    /// It moves `checked_work` as a safepoint does, so a loop whose every turn
     /// makes a host call and is shorter than a stride never finds one due at
     /// the dispatch loop, nor at a compiled backedge (#618). So it lowers the
     /// two flags a safepoint lowers: `just_resumed`, since a run that reached
     /// a host call has done something since it was resumed and may yield
     /// again; and `declined_this_stride`, since the stride it counted is the
-    /// one this charge ends. Without the first, such a loop yields once and
+    /// one this check ends. Without the first, such a loop yields once and
     /// then never again; compiled code's early poll reads both
     /// ([`Machine::native_poll_at`]). The encoded tier's offer is made after
     /// the call returns, by [`Machine::after_host_call`].
-    fn charge_at_host_boundary(&mut self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
-        let pending = self.work() - self.charged_work;
-        self.charged_work = self.work();
+    fn check_at_host_boundary(&mut self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
+        self.checked_work = self.work();
         self.just_resumed = false;
         self.declined_this_stride = false;
-        if let Err(stopped) = budget.safepoint(pending) {
+        if let Err(stopped) = budget.safepoint() {
             return Err(budget.to_runtime_error(stopped).at(span));
         }
         Ok(())
@@ -2353,7 +2313,7 @@ impl<'a> Machine<'a> {
             .at(span)
         })?;
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
-        self.charge_at_host_boundary(budget, span)?;
+        self.check_at_host_boundary(budget, span)?;
         let started = Instant::now();
         // The one question ADR 0080 adds to a host call, asked here and not in
         // the loop: a run nobody can resume never offers the host the choice.
@@ -2531,7 +2491,7 @@ impl<'a> Machine<'a> {
     /// moved: the safepoint's charge, cancellation check and collector poll
     /// have not happened, and `next_check` still says one is due, so the
     /// first thing a resumed run does is take the very safepoint it yielded
-    /// at. That is what makes the instruction count, the fuel charged at each
+    /// at. That is what makes the instruction count, the stops asked at each
     /// stride and the collections a yielded run makes the uninterrupted
     /// run's.
     #[cold]
@@ -2662,7 +2622,7 @@ impl<'a> Machine<'a> {
                 if self.yielded.is_some() {
                     return Ok(Vec::new());
                 }
-                return Err(self.failed_below(error, yielded.floor, budget));
+                return Err(self.failed_below(error, yielded.floor));
             }
         }
         let code = self.code()?;
@@ -2673,19 +2633,19 @@ impl<'a> Machine<'a> {
     /// [`Machine::drive`] ends one whose dispatch did — with the span of the
     /// encoded `call` the chain was entered at, for an error that has none of
     /// its own, as that call's arm would have added it.
-    fn failed_below(&mut self, error: RuntimeError, floor: usize, budget: &Meter) -> RuntimeError {
+    fn failed_below(&mut self, error: RuntimeError, floor: usize) -> RuntimeError {
         let caller = self.frames[floor - 1];
         let error = error.at(self.span(caller.function, caller.pc as usize - 1));
         let error = self.attach_call_chain(error);
         self.give_cells_back(0);
-        self.spend_pending_fuel(budget);
+        self.close_stride();
         error
     }
 
     /// Ends a yielded run with `stopped`, as the safepoint it yielded at
     /// would have ended it had the stop been seen there: the budget's error
     /// at that instruction, with the call chain under it, its cells given
-    /// back and its pending fuel spent — [`Machine::drive`]'s way out for an
+    /// back and its stride closed — [`Machine::drive`]'s way out for an
     /// error, which is the way that safepoint's error would have left by.
     pub(crate) fn stop_yielded(
         &mut self,
@@ -2703,7 +2663,7 @@ impl<'a> Machine<'a> {
         let span = self.span(frame.function, frame.pc as usize);
         let error = self.attach_call_chain(budget.to_runtime_error(stopped).at(span));
         self.give_cells_back(0);
-        self.spend_pending_fuel(budget);
+        self.close_stride();
         Err(error)
     }
 
@@ -2716,8 +2676,8 @@ impl<'a> Machine<'a> {
     /// to the declared result, the answer is converted at that layout and
     /// written at the slot, and the loop goes on from the instruction after
     /// the call. A refused answer fails the run at the call, with the call
-    /// chain the loop would have attached, and with the fuel it had pending
-    /// spent, exactly as [`Machine::drive`] ends a run that raised.
+    /// chain the loop would have attached, and with its stride closed,
+    /// exactly as [`Machine::drive`] ends a run that raised.
     ///
     /// # Panics
     ///
@@ -2754,7 +2714,7 @@ impl<'a> Machine<'a> {
                 // stands, as it would for the error uninterrupted.
                 self.parked_native = None;
                 let error = self.attach_call_chain(error);
-                self.spend_pending_fuel(budget);
+                self.close_stride();
                 return Err(error);
             }
         };
@@ -2782,7 +2742,7 @@ impl<'a> Machine<'a> {
                 if self.yielded.is_some() || self.suspended.is_some() {
                     return Ok(Vec::new());
                 }
-                return Err(self.failed_below(error, parked.floor, budget));
+                return Err(self.failed_below(error, parked.floor));
             }
         }
         self.drive(&code, budget)
@@ -2853,7 +2813,7 @@ impl<'a> Machine<'a> {
         // A resource operation is a Host API call and is bounded as one, so
         // ADR 0030's boundary is here for the reason it is in
         // [`Machine::call_host`] and in the same order.
-        self.charge_at_host_boundary(budget, span)?;
+        self.check_at_host_boundary(budget, span)?;
         let started = Instant::now();
         // And it may pend under the same condition, asked in the same place.
         let answer = if self.parking && self.quiescent() {
@@ -4792,8 +4752,8 @@ impl<'a> Machine<'a> {
     ///
     /// # What is still accounted
     ///
-    /// Everything the loop accounts, because it is the loop. Fuel is charged
-    /// every [`SAFEPOINT_STRIDE`] instructions, a frame that would leave this
+    /// Everything the loop accounts, because it is the loop. A safepoint is
+    /// taken every [`SAFEPOINT_STRIDE`] instructions, a frame that would leave this
     /// task's stack segment is a stack overflow, and every safepoint the
     /// callee reaches asks what a safepoint asks — including
     /// [`Machine::stops`], which [`Reentry::call_until`] pushes onto.
@@ -7988,27 +7948,24 @@ pub(crate) mod tests {
         assert!(machine.instructions() <= SAFEPOINT_STRIDE + 1);
     }
 
-    /// And fuel is charged at the same points, so a closure cannot spend a
-    /// run's budget without the run noticing.
+    /// And the deadline is asked at the same points, so a closure cannot
+    /// outrun a run's deadline without the run noticing.
     #[test]
-    fn fuel_runs_out_at_a_safepoint_inside_a_closure() {
+    fn an_expired_deadline_stops_at_a_safepoint_inside_a_closure() {
         let mut build = Build::default();
         let main = spinning_closure(&mut build);
         let program = build.done();
         let budget = crate::budget::Budget::new(crate::budget::Limits {
-            fuel: Some(2 * SAFEPOINT_STRIDE),
+            deadline: Some(std::time::Duration::ZERO),
             ..Default::default()
         });
         let mut machine = Machine::new(&program, 1 << 12);
         let error = machine.run(main, &[], &budget.meter()).unwrap_err();
         assert_eq!(
             error.message,
-            format!(
-                "execution stopped: fuel budget of {} exhausted",
-                2 * SAFEPOINT_STRIDE
-            )
+            "execution stopped: wall-clock deadline of 0ns exceeded"
         );
-        assert_eq!(machine.instructions(), 2 * SAFEPOINT_STRIDE);
+        assert!(machine.instructions() <= SAFEPOINT_STRIDE + 1);
     }
 
     /// The callee comes out of a heap object, so the machine checks that the
@@ -8603,8 +8560,8 @@ pub(crate) mod tests {
 
     /// The eager-placement failure, end to end: a heap too small for the
     /// program's literals fails before the entry runs, at the entry's own
-    /// span, with the message an exhausted heap already gives, and no fuel
-    /// charged — this program executed nothing.
+    /// span, with the message an exhausted heap already gives, and no
+    /// instruction counted — this program executed nothing.
     #[test]
     fn a_heap_too_small_for_its_literals_fails_before_the_entry_runs() {
         let mut build = Build::default().strings(&["far too long for the heap this run was given"]);
@@ -8633,9 +8590,9 @@ pub(crate) mod tests {
             "the entry's own span, not the literal's"
         );
         assert_eq!(
-            meter.fuel_spent(),
+            machine.instructions(),
             0,
-            "a run that executed nothing is charged nothing"
+            "a run that executed nothing counts nothing"
         );
     }
 
@@ -10935,25 +10892,25 @@ pub(crate) mod tests {
     /// to a difference nor the move into the `work` coordinate may shift a
     /// single count while every instruction still costs one.
     /// `crate::vm::debug`'s `the_safepoint_fires_at_the_same_counts_as_it_did_before`
-    /// proves that end to end through the fuel limit; this proves the
-    /// arithmetic, including the bulk case that test cannot reach.
+    /// proves the first safepoint end to end through an expired deadline; this
+    /// proves the arithmetic, including the bulk case that test cannot reach.
     #[test]
     fn the_next_question_is_a_stride_of_work_past_the_last_charge() {
         let program = Build::default().done();
         let mut machine = Machine::new(&program, 1 << 12);
 
-        // While every instruction costs one, `charged_work` lands on a
+        // While every instruction costs one, `checked_work` lands on a
         // multiple at every safepoint, so the next question is the next
         // multiple — which is what the condition used to say in so many words.
         for turn in 0..4u64 {
-            machine.charged_work = turn * SAFEPOINT_STRIDE;
-            machine.instructions = machine.charged_work + 1;
+            machine.checked_work = turn * SAFEPOINT_STRIDE;
+            machine.instructions = machine.checked_work + 1;
             machine.bulk_work = 0;
             assert_eq!(
                 machine.next_question(),
                 (turn + 1) * SAFEPOINT_STRIDE,
                 "with {} charged, the question is the next multiple",
-                machine.charged_work
+                machine.checked_work
             );
         }
 
@@ -10962,14 +10919,14 @@ pub(crate) mod tests {
         // have stepped clean over. `2500` is past `2048` and is not a multiple
         // of `1024`: the old rule answered false here and skipped the
         // safepoint entirely.
-        machine.charged_work = 0;
+        machine.checked_work = 0;
         machine.instructions = 500;
         machine.bulk_work = 2000;
         assert_eq!(machine.work(), 2500);
         // Already past a stride of work, so the question is due now.
         assert_eq!(machine.next_question(), 0);
         assert!(
-            machine.work() - machine.charged_work >= SAFEPOINT_STRIDE,
+            machine.work() - machine.checked_work >= SAFEPOINT_STRIDE,
             "2500 units of work since the last charge is a safepoint"
         );
         assert!(
@@ -10983,16 +10940,16 @@ pub(crate) mod tests {
     /// schedule where the uninterrupted run has it.**
     ///
     /// The arithmetic `tests/yielding.rs` cannot see: a resumed run that took
-    /// the stride's safepoint a second time would answer the same and charge
-    /// the same in total, and only a fuel limit falling inside that one
-    /// instruction's work would tell.
+    /// the stride's safepoint a second time would answer the same and count
+    /// the same in total, and only a stop asked inside that one instruction's
+    /// work would tell.
     #[test]
     fn a_yield_after_a_bulk_safepoint_is_offered_at_the_next_instruction() {
         let program = Build::default().done();
         let mut machine = Machine::new(&program, 1 << 12);
         machine.instructions = 300;
         machine.bulk_work = 5000;
-        machine.charged_work = machine.work();
+        machine.checked_work = machine.work();
 
         // Nobody asks: the question is a stride of work past the charge.
         machine.after_bulk_safepoint();
@@ -11008,7 +10965,7 @@ pub(crate) mod tests {
         assert_eq!(machine.next_check, 301);
         machine.instructions += 1;
         assert!(machine.instructions >= machine.next_check);
-        assert!(machine.work() - machine.charged_work >= machine.stride);
+        assert!(machine.work() - machine.checked_work >= machine.stride);
 
         // Yielding there takes the count back and puts the question back a
         // stride past the charge the bulk operation made.
@@ -11022,7 +10979,7 @@ pub(crate) mod tests {
     /// **#618: after a host call, a wanted yield is offered once a stride of
     /// work has passed since the last safepoint, and not sooner.**
     ///
-    /// The host call's charge moved `charged_work`, so the loop's own stride
+    /// The host call's charge moved `checked_work`, so the loop's own stride
     /// test cannot say this. Yielding there starts the next stride.
     #[test]
     fn a_yield_after_a_host_call_waits_for_a_stride_since_the_last_safepoint() {
@@ -11034,14 +10991,14 @@ pub(crate) mod tests {
 
         // Less than a stride since the last safepoint: nothing moves.
         machine.instructions = SAFEPOINT_STRIDE - 1;
-        machine.charged_work = machine.work();
+        machine.checked_work = machine.work();
         machine.after_host_call();
         assert_eq!(machine.stride, SAFEPOINT_STRIDE);
         assert_eq!(machine.next_check, before);
 
         // A stride: the next instruction asks, and finds the stride due.
         machine.instructions = SAFEPOINT_STRIDE;
-        machine.charged_work = machine.work();
+        machine.checked_work = machine.work();
         machine.after_host_call();
         assert_eq!(machine.stride, 0);
         assert_eq!(machine.next_check, SAFEPOINT_STRIDE + 1);
@@ -11079,11 +11036,11 @@ pub(crate) mod tests {
         // one stride — which is the same question `next_question` answers in
         // instruction coordinates, asked in the coordinate compiled code keeps.
         for done in [1u64, 2, 500, 1023, SAFEPOINT_STRIDE - 1] {
-            machine.charged_work = 4 * SAFEPOINT_STRIDE;
-            machine.instructions = machine.charged_work + done;
+            machine.checked_work = 4 * SAFEPOINT_STRIDE;
+            machine.instructions = machine.checked_work + done;
             machine.bulk_work = 0;
             assert_eq!(
-                machine.work() - machine.charged_work + machine.poll_budget(),
+                machine.work() - machine.checked_work + machine.poll_budget(),
                 SAFEPOINT_STRIDE,
                 "with {done} done and not charged, the budget is the rest"
             );
@@ -11093,7 +11050,7 @@ pub(crate) mod tests {
         // is nought: the first backedge compiled code reaches polls, because
         // its accumulator is never below nought. Saturating, not wrapping —
         // a wrap here would be an interval of 2^64 units of work.
-        machine.charged_work = 0;
+        machine.checked_work = 0;
         machine.instructions = 500;
         machine.bulk_work = 2000;
         assert_eq!(machine.poll_budget(), 0);

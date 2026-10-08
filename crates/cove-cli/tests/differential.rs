@@ -115,10 +115,9 @@
 //! The value the entry answered or the structured error it failed with, every
 //! line written to either of the fake console's streams in order, how the run
 //! ended, the fake filesystem as the run left it, and the trace the run
-//! wrote. Fuel is not compared: it is each evaluator's own work counter,
-//! charged at safepoints each puts where its own execution model has one, and
-//! an instruction is not an AST node, so there is no honest mapping between
-//! the two figures.
+//! wrote. Work counts are not compared: an instruction is not an AST node,
+//! and each evaluator puts its safepoints where its own execution model has
+//! one, so there is no honest mapping between the two.
 //!
 //! An error's source position is compared exactly, and this is the claim in
 //! this file that most had to be re-established rather than inherited.
@@ -136,10 +135,10 @@
 //! nothing here reaches the network or a real clock, and every answer is the
 //! same on every machine.
 //!
-//! Budgets come from `[run.<name>]` except fuel and the deadline, which are
-//! left off on purpose: fuel is per-evaluator for the reason above, and a
-//! deadline is wall-clock, so bounding either would make the two disagree by
-//! construction rather than by fault. No case in the corpus sets one today.
+//! Budgets come from `[run.<name>]` except the deadline, which is left off on
+//! purpose: a deadline is wall-clock, so bounding a run by one would make the
+//! two disagree by construction rather than by fault. No case in the corpus
+//! sets one today.
 //!
 //! # The trace, and what a normalization is allowed to drop
 //!
@@ -171,9 +170,9 @@
 //! `cove_runtime::runtime::Runtime` holds, so there was no renumbering to
 //! normalize.
 //!
-//! No trace event carries a fuel figure. The per-evaluator counter reaches
-//! `cove run --stats` and never the trace, so there was nothing here to
-//! exclude for it.
+//! No trace event carries a work count. The per-evaluator instruction count
+//! reaches `cove run --stats` and never the trace, so there was nothing here
+//! to exclude for it.
 //!
 //! # Reading the coverage summary
 //!
@@ -573,15 +572,12 @@ impl Fakes {
 
 /// The budgets a case runs under.
 ///
-/// Everything `[run.<name>]` sets except fuel and the deadline. Fuel is each
-/// evaluator's own counter — an instruction is not an AST node, and the two
-/// charge at safepoints they put where their own execution models have one —
-/// and a deadline is wall-clock, so either one would make the two stop at
+/// Everything `[run.<name>]` sets except the deadline. A deadline is
+/// wall-clock, so it would make the two stop at
 /// different points by construction rather than by fault. What is left counts
 /// things both count the same way: host calls, and tasks.
 fn limits(run: &RunConfig) -> Limits {
     Limits {
-        fuel: None,
         deadline: None,
         max_host_calls: run.max_host_calls,
         max_call_depth: None,

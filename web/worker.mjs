@@ -23,7 +23,7 @@ let cove = null;
 // `crates/cove-wasm/src/record.rs` argues that where a reader will look.
 
 self.onmessage = async ({ data }) => {
-  const { seq, kind, source, fuel, deadlineMs, moments } = data;
+  const { seq, kind, source, deadlineMs, moments } = data;
   try {
     if (cove === null) {
       cove = await load();
@@ -33,8 +33,8 @@ self.onmessage = async ({ data }) => {
       kind === "compile"
         ? cove.compile(source)
         : kind === "debug"
-          ? cove.debug(source, { fuel, deadlineMs, moments })
-          : cove.run(source, { fuel, deadlineMs });
+          ? cove.debug(source, { deadlineMs, moments })
+          : cove.run(source, { deadlineMs });
     self.postMessage({ seq, kind, answer });
   } catch (error) {
     // A trap reaches here as a `RuntimeError`. Nothing in the runtime is

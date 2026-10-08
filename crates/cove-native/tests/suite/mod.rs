@@ -88,7 +88,7 @@ thread_local! {
 /// The runtime's half of the boundary, as a test double.
 ///
 /// A real one is where [ADR 0040]'s three-step order lives — cancellation and
-/// task-local stops, then fuel and deadline accounting, then the collector
+/// task-local stops, then the run's cancellation and deadline, then the collector
 /// rendezvous. This one records and optionally stops, which is the whole of
 /// what compiled code can observe about it.
 ///
@@ -5739,7 +5739,7 @@ pub fn payload_bytes(heap: &Heap, index: u64, words: u64) -> Vec<u8> {
 /// its last word and the word after it are all as they were.
 ///
 /// The work is `words_of_bytes(count)` on top of the block's two instructions,
-/// which is the chunk loop's charge — so fuel is the same sum either way.
+/// which is the chunk loop's charge — so work is the same sum either way.
 pub fn a_short_byte_copy_is_answered_in_emitted_code<A: Arm>() {
     let limit = cove_native::template::SHORT_COPY_BYTES;
     let held = one_byte_copy();

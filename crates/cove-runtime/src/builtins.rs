@@ -2062,7 +2062,7 @@ pub fn call_method(
 /// loop body is what could do the mutating.
 ///
 /// Everything a callback costs is accounted where any other call is:
-/// [`Callable::call_value`] is the evaluator re-entered, so fuel, the depth
+/// [`Callable::call_value`] is the evaluator re-entered, so safepoints, the depth
 /// limit, the host's `max_call_depth`, cancellation, and the trace are the
 /// running task's exactly as they are outside a builtin. There is nothing
 /// here that steps around a safepoint, because there is nothing here that

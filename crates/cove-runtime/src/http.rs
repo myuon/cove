@@ -20,8 +20,8 @@
 //! for the second.
 //!
 //! The loop belongs to the program rather than to the host. A `serve` that
-//! never returned would be a host call outside the reach of the run's fuel,
-//! its deadline, and its cancellation; `handle` answers one request and
+//! never returned would be a host call outside the reach of the run's
+//! deadline and its cancellation; `handle` answers one request and
 //! returns, so the loop around it is ordinary Cove code with ordinary
 //! safepoints.
 //!

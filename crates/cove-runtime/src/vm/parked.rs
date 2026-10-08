@@ -226,6 +226,11 @@ impl OwnedVm {
         self.vm.instructions()
     }
 
+    /// [`Vm::work`].
+    pub fn work(&self) -> u64 {
+        self.vm.work()
+    }
+
     /// The handle another thread raises to ask this machine's run to give its
     /// thread up at its next safepoint, answering [`Step::Yielded`].
     ///
@@ -418,6 +423,11 @@ impl YieldedVm {
         self.vm.instructions()
     }
 
+    /// [`Vm::work`], up to the instruction it stands before.
+    pub fn work(&self) -> u64 {
+        self.vm.work()
+    }
+
     /// [`Vm::meter`]: the run's accounting so far.
     pub fn meter(&self) -> &Meter {
         self.vm.meter()
@@ -528,7 +538,7 @@ impl ParkedVm {
     ///
     /// A parked run holds nothing else to give back: it is quiescent (ADR
     /// 0080 §2), so it has no task running, no `Shared` cell held and no
-    /// callback below it, and its pending fuel was spent before the call. The
+    /// callback below it, and its stride was checked before the call. The
     /// host's request, if it was not taken, is dropped.
     ///
     /// The machine comes back with the error, ready for its next run, as an
@@ -571,6 +581,11 @@ impl ParkedVm {
     /// [`Vm::instructions`], up to the call it is parked at.
     pub fn instructions(&self) -> u64 {
         self.vm.instructions()
+    }
+
+    /// [`Vm::work`], up to the call it is parked at.
+    pub fn work(&self) -> u64 {
+        self.vm.work()
     }
 
     /// [`Vm::meter`]: the parked run's accounting, up to the call it is

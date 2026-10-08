@@ -135,8 +135,6 @@ pub struct EmbeddedRun {
     pub entry: &'static str,
     /// The capabilities this binary was granted.
     pub allow: &'static [&'static str],
-    /// The total fuel this binary may spend.
-    pub fuel: Option<u64>,
     /// The wall-clock deadline this binary may take, in nanoseconds.
     pub deadline_nanos: Option<u64>,
     /// The total number of host calls this binary may make.
@@ -327,7 +325,6 @@ impl Embedded {
         hosts.set_grant_source(GrantSource::Sealed);
 
         let limits = Limits {
-            fuel: self.run.fuel,
             deadline: self.run.deadline_nanos.map(Duration::from_nanos),
             max_host_calls: self.run.max_host_calls,
             max_call_depth: None,
@@ -413,7 +410,6 @@ impl Embedded {
             RunConfig {
                 entry: self.run.entry.to_string(),
                 allow: self.run.allow.iter().map(|s| (*s).to_string()).collect(),
-                fuel: self.run.fuel,
                 deadline: self.run.deadline_nanos.map(Duration::from_nanos),
                 max_host_calls: self.run.max_host_calls,
                 max_tasks: self.run.max_tasks,
@@ -538,7 +534,6 @@ export fn main() -> Result<Unit, Error> {
                 name: "app",
                 entry,
                 allow: &[],
-                fuel: None,
                 deadline_nanos: None,
                 max_host_calls: None,
                 max_tasks: None,

@@ -71,12 +71,11 @@ impl std::fmt::Display for Backend {
 
 /// What a request's run is bounded by when `cove.toml` says nothing.
 ///
-/// Fuel because a tenant is somebody else's code and can loop; a deadline
+/// A deadline because a tenant is somebody else's code and can loop, and
 /// because a parked run is still a run, and one whose upstream never answers
 /// should not hold its socket forever.
 pub fn default_limits() -> Limits {
     Limits {
-        fuel: Some(50_000_000),
         deadline: Some(Duration::from_secs(10)),
         max_host_calls: Some(1_000),
         ..Limits::default()
@@ -321,7 +320,6 @@ pub fn deploy_all(options: &DeployOptions) -> Result<Vec<Tenant>, String> {
 pub fn limits_of(run: &RunConfig) -> Limits {
     let defaults = default_limits();
     Limits {
-        fuel: run.fuel.or(defaults.fuel),
         deadline: run.deadline.or(defaults.deadline),
         max_host_calls: run.max_host_calls.or(defaults.max_host_calls),
         max_tasks: run.max_tasks.or(Some(8)),

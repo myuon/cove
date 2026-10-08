@@ -22,7 +22,7 @@
 //!
 //! So the direction is inverted a second time. This [`Debugger`] does not
 //! ask anything: it *writes down* what it saw, the run goes to completion (or
-//! to its fuel, or to its deadline), the worker hands the whole recording to
+//! to its deadline), the worker hands the whole recording to
 //! the page in one message, and the page scrubs through it. Nothing blocks,
 //! nothing is shared, and the timeline runs backwards as readily as forwards
 //! — which for reading a program is better than stepping, because "what did

@@ -73,7 +73,7 @@ jobs:
       # The same check `ci.yml`'s `wasm` job runs, against the same kind of
       # build. It runs before the artifact is staged, let alone uploaded, so
       # a playground that does not compile, or refuses a `spawn` with the
-      # wrong words, or fails to stop at its fuel or its deadline, never
+      # wrong words, or fails to stop at its deadline, never
       # reaches "Upload the documentation artifact" and the live site is
       # never replaced with one that doesn't work.
       - name: Run Cove programs through the playground under node

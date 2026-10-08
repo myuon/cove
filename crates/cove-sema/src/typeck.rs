@@ -227,8 +227,8 @@
 //! and stays at home in a function that answers nothing. `Checker::spawned`,
 //! `Checker::handle_awaited` and `Checker::leaving_scope` are the three
 //! points of that: what was spawned, what the program settled itself, and
-//! what is left for the scope to return. A child that *raises* — fuel, an
-//! invariant, a Host-boundary failure — is not part of it: that travels as a
+//! what is left for the scope to return. A child that *raises* — a deadline,
+//! an invariant, a Host-boundary failure — is not part of it: that travels as a
 //! runtime fault rather than as the function's value, so it depends on no
 //! Cove return type.
 //!
@@ -16256,7 +16256,6 @@ fn run() -> Int {
             crate::config::RunConfig {
                 entry: entry.to_string(),
                 allow: Vec::new(),
-                fuel: None,
                 deadline: None,
                 max_host_calls: None,
                 max_tasks: None,

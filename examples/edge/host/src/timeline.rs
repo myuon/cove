@@ -78,7 +78,6 @@ pub enum What {
     RunEnd {
         worker: usize,
         status: u16,
-        fuel: u64,
         host_calls: u64,
         heap_bytes: u64,
     },
@@ -217,12 +216,11 @@ pub fn render(workers: usize, tenants: &[String], events: &[Event]) -> String {
             What::RunEnd {
                 worker,
                 status,
-                fuel,
                 host_calls,
                 heap_bytes,
             } => write!(
                 out,
-                "\"run_end\", \"worker\": {worker}, \"status\": {status}, \"fuel\": {fuel}, \
+                "\"run_end\", \"worker\": {worker}, \"status\": {status}, \
                  \"host_calls\": {host_calls}, \"heap_bytes\": {heap_bytes}"
             ),
             What::Written { worker } => write!(out, "\"response_written\", \"worker\": {worker}"),

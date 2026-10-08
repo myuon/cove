@@ -60,7 +60,7 @@ server will do.
 — on every push to `main`, stages everything in `web/` except this file and
 `check.mjs` into one directory beside the built `.wasm`, and runs
 `node web/check.mjs` against that build before anything is deployed. A run that does not hold — a program
-that no longer compiles, a `spawn` that stops saying why, a fuel or deadline
+that no longer compiles, a `spawn` that stops saying why, a deadline
 bound that stops firing — fails the job, and nothing is published.
 
 It shares the repository's one GitHub Pages site with the API documentation
@@ -85,7 +85,7 @@ This is what CI runs. It loads the module through `cove.mjs` — the same module
 the page's worker loads through, so the loader under test is the loader the
 browser uses — and then compiles and runs Cove programs through it: **every
 sample in `samples/`**, and then a program that does not parse, one that spawns
-a task, one that loops past its fuel, one that loops past its deadline, and one
+a task, one that loops past its deadline, and one
 that calls a capability the playground does not grant. It exits non-zero on the
 first that does not hold.
 
@@ -199,7 +199,7 @@ It is not a refusal of live stepping forever — only until something serves
 those two headers.
 
 A recording is bounded three ways, and each says so rather than truncating
-quietly: **moments** (the field beside fuel — the first N stops, after which
+quietly: **moments** (the field beside the deadline — the first N stops, after which
 the run goes on unrecorded and the timeline says `truncated`), a hard ceiling
 of 4 MiB of recording, and sixteen frames and thirty-two heap objects per
 moment. The **moments** figure is why the timeline can be trusted not to
@@ -259,11 +259,10 @@ does.
 
 `10-arithmetic.cove` is the one written for the *counters* rather than for the
 source. It prints nothing; what it has to show is the instruction count and
-the fuel beside it, and the IR pane holding the dozen instructions that get
+the IR pane holding the dozen instructions that get
 run two million times. It is `benches/arith`'s loop — the program the project
 reads what a turn of a loop costs from — and it runs on this page at its real
-scale, about 22 million instructions inside the default 200,000,000 fuel and
-five seconds.
+scale, about 22 million instructions inside the default five seconds.
 
 Its manifest entry says so in a `sameAs` field, and the two files are held
 together by being **run** rather than by being compared as text: `check.mjs`
@@ -344,11 +343,11 @@ width in every monospace font and one glyph of drift is one too many.
 
 ## Stopping a run
 
-Two bounds and one blunt instrument.
+One bound and one blunt instrument.
 
-The **fuel** and **deadline** fields bound a run from inside it. They are what
-to reach for: a run they stop reports *why* it stopped, with the limit named,
-in the same vocabulary `cove run --fuel` uses.
+The **deadline** field bounds a run from inside it. It is what to reach for:
+a run it stops reports *why* it stopped, with the limit named, in the same
+vocabulary `cove run --deadline` uses.
 
 **Stop** terminates the worker. It is the only way to interrupt WebAssembly
 from outside it, and it is blunt: the run is gone and has nothing to say about

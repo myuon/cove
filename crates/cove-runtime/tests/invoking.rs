@@ -824,11 +824,11 @@ const CHURN_SIZE: i64 = 1_000;
 
 /// A budget wide enough that no call in the loop below is ever stopped by it.
 ///
-/// It has to be a single, fixed number: the point of the test below is that
-/// one invocation's fuel is a stable quantity a host can read once and budget
-/// every future call by, and a limit that itself varied would beg that
-/// question rather than answer it.
-const CHURN_FUEL: u64 = 1_000_000;
+/// It is a host-call limit because `churn` makes no host calls: what the test
+/// below asks is whether a fresh budget per invocation leaves the session
+/// alone, and a limit that could fire would beg that question rather than
+/// answer it.
+const CHURN_HOST_CALLS: u64 = 1;
 
 /// `Interpreter::invoke`'s doc comment and `Vm`'s module doc both promise
 /// "compile once, invoke many" — an embedder builds one session and calls it
@@ -840,8 +840,8 @@ const CHURN_FUEL: u64 = 1_000_000;
 /// things a long session must keep true of itself —
 ///
 /// - the same arguments answer the same thing every time;
-/// - one invocation costs the same fuel as any other, so a host can budget a
-///   request from a single measurement;
+/// - one invocation executes the same instructions as any other, so a host
+///   can size a request from a single measurement;
 /// - the heap does not grow once the run has warmed up, even though the
 ///   *cumulative* words handed out keeps climbing forever.
 #[test]
@@ -887,20 +887,21 @@ fn a_long_lived_session_answers_and_costs_the_same_across_thousands_of_invocatio
     };
 
     let mut answer = None;
-    let mut fuel_per_call = None;
+    let mut instructions_per_call = None;
     let mut heap_after_warm_up = None;
 
     for i in 0..CHURN_ITERATIONS {
         let budget = cove_runtime::Budget::new(cove_runtime::Limits {
-            fuel: Some(CHURN_FUEL),
+            max_host_calls: Some(CHURN_HOST_CALLS),
             ..cove_runtime::Limits::default()
         });
+        let before = vm.instructions();
         let this_answer = vm
             .invoke_within(budget, "m", "churn", batch())
             .unwrap_or_else(|e| panic!("iteration {i}: {}", e.message))
             .as_int()
             .expect("`churn` declares -> Int");
-        let this_fuel = vm.meter().fuel_spent();
+        let these_instructions = vm.instructions() - before;
 
         match answer {
             None => answer = Some(this_answer),
@@ -909,11 +910,11 @@ fn a_long_lived_session_answers_and_costs_the_same_across_thousands_of_invocatio
                 "iteration {i}: identical arguments answered differently"
             ),
         }
-        match fuel_per_call {
-            None => fuel_per_call = Some(this_fuel),
+        match instructions_per_call {
+            None => instructions_per_call = Some(these_instructions),
             Some(expected) => assert_eq!(
-                this_fuel, expected,
-                "iteration {i}: the same call cost a different amount of fuel"
+                these_instructions, expected,
+                "iteration {i}: the same call executed a different number of instructions"
             ),
         }
 

@@ -38,8 +38,8 @@
 //! [issue #442](https://github.com/myuon/cove/issues/442)'s blind spot, in the
 //! work that exists to have closed it.
 //!
-//! So the gate was wrong and has been amended, not worked around: fuel is an
-//! upper bound on work done, not an equality — the intrinsic this replaces
+//! So the gate was wrong and has been amended, not worked around: the charge
+//! is an upper bound on work done, not an equality — the intrinsic this replaces
 //! charges "the receiver's whole length as an upper bound" and says so,
 //! because `str::find` does not report how far it got. With the charge stated
 //! as a bound, the algorithm may be the one with no table, and the blind spot
@@ -240,8 +240,8 @@ impl Matcher {
     /// scans of at most `2m` turns each, a periodicity test of fewer than `m`,
     /// and Crochemore–Perrin's `2(n - from)` comparisons.
     ///
-    /// `#[cfg(test)]` because nothing in a running machine needs it: a fuel
-    /// bound is enforced by the meter a step at a time and does not have to
+    /// `#[cfg(test)]` because nothing in a running machine needs it: a stop
+    /// bound is enforced at the safepoints a step at a time and does not have to
     /// know what a whole search will cost. What wants it is the case that pins
     /// it, here and in `vm::exec::encoded`, because a bound nothing checks is
     /// a sentence rather than a property.
@@ -252,7 +252,7 @@ impl Matcher {
 
     /// Whether the needle is still being prepared.
     ///
-    /// The phase a fuel bound stopped a run in is the one thing about this
+    /// The phase a stop left a run in is the one thing about this
     /// state a test outside it wants, and Decision 4's first case is about
     /// exactly that: a needle far longer than a stride must be interruptible
     /// while it is being prepared, not only once the haystack is being read.
@@ -950,7 +950,7 @@ mod tests {
         }
     }
 
-    /// The phase changes once the needle has been prepared, and a fuel bound's
+    /// The phase changes once the needle has been prepared, and a stop bound's
     /// test reads that to say which phase a stopped run was in.
     #[test]
     fn a_matcher_leaves_preparation_before_it_reads_the_haystack() {
@@ -973,7 +973,7 @@ mod tests {
     ///
     /// The gate this replaces asked for `m + (n - from)` exactly, and an exact
     /// charge is what forced a table into a matcher that has no other use for
-    /// one. What a fuel bound needs is an upper bound on the work done, which
+    /// one. What a stop bound needs is an upper bound on the work done, which
     /// this is: `5m + 2(n - from)`, every term of it named in the module's
     /// note. Pinned over a spread of shapes — periodic and not, matching and
     /// not, at several starts — and checked again on every pair of the

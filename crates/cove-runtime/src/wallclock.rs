@@ -16,8 +16,8 @@
 //!
 //! It keeps working. The brief allowed either that or refusing a deadline at
 //! the boundary, and refusing was the weaker answer: an embedder that could
-//! not bound a run by time would be left with fuel as its only bound, and
-//! fuel is not portable between backends. So the clock is **an imported host
+//! not bound a run by time would be left with no bound on a runaway loop but
+//! cancellation from outside. So the clock is **an imported host
 //! function** — the embedder supplies `cove.cove_now_millis`, returning
 //! monotonically non-decreasing milliseconds since an origin it picks, and
 //! [`crate::budget::Meter::safepoint`] compares against it exactly as it
