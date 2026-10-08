@@ -418,12 +418,9 @@ impl Meter {
     pub fn charge_task(&self) -> Result<(), Stopped> {
         let live = &self.state.live_tasks;
         match self.state.limits.max_tasks {
-            Some(limit) => live
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
-                    (live < limit).then(|| live + 1)
-                })
+            Some(limit) => update(live, |live| (live < limit).then(|| live + 1))
                 .map(|_| ())
-                .map_err(|_| Stopped::Concurrency),
+                .ok_or(Stopped::Concurrency),
             None => {
                 live.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -440,12 +437,7 @@ impl Meter {
     /// tasks a run may spawn in total rather than on how many it may hold at
     /// once.
     pub fn release_task(&self) {
-        let _ = self
-            .state
-            .live_tasks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
-                Some(live.saturating_sub(1))
-            });
+        update(&self.state.live_tasks, |live| Some(live.saturating_sub(1)));
     }
 
     /// How many spawned tasks are alive right now: what the concurrency
@@ -540,6 +532,23 @@ impl Meter {
         RuntimeError::new(message)
             .with_rule(RULE)
             .with_outcome(stopped.outcome())
+    }
+}
+
+/// Replaces `counter` with what `next` makes of it, as one step, and answers
+/// the value it replaced — or `None`, changing nothing, when `next` refuses.
+///
+/// A compare-and-swap loop written out rather than `AtomicU64::fetch_update`,
+/// which Rust 1.99 deprecated in favour of a `try_update` that earlier
+/// toolchains do not have: this builds the same on both.
+fn update(counter: &AtomicU64, next: impl Fn(u64) -> Option<u64>) -> Option<u64> {
+    let mut now = counter.load(Ordering::Relaxed);
+    loop {
+        let then = next(now)?;
+        match counter.compare_exchange_weak(now, then, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(was) => return Some(was),
+            Err(seen) => now = seen,
+        }
     }
 }
 
