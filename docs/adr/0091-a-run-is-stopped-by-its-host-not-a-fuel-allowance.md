@@ -1,14 +1,14 @@
 # ADR 0091: A run is stopped by its host, not a fuel allowance
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
-- Supersedes, on acceptance:
+- Supersedes:
   [ADR 0003](0003-task-execution-and-runtime-control.md)'s fuel-budget requirement;
   [ADR 0024](0024-a-stop-is-a-bound-not-a-point.md) and
   [ADR 0040](0040-a-bound-outlives-its-backend.md), only their fuel-exhaustion
   and pending-fuel accounting contracts;
-  [ADR 0030](0030-a-host-call-asks-the-fuel-limit.md)'s requirement that a host
-  call ask the fuel limit
+  [ADR 0030](0030-a-host-call-asks-the-fuel-limit.md) whole, since its one
+  decision is that a host call ask the fuel limit
 - Refers to:
   [ADR 0082](0082-a-parked-run-keeps-its-deadline.md),
   [ADR 0084](0084-a-run-may-yield-at-a-safepoint.md),
@@ -19,7 +19,8 @@
   cancellation, deadlines and yielding remain independent of fuel
 - Decides: remove the fuel allowance and its public contract; retain the
   mechanisms needed to interrupt and schedule execution
-- Implementation status: implemented on branch `feat/remove-fuel` (the pull request that removes fuel)
+- Implementation status: implemented by
+  [PR #623](https://github.com/myuon/cove/pull/623)
 
 ## Context
 
@@ -130,10 +131,9 @@ includes waiting and is not a CPU-time budget.
    Report performance with and without host calls; do not infer improvement
    merely from deleting a counter.
 
-On acceptance, add the supersession pointers to the affected older ADR headers
-without changing their bodies, as CLAUDE.md requires. Broad ADRs are superseded
-only in the fuel clauses named above. This proposed document leaves their
-accepted headers untouched until that decision is made.
+The superseded ADRs carry a pointer here in their headers and nothing else, as
+CLAUDE.md requires: ADRs 0003, 0024 and 0040 are superseded in part, only in
+the fuel clauses named above, and ADR 0030 whole.
 
 ## Alternatives considered
 

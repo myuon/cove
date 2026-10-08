@@ -7,6 +7,10 @@
   Decision's naming of the safepoints the runtime controls are checked at —
   "loop back edges, calls, and `await`" — with a bound on how much may happen
   between two checks
+- Superseded in part by
+  [ADR 0091](0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md), which removes the fuel-budget requirement: a run is no longer bounded
+  by a fuel allowance, and deadlines, cancellation and the other controls
+  stand
 - Date: 2026-08-25
 - Superseded by: [ADR 0008](0008-concurrent-task-execution.md), which took over
   phase 2 of the Decision below and, with it, the whole of "What Phase 1 does

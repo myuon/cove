@@ -17,6 +17,11 @@
   document describes, and two of the four constants with it. The decision
   itself is untouched: a stop is still stated as a bound rather than as a
   point, and the bound is still measured rather than claimed
+- Superseded in part by
+  [ADR 0091](0091-a-run-is-stopped-by-its-host-not-a-fuel-allowance.md), which removes the fuel-exhaustion and pending-fuel accounting
+  contracts — the bound on how far a run overspends an exhausted fuel budget,
+  and "pending fuel is never lost" — with the fuel allowance itself. The
+  bounds on cancellation, deadlines and the other stops stand
 - Date: 2026-08-29
 - Supersedes: [ADR 0003](0003-task-execution-and-runtime-control.md)'s
   decision that the runtime controls are "all checked at defined safepoints —
