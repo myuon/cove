@@ -104,7 +104,7 @@ builds it. `go/edge-go` is ignored by git.
 | simulated upstream | `upstream.get`: 20–100 ms from `Latency::pick` (splitmix over a call counter), parked | the same function, the same counter, the same services; a `time.Timer` per call in the request's goroutine |
 | deadlines | `impatient` 300 ms, `proxy` 500 ms, `aggregate` 5 s, from the start of the run; the parking lot cancels a run whose deadline passes → 504 | `context.WithTimeout` from the start of the handler → 504 |
 | `proxy` fetch | 4 fetcher threads, a new connection per fetch (`Connection: close`) | `http.Client` with keep-alive (`MaxIdleConnsPerHost` 1024: the default of 2 is a known trap). The same allowlist check, as a plain map lookup |
-| CPU | 4 worker threads, plus accept, idle poller (`poll(2)`), parking lot (timer), slice monitor, 4 fetchers: **13 threads** idle | `GOMAXPROCS=4` (4 Ps), plus the runtime's netpoller (kqueue) and sysmon, and threads for blocking syscalls: **5 threads** idle |
+| CPU | 4 worker threads, plus accept, idle poller (`kqueue`; `poll(2)` before #590), parking lot (timer), slice monitor, 4 fetchers: **13 threads** idle | `GOMAXPROCS=4` (4 Ps), plus the runtime's netpoller (kqueue) and sysmon, and threads for blocking syscalls: **5 threads** idle |
 | scheduling | a run queue per worker, work stealing, a 2 ms slice at VM safepoints (ADR 0084) | Go's scheduler: per-P queues, work stealing, async preemption at 10 ms |
 | keep-alive | idle 5 s, 1,000 requests per connection | `IdleTimeout` 5 s, no per-connection cap |
 | **isolation** | a fresh isolate (`OwnedVm`) per request, with its own heap. A tenant cannot see another's memory | none: one address space, shared heap |
@@ -843,6 +843,47 @@ and epoll (Linux) make the wait O(ready); with a registration life cycle and
 expiry kept by a heap it is more than a small fix, so it is
 [issue #590](https://github.com/myuon/cove/issues/590), with these numbers
 and a plan.
+
+**Implemented (#590).** The idle thread now waits in `kqueue` on macOS
+(`EVFILT_READ` with `EV_DISPATCH`, re-armed per park) and `epoll` on Linux
+(`EPOLLONESHOT`), keeps idle connections in a slab indexed by descriptor and
+their expiries in a heap, and is woken by `EVFILT_USER` or an `eventfd`
+rather than a socket pair, with `perf/edge-idle-wake`'s flag that sends one
+wake-up per wait rather than one per park. `/_stats` now reports the idle
+thread's own CPU (`CLOCK_THREAD_CPUTIME_ID`), so the profile is no longer
+needed for that column. The same `idle_cost.py`, before (main at 8ba00d9, with
+the CPU counter added) and after, interleaved — after, before, after, before
+— on 2026-10-12, load average 10.3 falling to 5.5 (another build), **observed**,
+the two runs of each per cell:
+
+| connections | server CPU µs/req, before → after | p50 ms, before → after | p99 ms, before → after | idle wake-ups/s, before → after | idle thread's CPU, cores, before → after |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 58, 57 → 44, 50 | 1.56, 1.28 → 1.59, 1.30 | 2.82, 2.86 → 2.84, 2.88 | 6,091, 6,884 → 9,426, 10,148 | 0.22, 0.24 → 0.07, 0.09 |
+| 256 | 77, 82 → 42, 51 | 1.28, 1.11 → 1.60, 1.29 | 2.83, 2.78 → 2.90, 2.93 | 4,432, 4,787 → 9,612, 10,230 | 0.45, 0.49 → 0.07, 0.09 |
+| 1,000 | 126, 129 → 52, 54 | 0.92, 0.89 → 1.52, 1.29 | 2.64, 2.55 → 2.72, 2.92 | 2,531, 2,498 → 10,189, 10,895 | 0.92, 0.93 → 0.07, 0.10 |
+| 4,000 | 133, 133 → 57, 58 | 3.09, 3.09 → 1.05, 0.93 | 5.98, 5.89 → 2.79, 2.92 | 655, 665 → 13,905, 13,985 | 0.99, 0.99 → 0.09, 0.10 |
+| 10,000 | 134, 135 → 49, 45 | 6.22, 6.13 → 0.07, 0.06 | 14.16, 13.61 → 2.34, 2.24 | 415, 416 → 20,037, 20,286 | 0.99, 0.99 → 0.10, 0.09 |
+
+- **The idle thread no longer grows with the connections:** 0.07–0.09 cores
+  at 64, 0.09–0.10 at 10,000, against 0.22 → 0.99 before. What is left
+  follows the wake-ups, not N: about one per request at 64 connections and
+  two at 10,000, where each wake-up returns 0.6 readable connections rather
+  than one (the others are the waker's).
+- **CPU per request is flat**: 44–50 µs at 64, 45–49 at 10,000, within 10%;
+  before it was 57–58 → 134–135. At 64 connections it fell too, by 7 to 14
+  µs.
+- **p50 and p99 stay on the generator's floor at every N.** At 10,000 the p50
+  falls *below* the 1.5 ms floor, to 0.06 ms — presumably because with that
+  many sockets the generator always has one to progress and never takes its
+  200 µs sleep (*estimated*; the generator was not traced). Before, the p50
+  was 6.1–6.2 ms there.
+- Wake-ups per second *rise* with N now (6,100–6,900 → 9,400–20,300), the
+  opposite of before, because a wake-up is no longer a pass that collects
+  whatever turned readable during it. Each costs 1.4–4 µs around the wait.
+
+The Linux back end (`epoll`) is compiled and exercised by CI's `host/tests`,
+and was not measured here; the `poll` fallback passes the same tests when
+forced on macOS.
 
 ### 5. The first pass's claims, labelled
 

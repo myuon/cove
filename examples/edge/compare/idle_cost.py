@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""What the idle thread's `poll(2)` costs as kept-alive connections grow.
+"""What the idle thread costs as kept-alive connections grow.
 
     python3 examples/edge/compare/idle_cost.py [--reps 2] [--rate 10000] [--conns 64 256 ...]
 
 The same 10,000 `hello` requests a second as the `connections` sweep in
 README.md, spread over N kept-alive connections. Before and after each run
-it reads the server's `/_stats` `idle_poller` counters (wakes, pollfds
-handed to `poll`, wall time inside `poll` and around it), so each row has
-the idle thread's wakes per second, `pollfd`s per wake, and microseconds
-per wake inside and around `poll`, beside the server's CPU per request.
+it reads the server's `/_stats` `idle_poller` counters (wakes, the
+connections each wake returned — or, before #590, the pollfds handed to
+`poll` — wall time inside the wait and around it, and the idle thread's own
+CPU), so each row has the idle thread's wakes per second, what each wake
+cost, and the cores the thread used, beside the server's CPU per request.
 Appends to results/idle-cost.jsonl.
 """
 
@@ -53,9 +54,18 @@ def main():
             after = poller()
             sweep.stop(proc)
             wakes = after["wakes"] - before["wakes"]
-            fds = after["pollfds"] - before["pollfds"]
-            in_poll = after["in_poll_ms"] - before["in_poll_ms"]
-            around = after["around_poll_ms"] - before["around_poll_ms"]
+            # A server from before #590 counts `pollfds` and `in_poll_ms`;
+            # one after it counts the connections each wake-up returned
+            # (`ready`) and calls the wait `in_wait_ms`, whichever back end.
+            fds = after.get("pollfds", 0) - before.get("pollfds", 0)
+            ready = after.get("ready", 0) - before.get("ready", 0)
+            wait_key = "in_wait_ms" if "in_wait_ms" in after else "in_poll_ms"
+            around_key = "around_wait_ms" if "around_wait_ms" in after else "around_poll_ms"
+            in_poll = after[wait_key] - before[wait_key]
+            around = after[around_key] - before[around_key]
+            # The idle thread's own CPU (CLOCK_THREAD_CPUTIME_ID), where the
+            # server reports it.
+            cpu = after.get("cpu_ms", 0) - before.get("cpu_ms", 0)
             wall = summary["wall_s"]
             row = {
                 "rep": rep,
@@ -69,7 +79,10 @@ def main():
                 "cpu_us_per_req": 1e6 * summary["server_cpu_s"] / summary["answered"],
                 "idle_wakes": wakes,
                 "idle_wakes_per_s": wakes / wall,
+                "backend": after.get("backend", "poll"),
                 "pollfds_per_wake": fds / max(wakes, 1),
+                "ready_per_wake": ready / max(wakes, 1),
+                "idle_thread_cores": cpu / 1e3 / wall,
                 "in_poll_us_per_wake": 1e3 * in_poll / max(wakes, 1),
                 "around_poll_us_per_wake": 1e3 * around / max(wakes, 1),
                 "wakes_per_req": wakes / summary["answered"],
@@ -81,7 +94,8 @@ def main():
             print(
                 f"rep {rep} conns {n:>6}: {row['cpu_us_per_req']:6.1f} µs CPU/req, p50 {row['p50_ms']:.2f} "
                 f"p99 {row['p99_ms']:.2f} ms; idle {row['idle_wakes_per_s']:8.0f} wakes/s, "
-                f"{row['pollfds_per_wake']:7.0f} fds/wake, {row['wakes_per_req']:.2f} wakes/req, "
+                f"{row['pollfds_per_wake']:7.0f} fds/wake, {row['ready_per_wake']:5.1f} ready/wake, "
+                f"{row['wakes_per_req']:.2f} wakes/req, idle thread {row['idle_thread_cores']:.3f} cores, "
                 f"in poll {row['in_poll_us_per_wake']:7.1f} µs/wake, around {row['around_poll_us_per_wake']:7.1f} µs/wake "
                 f"({row['around_poll_us_per_req']:.1f} µs/req); load {row['load_before']:.2f}",
                 flush=True,

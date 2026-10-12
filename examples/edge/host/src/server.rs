@@ -1017,13 +1017,15 @@ impl Shared {
             self.idle().stats.idle.load(Ordering::Relaxed),
             self.idle().stats.expired.load(Ordering::Relaxed),
             {
+                let backend = self.idle().backend();
                 let idle = &self.idle().stats;
                 format!(
-                    "{{\"wakes\": {}, \"pollfds\": {}, \"in_poll_ms\": {:.3}, \"around_poll_ms\": {:.3}}}",
+                    "{{\"backend\": \"{backend}\", \"wakes\": {}, \"ready\": {}, \"in_wait_ms\": {:.3}, \"around_wait_ms\": {:.3}, \"cpu_ms\": {:.3}}}",
                     idle.wakes.load(Ordering::Relaxed),
-                    idle.polled.load(Ordering::Relaxed),
-                    idle.in_poll_ns.load(Ordering::Relaxed) as f64 / 1e6,
-                    idle.around_poll_ns.load(Ordering::Relaxed) as f64 / 1e6,
+                    idle.ready.load(Ordering::Relaxed),
+                    idle.in_wait_ns.load(Ordering::Relaxed) as f64 / 1e6,
+                    idle.around_wait_ns.load(Ordering::Relaxed) as f64 / 1e6,
+                    idle.cpu_ns.load(Ordering::Relaxed) as f64 / 1e6,
                 )
             },
             self.fetcher.stats().started.load(Ordering::Relaxed),
