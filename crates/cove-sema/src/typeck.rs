@@ -16261,6 +16261,7 @@ fn run() -> Int {
                 max_tasks: None,
                 trace: None,
                 generates: None,
+                manual: false,
             },
         );
         Config {
