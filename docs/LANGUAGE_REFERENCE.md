@@ -689,9 +689,16 @@ conservative, local one (`cove::unique::not_unique`), and it is made where
 the `freeze()` is written:
 
 - the vector originates at a creation in the same function — `Vector.of(...)`,
-  `array.toVector()`, `snapshot()`, or a field of a struct literal initialised
-  by one;
-- no `let`, `var` or assignment made a second handle from it;
+  `array.toVector()`, `snapshot()`, a field of a struct literal initialised
+  by one, or a call to a function the compiler has proved answers fresh
+  storage. A function is proved to when every value it answers — its tail and
+  every `return` — is itself one of these creations, or names a local of its
+  own for which this same list holds up to the answer, the answer standing in
+  for the `freeze()`. So `fn filled(n: Int) -> Vector<Int> { var out =
+  Vector.of(); ...; out }` answers fresh storage, and `var a = filled(3)` then
+  `a.freeze()` is proved;
+- no `let`, `var`, assignment or `match` pattern made a second handle from
+  it;
 - it did not escape: nothing captured it in a closure, returned it, stored it
   in another value, or passed it to a call that could keep it — which a call
   can only do through its result, through a `var` argument, or by writing it
@@ -724,8 +731,10 @@ bound or through `dyn` names no declaration for the obligation to be
 discharged at.
 
 The proof is deliberately conservative rather than complete: storage a call
-produced (`var log = build()`) or an assignment brought in (`log = lines`) is
-refused even where it happens to be unique. The correction is always the
+produced is refused unless the callee was proved to answer fresh storage as
+above — a callee that answers a parameter, or a local that something else in
+its body also got hold of, is not — and storage an assignment brought in
+(`log = lines`) is refused even where it happens to be unique. The correction is always the
 same, and the diagnostic gives it — call `toArray()` and pay the copy.
 
 A value type may not contain itself. A `struct` or an `enum` whose layout
