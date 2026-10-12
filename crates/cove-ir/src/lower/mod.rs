@@ -89,6 +89,7 @@ mod redefined;
 mod shapes;
 mod stmt;
 mod sweep;
+mod switches;
 pub(crate) mod synth;
 mod tails;
 mod tasks;
@@ -597,6 +598,11 @@ fn finish(
             .collect(),
         Roots::Package => Vec::new(),
     };
+    // A chain of `==` tests of one `Int` against dense small literals is
+    // dispatched through a table instead — before the expansion, because
+    // the inliner weighs a body by its instruction count and a chain of
+    // sixteen tests is thirty-two of them. Issue #535; see `switches`.
+    switches::chains_into_switches(&mut program);
     inline::expand_small_leaf_calls(&mut program, &entries);
 
     // And then the slice's own question, asked again about what that left:

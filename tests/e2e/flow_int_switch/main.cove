@@ -1,0 +1,141 @@
+use console.println
+
+/// A `match` over dense small literals, which `cove_ir::lower` dispatches as a
+/// table (issue #535). The hole at `3` and every value outside `0..=5` reach
+/// the `_` arm.
+fn dense(n: Int) -> String {
+  match n {
+    0 => "zero"
+    1 => "one"
+    2 => "two"
+    4 => "four"
+    5 => "five"
+    _ => "other"
+  }
+}
+
+/// A negative literal in front of dense ones: the comparison stays and the
+/// rest are a table behind it.
+fn signed(n: Int) -> String {
+  match n {
+    -1 => "minus one"
+    0 => "zero"
+    1 => "one"
+    2 => "two"
+    _ => "other"
+  }
+}
+
+/// Literals too far apart to be a table, which stay comparisons.
+fn sparse(n: Int) -> String {
+  match n {
+    0 => "zero"
+    10 => "ten"
+    1000 => "thousand"
+    _ => "other"
+  }
+}
+
+/// `std.dynamic`'s shape: a ladder of `==` and `!=` over one code, where a
+/// `!=` sends the value it names past the block and the rest further in, and
+/// a literal is named twice.
+fn kind(code: Int) -> String {
+  if code == 2 {
+    return "int"
+  } else {
+    if code != 6 {
+      if code != 9 {
+        if code == 7 {
+          return "enum"
+        } else if code == 2 {
+          return "unreachable"
+        } else if code != 8 {
+          if code == 0 {
+            return "unit"
+          }
+          if code == 1 {
+            return "bool"
+          }
+          return "unnamed"
+        }
+      }
+    }
+  }
+  "container"
+}
+
+/// A run of `if`s with no `else`, which is how `covefmt.lineAt` is written.
+fn indent(depth: Int) -> String {
+  if depth == 0 {
+    return "[]"
+  }
+  if depth == 1 {
+    return "[  ]"
+  }
+  if depth == 2 {
+    return "[    ]"
+  }
+  if depth == 3 {
+    return "[      ]"
+  }
+  "[deep]"
+}
+
+/// The answer of one test read again after the chain, which keeps the
+/// chain as comparisons.
+fn remembered(n: Int) -> String {
+  let zero = n == 0
+  if zero {
+    return "zero"
+  }
+  if n == 1 {
+    return "one"
+  }
+  if n == 2 {
+    return "two"
+  }
+  if zero {
+    return "unreachable"
+  }
+  "other"
+}
+
+/// Every probe through every function, in a callee: the outermost frame is
+/// always the encoded VM's, so a loop in `main` would never reach the native
+/// tier.
+fn report(probes: Array<Int>) -> Result<Unit, Error> {
+  for n in probes {
+    let line = "{n}: {dense(n)} {signed(n)} {sparse(n)} {kind(n)} {indent(n)} {remembered(n)}"
+    println(line)?
+  }
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  let probes = [
+    -9223372036854775807 - 1,
+    -1099511627776,
+    -4294967296,
+    -2,
+    -1,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    1000,
+    2147483647,
+    2147483648,
+    4294967296,
+    1099511627776,
+    9223372036854775807,
+  ]
+  report(probes)
+}

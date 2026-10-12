@@ -100,6 +100,65 @@ fn @m.name(Int) -> String
     );
 }
 
+/// Unless they are: three or more literals filling at least half of
+/// `0..=hi` are a table, and the chain of comparisons is dispatched as the
+/// switch an enum's `match` is (issue #535). The `_` arm is the default, and
+/// so is the hole at `2`.
+#[test]
+fn a_match_over_dense_small_literals_is_a_switch() {
+    assert_eq!(
+        listing(
+            "fn name(n: Int) -> String {\n  match n {\n    0 => \"zero\",\n    1 => \"one\",\n    3 => \"three\",\n    _ => \"many\",\n  }\n}",
+            "name"
+        ),
+        "\
+fn @m.name(Int) -> String
+  frame 5: s0!:int s1:ref s2:bool s3:ref s4:ref
+  local n -> s0:Int [0, 13)
+     0  switch s0:int [1 3 7 5] else 7
+     1  str s1:ref \"zero\"
+     2  jump 12
+     3  str s1:ref \"one\"
+     4  jump 12
+     5  str s1:ref \"three\"
+     6  jump 12
+     7  str s1:ref \"many\"
+     8  jump 12
+     9  str s3:ref \"no `match` arm covers this value\"
+    10  str s4:ref \"\"
+    11  trap s3:ref, s4:ref, s4:ref
+    12  return s1:String
+"
+    );
+}
+
+/// The same arms over literals too far apart to be a table stay a chain.
+#[test]
+fn a_match_over_sparse_literals_stays_a_chain() {
+    let text = listing(
+        "fn name(n: Int) -> String {\n  match n {\n    0 => \"zero\",\n    10 => \"ten\",\n    100 => \"hundred\",\n    _ => \"many\",\n  }\n}",
+        "name",
+    );
+    assert!(!text.contains("switch"), "{text}");
+    assert_eq!(text.matches("eq.int.imm.branch").count(), 3, "{text}");
+}
+
+/// A negative literal is not an index, so it stays a comparison in front of
+/// the table the rest make.
+#[test]
+fn a_negative_literal_stays_a_comparison_in_front_of_the_switch() {
+    let text = listing(
+        "fn name(n: Int) -> String {\n  match n {\n    -1 => \"minus one\",\n    0 => \"zero\",\n    1 => \"one\",\n    2 => \"two\",\n    _ => \"many\",\n  }\n}",
+        "name",
+    );
+    assert_eq!(text.matches("eq.int.imm.branch").count(), 1, "{text}");
+    assert!(
+        text.contains("eq.int.imm.branch s2:bool s0:int -1"),
+        "{text}"
+    );
+    assert_eq!(text.matches("switch").count(), 1, "{text}");
+}
+
 #[test]
 fn a_match_over_strings_compares_bytes() {
     assert_eq!(

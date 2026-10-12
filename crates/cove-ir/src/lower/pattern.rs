@@ -10,7 +10,10 @@
 //!
 //! A `match` over anything else — an `Int`, a `String`, a `Bool` — is a
 //! chain of comparisons, because there is no index to switch on and the
-//! arms' literals are values rather than a dense numbering.
+//! arms' literals are values rather than a dense numbering. Where they turn
+//! out to be one — three or more small non-negative `Int` literals filling at
+//! least half of `0..=hi` — [`super::switches`] dispatches the chain as a
+//! switch after the fact (issue #535).
 //!
 //! The table has a default even where the checker proved the `match`
 //! exhaustive, because the machine does not take the lowering's word for

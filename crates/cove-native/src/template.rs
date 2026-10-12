@@ -4241,6 +4241,13 @@ impl<'a> Emit<'a> {
         let default = table.default;
         self.load_slot(RAX, on);
         for (case, target) in targets.iter().enumerate() {
+            // An entry that goes where the default does is a hole in a table
+            // `cove_ir::lower` built from a chain of literal tests (issue
+            // #535): falling past it reaches the same place, so it costs no
+            // compare.
+            if *target == default {
+                continue;
+            }
             self.cmp_imm32(RAX, case as i32);
             self.jcc(CC_E, Target::Pc(*target));
         }

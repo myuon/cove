@@ -423,6 +423,11 @@ fn a_switch_takes_its_case_or_the_default() {
 }
 
 #[test]
+fn a_switch_hole_goes_where_the_default_does() {
+    suite::a_switch_hole_goes_where_the_default_does::<Template>();
+}
+
+#[test]
 fn a_call_hands_over_and_an_outcome_travels_out() {
     suite::a_call_hands_over_and_an_outcome_travels_out::<Template>();
 }
