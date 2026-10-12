@@ -1,0 +1,13 @@
+ascii chars 1 bytes 1 [65] first 65 same true
+latin chars 1 bytes 2 [195 169] first 233 same true
+upper chars 1 bytes 2 [195 169] first 233 same true
+padded chars 1 bytes 2 [195 169] first 233 same true
+kana chars 1 bytes 3 [227 129 130] first 12354 same true
+emoji chars 1 bytes 4 [240 159 152 128] first 128512 same true
+last chars 1 bytes 4 [244 143 191 191] first 1114111 same true
+nul chars 1 bytes 1 [0] first 0 same true
+mixed chars 6 bytes 9 [99 97 102 195 169 32 227 129 130] first 99 same true
+interpolated chars 3 bytes 3 [65 120 66] first 65 same true
+braces chars 2 bytes 2 [123 125] first 123 same true
+codePoint 65 233 128512 1114111 0
+sameCodePoint true true

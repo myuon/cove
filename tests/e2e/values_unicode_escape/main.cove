@@ -1,0 +1,63 @@
+use console.println
+
+/// The bytes of `text`, as decimal values separated by spaces.
+///
+/// `values_string_from_code_point`'s helper, and here for its reason: the
+/// bytes are the encoding itself, so `\u{e9}` at `195 169` is a fact no
+/// terminal can be blamed for — and one row below is a NUL.
+fn bytesOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    if at == 0 {
+      rendered = "{text.byteAt(at)}"
+    } else {
+      rendered = "{rendered} {text.byteAt(at)}"
+    }
+    at += 1
+  }
+  rendered
+}
+
+/// One escaped string, printed as its counts, its bytes, its first code point,
+/// and whether it equals the same text written as the character itself.
+fn show(label: String, text: String, written: String) -> Result<Unit, Error> {
+  let point = match text.codePointAtByte(0) {
+    Some(point) => "{point}"
+    None => "none"
+  }
+  println("{label} chars {text.length()} bytes {text.byteLength()} [{bytesOf(text)}] first {point} same {text == written}")?
+  Ok(())
+}
+
+/// Pins what `\u{X…}` denotes, on every evaluator: the escape names a Unicode
+/// scalar value by number, in one to six hex digits of either case, and the
+/// string holds that scalar's UTF-8 encoding. ADR 0094.
+///
+/// Each row compares the escape against the same text written as the
+/// character itself — or, where the character cannot be written in a source
+/// file legibly, against `String.fromCodePoint` — so a decoding that answered
+/// the right length and the wrong bytes would say `same false`.
+export fn main() -> Result<Unit, Error> {
+  show("ascii", "\u{41}", "A")?
+  show("latin", "\u{e9}", "é")?
+  show("upper", "\u{E9}", "é")?
+  show("padded", "\u{0000e9}", "é")?
+  show("kana", "\u{3042}", "あ")?
+  show("emoji", "\u{1F600}", "😀")?
+  show("last", "\u{10FFFF}", String.fromCodePoint(0x10FFFF)?)?
+  show("nul", "\u{0}", String.fromCodePoint(0)?)?
+  show("mixed", "caf\u{e9} \u{3042}", "café あ")?
+  // The escape's braces are its own; the one after it opens an
+  // interpolation as it always did.
+  let name = "x"
+  show("interpolated", "\u{41}{name}\u{42}", "AxB")?
+  show("braces", "\u{7B}\u{7D}", "\{\}")?
+  // A code-point literal takes the escape a string takes.
+  println(
+    "codePoint {'\u{41}'} {'\u{e9}'} {'\u{1F600}'} {'\u{10FFFF}'} {'\u{0}'}",
+  )?
+  println("sameCodePoint {'\u{e9}' == 'é'} {'\u{1F600}' == '😀'}")?
+  Ok(())
+}

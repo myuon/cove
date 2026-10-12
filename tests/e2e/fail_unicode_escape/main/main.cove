@@ -1,0 +1,14 @@
+use console.println
+
+/// Every way a `\u{...}` escape can fail to name a Unicode scalar value, each
+/// reported once and pointed at the escape. ADR 0094.
+export fn main() -> Result<Unit, Error> {
+  println("\u{D800}")?
+  println("\u{110000}")?
+  println("\u{}")?
+  println("\u{1234567}")?
+  println("\u{12G4}")?
+  println("\u41")?
+  println("\u{41")?
+  Ok(())
+}

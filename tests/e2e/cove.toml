@@ -432,6 +432,10 @@ allow = ["console"]
 entry = "values_code_point.main"
 allow = ["console"]
 
+[run.values_unicode_escape]
+entry = "values_unicode_escape.main"
+allow = ["console"]
+
 [run.values_string_length]
 entry = "values_string_length.main"
 allow = ["console"]

@@ -232,6 +232,32 @@ impl Scan {
     at
   }
 
+  /// The end of a `\u{...}` escape whose digits begin at `from`: past its
+  /// `}`, or at the first byte that is neither a letter, a digit nor that
+  /// brace — where the lexer stops reading it too, ADR 0094.
+  ///
+  /// Its `{` is the escape's and not an interpolation's. Read as one,
+  /// `"\u{41"` — which does not lex — would open an interpolation that runs
+  /// past the closing quote and swallows the rest of the file, and the
+  /// tiling of a file that does not lex has to hold as well as any other's.
+  fn unicodeEscape(self, from: Int) -> Int {
+    var at = from
+    while true {
+      let c = self.at(at)
+      if c == '\}' {
+        return at + 1
+      }
+      let digit = c >= '0' && c <= '9'
+      let lower = c >= 'a' && c <= 'z'
+      let upper = c >= 'A' && c <= 'Z'
+      if !digit && !lower && !upper {
+        return at
+      }
+      at = at + 1
+    }
+    at
+  }
+
   /// The end of the literal beginning at `from` and ending at `closer`.
   ///
   /// One rule for `"..."` and `'...'`, because they differ only in which
@@ -251,7 +277,9 @@ impl Scan {
       if c < 0 {
         return at
       }
-      if c == '\\' {
+      if c == '\\' && self.at(at + 1) == 'u' && self.at(at + 2) == '\{' {
+        at = self.unicodeEscape(at + 3)
+      } else if c == '\\' {
         // The escaped character may be wider than the backslash.
         at = at + 2
       } else if c == '\{' && closer == '"' {

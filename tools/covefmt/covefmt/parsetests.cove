@@ -1319,3 +1319,18 @@ test fn what_cove_fmt_writes_whatever_the_source_had() -> Result<Unit, Error> {
   )?
   Ok(())
 }
+
+/// A `\u{...}` escape is written back as it was written, never decoded to
+/// the character it names: `\u{e9}` and `é` are one string to the compiler
+/// and two spellings to the person who chose one. ADR 0094.
+test fn a_unicode_escape_keeps_its_spelling() -> Result<Unit, Error> {
+  let kept = "fn f() -> Int \{\n  let s = \"caf\\u\{e9\} \\u\{1F600\}\{s\}\\u\{10FFFF\}\"\n  '\\u\{41\}'\n\}\n"
+  let answer = formatSource(kept)
+  assert(answer.refused.isNone())?
+  assertEqual(answer.text, kept)?
+  assertEqual(
+    formatSource("fn f() -> Int \{'\\u\{e9\}'\}\n").text,
+    "fn f() -> Int \{\n  '\\u\{e9\}'\n\}\n",
+  )?
+  Ok(())
+}

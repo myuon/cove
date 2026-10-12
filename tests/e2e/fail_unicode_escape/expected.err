@@ -1,0 +1,50 @@
+error[cove::lex::invalid_unicode_escape]: invalid unicode escape: `\u{D800}` is a surrogate, not a Unicode scalar value
+ --> <e2e>/fail_unicode_escape/main/main.cove:6:12
+  |
+6 |   println("\u{D800}")?
+  |            ^^^^^^^^
+  rule: `\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to `10FFFF`, the surrogates `D800` to `DFFF` excluded.
+  help: Write the code point in hex between braces, as `\u{e9}` or `\u{1F600}`.
+error[cove::lex::invalid_unicode_escape]: invalid unicode escape: `\u{110000}` is above `10FFFF`, the last code point
+ --> <e2e>/fail_unicode_escape/main/main.cove:7:12
+  |
+7 |   println("\u{110000}")?
+  |            ^^^^^^^^^^
+  rule: `\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to `10FFFF`, the surrogates `D800` to `DFFF` excluded.
+  help: Write the code point in hex between braces, as `\u{e9}` or `\u{1F600}`.
+error[cove::lex::invalid_unicode_escape]: invalid unicode escape: `\u{}` names no code point
+ --> <e2e>/fail_unicode_escape/main/main.cove:8:12
+  |
+8 |   println("\u{}")?
+  |            ^^^^
+  rule: `\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to `10FFFF`, the surrogates `D800` to `DFFF` excluded.
+  help: Write the code point in hex between braces, as `\u{e9}` or `\u{1F600}`.
+error[cove::lex::invalid_unicode_escape]: invalid unicode escape: `\u{1234567}` has 7 hex digits, more than six
+ --> <e2e>/fail_unicode_escape/main/main.cove:9:12
+  |
+9 |   println("\u{1234567}")?
+  |            ^^^^^^^^^^^
+  rule: `\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to `10FFFF`, the surrogates `D800` to `DFFF` excluded.
+  help: Write the code point in hex between braces, as `\u{e9}` or `\u{1F600}`.
+error[cove::lex::invalid_unicode_escape]: invalid unicode escape: `G` is not a hex digit
+  --> <e2e>/fail_unicode_escape/main/main.cove:10:12
+   |
+10 |   println("\u{12G4}")?
+   |            ^^^^^^^^
+  rule: `\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to `10FFFF`, the surrogates `D800` to `DFFF` excluded.
+  help: Write the code point in hex between braces, as `\u{e9}` or `\u{1F600}`.
+error[cove::lex::invalid_unicode_escape]: invalid unicode escape: `\u` must be followed by `{`
+  --> <e2e>/fail_unicode_escape/main/main.cove:11:12
+   |
+11 |   println("\u41")?
+   |            ^^
+  rule: `\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to `10FFFF`, the surrogates `D800` to `DFFF` excluded.
+  help: Write the code point in hex between braces, as `\u{e9}` or `\u{1F600}`.
+error[cove::lex::invalid_unicode_escape]: invalid unicode escape: `\u{` is never closed with `}`
+  --> <e2e>/fail_unicode_escape/main/main.cove:12:12
+   |
+12 |   println("\u{41")?
+   |            ^^^^^
+  rule: `\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to `10FFFF`, the surrogates `D800` to `DFFF` excluded.
+  help: Write the code point in hex between braces, as `\u{e9}` or `\u{1F600}`.
+7 error(s)
