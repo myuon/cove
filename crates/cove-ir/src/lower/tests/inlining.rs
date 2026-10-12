@@ -937,6 +937,66 @@ fn a_call_passing_a_var_argument_is_not_doomed() {
     );
 }
 
+/// A call whose continuation is doomed carries no hotness to its callee, even
+/// inside a loop: it runs at most once a call of the body, on the path that
+/// ends the run (issue #538). The same call with a continuation that goes
+/// round the loop does make its callee hot.
+///
+/// This is the shape every refusal helper of the standard library is called
+/// in — `std.float`'s, `std.int`'s, `std.dynamic`'s — a sentence built by a
+/// call and handed straight to a trap.
+#[test]
+fn a_call_whose_continuation_is_doomed_makes_no_callee_hot() {
+    let (mut program, _) = program(LEAF);
+    let leaf = FunctionId(
+        program
+            .functions
+            .iter()
+            .position(|f| f.qualified() == "m.leaf")
+            .expect("`leaf` is lowered") as u32,
+    );
+    // A loop whose body calls `leaf`, and then does `then`.
+    let looped = |then: Inst| {
+        move |call: &Inst| {
+            vec![
+                Inst::Bool {
+                    dst: 4,
+                    value: true,
+                },
+                Inst::BranchFalse { cond: 4, to: 5 },
+                call.clone(),
+                then.clone(),
+                Inst::Jump { to: 0 },
+                Inst::Return { src: 0 },
+            ]
+        }
+    };
+    let trap = Inst::Trap {
+        message: 3,
+        rule: 3,
+        help: 3,
+    };
+    let refused = calling_leaf(&mut program, looped(trap));
+    assert!(inline::doomed_continuations(&program, refused)[2]);
+    assert!(
+        !inline::hot_functions(&program)[leaf.index()],
+        "a refusal inside a loop does not make what builds its sentence hot"
+    );
+
+    let turned = calling_leaf(
+        &mut program,
+        looped(Inst::Bool {
+            dst: 4,
+            value: false,
+        }),
+    );
+    assert!(!inline::doomed_continuations(&program, turned)[2]);
+    assert!(
+        inline::hot_functions(&program)[leaf.index()],
+        "the same call, going round the loop, does"
+    );
+}
+
 /// A call that stands inside an earlier expansion is never expanded, however
 /// small its callee: the other half of what bounds the pass, and what keeps
 /// one `Inlined` record from ever holding another this pass made.

@@ -1,6 +1,8 @@
 # ADR 0070: A call whose continuation is doomed may be expanded
 
 - Status: Accepted
+- Superseded in part by [ADR 0092](0092-a-doomed-call-carries-no-hotness.md),
+  for Decision 4: `hot_functions` skips a call whose continuation is doomed
 - Date: 2026-09-29
 - Decides: that the inliner may expand a body holding a call, when every path
   on from that call ends in a trap without returning and without going round a
