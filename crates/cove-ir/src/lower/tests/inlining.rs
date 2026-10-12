@@ -1126,11 +1126,14 @@ fn an_argument_an_address_reaches_is_copied_before_a_var_body_runs() {
 /// A leaf of twelve comparisons, each answering on its own arm: over
 /// `inline::HOT_LIMIT` and under `inline::LOOP_LIMIT`, which is the shape of
 /// `std.dynamic.children` at a size a test can hold.
+///
+/// The literals are ten apart so that they stay comparisons: twelve dense ones
+/// would be one switch (issue #535), and a leaf under the hot limit.
 const ARMS: &str = "fn arms(n: Int) -> Int {\n  \
-     if n == 1 { return 11 }\n  if n == 2 { return 12 }\n  if n == 3 { return 13 }\n  \
-     if n == 4 { return 14 }\n  if n == 5 { return 15 }\n  if n == 6 { return 16 }\n  \
-     if n == 7 { return 17 }\n  if n == 8 { return 18 }\n  if n == 9 { return 19 }\n  \
-     if n == 10 { return 20 }\n  if n == 11 { return 21 }\n  if n == 12 { return 22 }\n  \
+     if n == 10 { return 11 }\n  if n == 20 { return 12 }\n  if n == 30 { return 13 }\n  \
+     if n == 40 { return 14 }\n  if n == 50 { return 15 }\n  if n == 60 { return 16 }\n  \
+     if n == 70 { return 17 }\n  if n == 80 { return 18 }\n  if n == 90 { return 19 }\n  \
+     if n == 100 { return 20 }\n  if n == 110 { return 21 }\n  if n == 120 { return 22 }\n  \
      n * 3 - 1\n}\n";
 
 /// A leaf over the hot limit is expanded at a site inside a loop of its own

@@ -1879,7 +1879,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `followsAMember`, `asWritten`, `endsOnOneNewline`, …) and a test pinning
 /// them. The IR change in that PR is a serialization of the lowering and
 /// changes nothing it lowers.
-const FORWARDABLE_COPIES: usize = 7535;
+///
+/// **7,545 since issue #535 dispatches a dense chain of `Int` literal tests
+/// as a switch**, and the rise is all program and no lowering. With the new
+/// `tests/e2e/flow_int_switch` held out, the 269 programs before it answer
+/// 7,527 with the pass and 7,527 without it — the bound above had 8 of slack
+/// by then — and every row's `copy`, `prod` and `ret` are the same either way;
+/// what the pass moves is 26,485 fewer instructions over the corpus (2,785,978
+/// to 2,759,493). The new program is +18, the standard library a program that
+/// prints carries into the survey, as `values_int_bits` was.
+const FORWARDABLE_COPIES: usize = 7545;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

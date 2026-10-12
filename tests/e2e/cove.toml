@@ -180,6 +180,10 @@ allow = ["console"]
 entry = "flow_if.main"
 allow = ["console"]
 
+[run.flow_int_switch]
+entry = "flow_int_switch.main"
+allow = ["console"]
+
 [run.flow_loops]
 entry = "flow_loops.main"
 allow = ["console"]

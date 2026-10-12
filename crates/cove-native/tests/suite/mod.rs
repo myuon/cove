@@ -8264,6 +8264,52 @@ pub fn a_switch_takes_its_case_or_the_default<A: Arm>() {
     }
 }
 
+/// A table `cove_ir::lower` built from a chain of `Int` literal tests (issue
+/// #535): an `Int` operand, and entries for the literals no test named that go
+/// where the default does. The emitter skips the compare for such a hole, so
+/// this is the case that says skipping it changed no answer — a hole, every
+/// named entry on either side of one, and the words a negative `Int` or one
+/// past `i32` is.
+pub fn a_switch_hole_goes_where_the_default_does<A: Arm>() {
+    let held = program_with_tables(
+        function(
+            vec![Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::Switch {
+                    on: 0,
+                    table: TableId(0),
+                },
+                Inst::Int { dst: 1, value: 11 },
+                Inst::Return { src: 1 },
+                Inst::Int { dst: 1, value: 22 },
+                Inst::Return { src: 1 },
+                Inst::Int { dst: 1, value: 33 },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        vec![Table {
+            targets: vec![1, 5, 5, 3],
+            default: 5,
+        }],
+    );
+    for (index, answer) in [
+        (0u64, 11u64),
+        (1, 33),
+        (2, 33),
+        (3, 22),
+        (4, 33),
+        ((-1i64) as u64, 33),
+        (1 << 32, 33),
+        ((1 << 32) | 3, 33),
+    ] {
+        let mut words = vec![index, 0];
+        let left = run::<A>(&held, &mut words, 0);
+        assert_eq!(left.outcome, Outcome::Returned, "case {index}");
+        assert_eq!(words[1], answer, "case {index}");
+    }
+}
+
 /// A call is handed to the runtime whole, and what comes back decides.
 ///
 /// The helper is a double — see [`call`] — so what is asserted here is the
