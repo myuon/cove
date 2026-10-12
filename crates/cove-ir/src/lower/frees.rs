@@ -138,20 +138,33 @@
 //!
 //! # What the widths have to be careful about
 //!
-//! An instruction's destination is a *run* of words, and this pass asks two
-//! different questions about that run: which words it *may* write, which has
-//! to be an over-estimate, and which it *definitely* writes, which has to be
-//! an under-estimate. They differ in one place. [`Inst::CallClosure`] carries
-//! the layout of its answer, but this pass does not read it: the may-write is
-//! the widest answer any function in the program returns, and the
-//! definitely-writes is one word, which every call writes.
+//! An instruction's destination is a *run* of words, and a pass reading
+//! [`Flow::writes`] asks two different questions about that run: which words
+//! it *may* write, which has to be an over-estimate, and which it
+//! *definitely* writes, which has to be an under-estimate. Every destination
+//! here is sized exactly, so the one answer serves both.
 //!
-//! That over-estimate is now wider than it has to be, and deliberately so
-//! here. Narrowing it to the instruction's own `result` removes the two
-//! questions' one difference — the `wide` argument below and the `widest`
-//! field with it — which is a change to what this pass *emits* and belongs
-//! with its own measurement rather than in the change that made the layout
-//! available. See issue #301.
+//! The one that was not is [`Inst::CallClosure`], whose callee is a word read
+//! out of an object rather than a [`crate::FunctionId`] on the instruction.
+//! Until issue #301 this pass bounded its destination by the widest answer any
+//! function in the program returns for the may-write and by one word for the
+//! definitely-writes, because the answer's width was not on the instruction.
+//! It is now — `result`, since #299 — and it is exact for the reason
+//! [`Inst::Call`]'s `Function::returns` is: what writes the caller's
+//! destination is the callee's [`Inst::Return`], which copies the words the
+//! callee's own `returns` describes on both the encoded VM and the native
+//! tier, and the checker settled the call against the callee's function type,
+//! whose answer type is matched nominally and laid out by the same lowering.
+//! Where the callee's answer is `Never` the two layouts differ, and then the
+//! callee never returns, so no word after the call is reached at all.
+//!
+//! Nor is the trust new, which is what the `widest` bound was defensive
+//! against: `crate::verify` fits the destination in the frame by `result`,
+//! and [`Inst::writes`] answers `result` to every other pass, so a callee
+//! whose `Return` wrote a run other than `result` would already be writing
+//! where the verifier did not check and the other passes did not look.
+//! Narrowing was output-identical on `cove-ir`'s own tests and moved 5 of the
+//! corpus's 270 programs by 14 instructions — see #301.
 
 use crate::inst::{Inst, Len, Slot};
 use crate::layout::{Layout, LayoutId};
@@ -303,14 +316,10 @@ pub(super) struct Bounds {
     /// The widest layout the program declares, which bounds how far past
     /// the slot it names an address can reach. See [`Flow::of`].
     reach: u32,
-    /// The widest answer any function in the program returns, which is what
-    /// bounds an [`Inst::CallClosure`]'s destination.
-    widest: u32,
 }
 
 impl Bounds {
     pub(super) fn of(program: &Program) -> Bounds {
-        let width = |id: LayoutId| program.layouts.get(id.index()).map_or(1, Layout::width);
         let reach = program
             .layouts
             .iter()
@@ -318,13 +327,7 @@ impl Bounds {
             .max()
             .unwrap_or(1)
             .max(1);
-        let widest = program
-            .functions
-            .iter()
-            .map(|target| width(target.returns))
-            .max()
-            .unwrap_or(1);
-        Bounds { reach, widest }
+        Bounds { reach }
     }
 }
 
@@ -341,9 +344,6 @@ pub(super) struct Flow<'p> {
     /// The same words as a list, which is what a transfer walks: almost
     /// every function takes no slot's address, and then it is empty.
     pub(super) addressed_words: Vec<usize>,
-    /// The widest answer any function in the program returns, which is what
-    /// bounds an [`Inst::CallClosure`]'s destination.
-    widest: u32,
 }
 
 impl<'p> Flow<'p> {
@@ -380,7 +380,6 @@ impl<'p> Flow<'p> {
             size,
             addressed,
             addressed_words,
-            widest: bounds.widest,
         })
     }
 
@@ -425,12 +424,9 @@ impl<'p> Flow<'p> {
         }
     }
 
-    /// The words `inst` writes.
-    ///
-    /// `wide` picks the over-estimate where the two differ, which is the one
-    /// place a destination's width is not a static fact. See the module
-    /// documentation.
-    pub(super) fn writes(&self, inst: &Inst, wide: bool, f: &mut dyn FnMut(Slot, u32)) {
+    /// The words `inst` writes: exactly, so both what it may write and what
+    /// it certainly writes. See the module documentation.
+    pub(super) fn writes(&self, inst: &Inst, f: &mut dyn FnMut(Slot, u32)) {
         let width = |id| self.width(id);
         match *inst {
             Inst::Unit { dst }
@@ -520,11 +516,10 @@ impl<'p> Flow<'p> {
                 };
                 f(dst, answer);
             }
-            // The one destination this pass declines to size exactly. The
-            // instruction says how wide the answer is; the bound stays the
-            // widest answer in the program until narrowing it is measured.
+            // Exact, and exact for `Inst::Call`'s reason: the callee's
+            // `Return` writes `returns`, which the checker matched to `result`.
             // See the module documentation and issue #301.
-            Inst::CallClosure { dst, .. } => f(dst, if wide { self.widest } else { 1 }),
+            Inst::CallClosure { dst, result, .. } => f(dst, width(result)),
             Inst::CallHost { dst, op, .. } | Inst::CallResource { dst, op, .. } => {
                 let answer = match self.program.host_ops.get(op.index()) {
                     Some(op) => width(op.result),
@@ -869,7 +864,7 @@ impl<'p> Flow<'p> {
                     }
                 }
             }
-            _ => self.writes(inst, true, &mut |slot, width| {
+            _ => self.writes(inst, &mut |slot, width| {
                 bits::fill(raised, size, slot as usize, width as usize, true);
                 bits::fill(unknown, size, slot as usize, width as usize, true);
             }),
@@ -917,9 +912,9 @@ impl<'p> Flow<'p> {
             queued[pc] = false;
             let inst = &code[pc];
             state.copy_from_slice(&out[pc * w..(pc + 1) * w]);
-            // Only a write this pass is *sure* of may kill a word, so the
-            // narrow answer is the one liveness asks for.
-            self.writes(inst, false, &mut |slot, width| {
+            // Only a write this pass is *sure* of may kill a word, which every
+            // width `writes` answers is.
+            self.writes(inst, &mut |slot, width| {
                 bits::fill(&mut state, size, slot as usize, width as usize, false);
             });
             self.reads(inst, &mut |slot, width| {
@@ -1362,14 +1357,11 @@ mod tests {
         );
     }
 
-    /// This pass bounds an `Inst::CallClosure`'s destination by the widest
-    /// answer any function in the program returns rather than by the layout
-    /// the instruction carries — see the module documentation for why it
-    /// stays that way for now. Here that widest answer is the two-word `Pair`
-    /// a second function returns, so the word *after* the destination is
-    /// unknown too.
+    /// An `Inst::CallClosure` writes the run its `result` describes, and here
+    /// that is the two-word `Pair`, so the word *after* the destination is
+    /// unknown too and its clear stays.
     #[test]
-    fn a_closure_call_may_write_as_wide_as_the_widest_answer() {
+    fn a_closure_call_writes_as_wide_as_its_answer() {
         let mut wide = function(vec![Repr::Ref, Repr::Ref], vec![Inst::Return { src: 0 }]);
         wide.returns = PAIR;
         let caller = function(
@@ -1405,8 +1397,64 @@ mod tests {
         assert_eq!(program.function(FunctionId(0)).code, code);
     }
 
-    /// And the same call with the destination one slot further away: the
-    /// widest answer no longer reaches the cleared word.
+    /// The same call answering one word, in a program where another function
+    /// still returns the two-word `Pair`: the call's own answer bounds its
+    /// destination, not the widest answer in the program, so the word after
+    /// it still holds the literal and its clear is dropped. Until issue #301
+    /// this clear stayed.
+    #[test]
+    fn a_closure_call_answering_one_word_writes_one_word() {
+        let mut wide = function(vec![Repr::Ref, Repr::Ref], vec![Inst::Return { src: 0 }]);
+        wide.returns = PAIR;
+        let caller = function(
+            vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Ref],
+            vec![
+                Inst::Str {
+                    dst: 2,
+                    text: text(),
+                },
+                Inst::CallClosure {
+                    dst: 1,
+                    closure: 3,
+                    args: crate::ArgsId(0),
+                    result: STR,
+                },
+                Inst::Clear {
+                    slot: 2,
+                    layout: STR,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut program = Program {
+            functions: vec![caller, wide],
+            layouts: layouts(),
+            strings: vec![Arc::from("s")],
+            args: vec![Vec::new()],
+            str_layout: STR,
+            ..Program::default()
+        };
+        drop_clears_that_free_nothing(&mut program);
+        assert_eq!(
+            program.function(FunctionId(0)).code,
+            [
+                Inst::Str {
+                    dst: 2,
+                    text: text(),
+                },
+                Inst::CallClosure {
+                    dst: 1,
+                    closure: 3,
+                    args: crate::ArgsId(0),
+                    result: STR,
+                },
+                Inst::Return { src: 0 },
+            ]
+        );
+    }
+
+    /// And the two-word call with the destination one slot further away: its
+    /// answer no longer reaches the cleared word.
     #[test]
     fn a_word_outside_that_run_is_still_answered() {
         let mut wide = function(vec![Repr::Ref, Repr::Ref], vec![Inst::Return { src: 0 }]);

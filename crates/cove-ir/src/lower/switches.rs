@@ -344,7 +344,7 @@ fn read_before_written(function: &Function, flow: &Flow<'_>, start: usize, slot:
             return true;
         }
         let mut written = false;
-        flow.writes(inst, false, &mut |base, width| {
+        flow.writes(inst, &mut |base, width| {
             written |= base <= slot && slot < base + width;
         });
         if !written {
