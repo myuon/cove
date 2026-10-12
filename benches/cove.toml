@@ -1,3 +1,12 @@
+# `manual = true` marks a run a person makes by hand — a measurement matrix
+# read off a stopwatch, usually one build either side of a migration — rather
+# than a row `cove-bench` times (its nine, `startup`, and `--matrix`'s `conv_*`)
+# or a program sized for the corpus surveys (`seqsearch` and `keyed`, through
+# their `args` files). `cove run` runs a manual entry like any other; what the
+# mark changes is that `crates/cove-cli/tests/vm_coverage.rs` checks and lowers
+# it and does not run it, because at full size on the interpreter each one is
+# tens of seconds of the ratchet (issue #487). A new hand-run matrix sets it.
+
 [run.pure]
 entry = "pure.main"
 allow = []
@@ -99,10 +108,12 @@ allow = ["clock"]
 [run.bytescan]
 entry = "bytescan.main"
 allow = []
+manual = true
 
 [run.bytescan_call]
 entry = "bytescan.viaCall"
 allow = []
+manual = true
 
 # `contains` and `Int.parse` written in Cove against the byte-counted
 # primitives, beside the builtins they would replace — issue #292. `main` is
@@ -115,42 +126,50 @@ allow = []
 [run.contains_builtin]
 entry = "stringlib.containsBuiltinRow"
 allow = []
+manual = true
 
 [run.contains_scalar]
 entry = "stringlib.containsScalarRow"
 allow = []
+manual = true
 
 [run.contains_slice]
 entry = "stringlib.containsSliceRow"
 allow = []
+manual = true
 
 [run.parse_builtin]
 entry = "stringlib.parseBuiltinRow"
 allow = []
+manual = true
 
 [run.parse_cove]
 entry = "stringlib.parseCoveRow"
 allow = []
+manual = true
 
 # The length-and-verdict matrix beside the two single-input rows above, which
 # issue #454's Step 4 added when it moved `Int.parse` into `std.int`. The two
-# above are ADR 0042's Library test and are timed rows of `cove-bench`; this
-# one is not timed and is run by hand, the way `[run.chars_rows]` is.
+# above are ADR 0042's Library test; this one is its matrix, and like them
+# it is run by hand, the way `[run.chars_rows]` is.
 [run.parse_rows]
 entry = "stringlib.parseRows"
 allow = ["console", "clock"]
+manual = true
 
 # `Int.parseRadix`'s matrix, which issue #454's Step 4 added when it moved that
 # method into `std.int`; run by hand, as `[run.parse_rows]` is.
 [run.parse_radix_rows]
 entry = "stringlib.parseRadixRows"
 allow = ["console", "clock"]
+manual = true
 
 # `String.split`'s and `String.replace`'s matrix, which issue #454's Step 3
 # added when it moved both into `std.string`; run by hand.
 [run.split_rows]
 entry = "stringlib.splitRows"
 allow = ["console", "clock"]
+manual = true
 
 # What one `Inst::IntrinsicCall` costs, decomposed. Three loops over the same
 # 2,000,000 turns as `arith`, each with exactly one builtin in it, and a
@@ -165,10 +184,12 @@ allow = ["console", "clock"]
 [run.builtincall]
 entry = "builtincall.main"
 allow = ["console", "clock"]
+manual = true
 
 [run.scanshape]
 entry = "scanshape.main"
 allow = ["console", "clock"]
+manual = true
 
 # What `String.endsWith` costs on its own, at the four pairs of receiver and
 # suffix size — ADR 0064's Phase 1 moved it out of the runtime and into
@@ -181,6 +202,7 @@ allow = ["console", "clock"]
 [run.endswith]
 entry = "endswith.main"
 allow = ["console", "clock"]
+manual = true
 
 # The same four rows for `String.startsWith`, in a package of its own rather
 # than four more rows in `endswith`: the two are the same loop with a
@@ -193,6 +215,7 @@ allow = ["console", "clock"]
 [run.startswith]
 entry = "startswith.main"
 allow = ["console", "clock"]
+manual = true
 
 # What `String.contains` costs against what the same search costs in Cove, at
 # nine combinations of receiver length, needle length and match position —
@@ -206,6 +229,7 @@ allow = ["console", "clock"]
 [run.contains]
 entry = "contains.main"
 allow = ["console", "clock"]
+manual = true
 
 # What turning a byte offset into a character position costs — ADR 0064's
 # fifth Phase 1 migration, `String.indexOf`. The search under it is
@@ -220,6 +244,7 @@ allow = ["console", "clock"]
 [run.indexof]
 entry = "indexof.main"
 allow = ["console", "clock"]
+manual = true
 
 # What `Float.abs` costs as an instruction against what it cost as a call —
 # ADR 0064's sixth Phase 1 migration. The operation runs zero times on covefmt
@@ -232,6 +257,7 @@ allow = ["console", "clock"]
 [run.floatabs]
 entry = "floatabs.main"
 allow = ["console", "clock"]
+manual = true
 
 # `Float.min` and `Float.max` as an instruction against the same two as a
 # call, which is ADR 0064's last two Phase 1 migrations. `benches/floatabs`'
@@ -242,6 +268,7 @@ allow = ["console", "clock"]
 [run.floatminmax]
 entry = "floatminmax.main"
 allow = ["console", "clock"]
+manual = true
 
 # `Float.round` as an instruction against the same operation as a call, which
 # is ADR 0064's Decision 2 typed scalar operation applied to the third of the
@@ -253,6 +280,7 @@ allow = ["console", "clock"]
 [run.floatround]
 entry = "floatround.main"
 allow = ["console", "clock"]
+manual = true
 
 # `Float.sqrt` as an instruction against the same operation as a call, which
 # is ADR 0064's Decision 2 typed scalar operation applied to the last of the
@@ -264,6 +292,7 @@ allow = ["console", "clock"]
 [run.floatsqrt]
 entry = "floatsqrt.main"
 allow = ["console", "clock"]
+manual = true
 
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
@@ -299,6 +328,7 @@ allow = ["console", "clock"]
 [run.slice]
 entry = "slice.main"
 allow = ["console", "clock"]
+manual = true
 
 # `String.fromCodePoint` at each of the four widths it encodes to and on each
 # of the two ways it refuses — ADR 0064 and issue #454's Step 3. The census
@@ -312,6 +342,7 @@ allow = ["console", "clock"]
 [run.frompoint]
 entry = "frompoint.main"
 allow = ["console", "clock"]
+manual = true
 
 # `String.join` at four part counts, two separators and two part widths — ADR
 # 0064 and issue #454's Step 3. **This is the first package in the series whose
@@ -327,6 +358,7 @@ allow = ["console", "clock"]
 [run.join]
 entry = "join.main"
 allow = ["console", "clock"]
+manual = true
 
 # `chars`'s decomposition — issue #454's Step 3, which moved `String.chars`
 # into `std.string.chars`. `[run.chars]` above is one receiver at 32,000
@@ -339,6 +371,7 @@ allow = ["console", "clock"]
 [run.chars_rows]
 entry = "chars.rows"
 allow = ["console", "clock"]
+manual = true
 
 # `trim` and `words`, issue #454's Step 5, which moved both into `std.string`.
 # They are one package because they are one decision apart — `trim` removes
@@ -356,14 +389,17 @@ allow = ["console", "clock"]
 [run.trimwords]
 entry = "trimwords.main"
 allow = ["console", "clock"]
+manual = true
 
 [run.trim_rows]
 entry = "trimwords.trimRows"
 allow = ["console", "clock"]
+manual = true
 
 [run.words_rows]
 entry = "trimwords.wordsRows"
 allow = ["console", "clock"]
+manual = true
 
 # `String.toUpper` and `String.toLower`, issue #454's Step 5. Nothing in
 # `benches/` used either, and neither `tools/covefmt` nor `examples/cq`
@@ -377,14 +413,17 @@ allow = ["console", "clock"]
 [run.casemap]
 entry = "casemap.main"
 allow = ["console", "clock"]
+manual = true
 
 [run.upper_rows]
 entry = "casemap.upperRows"
 allow = ["console", "clock"]
+manual = true
 
 [run.lower_rows]
 entry = "casemap.lowerRows"
 allow = ["console", "clock"]
+manual = true
 
 # What a layout-directed `==` costs as a walk the lowering composed against
 # what it cost as one call into a walk written in Rust, which is ADR 0064's
@@ -395,15 +434,19 @@ allow = ["console", "clock"]
 [run.equals]
 entry = "equals.main"
 allow = ["console", "clock"]
+manual = true
 
 [run.ordering]
 entry = "ordering.main"
 allow = ["console", "clock"]
+manual = true
 
 [run.admission]
 entry = "admission.main"
 allow = ["console", "clock"]
+manual = true
 
 [run.rendering]
 entry = "rendering.main"
 allow = ["console", "clock"]
+manual = true

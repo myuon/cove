@@ -31,18 +31,26 @@ Run the ignored ones with `cargo ratchet`, an alias for the same thing under
 profile is not a nicety there, because this is the one suite that is
 compute-bound rather than spawn-bound.
 
-**It costs about eleven minutes now, and it has doubled twice.** Measured
-2026-09-28, when ADR 0068 was accepted: `cargo ratchet` **11:00**. Of that,
-`vm_coverage` is **557.1s** over **289 corpus programs**, 254 of which run;
-the Unicode final-sigma table check is 81.5s; and the formatter's comment
-probe is **20.8s**. This file said 39s, then 5:11 (301s and 9.6s, 160
-programs, 2026-09-21), then 9:34 to 9:36 (481.6s and 78.6s, 196 programs,
-2026-09-22), then 11:08 (550.0s and 80.1s, 283 programs, 2026-09-25), and
-each was right when it was written.
-Nothing regressed any of those times — the corpus did what it is supposed to do and
+**It costs about four minutes now; it doubled twice and then fell.** Measured
+2026-10-12, when issue 487 landed: `cargo ratchet` **3:52** (231.7s). Of
+that, `vm_coverage` is **43.7s** over **304 corpus programs**, 235 of which
+run and 34 of which lower and are not run because their `[run.<name>]` says
+`manual = true`; `float_parse.rs`'s six wide sweeps are 82.7s; the Unicode
+final-sigma table check is 78.1s; and the formatter's comment probe is
+**26.9s**. This file said 39s, then 5:11 (301s and 9.6s, 160 programs,
+2026-09-21), then 9:34 to 9:36 (481.6s and 78.6s, 196 programs, 2026-09-22),
+then 11:08 (550.0s and 80.1s, 283 programs, 2026-09-25), then 11:00 (557.1s
+and 20.8s, 289 programs, 254 run, 2026-09-28), and each was right when it was
+written. The fall is issue 487, not a speed-up: on the same tree the day
+before the change, `vm_coverage` was **448.2s** with 269 programs run, and
+the 34 hand-run benchmark matrices in `benches/cove.toml` were about nine
+tenths of it.
+Nothing regressed any of the rising times — the corpus did what it is supposed to do and
 grew, and `vm_coverage` runs every program on the tree-walking interpreter as
 well as on the linear-memory backend, so its cost is linear in a number this
-repository is trying to increase. **The figure here is dated because it goes
+repository is trying to increase. **A new benchmark matrix that a person runs
+by hand says `manual = true`**, or it puts its full size back on both
+evaluators of every ratchet run. **The figure here is dated because it goes
 stale quietly and every migration adds to it**; if yours disagrees by minutes,
 the corpus grew again rather than something being wrong. Budget for it: this
 is the one part of the gate worth starting before you need the answer.
@@ -52,7 +60,8 @@ There are two, and both do their work once per program in the repository.
 The first is the roadmap: `crates/cove-cli/tests/vm_coverage.rs` runs every
 program in the repository on the linear-memory backend and sorts the answers
 into agrees, *disagrees*, and does not lower. It is ignored because it runs
-what it lowers, and the benchmark rows are two million turns each.
+what it lowers, and the benchmark rows are two million turns each. A run
+marked `manual = true` is lowered and counted as such, and not run.
 
 Its two ratchets are both load-bearing and they are not the same. The count
 may rise and never fall. The known-disagreement set is compared as a *set*,
@@ -70,8 +79,8 @@ input against the ones it finds in the output — is the scanner judging itself,
 and it passed for as long as [issue 402](https://github.com/myuon/cove/issues/402)
 existed. A marker the test inserts and counts itself is an oracle the
 formatter does not supply. Every variant reparses a whole file, so the work is
-quadratic in file size, and it grows with the corpus: **20.8s over the cores**
-as of 2026-09-28 (80.1s on 2026-09-25 and 78.6s on 2026-09-22),
+quadratic in file size, and it grows with the corpus: **26.9s over the cores**
+as of 2026-10-12 (20.8s on 2026-09-28, 80.1s on 2026-09-25 and 78.6s on 2026-09-22),
 against 9s when this paragraph was written.
 
 ### Adding a program to the repository trips a ratchet in `cargo t`

@@ -140,6 +140,7 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
     let mut max_tasks = None;
     let mut trace = None;
     let mut generates = None;
+    let mut manual = false;
     for (key, value) in table {
         match key.as_str() {
             "entry" => {
@@ -192,6 +193,11 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
                     .ok_or_else(|| format!("run `{name}`: `generates` must be a string"))?;
                 generates = Some(parse_generates_path(name, text)?);
             }
+            "manual" => {
+                manual = value
+                    .as_bool()
+                    .ok_or_else(|| format!("run `{name}`: `manual` must be a boolean"))?;
+            }
             other => return Err(format!("run `{name}`: unknown key `{other}`")),
         }
     }
@@ -205,6 +211,7 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
         max_tasks,
         trace,
         generates,
+        manual,
     })
 }
 
@@ -314,6 +321,17 @@ pub struct RunConfig {
     /// also names where its output belongs. `cove generate --check`
     /// regenerates every run that sets this and refuses a stale result.
     pub generates: Option<PathBuf>,
+    /// Whether this run is one a person runs by hand, `manual = true` —
+    /// issue #487.
+    ///
+    /// It changes nothing about running it: `cove run` runs a manual entry
+    /// exactly as it runs any other, which is the point of keeping one. What
+    /// it changes is what the repository's corpus surveys do with it. A
+    /// benchmark matrix sized to be read off a stopwatch is a program those
+    /// surveys should still check and lower, but not execute at its full
+    /// size on every backend they compare: `vm_coverage` lowers a manual run
+    /// and counts it as lowered without running it.
+    pub manual: bool,
 }
 
 impl RunConfig {
@@ -500,6 +518,20 @@ mod tests {
             err,
             "run `hello`: `deadline` value `ms` is not a valid duration; the accepted units are `ns`, `us`, `ms`, `s`, `m`, and `h`"
         );
+    }
+
+    #[test]
+    fn manual_defaults_to_false_and_parses() {
+        let config = parse("[run.hello]\nentry = \"hello.main\"\n").unwrap();
+        assert!(!config.runs["hello"].manual);
+        let config = parse("[run.hello]\nentry = \"hello.main\"\nmanual = true\n").unwrap();
+        assert!(config.runs["hello"].manual);
+    }
+
+    #[test]
+    fn rejects_non_boolean_manual() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\nmanual = \"yes\"\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `manual` must be a boolean");
     }
 
     #[test]

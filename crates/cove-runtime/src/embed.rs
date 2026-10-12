@@ -418,6 +418,7 @@ impl Embedded {
                 // `cove build` already refused to build if it set
                 // `generates`, so the rebuilt config here carries none.
                 generates: None,
+                manual: false,
             },
         );
         Ok(Package {

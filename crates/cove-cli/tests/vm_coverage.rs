@@ -79,6 +79,23 @@
 //! is. The next family this backend learns will add to the minutes rather
 //! than replace them.
 //!
+//! # A run a person makes is lowered and not run
+//!
+//! That argument is about the rows `cove-bench` times. It does not reach the
+//! matrices `benches/` also keeps for a person with a stopwatch — a
+//! migration's before-and-after rows, `parse_rows`, `split_rows` and the
+//! rest — and [issue #487](https://github.com/myuon/cove/issues/487) is
+//! where the difference showed: `split_rows` alone was about forty seconds of
+//! interpreter time here, and a matrix grows exactly when an operation moves
+//! into Cove.
+//!
+//! So a `[run.<name>]` table that says `manual = true` is checked and
+//! lowered like any other, and then counted as **lowered, run by hand**
+//! instead of being run. The "does it lower" half of the survey still sees
+//! it — a manual run that stops lowering is a gap like any other — but it is
+//! in neither the agreeing count nor the disagreement set, because nothing
+//! ran it to agree or disagree. `cove run` runs it as it runs anything.
+//!
 //! # Reading the report
 //!
 //! ```console
@@ -329,6 +346,13 @@ use support::{Case, ModuleIndex, Prepared};
 /// beside the builtins they would replace. Each is a program this survey runs
 /// on both evaluators like any other, which is the reason a benchmark is
 /// allowed in the corpus at all.
+///
+/// A run marked `manual = true` (issue #487) is lowered and not run, so it
+/// is not in this count however well it would agree: it is reported as
+/// "lower and are run by hand" instead. Marking a run manual can therefore
+/// lower the agreeing count, and that is the one fall this floor's history
+/// should explain rather than forbid — it is a program moved out of the
+/// executing half of the survey on purpose, still checked and still lowered.
 const AGREEING_FLOOR: usize = 128;
 
 /// The code `cove_ir` raises a gap under.
@@ -624,6 +648,13 @@ fn survey(shard: usize, shards: usize) -> Report {
                 continue;
             }
         };
+
+        // A run a person makes by hand is lowered and not run: see the
+        // module docs' "A run a person makes is lowered and not run".
+        if case.run.manual {
+            report.manual.push(case.name.clone());
+            continue;
+        }
 
         let oracle = on_the_oracle(&case, &prepared, module, entry);
         let machine = on_the_machine(&case, &prepared, &program, module, entry);
@@ -1034,6 +1065,9 @@ struct Report {
     /// Each program that lowered, ran, and said something else, with both
     /// sides written out.
     disagreed: Vec<(String, String)>,
+    /// Each program that lowered and was not run, because its table says
+    /// `manual = true` — a matrix a person runs by hand (issue #487).
+    manual: Vec<String>,
     /// Each program that did not lower, and every gap that stopped it.
     not_lowered: Vec<(String, Vec<Gap>)>,
     /// Each program that made a box holding a nominal layout whose names the
@@ -1058,6 +1092,7 @@ impl Report {
             write_string(&mut out, name);
             write_string(&mut out, detail);
         }
+        write_strings(&mut out, &self.manual);
         write_usize(&mut out, self.not_lowered.len());
         for (name, gaps) in &self.not_lowered {
             write_string(&mut out, name);
@@ -1086,6 +1121,7 @@ impl Report {
         let disagreed = (0..read_usize(&mut input))
             .map(|_| (read_string(&mut input), read_string(&mut input)))
             .collect();
+        let manual = read_strings(&mut input);
         let not_lowered = (0..read_usize(&mut input))
             .map(|_| {
                 let name = read_string(&mut input);
@@ -1106,6 +1142,7 @@ impl Report {
             no_program,
             agreed,
             disagreed,
+            manual,
             not_lowered,
             unplaced,
         }
@@ -1116,6 +1153,7 @@ impl Report {
         self.no_program.append(&mut other.no_program);
         self.agreed.append(&mut other.agreed);
         self.disagreed.append(&mut other.disagreed);
+        self.manual.append(&mut other.manual);
         self.not_lowered.append(&mut other.not_lowered);
         self.unplaced.append(&mut other.unplaced);
     }
@@ -1124,6 +1162,7 @@ impl Report {
         self.no_program.sort();
         self.agreed.sort();
         self.disagreed.sort_by(|a, b| a.0.cmp(&b.0));
+        self.manual.sort();
         self.not_lowered.sort_by(|a, b| a.0.cmp(&b.0));
         self.unplaced.sort_by(|a, b| a.0.cmp(&b.0));
     }
@@ -1135,12 +1174,14 @@ impl Report {
              {:>3} lower and agree with the oracle\n  \
              {:>3} lower and disagree\n  \
              {:>3} ran in total\n  \
+             {:>3} lower and are run by hand, so were not run here\n  \
              {:>3} do not lower\n  \
              {:>3} have no checked program to lower\n",
             self.discovered,
             self.agreed.len(),
             self.disagreed.len(),
             ran,
+            self.manual.len(),
             self.not_lowered.len(),
             self.no_program.len(),
         );
@@ -1148,6 +1189,13 @@ impl Report {
         if !self.agreed.is_empty() {
             out.push_str("\nlower and agree, by name:\n");
             for name in &self.agreed {
+                let _ = writeln!(out, "       {name}");
+            }
+        }
+
+        if !self.manual.is_empty() {
+            out.push_str("\nlower and are run by hand (`manual = true`), by name:\n");
+            for name in &self.manual {
                 let _ = writeln!(out, "       {name}");
             }
         }
@@ -1251,10 +1299,11 @@ impl Report {
 #[test]
 fn a_worker_report_round_trips() {
     let report = Report {
-        discovered: 4,
+        discovered: 5,
         no_program: vec!["no program".to_string()],
         agreed: vec!["agreed".to_string()],
         disagreed: vec![("disagreed".to_string(), "two answers".to_string())],
+        manual: vec!["manual".to_string()],
         not_lowered: vec![(
             "not lowered".to_string(),
             vec![Gap {
