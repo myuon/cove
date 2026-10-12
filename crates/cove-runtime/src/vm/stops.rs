@@ -630,14 +630,6 @@ fn driven(world: &World, tier: Tier, name: &str, at: &[u64]) -> Driven {
     }
 }
 
-/// The one run whose safepoints a yield is known to move, issue 632: on the
-/// dispatch loop, a yield offered after one of `copying`'s bulk safepoints
-/// recomputes the next question with the operation's later work, and the
-/// resumed run asks a little sooner than the uninterrupted one — at one of
-/// 199 points. Its answer, instructions and work are still held, and its
-/// bound; deleting this is that issue's regression test.
-const SCHEDULE_MOVES: (&str, Tier) = ("copying", Tier::Encoded);
-
 /// **A resumed run keeps yielding, every time it is asked, within one stride
 /// and one step of being asked** — on the dispatch loop and the native tier,
 /// in a loop of plain instructions, a loop of host calls (ADR 0090, #618), a
@@ -667,19 +659,7 @@ fn a_resumed_run_yields_again_and_again_within_one_stride_and_one_step() {
             assert!(at.len() >= 10, "{name} on {tier:?}: asked many times");
             let run = driven(&world, tier, name, &at);
             let what = format!("{name} on {tier:?}");
-            if (name, tier) == SCHEDULE_MOVES {
-                assert_eq!(
-                    (
-                        &run.finished.answer,
-                        run.finished.instructions,
-                        run.finished.work
-                    ),
-                    (&expected.answer, expected.instructions, expected.work),
-                    "{what}: answers as uninterrupted"
-                );
-            } else {
-                assert_eq!(run.finished, expected, "{what}: answers as uninterrupted");
-            }
+            assert_eq!(run.finished, expected, "{what}: answers as uninterrupted");
             assert_eq!(run.requests, at.len(), "{what}: every request was raised");
             assert_eq!(
                 run.after_request.len(),

@@ -604,6 +604,18 @@ pub(crate) struct Machine<'a> {
     /// compares against this field where it compared against the constant.
     /// [`Machine::safepoint`] restores it.
     stride: u64,
+    /// The question a bulk operation's safepoint left `next_check` at, kept
+    /// while [`Machine::offer_yield_next`] has lowered `next_check` to the
+    /// next instruction, so that a yield taken there puts back that very
+    /// question (#632). `None` when the offer follows a host call, whose yield
+    /// begins a new stride and asks afresh (#618).
+    ///
+    /// Not recomputed at the yield, because the bulk operation goes on after
+    /// its safepoint and adds to `bulk_work`, and the question in instruction
+    /// coordinates would then fall sooner than the one the uninterrupted run
+    /// kept: its later safepoints would all move. Every lowering writes it,
+    /// so nothing stale survives to the next.
+    bulk_question: Option<u64>,
     /// [`Machine::work`] at the last safepoint, or at the last yield the
     /// dispatch loop took after a charge: where the stride a host call's
     /// charge cannot end began (#618).
@@ -1047,6 +1059,7 @@ impl<'a> Machine<'a> {
             just_resumed: false,
             declined_this_stride: false,
             stride: SAFEPOINT_STRIDE,
+            bulk_question: None,
             safepoint_work: 0,
             task: ENTRY_TASK,
             cell_tag: cell::new_tag(),
@@ -1139,6 +1152,7 @@ impl<'a> Machine<'a> {
             just_resumed: false,
             declined_this_stride: false,
             stride: SAFEPOINT_STRIDE,
+            bulk_question: None,
             safepoint_work: 0,
             task,
             cell_tag: cell::new_tag(),
@@ -1519,7 +1533,7 @@ impl<'a> Machine<'a> {
     pub(super) fn after_bulk_safepoint(&mut self) {
         self.next_check = self.next_question();
         if self.yield_wanted() && self.yieldable() {
-            self.offer_yield_next();
+            self.offer_yield_next(Some(self.next_check));
         }
     }
 
@@ -1546,16 +1560,19 @@ impl<'a> Machine<'a> {
             && self.work() - self.safepoint_work >= SAFEPOINT_STRIDE
             && self.yieldable()
         {
-            self.offer_yield_next();
+            self.offer_yield_next(None);
         }
     }
 
     /// [`Machine::after_bulk_safepoint`]'s and [`Machine::after_host_call`]'s
     /// lowering, out of line: it runs
-    /// only while a yield is asked for.
+    /// only while a yield is asked for. `restore` is the question a yield
+    /// taken there puts back — the bulk operation's, or `None` to ask afresh
+    /// after a host call ([`Machine::bulk_question`]).
     #[cold]
     #[inline(never)]
-    fn offer_yield_next(&mut self) {
+    fn offer_yield_next(&mut self, restore: Option<u64>) {
+        self.bulk_question = restore;
         self.stride = 0;
         self.next_check = self.instructions + 1;
     }
@@ -2529,9 +2546,15 @@ impl<'a> Machine<'a> {
             // Offered after a bulk operation's own safepoint (#606) or a host
             // call's charge (#618): the stride's charge has been made, so the
             // resumed run must not make it again. The question goes back to a stride past that
-            // charge, where the uninterrupted run had it.
+            // charge, where the uninterrupted run had it — after a bulk
+            // operation, the very question its safepoint computed, since the
+            // operation's later work would bring a recomputed one sooner
+            // (#632).
             self.stride = SAFEPOINT_STRIDE;
-            self.next_check = self.next_question();
+            self.next_check = match self.bulk_question.take() {
+                Some(question) => question,
+                None => self.next_question(),
+            };
             // And the next stride a host call's charge cannot end begins
             // here, so a loop of host calls asked again yields a stride on
             // rather than at its next call (#618).
@@ -10995,7 +11018,40 @@ pub(crate) mod tests {
         assert!(!machine.yield_requested(), "the request is honoured");
     }
 
-    /// **#618: after a host call, a wanted yield is offered once a stride of
+    /// **#632: a yield after a bulk safepoint puts back the question that
+    /// safepoint computed, though the operation charged more after it.**
+    ///
+    /// A chunked copy takes its safepoint and goes on copying, so by the next
+    /// instruction `bulk_work` has grown. The uninterrupted run keeps the
+    /// question computed at the safepoint; one recomputed at the yield falls
+    /// that much sooner, and every later safepoint moves with it.
+    #[test]
+    fn a_yield_after_a_bulk_safepoint_keeps_the_question_the_safepoint_computed() {
+        let program = Build::default().done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        machine.instructions = 300;
+        machine.bulk_work = 5000;
+        machine.checked_work = machine.work();
+        machine.parking = true;
+        machine.yield_request = Some(Arc::new(AtomicBool::new(true)));
+
+        machine.after_bulk_safepoint();
+        assert_eq!(machine.next_check, 301);
+        // The rest of the copy, after its safepoint and short of another.
+        machine.bulk_work += 952;
+        machine.instructions += 1;
+
+        assert!(machine.offer_yield().is_err());
+        assert_eq!(machine.stride, SAFEPOINT_STRIDE);
+        assert_eq!(
+            machine.next_check,
+            300 + SAFEPOINT_STRIDE,
+            "the uninterrupted run's question, not {}",
+            300 + SAFEPOINT_STRIDE - 952
+        );
+    }
+
+    /// **#618:after a host call, a wanted yield is offered once a stride of
     /// work has passed since the last safepoint, and not sooner.**
     ///
     /// The host call's charge moved `checked_work`, so the loop's own stride
