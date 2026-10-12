@@ -853,7 +853,13 @@ It does not synchronise a value, and those two are kept apart deliberately.
 **A task that blocks must still count as being at a safepoint.** A waiter on
 a cell, and a task inside a Host call, publish their roots and park; without
 that a collector waits for a task that waits for a task that waits for the
-collector.
+collector. The one exception is a run's *only* task, which parks with one
+atomic load and publishes nothing ([issue
+243](https://github.com/myuon/cove/issues/243)): a collection is started only
+by a live task and a task is attached only by a live one, so while the only
+one is blocked nothing can collect. Its own `spawn`, which parks around taking
+the new segment, is the one way a party appears during such a park, and the
+new task has no thread until the park is over.
 
 Two things are named by a word but are not Cove-owned objects, and ADR 0034
 carves out both: `Task` and `TaskScope` name **scheduler control state**, and
