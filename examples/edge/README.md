@@ -1057,7 +1057,11 @@ The most useful output of this demo. Ordered by how much each cost.
    loads a whole package root. `cove_sema::package::load_module(root, name,
    sources)` now loads the `.cove` files directly in `root/<name>` as module
    `name`, with the standard library, naming each file relative to `root`;
-   `deploy::compile` calls it.
+   `deploy::compile` calls it. Since
+   [issue 616](https://github.com/myuon/cove/issues/616) it also loads every
+   directory below `root/<name>`, named as `package::load` names it —
+   `root/app/json` is `app.json` — so an app with submodule directories needs
+   no walk of its own either.
 7. **A pending answer was built as a `Value` to become a `Transfer` —
    fixed (issue 601).** `upstream.get` and `upstream.fetch` answer
    `Result<String, Error>`; the parking lot built `Value::ok(Value::string(…))`

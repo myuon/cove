@@ -368,8 +368,9 @@ pub struct Compiled {
 /// the hosts answer [`cove_runtime::HostApi::module_schema`] with, not a copy
 /// of them.
 ///
-/// The module is the `.cove` files directly in `tenants/<module>/`, loaded
-/// with the standard library as a package of its own by
+/// The module is the `.cove` files directly in `tenants/<module>/`, and each
+/// directory below it a module `<module>.<sub>` of its own, loaded with the
+/// standard library as a package of its own by
 /// [`cove_sema::package::load_module`]: nothing beside it is read, so no
 /// tenant's package holds another's code.
 ///
