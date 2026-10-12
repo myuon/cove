@@ -54,7 +54,14 @@ pub fn load(root: &Path, sources: &mut SourceMap) -> Result<Package, Vec<Diagnos
 
     let mut modules = BTreeMap::new();
     let mut diagnostics = Vec::new();
-    walk(root, root, &mut modules, sources, &mut diagnostics);
+    walk(
+        root,
+        root,
+        Naming::AsRead,
+        &mut modules,
+        sources,
+        &mut diagnostics,
+    );
 
     match stdlib::attach(sources) {
         Ok(std_modules) => {
@@ -76,22 +83,27 @@ pub fn load(root: &Path, sources: &mut SourceMap) -> Result<Package, Vec<Diagnos
     }
 }
 
-/// Loads one directory as the one module `name`, with the standard library
-/// beside it: a package an embedder assembles, rather than one a `cove.toml`
-/// describes.
+/// Loads one directory as the module `name`, each directory below it as a
+/// module of its own, and the standard library beside them: a package an
+/// embedder assembles, rather than one a `cove.toml` describes.
 ///
 /// The module is the `.cove` files directly in `root/<name>` — a dotted name
-/// is a path below `root`, as [`load`] derives it — in file-name order, and
-/// nothing beside them is read: a host serving several tenants from one
+/// is a path below `root`, as [`load`] derives it — in file-name order. The
+/// directories below it are read by [`load`]'s own walk and named as it names
+/// them, by their path below `root`: `root/app/json` is the module
+/// `app.json` and `root/app/text/escape` is `app.text.escape`, and a hidden
+/// directory, `target`, or one holding its own `cove.toml` is skipped. Nothing
+/// beside `root/<name>` is read: a host serving several tenants from one
 /// directory loads each as a package of its own, so no tenant's package holds
 /// another's code. Each file is named in `sources` relative to `root`, so a
 /// diagnostic or a runtime error points at `hello/hello.cove:23` rather than at
 /// wherever the host is installed. The package's configuration is the default:
 /// what a run is granted is the embedder's to decide, not a manifest's.
 ///
-/// What `examples/edge` and other embedders used to copy (issue 601). Every
-/// failure is a diagnostic, and every file is read and parsed before any is
-/// reported, as [`load`] does.
+/// What `examples/edge` and other embedders used to copy (issues 601 and 616).
+/// `root/<name>` itself must hold a `.cove` file. Every failure is a
+/// diagnostic, and every file is read and parsed before any is reported, as
+/// [`load`] does.
 pub fn load_module(
     root: &Path,
     name: &str,
@@ -107,53 +119,23 @@ pub fn load_module(
     let dir = name
         .split('.')
         .fold(root.to_path_buf(), |dir, part| dir.join(part));
-    let entries = std::fs::read_dir(&dir).map_err(|e| {
-        vec![Diagnostic::error(
-            "cove::package::io",
-            format!("cannot read `{}`: {e}", dir.display()),
-        )]
-    })?;
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("cove"))
-        .collect();
-    files.sort();
-    if files.is_empty() {
-        return Err(vec![Diagnostic::error(
+
+    let mut modules = BTreeMap::new();
+    let mut diagnostics = Vec::new();
+    walk(
+        root,
+        &dir,
+        Naming::RelativeToRoot,
+        &mut modules,
+        sources,
+        &mut diagnostics,
+    );
+    if diagnostics.is_empty() && !modules.contains_key(name) {
+        diagnostics.push(Diagnostic::error(
             "cove::package::empty_module",
             format!("`{}` holds no `.cove` file", dir.display()),
-        )]);
+        ));
     }
-
-    let mut diagnostics = Vec::new();
-    let mut units = Vec::new();
-    for path in files {
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) => {
-                diagnostics.push(Diagnostic::error(
-                    "cove::package::io",
-                    format!("cannot read `{}`: {e}", path.display()),
-                ));
-                continue;
-            }
-        };
-        let shown = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        let file = sources.add(shown, text);
-        match cove_syntax::parse_file(sources, file) {
-            Ok(ast) => units.push(Unit { file, path, ast }),
-            Err(errs) => diagnostics.extend(errs),
-        }
-    }
-    let mut modules = BTreeMap::from([(
-        name.to_string(),
-        Module {
-            name: name.to_string(),
-            dir,
-            units,
-        },
-    )]);
     if let Err(errs) = stdlib::install(sources, &mut modules) {
         diagnostics.extend(errs);
     }
@@ -167,8 +149,17 @@ pub fn load_module(
     })
 }
 
+/// How [`walk`] names a file in the [`SourceMap`].
+#[derive(Clone, Copy)]
+enum Naming {
+    /// By the path it was read from, as [`load`] does.
+    AsRead,
+    /// By its path below the package root, as [`load_module`] does.
+    RelativeToRoot,
+}
+
 /// Recursively visits `dir`, turning every directory with `.cove` files
-/// directly inside it into a module.
+/// directly inside it into a module named by its path below `root`.
 ///
 /// A subdirectory holding its own `cove.toml` is a nested package, not a
 /// module of this one: the walk does not enter it, so its own check-time
@@ -176,6 +167,7 @@ pub fn load_module(
 fn walk(
     root: &Path,
     dir: &Path,
+    naming: Naming,
     modules: &mut BTreeMap<String, Module>,
     sources: &mut SourceMap,
     diagnostics: &mut Vec<Diagnostic>,
@@ -214,14 +206,22 @@ fn walk(
     }
 
     if !cove_files.is_empty() {
-        handle_module_dir(root, dir, &cove_files, modules, sources, diagnostics);
+        handle_module_dir(
+            root,
+            dir,
+            &cove_files,
+            naming,
+            modules,
+            sources,
+            diagnostics,
+        );
     }
 
     for subdir in subdirs {
         if subdir.join("cove.toml").is_file() {
             continue;
         }
-        walk(root, &subdir, modules, sources, diagnostics);
+        walk(root, &subdir, naming, modules, sources, diagnostics);
     }
 }
 
@@ -229,6 +229,7 @@ fn handle_module_dir(
     root: &Path,
     dir: &Path,
     cove_files: &[PathBuf],
+    naming: Naming,
     modules: &mut BTreeMap<String, Module>,
     sources: &mut SourceMap,
     diagnostics: &mut Vec<Diagnostic>,
@@ -311,7 +312,11 @@ fn handle_module_dir(
                 continue;
             }
         };
-        let file_id = sources.add(file.clone(), text);
+        let shown = match naming {
+            Naming::AsRead => file.clone(),
+            Naming::RelativeToRoot => file.strip_prefix(root).unwrap_or(file).to_path_buf(),
+        };
+        let file_id = sources.add(shown, text);
         match cove_syntax::parse_file(sources, file_id) {
             Ok(ast) => units.push(Unit {
                 file: file_id,
@@ -522,9 +527,8 @@ mod tests {
             FN_MAIN.replace("main", "second").as_str(),
         );
         write(dir.path(), "hello/a.cove", FN_MAIN);
-        // Beside it and below it, and neither is read.
+        // Beside it, and not read.
         write(dir.path(), "other/main.cove", "this does not parse");
-        write(dir.path(), "hello/inner/main.cove", "nor does this");
         write(dir.path(), "shop/cart/main.cove", FN_MAIN);
 
         let mut sources = SourceMap::new();
@@ -550,6 +554,99 @@ mod tests {
 
         let nested = load_module(dir.path(), "shop.cart", &mut sources).expect("loads");
         assert!(nested.modules.contains_key("shop.cart"));
+    }
+
+    /// The module names below `root`, standard library left out.
+    fn own_modules(package: &Package) -> Vec<&str> {
+        package
+            .modules
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !stdlib::module_names().contains(name))
+            .collect()
+    }
+
+    #[test]
+    fn load_module_names_its_subdirectories_as_load_does() {
+        let dir = TempDir::new("submodules");
+        write(dir.path(), "cove.toml", "[run.app]\nentry = \"app.main\"\n");
+        write(
+            dir.path(),
+            "app/main.cove",
+            "use app.json.Value\nuse app.text.escape.quote\n\n\
+             export fn main() -> Result<Unit, Error> {\n  \
+             let value = Value(text: quote(\"hi\"))\n  Ok(())\n}\n",
+        );
+        write(
+            dir.path(),
+            "app/json/value.cove",
+            "export struct Value {\n  text: String\n}\n",
+        );
+        write(
+            dir.path(),
+            "app/text/escape/quote.cove",
+            "export fn quote(text: String) -> String {\n  text\n}\n",
+        );
+        // Below it but skipped, as `load` skips them.
+        write(dir.path(), "app/.hidden/stray.cove", "not cove {{{");
+        write(dir.path(), "app/target/stray.cove", "not cove {{{");
+        write(dir.path(), "app/nested/cove.toml", "");
+        write(dir.path(), "app/nested/inner/stray.cove", "not cove {{{");
+        // Beside it, and not read.
+        write(dir.path(), "other/main.cove", "not cove {{{");
+
+        let mut sources = SourceMap::new();
+        let package = load_module(dir.path(), "app", &mut sources).expect("loads");
+        assert_eq!(
+            own_modules(&package),
+            vec!["app", "app.json", "app.text.escape"]
+        );
+
+        let mut whole_sources = SourceMap::new();
+        std::fs::remove_dir_all(dir.path().join("other")).unwrap();
+        let whole = load(dir.path(), &mut whole_sources).expect("loads");
+        assert_eq!(
+            own_modules(&package),
+            own_modules(&whole),
+            "the same names `load` gives the same tree"
+        );
+
+        let shown: Vec<_> = package.modules["app.text.escape"]
+            .units
+            .iter()
+            .map(|unit| sources.path(unit.file).to_path_buf())
+            .collect();
+        assert_eq!(shown, vec![Path::new("app/text/escape/quote.cove")]);
+
+        let program = crate::compile::Compiler::new()
+            .compile(&package)
+            .expect("a submodule's type and function resolve through `use`");
+        assert!(program.lookup_fn("app.text.escape", "quote").is_some());
+
+        // And without the submodule, the same `use` does not resolve.
+        std::fs::remove_dir_all(dir.path().join("app/json")).unwrap();
+        let mut sources = SourceMap::new();
+        let without = load_module(dir.path(), "app", &mut sources).expect("loads");
+        assert!(crate::compile::Compiler::new().compile(&without).is_err());
+    }
+
+    #[test]
+    fn load_module_reports_a_submodule_that_does_not_parse() {
+        let dir = TempDir::new("bad-submodule");
+        write(dir.path(), "app/main.cove", FN_MAIN);
+        write(dir.path(), "app/inner/main.cove", "export fn {");
+        let mut sources = SourceMap::new();
+        let errs = load_module(dir.path(), "app", &mut sources).unwrap_err();
+        assert!(!errs.is_empty());
+    }
+
+    #[test]
+    fn load_module_refuses_a_directory_with_only_submodules() {
+        let dir = TempDir::new("only-submodules");
+        write(dir.path(), "app/inner/main.cove", FN_MAIN);
+        let mut sources = SourceMap::new();
+        let errs = load_module(dir.path(), "app", &mut sources).unwrap_err();
+        assert_eq!(errs[0].code, "cove::package::empty_module");
     }
 
     #[test]
