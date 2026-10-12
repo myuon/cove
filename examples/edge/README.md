@@ -357,7 +357,7 @@ $ curl -s http://localhost:8787/_stats
   "keep_alive_reuses": 1,
   "idle_connections": 0,
   "idle_expired": 0,
-  "idle_poller": {"wakes": 31, "pollfds": 44, "in_poll_ms": 5401.233, "around_poll_ms": 1.012},
+  "idle_poller": {"backend": "kqueue", "wakes": 52, "ready": 26, "in_wait_ms": 432.964, "around_wait_ms": 0.142, "cpu_ms": 0.362},
   "fetches": 0,
   "fetches_aborted": 0,
   "live_isolates": 0,
@@ -375,9 +375,11 @@ $ curl -s http://localhost:8787/_stats
 requests that arrived on one an earlier request had opened;
 `idle_connections` is how many are waiting in the idle thread now, and
 `idle_expired` how many it closed for waiting too long. `idle_poller` is
-what the idle thread's `poll(2)` costs: how many times it came out of
-`poll`, the `pollfd`s it had handed it, summed, and the wall time inside
-`poll` and around it (rebuilding the array and sorting what it answered) —
+what the idle thread costs: which wait it uses (`kqueue`, `epoll`, or `poll`
+on any other Unix), how many times it came out of that wait, the readable
+connections those wake-ups handed back, summed, the wall time inside the
+wait and around it (arming what was parked, sorting what the wait answered,
+expiring), and the thread's own CPU time —
 [`compare/idle_cost.py`](compare/idle_cost.py) reads it. `fetches` and
 `fetches_aborted` are the fetch pool's.
 
@@ -419,8 +421,9 @@ in order.
 No thread waits on an idle connection. Between requests — and before the
 first, so a client that connects and says nothing holds no worker either — a
 connection is handed to one `edge-idle` thread ([`host/src/idle.rs`](host/src/idle.rs))
-that `poll(2)`s every idle socket at once through the `libc` crate already in
-the tree; one that becomes readable goes back on the run queue, and whichever
+that waits on every idle socket at once — `kqueue` on macOS, `epoll` on
+Linux, through the `libc` crate already in the tree, so a wake-up costs what
+turned readable and not how many are idle; one that becomes readable goes back on the run queue, and whichever
 worker takes it reads the request. A worker still reads a request that has
 started arriving with a 5 s timeout, so a client that sends half a head and
 stops holds one for that long.
@@ -1118,12 +1121,14 @@ checker needed.
 ## Not done
 
 - Chunked bodies and TLS. A request that has started arriving is read on a
-  worker, so a client that sends half a head holds one for up to 5 s; idle
-  connections cost no thread, but the idle thread's `poll` is O(idle
-  connections) per wake-up. Measured, that saturates the idle thread from
-  about a thousand kept-alive connections at 10,000 req/s
-  ([`compare/`](compare/README.md#4-many-idle-connections-poll2-is-the-cost-confirmed));
-  `epoll`/`kqueue` is [issue #590](https://github.com/myuon/cove/issues/590).
+  worker, so a client that sends half a head holds one for up to 5 s. Idle
+  connections cost no thread, and since
+  [issue #590](https://github.com/myuon/cove/issues/590) no more than what
+  turns readable: the idle thread waits in `kqueue` or `epoll` rather than
+  `poll(2)`ing every idle socket, and at 10,000 kept-alive connections it uses
+  a tenth of a core where it used all of one
+  ([`compare/`](compare/README.md#4-many-idle-connections-poll2-is-the-cost-confirmed)).
+  Any other Unix still gets `poll`.
 - The fetch pool is a few blocking threads, so more concurrent fetches than
   `--fetchers` queue; multiplexing them as the idle thread multiplexes
   connections would change `host/src/fetch.rs` and nothing else. `http://`
