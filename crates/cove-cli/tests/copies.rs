@@ -1888,7 +1888,18 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// what the pass moves is 26,485 fewer instructions over the corpus (2,785,978
 /// to 2,759,493). The new program is +18, the standard library a program that
 /// prints carries into the survey, as `values_int_bits` was.
-const FORWARDABLE_COPIES: usize = 7545;
+///
+/// **7,569 since string literals took `\u{X…}`** (issue #638, ADR 0094), a
+/// rise of 24 that is all program and no lowering: the escape is decoded by
+/// the lexer, so nothing past it knows it was written. With the new programs
+/// and covefmt's changes held out the corpus answers 7,545, the bound
+/// exactly; covefmt's two tests of the escape are +2 and its scanner's
+/// `unicodeEscape` +2, all in `tools/covefmt:covefmtBench`, which holds the
+/// whole `covefmt` module; and
+/// `tests/e2e/values_unicode_escape` is +20, the printing and string-building
+/// standard library a program like it carries. `fail_unicode_escape` does not
+/// lex and adds nothing.
+const FORWARDABLE_COPIES: usize = 7569;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

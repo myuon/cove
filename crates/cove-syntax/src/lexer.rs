@@ -86,11 +86,13 @@ struct Lexer<'a> {
 /// which is a widening, and a deliberate one: a second table would be a
 /// second rule to remember and a second place for the two to drift apart.
 ///
-/// There is no `\u{...}`. Nothing in the corpus has needed one — every
-/// code point a program in this repository names is ASCII — and adding it to
-/// one literal form and not the other would be exactly the asymmetry the
-/// paragraph above avoids. When something needs it, it goes in here and
-/// both forms gain it at once.
+/// `\u{...}` is not in this table because it is not one character long: it
+/// is read by [`Lexer::unicode_escape`], which both literal forms call when
+/// they meet a `u`, so both gained it at once — which is what
+/// [ADR 0047](../../../docs/adr/0047-a-code-point-is-written-as-a-character-and-is-an-int.md)
+/// asked of whoever added it.
+/// [ADR 0094](../../../docs/adr/0094-a-string-names-a-scalar-by-number-with-u.md)
+/// is the record of adding it.
 fn escaped_char(escaped: char) -> Option<char> {
     Some(match escaped {
         '\\' => '\\',
@@ -557,9 +559,15 @@ impl<'a> Lexer<'a> {
                         }
                         Some(escaped) => {
                             self.bump();
-                            match escaped_char(escaped) {
-                                Some(character) => current.push(character),
-                                None => self.unknown_escape(escaped, esc_start),
+                            if escaped == 'u' {
+                                if let Some(character) = self.unicode_escape(esc_start) {
+                                    current.push(character);
+                                }
+                            } else {
+                                match escaped_char(escaped) {
+                                    Some(character) => current.push(character),
+                                    None => self.unknown_escape(escaped, esc_start),
+                                }
                             }
                         }
                     }
@@ -681,9 +689,17 @@ impl<'a> Lexer<'a> {
                         }
                         Some(escaped) => {
                             self.bump();
-                            match escaped_char(escaped) {
-                                Some(character) => scalars.push(character),
-                                None => self.unknown_escape(escaped, esc_start),
+                            if escaped == 'u' {
+                                // A refused escape still stands for one
+                                // scalar, so `'\u{D800}'` is one complaint and
+                                // not a second one that the literal is empty.
+                                let character = self.unicode_escape(esc_start);
+                                scalars.push(character.unwrap_or(char::REPLACEMENT_CHARACTER));
+                            } else {
+                                match escaped_char(escaped) {
+                                    Some(character) => scalars.push(character),
+                                    None => self.unknown_escape(escaped, esc_start),
+                                }
                             }
                         }
                     }
@@ -696,6 +712,89 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Reads the rest of a `\u{X…}` escape, the `\u` at `esc_start` having
+    /// been consumed, and answers the scalar it names — or reports why it
+    /// names none and answers `None`.
+    ///
+    /// One to six hex digits, either case, naming a Unicode scalar value, so
+    /// a surrogate (`D800` to `DFFF`) and anything above `10FFFF` are refused,
+    /// as are no digits, a seventh digit, a character that is not a hex digit,
+    /// and a missing brace. It is Rust's and Swift's spelling. ADR 0094.
+    ///
+    /// Letters and digits after the `{` are consumed up to the `}`, so
+    /// `\u{12G4}` is one refusal that names the `G` and not a refusal followed
+    /// by `G4}` read as text. Inside a string a `{` opens an interpolation;
+    /// this consumes the escape's own `{` before the string's loop can see it,
+    /// so `"\u{41}"` is the text `A` and never an interpolation of `41`.
+    fn unicode_escape(&mut self, esc_start: usize) -> Option<char> {
+        if self.peek_char() != Some('{') {
+            self.invalid_unicode_escape(esc_start, "`\\u` must be followed by `{`".to_string());
+            return None;
+        }
+        self.bump();
+        let digits_start = self.pos;
+        while matches!(self.peek_char(), Some(c) if c.is_ascii_alphanumeric()) {
+            self.bump();
+        }
+        let digits = &self.text[digits_start..self.pos];
+        if self.peek_char() != Some('}') {
+            self.invalid_unicode_escape(esc_start, "`\\u{` is never closed with `}`".to_string());
+            return None;
+        }
+        self.bump();
+        if let Some(bad) = digits.chars().find(|c| !c.is_ascii_hexdigit()) {
+            self.invalid_unicode_escape(esc_start, format!("`{bad}` is not a hex digit"));
+            return None;
+        }
+        if digits.is_empty() {
+            self.invalid_unicode_escape(esc_start, "`\\u{}` names no code point".to_string());
+            return None;
+        }
+        if digits.len() > 6 {
+            let count = digits.len();
+            self.invalid_unicode_escape(
+                esc_start,
+                format!("`\\u{{{digits}}}` has {count} hex digits, more than six"),
+            );
+            return None;
+        }
+        // Six hex digits at most, so the parse cannot fail.
+        let value = u32::from_str_radix(digits, 16).unwrap_or(u32::MAX);
+        if (0xD800..=0xDFFF).contains(&value) {
+            self.invalid_unicode_escape(
+                esc_start,
+                format!("`\\u{{{digits}}}` is a surrogate, not a Unicode scalar value"),
+            );
+            return None;
+        }
+        let character = char::from_u32(value);
+        if character.is_none() {
+            self.invalid_unicode_escape(
+                esc_start,
+                format!("`\\u{{{digits}}}` is above `10FFFF`, the last code point"),
+            );
+        }
+        character
+    }
+
+    /// Reports a `\u` escape that names no scalar, over as much of the escape
+    /// as was read.
+    fn invalid_unicode_escape(&mut self, esc_start: usize, message: String) {
+        let span = Span::new(self.file, esc_start as u32, self.pos as u32);
+        self.diagnostics.push(
+            Diagnostic::error(
+                "cove::lex::invalid_unicode_escape",
+                format!("invalid unicode escape: {message}"),
+            )
+            .at(span)
+            .rule(
+                "`\\u{...}` holds one to six hex digits naming a Unicode scalar value: `0` to \
+                 `10FFFF`, the surrogates `D800` to `DFFF` excluded.",
+            )
+            .help("Write the code point in hex between braces, as `\\u{e9}` or `\\u{1F600}`."),
+        );
+    }
+
     /// Reports an escape neither literal form spells anything with.
     fn unknown_escape(&mut self, escaped: char, esc_start: usize) {
         let span = Span::new(self.file, esc_start as u32, self.pos as u32);
@@ -704,7 +803,7 @@ impl<'a> Lexer<'a> {
             Diagnostic::error("cove::lex::unknown_escape", message)
                 .at(span)
                 .help(
-                    "Use one of the supported escapes: \\\\, \\\", \\', \\n, \\t, \\r, \\0, \\{, \\}.",
+                    "Use one of the supported escapes: \\\\, \\\", \\', \\n, \\t, \\r, \\0, \\{, \\}, \\u{...}.",
                 ),
         );
     }
@@ -753,7 +852,18 @@ impl<'a> Lexer<'a> {
                     if self.peek_char().is_none() {
                         return Err(());
                     }
-                    self.bump();
+                    let escaped = self.bump();
+                    // A `\u{...}` escape's brace is its own and opens no
+                    // interpolation, read as far as `unicode_escape` reads it.
+                    if escaped == Some('u') && self.peek_char() == Some('{') {
+                        self.bump();
+                        while matches!(self.peek_char(), Some(c) if c.is_ascii_alphanumeric()) {
+                            self.bump();
+                        }
+                        if self.peek_char() == Some('}') {
+                            self.bump();
+                        }
+                    }
                 }
                 Some('"') if !inside_scalar => {
                     self.bump();
@@ -1169,6 +1279,105 @@ mod tests {
             panic!("expected one interpolation, got {parts:?}");
         };
         assert_eq!(source.trim(), "head == '{'");
+    }
+
+    fn text_of(src: &str) -> String {
+        match kinds(src).as_slice() {
+            [TokenKind::Str(parts)] => match parts.as_slice() {
+                [StringPart::Text(text)] => text.clone(),
+                [] => String::new(),
+                other => panic!("expected one text part in `{src}`, got {other:?}"),
+            },
+            other => panic!("expected one string token in `{src}`, got {other:?}"),
+        }
+    }
+
+    /// `\u{X…}` names a scalar by number, in one to six hex digits of either
+    /// case, from `0` to `10FFFF`. ADR 0094.
+    #[test]
+    fn a_unicode_escape_names_a_scalar_by_number() {
+        assert_eq!(text_of(r#""\u{41}""#), "A");
+        assert_eq!(text_of(r#""\u{e9}""#), "\u{e9}");
+        assert_eq!(text_of(r#""\u{E9}""#), "\u{e9}");
+        assert_eq!(text_of(r#""\u{1F600}""#), "\u{1F600}");
+        assert_eq!(text_of(r#""\u{10FFFF}""#), "\u{10FFFF}");
+        assert_eq!(text_of(r#""\u{0}""#), "\0");
+        assert_eq!(text_of(r#""\u{000041}""#), "A");
+        assert_eq!(text_of(r#""caf\u{e9} \u{3042}!""#), "caf\u{e9} \u{3042}!");
+    }
+
+    /// The escape's braces are its own and not an interpolation's, and a
+    /// brace right after one still opens an interpolation.
+    #[test]
+    fn a_unicode_escape_opens_no_interpolation() {
+        let tokens = kinds(r#""\u{41}{b}""#);
+        let [TokenKind::Str(parts)] = tokens.as_slice() else {
+            panic!("expected one string token, got {tokens:?}");
+        };
+        let [StringPart::Text(text), StringPart::Interpolation { source, .. }] = parts.as_slice()
+        else {
+            panic!("expected text then an interpolation, got {parts:?}");
+        };
+        assert_eq!((text.as_str(), source.as_str()), ("A", "b"));
+        // Inside an interpolation, a nested string's escape is balanced and
+        // the interpolation ends at its own brace.
+        let tokens = kinds(r#""{ f("\u{7D}") }""#);
+        let [TokenKind::Str(parts)] = tokens.as_slice() else {
+            panic!("expected one string token, got {tokens:?}");
+        };
+        let [StringPart::Interpolation { source, .. }] = parts.as_slice() else {
+            panic!("expected one interpolation, got {parts:?}");
+        };
+        assert_eq!(source.trim(), r#"f("\u{7D}")"#);
+        // And one never closed opens nothing either: the interpolation still
+        // ends at its own brace, leaving the escape for the lexing of its
+        // source to report.
+        let tokens = kinds(r#""{ f("\u{41") }""#);
+        let [TokenKind::Str(parts)] = tokens.as_slice() else {
+            panic!("expected one string token, got {tokens:?}");
+        };
+        let [StringPart::Interpolation { source, .. }] = parts.as_slice() else {
+            panic!("expected one interpolation, got {parts:?}");
+        };
+        assert_eq!(source.trim(), r#"f("\u{41")"#);
+    }
+
+    /// A code-point literal takes the escape a string takes.
+    #[test]
+    fn a_code_point_literal_takes_a_unicode_escape() {
+        assert_eq!(kinds(r"'\u{41}'"), vec![TokenKind::Int(65)]);
+        assert_eq!(kinds(r"'\u{e9}'"), vec![TokenKind::Int(233)]);
+        assert_eq!(kinds(r"'\u{1F600}'"), vec![TokenKind::Int(128512)]);
+        assert_eq!(kinds(r"'\u{10FFFF}'"), vec![TokenKind::Int(0x10FFFF)]);
+        assert_eq!(kinds(r"'\u{0}'"), vec![TokenKind::Int(0)]);
+    }
+
+    /// Every refusal is one diagnostic, spanning the escape as far as it was
+    /// read, whose message says which rule it broke.
+    #[test]
+    fn a_unicode_escape_that_names_no_scalar_is_refused() {
+        let cases: &[(&str, &str, &str)] = &[
+            (r#""\u{D800}""#, r"\u{D800}", "is a surrogate"),
+            (r#""\u{dfff}""#, r"\u{dfff}", "is a surrogate"),
+            (r#""\u{110000}""#, r"\u{110000}", "is above `10FFFF`"),
+            (r#""\u{}""#, r"\u{}", "names no code point"),
+            (r#""\u{1234567}""#, r"\u{1234567}", "has 7 hex digits"),
+            (r#""\u{12G4}""#, r"\u{12G4}", "`G` is not a hex digit"),
+            (r#""\u41""#, r"\u", "must be followed by `{`"),
+            (r#""\u{41""#, r"\u{41", "is never closed"),
+            (r#""\u{41 }""#, r"\u{41", "is never closed"),
+            (r"'\u{D800}'", r"\u{D800}", "is a surrogate"),
+            (r"'\u{}'", r"\u{}", "names no code point"),
+        ];
+        for (src, escape, says) in cases {
+            let diags = lex_err(src);
+            assert_eq!(diags.len(), 1, "`{src}`: {diags:?}");
+            let diag = &diags[0];
+            assert_eq!(diag.code, "cove::lex::invalid_unicode_escape", "`{src}`");
+            assert!(diag.message.contains(says), "`{src}`: {}", diag.message);
+            let span = diag.primary.expect("the escape is pointed at");
+            assert_eq!(&src[span.start as usize..span.end as usize], *escape);
+        }
     }
 
     #[test]

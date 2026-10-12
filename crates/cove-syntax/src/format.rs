@@ -173,6 +173,17 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 1;
     while i < bytes.len() {
         match bytes[i] {
+            // A `\u{...}` escape's brace is its own, not an interpolation's
+            // (ADR 0094), so it is stepped over the way the lexer reads it.
+            b'\\' if bytes.get(i + 1) == Some(&b'u') && bytes.get(i + 2) == Some(&b'{') => {
+                i += 3;
+                while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
+                    i += 1;
+                }
+                if bytes.get(i) == Some(&b'}') {
+                    i += 1;
+                }
+            }
             b'\\' => i += 2,
             b'"' => return i + 1,
             b'{' => i = skip_interpolation(bytes, i + 1),
@@ -2566,6 +2577,7 @@ fn codePoints() {
   let escapes = ['\\n', '\\t', '\\r', '\\0', '\\\\', '\\'']
   let space = ' '
   let multibyte = '\u{e9}'
+  let numbered = ['\\u{e9}', '\\u{1F600}', '\\u{0}']
   space
 }
 ",
@@ -2583,6 +2595,7 @@ fn literals() {
   let bools = [true, false]
   let unit = ()
   let text = \"escapes \\\\ \\\" \\n and {ints} interpolation\"
+  let scalars = \"caf\\u{e9} \\u{1F600}\\u{41}{text}\\u{10FFFF}\"
   text
 }
 ",

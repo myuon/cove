@@ -77,6 +77,19 @@ test fn an_escape_does_not_end_a_literal() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// A `\u{...}` escape is part of the literal it is written in, braces and
+/// all: its `{` is the escape's and not an interpolation's, so nothing after
+/// it is read as code. ADR 0094.
+test fn a_unicode_escape_stays_inside_its_literal() -> Result<Unit, Error> {
+  assertEqual(shape("\"caf\\u\{e9\}\" x"), "str space word")?
+  assertEqual(shape("\"\\u\{1F600\}\{a\}\\u\{41\}\" // c"), "str space line")?
+  assertEqual(shape("'\\u\{e9\}' x"), "char space word")?
+  // An escape that is never closed does not lex, and still opens nothing:
+  // the quote after it ends the literal.
+  assertEqual(shape("\"\\u\{41\" x"), "str space word")?
+  Ok(())
+}
+
 /// A `"` inside a code-point literal is a character and not the start of a
 /// string, so what follows it is still code. Issue 402 was a scanner in the
 /// Rust formatter that did not know the form existed: it read the `"` in

@@ -1,0 +1,3 @@
+[run.fail_unicode_escape]
+entry = "main.main"
+allow = ["console"]

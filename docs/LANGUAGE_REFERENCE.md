@@ -224,10 +224,18 @@ the idiom — because UTF-8 writes an ASCII character as itself, and every byte
 of a character that is not ASCII is at least 128 and equals no such literal.
 
 It takes the escapes a string takes and `\'` besides: `\\`, `\"`, `\'`,
-`\n`, `\t`, `\r`, `\0`, `\{`, `\}`. `\'` is legal in a string too,
-where the apostrophe needs no escaping, because there is one escape table.
-**There is no `\u{...}` in either form**; write the character itself, or use
-`String.fromCodePoint` for a number computed at run time.
+`\n`, `\t`, `\r`, `\0`, `\{`, `\}`, and `\u{...}`. `\'` is legal in a string
+too, where the apostrophe needs no escaping, because there is one escape table.
+
+`\u{...}` names a Unicode scalar value by number, in **one to six hex digits**
+of either case: `"caf\u{e9}"` is `"café"`, `'\u{1F600}'` is `128512`. Its
+braces are the escape's, not an interpolation's. A surrogate (`D800` to
+`DFFF`), a value above `10FFFF`, no digits, a seventh digit, a character that
+is not a hex digit, and a missing brace are each refused with
+`cove::lex::invalid_unicode_escape`, pointed at the escape. A string holds the
+scalar's UTF-8 bytes and nothing records that it was written as an escape;
+`cove fmt` writes it back as written. Use `String.fromCodePoint` for a number
+computed at run time.
 
 An interpolation `{expr}` renders any value and constrains none, so it is
 checked but not required to be a `String`.

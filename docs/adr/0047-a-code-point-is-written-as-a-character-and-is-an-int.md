@@ -1,6 +1,8 @@
 # ADR 0047: A code point is written as a character and is an `Int`
 
-- Status: Accepted
+- Status: Accepted. Superseded in part by
+  [ADR 0094](0094-a-string-names-a-scalar-by-number-with-u.md): its decision
+  that there is no `\u{...}`, in this form or in a string
 - Date: 2026-09-08
 - Decides: how a Unicode scalar value is written in Cove source, now that
   programs have to write them
