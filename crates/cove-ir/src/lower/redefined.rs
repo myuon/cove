@@ -440,9 +440,8 @@ impl Walk<'_, '_> {
         }
         let words = self.words;
         let mut all = false;
-        self.flow.writes(inst, false, &mut |slot, width| {
-            all |= words.within(slot, width)
-        });
+        self.flow
+            .writes(inst, &mut |slot, width| all |= words.within(slot, width));
         all
     }
 

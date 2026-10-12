@@ -4,8 +4,7 @@
 //! Each of `lower::inline`'s `written`, `lower::frees`' `writes` and
 //! `verify`'s slot facts enumerates the words an instruction writes, and
 //! `lower::branches` and `cove-native`'s `subset::leaders` each enumerate the
-//! counters one names. They answer slightly different questions — `frees`
-//! sizes a closure call's answer by the widest one in the program, and the
+//! counters one names. They answer slightly different questions — the
 //! inliner never sees a call — so they are left as they are.
 //! [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
 //! reservation rule is the first reader that needs *both* questions answered

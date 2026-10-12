@@ -19,8 +19,8 @@
 //! **every** path is dropped. The cache slot holds the current value from a
 //! load until the first instruction that *may* change it — a *kill*:
 //!
-//! - **a write of the owner slot**, by anything, at any width the wide answer
-//!   of [`Flow::writes`] gives;
+//! - **a write of the owner slot**, by anything, at the width
+//!   [`Flow::writes`] gives;
 //! - **a `store-field` at the same offset** into an owner that may be the
 //!   same object;
 //! - **a growable instruction** — `growable-ensure`, `growable-commit`,
@@ -469,10 +469,9 @@ impl Graph {
 /// The frame words each instruction reads and writes, asked of [`Flow`] once.
 struct Access {
     reads: Runs<(Slot, u32)>,
-    /// The wide answer: every word a write may reach.
+    /// The words a write reaches, which [`Flow::writes`] answers exactly: so
+    /// every word a write may reach, and every one it certainly does.
     writes: Runs<(Slot, u32)>,
-    /// The narrow answer: the words a write certainly reaches.
-    certain: Runs<(Slot, u32)>,
 }
 
 impl Access {
@@ -480,21 +479,16 @@ impl Access {
         let mut access = Access {
             reads: Runs::with_capacity(code.len()),
             writes: Runs::with_capacity(code.len()),
-            certain: Runs::with_capacity(code.len()),
         };
         for inst in code {
             flow.reads(inst, &mut |slot, width| {
                 access.reads.items.push((slot, width))
             });
-            flow.writes(inst, true, &mut |slot, width| {
+            flow.writes(inst, &mut |slot, width| {
                 access.writes.items.push((slot, width))
-            });
-            flow.writes(inst, false, &mut |slot, width| {
-                access.certain.items.push((slot, width))
             });
             access.reads.close();
             access.writes.close();
-            access.certain.close();
         }
         access
     }
@@ -779,7 +773,7 @@ fn slot_layouts(function: &Function, program: &Program, flow: &Flow<'_>) -> Vec<
         };
         match named {
             Some((dst, layout)) => agree(&mut seen, dst as usize, layout),
-            None => flow.writes(inst, true, &mut |slot, width| {
+            None => flow.writes(inst, &mut |slot, width| {
                 for at in slot as usize..slot as usize + width as usize {
                     agree(&mut seen, at, None);
                 }
@@ -933,19 +927,19 @@ fn reaching(
         count += held.len() + 1;
     }
     // What each counter does: for each slot it writes, the bits of that slot
-    // to clear if the write is certain, and the bit to set.
-    let mut own: Vec<Vec<(usize, usize, usize, bool)>> = vec![Vec::new(); n];
+    // to clear, and the bit to set. Every write `Flow::writes` answers is
+    // certain, so a write always clears.
+    let mut own: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); n];
     for (pc, writes) in own.iter_mut().enumerate() {
         for (at, &slot) in slots.iter().enumerate() {
             if touches(&access.writes[pc], slot) {
                 let width = loads[at].len() + 1;
                 let other = base[at] + loads[at].len();
-                let certain = touches(&access.certain[pc], slot);
                 let bit = loads[at]
                     .iter()
                     .position(|&load| load == pc)
                     .map_or(other, |index| base[at] + index);
-                writes.push((base[at], width, bit, certain || bit != other));
+                writes.push((base[at], width, bit));
             }
         }
     }
@@ -970,11 +964,9 @@ fn reaching(
                 }
             }
             leaving.assign(&arriving);
-            for &(from, width, bit, certain) in own {
-                if certain {
-                    for at in from..from + width {
-                        leaving.unset(at);
-                    }
+            for &(from, width, bit) in own {
+                for at in from..from + width {
+                    leaving.unset(at);
                 }
                 leaving.set(bit);
             }
@@ -1823,10 +1815,9 @@ fn clears(
             if reads {
                 flow.reads(inst, &mut probe);
             } else {
-                // The narrow answer: a closure call's guessed width may reach
-                // past the frame the cache slot was appended to, and what it
-                // really writes never does.
-                flow.writes(inst, false, &mut probe);
+                // Exact, a closure call's answer included, so no write reaches
+                // past the frame the cache slot was appended to.
+                flow.writes(inst, &mut probe);
             }
             hit
         };

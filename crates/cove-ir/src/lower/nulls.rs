@@ -24,9 +24,9 @@
 //!   the zero word, which is why `frees` treats it as a clear too.
 //! - **[`Inst::Copy`]** carries each source word's answer to its destination:
 //!   a copy of null is null.
-//! - **Everything else** that may write a word makes it unknown, using the
-//!   *wide* answer [`Flow::writes`] gives, so a closure call's guessed width
-//!   over-estimates rather than under-estimates.
+//! - **Everything else** that may write a word makes it unknown, at the
+//!   width [`Flow::writes`] gives, which is exact — a closure call's answer
+//!   included, since issue #301.
 //! - **A word some [`Inst::AddrOfSlot`] can reach** is unknown everywhere,
 //!   because an address writes it without naming it — the run `frees` holds
 //!   unknown, from the same [`Flow`].
@@ -204,7 +204,7 @@ fn step(flow: &Flow<'_>, inst: &Inst, into: &[u64], out: &mut [u64]) {
                 }
             }
         }
-        _ => flow.writes(inst, true, &mut |slot, width| {
+        _ => flow.writes(inst, &mut |slot, width| {
             bits::fill(out, size, slot as usize, width as usize, false)
         }),
     }
