@@ -145,7 +145,7 @@
 //! committed stay committed — compiled code holds their addresses — so pacing
 //! bounds how far a heap grows, not how far it shrinks.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 use cove_ir::{Layout, LayoutId, Repr, Shape, SHARED_VALUE};
@@ -712,15 +712,61 @@ fn pace(live: u64) -> u64 {
 struct Party {
     /// Whether a task is executing over this segment.
     live: bool,
-    /// The roots it published on its way to a safepoint, while it is at one.
+    /// Whether it is at a safepoint with [`Party::roots`] published.
     ///
-    /// `Some` is the whole of "arrived": the collector counts these and reads
-    /// them, and a task that stays at a safepoint — waiting on a cell, or
-    /// inside a host call — leaves them published until it is released. A
-    /// running task's are `None`, because a running task's frames change
-    /// between two instructions and a snapshot of them would be a lie by the
-    /// time the collector read it.
-    at: Option<Vec<u64>>,
+    /// This is the whole of "arrived": the collector counts these and reads
+    /// their roots, and a task that stays at a safepoint — waiting on a cell,
+    /// or inside a host call — stays arrived until it is released. A running
+    /// task is not, because a running task's frames change between two
+    /// instructions and a snapshot of them would be a lie by the time the
+    /// collector read it.
+    arrived: bool,
+    /// The roots it published on its way to a safepoint, meaningful only while
+    /// [`Party::arrived`].
+    ///
+    /// Kept across parks rather than built afresh for each, so that a task
+    /// which parks around every host call allocates for it only until the
+    /// buffer has grown to its deepest stack (issue #243). Reusing it is sound
+    /// for the reason the snapshot is: it is rewritten whole at each arrival
+    /// and read only while the task that wrote it is blocked.
+    roots: Vec<u64>,
+}
+
+impl Party {
+    /// The party a task takes when it attaches: live, running, nothing
+    /// published. The buffer of the task that last held the segment is kept.
+    fn attach(&mut self) {
+        self.live = true;
+        self.arrived = false;
+        self.roots.clear();
+    }
+}
+
+/// How a task stands at a safepoint it took around something that blocks.
+///
+/// Issue #243: the park around a host call is there to coordinate with a
+/// collector on another thread, and a run with one party has no other thread
+/// to coordinate with. So a task that is the only live party parks
+/// [`Park::Alone`] — no lock, no published roots, no broadcast — and the
+/// matching departure is a no-op.
+///
+/// That is sound because a collection is started only by a live party
+/// ([`Space::collect`]), and a party comes into being only through
+/// [`Space::attach`], which is called by a live party on its own thread
+/// ([`Memory::for_task`]) or for a new run's first task. While the only live
+/// party is parked, nothing else can attach, so nothing can collect. The one
+/// transition that happens *inside* such a park is the parked task's own
+/// `spawn` (`Machine::spawn` parks around taking the segment), and the task
+/// it attaches has no thread until the park is over, so it cannot collect
+/// before the parent departs either.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Park {
+    /// The only live party; nothing was published and there is nothing to
+    /// withdraw.
+    Alone,
+    /// Roots published under the lock; the departure waits out a collection
+    /// that has begun and withdraws them.
+    Published,
 }
 
 /// The run's stop-the-world state.
@@ -742,8 +788,24 @@ impl Stw {
         self.parties
             .iter()
             .enumerate()
-            .filter(|(at, party)| *at != me as usize && party.live && party.at.is_some())
+            .filter(|(at, party)| *at != me as usize && party.live && party.arrived)
             .count()
+    }
+
+    /// Publishes `roots` as `me`'s and marks it arrived.
+    ///
+    /// Into the party's own buffer, which keeps its capacity from one park to
+    /// the next.
+    fn publish(&mut self, me: u32, roots: &dyn Roots) {
+        let party = &mut self.parties[me as usize];
+        party.roots.clear();
+        roots.each_root(&mut |addr| party.roots.push(addr));
+        party.arrived = true;
+    }
+
+    /// Marks `me` running again. What it published stays in the buffer, unread.
+    fn withdraw(&mut self, me: u32) {
+        self.parties[me as usize].arrived = false;
     }
 }
 
@@ -797,8 +859,17 @@ pub(crate) struct Space {
     /// A safepoint runs every thousand instructions and a collection is rare,
     /// so the question has to be cheap when the answer is no.
     pending: AtomicBool,
-    /// Woken when a party arrives, when a collection ends, and when a task
-    /// leaves.
+    /// Mirrors `Stw::live`, written under its lock, so that a park can ask
+    /// whether it is alone without taking it. See [`Park`].
+    parties: AtomicUsize,
+    /// How many tasks are parked [`Park::Alone`] right now, counted only where
+    /// debug assertions are on, so that a collection which began beside one —
+    /// the thing [`Park`]'s argument says cannot happen — panics rather than
+    /// waiting forever for a task that published nothing.
+    #[cfg(debug_assertions)]
+    alone: AtomicUsize,
+    /// Woken when a party arrives during a collection, when a collection ends,
+    /// and when a task leaves.
     turn: Condvar,
     /// One bucket for every task waiting on a word of this memory.
     ///
@@ -866,6 +937,9 @@ impl Space {
                 last: Collected::default(),
             }),
             pending: AtomicBool::new(false),
+            parties: AtomicUsize::new(0),
+            #[cfg(debug_assertions)]
+            alone: AtomicUsize::new(0),
             turn: Condvar::new(),
             waiting: Mutex::new(()),
             woken: Condvar::new(),
@@ -1366,11 +1440,9 @@ impl Space {
             }
             None => return Err(NoSegment),
         };
-        stw.parties[at] = Party {
-            live: true,
-            at: None,
-        };
+        stw.parties[at].attach();
         stw.live += 1;
+        self.parties.store(stw.live, Ordering::Release);
         Ok(at as u32)
     }
 
@@ -1382,6 +1454,7 @@ impl Space {
         let mut stw = self.world();
         stw.parties[at as usize] = Party::default();
         stw.live -= 1;
+        self.parties.store(stw.live, Ordering::Release);
         self.turn.notify_all();
     }
 
@@ -1405,14 +1478,24 @@ impl Space {
     fn collect(&self, me: u32, layouts: &[Layout], mine: &dyn Roots) -> Collected {
         let mut stw = self.world();
         if stw.collecting {
-            stw.parties[me as usize].at = Some(gather(mine));
+            stw.publish(me, mine);
             self.turn.notify_all();
             while stw.collecting {
                 stw = self.turn.wait(stw).unwrap_or_else(|held| held.into_inner());
             }
-            stw.parties[me as usize].at = None;
+            stw.withdraw(me);
             return stw.last;
         }
+
+        // A task parked alone published nothing, and the wait below would wait
+        // for it for ever. [`Park`] argues this cannot happen; this says so
+        // loudly where the argument is wrong.
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            self.alone.load(Ordering::Acquire),
+            0,
+            "a collection began beside a task that parked alone"
+        );
 
         stw.collecting = true;
         self.pending.store(true, Ordering::Relaxed);
@@ -1423,8 +1506,8 @@ impl Space {
 
         let mut roots = gather(mine);
         for party in &stw.parties {
-            if let Some(published) = &party.at {
-                roots.extend_from_slice(published);
+            if party.live && party.arrived {
+                roots.extend_from_slice(&party.roots);
             }
         }
         // And what is named from outside every frame: an object a public
@@ -1712,12 +1795,12 @@ impl Space {
         if !stw.collecting {
             return;
         }
-        stw.parties[me as usize].at = Some(gather(roots));
+        stw.publish(me, roots);
         self.turn.notify_all();
         while stw.collecting {
             stw = self.turn.wait(stw).unwrap_or_else(|held| held.into_inner());
         }
-        stw.parties[me as usize].at = None;
+        stw.withdraw(me);
     }
 
     /// Publishes `roots` and stays at a safepoint until the answer is dropped.
@@ -1730,19 +1813,42 @@ impl Space {
     /// collector. A blocked task is not running, so its frames do not change
     /// and the snapshot it leaves stays true for as long as it is blocked.
     fn blocking<'s>(&'s self, me: u32, roots: &dyn Roots) -> Blocking<'s> {
-        self.arrive(me, roots);
-        Blocking { space: self, me }
+        let park = self.arrive(me, roots);
+        Blocking {
+            space: self,
+            me,
+            park,
+        }
     }
 
-    /// Publishes `roots` for `me` and says so, without waiting for anything.
+    /// Publishes `roots` for `me` and says so, without waiting for anything —
+    /// or, where `me` is the run's only live party, does nothing at all and
+    /// answers [`Park::Alone`].
     ///
     /// The half of a park that both guards share. [`Blocking`] borrows the
     /// space and [`Parked`] owns a handle on it, and neither difference is
     /// about what arriving and leaving *are*.
-    fn arrive(&self, me: u32, roots: &dyn Roots) {
+    ///
+    /// Issue #243 priced this on every host call: two lock acquisitions, two
+    /// broadcasts, and a root vector allocated and filled, in a run that had
+    /// nobody to synchronise with. The single-party case is now one atomic
+    /// load; see [`Park`] for why that is sound. Otherwise the roots go into
+    /// the party's own buffer, and the broadcast is made only when a
+    /// collection is under way: every wait on [`Space::turn`] is a wait for
+    /// something only a running collection changes, so with none running
+    /// under this lock nobody is waiting.
+    fn arrive(&self, me: u32, roots: &dyn Roots) -> Park {
+        if self.parties.load(Ordering::Acquire) == 1 {
+            #[cfg(debug_assertions)]
+            self.alone.fetch_add(1, Ordering::AcqRel);
+            return Park::Alone;
+        }
         let mut stw = self.world();
-        stw.parties[me as usize].at = Some(gather(roots));
-        self.turn.notify_all();
+        stw.publish(me, roots);
+        if stw.collecting {
+            self.turn.notify_all();
+        }
+        Park::Published
     }
 
     /// Leaves the safepoint, waiting out a collection that has already begun.
@@ -1750,13 +1856,25 @@ impl Space {
     /// Waiting is what makes the published snapshot honest: a task that
     /// resumed while the collector was still reading its roots would be
     /// changing the answer to a question already asked.
-    fn depart(&self, me: u32) {
+    ///
+    /// A [`Park::Alone`] published nothing, so it has nothing to wait out or
+    /// withdraw — even if the run gained a party while it stood, which is the
+    /// parked task's own spawn, whose new task has no thread yet. There is no
+    /// broadcast either way, because nothing waits for a task to *leave* a
+    /// safepoint: a collector waits for tasks to arrive, and a departure gets
+    /// past the loop below only once the collection it could have woken has
+    /// ended and woken everyone itself.
+    fn depart(&self, me: u32, park: Park) {
+        if park == Park::Alone {
+            #[cfg(debug_assertions)]
+            self.alone.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
         let mut stw = self.world();
         while stw.collecting {
             stw = self.turn.wait(stw).unwrap_or_else(|held| held.into_inner());
         }
-        stw.parties[me as usize].at = None;
-        self.turn.notify_all();
+        stw.withdraw(me);
     }
 
     /// Blocks until [`Space::wake`] names `addr` and the word is no longer
@@ -1840,11 +1958,12 @@ impl Space {
 pub(crate) struct Blocking<'s> {
     space: &'s Space,
     me: u32,
+    park: Park,
 }
 
 impl Drop for Blocking<'_> {
     fn drop(&mut self) {
-        self.space.depart(self.me);
+        self.space.depart(self.me, self.park);
     }
 }
 
@@ -1866,11 +1985,12 @@ impl Drop for Blocking<'_> {
 pub(crate) struct Parked {
     space: Arc<Space>,
     me: u32,
+    park: Park,
 }
 
 impl Drop for Parked {
     fn drop(&mut self) {
-        self.space.depart(self.me);
+        self.space.depart(self.me, self.park);
     }
 }
 
@@ -2648,10 +2768,11 @@ impl Memory {
 
     /// The same park, in a guard that borrows nothing. See [`Parked`].
     pub(crate) fn park(&self, roots: &dyn Roots) -> Parked {
-        self.space.arrive(self.at, roots);
+        let park = self.space.arrive(self.at, roots);
         Parked {
             space: Arc::clone(&self.space),
             me: self.at,
+            park,
         }
     }
 
@@ -4011,7 +4132,7 @@ mod tests {
                 mem.wait(word, 0, &Held(vec![theirs]));
             });
             if arrival == Arrival::BeforeTheCollection {
-                while space.world().parties[party].at.is_none() {
+                while !space.world().parties[party].arrived {
                     std::thread::yield_now();
                 }
             }
@@ -4110,5 +4231,140 @@ mod tests {
         origins.sort_unstable();
         origins.dedup();
         assert_eq!(origins.len(), SEGMENTS as usize);
+    }
+
+    /// Issue #243: a run's only task parks around a host call without the
+    /// lock, without publishing, and without leaving anything behind; once the
+    /// run has a second party, the same park publishes and withdraws as before.
+    #[test]
+    fn a_lone_task_parks_without_publishing_and_a_shared_one_publishes() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let mut first = Memory::new(1 << 14);
+        let mine = alloc(&mut first, &table, array, 1);
+        let me = first.at as usize;
+
+        let held = first.blocking(&Held(vec![mine]));
+        assert_eq!(held.park, Park::Alone);
+        assert!(!first.space.world().parties[me].arrived);
+        drop(held);
+        let parked = first.park(&Held(vec![mine]));
+        assert_eq!(parked.park, Park::Alone);
+        drop(parked);
+        #[cfg(debug_assertions)]
+        assert_eq!(first.space.alone.load(Ordering::Acquire), 0);
+
+        let second = first.for_task().unwrap();
+        let held = first.blocking(&Held(vec![mine]));
+        assert_eq!(held.park, Park::Published);
+        {
+            let stw = first.space.world();
+            assert!(stw.parties[me].arrived);
+            assert_eq!(stw.parties[me].roots, vec![mine]);
+        }
+        drop(held);
+        assert!(!first.space.world().parties[me].arrived);
+
+        // And alone again once the other party has gone.
+        drop(second);
+        let held = first.blocking(&Held(vec![mine]));
+        assert_eq!(held.park, Park::Alone);
+    }
+
+    /// The one transition a lone park can see: the parked task's own spawn,
+    /// which attaches a party while the park stands (`Machine::spawn` parks
+    /// around taking the segment). The park leaves without waiting for
+    /// anything, and the run it leaves behind collects as a two-party run.
+    #[test]
+    fn a_lone_park_that_spawns_leaves_a_run_that_collects() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let mut first = Memory::new(1 << 14);
+        let mine = alloc(&mut first, &table, array, 1);
+
+        let held = first.blocking(&Held(vec![mine]));
+        assert_eq!(held.park, Park::Alone);
+        let mut second = first.for_task().unwrap();
+        drop(held);
+        #[cfg(debug_assertions)]
+        assert_eq!(first.space.alone.load(Ordering::Acquire), 0);
+
+        let theirs = alloc(&mut second, &table, array, 4);
+        let inside = Barrier::new(2);
+        let done = Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let held = second.blocking(&Held(vec![theirs]));
+                assert_eq!(held.park, Park::Published);
+                inside.wait();
+                done.wait();
+                drop(held);
+            });
+            inside.wait();
+            let lost = alloc(&mut first, &table, array, 4);
+            first.collect(table.layouts(), &Held(vec![mine]));
+            assert_eq!(first.object_layout(lost), LayoutId::FREE);
+            assert_eq!(first.object_layout(mine), array);
+            assert_eq!(first.object_layout(theirs), array);
+            done.wait();
+        });
+    }
+
+    /// Many tasks parking and leaving as fast as they can while another
+    /// collects over and over: no collection hangs behind a park, none frees
+    /// what a parked or polling task holds, and the garbage goes every time.
+    ///
+    /// The broadcasts issue #243 removed were the ones made when no collection
+    /// was running; this is the test that a wake-up the collector needed was
+    /// not among them, because a lost one is a hang here.
+    #[test]
+    fn parks_under_contention_neither_hang_a_collection_nor_hide_a_root() {
+        const WORKERS: usize = 4;
+        const COLLECTIONS: usize = 200;
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let mut first = Memory::new(1 << 16);
+        let mut workers: Vec<(Memory, u64)> = (0..WORKERS)
+            .map(|_| {
+                let mut mem = first.for_task().unwrap();
+                let theirs = alloc(&mut mem, &table, array, 4);
+                (mem, theirs)
+            })
+            .collect();
+        let held: Vec<u64> = workers.iter().map(|(_, theirs)| *theirs).collect();
+        let stop = AtomicBool::new(false);
+        let parks = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for (mem, theirs) in workers.drain(..) {
+                let (stop, parks) = (&stop, &parks);
+                scope.spawn(move || {
+                    // Moved in, as a task's memory is.
+                    let mem = mem;
+                    let roots = Held(vec![theirs]);
+                    while !stop.load(Ordering::Acquire) {
+                        let parked = mem.blocking(&roots);
+                        assert_eq!(parked.park, Park::Published);
+                        std::thread::yield_now();
+                        drop(parked);
+                        parks.fetch_add(1, Ordering::Relaxed);
+                        // A running task reaches a safepoint, or the
+                        // collector would wait for it for ever.
+                        mem.poll(&roots);
+                    }
+                });
+            }
+            for _ in 0..COLLECTIONS {
+                let lost = alloc(&mut first, &table, array, 4);
+                first.collect(table.layouts(), &Held(vec![]));
+                assert_eq!(first.object_layout(lost), LayoutId::FREE);
+                for &theirs in &held {
+                    assert_eq!(first.object_layout(theirs), array);
+                }
+            }
+            stop.store(true, Ordering::Release);
+        });
+        assert!(parks.load(Ordering::Relaxed) > 0, "the workers parked");
+        assert!(first.collections() >= COLLECTIONS as u64);
     }
 }
