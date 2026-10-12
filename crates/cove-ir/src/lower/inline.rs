@@ -600,6 +600,20 @@ fn renamed_words(program: &Program, leaf: &Function, ordered: bool) -> u32 {
 /// A fixed point over the call graph, which terminates because the set only
 /// grows and is bounded by the functions there are.
 ///
+/// # A call whose continuation is doomed is not a call site here
+///
+/// A call after which every path runs into a trap — [`doomed_continuations`],
+/// the same predicate [`is_expandable`] admits such a call by — runs at most
+/// once a call of the function holding it, on the path that ends the run. So
+/// it carries no hotness to its callee, wherever it stands: inside a loop, or
+/// in a function that is hot. That is the shape of every refusal the standard
+/// library words in Cove, `core.refuse(digitsRefused(digits), ...)`, and
+/// before [ADR 0092] the helpers that build those sentences — and everything
+/// they call, down to `std.dynamic`'s rendering — were weighed as hot code and
+/// expanded against [`HOT_LIMIT`] for a path that runs once.
+///
+/// [ADR 0092]: ../../../../docs/adr/0092-a-doomed-call-carries-no-hotness.md
+///
 /// # Why the loop a function holds is not the question
 ///
 /// `wantsASpaceBetween` holds no loop at all — it is a run of `if`s — and it
@@ -622,8 +636,11 @@ fn renamed_words(program: &Program, leaf: &Function, ordered: bool) -> u32 {
 /// budget is spent in the wrong place. [`LOOP_LIMIT`] is the first step of it:
 /// a site inside a loop of its own caller is weighed apart from one that is
 /// only reached from somewhere hot.
-fn hot_functions(program: &Program) -> Vec<bool> {
+pub(super) fn hot_functions(program: &Program) -> Vec<bool> {
     let loops: Vec<Vec<bool>> = program.functions.iter().map(inside_a_loop).collect();
+    let doomed: Vec<Vec<bool>> = (0..program.functions.len())
+        .map(|at| doomed_continuations(program, FunctionId(at as u32)))
+        .collect();
     let mut hot = vec![false; program.functions.len()];
     loop {
         let mut moved = false;
@@ -632,6 +649,9 @@ fn hot_functions(program: &Program) -> Vec<bool> {
                 let Inst::Call { callee, .. } = inst else {
                     continue;
                 };
+                if doomed[at][pc] {
+                    continue;
+                }
                 if (loops[at][pc] || hot[at]) && !hot[callee.index()] {
                     hot[callee.index()] = true;
                     moved = true;
