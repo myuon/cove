@@ -1056,8 +1056,16 @@ fn isolates_share_compiled_code_and_keep_their_own_state_and_budgets() {
 
 // ------------------------------------------------------------ storms (#604)
 
-/// What a stormed run came to: its answer and accounting, how many yields,
-/// and the longest stretch it ran without one while the storm was blowing.
+/// What a stormed run came to: its answer and accounting, and how many
+/// yields.
+///
+/// Not how long it ran without one. A storm asks from a second thread, so
+/// any measure of a stretch between two yields is a race between two threads
+/// for the machine's cores: this used to count the monitor's requests, and a
+/// loaded runner that descheduled the run while the monitor spun failed it
+/// with a run that had heeded every request (#631). The bound is held in the
+/// run's own work, with requests raised at chosen points of it, by
+/// `src/vm/stops.rs` — over every shape stormed here.
 #[derive(Debug)]
 struct Stormed {
     finished: Finished,
@@ -1065,12 +1073,6 @@ struct Stormed {
     yields: usize,
     /// The most compiled frames any one yield left standing.
     deepest: usize,
-    /// The most requests the monitor raised between two yields, or between
-    /// the last one and the answer: how long, in the monitor's own clock, the
-    /// run went on while asked. Unlike a wall-clock gap, a monitor the machine
-    /// did not run raises nothing, so this does not grow with the machine's
-    /// load.
-    unheeded: u64,
 }
 
 /// A splitmix64 step, so a storm's pauses are random and reproducible.
@@ -1098,11 +1100,9 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
     let signal = vm.yield_request();
     let done = Arc::new(AtomicBool::new(false));
     let blowing = Arc::new(AtomicBool::new(false));
-    let raised = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let monitor = {
         let done = Arc::clone(&done);
         let blowing = Arc::clone(&blowing);
-        let raised = Arc::clone(&raised);
         std::thread::spawn(move || {
             let mut state = seed;
             blowing.store(true, Ordering::Relaxed);
@@ -1113,7 +1113,6 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
                     std::hint::spin_loop();
                 }
                 signal.request();
-                raised.fetch_add(1, Ordering::Relaxed);
             }
         })
     };
@@ -1123,8 +1122,6 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
         std::thread::yield_now();
     }
     let (mut yields, mut native_yields, mut deepest) = (0, 0, 0);
-    let mut unheeded = 0;
-    let mut raised_since = raised.load(Ordering::Relaxed);
     let mut next = taken(vm.invoke_within_parkable(unlimited(), "app", name, Vec::new()));
     let finished = loop {
         match next {
@@ -1136,11 +1133,8 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
                     .downcast::<i64>()
                     .expect("an Int");
                 next = taken(parked.resume(Ok(Transfer::Int(asked + 1))));
-                raised_since = raised.load(Ordering::Relaxed);
             }
             Taken::Yielded(yielded) => {
-                let now = raised.load(Ordering::Relaxed);
-                unheeded = unheeded.max(now - raised_since);
                 yields += 1;
                 if yielded.compiled_frames() > 0 {
                     native_yields += 1;
@@ -1152,11 +1146,9 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
                         .unwrap(),
                     _ => taken(yielded.resume()),
                 };
-                raised_since = raised.load(Ordering::Relaxed);
             }
         }
     };
-    unheeded = unheeded.max(raised.load(Ordering::Relaxed) - raised_since);
     done.store(true, Ordering::Relaxed);
     monitor.join().unwrap();
     Stormed {
@@ -1164,7 +1156,6 @@ fn storm_on(vm: OwnedVm, name: &str, seed: u64, most: u64) -> Stormed {
         native_yields,
         yields,
         deepest,
-        unheeded,
     }
 }
 
@@ -1214,16 +1205,18 @@ fn a_storm_of_yield_requests_changes_no_answer_and_no_count() {
 }
 
 /// **#604's third finding.** Under a request raised every few microseconds,
-/// no shape runs long without yielding: a loop whose every turn passes a
+/// every shape yields inside compiled code: a loop whose every turn passes a
 /// helper's safepoint — a copy, a buffer's growth — and never a due backedge
 /// still offers the yield.
 ///
-/// "Long" is counted in the monitor's requests, not in time, so a loaded
-/// machine does not fail it: a run that heeds its requests yields within a
-/// few of them, and one that cannot goes on through all the monitor raises —
-/// `buildingLong`, before the fix, through about ten thousand.
+/// That it does so *soon* — within one stride and one step of every request,
+/// however many — is `src/vm/stops.rs`'s
+/// `a_resumed_run_yields_again_and_again_within_one_stride_and_one_step`, on
+/// these shapes, in the run's own work. It was asserted here in the monitor's
+/// requests, which a loaded machine could run up while the run was off its
+/// core (#631).
 #[test]
-fn no_compiled_shape_runs_long_without_yielding_when_asked() {
+fn every_compiled_shape_yields_inside_compiled_code_in_a_storm() {
     let world = world();
     for name in STORMED.iter().chain(&["buildingLong"]) {
         let run = storm(&world, name, 17, 20);
@@ -1231,17 +1224,12 @@ fn no_compiled_shape_runs_long_without_yielding_when_asked() {
             run.native_yields > 0,
             "{name}: no yield inside compiled code: {run:?}"
         );
-        assert!(
-            run.unheeded < 2_000,
-            "{name}: went on through {} requests without yielding: {run:?}",
-            run.unheeded
-        );
     }
 }
 
 /// The same storm on the encoded tier, which has no compiled frames: its
-/// answers and counts are its own uninterrupted run's, and no shape runs long
-/// without yielding.
+/// answers and counts are its own uninterrupted run's, and every shape
+/// yields.
 ///
 /// The second half is #606. The dispatch loop reads a request only at a due
 /// safepoint (ADR 0084 §2), and a loop whose every turn makes a bulk charge —
@@ -1254,6 +1242,14 @@ fn no_compiled_shape_runs_long_without_yielding_when_asked() {
 /// stride along as a safepoint's does, so it never yielded either. A host
 /// call now offers the yield once a stride of work has passed since the last
 /// safepoint.
+///
+/// How *soon* each shape yields is not asserted here: a second thread's
+/// requests are no clock for the run, and holding the run to a count of them
+/// — or `ticking` to a yield per two strides of a monitor that may not have
+/// been scheduled — failed on loaded runners with nothing wrong (#631). Both
+/// bounds are held in the run's own work by `src/vm/stops.rs`, and `ticking`'s
+/// deterministically by
+/// `a_loop_of_host_calls_each_asking_to_yield_yields_on_both_tiers` below.
 #[test]
 fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
     let world = world();
@@ -1274,26 +1270,6 @@ fn a_storm_on_the_encoded_tier_changes_no_answer_and_no_count() {
             let run = storm_on(vm, name, seed, most);
             assert_eq!(run.finished, expected, "{name}, storm {seed}: {run:?}");
             assert!(run.yields > 0, "{name}, storm {seed}: never yielded");
-            if name == "ticking" {
-                // Asked without a pause, it yields once a stride of work:
-                // the most the dispatch loop runs between two questions. In
-                // requests that is more than other shapes go on through,
-                // because a host call is one unit of work and many times one
-                // instruction's time. On the encoded tier and with no bulk
-                // operation in it, its work is its instruction count.
-                if most == 0 {
-                    assert!(
-                        run.yields as u64 * 2 * SAFEPOINT_STRIDE >= run.finished.instructions,
-                        "{name}, storm {seed}: fewer than one yield in two strides: {run:?}"
-                    );
-                }
-                continue;
-            }
-            assert!(
-                run.unheeded < 2_000,
-                "{name}, storm {seed}: went on through {} requests without yielding: {run:?}",
-                run.unheeded
-            );
         }
     }
 }
