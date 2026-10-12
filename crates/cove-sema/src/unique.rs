@@ -114,15 +114,19 @@
 //! while this was written:
 //!
 //! - **storage a call produced, when the callee does not visibly build it.**
-//!   `var log = hand(mine)` then `log.freeze()` is refused whenever `hand`'s
-//!   answer is anything but a construction written where it is answered — a
-//!   parameter, a local, a literal over either. This entry used to say that
-//!   *every* call was refused, and `Freshness` is what changed it: a
-//!   declared function whose every answering expression builds its value on
-//!   the spot is proved to answer fresh storage, so `StringBuilder.withCapacity(16)`
-//!   is a creation where `freshVector()` used to be a dead end. What is still
-//!   refused is the interesting half, and the reason it is refused is written
-//!   there rather than here.
+//!   `var log = hand(mine)` then `log.freeze()` is refused whenever one of
+//!   `hand`'s answers is neither a construction written where it is answered
+//!   nor a local this pass can prove `hand` is the only holder of — a
+//!   parameter, a literal over one, a local something else got a handle on.
+//!   This entry used to say that *every* call was refused, and `Freshness` is
+//!   what changed it: a declared function whose every answering expression
+//!   builds its value on the spot is proved to answer fresh storage, so
+//!   `StringBuilder.withCapacity(16)` is a creation where `freshVector()` used
+//!   to be a dead end. [ADR 0093](../../../docs/adr/0093-an-answered-local-is-a-consumption.md)
+//!   widened it once more, to `var out = Vector.of(); ...; out` — an answer
+//!   naming a local is read as a consumption of that local and proved the way
+//!   a `freeze()` of it would be. What is still refused is the interesting
+//!   half, and the reason it is refused is written there rather than here.
 //! - **storage an assignment brought in.** `log = lines` gives `log` whatever
 //!   the caller is holding, and this refuses `log.freeze()` afterwards —
 //!   correctly, in that case.
@@ -343,10 +347,24 @@ struct Scan<'a> {
     /// rather than *under*: a `return` inside a lambda or a local `fn`
     /// returns from that closure and not from this body, and it is recorded
     /// here anyway. Over-collecting only ever adds an expression that has to
-    /// be a construction, so the summary refuses more; missing one would let
+    /// prove — be a construction, or a local handed over (see
+    /// [`hands_over`]) — so the summary refuses more; missing one would let
     /// a body answer something the summary never looked at, which is the
     /// direction that is unsound.
-    answers: Vec<&'a Expr>,
+    answers: Vec<Answer<'a>>,
+}
+
+/// One expression a body can answer with, and what [`answers_fresh`] needs to
+/// ask of it.
+#[derive(Clone, Debug)]
+struct Answer<'a> {
+    expr: &'a Expr,
+    /// The place the expression names, resolved where it is written — so a
+    /// bare `out` is the binding in scope at the `return`, not one of the same
+    /// name somewhere else in the body. `None` when it names no place.
+    place: Option<Place>,
+    /// The loop and closure bodies the answering expression sits inside.
+    regions: Vec<Span>,
 }
 
 /// Where an expression was written, as far as freshness is concerned: its
@@ -726,23 +744,32 @@ fn prove(
 /// compile, with nothing to update — which is what a derived summary buys
 /// over a declared one.
 ///
-/// # Why the rule is narrow on purpose
+/// # Two ways an answer counts, and why there is no third
 ///
-/// An answering expression counts only when it is *syntactically* a
-/// construction: a builtin fresh call, a call to a function already in this
-/// set, or a struct literal whose every argument is itself a construction or
-/// cannot reach an owner at all. `return x` naming a variable is not a
-/// construction, whatever `x` holds.
+/// An answering expression counts when it is *syntactically* a construction:
+/// a builtin fresh call, a call to a function already in this set, or a
+/// struct literal whose every argument is itself a construction or cannot
+/// reach an owner at all. An expression that builds its value on the spot
+/// cannot be aliased by anything else in the body, because there was no value
+/// to alias until the answer was built — so there is nothing to search the
+/// body for.
 ///
-/// That restriction is what makes the summary sound without an escape
-/// analysis. An expression that builds its value on the spot cannot be
-/// aliased by anything else in the body, because there was no value to alias
-/// until the answer was built — so there is nothing to search the body for.
-/// The moment a name is admitted the question changes into "did anything else
-/// in this body get a handle on what that name holds", which is a whole
-/// analysis and not a syntactic test. Widening this is a soundness decision;
-/// see the negative tests, each of which would start proving if a bare
-/// `return x` were accepted.
+/// It also counts when it *names a local* — `return out`, or a tail `out` —
+/// and the body's own per-place proof shows that handing `out` over leaves
+/// nobody else holding it. That is "did anything else in this body get a
+/// handle on what that name holds", which is not a syntactic question; but it
+/// is exactly the question [`prove`] already answers for a `freeze()`, so
+/// [`hands_over`] asks it of the answer as if the answer were a `freeze()` of
+/// that local, over the same [`Scan`]. There is no second escape analysis to
+/// keep in step with the first. [ADR 0093](../../../docs/adr/0093-an-answered-local-is-a-consumption.md)
+/// is the decision and its soundness argument.
+///
+/// Nothing weaker counts: a parameter, a receiver's field, a pattern's
+/// binding, an `if` or `match` over locals, and a literal over any of them
+/// are all refused. The negative tests are the load-bearing half, and the
+/// ones written before ADR 0093 — each of which would start proving if a
+/// bare `return x` were accepted *without* the per-place proof — still
+/// refuse, each for a reason the proof names.
 struct Freshness<'a> {
     /// Declarations proved to answer freshly created storage.
     answers: BTreeSet<FnKey>,
@@ -821,10 +848,10 @@ fn answers_fresh<'a>(
             if fresh.answers.contains(key) || scanned.answers.is_empty() {
                 continue;
             }
-            let proved = scanned
-                .answers
-                .iter()
-                .all(|answer| constructs(answer, facts, body.site(), &fresh));
+            let proved = scanned.answers.iter().all(|answer| {
+                constructs(answer.expr, facts, body.site(), &fresh)
+                    || hands_over(body, scanned, facts, &fresh, answer)
+            });
             if proved {
                 changed |= fresh.answers.insert(key.clone());
             }
@@ -833,6 +860,69 @@ fn answers_fresh<'a>(
             return fresh;
         }
     }
+}
+
+/// Whether an answering expression that names a local hands over storage the
+/// body created and nobody else holds.
+///
+/// This is [ADR 0093](../../../docs/adr/0093-an-answered-local-is-a-consumption.md):
+/// the answer is read as a consumption of the place it names, and the one
+/// proof [`prove`] makes of a `freeze()` is made of it — the binding was
+/// initialised by a construction ([`establishes`], against the set as it
+/// stands, which is what lets a fresh helper of a fresh helper prove), the
+/// site does not sit in a loop or closure the binding is outside of, no
+/// assignment rewrote the place, and no read of it anywhere else in the body
+/// copied it, stored it, captured it, returned it or passed it somewhere that
+/// could keep it. Nothing runs after an answer, so the used-afterwards half
+/// has nothing to check; the site is `terminal` for exactly the reason a
+/// `return x.freeze()` is.
+///
+/// Only a place rooted at a binding this body made qualifies. A parameter, a
+/// receiver and a module name have no creation here to point at, and a
+/// `var self` whose field a method answers is not the obligation-carrying
+/// receiver `prove` knows about — so they are refused before `prove` is
+/// asked, rather than letting a demand table that was never computed for this
+/// question decide it.
+///
+/// The diagnostics `prove` writes are discarded: a refusal here is not an
+/// error, it is a function that is not in the set, and the caller's own
+/// `freeze()` is where a reader is told about it.
+fn hands_over(
+    body: &Body<'_>,
+    scanned: &Scan<'_>,
+    facts: &Facts,
+    fresh: &Freshness<'_>,
+    answer: &Answer<'_>,
+) -> bool {
+    let Some(place) = answer
+        .place
+        .as_ref()
+        .filter(|place| place.binding.is_some())
+    else {
+        return false;
+    };
+    let consumed = Consume {
+        place: place.clone(),
+        // The answer's own read is the one `prove` excludes by span: it is the
+        // consumption, not a second handle.
+        span: answer.expr.span,
+        regions: answer.regions.clone(),
+        terminal: true,
+        // Never shown — see above — so which transition it is named as does
+        // not matter; a `freeze()` is the consumption it is being read as.
+        transition: Transition::Freeze,
+    };
+    let mut refused = Vec::new();
+    prove(
+        body,
+        scanned,
+        facts,
+        &BTreeMap::new(),
+        fresh,
+        &consumed,
+        &mut refused,
+    );
+    refused.is_empty()
 }
 
 /// Whether this expression *builds* the value it answers, so that nothing
@@ -1044,22 +1134,10 @@ fn scan<'a>(body: &Body<'a>, facts: &Facts, bearing: &Bearing) -> Scan<'a> {
         depth: 0,
         terminal: false,
         scopes: vec![Vec::new()],
+        body: body.block,
         scan: Scan::default(),
     };
     walk.block(body.block, None);
-    // The body's own tail is an answering expression, and it is the one the
-    // walk cannot recognise on its own: every nested block's tail reaches
-    // `Walk::block` the same way this one does.
-    //
-    // A tail that is itself a `return` answers nothing — the operand is the
-    // answer, and the walk has already recorded it — so counting the `return`
-    // as well would make a body written `{ return Builder.withCapacity(n) }`
-    // permanently unprovable for a reason that is about punctuation.
-    if let Some(tail) = &body.block.tail {
-        if !matches!(tail.kind, ExprKind::Return(_)) {
-            walk.scan.answers.push(tail);
-        }
-    }
     walk.scan
 }
 
@@ -1078,6 +1156,8 @@ struct Walk<'a, 'f> {
     terminal: bool,
     /// Names in scope, innermost last, each naming a `Scan::locals` index.
     scopes: Vec<Vec<(&'a str, usize)>>,
+    /// The body's own block, whose tail is an answering expression.
+    body: &'a Block,
     scan: Scan<'a>,
 }
 
@@ -1152,8 +1232,32 @@ impl<'a> Walk<'a, '_> {
                 }
             }
             if let Some(tail) = &block.tail {
+                // The body's own tail is an answering expression, and it is
+                // the one the walk cannot recognise from the expression alone:
+                // every nested block's tail reaches here the same way. It is
+                // recorded inside the block's scope so that a tail naming a
+                // local resolves to the binding it names.
+                //
+                // A tail that is itself a `return` answers nothing — the
+                // operand is the answer, and the walk records it there — so
+                // counting the `return` as well would make a body written
+                // `{ return Builder.withCapacity(n) }` permanently unprovable
+                // for a reason that is about punctuation.
+                if std::ptr::eq(block, walk.body) && !matches!(tail.kind, ExprKind::Return(_)) {
+                    walk.answer(tail);
+                }
                 walk.expr(tail, retain);
             }
+        });
+    }
+
+    /// Records an answering expression, with the place it names here.
+    fn answer(&mut self, expr: &'a Expr) {
+        let place = self.place_of(expr);
+        self.scan.answers.push(Answer {
+            expr,
+            place,
+            regions: self.regions.clone(),
         });
     }
 
@@ -1248,7 +1352,23 @@ impl<'a> Walk<'a, '_> {
                 }
             }
             ExprKind::Match { scrutinee, arms } => {
-                self.expr(scrutinee, None);
+                // A pattern that binds a name binds it to the scrutinee or to
+                // something inside it, and the binding is a local with no
+                // initialiser — so nothing would ever ask about it, and the
+                // handle it holds would be invisible. When the scrutinee can
+                // reach an owner and some arm binds a name, the scrutinee is
+                // read as copied. A pattern of literals and wildcards keeps
+                // nothing, and neither does one over a value that cannot
+                // carry an owner.
+                let binds = arms.iter().any(|arm| binds_a_name(&arm.pattern));
+                let carries = self
+                    .facts
+                    .ty(self.file, scrutinee.id)
+                    .is_none_or(|ty| self.holds_owned(ty));
+                self.expr(
+                    scrutinee,
+                    (binds && carries).then_some("is bound by a match pattern"),
+                );
                 for arm in arms {
                     self.scoped(|walk| {
                         walk.pattern(&arm.pattern);
@@ -1270,7 +1390,7 @@ impl<'a> Walk<'a, '_> {
                 self.repeated(None, body);
             }
             ExprKind::Return(Some(value)) => {
-                self.scan.answers.push(value);
+                self.answer(value);
                 let outer = std::mem::replace(&mut self.terminal, true);
                 self.expr(value, Some("is returned"));
                 self.terminal = outer;
@@ -1525,6 +1645,15 @@ fn holds_owned(bearing: &Bearing, ty: &Ty) -> bool {
                 || holds_owned(bearing, &signature.ret)
         }
         _ => false,
+    }
+}
+
+/// Whether a pattern binds a name anywhere in it.
+fn binds_a_name(pattern: &Pattern) -> bool {
+    match &pattern.kind {
+        PatternKind::Binding(_) => true,
+        PatternKind::Variant { payload, .. } => payload.iter().any(binds_a_name),
+        PatternKind::Wildcard | PatternKind::Literal(_) => false,
     }
 }
 
@@ -2572,8 +2701,12 @@ fn build() -> Int {
     // `answers_fresh` proves from a body what no declaration may claim, and the
     // negative tests below are the load-bearing half. Each one is written so
     // that it would stop refusing — and therefore fail — if the rule were
-    // widened to accept a bare `return x`, which is the one widening that would
-    // turn this summary from a syntactic test into a wrong escape analysis.
+    // widened to accept a bare `return x` *as such*, which would turn this
+    // summary from a syntactic test into a wrong escape analysis. ADR 0093 did
+    // accept `return x`, but only through the per-place proof, and each of
+    // these still refuses: the parameter answers have no binding this body
+    // made, the literal over a parameter names no place, and `leaked`'s `out`
+    // escapes into `stash`, whose result can hold it.
 
     /// The shape ADR 0052 wants a builder to be built in: an associated
     /// function answers one, and the caller finishes it.
@@ -2737,17 +2870,18 @@ fn build(given: ByteBuffer) -> String {
         );
     }
 
-    /// The case that makes the syntactic rule necessary rather than merely
-    /// convenient. `leaked` *does* create its buffer — and then gives a handle
-    /// to `stash`, which puts it in a `Holder` that outlives the call, and only
-    /// then answers the name.
+    /// The case that makes "created somewhere in the body" insufficient.
+    /// `leaked` *does* create its buffer — and then gives a handle to `stash`,
+    /// which puts it in a `Holder` that outlives the call, and only then
+    /// answers the name.
     ///
     /// A rule that accepted the answer because the storage was created
     /// somewhere in the body would prove this, and the proof would be wrong:
-    /// `kept` is holding the same run the caller is about to finish. A rule
-    /// that requires the answer to be *built where it is answered* has nothing
-    /// to search for, because nothing can have got hold of a value that did not
-    /// exist until the answer was built.
+    /// `kept` is holding the same run the caller is about to finish. ADR 0093's
+    /// rule accepts a named answer only when the per-place proof a
+    /// `core.bytesFinish(out)` in the same position would need goes through,
+    /// and it does not: `stash(out)` is a call whose result can hold a buffer,
+    /// so `out` escapes into it.
     #[test]
     fn a_construction_that_passed_through_a_call_before_being_answered_is_refused() {
         let error = refuses_in_library(
@@ -2873,6 +3007,447 @@ fn build() -> Int {
         assert_eq!(
             error.labels[0].message,
             "`StringBuilder.finish()` took the storage here"
+        );
+    }
+
+    // ------------------------------- an answered local is a consumption (#637)
+    //
+    // ADR 0093 admits an answering expression that names a local, by proving
+    // of it exactly what a `freeze()` of that local would need. The positive
+    // tests are the program #602 was refused on and the chain the fixpoint
+    // has to carry; the negative ones are each a way something else in the
+    // body could still be holding the storage when it is answered.
+
+    /// The program from #602: a helper fills a vector it built and answers
+    /// it, and the caller freezes the result.
+    #[test]
+    fn a_helper_that_answers_the_vector_it_filled_answers_fresh() {
+        proves(
+            "\
+fn filled(n: Int, v: Int) -> Vector<Int> {
+  var out = Vector.of()
+  for _i in 0..n {
+    out.push(v)
+  }
+  out
+}
+
+fn build(n: Int) -> Array<Int> {
+  var a = filled(n, -1)
+  a.push(0)
+  a.freeze()
+}
+",
+        );
+        // The same with a `return`, and with an early `return` of a second
+        // construction on another path.
+        proves(
+            "\
+fn filled(n: Int, v: Int) -> Vector<Int> {
+  if n == 0 {
+    return Vector.of()
+  }
+  var out = Vector.of()
+  for _i in 0..n {
+    out.push(v)
+  }
+  return out
+}
+
+fn build(n: Int) -> Array<Int> {
+  var a = filled(n, -1)
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// A fresh helper of a fresh helper: `padded` binds what `filled`
+    /// answers, which is a creation only once `filled` is in the set, so this
+    /// is the fixpoint's second round reaching through a local.
+    #[test]
+    fn a_fresh_helper_of_a_fresh_helper_answers_fresh() {
+        proves(
+            "\
+fn filled(n: Int, v: Int) -> Vector<Int> {
+  var out = Vector.of()
+  for _i in 0..n {
+    out.push(v)
+  }
+  out
+}
+
+fn padded(n: Int) -> Vector<Int> {
+  var row = filled(n, 0)
+  row.push(-1)
+  row
+}
+
+fn build(n: Int) -> Array<Int> {
+  var a = padded(n)
+  a.freeze()
+}
+",
+        );
+        // And a builder through the same shape.
+        proves_with_std(
+            "\
+use std.stringbuilder.StringBuilder
+
+fn started(head: String) -> StringBuilder {
+  var out = StringBuilder.withCapacity(16)
+  out.append(head)
+  out
+}
+
+fn build() -> String {
+  var out = started(\"a\")
+  out.append(\"b\")
+  out.finish()
+}
+",
+        );
+    }
+
+    /// The caller's half is unchanged: a fresh result bound twice is two
+    /// handles, however fresh it was.
+    #[test]
+    fn a_fresh_answered_local_is_still_refused_when_the_caller_aliases_it() {
+        let error = refuses(
+            "\
+fn filled(n: Int) -> Vector<Int> {
+  var out = Vector.of()
+  out.push(n)
+  out
+}
+
+fn build() -> Array<Int> {
+  var a = filled(1)
+  var b = a
+  b.push(2)
+  a.freeze()
+}
+",
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`a` is copied into another binding here"
+        );
+    }
+
+    /// The label every refusal below is reported under: the helper was not
+    /// proved fresh, so the caller's binding has no creation to point at.
+    #[track_caller]
+    fn refuses_as_not_fresh(source: &str) {
+        let error = refuses(source);
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.labels[0].message,
+            "`a` is initialised from a value this function did not create, so its storage may \
+             already have another handle"
+        );
+    }
+
+    /// Aliased into another variable before it is answered: `keep` holds the
+    /// same storage the caller is about to freeze.
+    #[test]
+    fn an_answered_local_aliased_into_another_binding_is_refused() {
+        refuses_as_not_fresh(
+            "\
+fn leaked(var sink: Vector<Vector<Int>>) -> Vector<Int> {
+  var out = Vector.of(1)
+  var keep = out
+  sink.push(keep)
+  out
+}
+
+fn build(var sink: Vector<Vector<Int>>) -> Array<Int> {
+  var a = leaked(var sink)
+  a.freeze()
+}
+",
+        );
+        // Assigned into another place, not bound.
+        refuses_as_not_fresh(
+            "\
+fn leaked() -> Vector<Int> {
+  var out = Vector.of(1)
+  var keep = Vector.of(2)
+  keep = out
+  out
+}
+
+fn build() -> Array<Int> {
+  var a = leaked()
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// Stored in a struct, or in an array literal, before it is answered.
+    #[test]
+    fn an_answered_local_stored_in_another_value_is_refused() {
+        refuses_as_not_fresh(
+            "\
+struct Holder {
+  items: Vector<Int>
+}
+
+fn leaked(var sink: Vector<Holder>) -> Vector<Int> {
+  var out = Vector.of(1)
+  sink.push(Holder(items: out))
+  out
+}
+
+fn build(var sink: Vector<Holder>) -> Array<Int> {
+  var a = leaked(var sink)
+  a.freeze()
+}
+",
+        );
+        refuses_as_not_fresh(
+            "\
+fn leaked() -> Vector<Int> {
+  var out = Vector.of(1)
+  let rows = [out]
+  out
+}
+
+fn build() -> Array<Int> {
+  var a = leaked()
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// Captured by a closure before it is answered: the closure may be
+    /// holding it for as long as it lives.
+    #[test]
+    fn an_answered_local_captured_by_a_closure_is_refused() {
+        refuses_as_not_fresh(
+            "\
+fn leaked() -> Vector<Int> {
+  var out = Vector.of(1)
+  let count = fn() {
+    out.length()
+  }
+  count()
+  out
+}
+
+fn build() -> Array<Int> {
+  var a = leaked()
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// Passed to a call that could keep it — through its result, or into a
+    /// `var` argument beside it.
+    #[test]
+    fn an_answered_local_passed_to_a_call_that_could_keep_it_is_refused() {
+        refuses_as_not_fresh(
+            "\
+fn wrap(one: Vector<Int>) -> Vector<Vector<Int>> {
+  Vector.of(one)
+}
+
+fn leaked() -> Vector<Int> {
+  var out = Vector.of(1)
+  let held = wrap(out)
+  out
+}
+
+fn build() -> Array<Int> {
+  var a = leaked()
+  a.freeze()
+}
+",
+        );
+        refuses_as_not_fresh(
+            "\
+fn keep(var into: Vector<Vector<Int>>, one: Vector<Int>) {
+  into.push(one)
+}
+
+fn leaked(var sink: Vector<Vector<Int>>) -> Vector<Int> {
+  var out = Vector.of(1)
+  keep(var sink, out)
+  out
+}
+
+fn build(var sink: Vector<Vector<Int>>) -> Array<Int> {
+  var a = leaked(var sink)
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// Answered on one path and something not fresh on another. One answer
+    /// that fails is the whole function failing.
+    #[test]
+    fn an_answered_local_beside_a_non_fresh_answer_is_refused() {
+        refuses_as_not_fresh(
+            "\
+fn either(given: Vector<Int>, mine: Bool) -> Vector<Int> {
+  var out = Vector.of(1)
+  if mine {
+    return out
+  }
+  given
+}
+
+fn build(given: Vector<Int>) -> Array<Int> {
+  var a = either(given, true)
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// A local initialised from a parameter has no creation in this body, and
+    /// one reassigned from a parameter no longer names the one it had.
+    #[test]
+    fn an_answered_local_created_from_a_parameter_is_refused() {
+        refuses_as_not_fresh(
+            "\
+fn handed(given: Vector<Int>) -> Vector<Int> {
+  var out = given
+  out.push(1)
+  out
+}
+
+fn build(given: Vector<Int>) -> Array<Int> {
+  var a = handed(given)
+  a.freeze()
+}
+",
+        );
+        refuses_as_not_fresh(
+            "\
+fn handed(given: Vector<Int>) -> Vector<Int> {
+  var out = Vector.of()
+  out = given
+  out
+}
+
+fn build(given: Vector<Int>) -> Array<Int> {
+  var a = handed(given)
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// A local created outside a loop and answered from inside it meets the
+    /// region rule a `freeze()` there would meet. A `return` leaves the loop,
+    /// so this is conservative, and it is the same conservatism.
+    #[test]
+    fn an_answered_local_from_inside_a_loop_it_was_not_created_in_is_refused() {
+        refuses_as_not_fresh(
+            "\
+fn found(n: Int) -> Vector<Int> {
+  var out = Vector.of()
+  for i in 0..n {
+    out.push(i)
+    if i == 3 {
+      return out
+    }
+  }
+  Vector.of()
+}
+
+fn build() -> Array<Int> {
+  var a = found(5)
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// A local `fn`'s own local, answered by its `return`, is an
+    /// over-collected answer and stands for nothing: the function's real
+    /// answer still has to prove on its own, and here it does not.
+    #[test]
+    fn a_local_fns_answered_local_does_not_stand_for_the_functions_answer() {
+        refuses_as_not_fresh(
+            "\
+fn handed(given: Vector<Int>) -> Vector<Int> {
+  fn make() -> Vector<Int> {
+    var mine = Vector.of(1)
+    return mine
+  }
+  make()
+  given
+}
+
+fn build(given: Vector<Int>) -> Array<Int> {
+  var a = handed(given)
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// A pattern that binds the scrutinee is a second handle to it, and that
+    /// was a gap in the proof of a plain `freeze()` before it was one in the
+    /// answered-local rule: `match out { v => sink.push(v) }` read `out` as a
+    /// scrutinee, which kept nothing, and `v` as a binding of its own, so
+    /// `out.freeze()` was proved while `sink` held the same storage.
+    #[test]
+    fn a_pattern_binding_the_scrutinee_defeats_a_freeze() {
+        let error = refuses(
+            "\
+fn build(var sink: Vector<Vector<Int>>) -> Array<Int> {
+  var out = Vector.of(1)
+  match out {
+    v => sink.push(v)
+  }
+  out.freeze()
+}
+",
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`out` is bound by a match pattern here"
+        );
+        // A pattern that binds nothing keeps nothing.
+        proves(
+            "\
+fn build() -> Array<Int> {
+  var out = Vector.of(1)
+  let n = match out.length() {
+    0 => 0
+    _ => 1
+  }
+  out.freeze()
+}
+",
+        );
+    }
+
+    /// The same gap, as the answered-local rule would have met it.
+    #[test]
+    fn an_answered_local_bound_by_a_match_pattern_is_refused() {
+        refuses_as_not_fresh(
+            "\
+fn leaked(var sink: Vector<Vector<Int>>) -> Vector<Int> {
+  var out = Vector.of(1)
+  match out {
+    v => sink.push(v)
+  }
+  out
+}
+
+fn build(var sink: Vector<Vector<Int>>) -> Array<Int> {
+  var a = leaked(var sink)
+  a.freeze()
+}
+",
         );
     }
 }
