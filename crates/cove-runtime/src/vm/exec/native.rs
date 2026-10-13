@@ -736,6 +736,55 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
     }
 }
 
+/// A call's return, polled in its caller ([ADR 0095]): [`safepoint`],
+/// standing after the call rather than before a block. `pc` is the
+/// instruction after the call, and `work` is nought: the callee's was charged
+/// by its close.
+///
+/// A yield here stands at [`Stands::AfterReturn`] and takes nothing first:
+/// the frame is entered at the poll again, which takes the safepoint if it is
+/// still due.
+///
+/// [ADR 0095]: ../../../../../docs/adr/0095-a-native-return-is-a-poll.md
+///
+/// # Safety
+///
+/// As [`safepoint`].
+unsafe extern "C" fn returned(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+    let stopped = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let id = machine
+            .frames
+            .last()
+            .expect("a native frame is executing")
+            .function;
+        let offered = match machine.yield_requested() {
+            true => offer_yield(machine, (*host).tier, (*host).floor, Stands::AfterReturn),
+            false => None,
+        };
+        match offered {
+            Some(marker) => Some(marker),
+            None if machine.safepoint_due() => machine.safepoint(budget, id, pc as usize).err(),
+            None => None,
+        }
+    };
+    match stopped {
+        None => {
+            republish(ctx, host);
+            true
+        }
+        Some(error) => {
+            (*host).left = Some(error);
+            false
+        }
+    }
+}
+
 /// Where the innermost compiled frame of a yield stands, and so how [`resume`]
 /// re-enters it ([ADR 0085]).
 ///
@@ -757,6 +806,11 @@ pub(super) enum Stands {
     ///
     /// [ADR 0087]: ../../../../../docs/adr/0087-compiled-code-calls-the-host.md
     AfterCall,
+    /// At the poll a call's return takes in its caller, once the callee's
+    /// frame is off and its answer written (ADR 0095), with its `pc` one past
+    /// the call. Entered after the call, which is the poll's first byte, so
+    /// the poll is taken again and nothing is taken before it.
+    AfterReturn,
 }
 
 /// A run that yielded inside compiled code: the chain's floor and where its
@@ -819,6 +873,9 @@ unsafe fn offer_yield(
                         (0, Stands::AtBlock | Stands::BeforeBlock) => points.at_block(frame.pc),
                         (0, Stands::AtInstruction) => points.at_instruction(frame.pc),
                         (0, Stands::AfterCall) => points.after_call(frame.pc),
+                        (0, Stands::AfterReturn) => {
+                            frame.pc.checked_sub(1).and_then(|at| points.after_call(at))
+                        }
                         _ => frame.pc.checked_sub(1).and_then(|at| points.after_call(at)),
                     })
                     .is_some()
@@ -836,7 +893,8 @@ unsafe fn offer_yield(
 /// A call's poll (ADR 0078): the safepoint if the stride is due, and — where
 /// it is due and a yield has been asked for — the yield instead, with the
 /// call to be made again on resuming ([ADR 0085]). A recursion with no loop
-/// in it polls nowhere else.
+/// in it polls nowhere else on its way down; on its way back up it polls at
+/// each return ([`returned`], ADR 0095).
 ///
 /// # Safety
 ///
@@ -923,7 +981,7 @@ pub(super) unsafe fn resume(
         let at = match stands.take() {
             Some(Stands::AtBlock | Stands::BeforeBlock) => points.at_block(frame.pc),
             Some(Stands::AtInstruction) => points.at_instruction(frame.pc),
-            Some(Stands::AfterCall) | None => points.after_call(frame.pc - 1),
+            Some(Stands::AfterCall | Stands::AfterReturn) | None => points.after_call(frame.pc - 1),
         }
         .expect("the yield checked every frame has its resume point");
         let held: *mut Machine = machine;
@@ -2665,6 +2723,7 @@ impl<'v, 'a> Session<'v, 'a> {
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
+        returned,
         call,
         call_closure,
         host,
@@ -2699,6 +2758,7 @@ pub fn helpers() -> NativeHelpers {
 pub fn helpers_counting() -> NativeHelpers {
     NativeHelpers {
         safepoint: counted_safepoint,
+        returned: counted_returned,
         call: counted_call,
         call_closure: counted_call_closure,
         host,
@@ -2749,6 +2809,10 @@ macro_rules! counted {
 counted!(
     /// [`safepoint`], counted.
     counted_safepoint => safepoint.safepoint(pc: u32, work: u64) -> bool
+);
+counted!(
+    /// [`returned`], counted as a safepoint.
+    counted_returned => returned.safepoint(pc: u32, work: u64) -> bool
 );
 /// [`call`], counted, and the callee charged if it is the standard library's.
 ///
@@ -2986,6 +3050,7 @@ pub mod ablate {
 pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
     NativeHelpers {
         safepoint,
+        returned,
         call: call_ablated::<MASK>,
         call_closure,
         host,

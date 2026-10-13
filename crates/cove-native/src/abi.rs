@@ -324,7 +324,9 @@ pub type ResumeEntry = unsafe extern "C" fn(
 ///   charge, and takes that safepoint itself;
 /// - **the instant after a call** — every other compiled frame, which is
 ///   waiting on the call above it and resumes, once that call has answered into
-///   its destination, at the instruction after it.
+///   its destination, at the instruction after it; and the innermost frame,
+///   when it yielded at the poll its callee's return took (ADR 0095). That
+///   poll is the instant's first code, so a frame entered there takes it.
 ///
 /// Addresses into one finalized, read-execute mapping, which never moves and
 /// is never written again; so a table is as good on any thread as on the one
@@ -1458,6 +1460,14 @@ impl RunOp {
 pub struct NativeHelpers {
     /// See [`SafepointFn`].
     pub safepoint: SafepointFn,
+    /// [`SafepointFn`]'s shape for a call's return, polled in the caller once
+    /// the callee's frame is off ([ADR 0095]): `pc` is the instruction after
+    /// the call, and `work` is nought, because the callee's was charged by
+    /// its close. Called, as [`NativeHelpers::safepoint`] is, only when the
+    /// poll is due.
+    ///
+    /// [ADR 0095]: ../../../../docs/adr/0095-a-native-return-is-a-poll.md
+    pub returned: SafepointFn,
     /// See [`CallFn`].
     pub call: CallFn,
     /// [`CallFn`]'s shape for an [`Inst::CallClosure`](cove_ir::Inst::CallClosure):

@@ -436,6 +436,7 @@ pub struct Jit {
 #[derive(Clone, Copy)]
 struct Helpers {
     safepoint: usize,
+    returned: usize,
     call: usize,
     call_closure: usize,
     host: usize,
@@ -476,6 +477,7 @@ impl Jit {
         Ok(Jit {
             helpers: Helpers {
                 safepoint: helpers.safepoint as usize,
+                returned: helpers.returned as usize,
                 call: helpers.call as usize,
                 call_closure: helpers.call_closure as usize,
                 host: helpers.host as usize,
@@ -694,6 +696,7 @@ struct Emit<'a> {
     program: &'a Program,
     function: &'a Function,
     safepoint: usize,
+    returned: usize,
     call: usize,
     call_closure: usize,
     host: usize,
@@ -775,6 +778,7 @@ impl<'a> Emit<'a> {
             program,
             function,
             safepoint: helpers.safepoint,
+            returned: helpers.returned,
             call: helpers.call,
             call_closure: helpers.call_closure,
             host: helpers.host,
@@ -1361,7 +1365,9 @@ impl<'a> Emit<'a> {
                 self.frame_live = false;
                 self.insts[pc] = Some(self.code.len());
                 self.callee_closure(*dst, *closure, args.0);
-                self.returns[pc] = Some(self.code.len());
+                if self.returns[pc].is_none() {
+                    self.returns[pc] = Some(self.code.len());
+                }
             }
             Inst::Call { dst, callee, args } => {
                 // Where this frame resumes if the call's poll yields (ADR 0085):
@@ -1375,7 +1381,9 @@ impl<'a> Emit<'a> {
                 // Where a frame waiting on this call resumes (ADR 0085):
                 // `callee` ends with the frame pointer dead and the accumulator
                 // nought, which is what the resume prologue leaves.
-                self.returns[pc] = Some(self.code.len());
+                if self.returns[pc].is_none() {
+                    self.returns[pc] = Some(self.code.len());
+                }
             }
             // ADR 0052's four. An alloc, an extend and a finish are handed to the
             // runtime whole: see [`crate::abi::GrowableFn`] for why none of them
@@ -4830,6 +4838,10 @@ impl<'a> Emit<'a> {
         self.jcc(CC_E, Target::Label(on));
         self.leave_answered();
         self.bind(on);
+        // A return is a poll (ADR 0095), taken here once the callee's frame is
+        // off.
+        let (due, done) = (self.label(), self.label());
+        self.returned_poll(due, done);
         // The helper is allowed to have grown the stack, so the frame pointer
         // derived before the call is not to be used after it.
         self.frame_live = false;
@@ -4864,6 +4876,12 @@ impl<'a> Emit<'a> {
         self.jcc(CC_E, Target::Label(on));
         self.leave_answered();
         self.bind(on);
+        // A closure's return is a call's (ADR 0095); a host call is no return
+        // from Cove, and its park resumes after it.
+        if helper == self.call_closure {
+            let (due, done) = (self.label(), self.label());
+            self.returned_poll(due, done);
+        }
         self.frame_live = false;
     }
 
@@ -4934,6 +4952,9 @@ impl<'a> Emit<'a> {
         let opened = self.label();
         let finished = self.label();
         let joined = self.label();
+        // Where a return's poll is entered when [`Emit::close_inline`] found it
+        // due, and where it leaves (ADR 0095).
+        let (due, done) = (self.label(), self.label());
         // The entry is read at `entries + callee * 8`, a `disp32`.
         let inline = self.inline_frames && callee < (i32::MAX as u32) / 8;
         if inline {
@@ -5012,8 +5033,7 @@ impl<'a> Emit<'a> {
             let raised = self.label();
             self.test_rr32(RAX, RAX);
             self.jcc(CC_NE, Target::Label(raised));
-            self.close_inline();
-            self.jmp(Target::Label(joined));
+            self.close_inline(due, done);
             self.bind(raised);
         }
 
@@ -5036,6 +5056,7 @@ impl<'a> Emit<'a> {
         self.jcc(CC_E, Target::Label(on));
         self.leave_answered();
         self.bind(on);
+        self.returned_poll(due, done);
         self.frame_live = false;
     }
 
@@ -5176,24 +5197,72 @@ impl<'a> Emit<'a> {
     /// It closes a frame `open` opened as readily as one [`Emit::open_inline`]
     /// did: both left the same record on top and the same base in `r15`.
     ///
+    /// **It is also the return's poll** ([ADR 0095]), and costs no instruction
+    /// for being one. The frame comes off first, so that the poll stands in the
+    /// caller; then the threshold is lowered by the callee's work, and the
+    /// branch that used to only saturate it at nought now tells the two cases
+    /// apart: above nought, nothing is due and the call is done; at or below,
+    /// the threshold is stored as nought and the poll is entered at `due`,
+    /// which is [`Emit::returned_poll`]'s call to the helper.
+    ///
     /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
-    fn close_inline(&mut self) {
+    /// [ADR 0095]: ../../../../docs/adr/0095-a-native-return-is-a-poll.md
+    fn close_inline(&mut self, due: usize, done: usize) {
         self.load(RDX, CTX, OFF_PENDING_WORK);
         self.xor_rr(RCX, RCX);
         self.store(CTX, OFF_PENDING_WORK, RCX);
         self.load(RCX, CTX, OFF_BULK_WORK);
         self.add_mem_r(RCX, 0, RDX);
-        let kept = self.label();
-        self.load(RCX, CTX, OFF_POLL_AT);
-        self.sub_rr(RCX, RDX);
-        self.jcc(CC_AE, Target::Label(kept));
-        self.xor_rr(RCX, RCX);
-        self.bind(kept);
-        self.store(CTX, OFF_POLL_AT, RCX);
         self.load(RCX, CTX, OFF_FRAMES);
         self.add_mem_imm32(RCX, FS_LEN, -1);
         self.load(RCX, CTX, OFF_STACK);
         self.store(RCX, WS_LEN, HEAP_SPARE);
+        let kept = self.label();
+        self.load(RCX, CTX, OFF_POLL_AT);
+        self.sub_rr(RCX, RDX);
+        self.jcc(CC_A, Target::Label(kept));
+        self.xor_rr(RCX, RCX);
+        self.store(CTX, OFF_POLL_AT, RCX);
+        self.jmp(Target::Label(due));
+        self.bind(kept);
+        self.store(CTX, OFF_POLL_AT, RCX);
+        self.jmp(Target::Label(done));
+    }
+
+    /// A call's return, polled in the caller once the callee's frame is off
+    /// ([ADR 0095]): [`Emit::safepoint`]'s test, handed to the `returned`
+    /// helper with the instruction after the call as its `pc`.
+    ///
+    /// `due` is where [`Emit::close_inline`] enters when its own branch found
+    /// the poll due, and `done` is where both ways leave. [`WORK`] is nought
+    /// here — every way through a call clears it — so the test is whether the
+    /// threshold has reached nought.
+    ///
+    /// The poll's first byte is the call's `returns` entry, where a frame
+    /// waiting on the call resumes ([ADR 0085]): a resumed caller takes the
+    /// poll its callee's return would have taken, so a chain resumed in the
+    /// middle of an unwinding polls the rest of the way up as the
+    /// uninterrupted run does.
+    ///
+    /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
+    /// [ADR 0095]: ../../../../docs/adr/0095-a-native-return-is-a-poll.md
+    fn returned_poll(&mut self, due: usize, done: usize) {
+        // Where a frame waiting on this call resumes: the poll, taken again.
+        self.returns[self.pc] = Some(self.code.len());
+        self.cmp_r_mem(WORK, CTX, OFF_POLL_AT);
+        self.jcc(CC_B, Target::Label(done));
+        self.bind(due);
+        self.mov_rr(RDI, CTX);
+        self.mov_imm32(RSI, self.pc as i32 + 1);
+        self.mov_rr(RDX, WORK);
+        self.mov_imm64(RAX, self.returned as i64);
+        self.call(RAX);
+        self.test_al_al();
+        self.jcc(CC_NE, Target::Label(done));
+        self.xor_rr(RAX, RAX);
+        self.store(CTX, OFF_PENDING_WORK, RAX);
+        self.leave(Outcome::Stopped);
+        self.bind(done);
     }
 
     /// `encoded.rs`'s `RETURN` arm, whole: the answer's words into the

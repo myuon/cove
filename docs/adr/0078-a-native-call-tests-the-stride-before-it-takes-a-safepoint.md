@@ -29,6 +29,11 @@
   *direct* native-to-native call, whose poll now runs in emitted code ahead of
   `open`. The mediated `call` and `open` itself poll as written here, and
   nothing else here is disturbed
+- Superseded in part by [ADR 0095](0095-a-native-return-is-a-poll.md): its
+  "**The return path.** … It was not a poll before and is not one now", and
+  the header's "return path, which was and remains free of safepoints" as far
+  as it says a return does not poll. A compiled call's return is now a poll,
+  taken in the caller once the callee's frame is off
 
 ## Context
 
