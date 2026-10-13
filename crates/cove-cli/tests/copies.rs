@@ -1899,7 +1899,14 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `tests/e2e/values_unicode_escape` is +20, the printing and string-building
 /// standard library a program like it carries. `fail_unicode_escape` does not
 /// lex and adds nothing.
-const FORWARDABLE_COPIES: usize = 7569;
+///
+/// **7,570 since the formatter keeps written parentheses** (issue #641, ADR
+/// 0096), a rise of 1 that is all program and no lowering: the parser counts
+/// the pairs on the tree and nothing past the formatter reads the count. With
+/// covefmt's new `written_parentheses_are_kept` held out the corpus answers
+/// 7,569, the bound exactly, and that with `scan.cove`'s condition already
+/// back in its parenthesised form; the test is the +1.
+const FORWARDABLE_COPIES: usize = 7570;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

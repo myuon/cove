@@ -247,10 +247,8 @@ impl Scan {
       if c == '\}' {
         return at + 1
       }
-      let digit = c >= '0' && c <= '9'
-      let lower = c >= 'a' && c <= 'z'
-      let upper = c >= 'A' && c <= 'Z'
-      if !digit && !lower && !upper {
+      if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z')) {
         return at
       }
       at = at + 1

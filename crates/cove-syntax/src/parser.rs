@@ -264,6 +264,7 @@ fn expr(kind: ExprKind, span: Span) -> Expr {
         id: ExprId::UNSET,
         kind,
         span,
+        parens: 0,
     }
 }
 
@@ -2092,7 +2093,12 @@ impl Parser<'_> {
                 }
                 let inner = self.grouped(|parser| parser.scoped(false, Parser::parse_expr))?;
                 self.expect(&TokenKind::RParen, "`)`")?;
-                Ok(expr(inner.kind, start.to(self.prev_span())))
+                // The parentheses are kept on the tree only as a count, for
+                // the formatter (ADR 0096); every other reader sees `inner`.
+                Ok(Expr {
+                    parens: inner.parens + 1,
+                    ..expr(inner.kind, start.to(self.prev_span()))
+                })
             }
             TokenKind::LBracket => {
                 self.bump();
