@@ -49,6 +49,12 @@ use crate::value::Value;
 /// [`HostAnswer::Pending`](crate::HostAnswer::Pending) where the run can park
 /// hands it back as a [`ParkedVm`].
 ///
+/// Each of those, and [`ParkedVm::resume`] and [`YieldedVm::resume`], runs on
+/// the thread that calls it, which must keep
+/// [the stack promise](Vm#the-calling-threads-stack): a stack of at least
+/// [`STACK_SIZE`](crate::STACK_SIZE). A scheduler's worker threads are the
+/// ones to size.
+///
 /// # Why it is not a `Deref` to the `Vm`
 ///
 /// The `Vm` inside borrows the `Arc`s beside it, written as `Vm<'static>`
@@ -153,7 +159,8 @@ impl OwnedVm {
         }
     }
 
-    /// [`Vm::invoke`]: every host call blocks.
+    /// [`Vm::invoke`]: every host call blocks. Runs on the calling thread,
+    /// which must keep [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke(
         &mut self,
         module: &str,
@@ -163,7 +170,8 @@ impl OwnedVm {
         self.vm.invoke(module, name, args)
     }
 
-    /// [`Vm::invoke_within`]: every host call blocks.
+    /// [`Vm::invoke_within`]: every host call blocks. Runs on the calling
+    /// thread, which must keep [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke_within(
         &mut self,
         budget: Budget,
@@ -174,7 +182,8 @@ impl OwnedVm {
         self.vm.invoke_within(budget, module, name, args)
     }
 
-    /// [`Vm::run_entry`]: every host call blocks.
+    /// [`Vm::run_entry`]: every host call blocks. Runs on the calling thread,
+    /// which must keep [the stack promise](Vm#the-calling-threads-stack).
     pub fn run_entry(
         &mut self,
         module: &str,
@@ -193,6 +202,9 @@ impl OwnedVm {
     /// [`Step::Parked`]. Where the run cannot park — inside a callback, with a
     /// task running, inside a `lock` — the call blocks, as it would here
     /// anyway.
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke_parkable(mut self, module: &str, name: &str, args: Vec<Value>) -> Step {
         let outcome = self.vm.parkable(|vm| vm.invoke_checked(module, name, args));
         self.step(outcome)
@@ -202,6 +214,9 @@ impl OwnedVm {
     ///
     /// The budget bounds the whole run, parked time included: a deadline is a
     /// wall-clock bound, and a run that waits for its host is still running.
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke_within_parkable(
         mut self,
         budget: Budget,
@@ -216,6 +231,9 @@ impl OwnedVm {
     }
 
     /// [`Vm::run_entry`], with its host calls allowed to answer pending.
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn run_entry_parkable(mut self, module: &str, name: &str, args: Vec<Rc<str>>) -> Step {
         let outcome = self.vm.parkable(|vm| vm.enter(module, name, args));
         self.step(outcome)
@@ -380,7 +398,9 @@ pub struct YieldedVm {
 
 impl YieldedVm {
     /// Runs the run on, on this thread, until it answers, parks or yields
-    /// again.
+    /// again. This thread must keep
+    /// [the stack promise](Vm#the-calling-threads-stack), whichever thread
+    /// the run last ran on.
     ///
     /// Asked first, as [`ParkedVm::resume`] asks, whether the run has been
     /// stopped while it waited: its [`Cancellation`](crate::Cancellation)
@@ -510,7 +530,9 @@ impl ParkedVm {
     }
 
     /// Resumes the run with its host call's answer, on this thread, and runs
-    /// it until it answers or parks again.
+    /// it until it answers or parks again. This thread must keep
+    /// [the stack promise](Vm#the-calling-threads-stack), whichever thread
+    /// the run last ran on.
     ///
     /// The answer is a [`Transfer`], which is `Send`, because it is made
     /// wherever the host's work finished and that is rarely this thread. It

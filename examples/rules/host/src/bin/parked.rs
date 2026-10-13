@@ -218,6 +218,12 @@ struct Queued {
 }
 
 fn main() {
+    // The runs below start on this thread, so it is one the runtime sized
+    // (issue #625): the main thread's stack is the platform's business.
+    cove_runtime::on_cove_stack(study).expect("a thread to run Cove on");
+}
+
+fn study() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args.get(1).map_or(1000, |n| n.parse().expect("n"));
     let workers: usize = args.get(2).map_or(4, |w| w.parse().expect("workers"));
@@ -289,40 +295,46 @@ fn main() {
                 Arc::clone(&wrong),
                 expected.clone(),
             );
-            std::thread::spawn(move || {
-                let (mut mine, mut waited) = (Vec::new(), Vec::new());
-                while finished.load(Ordering::Relaxed) < n {
-                    let Some(Queued { mut parked, since }) = queue.lock().unwrap().pop_front()
-                    else {
-                        std::thread::yield_now();
-                        continue;
-                    };
-                    let started = Instant::now();
-                    waited.push(started - since);
-                    let request = parked.take_request().expect("a request");
-                    let asked = *request.downcast::<i64>().expect("the host's own type");
-                    let step = parked.resume(Ok(Transfer::Int(reply(asked))));
-                    mine.push(started.elapsed());
-                    match step {
-                        Step::Parked(parked) => queue.lock().unwrap().push_back(Queued {
-                            parked,
-                            since: Instant::now(),
-                        }),
-                        Step::Answered(vm, answer) => {
-                            let answer = answer.map(|v| v.to_string()).ok();
-                            if answer.as_deref() != Some(expected.as_str())
-                                || vm.instructions() != instructions
-                            {
-                                wrong.fetch_add(1, Ordering::Relaxed);
+            // A worker resumes Cove, so it keeps the runtime's stack promise
+            // (issue #625) with a stack the runtime sized.
+            std::thread::Builder::new()
+                .name("parked-worker".to_string())
+                .stack_size(cove_runtime::STACK_SIZE)
+                .spawn(move || {
+                    let (mut mine, mut waited) = (Vec::new(), Vec::new());
+                    while finished.load(Ordering::Relaxed) < n {
+                        let Some(Queued { mut parked, since }) = queue.lock().unwrap().pop_front()
+                        else {
+                            std::thread::yield_now();
+                            continue;
+                        };
+                        let started = Instant::now();
+                        waited.push(started - since);
+                        let request = parked.take_request().expect("a request");
+                        let asked = *request.downcast::<i64>().expect("the host's own type");
+                        let step = parked.resume(Ok(Transfer::Int(reply(asked))));
+                        mine.push(started.elapsed());
+                        match step {
+                            Step::Parked(parked) => queue.lock().unwrap().push_back(Queued {
+                                parked,
+                                since: Instant::now(),
+                            }),
+                            Step::Answered(vm, answer) => {
+                                let answer = answer.map(|v| v.to_string()).ok();
+                                if answer.as_deref() != Some(expected.as_str())
+                                    || vm.instructions() != instructions
+                                {
+                                    wrong.fetch_add(1, Ordering::Relaxed);
+                                }
+                                finished.fetch_add(1, Ordering::Relaxed);
                             }
-                            finished.fetch_add(1, Ordering::Relaxed);
+                            Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
                         }
-                        Step::Yielded(_) => unreachable!("nothing here asks a run to yield"),
                     }
-                }
-                resumes.lock().unwrap().extend(mine);
-                waits.lock().unwrap().extend(waited);
-            })
+                    resumes.lock().unwrap().extend(mine);
+                    waits.lock().unwrap().extend(waited);
+                })
+                .expect("a worker thread")
         })
         .collect();
     for worker in pool {

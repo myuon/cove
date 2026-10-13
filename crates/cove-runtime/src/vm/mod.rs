@@ -208,6 +208,10 @@ impl PreparedProgram {
     /// in the dispatch loop (ADR 0084), resuming on whatever thread resumes
     /// them.
     ///
+    /// A run with a native tier spends Rust stack on every crossing between
+    /// the tiers, so the thread that drives it must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
+    ///
     /// # Errors
     ///
     /// [`Unavailable`](cove_native::Unavailable) where this host or build has
@@ -246,6 +250,30 @@ impl PreparedProgram {
 /// are strings. [`Vm::invoke`] is how an *application* does: the arguments
 /// are values the host built, held to the types the checker resolved before
 /// the first instruction runs. Everything below the two is one path.
+///
+/// # The calling thread's stack
+///
+/// Every way into a run — [`Vm::invoke`], [`Vm::run_entry`] and their
+/// siblings here, the same methods on [`OwnedVm`], and [`ParkedVm::resume`]
+/// and [`YieldedVm::resume`] — runs Cove **on the thread that calls it**, and
+/// does not move to a stack of its own (issue #625: doing so at every entry
+/// cost eight to thirty-eight times a call). So the calling thread must have
+/// a stack of at least [`STACK_SIZE`](crate::STACK_SIZE): create it with
+/// `std::thread::Builder::stack_size(cove_runtime::STACK_SIZE)`, or do the
+/// work inside [`on_cove_stack`](crate::on_cove_stack). The process main
+/// thread and a thread created without a size are not enough: a thread gets
+/// 2 MiB by default, and the main thread is 1 MiB on Windows.
+///
+/// A run that never leaves the encoded tier needs little of it. What spends
+/// it is a chain of calls that crosses between the native tier and the
+/// encoded VM: each crossing nests the dispatch loop's Rust frames on this
+/// stack, several KiB a crossing (measured 2026-10-13 at about 6 KiB on Rust
+/// 1.98, x86-64; Rust 1.99 grew the frame), and a few hundred crossings
+/// overflow 2 MiB. On a stack too small for the chain, the process aborts
+/// with a stack overflow; it is not an error a caller can catch. The number
+/// of crossings is bounded only by how deep the run's calls nest, so an
+/// embedder running programs it does not trust bounds it with
+/// [`Limits::max_call_depth`](crate::Limits::max_call_depth) as well.
 pub struct Vm<'a> {
     runtime: &'a Runtime,
     program: &'a Program,
@@ -564,6 +592,9 @@ impl<'a> Vm<'a> {
     /// An entry takes either no parameters or one `Array<String>`, and that
     /// rule is the language's rather than a backend's — the oracle refuses
     /// the third shape in these words, at this span.
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn run_entry(
         &mut self,
         module: &str,
@@ -590,6 +621,9 @@ impl<'a> Vm<'a> {
     /// from that entry leads to. Saying the package does not declare it would
     /// be false and would send an embedder to the wrong file, so this says
     /// which of the two is missing and what to lower instead.
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke(
         &mut self,
         module: &str,
@@ -620,6 +654,9 @@ impl<'a> Vm<'a> {
     /// nothing on this path reads it.
     ///
     /// [ADR 0077]: ../../../../docs/adr/0077-cove-fmt-is-covefmt.md
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke_lowered(
         &mut self,
         module: &str,
@@ -657,6 +694,9 @@ impl<'a> Vm<'a> {
     /// application that runs somebody else's Cove wants the *request*
     /// bounded, not the session, and a session is built once and invoked
     /// many times.
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn run_entry_within(
         &mut self,
         budget: Budget,
@@ -674,6 +714,9 @@ impl<'a> Vm<'a> {
     /// The check runs before the budget is installed, so a call refused for a
     /// wrong argument spends none of the budget it was handed and leaves
     /// whatever bounded this backend where it was.
+    ///
+    /// Runs on the calling thread, which must keep
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke_within(
         &mut self,
         budget: Budget,
