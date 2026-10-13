@@ -1073,6 +1073,25 @@ export fn callsCopiesShort(text: String, limit: Int) -> String {
   copiesShort(text, limit)
 }
 
+/// What `contains`, `replace` and `split` answer for one pair: each is a byte
+/// run search a call, or a match, which issue #486 answers in emitted code.
+export fn searches(text: String, needle: String) -> String {
+  var all = StringBuilder.withCapacity(64)
+  all.append(\"{text.contains(needle)}\")
+  if needle.byteLength() > 0 {
+    all.append(\"|\")
+    all.append(text.replace(needle, \"<>\"))
+    all.append(\"|{text.split(needle).length()}\")
+  }
+  all.finish()
+}
+
+/// A refused caller, so every search above is a compiled frame's.
+export fn callsSearches(text: String, needle: String) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  searches(text, needle)
+}
+
 /// `sliceBytes`, or nothing where it refuses.
 fn piece(text: String, from: Int, to: Int) -> String {
   match text.sliceBytes(from, to) {
@@ -4121,6 +4140,71 @@ fn a_short_byte_copy_in_compiled_code_is_the_helper_s() {
         "the copies happened in machine code: {:?}",
         both.tiers
     );
+}
+
+/// **A byte search in compiled code answers what the VM's does** — issue #486,
+/// which answers a `run-find` in emitted code wherever the runtime's matcher
+/// would finish in one step, and hands the rest to the helper.
+///
+/// Through the three `std.string` bodies the search is under — `contains`, and
+/// the per-match `replace` and `split` — over empty text and an empty needle,
+/// a needle at either end and the needle that is its whole text, a needle
+/// whose matches would overlap, multi-byte characters found whole, a
+/// character that is not there, and a text longer than the emitted search's
+/// budget, which the helper answers. Both tiers are held to what Rust's own
+/// `str` methods answer.
+#[test]
+fn a_byte_search_in_compiled_code_is_the_vm_s() {
+    on_each_tier(&["searches"], &["callsSearches"]);
+    let long = format!("{}needle{}", "x".repeat(1500), "y".repeat(10));
+    let cases: Vec<(&str, &str)> = vec![
+        ("", ""),
+        ("", "a"),
+        ("abc", ""),
+        ("a", "a"),
+        ("abc", "a"),
+        ("abc", "c"),
+        ("abc", "abcd"),
+        ("aaaaa", "aa"),
+        ("f00,f01,f02", ","),
+        ("f00 | f01 | f02 | ", " | "),
+        ("héllo wörld, héllo", "é"),
+        ("héllo wörld, héllo", "llo"),
+        ("日本語のテキスト、日本語", "日本語"),
+        ("日本語のテキスト", "本の"),
+        ("ab\"cab\"c", "\""),
+        (long.as_str(), "needle"),
+        (long.as_str(), "y"),
+        (long.as_str(), "z"),
+    ];
+    for (text, needle) in cases {
+        let mut want = format!("{}", text.contains(needle));
+        if !needle.is_empty() {
+            want.push_str(&format!(
+                "|{}|{}",
+                text.replace(needle, "<>"),
+                text.split(needle).count()
+            ));
+        }
+        let both = both(
+            "callsSearches",
+            vec![Value::string(text), Value::string(needle)],
+        );
+        assert_eq!(
+            both.vm,
+            Ok(want),
+            "the encoded tier, {needle:?} in {text:?}"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "and a compiled frame, {needle:?} in {text:?}"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "the search happened in machine code: {:?}",
+            both.tiers
+        );
+    }
 }
 
 /// **A short byte slice in compiled code is the helper's slice, bit for bit.**
