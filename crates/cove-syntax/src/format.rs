@@ -32,6 +32,17 @@
 //! argument lists break one argument per line, a binary expression breaks
 //! *after* its operator, and a method chain breaks *before* its dots.
 //!
+//! # Parentheses
+//!
+//! The parentheses the source wrote are kept, whether precedence needs them
+//! or not: `(a && b) || (c && d)` stays as written, because a deliberate
+//! grouping is there for the reader and `cove fmt` keeps it
+//! ([ADR 0096](../../../docs/adr/0096-the-formatter-keeps-written-parentheses.md)).
+//! The parser counts them on [`Expr::parens`]. Where the tree has none and
+//! precedence requires a pair — `1 - (2 - 3)` built without one, or a header
+//! that would end in a `}` — the formatter writes it; it never writes one
+//! that is not required.
+//!
 //! # Comments
 //!
 //! The tree carries `///` doc comments but not `//` or `/* */` comments, and
@@ -448,6 +459,9 @@ fn unary_symbol(op: UnaryOp) -> &'static str {
 /// closures disabled, so a header that would end in a brace must be
 /// parenthesised or the body's `{` would be read as part of the header.
 fn ends_with_brace(expr: &Expr) -> bool {
+    if expr.parens > 0 {
+        return false;
+    }
     match &expr.kind {
         ExprKind::Block(_)
         | ExprKind::If { .. }
@@ -559,6 +573,54 @@ impl<'a> Formatter<'a> {
         } else {
             None
         }
+    }
+
+    /// The span of `expr` without the parentheses the source wrote around
+    /// it, which is where its own spelling and its own closing bracket are.
+    ///
+    /// The parser counts the pairs on the tree rather than keeping the inner
+    /// span, so this steps inside each pair in the text, over whitespace and
+    /// comments on both sides. With no source to read, the span is the
+    /// tree's.
+    fn bare_span(&self, expr: &Expr) -> Span {
+        let mut span = expr.span;
+        let bytes = self.source.as_bytes();
+        for _ in 0..expr.parens {
+            let (start, end) = (span.start as usize, span.end as usize);
+            if end <= start + 1
+                || bytes.get(start) != Some(&b'(')
+                || bytes.get(end - 1) != Some(&b')')
+            {
+                return expr.span;
+            }
+            let mut from = start + 1;
+            loop {
+                while bytes.get(from).is_some_and(u8::is_ascii_whitespace) {
+                    from += 1;
+                }
+                match self.comments.iter().find(|c| c.start == from) {
+                    Some(comment) => from = comment.end,
+                    None => break,
+                }
+            }
+            let mut to = end - 1;
+            loop {
+                while to > from && bytes[to - 1].is_ascii_whitespace() {
+                    to -= 1;
+                }
+                match self
+                    .comments
+                    .iter()
+                    .find(|c| c.start < to && to <= c.end && c.start >= from)
+                {
+                    Some(comment) => to = comment.start,
+                    None => break,
+                }
+            }
+            span.start = from as u32;
+            span.end = to as u32;
+        }
+        span
     }
 
     /// Whether a blank line separates `from` from `to` in the source.
@@ -1111,10 +1173,14 @@ enum Post<'e> {
 
 /// Splits `a.b(x).c(y)?` into its base and the postfix operators applied to
 /// it, so that a chain too long for one line can break before its dots.
+///
+/// A link the source parenthesised, such as the `(a.b())` of `(a.b()).c()`,
+/// is the base rather than part of the chain, so that its parentheses stay
+/// where they were written.
 fn flatten_postfix(expr: &Expr) -> (&Expr, Vec<Post<'_>>) {
     match &expr.kind {
         ExprKind::Field { base, name } => {
-            let (base, mut ops) = flatten_postfix(base);
+            let (base, mut ops) = flatten_link(base);
             ops.push(Post::Field(name.node.as_str()));
             (base, ops)
         }
@@ -1124,7 +1190,7 @@ fn flatten_postfix(expr: &Expr) -> (&Expr, Vec<Post<'_>>) {
             args,
             trailing,
         } => {
-            let (base, mut ops) = flatten_postfix(callee);
+            let (base, mut ops) = flatten_link(callee);
             ops.push(Post::Call {
                 generics,
                 args,
@@ -1133,11 +1199,21 @@ fn flatten_postfix(expr: &Expr) -> (&Expr, Vec<Post<'_>>) {
             (base, ops)
         }
         ExprKind::Try(inner) => {
-            let (base, mut ops) = flatten_postfix(inner);
+            let (base, mut ops) = flatten_link(inner);
             ops.push(Post::Try);
             (base, ops)
         }
         _ => (expr, Vec::new()),
+    }
+}
+
+/// [`flatten_postfix`] for an operand inside the chain, which ends the chain
+/// when the source parenthesised it.
+fn flatten_link(expr: &Expr) -> (&Expr, Vec<Post<'_>>) {
+    if expr.parens > 0 {
+        (expr, Vec::new())
+    } else {
+        flatten_postfix(expr)
     }
 }
 
@@ -1239,17 +1315,25 @@ impl Formatter<'_> {
         body.tail.as_deref().is_some_and(|tail| self.breaks(tail))
     }
 
-    /// Writes `expr`, parenthesised when its precedence is below `min`, and
-    /// broken across lines when it must be or does not fit.
+    /// Writes `expr`, inside the parentheses the source wrote around it and
+    /// parenthesised when its precedence is below `min`, and broken across
+    /// lines when it must be or does not fit.
     fn expr(&mut self, expr: &Expr, min: u8, indent: usize) {
-        if expr_prec(expr) < min {
+        self.expr_within(expr, expr.parens, min, indent);
+    }
+
+    /// [`Self::expr`] with `parens` of the written parentheses still to
+    /// write. A written pair is laid out exactly as a pair precedence
+    /// requires, and an expression inside one needs no other.
+    fn expr_within(&mut self, expr: &Expr, parens: u32, min: u8, indent: usize) {
+        if parens > 0 || expr_prec(expr) < min {
             self.out.write("(");
-            self.expr(expr, prec::RETURN, indent);
+            self.expr_within(expr, parens.saturating_sub(1), prec::RETURN, indent);
             self.out.write(")");
             return;
         }
         if !self.breaks(expr) {
-            let flat = self.flat_inner(expr);
+            let flat = self.flat_bare(expr);
             if self.out.col() + width(&flat) <= MAX_WIDTH {
                 self.out.write(&flat);
                 return;
@@ -1274,7 +1358,9 @@ impl Formatter<'_> {
     fn expr_broken(&mut self, expr: &Expr, indent: usize) {
         match &expr.kind {
             ExprKind::Call { .. } => self.call(expr, indent),
-            ExprKind::ArrayLit(elements) => self.array_literal(elements, expr.span, indent),
+            ExprKind::ArrayLit(elements) => {
+                self.array_literal(elements, self.bare_span(expr), indent)
+            }
             ExprKind::Field { base, name } => {
                 self.expr(base, prec::POSTFIX, indent);
                 self.out.write(".");
@@ -1300,7 +1386,7 @@ impl Formatter<'_> {
             // `await x?` is how the parser builds `Try(Await(x))`, so it is
             // also how the formatter writes it back.
             ExprKind::Try(inner) => match &inner.kind {
-                ExprKind::Await(awaited) => {
+                ExprKind::Await(awaited) if inner.parens == 0 => {
                     self.out.write("await ");
                     self.expr(awaited, prec::POSTFIX, indent);
                     self.out.write("?");
@@ -1317,7 +1403,7 @@ impl Formatter<'_> {
             ExprKind::Block(block) => self.block(block, indent),
             ExprKind::If { .. } => self.if_expr(expr, indent),
             ExprKind::Match { scrutinee, arms } => {
-                self.match_expr(scrutinee, arms, expr.span, indent)
+                self.match_expr(scrutinee, arms, self.bare_span(expr), indent)
             }
             ExprKind::For {
                 binding,
@@ -1496,14 +1582,20 @@ impl Formatter<'_> {
             let (base, ops) = flatten_postfix(expr);
             let points = chain_break_points(&ops);
             if call_count(&ops) >= 2 && !points.is_empty() {
-                self.chain(base, &ops, &points, expr.span, indent);
+                self.chain(base, &ops, &points, self.bare_span(expr), indent);
                 return;
             }
         }
 
         self.expr(callee, prec::POSTFIX, indent);
         self.generic_args(generics);
-        self.call_tail(args, trailing.as_deref(), generics, expr.span, indent);
+        self.call_tail(
+            args,
+            trailing.as_deref(),
+            generics,
+            self.bare_span(expr),
+            indent,
+        );
     }
 
     /// Writes the argument list, and the trailing closure when there is one.
@@ -1598,6 +1690,9 @@ impl Formatter<'_> {
     ///
     /// `None` when the argument has no such head and so cannot be hugged.
     fn hug_head(&self, expr: &Expr) -> Option<(String, bool)> {
+        if expr.parens > 0 {
+            return None;
+        }
         match &expr.kind {
             ExprKind::Lambda {
                 is_async, params, ..
@@ -1792,14 +1887,13 @@ fn duration_text(ns: i64) -> String {
 }
 
 impl Formatter<'_> {
-    /// Renders `expr` on one line, parenthesised when its precedence is below
-    /// `min`.
+    /// Renders `expr` on one line, inside the parentheses the source wrote
+    /// around it and parenthesised when its precedence is below `min`.
     fn flat(&self, expr: &Expr, min: u8) -> String {
-        let inner = self.flat_inner(expr);
-        if expr_prec(expr) < min {
-            format!("({inner})")
+        if expr.parens == 0 && expr_prec(expr) < min {
+            format!("({})", self.flat_bare(expr))
         } else {
-            inner
+            self.flat_inner(expr)
         }
     }
 
@@ -1811,24 +1905,38 @@ impl Formatter<'_> {
         }
     }
 
+    /// Renders `expr` on one line inside the parentheses the source wrote
+    /// around it, and no others.
     fn flat_inner(&self, expr: &Expr) -> String {
+        let parens = expr.parens as usize;
+        let bare = self.flat_bare(expr);
+        if parens == 0 {
+            return bare;
+        }
+        format!("{}{bare}{}", "(".repeat(parens), ")".repeat(parens))
+    }
+
+    /// Renders `expr` on one line without the parentheses the source wrote
+    /// around it.
+    fn flat_bare(&self, expr: &Expr) -> String {
+        let span = self.bare_span(expr);
         match &expr.kind {
             ExprKind::Int(value) => self
-                .number_text(expr.span)
-                .or_else(|| self.code_point_text(expr.span))
+                .number_text(span)
+                .or_else(|| self.code_point_text(span))
                 .map(str::to_string)
                 .unwrap_or_else(|| value.to_string()),
             ExprKind::Float(value) => self
-                .number_text(expr.span)
+                .number_text(span)
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{value:?}")),
             ExprKind::Duration(ns) => self
-                .number_text(expr.span)
+                .number_text(span)
                 .map(str::to_string)
                 .unwrap_or_else(|| duration_text(*ns)),
             ExprKind::Bool(value) => value.to_string(),
             ExprKind::Str(parts) => self
-                .string_text(expr.span)
+                .string_text(span)
                 .map(str::to_string)
                 .unwrap_or_else(|| self.string_from_parts(parts)),
             ExprKind::Unit => "()".to_string(),
@@ -1894,7 +2002,7 @@ impl Formatter<'_> {
                 )
             }
             ExprKind::Try(inner) => match &inner.kind {
-                ExprKind::Await(awaited) => {
+                ExprKind::Await(awaited) if inner.parens == 0 => {
                     format!("await {}?", self.flat(awaited, prec::POSTFIX))
                 }
                 _ => format!("{}?", self.flat(inner, prec::POSTFIX)),
@@ -2648,9 +2756,12 @@ fn lambdas() {
         );
     }
 
+    /// The parentheses an author wrote are kept, redundant or not
+    /// ([ADR 0096](../../../docs/adr/0096-the-formatter-keeps-written-parentheses.md)),
+    /// because `cove fmt` keeps them and this formatter is its oracle.
     #[test]
-    fn parenthesises_only_where_precedence_requires_it() {
-        reformats(
+    fn keeps_the_parentheses_the_source_wrote() {
+        formatted(
             "
 fn precedence() {
   let a = (1 + 2) * 3
@@ -2663,6 +2774,32 @@ fn precedence() {
   let h = (a || b) && c
   let i = (0..<3).isEmpty()
   let j = 1 - (2 - 3)
+  let k = (a && b) || (c && d)
+  let l = (x)
+  let m = ((x))
+  let n = (1 + ((2 * 3) - (4)))
+  let o = (0xff) + ('a')
+  let p = (a.b()).c().d()
+  let q = (await x)?
+  if (a) { }
+  while (a && b) { }
+  j
+}
+",
+        );
+    }
+
+    /// Writing parentheses is the source's choice, never the formatter's:
+    /// `( x )` loses its inner spaces, and a parenthesis precedence needs is
+    /// written whether or not the source had one.
+    #[test]
+    fn tightens_written_parentheses_and_invents_none() {
+        reformats(
+            "
+fn precedence() {
+  let a = ( 1 + 2 ) * 3
+  let b = 1 + 2 * 3
+  let c = a || b && c
   j
 }
 ",
@@ -2670,17 +2807,83 @@ fn precedence() {
 fn precedence() {
   let a = (1 + 2) * 3
   let b = 1 + 2 * 3
+  let c = a || b && c
+  j
+}
+",
+        );
+    }
+
+    /// A tree that carries no parentheses — one built by hand, as `cove
+    /// generate` may — still gets every pair its precedence and the
+    /// header-ending-in-a-brace rule require, and only those.
+    #[test]
+    fn parenthesises_a_bare_tree_where_precedence_requires_it() {
+        fn erase(expr: &mut Expr) {
+            expr.parens = 0;
+            match &mut expr.kind {
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    erase(lhs);
+                    erase(rhs);
+                }
+                ExprKind::Range { start, end, .. } => {
+                    erase(start);
+                    erase(end);
+                }
+                ExprKind::Unary { operand: inner, .. }
+                | ExprKind::Try(inner)
+                | ExprKind::Field { base: inner, .. }
+                | ExprKind::Call { callee: inner, .. } => erase(inner),
+                ExprKind::If { condition, .. } | ExprKind::While { condition, .. } => {
+                    erase(condition)
+                }
+                _ => {}
+            }
+        }
+        let source = src("
+fn precedence() {
+  let a = (1 + 2) * 3
+  let b = (1 + (2 * 3))
   let c = -(1 + 2)
   let d = !(a && b)
   let e = (a + b)?
   let f = (a + b).field
-  let g = a || b && c
   let h = (a || b) && c
   let i = (0..<3).isEmpty()
   let j = 1 - (2 - 3)
+  let k = (a && b) || (c && d)
+  while (f { a }) { }
   j
 }
-",
+");
+        let mut unit = parse(&source);
+        let ItemKind::Fn(decl) = &mut unit.items[0].kind else {
+            panic!("expected a function");
+        };
+        for stmt in &mut std::sync::Arc::make_mut(decl).body.statements {
+            match &mut stmt.kind {
+                StmtKind::Let { value, .. } | StmtKind::Expr(value) => erase(value),
+                StmtKind::Item(_) => {}
+            }
+        }
+        assert_eq!(
+            format_unit(&unit),
+            src("
+fn precedence() {
+  let a = (1 + 2) * 3
+  let b = 1 + 2 * 3
+  let c = -(1 + 2)
+  let d = !(a && b)
+  let e = (a + b)?
+  let f = (a + b).field
+  let h = (a || b) && c
+  let i = (0..<3).isEmpty()
+  let j = 1 - (2 - 3)
+  let k = a && b || c && d
+  while (f { a }) { }
+  j
+}
+"),
         );
     }
 

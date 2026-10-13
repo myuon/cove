@@ -1334,3 +1334,42 @@ test fn a_unicode_escape_keeps_its_spelling() -> Result<Unit, Error> {
   )?
   Ok(())
 }
+
+/// Parentheses the source wrote are kept, whether or not precedence needs
+/// them: a deliberate grouping is there for the reader, and the meaning check
+/// holds every significant token, these included. ADR 0096.
+///
+/// The body is the shape as well as the test of it. The oracle reads every
+/// `.cove` file in the repository, so the lines below are also where
+/// `cove_syntax::format` is asked to keep the same parentheses.
+test fn written_parentheses_are_kept() -> Result<Unit, Error> {
+  let a = true
+  let b = false
+  let c = true
+  let d = true
+  assert((a && b) || (c && d))?
+  assertEqual(1 + (2 * 3), 7)?
+  assertEqual((1 + ((2 * 3) - (4))), 3)?
+  assertEqual(((a)), true)?
+  // Here precedence needs them, and nothing may take them out.
+  assertEqual(1 - (2 - 3), 2)?
+  assertEqual((1 + 2) * 3, 9)?
+  for line in [
+    "let k = (a && b) || (c && d)",
+    "let k = 1 + (2 * 3)",
+    "let k = (x)",
+    "let k = ((x))",
+    "let k = (1 + ((2 * 3) - (4)))",
+    "let k = 1 - (2 - 3)",
+    "let k = (a.b()).c().d()",
+    "let k = (await x)?",
+    "if (a) \{ \}",
+  ] {
+    let source = "fn f() -> Int \{\n  {line}\n  0\n\}\n"
+    let answer = formatSource(source)
+    if answer.refused.isSome() || answer.text != source {
+      return Err(Error(message: "`{line}` does not come back as written"))
+    }
+  }
+  Ok(())
+}

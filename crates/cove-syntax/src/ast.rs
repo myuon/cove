@@ -384,6 +384,16 @@ pub struct Expr {
     pub id: ExprId,
     pub kind: ExprKind,
     pub span: Span,
+    /// How many pairs of parentheses the source wrote around this
+    /// expression: 1 for `(a && b)`, 2 for `((x))`, 0 for an expression
+    /// written bare. `span` covers them.
+    ///
+    /// Only the formatter reads it, to keep the grouping an author wrote
+    /// ([ADR 0096](../../../docs/adr/0096-the-formatter-keeps-written-parentheses.md)).
+    /// Nothing else may: parentheses carry no meaning the tree does not
+    /// already hold in its shape, so a parenthesised expression is the same
+    /// expression to every other reader.
+    pub parens: u32,
 }
 
 /// One argument at a call site.
