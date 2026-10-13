@@ -226,8 +226,14 @@ impl Server {
         }
         for at in 0..shared.options.workers.max(1) {
             let shared = Arc::clone(&shared);
+            // A worker runs and resumes Cove on its own stack, and a chain
+            // that crosses between the native tier and the VM spends Rust
+            // stack per crossing: the runtime's stack promise (issue #625,
+            // `cove_runtime::Vm`'s "The calling thread's stack") is this
+            // thread's to keep. The other threads here never run Cove.
             std::thread::Builder::new()
                 .name(format!("edge-worker-{at}"))
+                .stack_size(cove_runtime::STACK_SIZE)
                 .spawn(move || shared.run_worker(at))
                 .map_err(|e| e.to_string())?;
         }

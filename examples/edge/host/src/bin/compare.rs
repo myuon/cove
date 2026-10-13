@@ -87,6 +87,12 @@ const CASES: [Case; 4] = [
 ];
 
 fn main() {
+    // Every run below is on this thread, so it is one the runtime sized
+    // (issue #625): the main thread's stack is the platform's business.
+    cove_runtime::on_cove_stack(compare).expect("a thread to run Cove on");
+}
+
+fn compare() {
     let mut batches = 7usize;
     let mut min_ms = 300u64;
     let mut tenants = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tenants");

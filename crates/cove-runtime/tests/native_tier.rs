@@ -2492,6 +2492,57 @@ fn frames_opened_inline_interleave_with_encoded_frames() {
     );
 }
 
+/// **A tier-crossing chain that overflows a default thread completes on a thread
+/// of [`cove_runtime::STACK_SIZE`] (issue #625).**
+///
+/// Every crossing between the tiers nests the dispatch loop on the Rust stack,
+/// so the stack a chain needs is linear in how many times it crosses, and the
+/// runtime does not switch stacks at its entry points: the calling thread's
+/// stack is the one the chain runs on, and the promise documented on [`Vm`] is
+/// that a thread of `STACK_SIZE` is enough. This is that promise, kept the way
+/// an embedder keeps it — a thread it creates itself, sized by the public
+/// constant, running the public `Vm` — over a chain deep enough to overflow the
+/// 2 MiB a thread is given by default. The overflow itself is not tested: it
+/// ends the process.
+///
+/// Two thousand levels is five hundred crossings each way. Measured on
+/// 2026-10-13 (x86-64 macOS, Rust 1.98, `--profile checked`), this chain
+/// overflowed a 2 MiB thread at 2,000 levels and ran on a 4 MiB one; under Rust
+/// 1.99 a crossing costs more, so the margin over 2 MiB only grows.
+#[test]
+fn a_long_crossing_chain_completes_on_a_thread_of_the_runtimes_stack_size() {
+    on_each_tier(&["alternates"], &["throughTheVm"]);
+    const DEEP: i64 = 2_000;
+    let answered = std::thread::Builder::new()
+        .name("embedder".to_string())
+        .stack_size(cove_runtime::STACK_SIZE)
+        .spawn(|| {
+            let (sources, program) = checked();
+            let lowered = Arc::new(
+                cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+                    .expect("the fixture lowers"),
+            );
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, Arc::clone(&hosts));
+            let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+            let mut vm = Vm::with_native(&runtime, &hosts, &lowered, &native);
+            let answer = vm
+                .invoke(MODULE, "throughTheVm", vec![Value::int(DEEP)])
+                .map(|value| value.to_string())
+                .map_err(|error| error.message);
+            (answer, vm.tiers())
+        })
+        .expect("a thread to run Cove on")
+        .join()
+        .expect("the run did not panic");
+    let (answer, tiers) = answered;
+    assert_eq!(answer, Ok(DEEP.to_string()));
+    assert!(
+        tiers.native_to_vm >= DEEP as u64 / 4 - 1 && tiers.vm_to_native >= DEEP as u64 / 4,
+        "the chain crossed the boundary both ways every fourth level: {tiers:?}"
+    );
+}
+
 /// **The embedder's call depth is enforced on frames emitted code opens.**
 ///
 /// The inline path pushes a record only while the frame stack is below its
