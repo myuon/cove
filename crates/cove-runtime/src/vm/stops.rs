@@ -149,7 +149,8 @@ export fn regrowing() -> Int {
 }
 
 /// Recursive, so no call can be inlined away, and with no loop in it: on the
-/// native tier a call is the only place its descent polls (ADR 0078).
+/// native tier a call is the only place its descent polls (ADR 0078), and a
+/// return the only place its ascent does (ADR 0095).
 fn counts(n: Int) -> Int {
   if n <= 0 {
     0
@@ -308,17 +309,21 @@ export fn copying() -> Int {
 }
 ";
 
-/// How much of a run of `name` a stop may be raised in and be held to the
-/// bound: all of it, but for the recursion, whose ascent is returns and no
-/// calls. A return is not a poll on the native tier — ADR 0078 made a *call*
-/// one — so the bound is the descent's, which is the first half of the run's
-/// work and more; the encoded tier counts a return as it counts any
-/// instruction, and is held to the same part so the two are one case.
-fn stoppable(name: &str, whole: u64) -> u64 {
-    match name {
-        "counting" => whole * 45 / 100,
-        _ => whole,
-    }
+/// Where `counting`'s descent ends, as a share of its run's work: past it the
+/// run is all returns. On the native tier a return is a poll ([ADR
+/// 0095](../../../../docs/adr/0095-a-native-return-is-a-poll.md),
+/// #624) as a call is (ADR 0078), so a stop or a request raised in the ascent
+/// is held to the same bound as one raised in the descent — and the points
+/// below are spread over the whole run so that about half of them fall there.
+/// Before ADR 0095 they were held to the first 45% of the run, because a stop
+/// raised later was noticed some 23,000 units of work after it was raised.
+const DESCENT: (u64, u64) = (45, 100);
+
+/// How many of `at` fall past [`DESCENT`] in a run of `whole` work.
+fn ascending(whole: u64, at: &[u64]) -> usize {
+    at.iter()
+        .filter(|at| **at > whole * DESCENT.0 / DESCENT.1)
+        .count()
 }
 
 /// Every program, with the most one of its steps does between two questions.
@@ -506,7 +511,8 @@ fn points(total: u64, count: u64) -> Vec<u64> {
 ///
 /// What is measured is the work the run did between the raising and the stop.
 /// A loop of host calls notices at its next call; a bulk operation at its
-/// next chunk; compiled code at its next poll, a backedge's or a call's. The
+/// next chunk; compiled code at its next poll, a backedge's, a call's or a
+/// return's. The
 /// trip is also held to the point it was asked for, so that a stop raised late
 /// cannot pass the bound by being measured from where it was raised.
 #[test]
@@ -524,7 +530,14 @@ fn a_stop_raised_anywhere_in_a_run_is_noticed_within_one_stride_and_one_step() {
                     Trip::Cancel => RunOutcome::Cancelled,
                     _ => RunOutcome::Deadline,
                 };
-                for at in points(stoppable(name, whole), 12) {
+                let at = points(whole, 12);
+                if name == "counting" {
+                    assert!(
+                        ascending(whole, &at) >= 5,
+                        "{name} on {tier:?}: stops raised while the recursion unwinds"
+                    );
+                }
+                for at in at {
                     let mut vm = world.vm(tier);
                     vm.inner().set_trips(vec![(at, trip)]);
                     let error = vm
@@ -653,10 +666,16 @@ fn a_resumed_run_yields_again_and_again_within_one_stride_and_one_step() {
             let whole = world.uninterrupted(name, tier).work;
             let at: Vec<u64> = (1..)
                 .map(|k| k * 3 * S)
-                .take_while(|at| *at + 3 * S < stoppable(name, whole))
+                .take_while(|at| *at + 3 * S < whole)
                 .collect();
             let expected = world.marked(name, tier, &at);
             assert!(at.len() >= 10, "{name} on {tier:?}: asked many times");
+            if name == "counting" {
+                assert!(
+                    ascending(whole, &at) >= 5,
+                    "{name} on {tier:?}: yields asked for while the recursion unwinds"
+                );
+            }
             let run = driven(&world, tier, name, &at);
             let what = format!("{name} on {tier:?}");
             assert_eq!(run.finished, expected, "{what}: answers as uninterrupted");

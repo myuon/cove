@@ -83,6 +83,9 @@ thread_local! {
     pub static WATCHED: Cell<Option<usize>> = const { Cell::new(None) };
     /// What [`WATCHED`] held at each safepoint, in order.
     pub static WATCHED_SAW: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Every poll a call's return made, as `(pc, work_since_last)`: kept
+    /// apart from [`POLLS`], which the cases count backedges by.
+    pub static RETURN_POLLS: RefCell<Vec<(u32, u64)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The runtime's half of the boundary, as a test double.
@@ -103,6 +106,12 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
     }
     let taken = POLLS.with(|polls| polls.borrow().len());
     taken < POLLS_ALLOWED.with(Cell::get)
+}
+
+/// A call's return's poll, which carries on. See [`RETURN_POLLS`].
+unsafe extern "C" fn returned(_ctx: *mut NativeCtx, pc: u32, work: u64) -> bool {
+    RETURN_POLLS.with(|polls| polls.borrow_mut().push((pc, work)));
+    true
 }
 
 /// One call compiled code made through [`CallFn`](cove_native::CallFn).
@@ -801,6 +810,7 @@ pub fn observed_answers(outcomes: &[Outcome]) {
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
+        returned,
         call,
         call_closure: call,
         host: call,

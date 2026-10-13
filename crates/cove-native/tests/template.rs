@@ -588,6 +588,7 @@ fn direct_helpers() -> NativeHelpers {
     let shared = suite::helpers();
     NativeHelpers {
         safepoint,
+        returned: shared.returned,
         call,
         call_closure: shared.call_closure,
         host: shared.host,
