@@ -905,6 +905,16 @@ fn a_run_find_is_handed_to_the_runtime_whole() {
 }
 
 #[test]
+fn a_short_byte_find_is_answered_in_emitted_code() {
+    suite::a_short_byte_find_is_answered_in_emitted_code::<Template>();
+}
+
+#[test]
+fn a_byte_find_leaves_the_rest_to_the_helper() {
+    suite::a_byte_find_leaves_the_rest_to_the_helper::<Template>();
+}
+
+#[test]
 fn a_run_find_is_admitted_with_four_one_word_operands() {
     suite::a_run_find_is_admitted_with_four_one_word_operands::<Template>();
 }

@@ -185,6 +185,25 @@ const TRUNCATE_LEAST: i64 = 0xc3e0_0000_0000_0000_u64 as i64;
 /// one piece and never polls inside the helper either.
 pub const SHORT_COPY_BYTES: u32 = 64;
 
+/// The most turns of the runtime's matcher a byte [`Inst::RunFind`] takes in
+/// emitted code (`Emit::short_find_bytes`) before it hands the search to the
+/// run-copy helper — and the longest stretch of haystack, `n - from`, it
+/// starts one over at all.
+///
+/// It is `cove_runtime`'s `SAFEPOINT_STRIDE`, which is the number of turns
+/// `encoded::run_find_bytes` gives its matcher before its first poll, and it
+/// has to be: a search the emitted code finishes within this many turns is
+/// one the helper would have finished in its first step, with no poll inside
+/// it, so the answer and the charge are the helper's exactly. `cove_runtime`
+/// holds the two equal at compile time.
+pub const SHORT_FIND_TURNS: u32 = 1024;
+
+/// A byte in every unit of a word, and the high bit of every unit: the two
+/// constants of the word-wide zero-unit test `cove_runtime::find`'s skip makes,
+/// which `Emit::short_find_bytes` makes too.
+const ONES: u64 = 0x0101_0101_0101_0101;
+const HIGH: u64 = 0x8080_8080_8080_8080;
+
 // The three SSE2 packed logicals the min/max blend is built from, and the
 // `cmpsd` predicate that drives it.
 const ANDPD: u8 = 0x54;
@@ -199,6 +218,7 @@ const CC_B: u8 = 0x2;
 const CC_AE: u8 = 0x3;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
+const CC_BE: u8 = 0x6;
 const CC_A: u8 = 0x7;
 const CC_S: u8 = 0x8;
 const CC_P: u8 = 0xa;
@@ -1448,15 +1468,17 @@ impl<'a> Emit<'a> {
                 Storage::PackedBytes => self.run_copy(args.0, RunOp::SliceBytes, 0),
                 Storage::Words(elem) => self.run_copy(args.0, RunOp::SliceWords, elem.0),
             },
-            // ADR 0065's `run-find`: the same helper, reading two runs a
-            // bounded step at a time and writing the answer into the row's
-            // `dst`. Lowered rather than refused: a refusal is of the whole
-            // function, and this instruction's caller is expanded at every
-            // site of `String.contains`.
+            // ADR 0065's `run-find`: answered in emitted code where the search
+            // is one step of the runtime's matcher — [`Emit::short_find_bytes`],
+            // issue #486 — and otherwise handed to the run-copy helper, which
+            // reads the two runs a bounded step at a time and writes the answer
+            // into the row's `dst`. Lowered rather than refused: a refusal is of
+            // the whole function, and this instruction's caller is expanded at
+            // every site of `String.contains`.
             Inst::RunFind {
                 args,
                 storage: Storage::PackedBytes,
-            } => self.run_copy(args.0, RunOp::FindBytes, 0),
+            } => self.run_find(args.0),
             Inst::Alloc { dst, layout, len } => {
                 // Where this frame resumes if the allocation's safepoint yields
                 // (ADR 0085): the template from its first byte. The resume
@@ -2966,6 +2988,483 @@ impl<'a> Emit<'a> {
         self.mov_rr(obj, HEAP_TABLE);
         self.add_imm32(obj, 8);
         self.add_rr(obj, AT);
+    }
+
+    /// One [ADR 0065] `run-find` over packed bytes: [`Emit::short_find_bytes`]
+    /// first, and the run-copy helper for whatever that does not answer.
+    ///
+    /// [ADR 0065]: ../../../../docs/adr/0065-a-run-search-is-the-one-loop-that-stays-below.md
+    fn run_find(&mut self, args: u32) {
+        let cold = self.label();
+        let done = self.label();
+        self.short_find_bytes(args, cold, done);
+        self.bind(cold);
+        self.run_copy_call(args, RunOp::FindBytes, 0);
+        self.bind(done);
+        // The cold predecessor came through a helper that may have grown the
+        // stack.
+        self.frame_live = false;
+    }
+
+    /// A byte [`Inst::RunFind`](cove_ir::Inst::RunFind) answered in emitted
+    /// code — issue #486 — with a jump to `done` once the answer is in `dst`,
+    /// and a jump to `cold` for anything this does not answer **before
+    /// anything has been written or charged**, so that the helper behind
+    /// `cold` sees exactly what it always saw.
+    ///
+    /// # Why it is emitted
+    ///
+    /// A per-match `std.string` body — `split`, `replace` — makes one search
+    /// a match, and through the helper each was a crossing: the work
+    /// published, the machine synced, a safepoint, the argument list decoded,
+    /// and the context re-published on the way back. Measured on
+    /// `benches/stringlib`'s `split_rows`, the searches were 8.16 million of
+    /// the 12.7 million helper calls. The VM runs the same search as one
+    /// instruction of its dispatch loop.
+    ///
+    /// # What it answers, and what goes to the helper
+    ///
+    /// Everything `encoded::run_find_bytes` refuses goes to `cold`, which
+    /// refuses it in the runtime's own words: either run below the heap (null
+    /// included), either not a [`Program::str_layout`](cove_ir::Program::str_layout),
+    /// and a `from` outside `0 ..= n` — a negative one read as an unsigned
+    /// number too large to pass. So do three things the helper answers and
+    /// this does not: a run whose payload straddles two heap chunks, a
+    /// stretch `n - from` longer than [`SHORT_FIND_TURNS`], and a search that
+    /// would take more than [`SHORT_FIND_TURNS`] turns.
+    ///
+    /// # It is the runtime's matcher, turn for turn
+    ///
+    /// The answer and the charge are `cove_runtime::find`'s `Matcher` run
+    /// with a budget of [`SHORT_FIND_TURNS`] turns, step for step: the two
+    /// maximal-suffix scans, the periodicity test, and the attempts — the
+    /// right half forwards, the left half backwards down to the memory a
+    /// periodic needle carries across its shift. The two answers that take no
+    /// turn — an empty needle and a needle longer than what is left of the
+    /// haystack — are reached first and charge nothing, as the helper's do.
+    ///
+    /// That includes **the skip**, whose stopping places are what the charge
+    /// is most easily wrong about: the positions whose critical unit is not
+    /// the needle's are stepped over a payload word at a time, with the same
+    /// word-wide zero-unit test, up to the first match or the end of the
+    /// eight-unit block the critical unit is in, the end of the haystack, or
+    /// the end of the budget, whichever is first — a turn a position — and
+    /// back to the top of the loop, as the matcher's `continue` goes. The
+    /// payload word is read whole and shifted down, which relies on a
+    /// payload's first byte being a multiple of eight, as every heap word is.
+    ///
+    /// The turns are counted in a register, and a turn about to be taken with
+    /// [`SHORT_FIND_TURNS`] already taken goes to `cold`, where the matcher's
+    /// first step would have returned to poll. A search that finishes within
+    /// the budget is therefore one the helper finishes in one step with no
+    /// poll, so the turns are its whole charge, and they are added to
+    /// [`WORK`] for the next poll, where [`Emit::short_copy_bytes`]' words go.
+    /// A search that does not is started again by the helper from nothing:
+    /// the emitted code read and wrote nothing the helper reads, so the cost
+    /// is the turns it took, at most [`SHORT_FIND_TURNS`].
+    ///
+    /// # Registers
+    ///
+    /// The search needs fourteen values at once, more than the scratch
+    /// registers, so the four long-lived registers it does not touch —
+    /// [`RETURN_BYTES`], [`BASE_BYTES`], [`WORK`] and [`FRAME`] — are pushed
+    /// for its duration, after the last jump to `cold` that does not first pop
+    /// them. Nothing here calls, so the pushes need not keep `rsp` aligned.
+    /// Every memory operand's base is `RAX` or `RCX`, because the encoder has
+    /// no SIB byte and so no `r12` base.
+    #[allow(clippy::too_many_lines)]
+    fn short_find_bytes(&mut self, args: u32, cold: usize, done: usize) {
+        let row = self.program.arg_list(ArgsId(args));
+        let (dst, haystack, needle, from) = (row[0].slot, row[1].slot, row[2].slot, row[3].slot);
+        let str_layout = self.program.str_layout.0;
+        let turns = SHORT_FIND_TURNS as i32;
+
+        // The checks, in `run_find_bytes`' order, with nothing written: both
+        // runs on the heap and `String`s, and `from` in `0 ..= n`.
+        const HAY: u8 = R8;
+        const NEEDLE: u8 = R9;
+        const N: u8 = R10;
+        const M: u8 = R11;
+        const FROM: u8 = RDX;
+        self.mov_imm64(RCX, HEAP_ORIGIN_WORDS as i64);
+        self.load_slot(HAY, haystack);
+        self.cmp_rr(HAY, RCX);
+        self.jcc(CC_B, Target::Label(cold));
+        self.load_slot(NEEDLE, needle);
+        self.cmp_rr(NEEDLE, RCX);
+        self.jcc(CC_B, Target::Label(cold));
+        self.load_slot(FROM, from);
+        for (obj, len) in [(HAY, N), (NEEDLE, M)] {
+            self.mov_rr(RAX, obj);
+            self.heap_word(RAX);
+            self.mov_rr32(len, RAX);
+            self.shr_imm8(RAX, 32);
+            self.cmp_imm32(RAX, str_layout as i32);
+            self.jcc(CC_NE, Target::Label(cold));
+        }
+        self.cmp_rr(FROM, N);
+        self.jcc(CC_A, Target::Label(cold));
+
+        // The two answers that take no turn: an empty needle is found at
+        // `from`, and one longer than `n - from` is not found.
+        let searching = self.label();
+        let past = self.label();
+        self.test_rr(M, M);
+        self.jcc(CC_NE, Target::Label(past));
+        self.store_slot(dst, FROM);
+        self.jmp(Target::Label(done));
+        self.bind(past);
+        self.mov_rr(RAX, N);
+        self.sub_rr(RAX, FROM);
+        self.cmp_rr(M, RAX);
+        self.jcc(CC_BE, Target::Label(searching));
+        self.mov_imm64(RAX, -1);
+        self.store_slot(dst, RAX);
+        self.jmp(Target::Label(done));
+        self.bind(searching);
+
+        // A stretch longer than the budget is the helper's from the start: it
+        // cannot be searched to the end within the budget, so the emitted
+        // code would only find what lies near its beginning, and for the rest
+        // it would spend a budget of turns the helper then spends again.
+        self.cmp_imm32(RAX, turns);
+        self.jcc(CC_A, Target::Label(cold));
+
+        // Each run's payload in one heap chunk — `run_end`'s test, with the
+        // whole run as the range — and then its first byte as a machine
+        // address.
+        for (obj, len) in [(HAY, N), (NEEDLE, M)] {
+            self.mov_rr(RCX, len);
+            self.shr_imm8(RCX, 3);
+            self.add_rr(RCX, obj);
+            self.add_imm32(RCX, 1);
+            self.xor_rr(RCX, obj);
+            self.shr_imm8(RCX, HEAP_CHUNK_SHIFT as u8);
+            self.jcc(CC_NE, Target::Label(cold));
+        }
+        for obj in [HAY, NEEDLE] {
+            self.mov_rr(RAX, obj);
+            self.heap_ptr(RAX);
+            self.mov_rr(obj, HEAP_TABLE);
+            self.add_imm32(obj, 8);
+        }
+
+        // The search's registers. `P` is the haystack address of the attempt's
+        // position, `LIMIT` the last one a needle fits at: `pos + m > n` is
+        // `P > LIMIT`.
+        const H: u8 = R8;
+        const NP: u8 = R9;
+        const LIMIT: u8 = R10;
+        const P: u8 = RDX;
+        const T: u8 = R12;
+        const CRIT: u8 = R13;
+        const PROBE: u8 = R14;
+        const MEMORY: u8 = R15;
+        const PERIOD: u8 = RBP;
+        const SHIFT_MEMORY: u8 = RSI;
+        const HEAD: u8 = RDI;
+        // The scans' own names for some of the same registers.
+        const START: u8 = R13;
+        const AT: u8 = R14;
+        const OFFSET: u8 = R15;
+        const EARLIER_START: u8 = RSI;
+        const EARLIER_PERIOD: u8 = RDI;
+
+        // `LIMIT` is the register `N` was in.
+        const _: () = assert!(LIMIT == N);
+        self.add_rr(P, H);
+        self.add_rr(LIMIT, H);
+        self.sub_rr(LIMIT, M);
+        for reg in [RETURN_BYTES, BASE_BYTES, WORK, FRAME] {
+            self.push(reg);
+        }
+        let bail = self.label();
+        self.xor_rr(T, T);
+
+        // A turn: `cold` once the budget is spent, and one more turn taken.
+        let turn = |emit: &mut Self| {
+            emit.cmp_imm32(T, turns);
+            emit.jcc(CC_AE, Target::Label(bail));
+            emit.add_imm32(T, 1);
+        };
+        // The byte at `base + a (+ b) + disp`, into `into`, which is `RAX` or
+        // `RCX` and is the address first.
+        let byte = |emit: &mut Self, into: u8, base: u8, a: u8, b: Option<u8>, disp: i32| {
+            emit.mov_rr(into, base);
+            emit.add_rr(into, a);
+            if let Some(b) = b {
+                emit.add_rr(into, b);
+            }
+            emit.load8(into, into, disp);
+        };
+
+        // The two maximal-suffix scans, the first under `<` and the second
+        // under `>`; the first's answer is held while the second runs.
+        for greater in [false, true] {
+            let scan = self.label();
+            let scanned = self.label();
+            let equal = self.label();
+            let onwards = self.label();
+            let extend = self.label();
+            self.xor_rr(START, START);
+            self.mov_imm32(AT, 1);
+            self.xor_rr(OFFSET, OFFSET);
+            self.mov_imm32(PERIOD, 1);
+            self.bind(scan);
+            self.mov_rr(RAX, AT);
+            self.add_rr(RAX, OFFSET);
+            self.cmp_rr(RAX, M);
+            self.jcc(CC_AE, Target::Label(scanned));
+            turn(self);
+            byte(self, RAX, NP, AT, Some(OFFSET), 0);
+            byte(self, RCX, NP, START, Some(OFFSET), 0);
+            self.cmp_rr(RAX, RCX);
+            self.jcc(CC_E, Target::Label(equal));
+            // `(a < b) != greater`: the candidate is the smaller in this
+            // order, and the best suffix keeps its start.
+            self.jcc(if greater { CC_A } else { CC_B }, Target::Label(extend));
+            // The candidate is the larger: start again from it.
+            self.mov_rr(START, AT);
+            self.mov_rr(AT, START);
+            self.add_imm32(AT, 1);
+            self.xor_rr(OFFSET, OFFSET);
+            self.mov_imm32(PERIOD, 1);
+            self.jmp(Target::Label(scan));
+            self.bind(extend);
+            self.add_rr(AT, OFFSET);
+            self.add_imm32(AT, 1);
+            self.xor_rr(OFFSET, OFFSET);
+            self.mov_rr(PERIOD, AT);
+            self.sub_rr(PERIOD, START);
+            self.jmp(Target::Label(scan));
+            // Through a repetition of the period so far.
+            self.bind(equal);
+            self.mov_rr(RAX, OFFSET);
+            self.add_imm32(RAX, 1);
+            self.cmp_rr(RAX, PERIOD);
+            self.jcc(CC_NE, Target::Label(onwards));
+            self.add_rr(AT, PERIOD);
+            self.xor_rr(OFFSET, OFFSET);
+            self.jmp(Target::Label(scan));
+            self.bind(onwards);
+            self.add_imm32(OFFSET, 1);
+            self.jmp(Target::Label(scan));
+            self.bind(scanned);
+            if greater {
+                // The later critical position, and its period.
+                self.cmp_rr(EARLIER_START, START);
+                self.cmov(CC_A, CRIT, EARLIER_START);
+                self.cmov(CC_A, PERIOD, EARLIER_PERIOD);
+            } else {
+                self.mov_rr(EARLIER_START, START);
+                self.mov_rr(EARLIER_PERIOD, PERIOD);
+            }
+        }
+
+        // Is the needle's left half what lies one period into it? Then an
+        // attempt carries `m - period` across its shift; if not, the period
+        // becomes one past the larger half and nothing is carried.
+        {
+            let test = self.label();
+            let periodic = self.label();
+            let not_periodic = self.label();
+            let tested = self.label();
+            self.xor_rr(AT, AT);
+            self.bind(test);
+            self.cmp_rr(AT, CRIT);
+            self.jcc(CC_AE, Target::Label(periodic));
+            turn(self);
+            byte(self, RAX, NP, AT, None, 0);
+            byte(self, RCX, NP, PERIOD, Some(AT), 0);
+            self.cmp_rr(RAX, RCX);
+            self.jcc(CC_NE, Target::Label(not_periodic));
+            self.add_imm32(AT, 1);
+            self.jmp(Target::Label(test));
+            self.bind(periodic);
+            self.mov_rr(SHIFT_MEMORY, M);
+            self.sub_rr(SHIFT_MEMORY, PERIOD);
+            self.jmp(Target::Label(tested));
+            self.bind(not_periodic);
+            self.xor_rr(SHIFT_MEMORY, SHIFT_MEMORY);
+            self.mov_rr(PERIOD, M);
+            self.sub_rr(PERIOD, CRIT);
+            self.cmp_rr(PERIOD, CRIT);
+            self.cmov(CC_B, PERIOD, CRIT);
+            self.add_imm32(PERIOD, 1);
+            self.bind(tested);
+        }
+        // The critical unit, repeated through a word: what the skip compares
+        // eight positions against at once.
+        byte(self, RAX, NP, CRIT, None, 0);
+        self.mov_imm64(RCX, ONES as i64);
+        self.imul_rr(RAX, RCX);
+        self.mov_rr(HEAD, RAX);
+
+        // The first attempt, at `from`, with nothing remembered.
+        let top = self.label();
+        let right = self.label();
+        let matched = self.label();
+        let missed = self.label();
+        let left = self.label();
+        let found = self.label();
+        let not_found = self.label();
+        let answered = self.label();
+        self.xor_rr(MEMORY, MEMORY);
+        self.mov_rr(PROBE, CRIT);
+
+        self.bind(top);
+        self.cmp_rr(P, LIMIT);
+        self.jcc(CC_A, Target::Label(not_found));
+        // The skip, only where nothing is remembered — which leaves `PROBE` and
+        // `MEMORY` free until it is done, as `crit` and nought.
+        self.test_rr(MEMORY, MEMORY);
+        self.jcc(CC_NE, Target::Label(right));
+        self.cmp_rr(PROBE, CRIT);
+        self.jcc(CC_NE, Target::Label(right));
+        self.cmp_imm32(T, turns);
+        self.jcc(CC_AE, Target::Label(bail));
+        {
+            const AT: u8 = R14;
+            const WINDOW: u8 = R15;
+            // `at`, the critical unit's offset in the haystack, and the window:
+            // the payload word it lies in, shifted down to it. `H` is a payload's
+            // first byte and so a multiple of eight, and the word is the
+            // payload's own, so nothing outside the run is read.
+            self.mov_rr(AT, P);
+            self.add_rr(AT, CRIT);
+            self.sub_rr(AT, H);
+            self.mov_rr(RAX, AT);
+            self.and_imm32(RAX, 7);
+            self.mov_rr(RCX, H);
+            self.add_rr(RCX, AT);
+            self.sub_rr(RCX, RAX);
+            self.load(WINDOW, RCX, 0);
+            self.mov_rr(RCX, RAX);
+            self.shl_imm8(RCX, 3);
+            self.shr_cl(WINDOW);
+            // A unit equal to the critical one is a zero unit of `x`; the low
+            // one is the attempt this position is, which the right half makes.
+            self.xor_rr(WINDOW, HEAD);
+            self.mov_rr(RCX, WINDOW);
+            self.and_imm32(RCX, 0xff);
+            let stepping = self.label();
+            self.jcc(CC_NE, Target::Label(stepping));
+            self.mov_rr(PROBE, CRIT);
+            self.xor_rr(MEMORY, MEMORY);
+            self.jmp(Target::Label(right));
+            self.bind(stepping);
+            // `first_unit_at`: `(x - ONES) & !x & HIGH`, whose lowest set bit
+            // is the lowest zero unit.
+            self.mov_rr(RCX, WINDOW);
+            self.mov_imm64(RAX, ONES as i64);
+            self.sub_rr(RCX, RAX);
+            self.not_r(WINDOW);
+            self.and_rr(WINDOW, RCX);
+            self.mov_imm64(RAX, HIGH as i64);
+            self.and_rr(WINDOW, RAX);
+            // `take`: the block's end, the haystack's, or the budget's, whichever
+            // is first — each at least one.
+            self.mov_imm32(RAX, 8);
+            self.mov_rr(RCX, AT);
+            self.and_imm32(RCX, 7);
+            self.sub_rr(RAX, RCX);
+            self.mov_rr(RCX, LIMIT);
+            self.add_rr(RCX, M);
+            self.sub_rr(RCX, H);
+            self.sub_rr(RCX, AT);
+            self.cmp_rr(RCX, RAX);
+            self.cmov(CC_B, RAX, RCX);
+            self.mov_imm32(RCX, turns);
+            self.sub_rr(RCX, T);
+            self.cmp_rr(RCX, RAX);
+            self.cmov(CC_B, RAX, RCX);
+            // Only the `take` units the window really has: `found` masked by
+            // `!0 >> (64 - 8 * take)`.
+            self.mov_imm64(AT, -1);
+            self.mov_imm32(RCX, 8);
+            self.sub_rr(RCX, RAX);
+            self.shl_imm8(RCX, 3);
+            self.shr_cl(AT);
+            self.and_rr(WINDOW, AT);
+            // `ahead`: the lowest match's unit, or `take` without one.
+            self.bsf(AT, WINDOW);
+            self.shr_imm8(AT, 3);
+            self.test_rr(WINDOW, WINDOW);
+            self.cmov(CC_NE, RAX, AT);
+            self.add_rr(P, RAX);
+            self.add_rr(T, RAX);
+            self.mov_rr(PROBE, CRIT);
+            self.xor_rr(MEMORY, MEMORY);
+            self.jmp(Target::Label(top));
+        }
+
+        // The right half, forwards from the probe.
+        self.bind(right);
+        self.cmp_rr(PROBE, M);
+        self.jcc(CC_AE, Target::Label(matched));
+        turn(self);
+        byte(self, RAX, NP, PROBE, None, 0);
+        byte(self, RCX, P, PROBE, None, 0);
+        self.cmp_rr(RAX, RCX);
+        self.jcc(CC_NE, Target::Label(missed));
+        self.add_imm32(PROBE, 1);
+        self.jmp(Target::Label(right));
+        // A mismatch shifts past the comparison that failed, remembering
+        // nothing.
+        self.bind(missed);
+        self.add_rr(P, PROBE);
+        self.sub_rr(P, CRIT);
+        self.add_imm32(P, 1);
+        self.xor_rr(MEMORY, MEMORY);
+        self.mov_rr(PROBE, CRIT);
+        self.jmp(Target::Label(top));
+
+        // The left half, backwards from the critical position down to what
+        // the last attempt established.
+        let shifted = self.label();
+        self.bind(matched);
+        self.mov_rr(PROBE, CRIT);
+        self.bind(left);
+        self.cmp_rr(PROBE, MEMORY);
+        self.jcc(CC_BE, Target::Label(found));
+        turn(self);
+        byte(self, RAX, NP, PROBE, None, -1);
+        byte(self, RCX, P, PROBE, None, -1);
+        self.cmp_rr(RAX, RCX);
+        self.jcc(CC_NE, Target::Label(shifted));
+        self.add_imm32(PROBE, -1);
+        self.jmp(Target::Label(left));
+        // A shift by the period, carrying what a periodic needle carries.
+        self.bind(shifted);
+        self.add_rr(P, PERIOD);
+        self.mov_rr(MEMORY, SHIFT_MEMORY);
+        self.mov_rr(PROBE, CRIT);
+        self.cmp_rr(PROBE, MEMORY);
+        self.cmov(CC_B, PROBE, MEMORY);
+        self.jmp(Target::Label(top));
+
+        // The answer into `RAX` and the turns into `RCX`, and the four
+        // registers back before either is used.
+        self.bind(found);
+        self.mov_rr(RAX, P);
+        self.sub_rr(RAX, H);
+        self.jmp(Target::Label(answered));
+        self.bind(not_found);
+        self.mov_imm64(RAX, -1);
+        self.bind(answered);
+        self.mov_rr(RCX, T);
+        for reg in [FRAME, WORK, BASE_BYTES, RETURN_BYTES] {
+            self.pop(reg);
+        }
+        self.store_slot(dst, RAX);
+        self.add_rr(WORK, RCX);
+        self.jmp(Target::Label(done));
+
+        self.bind(bail);
+        for reg in [FRAME, WORK, BASE_BYTES, RETURN_BYTES] {
+            self.pop(reg);
+        }
+        self.jmp(Target::Label(cold));
     }
 
     /// The helper call itself: see [`Emit::run_copy`].
@@ -5058,6 +5557,15 @@ impl<'a> Emit<'a> {
         self.byte(0xc1);
         self.modrm_reg(5, dst);
         self.byte(by);
+    }
+
+    /// `bsf r64, r64`: the index of the lowest set bit of `src`, into `dst`.
+    /// `dst` is left undefined when `src` is nought, so a caller tests `src`.
+    fn bsf(&mut self, dst: u8, src: u8) {
+        self.rex(true, dst, src);
+        self.byte(0x0f);
+        self.byte(0xbc);
+        self.modrm_reg(dst, src);
     }
 
     /// `shr r64, cl`

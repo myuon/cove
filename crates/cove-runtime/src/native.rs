@@ -311,6 +311,13 @@ pub fn compile_counting(program: &Program) -> Result<NativeProgram, Unavailable>
     compile_with(program, true)
 }
 
+// The template arm answers a byte `Inst::RunFind` in emitted code when the
+// matcher finishes within this many turns, which is a promise that the
+// helper's matcher would have finished in its first step, with no poll —
+// true only while it is the stride `encoded::run_find_bytes` steps by.
+#[cfg(feature = "template")]
+const _: () = assert!(cove_native::template::SHORT_FIND_TURNS as u64 == crate::SAFEPOINT_STRIDE);
+
 #[cfg(feature = "template")]
 fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unavailable> {
     use crate::wallclock::Instant;

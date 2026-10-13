@@ -6216,6 +6216,10 @@ pub fn run_finds() -> Program {
 
 /// [ADR 0065]'s `run-find`, handed to the runtime whole on the run-copy helper.
 ///
+/// The frame's two references are not heap addresses, so the emitted search —
+/// [`a_short_byte_find_is_answered_in_emitted_code`] — declines it and this is
+/// the hand-over alone.
+///
 /// [`a_run_slice_is_handed_to_the_runtime_whole`]'s case for the search, and it
 /// is the case the ADR's Decision 5 is *about*: a native refusal is not an
 /// acceptable outcome, because the tier refuses a whole function and
@@ -6262,6 +6266,184 @@ pub fn a_run_find_is_handed_to_the_runtime_whole<A: Arm>() {
         assert_eq!(answer.outcome, outcome);
         assert_eq!(answer.returned[0], UNWRITTEN);
     }
+}
+
+/// What a byte run search must answer, by `str::find`'s rule over bytes: the
+/// first offset at or after `from` where the needle occurs, or -1.
+fn want_find(haystack: &[u8], needle: &[u8], from: usize) -> i64 {
+    if needle.is_empty() {
+        return from as i64;
+    }
+    if needle.len() > haystack.len() - from {
+        return -1;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map_or(-1, |at| (at + from) as i64)
+}
+
+/// **A byte run search over two strings in one heap chunk is answered in
+/// emitted code** — issue #486 — with no hand-over, the answer `str::find`'s
+/// rule gives, and its turns charged into the unpaid work.
+///
+/// The corpus is the shapes the per-match `std.string` bodies make: a
+/// one-byte separator, a three-byte one, a needle repeated through its
+/// haystack, a periodic needle, multi-byte characters searched for whole and
+/// by a lead byte, the needle that is its whole haystack — the very same
+/// object at both operands among them — and every start, the two ends
+/// included. The charge is held as tightly as it is known without the
+/// runtime's matcher: nothing past the block for the two answers that take no
+/// turn, a one-byte needle's turns exactly — one a position stepped over and
+/// one for the match — and the matcher's stated bound `5m + 2(n - from)`
+/// otherwise. `cove-runtime` holds the charge to the matcher's turn for turn.
+pub fn a_short_byte_find_is_answered_in_emitted_code<A: Arm>() {
+    let held = run_finds();
+    let text = |s: &str| s.as_bytes().to_vec();
+    let haystacks: Vec<Vec<u8>> = vec![
+        text(""),
+        text("a"),
+        text("f00,f01,f02,f03,f04,f05,f06,f07,f08,f09"),
+        text("f00 | f01 | f02 | f03 | f04"),
+        b"ab\"c".repeat(12),
+        text("aaaaaaaaaaaaaaaaaaaab"),
+        text("abababababababababab"),
+        text("héllo wörld, héllo"),
+        text("日本語のテキスト、日本語"),
+        vec![0x00, 0x80, 0xff, 0x00, 0x80, 0xff, 0x00],
+    ];
+    let needles: Vec<Vec<u8>> = vec![
+        text(""),
+        text(","),
+        text("\""),
+        text(" | "),
+        text("a"),
+        text("b"),
+        text("ab"),
+        text("aab"),
+        text("abab"),
+        text("é"),
+        text("llo"),
+        text("日本語"),
+        vec![0xe3],
+        vec![0x80, 0xff],
+        text("zz"),
+    ];
+    let mut emitted = 0;
+    for haystack in &haystacks {
+        let mut pairs: Vec<(Vec<u8>, bool)> = needles
+            .iter()
+            .map(|needle| (needle.clone(), false))
+            .collect();
+        pairs.push((haystack.clone(), false));
+        pairs.push((haystack.clone(), true));
+        for (needle, same) in &pairs {
+            for from in 0..=haystack.len() {
+                forget_copied();
+                let mut heap = Heap::new(1);
+                let hay = a_string(&mut heap, 10, haystack);
+                let sought = if *same {
+                    hay
+                } else {
+                    a_string(&mut heap, 200, needle)
+                };
+                let mut words = vec![hay, sought, from as u64, UNWRITTEN];
+                let answer = run_over::<A>(&held, &mut words, 0, &heap);
+                let at = format!("{needle:?} in {haystack:?} from {from}");
+                assert_eq!(answer.outcome, Outcome::Returned, "{at}");
+                assert!(copied().is_empty(), "{at}: no hand-over");
+                let want = want_find(haystack, needle, from);
+                assert_eq!(answer.returned[0] as i64, want, "{at}");
+                let (n, m) = (haystack.len() as u64, needle.len() as u64);
+                let left = n - from as u64;
+                let turns = answer.pending_work - 2;
+                if m == 0 || m > left {
+                    assert_eq!(turns, 0, "{at}: no turn taken");
+                } else if m == 1 {
+                    let want_turns = match want {
+                        -1 => left,
+                        found => found as u64 - from as u64 + 1,
+                    };
+                    assert_eq!(turns, want_turns, "{at}: a turn a position");
+                } else {
+                    assert!(turns >= 1 && turns <= 5 * m + 2 * left, "{at}: {turns}");
+                }
+                emitted += 1;
+            }
+        }
+    }
+    assert!(emitted > 1000, "{emitted}");
+    forget_copied();
+}
+
+/// **Everything the emitted search does not answer is the helper's, with
+/// nothing written and nothing charged but the block.**
+///
+/// The refusals `encoded::run_find_bytes` makes — a null haystack or needle,
+/// either one not a `String` (a byte run is not admitted, as it is not a
+/// slice's source), and a `from` that is negative or past the haystack — and
+/// the three shapes it answers but emitted code leaves to it: a run whose
+/// payload straddles two heap chunks, a stretch `n - from` longer than
+/// [`SHORT_FIND_TURNS`](cove_native::template::SHORT_FIND_TURNS), and a search
+/// whose turns outrun that budget inside a stretch that is not — a needle of
+/// five hundred `a`s and a `b`, whose two maximal-suffix scans alone take
+/// about a thousand turns.
+pub fn a_byte_find_leaves_the_rest_to_the_helper<A: Arm>() {
+    let held = run_finds();
+    let budget = cove_native::template::SHORT_FIND_TURNS as usize;
+    let straddle = HEAP_CHUNK_WORDS - 2;
+    let mut long_needle = vec![b'a'; 500];
+    long_needle.push(b'b');
+    // `(name, haystack index, needle index, from)`, over a heap that holds a
+    // short string at 10, a byte run at 40, a one-byte string at 80, a string
+    // across a chunk edge at `straddle`, a string longer than the budget at
+    // 100, and the long needle and a haystack of `a`s exactly the budget long
+    // at 400 and 600.
+    let cases: [(&str, u64, u64, i64); 11] = [
+        ("a null haystack", u64::MAX, 10, 0),
+        ("a null needle", 10, u64::MAX, 0),
+        ("a byte-run haystack", 40, 10, 0),
+        ("a byte-run needle", 10, 40, 0),
+        ("a negative start", 10, 10, -1),
+        ("a start past the haystack", 10, 10, 18),
+        ("a haystack across a chunk", straddle, 10, 0),
+        ("a needle across a chunk", 600, straddle, 0),
+        ("a stretch past the budget", 100, 10, 0),
+        ("a search past the budget", 600, 400, 0),
+        ("the budget is turns, not bytes", 100, 80, 1),
+    ];
+    for (name, haystack, needle, from) in cases {
+        forget_copied();
+        let mut heap = Heap::new(2);
+        a_string(&mut heap, 10, b"abcdefghijklmnopq");
+        a_byte_run(&mut heap, 40, 16, b'a');
+        a_string(&mut heap, 80, b"y");
+        a_string(&mut heap, straddle, b"abcdefghijklmnopqrstuvwx");
+        a_string(&mut heap, 100, &vec![b'z'; budget + 1]);
+        a_string(&mut heap, 400, &long_needle);
+        a_string(&mut heap, 600, &vec![b'a'; budget]);
+        let addr = |index: u64| match index {
+            u64::MAX => 0,
+            index => heap.addr(index),
+        };
+        let mut words = vec![addr(haystack), addr(needle), from as u64, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{name}");
+        let handed = copied();
+        if name == "the budget is turns, not bytes" {
+            // A stretch of exactly the budget, with a one-byte needle found
+            // nowhere: a turn a position, the budget's worth, and answered.
+            assert!(handed.is_empty(), "{name}");
+            assert_eq!(answer.returned[0] as i64, -1, "{name}");
+            assert_eq!(answer.pending_work, 2 + budget as u64, "{name}");
+            continue;
+        }
+        assert_eq!(handed.len(), 1, "{name}: handed over");
+        assert_eq!(handed[0].kind, RunOp::FindBytes.abi(), "{name}");
+        assert_eq!(handed[0].work, 2, "{name}: with the block's work, unpaid");
+        assert_eq!(answer.returned[0], UNWRITTEN, "{name}: nothing written");
+    }
+    forget_copied();
 }
 
 /// A run search is admitted with four one-word operands the frame has, over

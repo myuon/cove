@@ -7602,6 +7602,173 @@ mod tests {
             native
         }
 
+        /// **A byte search from compiled code answers what the VM answers and
+        /// charges what it charges, turn for turn — in emitted code wherever
+        /// the matcher's first step would have finished, and through the
+        /// helper everywhere else.**
+        ///
+        /// Issue #486 answers a `run-find` in emitted code that mirrors
+        /// [`crate::find::Matcher`] step for step, so this is that code against
+        /// the matcher over the whole differential corpus, from every start
+        /// that can move an answer, with multi-byte text and the budget's two
+        /// edges — a stretch of exactly [`SAFEPOINT_STRIDE`] bytes and one
+        /// more, and a needle whose preparation alone outruns it. Three things
+        /// are held equal: what the run said, the machine's whole work — which
+        /// is where a turn charged once too often or too seldom shows — and the
+        /// answer `str::find`'s rule gives. And the path is held to the one
+        /// the case predicts, from the safepoints the run took: the helper
+        /// takes one on entry and the emitted search takes none, so a case
+        /// that quietly went to the helper cannot pass as an emitted one.
+        #[test]
+        fn a_compiled_byte_search_answers_and_charges_what_the_vm_does() {
+            let (program, find) = find_fixture();
+            let mut build = Build { program };
+            let entry = through_a_call(&mut build, find, Repr::Int);
+            let program = build.done();
+            let native = compiled(&program, find);
+            let stride = SAFEPOINT_STRIDE as usize;
+
+            let mut corpus = find_corpus();
+            corpus.extend([
+                "héllo wörld, héllo".as_bytes().to_vec(),
+                "é".as_bytes().to_vec(),
+                "日本語のテキスト、日本語".as_bytes().to_vec(),
+                "本".as_bytes().to_vec(),
+                b"ab\"c".repeat(40),
+                b"\"".to_vec(),
+                b" | ".to_vec(),
+                (0..100)
+                    .map(|at| format!("f{at:02}"))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+                    .into_bytes(),
+            ]);
+            let mut cases: Vec<(Vec<u8>, Vec<u8>, usize)> = Vec::new();
+            for haystack in &corpus {
+                for needle in &corpus {
+                    let n = haystack.len();
+                    let mut froms = vec![0, 1, 2, 7, 8, 9, n / 2, n.saturating_sub(1), n];
+                    froms.retain(|from| *from <= n);
+                    froms.dedup();
+                    for from in froms {
+                        cases.push((haystack.clone(), needle.clone(), from));
+                    }
+                }
+            }
+            // The budget's edges: a stretch of exactly the stride and one more,
+            // found at its far end and not found at all, and a needle whose
+            // preparation alone is more than a step.
+            for stretch in [stride - 1, stride, stride + 1] {
+                let mut far = vec![b'x'; stretch - 1];
+                far.push(b'y');
+                cases.push((far.clone(), b"y".to_vec(), 0));
+                cases.push((far.clone(), b"z".to_vec(), 0));
+                cases.push((far, b"xy".to_vec(), 0));
+            }
+            // And the budget running out inside a skip's window, close enough
+            // to the haystack's end that a window not cut at the budget would
+            // reach past where the last attempt fits.
+            for len in stride - 12..=stride {
+                for needle in [&b"zy"[..], b"xz", b"xxz", b"zzzz"] {
+                    for from in [0, 1, 3] {
+                        cases.push((vec![b'x'; len], needle.to_vec(), from));
+                    }
+                }
+            }
+            let mut long_needle = b"ab".repeat(300);
+            long_needle.push(b'c');
+            let mut hay = b"ab".repeat(400);
+            hay.extend_from_slice(&long_needle);
+            cases.push((hay.clone(), long_needle.clone(), 0));
+            cases.push((hay[..stride].to_vec(), long_needle, 0));
+
+            let mut emitted = 0;
+            for (haystack, needle, from) in &cases {
+                let what = format!(
+                    "{} byte(s) for {} from {from}",
+                    haystack.len(),
+                    needle.len()
+                );
+                let prepare = |machine: &mut Machine<'_>| {
+                    machine.trips.logging = true;
+                    vec![
+                        run_of(machine, haystack),
+                        run_of(machine, needle),
+                        *from as u64,
+                    ]
+                };
+                // The helper takes a safepoint on entry, before the search has
+                // charged anything, and the emitted search takes none: so a
+                // safepoint taken at less work than one stride is the helper's.
+                let inspect = |machine: &Machine<'_>, _: &[u64]| {
+                    machine
+                        .trips
+                        .safepoints
+                        .iter()
+                        .any(|work| *work < SAFEPOINT_STRIDE)
+                };
+                let (vm, early, _, vm_work) = on(
+                    &program,
+                    None,
+                    1 << 16,
+                    &budget(),
+                    entry,
+                    &prepare,
+                    &inspect,
+                );
+                assert!(!early, "{what}: the encoded tier polls by the stride");
+                let (said, handed, tiers, work) = on(
+                    &program,
+                    Some(&native),
+                    1 << 16,
+                    &budget(),
+                    entry,
+                    &prepare,
+                    &inspect,
+                );
+                assert_eq!(said, vm, "what the run said: {what}");
+                assert_eq!(
+                    vm.as_ref().map(|words| words[0] as i64),
+                    Ok(want_find(haystack, needle, *from)),
+                    "{what}"
+                );
+                assert_eq!(work, vm_work, "the work charged: {what}");
+                assert!(tiers.vm_to_native >= 1, "{what}: {tiers:?}");
+
+                // Emitted exactly where the matcher's first step finishes.
+                let (n, m) = (haystack.len(), needle.len());
+                let inline = m == 0
+                    || m > n - from
+                    || (n - from <= stride && {
+                        let mut matcher = crate::find::Matcher::new(n, m, *from);
+                        matcher
+                            .run(
+                                SAFEPOINT_STRIDE,
+                                |at| needle[at],
+                                |at| {
+                                    let mut word = [0u8; 8];
+                                    let end = (at - at % 8 + 8).min(n);
+                                    word[..end - at].copy_from_slice(&haystack[at..end]);
+                                    u64::from_le_bytes(word)
+                                },
+                            )
+                            .is_some()
+                    });
+                assert_eq!(
+                    handed, !inline,
+                    "{what}: answered in emitted code: {inline}"
+                );
+                if inline {
+                    emitted += 1;
+                }
+            }
+            assert!(
+                emitted * 2 > cases.len(),
+                "most of the corpus is answered in emitted code: {emitted} of {}",
+                cases.len()
+            );
+        }
+
         /// `fixture()`'s byte copier, with a caller in front of it.
         fn byte_copier() -> (Program, FunctionId, FunctionId) {
             let Fixture { program, copy_into } = fixture();
