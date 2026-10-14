@@ -75,10 +75,18 @@ jobs:
             target
             examples/target
             tests/e2e/target
-          # Every Rust source, every manifest, the lockfile and the cargo
-          # config. A key that holds all of them means an *exact* hit is a
-          # promise: these artifacts were built from these bytes.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
+          # Every Rust source, every manifest, the lockfile, the cargo config
+          # — and the standard library's Cove sources, which `stdlib.rs`
+          # pulls into the binary with `include_str!`. Those last ones were
+          # missing, and a commit that edited one without touching any `.rs`
+          # hit the key exactly, had its sources dated back, and ran a `cove`
+          # whose standard library was the *previous* commit's. The key has to
+          # hold everything that ends up inside an artifact, not everything
+          # the compiler reads.
+          #
+          # An *exact* hit is then a promise again: these artifacts were built
+          # from these bytes.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/*.rs', 'crates/*/std/**', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -274,7 +282,10 @@ jobs:
             target
             examples/target
             tests/e2e/target
-          key: ${{ runner.os }}-cargo-native-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
+          # `crates/*/std/**` for the reason the first of these keys gives at
+          # length: those files are `include_str!`'d into the binary, so a
+          # key without them calls artifacts current that are not.
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('**/*.rs', 'crates/*/std/**', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
           restore-keys: |
             ${{ runner.os }}-cargo-native-
             ${{ runner.os }}-cargo-
@@ -349,7 +360,10 @@ jobs:
             target
             examples/target
             tests/e2e/target
-          key: ${{ runner.os }}-cargo-ratchet-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
+          # `crates/*/std/**` for the reason the first of these keys gives at
+          # length: those files are `include_str!`'d into the binary, so a
+          # key without them calls artifacts current that are not.
+          key: ${{ runner.os }}-cargo-ratchet-${{ hashFiles('**/*.rs', 'crates/*/std/**', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
           restore-keys: |
             ${{ runner.os }}-cargo-ratchet-
             ${{ runner.os }}-cargo-
@@ -424,7 +438,10 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
+          # `crates/*/std/**` for the reason the first of these keys gives at
+          # length: those files are `include_str!`'d into the binary, so a
+          # key without them calls artifacts current that are not.
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/*.rs', 'crates/*/std/**', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
 
