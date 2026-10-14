@@ -225,7 +225,8 @@ pub fn is_library_module(module: &str) -> bool {
 const IMPORTED: &[&str] = &["std.json"];
 
 /// Whether `module` is a standard-library module a program has only by
-/// importing it: see [`IMPORTED`].
+/// importing it: the modules named in this file's `IMPORTED`, for the reason
+/// written there.
 pub fn is_imported_library(module: &str) -> bool {
     IMPORTED.contains(&module)
 }
