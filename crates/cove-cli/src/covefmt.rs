@@ -282,6 +282,7 @@ mod tests {
         let mut session = covefmt.session();
         let mut sources = SourceMap::new();
         let (mut compared, mut unparsed) = (vec![0; damages.len()], 0);
+        let mut refolded = vec![0; damages.len()];
         let mut faults = Vec::new();
         let mut spent = std::time::Duration::ZERO;
         let walked = Instant::now();
@@ -305,7 +306,21 @@ mod tests {
                 }
                 compared[at] += 1;
                 match answer {
-                    Ok(Answer::Formatted(found)) if found == expected => {}
+                    // An answer that is its input is a fixed point already;
+                    // any other is formatted again, and must come back as it
+                    // went in. Issue 651 was a first pass that agreed with
+                    // neither the oracle nor the second pass, and a second
+                    // pass that undid the first.
+                    Ok(Answer::Formatted(found)) if found == expected && found == text => {}
+                    Ok(Answer::Formatted(found)) if found == expected => {
+                        refolded[at] += 1;
+                        match session.format(&found) {
+                            Ok(Answer::Formatted(again)) if again == found => {}
+                            _ => faults.push(format!(
+                                "{shown} ({damage}): formatting covefmt's answer again changes it"
+                            )),
+                        }
+                    }
                     Ok(Answer::Formatted(found)) => {
                         let line = found
                             .lines()
@@ -327,9 +342,9 @@ mod tests {
             }
         }
         println!(
-            "covefmt on {:?}: {:?} file(s) compared ({}), {unparsed} that do not parse \
-             skipped; setup {:.1} ms, formatting the undamaged files {:.1} ms, the whole \
-             test {:.1} ms",
+            "covefmt on {:?}: {:?} file(s) compared ({}), {refolded:?} of them formatted \
+             again, {unparsed} that do not parse skipped; setup {:.1} ms, formatting \
+             the undamaged files {:.1} ms, the whole test {:.1} ms",
             covefmt.tier(),
             compared,
             damages.map(|(name, _)| name).join(", "),
@@ -347,6 +362,56 @@ mod tests {
             faults.len(),
             faults.join("\n")
         );
+    }
+
+    /// Issue 651, as it was found: a call broken around a broken call that
+    /// flattens to exactly 80 columns. covefmt counted the inner group's
+    /// trailing comma, which flattening drops, so the first pass wrapped the
+    /// `Err(` around a line of its own and the second joined it back up.
+    /// Both layouts, and the line itself, format to the one line the Rust
+    /// formatter writes, and formatting that again changes nothing.
+    #[test]
+    fn a_call_around_a_broken_call_is_formatted_once() {
+        let around = |inner: &str| {
+            format!(
+                "fn f(text: String) -> Result<Int, String> {{\n  match g(text) {{\n    \
+                 Ok(number) => {{\n      if number > 0 {{\n        Ok(number)\n      \
+                 }} else {{\n{inner}      }}\n    }}\n    Err(_) => Err(\"\")\n  }}\n}}\n"
+            )
+        };
+        let literal = "\"`{text}` is too large for a `Float` to hold\"";
+        let flat = around(&format!("        Err(scan.detailAt(start, {literal}))\n"));
+        let inputs = [
+            around(&format!(
+                "        Err(scan.detailAt(\n          start,\n          {literal},\n        ))\n"
+            )),
+            around(&format!(
+                "        Err(\n          scan.detailAt(start, {literal}),\n        )\n"
+            )),
+            flat.clone(),
+        ];
+        assert_eq!(
+            flat.lines().map(str::len).max(),
+            Some(80),
+            "the case is the one at exactly the width"
+        );
+        let covefmt = Covefmt::load(None).expect("the built-in formatter loads");
+        let mut session = covefmt.session();
+        let mut sources = SourceMap::new();
+        for input in &inputs {
+            let file = sources.add("issue651.cove", input.clone());
+            let unit = cove_syntax::parse_file(&sources, file).expect("it parses");
+            let oracle = cove_syntax::format::format_source(input, &unit);
+            assert_eq!(oracle, flat, "the Rust formatter, on:\n{input}");
+            let Ok(Answer::Formatted(once)) = session.format(input) else {
+                panic!("covefmt did not format:\n{input}");
+            };
+            assert_eq!(once, oracle, "covefmt, on:\n{input}");
+            let Ok(Answer::Formatted(twice)) = session.format(&once) else {
+                panic!("covefmt did not format its own answer:\n{once}");
+            };
+            assert_eq!(twice, once, "covefmt is not idempotent on:\n{input}");
+        }
     }
 
     /// The image is the one `build.rs` wrote, and it reads back.

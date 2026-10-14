@@ -1156,6 +1156,18 @@ fn indenting(kind: Node) -> Bool {
 /// so the text is measured rather than subtracted.
 fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
   var width = 0
+  // Whether the last token that was not space is a comma. [`flattened`] drops
+  // every comma that stands against a closing bracket — the inner groups'
+  // as well as this one's — so each is taken off when its bracket is
+  // reached. Taking off only the outermost one measured
+  // `Err(scan.detailAt(\n  start,\n  "…",\n))` a column wider than the line
+  // it flattens to, broke a call that fits at exactly the width, and the
+  // second pass, with the inner comma gone, joined it back: issue 651.
+  //
+  // Read off the token already in hand, and only for a one-byte mark. Asking
+  // `isATrailingComma` of every token instead is two builtin calls per comma
+  // in the file and measured 11% of the whole run.
+  var comma = false
   var at = tree.from
   while at < tree.to {
     match held.get(at) {
@@ -1173,7 +1185,17 @@ fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
           // caller asks that first, so the width it would have is not a
           // question here.
           width = width + 1
+          comma = false
         } else {
+          if token.kind == Kind.Punct && token.to - token.from == 1 {
+            let c = source.byteAt(token.from)
+            if comma && (c == ')' || c == ']') {
+              width = width - 1
+            }
+            comma = c == ','
+          } else {
+            comma = false
+          }
           if wantsAMissingSpace(source, held, tree.from, at) {
             width = width + 1
           }
@@ -1184,35 +1206,7 @@ fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
     }
     at = at + 1
   }
-  // The comma a broken group ends its last member with, taken off once. Asked
-  // of every token instead, it is two builtin calls per comma in the file and
-  // measured 11% of the whole run.
-  if endsOnATrailingComma(source, held, tree) {
-    width - 1
-  } else {
-    width
-  }
-}
-
-/// Whether `tree`'s closing bracket has a comma in front of it.
-fn endsOnATrailingComma(
-  source: String,
-  held: Array<Token>,
-  tree: Tree,
-) -> Bool {
-  var i = tree.to - 2
-  while i > tree.from {
-    match held.get(i) {
-      Some(token) => {
-        if token.kind != Kind.Space {
-          return byteOfPunct(source, held, i) == ','
-        }
-      }
-      None => { }
-    }
-    i = i - 1
-  }
-  false
+  width
 }
 
 /// Whether `kind` is space or a comment.
