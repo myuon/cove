@@ -83,14 +83,22 @@ export fn empty() -> Html
 export fn render(page: Html) -> String
 ```
 
-**A hole is a path, written as JSONPath:**
+**A hole is a path, written as JSONPath.** The rule is one sentence and reads
+from either side: **a `$` is a hole only when a `.` follows it.** So every
+other dollar a template writes is text — `$5.00`, `100$`, `?cost=$` — and the
+data itself is `$.`, which is the path with no segments.
 
 | | |
 | --- | --- |
-| `$` | the data itself |
+| `$.` | the data itself |
 | `$.name` | a field |
 | `$.limits.maxQueued` | a field of a field |
 | `$.items[2]` | an element |
+
+(The first draft wrote the data itself as a bare `$`. It cannot coexist with a
+literal dollar: `100$</p>` and `$</table>` are the same three characters, and
+no rule reading left to right tells them apart. The trailing `.` costs one
+character and buys every dollar in every template.)
 
 **The type of what the path reaches decides how it goes in:**
 
@@ -127,9 +135,16 @@ fn row(line: Line) -> Html {
   fill("<tr><td class=at>$.at</td><td class=said>$.said</td></tr>", line)
 }
 
-// `$` is the data itself, so wrapping needs no struct
-fill("<div class=scroll><table class=log>$</table></div>", rows)
+// `$.` is the data itself, so wrapping needs no struct
+fill("<div class=scroll><table class=log>$.</table></div>", rows)
 ```
+
+**A path that reaches nothing is loud.** It renders
+`[no such path: $.what.was.asked]`, through the same escaper as every other
+hole so that it is inert between tags and inside an attribute's quotes. A
+silent empty string would hide the one kind of mistake this design can still
+make, and answering a `Result` would poison every call site of a function used
+once per element.
 
 **Paths, not positions.** An earlier draft used `$1`, `$2`. A path does not
 move when the markup is rearranged — reordering columns, adding a cell —
@@ -171,6 +186,16 @@ know what a doubled sigil means.
 
 **Nothing is built.** It is Cove source; it travels in the app's directory and
 the embedder checks it like any other module.
+
+**`fill` renders a value itself, and that is structural rather than a
+duplication.** Escaping what a path reaches needs the language's own text for
+an arbitrary value, and `std.dynamic`'s renderers take a `RenderPath`, which
+the lowering makes and nothing else does — `cove_schema::builtins` asserts that
+no `core.*` intrinsic answers one. A standard library module that is not the
+lowering's callee therefore cannot call them. `fill`'s own renderer agrees
+with `"{value}"` for everything a page carries; where `std.dynamic` uses the
+path to notice a vector holding itself, this bounds depth at sixteen and
+writes `…` past it.
 
 **The binding is a run-time check, and that is a deliberate trade.** A path
 that reaches nothing is a programming error a test catches, and `fill` can say
@@ -217,20 +242,24 @@ counting, but they swap silently when markup is rearranged.
 
 ## Open
 
-- **What `fill` does with a path that reaches nothing.** It can refuse, or
-  render something conspicuous. It should be loud; which kind of loud is for
-  the implementation.
+- **An `Html` is recognised by its shape, not its identity.**
+  `core.dynamicTypeName` answers a declared name with no module on it, so
+  `fill` asks instead for an opaque struct named `Html` holding one `String`.
+  A program that declares the same shape is indistinguishable — which costs
+  nothing it did not already have, since such a program could call `markup`
+  and be believed. A qualified type name would close it, and that is a
+  language change, not this ADR's.
 - **Whether `[n]` earns its place.** An `Array<Html>` goes in whole, so
   wanting one element of an array is rare, and an index is the one part of the
   path notation that invites logic into a template. It is included because it
   costs nothing; it is the first thing to drop if it is used for branching.
 - **`Json` needs one branch**, since its fields are a `Map` inside an enum
   case rather than a struct's.
-- **This is unverified end to end.** The pieces were each checked by
-  compiling — the `impl` rule, `positional_after_label`, the `?` collisions,
-  `$` needing no escape, and `core.dynamic*` being a std privilege — and a
-  positional prototype of `fill` was built and run against hostile input in an
-  embedder. The path version cannot be prototyped from an application, because
-  reflection is exactly what an application may not reach. Implementing it in
-  `std` with an `e2e` test is the next step, and this ADR should not be
-  accepted before that runs.
+- ~~This is unverified end to end.~~ **It is implemented**, in
+  `crates/cove-sema/std/html.cove`, with 23 cases in `tests/e2e/std_html`
+  passing on both backends: escaping between tags and inside an attribute's
+  quotes, a nested path, an index, an `Html` field going in whole, an
+  `Array<Html>`, `$.` as the data, a literal dollar surviving, the marker for
+  a path that reaches nothing, and a non-`String` scalar. One thing in the
+  Decision did not survive contact and is corrected above: the data itself is
+  `$.`, not `$`.

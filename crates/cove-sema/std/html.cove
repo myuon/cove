@@ -1,0 +1,686 @@
+// HTML: markup with a path in every hole, and one way past escaping.
+//
+// A page is written as two things that do not know about each other — a
+// function that answers an ordinary struct, and a string of markup whose holes
+// are paths into it. `fill` puts them together, and **the type of what a path
+// reaches decides whether it is escaped**: an `Html` goes in whole because it
+// is already markup, and everything else is rendered and escaped. So the
+// escaping decision is written once, where the data is declared, rather than
+// at each of the places the data is used.
+// [ADR 0099](../../../docs/adr/0099-a-page-is-markup-with-a-path-in-every-hole.md)
+// is the record of that and of what it was measured against.
+//
+// ```cove
+// use std.html
+// use std.html.Html
+//
+// struct Row {
+//   at: String
+//   said: String
+//   who: Html      // this one is markup, and the declaration says so
+// }
+//
+// fn row(line: Row) -> Html {
+//   html.fill("<tr><td class=at>$.at</td>$.who<td>$.said</td></tr>", line)
+// }
+// ```
+//
+// **The data itself is `$.` and not a bare `$`.** ADR 0099 wrote it `$`, and
+// that cannot be: a template is ordinary text, and a page of prices holds
+// `$5.00` and `100$`. One of the two had to give, and it was the sigil that
+// stands alone — a `$` is a hole only when a `.` follows it, which is one rule
+// read from either side and leaves every dollar in every template untouched.
+//
+// What this module is not: a template language. There is no `if` and no `for`
+// in a template, because the language already has both, and a second syntax to
+// parse, check, format and colour buys nothing that a `for` around a `fill`
+// does not. There is no element tree either — `<td class=at>` is written as
+// `<td class=at>`, not translated into a call. And nothing here renders a
+// page: `render` hands back the text, and what is done with it belongs to
+// whatever is serving.
+
+use std.stringbuilder.StringBuilder
+
+/// A piece of markup: text that `fill` will put in whole rather than escape.
+///
+/// It is `opaque`, which is the whole of its safety. The only values of this
+/// type are ones [`fill`] built and ones [`markup`] was told about, so
+/// `markup` is the single way text can reach a page unescaped — one name for a
+/// review to grep for, where an escaping helper called at 259 sites is 259
+/// places a reader has to decide about.
+export opaque struct Html {
+  /// The markup, as it will be written.
+  said: String
+}
+
+/// Markup that was written by hand, taken at its word.
+///
+/// **This is the one way past escaping**, so what it is given has to be markup
+/// already — a constant in the program, or something another `fill` built.
+/// Text that came from outside the program goes through [`fill`] as data,
+/// where it is escaped because its type is not this one.
+export fn markup(said: String) -> Html {
+  Html(said: said)
+}
+
+/// No markup at all: what a page puts where a part is absent.
+///
+/// A field of type `Html` has to hold something, and `""` is not an `Html`, so
+/// this is what a `None` becomes on the way into a view model.
+export fn empty() -> Html {
+  Html(said: "")
+}
+
+/// The text of a page, for whatever is going to serve it.
+///
+/// The one way out, as [`markup`] is the one way in. Everything between the
+/// two is `Html`, so nothing in the middle of building a page is a `String`
+/// that somebody might concatenate unescaped.
+export fn render(page: Html) -> String {
+  page.said
+}
+
+/// `template` with every hole filled from `data`.
+///
+/// **A hole is a `$` with a path after it**, and a `$` with no `.` after it is
+/// ordinary text — `$5.00` and `100$` come through as they were written, which
+/// is what a page full of prices needs. The paths are JSONPath's:
+///
+/// | written | what it reaches |
+/// | --- | --- |
+/// | `$.` | the data itself |
+/// | `$.name` | the field called `name` |
+/// | `$.limits.maxQueued` | a field of a field |
+/// | `$.items[2]` | the element at index 2 |
+///
+/// A segment's name is letters, digits and `_`, and an index is `[` digits
+/// `]`. A `$.` that is followed by neither is the data itself, which is how a
+/// bare `Array<Html>` is wrapped without inventing a struct to hold it.
+///
+/// **What goes in is decided by the type the path reaches**, never by the
+/// template:
+///
+/// | reached | what goes in |
+/// | --- | --- |
+/// | an `Html` | its text, whole and unescaped — it is already markup |
+/// | an `Array<Html>` or a `Vector<Html>` | each of them, in order, unescaped |
+/// | anything else | its text, with `&`, `<`, `>`, `"` and `'` escaped |
+///
+/// The escaping is the same inside an attribute value as between tags, which
+/// is why `"` and `'` are in that list: `<a title="$.said">` holds whatever
+/// `said` is, and nothing it can hold closes the quote.
+///
+/// A value that is not a `String` needs no stringifying by the caller — an
+/// `Int`, a `Bool`, a `Float` and a `Duration` are written as the language
+/// writes them, and so is a struct or an array of anything that is not markup.
+/// An empty `Array` or `Vector` puts in nothing rather than `[]`, because the
+/// list a page loops over is usually a list of rows and no rows should be no
+/// markup.
+///
+/// # A path that reaches nothing is loud
+///
+/// It renders `[no such path: $.whatever.was.asked]`, escaped like any other
+/// hole so that it can never open a tag. It is a visible marker and not a
+/// silent empty string because a misspelt field — `$.nmae` — is a programming
+/// error, and a page that quietly loses a column looks exactly like a page
+/// whose column was empty. The marker is the one form of that error a test, or
+/// a glance at the page, cannot miss.
+///
+/// **And it is a marker rather than a `Result`.** `fill` is called once per
+/// row and once per cell, so answering a `Result` would put a `?` or a `match`
+/// at every one of those sites, in code whose whole point is that it reads
+/// like the markup it produces — for an error that no input can cause and that
+/// the first run finds. The binding is checked at run time either way; this is
+/// only about who pays for it (ADR 0099's "The binding is a run-time check").
+export fn fill(template: String, data: Any) -> Html {
+  let end = template.byteLength()
+  var out = StringBuilder.withCapacity(end + 32)
+  let root = core.dynamicOpen(data)
+  var at = 0
+  var copied = 0
+  while at < end {
+    if opensHole(template, at, end) {
+      out.appendSlice(template, copied, at)
+      let stop = holeEnd(template, at + 2, end)
+      out.append(place(root, template, at, stop))
+      at = stop
+      copied = stop
+    } else {
+      at = at + 1
+    }
+  }
+  out.appendSlice(template, copied, end)
+  Html(said: out.finish())
+}
+
+/// Whether the byte at `at` begins a hole: a `$` with a `.` after it.
+///
+/// The `.` is what tells a hole from a dollar sign, and it is the whole of the
+/// rule. A `$` is a byte no character of any other value begins with, so this
+/// may walk `template` a byte at a time without decoding it.
+fn opensHole(template: String, at: Int, end: Int) -> Bool {
+  if template.byteAt(at) != '$' {
+    return false
+  }
+  if at + 1 >= end {
+    return false
+  }
+  template.byteAt(at + 1) == '.'
+}
+
+/// Where the hole that began at `$.` ends, given `at` just past the `.`.
+///
+/// The path is read rather than validated: a `.` with no name after it, or a
+/// `[` with no number and `]`, is not part of the hole and stays in the
+/// template as the text it is. So the hole is always exactly as long as what
+/// could be read, and [`place`] can quote it back verbatim.
+fn holeEnd(template: String, at: Int, end: Int) -> Int {
+  var stop = at
+  var more = true
+  while more {
+    let name = nameEnd(template, stop, end)
+    if name == stop {
+      return stop
+    }
+    stop = indexEnd(template, name, end)
+    more = false
+    if stop + 1 < end {
+      if template.byteAt(stop) == '.' {
+        if isNameByte(template.byteAt(stop + 1)) {
+          stop = stop + 1
+          more = true
+        }
+      }
+    }
+  }
+  stop
+}
+
+/// Where the run of name bytes starting at `at` ends, which is `at` itself
+/// when there is none.
+fn nameEnd(template: String, at: Int, end: Int) -> Int {
+  var stop = at
+  while stop < end {
+    if !isNameByte(template.byteAt(stop)) {
+      return stop
+    }
+    stop = stop + 1
+  }
+  stop
+}
+
+/// Where the run of `[` digits `]` starting at `at` ends.
+fn indexEnd(template: String, at: Int, end: Int) -> Int {
+  var stop = at
+  while stop < end {
+    if template.byteAt(stop) != '[' {
+      break
+    }
+    let digits = digitEnd(template, stop + 1, end)
+    if digits == stop + 1 || digits >= end {
+      break
+    }
+    if template.byteAt(digits) != ']' {
+      break
+    }
+    stop = digits + 1
+  }
+  stop
+}
+
+/// Where the run of digits starting at `at` ends, which is `at` itself when
+/// there is none.
+fn digitEnd(template: String, at: Int, end: Int) -> Int {
+  var stop = at
+  while stop < end {
+    if !isDigitByte(template.byteAt(stop)) {
+      return stop
+    }
+    stop = stop + 1
+  }
+  stop
+}
+
+/// Whether `byte` may appear in a path segment's name: a letter, a digit or
+/// `_`.
+fn isNameByte(byte: Int) -> Bool {
+  if isDigitByte(byte) {
+    return true
+  }
+  if byte == '_' {
+    return true
+  }
+  if byte >= 'a' {
+    return byte <= 'z'
+  }
+  if byte >= 'A' {
+    return byte <= 'Z'
+  }
+  false
+}
+
+/// Whether `byte` is one of `0` through `9`.
+fn isDigitByte(byte: Int) -> Bool {
+  if byte < '0' {
+    return false
+  }
+  byte <= '9'
+}
+
+/// The text the hole written from `from` to `to` puts in, escaped or not as
+/// what its path reaches decides.
+///
+/// The path is walked again here rather than carried out of [`holeEnd`],
+/// because the two answer different questions and a path is a handful of
+/// bytes: `holeEnd` says how much of the template the hole is, and this says
+/// what the hole reaches. Reading it twice keeps either from having to
+/// describe the other's state.
+fn place(root: DynamicView, template: String, from: Int, to: Int) -> String {
+  var view = root
+  var at = from + 2
+  while at < to {
+    let byte = template.byteAt(at)
+    if byte == '.' {
+      at = at + 1
+    } else if byte == '[' {
+      let close = digitEnd(template, at + 1, to)
+      let index = number(template, at + 1, close)
+      if !isList(core.dynamicKind(view)) {
+        return missing(template, from, to)
+      }
+      if index >= core.dynamicChildCount(view) {
+        return missing(template, from, to)
+      }
+      view = core.dynamicChild(view, index)
+      at = close + 1
+    } else {
+      let stop = nameEnd(template, at, to)
+      let field = fieldOf(view, core.stringSlice(template, at, stop - at))
+      if field < 0 {
+        return missing(template, from, to)
+      }
+      view = core.dynamicChild(view, field)
+      at = stop
+    }
+  }
+  placed(view)
+}
+
+/// The text a view puts in: markup whole, a list of markup one after another,
+/// and anything else rendered and escaped.
+fn placed(view: DynamicView) -> String {
+  if isHtml(view) {
+    return core.dynamicString(core.dynamicChild(view, 0))
+  }
+  if isList(core.dynamicKind(view)) {
+    let count = core.dynamicChildCount(view)
+    if count == 0 {
+      return ""
+    }
+    if everyChildIsHtml(view, count) {
+      var out = StringBuilder.withCapacity(16 * count)
+      var at = 0
+      while at < count {
+        let part = core.dynamicChild(view, at)
+        out.append(core.dynamicString(core.dynamicChild(part, 0)))
+        at = at + 1
+      }
+      return out.finish()
+    }
+  }
+  escape(renderValue(view, maxDepth()))
+}
+
+/// Whether `kind` is an `Array` or a `Vector`, the two a `$.items[2]` indexes
+/// and the two that can hold a list of markup.
+fn isList(kind: Int) -> Bool {
+  // Array, Vector
+  kind == 8 || kind == 9
+}
+
+/// Whether every one of `view`'s `count` children is an [`Html`].
+///
+/// Every child and not only the first: a list whose type is `Array<Html>` is
+/// settled by its first element, but a list of `Any` is not, and a list that
+/// is markup in part is not markup.
+fn everyChildIsHtml(view: DynamicView, count: Int) -> Bool {
+  var at = 0
+  while at < count {
+    if !isHtml(core.dynamicChild(view, at)) {
+      return false
+    }
+    at = at + 1
+  }
+  true
+}
+
+/// `[no such path: …]`, naming the hole as the template wrote it.
+///
+/// Escaped like every other hole, so a marker is inert wherever it lands —
+/// between tags or inside an attribute's quotes.
+fn missing(template: String, from: Int, to: Int) -> String {
+  escape("[no such path: {core.stringSlice(template, from, to - from)}]")
+}
+
+/// The number the digits from `at` up to `to` spell, stopping at
+/// [`tooFarAlong`].
+///
+/// A template is text somebody typed, so the digits in it are not bounded by
+/// anything, and `$.words[99999999999999999999]` must answer the marker rather
+/// than stop the run on an overflow. Nothing is lost by stopping: an index at
+/// the bound is past the end of every collection a run can hold, so it reaches
+/// nothing either way.
+fn number(template: String, at: Int, to: Int) -> Int {
+  var value = 0
+  var scan = at
+  while scan < to {
+    if value >= tooFarAlong() {
+      return tooFarAlong()
+    }
+    value = value * 10 + (template.byteAt(scan) - '0')
+    scan = scan + 1
+  }
+  value
+}
+
+/// An index no collection has: where [`number`] stops counting.
+fn tooFarAlong() -> Int {
+  1000000000000000
+}
+
+/// Which child of `view` is the field called `name`, or `-1`.
+///
+/// Only a struct has fields, and an `opaque` struct publishes none: a path
+/// stops at one rather than reading what its module did not export, which is
+/// what keeps `$.who.said` from reaching inside an [`Html`].
+fn fieldOf(view: DynamicView, name: String) -> Int {
+  // Struct
+  if core.dynamicKind(view) != 6 {
+    return -1
+  }
+  if core.dynamicOpaque(view) {
+    return -1
+  }
+  let count = core.dynamicChildCount(view)
+  var at = 0
+  while at < count {
+    if core.dynamicFieldName(view, at) == name {
+      return at
+    }
+    at = at + 1
+  }
+  -1
+}
+
+/// Whether `view` names an [`Html`]: the one type whose text goes in whole.
+///
+/// There is no type identity to ask for — `core.dynamicTypeName` answers a
+/// declared name with no module on it — so this asks for the whole shape this
+/// module's declaration has: an `opaque` struct called `Html` with one field,
+/// a `String`. A program that declares its own `export opaque struct Html {
+/// said: String }` would be taken for this one; nothing can tell them apart
+/// from here, and the cost of being wrong is that a program's own type is
+/// trusted as markup, which is a thing that program could have done with
+/// [`markup`] anyway.
+fn isHtml(view: DynamicView) -> Bool {
+  // Struct
+  if core.dynamicKind(view) != 6 {
+    return false
+  }
+  if !core.dynamicOpaque(view) {
+    return false
+  }
+  if core.dynamicTypeName(view) != "Html" {
+    return false
+  }
+  if core.dynamicChildCount(view) != 1 {
+    return false
+  }
+  // String
+  core.dynamicKind(core.dynamicChild(view, 0)) == 5
+}
+
+/// `text` with the five characters that mean something to a parser written as
+/// entities.
+///
+/// `&` first, because the others are written with one. `"` and `'` are here
+/// and not only `<` and `>`, because a hole is as likely to be an attribute's
+/// value as it is to be between tags, and `<a title="$.said">` has to hold a
+/// quote without ending the attribute.
+///
+/// Nothing is copied until the first character that needs one: text with none
+/// of the five — which most text is — is appended in one piece at the end.
+fn escape(text: String) -> String {
+  let end = text.byteLength()
+  var out = StringBuilder.withCapacity(end)
+  var at = 0
+  var copied = 0
+  while at < end {
+    let named = entity(text.byteAt(at))
+    if named != "" {
+      out.appendSlice(text, copied, at)
+      out.append(named)
+      copied = at + 1
+    }
+    at = at + 1
+  }
+  out.appendSlice(text, copied, end)
+  out.finish()
+}
+
+/// The entity `byte` is written as, or `""` where it is written as itself.
+fn entity(byte: Int) -> String {
+  if byte == '&' {
+    return "&amp;"
+  }
+  if byte == '<' {
+    return "&lt;"
+  }
+  if byte == '>' {
+    return "&gt;"
+  }
+  if byte == '"' {
+    return "&quot;"
+  }
+  if byte == 39 {
+    return "&#39;"
+  }
+  ""
+}
+
+/// How far [`renderValue`] descends before it writes `…`.
+///
+/// A value that holds itself through a `Vector` has no end to render, and the
+/// walk `std.dynamic` uses to say so needs the `RenderPath` the lowering hands
+/// it, which nothing in Cove can make. So this walk is bounded instead. Page
+/// data is a view model — a struct of scalars, or a list of them — and sixteen
+/// levels is far past anything a hole is given on purpose.
+fn maxDepth() -> Int {
+  16
+}
+
+/// The text the language writes for what `view` names: what `"{value}"` gives,
+/// kind for kind, down to [`maxDepth`] levels.
+///
+/// This is `std.dynamic`'s rendering written again rather than called, and
+/// that is not a choice. `std.dynamic.renderInto` takes a `RenderPath` — the
+/// path of vectors the walk that reached a box was inside — and a `RenderPath`
+/// is made by the lowering and by nothing else: `core` has no intrinsic that
+/// answers one, so a standard-library module that is not the lowering's callee
+/// cannot produce one to pass. What it costs is this function; what it buys is
+/// that a hole holding an `Int` needs no stringifying at the call site, which
+/// is the whole of the third row of [`fill`]'s table.
+fn renderValue(view: DynamicView, depth: Int) -> String {
+  let kind = core.dynamicKind(view)
+  // String
+  if kind == 5 {
+    return core.dynamicString(view)
+  }
+  // Int
+  if kind == 2 {
+    return "{core.dynamicInt(view)}"
+  }
+  // Bool
+  if kind == 1 {
+    return "{core.dynamicBool(view)}"
+  }
+  // Float
+  if kind == 3 {
+    return "{core.dynamicFloat(view)}"
+  }
+  // Duration
+  if kind == 4 {
+    return "{core.dynamicDuration(view)}"
+  }
+  // Unit
+  if kind == 0 {
+    return "()"
+  }
+  // Range
+  if kind == 12 {
+    let from = core.dynamicInt(core.dynamicChild(view, 0))
+    let to = core.dynamicInt(core.dynamicChild(view, 1))
+    if core.dynamicBool(core.dynamicChild(view, 2)) {
+      return "{from}..{to}"
+    }
+    return "{from}..<{to}"
+  }
+  // Function
+  if kind == 13 {
+    return "<fn>"
+  }
+  // Opaque
+  if kind == 14 {
+    return core.dynamicHandleText(view)
+  }
+  // Shared
+  if kind == 15 {
+    return "<shared>"
+  }
+  if depth <= 0 {
+    return "…"
+  }
+  // Struct
+  if kind == 6 {
+    return renderRecord(view, depth)
+  }
+  // Enum
+  if kind == 7 {
+    if core.dynamicChildCount(view) == 0 {
+      return core.dynamicCaseName(view)
+    }
+    return renderParts(view, core.dynamicCaseName(view), "(", ")", depth)
+  }
+  // Array
+  if kind == 8 {
+    return renderParts(view, "", "[", "]", depth)
+  }
+  // Vector
+  if kind == 9 {
+    return renderParts(view, "", "[", "]", depth)
+  }
+  // Set
+  if kind == 10 {
+    return renderParts(view, "", "\{", "\}", depth)
+  }
+  // Map
+  if kind == 11 {
+    return renderPairs(view, depth)
+  }
+  unnamedKind()
+  ""
+}
+
+/// [`renderValue`] of a struct: `Name(field: value, …)`, an `opaque` one as
+/// its name alone, and the builtin `Error` as its message — the three forms
+/// `Display for Value` has always written.
+fn renderRecord(view: DynamicView, depth: Int) -> String {
+  if core.dynamicOpaque(view) {
+    return core.dynamicTypeName(view)
+  }
+  let count = core.dynamicChildCount(view)
+  if count == 1 {
+    if core.dynamicTypeName(view) == "Error" {
+      if core.dynamicFieldName(view, 0) == "message" {
+        return renderValue(core.dynamicChild(view, 0), depth - 1)
+      }
+    }
+  }
+  var out = StringBuilder.withCapacity(16)
+  out.append(core.dynamicTypeName(view))
+  out.append("(")
+  var at = 0
+  while at < count {
+    if at > 0 {
+      out.append(", ")
+    }
+    out.append(core.dynamicFieldName(view, at))
+    out.append(": ")
+    out.append(renderValue(core.dynamicChild(view, at), depth - 1))
+    at = at + 1
+  }
+  out.append(")")
+  out.finish()
+}
+
+/// [`renderValue`] of a container whose children are written one after
+/// another: `head`, then `open`, the children separated by `, `, and `close`.
+fn renderParts(
+  view: DynamicView,
+  head: String,
+  open: String,
+  close: String,
+  depth: Int,
+) -> String {
+  let count = core.dynamicChildCount(view)
+  var out = StringBuilder.withCapacity(16)
+  out.append(head)
+  out.append(open)
+  var at = 0
+  while at < count {
+    if at > 0 {
+      out.append(", ")
+    }
+    out.append(renderValue(core.dynamicChild(view, at), depth - 1))
+    at = at + 1
+  }
+  out.append(close)
+  out.finish()
+}
+
+/// [`renderValue`] of a `Map`: `{key: value, …}`, whose children alternate
+/// key, value, key, value in the one ascending order a map has.
+fn renderPairs(view: DynamicView, depth: Int) -> String {
+  let count = core.dynamicChildCount(view)
+  var out = StringBuilder.withCapacity(16)
+  out.append("\{")
+  var at = 0
+  while at < count {
+    if at > 0 {
+      if at % 2 == 0 {
+        out.append(", ")
+      } else {
+        out.append(": ")
+      }
+    }
+    out.append(renderValue(core.dynamicChild(view, at), depth - 1))
+    at = at + 1
+  }
+  out.append("\}")
+  out.finish()
+}
+
+/// Stops the run: [`renderValue`] was handed a kind it does not name.
+///
+/// `std.dynamic.unclassified`'s reason, in this module's words. A kind is a
+/// name and never a range, so a code appended to `cove_ir::DynamicKind` does
+/// not quietly join whichever class its number falls beside — it comes here
+/// until somebody decides what a page does with it.
+fn unnamedKind() {
+  let none = ""
+  core.refuse(
+    "`std.html` was handed a value of a kind none of its walks names: this is a fault in Cove's standard library, not in the program",
+    none,
+    none,
+  )
+}

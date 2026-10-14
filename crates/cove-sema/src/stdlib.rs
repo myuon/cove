@@ -160,6 +160,18 @@ static SOURCES: &[StdSource] = &[
         path: "std/json.cove",
         text: include_str!("../std/json.cove"),
     },
+    // The second library in that ordinary sense, and the second module on
+    // [`IMPORTED`]: an opaque `Html` and the `fill` that puts a path in every
+    // hole of a template (ADR 0099). Like `std.json` it binds nothing in
+    // `cove_schema::builtins::STANDARD_LIBRARY` and nothing in the lowering
+    // names it — but unlike `std.json` it could be written nowhere else, since
+    // the `core.dynamic*` intrinsics `fill` reads its data with are a
+    // standard-library privilege (ADR 0069).
+    StdSource {
+        module: "std.html",
+        path: "std/html.cove",
+        text: include_str!("../std/html.cove"),
+    },
 ];
 
 /// The embedded text of the standard-library file [`attach`] adds as `path`,
@@ -222,7 +234,7 @@ pub fn is_library_module(module: &str) -> bool {
 /// the corpus surveys that count every program's functions (ADR 0097). A
 /// sliced lowering — what `cove run` and `cove test` do — never lowered them
 /// unreached in the first place.
-const IMPORTED: &[&str] = &["std.json"];
+const IMPORTED: &[&str] = &["std.json", "std.html"];
 
 /// Whether `module` is a standard-library module a program has only by
 /// importing it: the modules named in this file's `IMPORTED`, for the reason

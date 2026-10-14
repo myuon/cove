@@ -1,0 +1,24 @@
+ok    html.aDollarThatBeginsNoPathIsADollar
+ok    html.aListOfMarkupGoesInOneAfterAnother
+ok    html.aListThatIsNotMarkupIsEscaped
+ok    html.aPageIsBuiltOutOfPages
+ok    html.aPathDoesNotReachInsideAnOpaqueValue
+ok    html.aPathReachesAField
+ok    html.aPathReachesAFieldOfAField
+ok    html.aPathReachesAnElementByIndex
+ok    html.aPathStopsWhereItStopsReading
+ok    html.aPathThatReachesNothingSaysSo
+ok    html.aPathWithNoSegmentsIsTheDataItself
+ok    html.aQuoteDoesNotEscapeAnAttribute
+ok    html.aScriptInTheDataIsNotAScript
+ok    html.aStructIsEscapedLikeAnythingElse
+ok    html.aTemplateWithNoHoleIsItself
+ok    html.aValueThatIsNotAStringRenders
+ok    html.anEmptyListPutsInNothing
+ok    html.emptyIsNoMarkupAtAll
+ok    html.escapesWhatAPathReaches
+ok    html.isUsableAsAQualifiedModule
+ok    html.markupGoesInWhole
+ok    html.markupIsTakenAtItsWord
+ok    html.theMarkerCannotBreakOutOfWhereItLands
+ran 23 test(s), 23 passed
