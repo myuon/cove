@@ -35,6 +35,7 @@ mod foresee;
 mod gaps;
 mod generics;
 mod hosts;
+mod imported;
 mod inlining;
 mod layouts;
 mod limits;

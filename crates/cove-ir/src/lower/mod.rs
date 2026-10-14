@@ -176,19 +176,33 @@ impl Dest {
 /// slice. This one is what a whole-package listing means — everything the
 /// package declares is part of it — and it is what the lowering's own tests
 /// and the corpus survey ask for.
+///
+/// "Everything the package declares" has one exception: a standard-library
+/// module a program has only by importing it, such as `std.json`
+/// ([`cove_sema::stdlib::is_imported_library`]), is lowered only as far as the
+/// rest of the package reaches into it. Its declarations are not the
+/// package's own, and a program that never imports it does not have it. What
+/// the call graph cannot show — one of its functions passed as a value — is
+/// found the way [`lower_roots`] finds it: a round that names a declaration it
+/// left out adds it and lowers again.
 pub fn lower(
     checked: &Checked,
     sources: &SourceMap,
     schemas: &HostSchemas,
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut plan = Plan::index(checked);
-    let everything: HashSet<FunctionId> = (0..plan.decls.len())
-        .map(|at| FunctionId(at as u32))
-        .collect();
-    let Lowering {
-        program, errors, ..
-    } = emit(checked, sources, schemas, &mut plan, &everything);
-    finish(program, errors, Roots::Package, schemas)
+    let mut reach = plan.package(checked);
+    loop {
+        let Lowering {
+            program,
+            errors,
+            wanted,
+        } = emit(checked, sources, schemas, &mut plan, &reach);
+        if wanted.missing.is_empty() {
+            return finish(program, errors, Roots::Package, schemas);
+        }
+        reach.extend(wanted.missing);
+    }
 }
 
 /// [`lower`] stopped before [`finish`]: every body as it was emitted, before
@@ -201,10 +215,14 @@ pub fn lower(
 #[cfg(test)]
 pub(super) fn emitted(checked: &Checked, sources: &SourceMap, schemas: &HostSchemas) -> Program {
     let mut plan = Plan::index(checked);
-    let everything: HashSet<FunctionId> = (0..plan.decls.len())
-        .map(|at| FunctionId(at as u32))
-        .collect();
-    emit(checked, sources, schemas, &mut plan, &everything).program
+    let mut reach = plan.package(checked);
+    loop {
+        let lowering = emit(checked, sources, schemas, &mut plan, &reach);
+        if lowering.wanted.missing.is_empty() {
+            return lowering.program;
+        }
+        reach.extend(lowering.wanted.missing);
+    }
 }
 
 /// Lowers only the declarations `roots` can reach.
@@ -427,8 +445,9 @@ struct Lowering {
 struct Wants {
     /// The ones this pass had left out.
     ///
-    /// Empty for a whole-package lowering, because nothing is left out.
-    /// For a sliced one it is the correction: see [`lower_roots`].
+    /// Empty for a whole-package lowering unless it reached an imported
+    /// library module through a function value (see [`lower`]). For a sliced
+    /// one it is the correction: see [`lower_roots`].
     missing: HashSet<FunctionId>,
     /// Every declaration a body named, beside the declaration whose
     /// lowering named it — a lambda's and an instantiation's names counted
@@ -1034,6 +1053,44 @@ impl<'a> Plan<'a> {
     /// method whose body has moved into the standard library costs a
     /// program nothing extra unless a program actually calls it, which is
     /// the same promise every other builtin already keeps.
+    /// What a whole-package lowering starts from: every declaration, except
+    /// those of a standard-library module a program has only by importing it
+    /// ([`cove_sema::stdlib::is_imported_library`]).
+    ///
+    /// Those are not part of the package until something in it reaches them.
+    /// The call graph says where it does, and a callee it cannot see — a
+    /// function passed as a value — is what [`lower`]'s rounds add, exactly as
+    /// a sliced lowering's do.
+    fn package(&self, checked: &'a Checked) -> HashSet<FunctionId> {
+        let mut reach: HashSet<FunctionId> = self
+            .decls
+            .iter()
+            .enumerate()
+            .filter(|(_, decl)| !cove_sema::stdlib::is_imported_library(&decl.module))
+            .map(|(at, _)| FunctionId(at as u32))
+            .collect();
+        if reach.len() == self.decls.len() {
+            return reach;
+        }
+        let mut seen: BTreeSet<Node> = BTreeSet::new();
+        let mut stack: Vec<Node> = checked
+            .call_graph
+            .keys()
+            .filter(|(module, _)| !cove_sema::stdlib::is_imported_library(module))
+            .cloned()
+            .collect();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            if let Some(edges) = checked.call_graph.get(&node) {
+                stack.extend(edges.keys().cloned());
+            }
+        }
+        reach.extend(seen.iter().filter_map(|node| self.id_of(node)));
+        reach
+    }
+
     fn reachable_from(&self, checked: &'a Checked, roots: &[(&str, &str)]) -> HashSet<FunctionId> {
         let mut seen: BTreeSet<Node> = BTreeSet::new();
         let mut stack: Vec<Node> = roots

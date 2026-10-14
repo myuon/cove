@@ -1,6 +1,6 @@
 use cq.csv.formatRecord
-use cq.json.Json
-use cq.json.render
+use std.json.Json
+use std.json.render
 
 /// One value in an output row.
 ///

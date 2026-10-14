@@ -1,0 +1,705 @@
+use std.json
+use std.json.Json
+use std.json.asBool
+use std.json.asFields
+use std.json.asItems
+use std.json.asNumber
+use std.json.asText
+use std.json.asWhole
+use std.json.field
+use std.json.parse
+use std.json.render
+use std.json.renderPretty
+
+/// The text a value takes after `parse` and then `render`, or the failure
+/// `parse` reported as `column: message`.
+///
+/// One helper answers both, so a round trip that stopped being one says which
+/// diagnostic it got instead of merely differing from what was expected.
+fn roundTrip(text: String) -> String {
+  match parse(text) {
+    Ok(value) => render(value)
+    Err(detail) => "{detail.column}: {detail.message}"
+  }
+}
+
+/// The failure `parse` reports for `text`, as `column: message`.
+///
+/// The column and the message are pinned together because a diagnostic is
+/// only useful as a pair: a message that survives while its column drifts
+/// points an editor at the wrong character, and that is the same regression
+/// as losing the message.
+fn failure(text: String) -> String {
+  match parse(text) {
+    Ok(value) => "parsed as {render(value)}"
+    Err(detail) => "{detail.column}: {detail.message}"
+  }
+}
+
+/// The failure `parse` reports for `text`, as `line:column: message`.
+fn located(text: String) -> String {
+  match parse(text) {
+    Ok(value) => "parsed as {render(value)}"
+    Err(detail) => "{detail.line}:{detail.column}: {detail.message}"
+  }
+}
+
+/// `text` wrapped in `depth` levels of array.
+fn nested(depth: Int) -> String {
+  var text = "1"
+  for i in 0..<depth {
+    text = "[{text}]"
+  }
+  text
+}
+
+/// `text` wrapped in `depth` levels of object, each under the name `a`.
+fn nestedObjects(depth: Int) -> String {
+  var text = "1"
+  for i in 0..<depth {
+    text = "\{\"a\":{text}\}"
+  }
+  text
+}
+
+/// The value `text` parses to, or `Json.Null` when it does not parse.
+///
+/// A test that reaches for this has already pinned that `text` parses, so the
+/// failing case is the one the assertion reports rather than one this has to
+/// describe.
+fn parseOr(text: String) -> Json {
+  match parse(text) {
+    Ok(value) => value
+    Err(_) => Json.Null
+  }
+}
+
+/// The field `name` of `value` as JSON, or `no field` when there is none.
+fn renderField(value: Json, name: String) -> String {
+  match field(value, name) {
+    Some(found) => render(found)
+    None => "no field"
+  }
+}
+
+// ------------------------------------------------------------ every kind
+
+/// Every kind of JSON value survives being read and written again.
+test fn roundTripsEveryKindOfValue() -> Result<Unit, Error> {
+  assertEqual(roundTrip("\{\"id\":\"B-1\"\}"), "\{\"id\":\"B-1\"\}")?
+  assertEqual(roundTrip("[1,2,3]"), "[1,2,3]")?
+  assertEqual(
+    roundTrip("\{\"a\":\{\"b\":[true,null]\}\}"),
+    "\{\"a\":\{\"b\":[true,null]\}\}",
+  )?
+  assertEqual(roundTrip("null"), "null")?
+  assertEqual(roundTrip("true"), "true")?
+  assertEqual(roundTrip("false"), "false")?
+  assertEqual(roundTrip("-12.5"), "-12.5")?
+  assertEqual(roundTrip("\"text\""), "\"text\"")?
+  Ok(())
+}
+
+/// Each kind parses to its own case, so a program matching on the value sees
+/// what the text wrote.
+test fn parsesEveryKindToItsCase() -> Result<Unit, Error> {
+  assertEqual(parseOr("null"), Json.Null)?
+  assertEqual(parseOr("true"), Json.Bool(true))?
+  assertEqual(parseOr("2.5"), Json.Number(2.5))?
+  assertEqual(parseOr("\"x\""), Json.Text("x"))?
+  assertEqual(
+    parseOr("[1,\"a\"]"),
+    Json.Items([Json.Number(1.0), Json.Text("a")]),
+  )?
+  assertEqual(
+    parseOr("\{\"k\":false\}"),
+    Json.Fields(Map.of(MapEntry(key: "k", value: Json.Bool(false)))),
+  )?
+  Ok(())
+}
+
+/// An empty object and an empty array are values in their own right, and come
+/// back as themselves rather than as nothing.
+test fn roundTripsTheEmptyContainers() -> Result<Unit, Error> {
+  assertEqual(roundTrip("\{\}"), "\{\}")?
+  assertEqual(roundTrip("[]"), "[]")?
+  assertEqual(roundTrip("[\{\},[]]"), "[\{\},[]]")?
+  assertEqual(roundTrip("\"\""), "\"\"")?
+  Ok(())
+}
+
+/// Object fields come back in ascending order by name whatever order they
+/// arrived in, so two runs over the same input write the same bytes.
+test fn ordersObjectFieldsByName() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip("\{\"b\":1,\"a\":2,\"c\":3\}"),
+    "\{\"a\":2,\"b\":1,\"c\":3\}",
+  )?
+  Ok(())
+}
+
+// --------------------------------------------------------------- whitespace
+
+/// The four JSON whitespace characters are allowed around every token and
+/// around the whole value, and none of them reaches the value.
+test fn skipsJsonWhitespaceEverywhere() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip(" \t\r\n\{ \"a\" :\n[ 1 ,\t2 ] , \"b\" : \{ \} \}\r\n "),
+    "\{\"a\":[1,2],\"b\":\{\}\}",
+  )?
+  Ok(())
+}
+
+/// Whitespace JSON does not name is not whitespace here: a form feed and a
+/// no-break space are characters that start no value.
+test fn refusesWhitespaceJsonDoesNotName() -> Result<Unit, Error> {
+  assertEqual(failure("\u{c}1"), "1: `\u{c}` does not start a JSON value")?
+  assertEqual(failure("\u{a0}1"), "1: `\u{a0}` does not start a JSON value")?
+  Ok(())
+}
+
+// ------------------------------------------------------------------ strings
+
+/// The two-character escapes read as the characters they name and are written
+/// back the same way, so a string holding any of them makes it through a
+/// round trip unchanged.
+test fn roundTripsEveryShortEscape() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip("\"q\\\"b\\\\s\\nn\\tt\\rr\\bb\\ff\""),
+    "\"q\\\"b\\\\s\\nn\\tt\\rr\\bb\\ff\"",
+  )?
+  assertEqual(parseOr("\"\\b\\f\""), Json.Text("\u{8}\u{c}"))?
+  Ok(())
+}
+
+/// `\/` is an escape JSON allows and never needs, so it reads as `/` and `/`
+/// is written as itself.
+test fn readsAnEscapedSolidusAsItself() -> Result<Unit, Error> {
+  assertEqual(roundTrip("\"a\\/b\""), "\"a/b\"")?
+  Ok(())
+}
+
+/// A `\u` escape names a character by four hexadecimal digits of either case,
+/// and the character it names is written back as itself.
+test fn readsAUnicodeEscape() -> Result<Unit, Error> {
+  assertEqual(parseOr("\"\\u0041\""), Json.Text("A"))?
+  assertEqual(parseOr("\"\\u00e9\\u00E9\\u3042\""), Json.Text("ééあ"))?
+  assertEqual(roundTrip("\"caf\\u00e9\""), "\"café\"")?
+  assertEqual(parseOr("\"\\u0000\""), Json.Text("\0"))?
+  Ok(())
+}
+
+/// A character outside the Basic Multilingual Plane is two escapes, a high
+/// surrogate and then a low one, and the pair reads as one character.
+test fn joinsASurrogatePair() -> Result<Unit, Error> {
+  assertEqual(parseOr("\"\\ud83d\\ude00\""), Json.Text("😀"))?
+  assertEqual(parseOr("\"\\uD83D\\uDE00!\""), Json.Text("😀!"))?
+  assertEqual(parseOr("\"\\udbff\\udfff\""), Json.Text("\u{10ffff}"))?
+  assertEqual(roundTrip("\"\\ud800\\udc00\""), "\"\u{10000}\"")?
+  Ok(())
+}
+
+/// Half of a surrogate pair names no character, so it is refused at the
+/// escape rather than replaced with one the input did not hold.
+test fn refusesALoneSurrogate() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\"\\ud83d\""),
+    "2: `\\ud83d` is a high surrogate and must be followed by a `\\u` low surrogate",
+  )?
+  assertEqual(
+    failure("\"\\ud83dx\""),
+    "2: `\\ud83d` is a high surrogate and must be followed by a `\\u` low surrogate",
+  )?
+  assertEqual(
+    failure("\"\\ud83d\\n\""),
+    "2: `\\ud83d` is a high surrogate and must be followed by a `\\u` low surrogate",
+  )?
+  assertEqual(
+    failure("\"\\ud83d\\u0041\""),
+    "2: `\\ud83d` is a high surrogate and must be followed by a `\\u` low surrogate",
+  )?
+  assertEqual(
+    failure("\"\\ud83d\\ud83d\""),
+    "2: `\\ud83d` is a high surrogate and must be followed by a `\\u` low surrogate",
+  )?
+  assertEqual(
+    failure("\"a\\ude00\""),
+    "3: `\\ude00` is a low surrogate with no high surrogate before it",
+  )?
+  Ok(())
+}
+
+/// `\u` takes exactly four hexadecimal digits, and the column names the first
+/// character that is not one.
+test fn refusesAUnicodeEscapeWithoutFourDigits() -> Result<Unit, Error> {
+  assertEqual(failure("\"\\u12g4\""), "6: `\\u` needs four hexadecimal digits")?
+  assertEqual(failure("\"\\u12\""), "6: `\\u` needs four hexadecimal digits")?
+  assertEqual(failure("\"\\u+041\""), "4: `\\u` needs four hexadecimal digits")?
+  assertEqual(failure("\"\\u"), "4: `\\u` needs four hexadecimal digits")?
+  assertEqual(
+    failure("\"\\ud83d\\u12\""),
+    "12: `\\u` needs four hexadecimal digits",
+  )?
+  Ok(())
+}
+
+/// A backslash before anything that is not one of JSON's escapes is refused,
+/// quoting what it was before.
+test fn refusesAnEscapeJsonDoesNotHave() -> Result<Unit, Error> {
+  assertEqual(failure("\"\\x\""), "4: `\\x` is not a JSON escape")?
+  assertEqual(failure("\"\\é\""), "4: `\\é` is not a JSON escape")?
+  assertEqual(failure("\"\\"), "3: a backslash ended the line")?
+  Ok(())
+}
+
+/// A control character inside a string is refused where it stands, and its
+/// escape is read as the character it names.
+///
+/// JSON writes every character below U+0020 as an escape and never as itself,
+/// so a literal tab between two quotes is a string JSON did not write. The
+/// escaped forms still round trip, so what is refused is the spelling and not
+/// the character.
+test fn refusesAnUnescapedControlCharacter() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\"a\tb\""),
+    "3: a string may not hold an unescaped control character",
+  )?
+  assertEqual(roundTrip("\"a\\tb\""), "\"a\\tb\"")?
+  assertEqual(
+    failure("\"a\rb\""),
+    "3: a string may not hold an unescaped control character",
+  )?
+  assertEqual(roundTrip("\"a\\rb\""), "\"a\\rb\"")?
+  assertEqual(
+    failure("\"a\0\""),
+    "3: a string may not hold an unescaped control character",
+  )?
+  Ok(())
+}
+
+/// Every control character is escaped on the way out — with its short form
+/// where JSON has one and as `\u00XX` where it does not — and `DEL` and every
+/// character above it are written as themselves.
+test fn escapesEveryControlCharacterItWrites() -> Result<Unit, Error> {
+  assertEqual(render(Json.Text("\u{1}")), "\"\\u0001\"")?
+  assertEqual(render(Json.Text("a\u{1f}b")), "\"a\\u001fb\"")?
+  assertEqual(render(Json.Text("\0")), "\"\\u0000\"")?
+  assertEqual(render(Json.Text("\u{8}\u{c}")), "\"\\b\\f\"")?
+  assertEqual(render(Json.Text("\u{7f}é😀")), "\"\u{7f}é😀\"")?
+  Ok(())
+}
+
+/// Any text at all survives `render` and then `parse`, which is the property
+/// the escaping above exists for.
+test fn anyTextSurvivesARoundTrip() -> Result<Unit, Error> {
+  var original = "quote \" backslash \\ newline \n tab \t é😀 "
+  for point in 0..<32 {
+    original = "{original}{String.fromCodePoint(point).unwrapOr("")}"
+  }
+  assertEqual(parseOr(render(Json.Text(original))), Json.Text(original))?
+  assertEqual(parseOr(renderPretty(Json.Text(original))), Json.Text(original))?
+  Ok(())
+}
+
+/// A string the input ends inside is refused at the end.
+test fn refusesAStringTheLineNeverCloses() -> Result<Unit, Error> {
+  assertEqual(failure("\{\"a\":\"b"), "8: this string was never closed")?
+  assertEqual(failure("\""), "2: this string was never closed")?
+  Ok(())
+}
+
+// ------------------------------------------------------------------ numbers
+
+/// Every number JSON does write is read as the number it names, because a
+/// grammar checked by hand has to be pinned from both sides.
+///
+/// Each answer is the text the value renders back to rather than the text it
+/// arrived as, so an exponent is its value written out.
+test fn readsEveryNumberJsonDoesWrite() -> Result<Unit, Error> {
+  assertEqual(roundTrip("0"), "0")?
+  assertEqual(roundTrip("0.5"), "0.5")?
+  assertEqual(roundTrip("123"), "123")?
+  assertEqual(roundTrip("-1.25e-3"), "-0.00125")?
+  assertEqual(roundTrip("1E3"), "1000")?
+  assertEqual(roundTrip("1e+3"), "1000")?
+  assertEqual(roundTrip("1e-3"), "0.001")?
+  assertEqual(roundTrip("0e0"), "0")?
+  assertEqual(roundTrip("-0.0e+00"), "-0")?
+  assertEqual(roundTrip("1.5e2"), "150")?
+  assertEqual(roundTrip("2E-3"), "0.002")?
+  Ok(())
+}
+
+/// A number that is whole is written without a decimal point, because a
+/// reader that takes a count as an integer should get `3` and not `3.0`.
+test fn writesAWholeNumberWithoutADecimalPoint() -> Result<Unit, Error> {
+  assertEqual(roundTrip("3"), "3")?
+  assertEqual(roundTrip("3.0"), "3")?
+  assertEqual(roundTrip("184.0"), "184")?
+  assertEqual(roundTrip("-7.0"), "-7")?
+  assertEqual(roundTrip("129.5"), "129.5")?
+  Ok(())
+}
+
+/// Negative zero is a `Float` of its own, and it is written `-0` so that it
+/// reads back as itself rather than as zero.
+test fn keepsTheSignOfNegativeZero() -> Result<Unit, Error> {
+  assertEqual(roundTrip("-0"), "-0")?
+  assertEqual(render(Json.Number(-0.0)), "-0")?
+  assertEqual(render(Json.Number(0.0)), "0")?
+  assertEqual(roundTrip(render(Json.Number(-0.0))), "-0")?
+  Ok(())
+}
+
+/// An integer is a `Float` here, so one past 2^53 is rounded to the nearest
+/// `Float` and one past what an `Int` holds is written as the `Float` it is.
+///
+/// This is the cost of JSON's one number type, pinned: an identifier wider
+/// than 53 bits should travel as a string.
+test fn roundsAnIntegerPastWhatAFloatHoldsExactly() -> Result<Unit, Error> {
+  assertEqual(roundTrip("9007199254740992"), "9007199254740992")?
+  assertEqual(roundTrip("9007199254740993"), "9007199254740992")?
+  assertEqual(roundTrip("-9007199254740993"), "-9007199254740992")?
+  assertEqual(roundTrip("12345678901234567890"), "12345678901234567168.0")?
+  Ok(())
+}
+
+/// The largest exponent a `Float` holds is read, and comes back as the whole
+/// number it names; the smallest underflows to zero.
+///
+/// The bound refusing `1e999` sits beyond `1e308`, not anywhere nearer. The
+/// answer is 309 digits because this keeps the value and not the spelling, and
+/// it ends in `.0` because the value is past what an `Int` holds.
+test fn readsTheLargestExponentAFloatHolds() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip("1e308"),
+    "100000000000000001097906362944045541740492309677311846336810682903157585404911491537163328978494688899061249669721172515611590283743140088328307009198146046031271664502933027185697489699588559043338384466165001178426897626212945177628091195786707458122783970171784415105291802893207873272974885715430223118336.0",
+  )?
+  assertEqual(roundTrip("1e-400"), "0")?
+  Ok(())
+}
+
+/// A number JSON spells correctly and a `Float` cannot hold is refused at the
+/// column the number started on, rather than read as an infinity no input
+/// meant.
+test fn refusesANumberTooLargeForAFloat() -> Result<Unit, Error> {
+  assertEqual(failure("1e999"), "1: `1e999` is too large for a `Float` to hold")?
+  assertEqual(
+    failure("[-1e999]"),
+    "2: `-1e999` is too large for a `Float` to hold",
+  )?
+  Ok(())
+}
+
+/// A `Float` JSON cannot write — an infinity or `NaN` — is written `null`, so
+/// what `render` writes is always JSON.
+test fn writesANumberJsonCannotSpellAsNull() -> Result<Unit, Error> {
+  let infinity = 1.0e308 * 10.0
+  assertEqual(render(Json.Number(infinity)), "null")?
+  assertEqual(render(Json.Number(0.0 - infinity)), "null")?
+  assertEqual(render(Json.Number(infinity - infinity)), "null")?
+  Ok(())
+}
+
+/// A number must be spelled the way JSON spells one, and a run that is not is
+/// refused rather than read as the number it resembles.
+///
+/// `+1`, `01`, `.5`, and `1.` are each a `Float` literal `Float.parse`
+/// accepts and JSON does not write.
+test fn refusesANumberJsonWouldNotWrite() -> Result<Unit, Error> {
+  assertEqual(failure("+1"), "1: `+` does not start a JSON value")?
+  assertEqual(failure(".5"), "1: `.` does not start a JSON value")?
+  assertEqual(failure("01"), "2: a number may not have a leading zero")?
+  assertEqual(failure("-01"), "3: a number may not have a leading zero")?
+  assertEqual(failure("1."), "3: a decimal point needs a digit after it")?
+  assertEqual(failure("1.e5"), "3: a decimal point needs a digit after it")?
+  assertEqual(
+    failure("\{\"a\":01\}"),
+    "7: a number may not have a leading zero",
+  )?
+  Ok(())
+}
+
+/// An exponent needs a digit after it, whether the input ended first or a
+/// sign was all that followed.
+test fn refusesAnExponentWithNoDigit() -> Result<Unit, Error> {
+  assertEqual(failure("1e"), "3: an exponent needs a digit after it")?
+  assertEqual(failure("1e+"), "4: an exponent needs a digit after it")?
+  assertEqual(failure("[ 1e]"), "5: an exponent needs a digit after it")?
+  Ok(())
+}
+
+/// A `-` with no digit after it is refused where the digit should be.
+test fn refusesASignWithNoDigit() -> Result<Unit, Error> {
+  assertEqual(failure("-"), "2: a number needs a digit here")?
+  assertEqual(failure("-a"), "2: a number needs a digit here")?
+  Ok(())
+}
+
+/// The scanner stops at the end of a number rather than gathering every
+/// character that could appear in one, so `1-2` is a number followed by more.
+test fn refusesARunThatIsNotANumber() -> Result<Unit, Error> {
+  assertEqual(failure("1-2"), "2: this line has more after the JSON value")?
+  Ok(())
+}
+
+// ------------------------------------------------------------- structure
+
+/// Input with anything after its value is refused rather than read as the
+/// value with a comment on it.
+test fn refusesContentAfterTheValue() -> Result<Unit, Error> {
+  assertEqual(failure("1 2"), "3: this line has more after the JSON value")?
+  assertEqual(
+    failure("\{\"a\":1\} \{\}"),
+    "9: this line has more after the JSON value",
+  )?
+  Ok(())
+}
+
+/// Empty input holds no value, and says so where the value should start.
+test fn refusesAnEmptyInput() -> Result<Unit, Error> {
+  assertEqual(failure(""), "1: a JSON value was expected and the line ended")?
+  assertEqual(failure("   "), "4: a JSON value was expected and the line ended")?
+  assertEqual(failure("[1,"), "4: a JSON value was expected and the line ended")?
+  Ok(())
+}
+
+/// A literal that only starts like one of the three JSON names is refused as
+/// that name, so `nul` reports what was expected rather than what was found.
+test fn refusesALiteralThatIsNotOneOfTheThree() -> Result<Unit, Error> {
+  assertEqual(failure("nul"), "4: expected `null`")?
+  assertEqual(failure("tru"), "4: expected `true`")?
+  assertEqual(failure("fals"), "5: expected `false`")?
+  assertEqual(failure("True"), "1: `T` does not start a JSON value")?
+  assertEqual(failure("é"), "1: `é` does not start a JSON value")?
+  Ok(())
+}
+
+/// An object's names must be strings, each followed by `:` and a value, and
+/// the fields must be separated by `,` with none after the last.
+test fn refusesAMalformedObject() -> Result<Unit, Error> {
+  assertEqual(failure("\{1:2\}"), "2: a field name must be a quoted string")?
+  assertEqual(failure("\{a:2\}"), "2: a field name must be a quoted string")?
+  assertEqual(failure("\{\"a\" 1\}"), "6: a field name must be followed by `:`")?
+  assertEqual(failure("\{\"a\":\}"), "6: `\}` does not start a JSON value")?
+  assertEqual(
+    failure("\{\"a\":1 \"b\":2\}"),
+    "8: expected `,` or `\}` after a field",
+  )?
+  assertEqual(
+    failure("\{\"a\":1,\}"),
+    "8: a field name must be a quoted string",
+  )?
+  assertEqual(failure("\{\"a\":1"), "7: expected `,` or `\}` after a field")?
+  Ok(())
+}
+
+/// An array's elements must be separated by `,` with none after the last, and
+/// an array the input ends inside is refused where the `]` should have been.
+test fn refusesAMalformedArray() -> Result<Unit, Error> {
+  assertEqual(failure("[1,2"), "5: expected `,` or `]` after an element")?
+  assertEqual(failure("[1 2]"), "4: expected `,` or `]` after an element")?
+  assertEqual(failure("[1,]"), "4: `]` does not start a JSON value")?
+  assertEqual(failure("[,1]"), "2: `,` does not start a JSON value")?
+  Ok(())
+}
+
+/// A value nested deeper than the bound is refused rather than recursed into.
+///
+/// The bound counts the value at the bottom too, so 63 arrays around a number
+/// is 64 levels and passes, and one more is 65 and does not. Objects count the
+/// same as arrays.
+test fn refusesNestingDeeperThanItsBound() -> Result<Unit, Error> {
+  assertEqual(roundTrip(nested(63)), nested(63))?
+  assertEqual(
+    failure(nested(64)),
+    "65: this value nests more than 64 levels deep",
+  )?
+  assertEqual(
+    failure(nested(500)),
+    "65: this value nests more than 64 levels deep",
+  )?
+  assertEqual(roundTrip(nestedObjects(63)), nestedObjects(63))?
+  assertEqual(
+    failure(nestedObjects(64)),
+    "321: this value nests more than 64 levels deep",
+  )?
+  Ok(())
+}
+
+/// A failure in text that spans lines says which line, and counts its column
+/// from the start of that line — in characters, not bytes.
+test fn locatesAFailureByLineAndColumn() -> Result<Unit, Error> {
+  assertEqual(located("[1, x]"), "1:5: `x` does not start a JSON value")?
+  assertEqual(
+    located("[\n  1,\n  x\n]"),
+    "3:3: `x` does not start a JSON value",
+  )?
+  assertEqual(located("\{\n  \"é\": tru\n\}"), "2:11: expected `true`")?
+  assertEqual(located("[1]\n\n"), "parsed as [1]")?
+  assertEqual(
+    located("[1]\n\n2"),
+    "3:1: this line has more after the JSON value",
+  )?
+  Ok(())
+}
+
+// --------------------------------------------------------------- duplicates
+
+/// An object that names a field twice has no one value for it, so it is
+/// refused at the second name rather than keeping either value — even when
+/// the two values agree.
+test fn refusesAFieldNamedTwice() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\{\"p99\": 1, \"p99\": 2\}"),
+    "12: the field `p99` appears twice in one object",
+  )?
+  assertEqual(
+    failure("\{\"a\":1,\"b\":2,\"a\":1\}"),
+    "14: the field `a` appears twice in one object",
+  )?
+  assertEqual(
+    located("\{\n  \"a\": 1,\n  \"a\": 2\n\}"),
+    "3:3: the field `a` appears twice in one object",
+  )?
+  Ok(())
+}
+
+/// Names are compared after escapes are read, so two spellings of one name
+/// are one name; and the rule is per object, so the same name in two objects
+/// is two fields.
+test fn comparesNamesAsTheTextTheySpell() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\{\"a\":1,\"\\u0061\":2\}"),
+    "8: the field `a` appears twice in one object",
+  )?
+  assertEqual(
+    roundTrip("\{\"a\": \{\"p99\": 1\}, \"p99\": 2\}"),
+    "\{\"a\":\{\"p99\":1\},\"p99\":2\}",
+  )?
+  assertEqual(
+    roundTrip("[\{\"a\":1\},\{\"a\":2\}]"),
+    "[\{\"a\":1\},\{\"a\":2\}]",
+  )?
+  Ok(())
+}
+
+/// The value after a repeated name is read before the repetition is found,
+/// so a repeated name whose value is also malformed reports the value.
+test fn readsTheValueBeforeFindingTheRepetition() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\{\"a\":1,\"a\":x\}"),
+    "12: `x` does not start a JSON value",
+  )?
+  Ok(())
+}
+
+// ------------------------------------------------------------- rendering
+
+/// `renderPretty` puts every element and field on its own line, two spaces a
+/// level, with `": "` after a name and the empty containers kept on one line.
+test fn rendersIndented() -> Result<Unit, Error> {
+  let value = parseOr("\{\"b\":[1,2],\"a\":\{\}\}")
+  assertEqual(
+    renderPretty(value),
+    "\{\n  \"a\": \{\},\n  \"b\": [\n    1,\n    2\n  ]\n\}",
+  )?
+  assertEqual(
+    renderPretty(parseOr("[[],[\{\"x\":null\}]]")),
+    "[\n  [],\n  [\n    \{\n      \"x\": null\n    \}\n  ]\n]",
+  )?
+  Ok(())
+}
+
+/// A value with no structure is written by `renderPretty` as `render` writes
+/// it, on one line with no newline after it.
+test fn rendersAScalarPrettyAsItself() -> Result<Unit, Error> {
+  assertEqual(renderPretty(Json.Null), "null")?
+  assertEqual(renderPretty(Json.Number(1.5)), "1.5")?
+  assertEqual(renderPretty(Json.Text("a\nb")), "\"a\\nb\"")?
+  assertEqual(renderPretty(Json.Items([])), "[]")?
+  assertEqual(renderPretty(Json.Fields(Map.of())), "\{\}")?
+  Ok(())
+}
+
+/// Both renderers write text `parse` reads back as the value they were given,
+/// and the compact form of the pretty form's value is the compact form.
+test fn bothRenderersRoundTrip() -> Result<Unit, Error> {
+  let text = "\{\"name\":\"caf\\u00e9 \\\"x\\\"\",\"tags\":[\"a\",\"\\n\"],\"n\":[1,-2.5,1e3,-0],\"deep\":\{\"x\":\{\"y\":[[],\{\}]\}\},\"ok\":true,\"none\":null\}"
+  let value = parseOr(text)
+  assert(value != Json.Null)?
+  assertEqual(parseOr(render(value)), value)?
+  assertEqual(parseOr(renderPretty(value)), value)?
+  assertEqual(render(parseOr(renderPretty(value))), render(value))?
+  assertEqual(
+    render(value),
+    "\{\"deep\":\{\"x\":\{\"y\":[[],\{\}]\}\},\"n\":[1,-2.5,1000,-0],\"name\":\"café \\\"x\\\"\",\"none\":null,\"ok\":true,\"tags\":[\"a\",\"\\n\"]\}",
+  )?
+  Ok(())
+}
+
+// ---------------------------------------------------------------- accessors
+
+/// `field` answers the value under a name, `None` for a name an object does
+/// not carry, and `None` for a value that has no fields at all.
+test fn readsAFieldOnlyOutOfAnObject() -> Result<Unit, Error> {
+  let record = parseOr("\{\"a\":1,\"b\":\"two\"\}")
+  assertEqual(renderField(record, "b"), "\"two\"")?
+  assertEqual(renderField(record, "c"), "no field")?
+  assertEqual(renderField(parseOr("[1]"), "a"), "no field")?
+  assertEqual(renderField(parseOr("null"), "a"), "no field")?
+  Ok(())
+}
+
+/// Each accessor answers its own kind's payload and `None` for every other
+/// kind.
+test fn readsEachKindThroughItsAccessor() -> Result<Unit, Error> {
+  assertEqual(asText(Json.Text("x")), Some("x"))?
+  assertEqual(asText(Json.Number(1.0)), None)?
+  assertEqual(asNumber(Json.Number(2.5)), Some(2.5))?
+  assertEqual(asNumber(Json.Text("2.5")), None)?
+  assertEqual(asBool(Json.Bool(false)), Some(false))?
+  assertEqual(asBool(Json.Null), None)?
+  assertEqual(asItems(parseOr("[1]")), Some([Json.Number(1.0)]))?
+  assertEqual(asItems(parseOr("\{\}")), None)?
+  assertEqual(
+    asFields(parseOr("\{\"a\":null\}")),
+    Some(Map.of(MapEntry(key: "a", value: Json.Null))),
+  )?
+  assertEqual(asFields(parseOr("[]")), None)?
+  Ok(())
+}
+
+/// `asWhole` answers a number that is a whole `Int` and nothing else: a
+/// fraction is not rounded and a number past an `Int` is not clamped.
+test fn readsAWholeNumberOnlyWhenItIsOne() -> Result<Unit, Error> {
+  assertEqual(asWhole(parseOr("3")), Some(3))?
+  assertEqual(asWhole(parseOr("3.0")), Some(3))?
+  assertEqual(asWhole(parseOr("-4e2")), Some(-400))?
+  assertEqual(asWhole(parseOr("3.5")), None)?
+  assertEqual(asWhole(parseOr("1e300")), None)?
+  assertEqual(asWhole(parseOr("\"3\"")), None)?
+  Ok(())
+}
+
+/// The module imported whole reaches every one of these by its qualified
+/// name, which is how the module's own documentation uses it.
+test fn isUsableAsAQualifiedModule() -> Result<Unit, Error> {
+  let nights = match json.parse("\{\"nights\":3\}") {
+    Ok(record) => {
+      match json.field(record, "nights") {
+        Some(value) => json.asWhole(value)
+        None => None
+      }
+    }
+    Err(_) => None
+  }
+  assertEqual(nights, Some(3))?
+  let detail = match json.parse("[") {
+    Ok(_) => json.Detail(line: 0, column: 0, message: "")
+    Err(found) => found
+  }
+  assertEqual(detail.line, 1)?
+  assertEqual(detail.column, 2)?
+  Ok(())
+}

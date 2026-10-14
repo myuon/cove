@@ -1029,7 +1029,7 @@ mod tests {
     /// The first of the two kinds of word a clear cannot free: one holding
     /// the address of a literal placed once for the run and never freed.
     ///
-    /// This is `cq.json.isSpace`, which does it four times a call.
+    /// This is `std.json.isSpace`, which does it four times a call.
     #[test]
     fn a_slot_holding_an_interned_string_is_not_cleared() {
         assert_eq!(

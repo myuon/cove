@@ -1,3 +1,5 @@
+use std.json
+
 /// Where in one line something went wrong, and what.
 ///
 /// A parser knows the column and not the line: it is handed one record at a
@@ -6,6 +8,14 @@
 export struct Detail {
   column: Int
   message: String
+}
+
+/// What `std.json` reported about one record, as this program's `Detail`.
+///
+/// A record is one line, so `std.json`'s `line` is always 1 and the column is
+/// the part worth keeping; the line in the file is `locate`'s to supply.
+export fn fromJson(detail: json.Detail) -> Detail {
+  Detail(column: detail.column, message: detail.message)
 }
 
 /// A detail, once the record it came from is known.

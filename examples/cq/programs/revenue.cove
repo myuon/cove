@@ -1,9 +1,10 @@
 use cq.diag.Detail
-use cq.json.parse
+use cq.diag.fromJson
 use cq.records.Status
 use cq.records.bookingFrom
 use cq.rows.Cell
 use cq.rows.Step
+use std.json.parse
 
 /// What a revenue summary accumulates.
 ///
@@ -37,7 +38,11 @@ export fn foldRevenue(
   line: String,
   number: Int,
 ) -> Result<Step<Revenue>, Detail> {
-  let booking = bookingFrom(parse(line)?)?
+  let record = match parse(line) {
+    Ok(value) => value
+    Err(detail) => return Err(fromJson(detail))
+  }
+  let booking = bookingFrom(record)?
   match booking.status {
     Status.Cancelled => Ok(Step(state: state, rows: []))
     _ => {

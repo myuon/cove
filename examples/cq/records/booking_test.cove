@@ -1,4 +1,4 @@
-use cq.json.parse
+use std.json.parse
 
 /// The booking `line` holds, or the failure that stopped it, as an `Error`
 /// carrying `column: message`.

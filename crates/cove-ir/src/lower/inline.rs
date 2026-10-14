@@ -238,7 +238,7 @@ const LIMIT: usize = 16;
 /// It is a rule about *which function is the entry*, and nothing about which
 /// functions the native tier would compile: the lowering does not know the
 /// tier's subset and does not ask. A function the tier refuses for its own
-/// reasons — `examples/cq`'s `cq.json.parseValue`, over a `FuncRef` — runs
+/// reasons — `std.json.parseValue`, which `examples/cq` runs, over a `FuncRef` — runs
 /// encoded too and takes `LOOP_LIMIT`'s expansions like any other; finding
 /// those would mean teaching the lowering the tier's refusal list, and this
 /// does not.

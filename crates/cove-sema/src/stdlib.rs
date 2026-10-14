@@ -150,6 +150,16 @@ static SOURCES: &[StdSource] = &[
         path: "std/dynamic.cove",
         text: include_str!("../std/dynamic.cove"),
     },
+    // The third that is not a receiver's methods, and the first that is a
+    // library in the ordinary sense: a value type and the functions over it,
+    // which a program imports as `std.json` (ADR 0097). It binds nothing in
+    // `cove_schema::builtins::STANDARD_LIBRARY`, and nothing in the lowering
+    // names it, so it is on [`IMPORTED`].
+    StdSource {
+        module: "std.json",
+        path: "std/json.cove",
+        text: include_str!("../std/json.cove"),
+    },
 ];
 
 /// The embedded text of the standard-library file [`attach`] adds as `path`,
@@ -195,6 +205,30 @@ pub fn module_names() -> &'static [&'static str] {
 /// source.
 pub fn is_library_module(module: &str) -> bool {
     module_names().contains(&module)
+}
+
+/// The standard-library modules a program has only by importing them.
+///
+/// Every other module here is part of the language: `cove_schema` binds a
+/// builtin method to it, or the lowering names it — an interpolation's
+/// appends are `std.stringbuilder`'s, `==` on two erased values is
+/// `std.dynamic`'s. A module on this list is neither. It is a library in the
+/// ordinary sense, and a program that does not `use` it does not have it.
+///
+/// What that changes is a whole-package lowering, `cove_ir::lower`, which
+/// lowers every declaration the package holds. It lowers this list's
+/// declarations only where the rest of the package reaches them, so a module
+/// a program never imports does not appear in its listing, its layouts, or
+/// the corpus surveys that count every program's functions (ADR 0097). A
+/// sliced lowering — what `cove run` and `cove test` do — never lowered them
+/// unreached in the first place.
+const IMPORTED: &[&str] = &["std.json"];
+
+/// Whether `module` is a standard-library module a program has only by
+/// importing it: the modules named in this file's `IMPORTED`, for the reason
+/// written there.
+pub fn is_imported_library(module: &str) -> bool {
+    IMPORTED.contains(&module)
 }
 
 /// Whether module `from` may name `owner`'s declarations that are not

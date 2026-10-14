@@ -1,6 +1,6 @@
-use cq.json.Json
-use cq.json.field
-use cq.json.parse
+use std.json.Json
+use std.json.field
+use std.json.parse
 
 /// One endpoint a run asks about, what its answer has to look like, and how
 /// long the run waits for one.

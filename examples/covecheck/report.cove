@@ -1,5 +1,5 @@
-use cq.json.Json
-use cq.json.render
+use std.json.Json
+use std.json.render
 
 /// Which of the two reports a run writes.
 export enum Format {
@@ -63,7 +63,7 @@ fn textReport(source: String, run: Run) -> String {
 
 /// The report another program reads.
 ///
-/// `cq.json`'s renderer writes an object's fields in `Map` order, which is
+/// `std.json`'s renderer writes an object's fields in `Map` order, which is
 /// ascending by key, so two runs over the same manifest write the same bytes
 /// and a diff of two reports is a diff of two runs.
 fn jsonReport(source: String, run: Run) -> String {

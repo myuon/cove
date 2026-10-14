@@ -1,6 +1,6 @@
 use cq.diag.Detail
-use cq.json.Json
-use cq.json.field
+use std.json.Json
+use std.json.field
 
 /// A booking, as this program requires one to be.
 ///

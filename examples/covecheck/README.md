@@ -173,11 +173,10 @@ record per line, so what is wrong is a path through that document and not a
 place in the file — which is a smaller diagnostic than [`cq`](../cq/README.md)
 gives, for a smaller reason to give one.
 
-The parser is `cq.json`, imported rather than written again. A second JSON
-parser in this package would test nothing the first one does not, and
-`cq.json` already refuses rather than guesses about the four number forms JSON
-does not write. This is the second cross-example import in `examples/`, after
-`restricted/` importing `text/`.
+The parser is `std.json`, the standard library's. It was `cq.json`, imported
+from [`cq`](../cq/README.md) rather than written again, until issue #647 moved
+that module into the standard library; it refuses rather than guesses about the
+four number forms JSON does not write.
 
 ## What a check could not say, and what closed it
 
