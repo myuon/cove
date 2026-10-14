@@ -1931,7 +1931,13 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// import it lowers none of it (`cove_sema::stdlib::is_imported_library`).
 /// Before that rule this rise was 8,480, about 31 copies in every one of the
 /// 271 programs.
-const FORWARDABLE_COPIES: usize = 7570;
+///
+/// **7,571 since covefmt stopped counting the commas flattening drops**
+/// (issue #651), a rise of 1 that is all program and no lowering. With
+/// covefmt's new `a_dropped_comma_is_no_column` held out and the fix to
+/// `flatWidth` kept, the corpus answers 7,570, the bound exactly; the test is
+/// the +1, in `tools/covefmt:covefmtBench`'s `ret` (155 to 156).
+const FORWARDABLE_COPIES: usize = 7571;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

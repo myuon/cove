@@ -473,6 +473,33 @@ test fn a_group_that_fits_goes_back_on_one_line() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A group's width does not count the commas flattening drops.**
+///
+/// Every trailing comma inside a broken group goes, the inner groups' as
+/// well as its own, so a call broken around a broken call is as wide as the
+/// line it flattens to. Counting the inner `,` made this one 81 columns where
+/// it is 80, so the first `cove fmt` wrote the `Err(` broken around a line
+/// of its own and the second, with that comma gone, joined it back up. Both
+/// layouts, formatted, are the one line `cove_syntax::format` writes, and
+/// that line is a fixed point. Issue 651.
+test fn a_dropped_comma_is_no_column() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn f() \{", "  Err(scan.detailAt(start, \"this call is on a line of exactly eighty columns.\"))", "\}", ""])
+  let hugged = "\n".join(["fn f() \{", "  Err(scan.detailAt(", "    start,", "    \"this call is on a line of exactly eighty columns.\",", "  ))", "\}", ""])
+  let wrapped = "\n".join(["fn f() \{", "  Err(", "    scan.detailAt(start, \"this call is on a line of exactly eighty columns.\"),", "  )", "\}", ""])
+  let heldHugged = lex(hugged)
+  assertEqual(
+    print(hugged, heldHugged, parseTokens(hugged, heldHugged.tokens)),
+    flat,
+  )?
+  let heldWrapped = lex(wrapped)
+  assertEqual(
+    print(wrapped, heldWrapped, parseTokens(wrapped, heldWrapped.tokens)),
+    flat,
+  )?
+  assert(roundTrips(flat))?
+  Ok(())
+}
+
 /// **What does not fit stays broken, and the rest of the line counts.**
 ///
 /// A parameter list that fits on its own can still be one that does not fit:
