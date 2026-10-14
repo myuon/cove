@@ -1,0 +1,26 @@
+ok    html.aDotAloneIsTheDataItself
+ok    html.aListOfMarkupGoesInOneAfterAnother
+ok    html.aListThatIsNotMarkupIsEscaped
+ok    html.aMarkerCannotBreakOutOfWhereItLands
+ok    html.aPageIsBuiltOutOfPages
+ok    html.aPathDoesNotReachInsideAnOpaqueValue
+ok    html.aPathReachesAField
+ok    html.aPathReachesAFieldOfAField
+ok    html.aPathReachesAnElementByIndex
+ok    html.aPathThatReachesNothingSaysSo
+ok    html.aQuoteDoesNotEscapeAnAttribute
+ok    html.aScriptInTheDataIsNotAScript
+ok    html.aStructIsEscapedLikeAnythingElse
+ok    html.aTemplateWithNoHoleIsItself
+ok    html.aValueThatIsNotAStringRenders
+ok    html.anEmptyListPutsInNothing
+ok    html.anUnclosedOpenerSaysSo
+ok    html.emptyIsNoMarkupAtAll
+ok    html.escapesWhatAPathReaches
+ok    html.everythingOutsideTheDelimitersIsText
+ok    html.isUsableAsAQualifiedModule
+ok    html.markupGoesInWhole
+ok    html.markupIsTakenAtItsWord
+ok    html.textThatIsNotAPathIsTheSameMarker
+ok    html.theSpaceInsideTheDelimitersIsTrimmed
+ran 25 test(s), 25 passed
