@@ -697,13 +697,13 @@ conservative, local one (`cove::unique::not_unique`), and it is made where
 the `freeze()` is written:
 
 - the vector originates at a creation in the same function — `Vector.of(...)`,
-  `array.toVector()`, `snapshot()`, a field of a struct literal initialised
-  by one, or a call to a function the compiler has proved answers fresh
+  `Vector.filled(n, value)`, `array.toVector()`, `snapshot()`, a field of a
+  struct literal initialised by one, or a call to a function the compiler has proved answers fresh
   storage. A function is proved to when every value it answers — its tail and
   every `return` — is itself one of these creations, or names a local of its
   own for which this same list holds up to the answer, the answer standing in
-  for the `freeze()`. So `fn filled(n: Int) -> Vector<Int> { var out =
-  Vector.of(); ...; out }` answers fresh storage, and `var a = filled(3)` then
+  for the `freeze()`. So `fn counted(n: Int) -> Vector<Int> { var out =
+  Vector.of(); ...; out }` answers fresh storage, and `var a = counted(3)` then
   `a.freeze()` is proved;
 - no `let`, `var`, assignment or `match` pattern made a second handle from
   it;

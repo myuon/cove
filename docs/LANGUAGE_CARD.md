@@ -105,6 +105,10 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 - Primitive values, strings, enums, and structs have value semantics.
 - `Array<T>` is fixed-length and immutable; `[1, 2]` is an array.
 - `Vector<T>` is growable and mutable; `Vector.of(1, 2)` constructs one.
+  `Vector.filled(n, value)` constructs one of `n` elements, each `value` — the
+  same value `n` times, so a filled `Vector` of vectors holds one row `n`
+  times over; `n == 0` is empty and a negative `n` stops the program. Both
+  are fresh storage, so `freeze()` on either is the O(1) one.
 - `Array`, `Vector`, `String`, and ranges all answer `length()`.
 - `contains(element)` answers whether a collection holds a value equal to
   `element`, under `==`. `Array`, `Vector`, `Map`, `Set`, and `String` all

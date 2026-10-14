@@ -1,0 +1,21 @@
+use console.println
+
+/// A vector of `n` noughts. Not the standard library: an ordinary Cove
+/// function with a caller, between `main` and the operation that refuses, so
+/// that the diagnostic below has a frame to blame that is neither the entry
+/// point nor the machine.
+fn noughts(n: Int) -> Vector<Int> {
+  Vector.filled(n, 0)
+}
+
+/// Pins `Vector.filled`'s refusal of a negative length, word for word (#649).
+///
+/// A negative `n` names no length, so it is the call that is wrong rather
+/// than an answer to give — an empty vector would hide the mistake — and the
+/// run stops through `core.refuse`, as `fail_float_format_digits` does. One
+/// case, because a refusal stops the run and takes every row after it;
+/// `coll_vector_filled` holds the half that answers.
+export fn main() -> Result<Unit, Error> {
+  println("{noughts(-1)}")?
+  Ok(())
+}

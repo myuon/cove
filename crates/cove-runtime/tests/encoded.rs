@@ -339,12 +339,19 @@ fn the_run_writes_the_recording_a_run_writes() {
     // length. It is the cost that ADR records as accepted, and this fixture
     // pays it without parsing a `Float` because a whole-package lowering
     // places every function's literals.
+    //
+    // It is 3,035 since issue #649 added `Vector.filled`, and the twenty words
+    // are the three literals `std.vector.filled`'s refusal of a negative length
+    // is built from: the two pieces its sentence is interpolated between —
+    // `` `Vector.filled` cannot make a vector of ` ``, 41 bytes and seven
+    // words, and `` ` elements ``, 10 and three — and its rule, 68 bytes and
+    // ten words. This fixture calls nothing of it, for the reason above.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(3015), capacity_words: Some(3015) }"
+            "HeapSummary { collections: 0, allocated_words: Some(3035), capacity_words: Some(3035) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

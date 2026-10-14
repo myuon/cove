@@ -1906,7 +1906,15 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// covefmt's new `written_parentheses_are_kept` held out the corpus answers
 /// 7,569, the bound exactly, and that with `scan.cove`'s condition already
 /// back in its parenthesised form; the test is the +1.
-const FORWARDABLE_COPIES: usize = 7570;
+///
+/// **7,618 since `Vector.filled(n, value)`** (issue #649), a rise of 48 that
+/// is all program and no lowering: no program before it calls
+/// `std.vector.filled`, so with the two new cases held out the corpus answers
+/// 7,570, the bound exactly. `tests/e2e/coll_vector_filled` is +28 and
+/// `fail_vector_filled_negative` +20: the printing standard library each
+/// carries, and in the first the five element types `filled` is instantiated
+/// at.
+const FORWARDABLE_COPIES: usize = 7618;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

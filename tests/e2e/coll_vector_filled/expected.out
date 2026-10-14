@@ -1,0 +1,9 @@
+zero [] length 0 isEmpty true
+one [a] length 1
+many [3, 3, 3, 3, 3] length 5
+after push and set [9, 3, 3, 3, 3, 4]
+points [Point(x: 1, y: 2), Point(x: 5, y: 6), Point(x: 1, y: 2)]
+shared rows [[0, 0, 1], [0, 0, 1], [0, 0, 1]]
+independent rows [[0, 0, 0, 1], [0, 0, 0]]
+frozen temporary [true, true, true]
+frozen after set [0, 0, 8, 0] length 4

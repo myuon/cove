@@ -163,6 +163,11 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "Vector",
+        name: "filled",
+        body: "  var items = Vector.filled(3, 7)\n  items.length()",
+    },
+    Exercise {
+        ty: "Vector",
         name: "map",
         body: "  var items = Vector.of(1, 2)\n  items.map(fn(n) { n * 10 }).length()",
     },

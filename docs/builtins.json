@@ -98,7 +98,8 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "of", "signature": "of(items: T...) -> Vector<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Vector<T>", "implementedBy": "machine", "host": false}
+        {"name": "of", "signature": "of(items: T...) -> Vector<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Vector<T>", "implementedBy": "machine", "host": false},
+        {"name": "filled", "signature": "filled(n: Int, value: T) -> Vector<T>", "generics": ["T"], "params": [{"name": "n", "type": "Int"}, {"name": "value", "type": "T"}], "variadic": false, "result": "Vector<T>", "implementedBy": "std.vector.filled", "host": false}
       ],
       "methods": [
         {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "implementedBy": "machine", "host": false},

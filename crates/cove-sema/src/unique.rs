@@ -1978,6 +1978,47 @@ fn build(upTo: Int) -> Array<Int> {
         proves("fn build(items: Array<Int>) -> Array<Int> {\n  items.toVector().freeze()\n}\n");
     }
 
+    /// `Vector.filled(n, value)` allocates the vector it answers (#649), and
+    /// says so where `Vector.of` does — `cove-schema`'s `fresh` — so a
+    /// temporary of it and a binding initialised by it are both proved, the
+    /// second after writing through it.
+    #[test]
+    fn a_filled_vector_is_fresh_storage() {
+        proves_with_std("fn build(n: Int) -> Array<Int> {\n  Vector.filled(n, 0).freeze()\n}\n");
+        proves_with_std(
+            "\
+fn build(n: Int) -> Array<Int> {
+  var a = Vector.filled(n, 0)
+  a.set(0, 1)
+  a.push(2)
+  a.freeze()
+}
+",
+        );
+    }
+
+    /// Fresh is where the storage starts, not a pass for what happens to it:
+    /// a filled vector aliased before its `freeze()` is refused as any other
+    /// is.
+    #[test]
+    fn a_filled_vector_aliased_before_freeze_is_refused() {
+        let error = refuses_with_std(
+            "\
+fn build(n: Int) -> Array<Int> {
+  var a = Vector.filled(n, 0)
+  var alias = a
+  alias.push(3)
+  a.freeze()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.message,
+            "`freeze()` cannot prove that `a` holds the only handle to its storage"
+        );
+    }
+
     /// The case the corpus pins: a second binding is a second handle.
     #[test]
     fn a_second_binding_defeats_the_proof_and_the_diagnostic_names_it() {

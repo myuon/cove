@@ -1,0 +1,69 @@
+use console.println
+
+/// A point, so that a filled element can be a struct.
+struct Point {
+  x: Int
+  y: Int
+}
+
+/// A grid of `rows` by `columns` noughts, one row built per row.
+///
+/// The shape an application writes when it wants independent rows: a
+/// `Vector.filled(rows, Vector.filled(columns, 0))` would hold the *same*
+/// row `rows` times over, which `main` shows below.
+fn grid(rows: Int, columns: Int) -> Vector<Vector<Int>> {
+  var out = Vector.of()
+  var at = 0
+  while at < rows {
+    out.push(Vector.filled(columns, 0))
+    at += 1
+  }
+  out
+}
+
+/// Prints `Vector.filled(n, value)` (#649): no elements, one, many, a struct
+/// value, a vector value, and the freezes its fresh storage allows.
+export fn main() -> Result<Unit, Error> {
+  let none: Vector<Int> = Vector.filled(0, 7)
+  println("zero {none} length {none.length()} isEmpty {none.isEmpty()}")?
+
+  let one = Vector.filled(1, "a")
+  println("one {one} length {one.length()}")?
+
+  var many = Vector.filled(5, 3)
+  println("many {many} length {many.length()}")?
+
+  // It is an ordinary vector: it grows past the room it was made with, and a
+  // `set` replaces one element and no other.
+  many.push(4)
+  many.set(0, 9)
+  println("after push and set {many}")?
+
+  // A struct is a value, so each element is its own copy.
+  var points = Vector.filled(3, Point(x: 1, y: 2))
+  points.set(1, Point(x: 5, y: 6))
+  println("points {points}")?
+
+  // A vector shares its storage, so every element is the same vector, as
+  // `Vector.of(row, row, row)` would hold it.
+  var row = Vector.filled(2, 0)
+  let shared = Vector.filled(3, row)
+  row.push(1)
+  println("shared rows {shared}")?
+
+  let rows = grid(2, 3)
+  var first = rows.get(0).unwrapOr(Vector.of())
+  first.push(1)
+  println("independent rows {rows}")?
+
+  // Fresh storage: a temporary of it freezes, and so does a binding written
+  // through first.
+  let frozen = Vector.filled(3, true).freeze()
+  println("frozen temporary {frozen}")?
+
+  var written = Vector.filled(4, 0)
+  written.set(2, 8)
+  let array = written.freeze()
+  println("frozen after set {array} length {array.length()}")?
+  Ok(())
+}
