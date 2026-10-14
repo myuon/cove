@@ -17,7 +17,7 @@ unless the run was granted the capability it names.
 | --- | --- |
 | builtin types | 18 |
 | builtin methods | 109 |
-| builtin associated functions | 13 |
+| builtin associated functions | 14 |
 | free builtins | 7 |
 | host modules | 8 |
 | host operations | 25 |
@@ -136,6 +136,7 @@ written as a namespace; binds `T`.
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
 | `of(items: T...) -> Vector<T>` | yes | `T` | `machine` |
+| `filled(n: Int, value: T) -> Vector<T>` |  | `T` | `std.vector.filled` |
 
 **Methods.**
 

@@ -220,3 +220,50 @@ export fn fold<T, A>(
   }
   acc
 }
+
+/// A vector of `n` elements, every one of them `value`.
+///
+/// `Vector.filled(0, value)` is an empty vector. A negative `n` names no
+/// length, and that is the call that is wrong rather than an answer to give,
+/// so the run stops through `core.refuse` (ADR 0067), as `Float.format`'s
+/// digit count does.
+///
+/// **Every element is `value`, as `Vector.of(value, value, ...)` would hold
+/// it.** Nothing is copied deeper than an assignment copies: a struct or a
+/// scalar is a value, so each element is its own, but a `Vector` — or
+/// anything else that shares its storage — is the *same* vector `n` times
+/// over, and a `push` through one element is seen through all of them. A
+/// row per element is a loop that builds each one.
+///
+/// The store is allocated once, at exactly `n`, and filled by ADR 0062's
+/// append, so no element ever grows it. Nothing else holds the vector this
+/// answers — it was allocated here — so `Vector.filled(n, v).freeze()` is
+/// the O(1) one.
+export fn filled<T>(n: Int, value: T) -> Vector<T> {
+  if n < 0 {
+    core.refuse(lengthRefused(n), lengthRule(), "")
+  }
+  let out: Vector<T> = core.vectorWithCapacity(n)
+  var left = n
+  while left > 0 {
+    let at = core.vectorLength(out)
+    core.vectorEnsure(out, 1)
+    core.vectorStore(out, at, value)
+    core.vectorCommit(out, 1)
+    left -= 1
+  }
+  out
+}
+
+/// What [`filled`] says of a negative length.
+///
+/// A function of its own, as `std.float`'s `digitsRefused` is: the path that
+/// succeeds carries no interpolation, and the refusal stays one line.
+fn lengthRefused(n: Int) -> String {
+  "`Vector.filled` cannot make a vector of `{n}` elements"
+}
+
+/// The rule a length is held to.
+fn lengthRule() -> String {
+  "A vector holds a whole number of elements, so `n` must be 0 or more."
+}

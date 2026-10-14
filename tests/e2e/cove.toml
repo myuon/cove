@@ -46,6 +46,14 @@ allow = ["console"]
 entry = "coll_vector_edges.main"
 allow = ["console"]
 
+[run.coll_vector_filled]
+entry = "coll_vector_filled.main"
+allow = ["console"]
+
+[run.fail_vector_filled_negative]
+entry = "fail_vector_filled_negative.main"
+allow = ["console"]
+
 [run.fail_database_connect_denied]
 entry = "fail_database_connect_denied.main"
 allow = ["database", "console"]

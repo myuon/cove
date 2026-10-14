@@ -1,0 +1,15 @@
+error[cove::runtime]: `Vector.filled` cannot make a vector of `-1` elements
+ --> <e2e>/fail_vector_filled_negative/main.cove:8:3
+  |
+8 |   Vector.filled(n, 0)
+  |   ^^^^^^^^^^^^^^^^^^^
+   --> std/vector.cove:244:5
+    |
+244 |     core.refuse(lengthRefused(n), lengthRule(), "")
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_vector_filled_negative/main.cove:19:13
+   |
+19 |   println("{noughts(-1)}")?
+   |             ^^^^^^^^^^^ called from here
+  rule: A vector holds a whole number of elements, so `n` must be 0 or more.
+1 error(s)

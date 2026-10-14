@@ -322,10 +322,10 @@ pub struct MethodSchema {
     /// freshly allocated storage, or a copy of somebody else's.
     ///
     /// `cove_sema::unique::creates` is the one reader, and this field is the
-    /// whole of what it trusts: `Vector.of(...)` allocates,
-    /// `Array.toVector()` copies an array's elements into storage nothing
-    /// else names, and `Vector.snapshot()` copies the vector's own graph, so
-    /// the three are `true`. Everything else here is `false`, including the
+    /// whole of what it trusts: `Vector.of(...)` and `Vector.filled(n, v)`
+    /// allocate, `Array.toVector()` copies an array's elements into storage
+    /// nothing else names, and `Vector.snapshot()` copies the vector's own
+    /// graph, so the four are `true`. Everything else here is `false`, including the
     /// other types that share `snapshot`'s declaration —
     /// `Array.snapshot()`, `Map.snapshot()`, `Set.snapshot()` and the rest
     /// answer themselves, because the type is immutable and "itself" is
@@ -1017,6 +1017,16 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "of",
         module: "std.map",
         function: "of",
+    },
+    // `Vector.filled(n, value)` (#649): a loop of ADR 0062's append over a
+    // store allocated at exactly `n`, and the refusal of a negative `n`, in
+    // Cove. `Vector.of` stays the lowering's own, built in place.
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Vector",
+        method: "filled",
+        module: "std.vector",
+        function: "filled",
     },
     // A character count is a policy over a representation and not an
     // operation of the machine, which is ADR 0064's Decision 2 read straight
@@ -3989,19 +3999,46 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             ..SNAPSHOT
         },
     ],
-    associated: &[MethodSchema {
-        name: "of",
-        generics: &["T"],
-        params: &[ParamSchema {
-            name: "items",
-            ty: BuiltinType::Param("T"),
-        }],
-        variadic: true,
-        result: BuiltinType::Vector(&BuiltinType::Param("T")),
-        mutating: false,
-        // Allocates fresh storage — see `MethodSchema::fresh`.
-        fresh: true,
-    }],
+    associated: &[
+        MethodSchema {
+            name: "of",
+            generics: &["T"],
+            params: &[ParamSchema {
+                name: "items",
+                ty: BuiltinType::Param("T"),
+            }],
+            variadic: true,
+            result: BuiltinType::Vector(&BuiltinType::Param("T")),
+            mutating: false,
+            // Allocates fresh storage — see `MethodSchema::fresh`.
+            fresh: true,
+        },
+        // `filled(n, value) -> Vector<T>`: `n` copies of `value`, in a store
+        // allocated once at exactly `n`. `std.vector.filled` is the body, over
+        // `core.vectorWithCapacity` — which is what makes the vector it answers
+        // one nothing else holds, and so `fresh` for the reason `of` is — and a
+        // negative `n` stops the run through `core.refuse` rather than answering
+        // an empty vector for a call that is wrong.
+        MethodSchema {
+            name: "filled",
+            generics: &["T"],
+            params: &[
+                ParamSchema {
+                    name: "n",
+                    ty: BuiltinType::Int,
+                },
+                ParamSchema {
+                    name: "value",
+                    ty: BuiltinType::Param("T"),
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::Vector(&BuiltinType::Param("T")),
+            mutating: false,
+            // Allocates fresh storage — see `MethodSchema::fresh`.
+            fresh: true,
+        },
+    ],
 };
 
 // --------------------------------------------------------------------- Map
