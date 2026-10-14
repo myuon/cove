@@ -1450,6 +1450,52 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.float",
         function: "parse",
     },
+    // The six elementary functions of issue #648, which arrived as Cove and
+    // were never anything else: FreeBSD's fdlibm algorithms over `Float` and
+    // `Int` arithmetic, so that every tier answers the same bits, which a
+    // host `libm` would not (ADR 0098).
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "exp",
+        module: "std.float",
+        function: "exp",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "ln",
+        module: "std.float",
+        function: "ln",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "log10",
+        module: "std.float",
+        function: "log10",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "sin",
+        module: "std.float",
+        function: "sin",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "cos",
+        module: "std.float",
+        function: "cos",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Float",
+        method: "pow",
+        module: "std.float",
+        function: "pow",
+    },
     // `Duration.nanos` is not here: it is the one primitive left, and both
     // its forms — the reader and the builder — stay in the machine. Each of
     // its five neighbours is bound twice, once as the method that reads it
@@ -5078,6 +5124,78 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
             }],
             variadic: false,
             result: BuiltinType::String,
+            mutating: false,
+            fresh: false,
+        },
+        // `e` to the receiver. These six are `std.float` and not the
+        // machine's, and that is what lets them exist at all where
+        // `sqrt`'s note above says a transcendental function could not: a
+        // host `libm` differs between machines in the last bit, and a Cove
+        // body made of correctly rounded `+ - * /` does not. Each is within
+        // one unit in the last place of the exact answer, and total — a
+        // value with no answer is `NaN`, as IEEE 754 says (ADR 0098).
+        MethodSchema {
+            name: "exp",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+            fresh: false,
+        },
+        // The natural logarithm: `-inf` at either zero, `NaN` below it.
+        MethodSchema {
+            name: "ln",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+            fresh: false,
+        },
+        // The base-ten logarithm, exact on every normal power of ten.
+        MethodSchema {
+            name: "log10",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+            fresh: false,
+        },
+        // The sine, in radians, reduced exactly at every magnitude.
+        MethodSchema {
+            name: "sin",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+            fresh: false,
+        },
+        // The cosine, in radians, reduced exactly at every magnitude.
+        MethodSchema {
+            name: "cos",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+            fresh: false,
+        },
+        // The receiver raised to `exponent`, with C99's and IEEE 754's
+        // special cases: `x.pow(0.0)` is `1.0` for every `x`, a negative
+        // receiver to a power that is not whole is `NaN`, and two integers
+        // whose power is below `2^53` answer it exactly.
+        MethodSchema {
+            name: "pow",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "exponent",
+                ty: BuiltinType::Float,
+            }],
+            variadic: false,
+            result: BuiltinType::Float,
             mutating: false,
             fresh: false,
         },

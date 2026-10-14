@@ -346,12 +346,17 @@ fn the_run_writes_the_recording_a_run_writes() {
     // `` `Vector.filled` cannot make a vector of ` ``, 41 bytes and seven
     // words, and `` ` elements ``, 10 and three — and its rule, 68 bytes and
     // ten words. This fixture calls nothing of it, for the reason above.
+    //
+    // It is 3,064 since ADR 0098's `sin` and `cos`, and the 29 words are one
+    // literal: `std.float.twoOverPi`'s 56 digits of `2/π`, 24 bits each as
+    // four bytes of six bits, 224 bytes in all — 28 words of bytes and the
+    // one word of its length. The other five functions hold no literal.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(3035), capacity_words: Some(3035) }"
+            "HeapSummary { collections: 0, allocated_words: Some(3064), capacity_words: Some(3064) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

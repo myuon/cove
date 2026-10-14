@@ -572,6 +572,36 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "Float",
+        name: "exp",
+        body: "  let ratio = 1.5\n  let grown = ratio.exp()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "ln",
+        body: "  let ratio = 1.5\n  let logarithm = ratio.ln()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "log10",
+        body: "  let ratio = 1.5\n  let decimal = ratio.log10()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "sin",
+        body: "  let angle = 1.5\n  let sine = angle.sin()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "cos",
+        body: "  let angle = 1.5\n  let cosine = angle.cos()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "pow",
+        body: "  let ratio = 1.5\n  let power = ratio.pow(2.5)\n  0",
+    },
+    Exercise {
+        ty: "Float",
         name: "min",
         body: "  let ratio = 1.5\n  let lesser = ratio.min(0.5)\n  0",
     },

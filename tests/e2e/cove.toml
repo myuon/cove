@@ -628,6 +628,10 @@ allow = ["console"]
 entry = "values_float_parse.main"
 allow = ["console"]
 
+[run.values_float_math]
+entry = "values_float_math.main"
+allow = ["console"]
+
 [run.values_float_parse_native]
 entry = "values_float_parse_native.main"
 allow = ["console"]

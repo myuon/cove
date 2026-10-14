@@ -16,7 +16,7 @@ unless the run was granted the capability it names.
 | | |
 | --- | --- |
 | builtin types | 18 |
-| builtin methods | 109 |
+| builtin methods | 115 |
 | builtin associated functions | 14 |
 | free builtins | 7 |
 | host modules | 8 |
@@ -338,6 +338,12 @@ written as a namespace.
 | `min(other: Float) -> Float` |  |  |  | `machine` |
 | `max(other: Float) -> Float` |  |  |  | `machine` |
 | `format(digits: Int) -> String` |  |  |  | `std.float.format` |
+| `exp() -> Float` |  |  |  | `std.float.exp` |
+| `ln() -> Float` |  |  |  | `std.float.ln` |
+| `log10() -> Float` |  |  |  | `std.float.log10` |
+| `sin() -> Float` |  |  |  | `std.float.sin` |
+| `cos() -> Float` |  |  |  | `std.float.cos` |
+| `pow(exponent: Float) -> Float` |  |  |  | `std.float.pow` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Bool`

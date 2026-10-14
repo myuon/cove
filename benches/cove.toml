@@ -294,6 +294,14 @@ entry = "floatsqrt.main"
 allow = ["console", "clock"]
 manual = true
 
+# `std.float`'s elementary functions (issue #648, ADR 0098): what a call of
+# each costs on the VM and on the native tier, with `sin` and `cos` at each of
+# their three reduction regimes and `sqrt` beside them for scale.
+[run.floatmath]
+entry = "floatmath.main"
+allow = ["console", "clock"]
+manual = true
+
 # `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
 # and a two-word struct element, found and not found, at n = 8 and n = 1024 —
 # #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,

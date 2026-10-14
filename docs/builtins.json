@@ -290,6 +290,12 @@
         {"name": "min", "signature": "min(other: Float) -> Float", "generics": [], "params": [{"name": "other", "type": "Float"}], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "max", "signature": "max(other: Float) -> Float", "generics": [], "params": [{"name": "other", "type": "Float"}], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "format", "signature": "format(digits: Int) -> String", "generics": [], "params": [{"name": "digits", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "implementedBy": "std.float.format", "host": false},
+        {"name": "exp", "signature": "exp() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "std.float.exp", "host": false},
+        {"name": "ln", "signature": "ln() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "std.float.ln", "host": false},
+        {"name": "log10", "signature": "log10() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "std.float.log10", "host": false},
+        {"name": "sin", "signature": "sin() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "std.float.sin", "host": false},
+        {"name": "cos", "signature": "cos() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "std.float.cos", "host": false},
+        {"name": "pow", "signature": "pow(exponent: Float) -> Float", "generics": [], "params": [{"name": "exponent", "type": "Float"}], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "std.float.pow", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },
