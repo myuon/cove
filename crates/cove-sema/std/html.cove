@@ -1,4 +1,4 @@
-// HTML: markup with a path in every hole, and one way past escaping.
+// HTML: markup with a path in every `<%= %>`, and one way past escaping.
 //
 // A page is written as two things that do not know about each other — a
 // function that answers an ordinary struct, and a string of markup whose holes
@@ -7,7 +7,7 @@
 // is already markup, and everything else is rendered and escaped. So the
 // escaping decision is written once, where the data is declared, rather than
 // at each of the places the data is used.
-// [ADR 0099](../../../docs/adr/0099-a-page-is-markup-with-a-path-in-every-hole.md)
+// [ADR 0099](../../../docs/adr/0099-a-page-is-markup-with-a-path-in-every-erb-tag.md)
 // is the record of that and of what it was measured against.
 //
 // ```cove
@@ -21,23 +21,46 @@
 // }
 //
 // fn row(line: Row) -> Html {
-//   html.fill("<tr><td class=at>$.at</td>$.who<td>$.said</td></tr>", line)
+//   html.fill(
+//     "<tr><td class=at><%= at %></td><%= who %><td><%= said %></td></tr>",
+//     line,
+//   )
 // }
 // ```
 //
-// **The data itself is `$.` and not a bare `$`.** ADR 0099 wrote it `$`, and
-// that cannot be: a template is ordinary text, and a page of prices holds
-// `$5.00` and `100$`. One of the two had to give, and it was the sigil that
-// stands alone — a `$` is a hole only when a `.` follows it, which is one rule
-// read from either side and leaves every dollar in every template untouched.
+// # Why `<%= %>` and not `{{ }}`
+//
+// `{{ }}` is what nearly every template language uses — Mustache, Handlebars,
+// Jinja, Liquid, Angular, Vue, Go — and Cove cannot have it: interpolation owns
+// `{`, so a literal brace in a Cove string is `\{`, and a template full of
+// `\{\{ name \}\}` would be unreadable at the one place it has to be read.
+// `<%= %>` is the next most recognised pair — ERB, EJS, JSP, ASP — it needs no
+// escaping in a Cove string, and `<%` is not valid HTML, so it collides with no
+// markup, no URL and no prose, which `$`, `?`, `[[` and `$(` each could.
+//
+// The deciding reason is that it brings the right *meaning* with it and not
+// only the right shape. **Rails' `<%= %>` already decides escaping by type**:
+// an `ActiveSupport::SafeBuffer` goes in whole and a plain `String` is
+// escaped, with `raw` and `html_safe` as the single opt-out — and the standard
+// warning in that community is that `html_safe` scattered through a view is the
+// XSS anti-pattern. That is this module's design exactly: an `Html` goes in
+// whole, everything else is escaped, and `markup` is the one name a review
+// greps for. A reader who knows Rails already knows what `<%= %>` means here.
+//
+// Two ways this is stricter than Rails. `Html` is `opaque`, so unlike a
+// `SafeBuffer` it cannot be conjured out of any `String` by a method call —
+// `fill` and `markup` are the only two things that make one. And `markup` has
+// to be imported by name, so the opt-out is in the import list as well as at
+// its call site.
 //
 // What this module is not: a template language. There is no `if` and no `for`
 // in a template, because the language already has both, and a second syntax to
 // parse, check, format and colour buys nothing that a `for` around a `fill`
-// does not. There is no element tree either — `<td class=at>` is written as
-// `<td class=at>`, not translated into a call. And nothing here renders a
-// page: `render` hands back the text, and what is done with it belongs to
-// whatever is serving.
+// does not. `<% %>` without the `=` — ERB's statement form — has no meaning
+// here for the same reason, and is text. There is no element tree either:
+// `<td class=at>` is written as `<td class=at>`, not translated into a call.
+// And nothing here renders a page — `render` hands back the text, and what is
+// done with it belongs to whatever is serving.
 
 use std.stringbuilder.StringBuilder
 
@@ -82,20 +105,23 @@ export fn render(page: Html) -> String {
 
 /// `template` with every hole filled from `data`.
 ///
-/// **A hole is a `$` with a path after it**, and a `$` with no `.` after it is
-/// ordinary text — `$5.00` and `100$` come through as they were written, which
-/// is what a page full of prices needs. The paths are JSONPath's:
+/// **A hole is `<%=`, a path, and `%>`.** Everything outside a pair of those
+/// is text, whatever it holds: `$5.00`, `?over=hour`, `[[x]]`, `$(y)` and
+/// `100%` come through as they were written, and so does a `{` — which no
+/// sigil-shaped notation could promise, and which is most of why these are the
+/// delimiters (see this module's header).
 ///
 /// | written | what it reaches |
 /// | --- | --- |
-/// | `$.` | the data itself |
-/// | `$.name` | the field called `name` |
-/// | `$.limits.maxQueued` | a field of a field |
-/// | `$.items[2]` | the element at index 2 |
+/// | `<%= . %>` | the data itself, as `.` is jq's input |
+/// | `<%= name %>` | the field called `name` |
+/// | `<%= limits.maxQueued %>` | a field of a field |
+/// | `<%= items[2] %>` | the element at index 2 |
 ///
 /// A segment's name is letters, digits and `_`, and an index is `[` digits
-/// `]`. A `$.` that is followed by neither is the data itself, which is how a
-/// bare `Array<Html>` is wrapped without inventing a struct to hold it.
+/// `]`. **The space inside the delimiters is trimmed**, so `<%=name%>`,
+/// `<%= name %>` and `<%=  name  %>` are one hole written three ways — a
+/// template is laid out by whoever is reading the markup, not by a scanner.
 ///
 /// **What goes in is decided by the type the path reaches**, never by the
 /// template:
@@ -107,8 +133,8 @@ export fn render(page: Html) -> String {
 /// | anything else | its text, with `&`, `<`, `>`, `"` and `'` escaped |
 ///
 /// The escaping is the same inside an attribute value as between tags, which
-/// is why `"` and `'` are in that list: `<a title="$.said">` holds whatever
-/// `said` is, and nothing it can hold closes the quote.
+/// is why `"` and `'` are in that list: `<a title="<%= said %>">` holds
+/// whatever `said` is, and nothing it can hold closes the quote.
 ///
 /// A value that is not a `String` needs no stringifying by the caller — an
 /// `Int`, a `Bool`, a `Float` and a `Duration` are written as the language
@@ -117,14 +143,24 @@ export fn render(page: Html) -> String {
 /// list a page loops over is usually a list of rows and no rows should be no
 /// markup.
 ///
-/// # A path that reaches nothing is loud
+/// # A hole that goes wrong is loud
 ///
-/// It renders `[no such path: $.whatever.was.asked]`, escaped like any other
-/// hole so that it can never open a tag. It is a visible marker and not a
-/// silent empty string because a misspelt field — `$.nmae` — is a programming
-/// error, and a page that quietly loses a column looks exactly like a page
-/// whose column was empty. The marker is the one form of that error a test, or
-/// a glance at the page, cannot miss.
+/// A path that reaches nothing renders `[no such path: whatever.was.asked]`,
+/// and a `<%=` that is never closed renders `[unclosed <%=: …]` naming what it
+/// opened. Both are escaped like any other hole, so neither can open a tag.
+///
+/// They are visible markers and not silent empty strings because a misspelt
+/// field — `<%= nmae %>` — is a programming error, and a page that quietly
+/// loses a column looks exactly like a page whose column was empty. A marker
+/// is the one form of that error a test, or a glance at the page, cannot miss.
+///
+/// **The delimiters are what make this possible, and that is the second thing
+/// they buy.** A hole has a beginning and an end, so the text between them is
+/// a path or it is nothing: a malformed path is refused with the same marker
+/// as a path that misses. Under a sigil the scanner could only read as far as
+/// it understood and leave the rest as text, so `$.limits.maxQued` and
+/// `$.limits.max Qued` failed in two different ways, one loudly and one not at
+/// all.
 ///
 /// **And it is a marker rather than a `Result`.** `fill` is called once per
 /// row and once per cell, so answering a `Result` would put a `?` or a `match`
@@ -141,10 +177,18 @@ export fn fill(template: String, data: Any) -> Html {
   while at < end {
     if opensHole(template, at, end) {
       out.appendSlice(template, copied, at)
-      let stop = holeEnd(template, at + 2, end)
-      out.append(place(root, template, at, stop))
-      at = stop
-      copied = stop
+      let inner = at + opener().byteLength()
+      let close = core.stringFind(template, closer(), inner)
+      if close < 0 {
+        let rest = core.stringSlice(template, inner, end - inner)
+        out.append(unclosed(rest.trim()))
+        at = end
+      } else {
+        let path = core.stringSlice(template, inner, close - inner)
+        out.append(place(root, path.trim()))
+        at = close + closer().byteLength()
+      }
+      copied = at
     } else {
       at = at + 1
     }
@@ -153,47 +197,41 @@ export fn fill(template: String, data: Any) -> Html {
   Html(said: out.finish())
 }
 
-/// Whether the byte at `at` begins a hole: a `$` with a `.` after it.
+/// What opens a hole.
 ///
-/// The `.` is what tells a hole from a dollar sign, and it is the whole of the
-/// rule. A `$` is a byte no character of any other value begins with, so this
-/// may walk `template` a byte at a time without decoding it.
-fn opensHole(template: String, at: Int, end: Int) -> Bool {
-  if template.byteAt(at) != '$' {
-    return false
-  }
-  if at + 1 >= end {
-    return false
-  }
-  template.byteAt(at + 1) == '.'
+/// Written once rather than as three byte comparisons, because [`fill`] needs
+/// its length to step over it and [`unclosed`] needs its text to name it, and
+/// a delimiter spelled in three places is a delimiter that will one day be
+/// spelled two ways.
+fn opener() -> String {
+  "<%="
 }
 
-/// Where the hole that began at `$.` ends, given `at` just past the `.`.
+/// What closes a hole.
+fn closer() -> String {
+  "%>"
+}
+
+/// Whether the byte at `at` begins a hole: the three bytes of [`opener`].
 ///
-/// The path is read rather than validated: a `.` with no name after it, or a
-/// `[` with no number and `]`, is not part of the hole and stays in the
-/// template as the text it is. So the hole is always exactly as long as what
-/// could be read, and [`place`] can quote it back verbatim.
-fn holeEnd(template: String, at: Int, end: Int) -> Int {
-  var stop = at
-  var more = true
-  while more {
-    let name = nameEnd(template, stop, end)
-    if name == stop {
-      return stop
-    }
-    stop = indexEnd(template, name, end)
-    more = false
-    if stop + 1 < end {
-      if template.byteAt(stop) == '.' {
-        if isNameByte(template.byteAt(stop + 1)) {
-          stop = stop + 1
-          more = true
-        }
-      }
-    }
+/// The `=` is part of it. `<%` on its own is ERB's statement form, which this
+/// module has no use for — the `for` and the `if` are the language's — so a
+/// `<%` that is not a `<%=` is text like anything else.
+///
+/// Every byte of the delimiter is ASCII, and no character of any other value
+/// begins with one, so this walks `template` a byte at a time without decoding
+/// it and can never stop inside a character.
+fn opensHole(template: String, at: Int, end: Int) -> Bool {
+  if template.byteAt(at) != '<' {
+    return false
   }
-  stop
+  if at + 2 >= end {
+    return false
+  }
+  if template.byteAt(at + 1) != '%' {
+    return false
+  }
+  template.byteAt(at + 2) == '='
 }
 
 /// Where the run of name bytes starting at `at` ends, which is `at` itself
@@ -205,25 +243,6 @@ fn nameEnd(template: String, at: Int, end: Int) -> Int {
       return stop
     }
     stop = stop + 1
-  }
-  stop
-}
-
-/// Where the run of `[` digits `]` starting at `at` ends.
-fn indexEnd(template: String, at: Int, end: Int) -> Int {
-  var stop = at
-  while stop < end {
-    if template.byteAt(stop) != '[' {
-      break
-    }
-    let digits = digitEnd(template, stop + 1, end)
-    if digits == stop + 1 || digits >= end {
-      break
-    }
-    if template.byteAt(digits) != ']' {
-      break
-    }
-    stop = digits + 1
   }
   stop
 }
@@ -267,40 +286,60 @@ fn isDigitByte(byte: Int) -> Bool {
   byte <= '9'
 }
 
-/// The text the hole written from `from` to `to` puts in, escaped or not as
-/// what its path reaches decides.
+/// What the hole whose path is `path` puts in, escaped or not as the type the
+/// path reaches decides.
 ///
-/// The path is walked again here rather than carried out of [`holeEnd`],
-/// because the two answer different questions and a path is a handful of
-/// bytes: `holeEnd` says how much of the template the hole is, and this says
-/// what the hole reaches. Reading it twice keeps either from having to
-/// describe the other's state.
-fn place(root: DynamicView, template: String, from: Int, to: Int) -> String {
+/// `path` is the text between the delimiters with its space trimmed off, so
+/// this reads a path and nothing else: `.`, or a name, or a name with `[n]`
+/// after it, joined by `.`. **The whole of it has to be a path.** A trailing
+/// `.`, a bracket with no number in it, a space in the middle — each is a
+/// programming error and answers [`missing`], where a scanner that had no
+/// closing delimiter to stop at could only read as far as it understood and
+/// leave the rest as markup.
+fn place(root: DynamicView, path: String) -> String {
+  let end = path.byteLength()
+  if end == 0 {
+    return missing(path)
+  }
+  if end == 1 && path.byteAt(0) == '.' {
+    return placed(root)
+  }
   var view = root
-  var at = from + 2
-  while at < to {
-    let byte = template.byteAt(at)
-    if byte == '.' {
-      at = at + 1
-    } else if byte == '[' {
-      let close = digitEnd(template, at + 1, to)
-      let index = number(template, at + 1, close)
-      if !isList(core.dynamicKind(view)) {
-        return missing(template, from, to)
+  var at = 0
+  while at < end {
+    if at > 0 {
+      if path.byteAt(at) != '.' {
+        return missing(path)
       }
+      at = at + 1
+    }
+    let stop = nameEnd(path, at, end)
+    if stop == at {
+      return missing(path)
+    }
+    let field = fieldOf(view, core.stringSlice(path, at, stop - at))
+    if field < 0 {
+      return missing(path)
+    }
+    view = core.dynamicChild(view, field)
+    at = stop
+    while at < end {
+      if path.byteAt(at) != '[' {
+        break
+      }
+      let digits = digitEnd(path, at + 1, end)
+      if digits == at + 1 || digits >= end || path.byteAt(digits) != ']' {
+        return missing(path)
+      }
+      if !isList(core.dynamicKind(view)) {
+        return missing(path)
+      }
+      let index = number(path, at + 1, digits)
       if index >= core.dynamicChildCount(view) {
-        return missing(template, from, to)
+        return missing(path)
       }
       view = core.dynamicChild(view, index)
-      at = close + 1
-    } else {
-      let stop = nameEnd(template, at, to)
-      let field = fieldOf(view, core.stringSlice(template, at, stop - at))
-      if field < 0 {
-        return missing(template, from, to)
-      }
-      view = core.dynamicChild(view, field)
-      at = stop
+      at = digits + 1
     }
   }
   placed(view)
@@ -354,12 +393,25 @@ fn everyChildIsHtml(view: DynamicView, count: Int) -> Bool {
   true
 }
 
-/// `[no such path: …]`, naming the hole as the template wrote it.
+/// `[no such path: …]`, naming the path the hole asked for.
 ///
 /// Escaped like every other hole, so a marker is inert wherever it lands —
-/// between tags or inside an attribute's quotes.
-fn missing(template: String, from: Int, to: Int) -> String {
-  escape("[no such path: {core.stringSlice(template, from, to - from)}]")
+/// between tags or inside an attribute's quotes. The path came out of the
+/// template rather than out of the data, so there is nothing hostile in it to
+/// escape; escaping it anyway means there is no second rule to get wrong the
+/// day a marker learns to quote something that did.
+fn missing(path: String) -> String {
+  escape("[no such path: {path}]")
+}
+
+/// `[unclosed <%=: …]`, naming the text a hole was opened in front of.
+///
+/// The rest of the template is inside the hole, because nothing closed it, so
+/// the rest of the template is what the marker names — which makes the page
+/// obviously broken rather than subtly short, and loses none of it. Escaped,
+/// so a tail full of markup arrives as text.
+fn unclosed(rest: String) -> String {
+  escape("[unclosed {opener()}: {rest}]")
 }
 
 /// The number the digits from `at` up to `to` spell, stopping at

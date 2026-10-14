@@ -4,7 +4,7 @@ use std.html.empty
 use std.html.fill
 use std.html.markup
 
-/// A field of a field, which `$.limits.maxQueued` is the ADR's example of.
+/// A field of a field, which `<%= limits.maxQueued %>` is the ADR's example of.
 struct Limits {
   maxQueued: Int
 }
@@ -85,9 +85,9 @@ fn escaped() -> String {
 /// none to forget, so the 259 places a reader of a hand-escaped page has to
 /// decide about become none.
 test fn escapesWhatAPathReaches() -> Result<Unit, Error> {
-  assertEqual(filled("<td>$.title</td>"), "<td>{escaped()}</td>")?
+  assertEqual(filled("<td><%= title %></td>"), "<td>{escaped()}</td>")?
   assertEqual(
-    filled("<p>$.title</p>"),
+    filled("<p><%= title %></p>"),
     "<p>it&#39;s &quot;5&quot; &lt; 6 &amp; 7 &gt; 4</p>",
   )?
   Ok(())
@@ -98,7 +98,7 @@ test fn aScriptInTheDataIsNotAScript() -> Result<Unit, Error> {
   let said = "<script>alert(1)</script>"
   let line = Line(at: "09:00", said: said, who: empty())
   assertEqual(
-    html.render(fill("<td class=said>$.said</td>", line)),
+    html.render(fill("<td class=said><%= said %></td>", line)),
     "<td class=said>&lt;script&gt;alert(1)&lt;/script&gt;</td>",
   )?
   Ok(())
@@ -112,11 +112,11 @@ test fn aScriptInTheDataIsNotAScript() -> Result<Unit, Error> {
 /// be reconsidered.
 test fn aQuoteDoesNotEscapeAnAttribute() -> Result<Unit, Error> {
   assertEqual(
-    filled("<a title=\"$.title\">x</a>"),
+    filled("<a title=\"<%= title %>\">x</a>"),
     "<a title=\"{escaped()}\">x</a>",
   )?
   assertEqual(
-    filled("<a title='$.title'>x</a>"),
+    filled("<a title='<%= title %>'>x</a>"),
     "<a title='{escaped()}'>x</a>",
   )?
   Ok(())
@@ -124,59 +124,79 @@ test fn aQuoteDoesNotEscapeAnAttribute() -> Result<Unit, Error> {
 
 // ------------------------------------------------------------ the paths
 
-/// `$.name` reaches the field called `name`.
+/// A path reaches the field it names.
 test fn aPathReachesAField() -> Result<Unit, Error> {
-  assertEqual(filled("$.count"), "42")?
-  assertEqual(filled("<b>$.count</b> queued"), "<b>42</b> queued")?
+  assertEqual(filled("<%= count %>"), "42")?
+  assertEqual(filled("<b><%= count %></b> queued"), "<b>42</b> queued")?
   Ok(())
 }
 
-/// `$.a.b` reaches a field of a field, which a flat name could not.
+/// `a.b` reaches a field of a field, which a flat name could not.
 test fn aPathReachesAFieldOfAField() -> Result<Unit, Error> {
-  assertEqual(filled("$.limits.maxQueued"), "32")?
-  assertEqual(filled("<td>$.limits.maxQueued</td>"), "<td>32</td>")?
+  assertEqual(filled("<%= limits.maxQueued %>"), "32")?
+  assertEqual(filled("<td><%= limits.maxQueued %></td>"), "<td>32</td>")?
   Ok(())
 }
 
-/// `$.items[2]` reaches an element by its position.
+/// `items[2]` reaches an element by its position.
 test fn aPathReachesAnElementByIndex() -> Result<Unit, Error> {
-  assertEqual(filled("$.words[0]"), "zero")?
-  assertEqual(filled("$.words[2]"), "two")?
-  assertEqual(filled("<li>$.words[1]</li>"), "<li>one</li>")?
+  assertEqual(filled("<%= words[0] %>"), "zero")?
+  assertEqual(filled("<%= words[2] %>"), "two")?
+  assertEqual(filled("<li><%= words[1] %></li>"), "<li>one</li>")?
   Ok(())
 }
 
-/// `$.` with no path after it is the data itself, so wrapping a value needs no
-/// struct to hold it.
+/// `.` on its own is the data itself, so wrapping a value needs no struct to
+/// hold it.
 ///
-/// It is written `$.` and not `$` because a `$` with no `.` after it is a
-/// dollar sign — see [`aDollarThatBeginsNoPathIsADollar`]. The two rules are
-/// one rule read from either side, and this is the side the ADR's
-/// `<table class=log>$</table>` example wanted.
-test fn aPathWithNoSegmentsIsTheDataItself() -> Result<Unit, Error> {
+/// `.` is jq's: the input, with nothing asked of it. It is the one path that
+/// names no field, and it is what lets a page wrap an `Array<Html>` that a
+/// loop built without inventing a one-field struct to carry it.
+test fn aDotAloneIsTheDataItself() -> Result<Unit, Error> {
   let cells = [markup("<td>1</td>"), markup("<td>2</td>")]
   assertEqual(
-    html.render(fill("<tr>$.</tr>", cells)),
+    html.render(fill("<tr><%= . %></tr>", cells)),
     "<tr><td>1</td><td>2</td></tr>",
   )?
-  assertEqual(html.render(fill("<b>$.</b>", 7)), "<b>7</b>")?
-  assertEqual(html.render(fill("<b>$.</b>", hostile())), "<b>{escaped()}</b>")?
+  assertEqual(html.render(fill("<b><%= . %></b>", 7)), "<b>7</b>")?
+  assertEqual(
+    html.render(fill("<b><%= . %></b>", hostile())),
+    "<b>{escaped()}</b>",
+  )?
   Ok(())
 }
 
-/// A `$` with no `.` after it is text, so a page of prices needs no escape.
+/// The space inside the delimiters is trimmed, so one hole has many spellings.
 ///
-/// `$` was chosen over `?` because a page is full of query strings and holds
-/// no dollars — measured at 19 against 0 in the program ADR 0099 was written
-/// against — but "holds none" is not "can hold none", and a template is
-/// ordinary text that somebody will one day write a price into.
-test fn aDollarThatBeginsNoPathIsADollar() -> Result<Unit, Error> {
-  assertEqual(filled("<p>$5.00 and 100$</p>"), "<p>$5.00 and 100$</p>")?
-  assertEqual(filled("<p>$ $$ $x $_</p>"), "<p>$ $$ $x $_</p>")?
+/// A template is laid out by whoever is reading the markup — tight inside a
+/// crowded attribute, airy in a block of prose — and a scanner that cared
+/// would be a scanner people worked around.
+test fn theSpaceInsideTheDelimitersIsTrimmed() -> Result<Unit, Error> {
+  assertEqual(filled("<%=count%>"), "42")?
+  assertEqual(filled("<%= count %>"), "42")?
+  assertEqual(filled("<%=    count    %>"), "42")?
+  assertEqual(filled("<%=\tcount\t%>"), "42")?
+  assertEqual(filled("<%= limits.maxQueued%>"), "32")?
+  Ok(())
+}
+
+/// Everything outside a pair of delimiters is text, whatever it holds.
+///
+/// `<%` is not valid HTML, so it collides with no markup, no URL and no prose
+/// — which is the other half of why these are the delimiters. Every notation
+/// that was weighed against them collides with something a page already holds:
+/// `$` with a price, `?` with a query string, `[[` and `$(` with nothing in
+/// particular but with no precedent either, and `{{` with Cove's own
+/// interpolation, which owns `{`.
+test fn everythingOutsideTheDelimitersIsText() -> Result<Unit, Error> {
+  let loose = "<p>$5.00 ?over=hour [[x]] $(y) 100%</p>"
+  assertEqual(filled(loose), loose)?
   assertEqual(
-    filled("<a href=\"/q?over=$\">x</a>"),
-    "<a href=\"/q?over=$\">x</a>",
+    filled("<p>\{x\} \{\{y\}\} $\{z\}</p>"),
+    "<p>\{x\} \{\{y\}\} $\{z\}</p>",
   )?
+  assertEqual(filled("<p><% not a hole %></p>"), "<p><% not a hole %></p>")?
+  assertEqual(filled("<p>50%> done</p>"), "<p>50%> done</p>")?
   Ok(())
 }
 
@@ -190,29 +210,14 @@ test fn aTemplateWithNoHoleIsItself() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// A `.` or a `[` that no path can be read from stays in the template.
-///
-/// The hole is exactly as long as what could be read, so a trailing `.` and a
-/// bracket that holds no number are text — which keeps a near miss from
-/// swallowing the markup after it.
-test fn aPathStopsWhereItStopsReading() -> Result<Unit, Error> {
-  assertEqual(filled("$.count."), "42.")?
-  assertEqual(filled("$.words[x]"), "[zero, one, two][x]")?
-  assertEqual(filled("$.count[]"), "42[]")?
-  assertEqual(
-    filled("$.limits.maxQueued.end"),
-    "[no such path: $.limits.maxQueued.end]",
-  )?
-  Ok(())
-}
-
 // ------------------------------------------------------- what goes in
 
 /// A field whose type is `Html` goes in whole, because it is already markup.
 test fn markupGoesInWhole() -> Result<Unit, Error> {
+  let row = "<tr><td><%= at %></td><%= who %><td><%= said %></td></tr>"
   let line = Line(at: "09:00", said: "said", who: markup("<b>me</b>"))
   assertEqual(
-    html.render(fill("<tr><td>$.at</td>$.who<td>$.said</td></tr>", line)),
+    html.render(fill(row, line)),
     "<tr><td>09:00</td><b>me</b><td>said</td></tr>",
   )?
   Ok(())
@@ -223,9 +228,9 @@ test fn markupGoesInWhole() -> Result<Unit, Error> {
 /// This is what makes the `for` the language's: a page builds its rows in a
 /// loop, freezes them or does not, and the template names the list once.
 test fn aListOfMarkupGoesInOneAfterAnother() -> Result<Unit, Error> {
-  assertEqual(filled("<tr>$.cells</tr>"), "<tr><td>1</td><td>2</td></tr>")?
+  assertEqual(filled("<tr><%= cells %></tr>"), "<tr><td>1</td><td>2</td></tr>")?
   assertEqual(
-    filled("<table>$.rows</table>"),
+    filled("<table><%= rows %></table>"),
     "<table><tr><td>a</td></tr></table>",
   )?
   Ok(())
@@ -237,7 +242,7 @@ test fn aListOfMarkupGoesInOneAfterAnother() -> Result<Unit, Error> {
 /// alternative — writing what the language writes for an empty array — would
 /// put `[]` on the page on the one day there is nothing to show.
 test fn anEmptyListPutsInNothing() -> Result<Unit, Error> {
-  assertEqual(filled("<table>$.spare</table>"), "<table></table>")?
+  assertEqual(filled("<table><%= spare %></table>"), "<table></table>")?
   Ok(())
 }
 
@@ -247,12 +252,12 @@ test fn anEmptyListPutsInNothing() -> Result<Unit, Error> {
 /// holds the number it computed rather than a string of it — which is the
 /// same property that lets the loader answer a `.json` endpoint.
 test fn aValueThatIsNotAStringRenders() -> Result<Unit, Error> {
-  assertEqual(filled("$.count"), "42")?
-  assertEqual(filled("$.live"), "true")?
-  assertEqual(filled("$.ratio"), "0.5")?
-  assertEqual(filled("$.note"), "None")?
+  assertEqual(filled("<%= count %>"), "42")?
+  assertEqual(filled("<%= live %>"), "true")?
+  assertEqual(filled("<%= ratio %>"), "0.5")?
+  assertEqual(filled("<%= note %>"), "None")?
   assertEqual(
-    filled("<td>$.count</td><td>$.live</td>"),
+    filled("<td><%= count %></td><td><%= live %></td>"),
     "<td>42</td><td>true</td>",
   )?
   Ok(())
@@ -260,9 +265,9 @@ test fn aValueThatIsNotAStringRenders() -> Result<Unit, Error> {
 
 /// A list that is not markup is written as the language writes it, escaped.
 test fn aListThatIsNotMarkupIsEscaped() -> Result<Unit, Error> {
-  assertEqual(filled("$.words"), "[zero, one, two]")?
+  assertEqual(filled("<%= words %>"), "[zero, one, two]")?
   assertEqual(
-    html.render(fill("$.", [hostile()])),
+    html.render(fill("<%= . %>", [hostile()])),
     "[it&#39;s &quot;5&quot; &lt; 6 &amp; 7 &gt; 4]",
   )?
   Ok(())
@@ -274,15 +279,15 @@ test fn aListThatIsNotMarkupIsEscaped() -> Result<Unit, Error> {
 /// than a promise that the third row of the table has no hole in it: whatever
 /// a path reaches, it arrives escaped.
 test fn aStructIsEscapedLikeAnythingElse() -> Result<Unit, Error> {
-  assertEqual(filled("$.limits"), "Limits(maxQueued: 32)")?
+  assertEqual(filled("<%= limits %>"), "Limits(maxQueued: 32)")?
   assertEqual(
-    html.render(fill("$.", Limits(maxQueued: 1))),
+    html.render(fill("<%= . %>", Limits(maxQueued: 1))),
     "Limits(maxQueued: 1)",
   )?
   Ok(())
 }
 
-// ------------------------------------------------- a path that reaches nothing
+// ------------------------------------------------- a hole that goes wrong
 
 /// A path that reaches nothing renders a marker, not an empty string.
 ///
@@ -291,41 +296,85 @@ test fn aStructIsEscapedLikeAnythingElse() -> Result<Unit, Error> {
 /// difference nobody sees. The marker is the one form of it that a test, or a
 /// glance, cannot miss.
 test fn aPathThatReachesNothingSaysSo() -> Result<Unit, Error> {
-  assertEqual(filled("$.nmae"), "[no such path: $.nmae]")?
-  assertEqual(filled("$.limits.maxQueud"), "[no such path: $.limits.maxQueud]")?
-  assertEqual(filled("$.words[9]"), "[no such path: $.words[9]]")?
-  assertEqual(filled("$.count[0]"), "[no such path: $.count[0]]")?
+  assertEqual(filled("<%= nmae %>"), "[no such path: nmae]")?
   assertEqual(
-    filled("$.words[99999999999999999999]"),
-    "[no such path: $.words[99999999999999999999]]",
+    filled("<%= limits.maxQueud %>"),
+    "[no such path: limits.maxQueud]",
+  )?
+  assertEqual(filled("<%= words[9] %>"), "[no such path: words[9]]")?
+  assertEqual(filled("<%= count[0] %>"), "[no such path: count[0]]")?
+  assertEqual(
+    filled("<%= words[99999999999999999999] %>"),
+    "[no such path: words[99999999999999999999]]",
   )?
   Ok(())
 }
 
-/// The marker goes through the escaper too, so it is inert wherever it lands.
+/// Text between the delimiters that is not a path is the same marker.
 ///
-/// It is written into whatever the template was writing — between tags, or
-/// inside an attribute's quotes — and a marker that closed the attribute it
-/// was inside would turn a misspelling into an injection.
-test fn theMarkerCannotBreakOutOfWhereItLands() -> Result<Unit, Error> {
+/// This is what the closing delimiter buys. The whole of what is between the
+/// two has to be a path, so a trailing `.`, a bracket with no number in it and
+/// a space in the middle of a name are all refused — where a scanner with
+/// nothing to stop at could only read as far as it understood and leave the
+/// rest of the hole standing in the markup.
+test fn textThatIsNotAPathIsTheSameMarker() -> Result<Unit, Error> {
+  assertEqual(filled("<%= count. %>"), "[no such path: count.]")?
+  assertEqual(filled("<%= .count %>"), "[no such path: .count]")?
+  assertEqual(filled("<%= words[] %>"), "[no such path: words[]]")?
+  assertEqual(filled("<%= words[x] %>"), "[no such path: words[x]]")?
+  assertEqual(filled("<%= max Queued %>"), "[no such path: max Queued]")?
+  assertEqual(filled("<%= %>"), "[no such path: ]")?
+  Ok(())
+}
+
+/// A `<%=` that is never closed renders a marker naming what it opened.
+///
+/// Nothing closed it, so the rest of the template is inside the hole, and the
+/// rest of the template is what the marker names: the page comes out
+/// obviously broken rather than subtly short, and none of it is lost. Under a
+/// sigil there was no such error to report — a malformed hole simply became
+/// text, which is the quiet failure this notation does not have.
+test fn anUnclosedOpenerSaysSo() -> Result<Unit, Error> {
+  assertEqual(filled("<p><%= count"), "<p>[unclosed &lt;%=: count]")?
   assertEqual(
-    filled("<a title=\"$.nmae\">x</a>"),
-    "<a title=\"[no such path: $.nmae]\">x</a>",
+    filled("<p><%= count</p>"),
+    "<p>[unclosed &lt;%=: count&lt;/p&gt;]",
   )?
-  assertEqual(filled("<p>$.nmae</p>").contains("<p>[no such path"), true)?
+  assertEqual(filled("<p><%="), "<p>[unclosed &lt;%=: ]")?
+  assertEqual(
+    filled("<p><%= count %></p><%= live"),
+    "<p>42</p>[unclosed &lt;%=: live]",
+  )?
+  Ok(())
+}
+
+/// Both markers go through the escaper, so neither can break out of where it
+/// lands.
+///
+/// A marker is written into whatever the template was writing — between tags,
+/// or inside an attribute's quotes — and a marker that closed the attribute it
+/// was inside would turn a misspelling into an injection. The unclosed one
+/// matters most: what it quotes is the tail of the template, which is markup.
+test fn aMarkerCannotBreakOutOfWhereItLands() -> Result<Unit, Error> {
+  assertEqual(
+    filled("<a title=\"<%= nmae %>\">x</a>"),
+    "<a title=\"[no such path: nmae]\">x</a>",
+  )?
+  assertEqual(filled("<p><%= nmae %></p>").contains("<p>[no such path"), true)?
+  assertEqual(filled("<p><%= x<script>").contains("<script>"), false)?
   Ok(())
 }
 
 /// A path stops at an `opaque` struct rather than reading inside it.
 ///
-/// `Html` is one, so `$.who.said` cannot reach the text a `markup` was told
+/// `Html` is one, so `who.said` cannot reach the text a `markup` was told
 /// about — and no program's `opaque` type can be read through a template
 /// either, which is the same rule the language has everywhere else.
 test fn aPathDoesNotReachInsideAnOpaqueValue() -> Result<Unit, Error> {
   let line = Line(at: "09:00", said: "said", who: markup("<b>me</b>"))
   assertEqual(
-    html.render(fill("$.who.said", line)),
-    "[no such path: $.who.said]",
+    html.render(fill("<%= who.said %>", line)),
+    "[no such path: who.said]",
   )?
   Ok(())
 }
@@ -343,7 +392,10 @@ test fn markupIsTakenAtItsWord() -> Result<Unit, Error> {
 test fn emptyIsNoMarkupAtAll() -> Result<Unit, Error> {
   assertEqual(html.render(empty()), "")?
   let line = Line(at: "09:00", said: "said", who: empty())
-  assertEqual(html.render(fill("<td>$.at</td>$.who", line)), "<td>09:00</td>")?
+  assertEqual(
+    html.render(fill("<td><%= at %></td><%= who %>", line)),
+    "<td>09:00</td>",
+  )?
   Ok(())
 }
 
@@ -353,15 +405,17 @@ test fn emptyIsNoMarkupAtAll() -> Result<Unit, Error> {
 /// The `for` is the language's and so is the `if`; the templates know only
 /// their own row. This is the shape the whole thing is for.
 test fn aPageIsBuiltOutOfPages() -> Result<Unit, Error> {
+  let row = "<tr><td><%= at %></td><td><%= who %></td><td><%= said %></td></tr>"
   var rows = Vector.of()
   for said in ["<a>", "b & c"] {
-    let line = Line(at: "09:00", said: said, who: markup("<i>me</i>"))
-    rows.push(fill("<tr><td>$.at</td><td>$.who</td><td>$.said</td></tr>", line))
+    rows.push(
+      fill(row, Line(at: "09:00", said: said, who: markup("<i>me</i>"))),
+    )
   }
   let first = "<tr><td>09:00</td><td><i>me</i></td><td>&lt;a&gt;</td></tr>"
   let second = "<tr><td>09:00</td><td><i>me</i></td><td>b &amp; c</td></tr>"
   assertEqual(
-    html.render(fill("<table class=log>$.</table>", rows.freeze())),
+    html.render(fill("<table class=log><%= . %></table>", rows.freeze())),
     "<table class=log>{first}{second}</table>",
   )?
   Ok(())
@@ -370,7 +424,7 @@ test fn aPageIsBuiltOutOfPages() -> Result<Unit, Error> {
 /// The module is usable as a qualified name as well as through its exports.
 test fn isUsableAsAQualifiedModule() -> Result<Unit, Error> {
   assertEqual(html.render(html.markup("<b>x</b>")), "<b>x</b>")?
-  assertEqual(html.render(html.fill("$.count", page())), "42")?
+  assertEqual(html.render(html.fill("<%= count %>", page())), "42")?
   assertEqual(html.render(html.empty()), "")?
   Ok(())
 }
