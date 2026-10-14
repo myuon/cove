@@ -31,8 +31,8 @@ export fn sample() -> Result<Unit, Error> {
 
 /// One record, as the line it takes in the file.
 ///
-/// Built by interpolation rather than through `cq.json`, because this writes
-/// JSON and `cq.json` reads it: generating the input with the same code that
+/// Built by interpolation rather than through `std.json`, because this writes
+/// JSON and `std.json` reads it: generating the input with the same code that
 /// parses it would make a round trip that agreed with itself and with nothing
 /// else.
 fn record(number: Int, seed: Int) -> String {

@@ -127,7 +127,7 @@ around is between input a format does not cover and input a format spells
 differently. `"a"x` is not an unsupported CSV field, it is a field the naive
 reading turns into `ax` — a different value — so a quoted field must end at a
 `,` or at the end of the record. `01`, `+1`, `.5`, and `1.` are not numbers
-JSON writes, and `Float.parse` reads all four, so `cq.json` walks JSON's own
+JSON writes, and `Float.parse` reads all four, so `std.json` walks JSON's own
 number grammar instead of delegating the judgement; `1e999` is grammatical and
 still refused, because the `inf` it parses to is not a number any input meant.
 A data tool that quietly turns one record in a hundred thousand into a
@@ -154,13 +154,18 @@ Each directory is a module.
 | module | what it is |
 | --- | --- |
 | `cq` | the CLI: `main.cove` runs one transformation, `options.cove` reads the command line, `sample.cove` generates measurable input |
-| `cq.json` | a recursive `Json` value, a parser that reports a column, and a renderer |
 | `cq.csv` | RFC 4180 field splitting and formatting, as a four-state machine |
 | `cq.diag` | a `Detail` a parser can report, and the `Diagnostic` it becomes once the line is known |
 | `cq.records` | the typed `Booking` and `Status`, and the validation that produces them |
 | `cq.rows` | `Cell`, `Format`, and the rendering that makes one row go out as either |
 | `cq.pipeline` | the streaming engine: read, fold, write, count |
 | `cq.programs` | the three transformations |
+
+JSON is `std.json`, the standard library's. It was this program's own
+`cq.json` until [issue #647](https://github.com/myuon/cove/issues/647) moved it
+into the standard library, together with what two copies of it in other
+programs had grown; the sections below that measure `cq.json` measured that
+module, which is the same parser.
 
 The engine is one generic function. A transformation supplies a state type, a
 step, and a finish, and gets back a loop that never holds more than one record:
@@ -606,7 +611,7 @@ Still open, and found by writing this:
   from a code point and `Int.parse` has no radix, so a `\u0041` escape cannot
   be implemented. `cq.json` refuses it rather than half-supporting it. `\b` and
   `\f` are refused for a nearer reason: Cove's own string literals cannot write
-  those characters.
+  those characters. (Closed since: `std.json` reads all three.)
 - [#102](https://github.com/myuon/cove/issues/102) — `console` has one stream,
   so diagnostics land in the output.
 

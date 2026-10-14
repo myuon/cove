@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:aec136443490c6f9
+hash fnv1a64:f4d633a475017886
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -304,41 +304,13 @@ module cq.diag
   /// Reports `diagnostic` the way a compiler reports one, so an editor that
   /// already knows how to jump to `file:line:column` can jump to a bad record.
   export fn describe(diagnostic: Diagnostic) -> String
+  /// What `std.json` reported about one record, as this program's `Detail`.
+  ///
+  /// A record is one line, so `std.json`'s `line` is always 1 and the column is
+  /// the part worth keeping; the line in the file is `locate`'s to supply.
+  export fn fromJson(detail: json.Detail) -> Detail
   /// Places `detail` at line `line` of `source`.
   export fn locate(detail: Detail, source: String, line: Int) -> Diagnostic
-
-module cq.json
-  /// A JSON value.
-  ///
-  /// JSON has one number type, so this does too: an integer that arrived in the
-  /// input is a `Number` like any other, and a program that needs an `Int` asks
-  /// for one at the point where it knows that is what the field means. Putting
-  /// the distinction here instead would be inventing a JSON that the format does
-  /// not have.
-  export enum Json
-    case Null
-    case Bool(Bool)
-    case Number(Float)
-    case Text(String)
-    case Items(Array<Json>)
-    case Fields(Map<String, Json>)
-  /// The field `name` of an object, or `None` for anything else.
-  ///
-  /// A value that is not an object has no fields rather than an empty set of
-  /// them, and both answer `None` here; a caller that needs to tell the two
-  /// apart matches on the value itself.
-  export fn field(value: Json, name: String) -> Option<Json>
-  /// Parses `text` as one complete JSON value.
-  ///
-  /// The whole of `text` must be that value: trailing content is an error rather
-  /// than something the caller is left to notice, because a line of JSON Lines
-  /// that has more after the record is not a record with a comment on it.
-  export fn parse(text: String) -> Result<Json, Detail>
-  /// Renders `value` as JSON on one line, which is what a JSON Lines record is.
-  ///
-  /// Object fields come out in `Map` order, which is ascending by key, so two
-  /// runs over the same input write the same bytes.
-  export fn render(value: Json) -> String
 
 module cq.pipeline
   /// What one run did.

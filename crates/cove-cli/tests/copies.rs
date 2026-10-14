@@ -1914,7 +1914,24 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `fail_vector_filled_negative` +20: the printing standard library each
 /// carries, and in the first the five element types `filled` is instantiated
 /// at.
-const FORWARDABLE_COPIES: usize = 7618;
+///
+/// **7,570 since JSON became `std.json`** (issue #647, ADR 0097), a fall of 48
+/// that is two movements in opposite directions, both in the three rows that
+/// use JSON and in no other. `examples/cq/json/json_test.cove`'s tests moved to
+/// `tests/e2e/std_json`, a package this survey does not lower: with that file
+/// held out and everything else as it was, the corpus answered 7,486 against
+/// 7,570 before #649 (above) landed, so the
+/// tests were 84. Against that, `std.json` is 36 more than `cq.json` was —
+/// `examples:cq` and `examples:cqSample` +14 each (94 to 105 in `prod`, 101 to
+/// 104 in `ret`) and `examples:covecheck` +8 (81 to 88, 105 to 106) — which is
+/// the code the module grew: `\u` escapes and surrogate pairs, the duplicate
+/// check, the escaping renderer, and a `Detail` with a line. Nothing here is
+/// the lowering, and no other row moved: `std.json` is a library a program has
+/// only by importing it, so a whole-package lowering of a package that does not
+/// import it lowers none of it (`cove_sema::stdlib::is_imported_library`).
+/// Before that rule this rise was 8,480, about 31 copies in every one of the
+/// 271 programs.
+const FORWARDABLE_COPIES: usize = 7570;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

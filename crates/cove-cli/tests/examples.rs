@@ -978,7 +978,7 @@ fn cq_prints_its_usage_when_asked_for_help() {
 /// `cq.sample` writes records `cq.main` can read, which is the one thing a
 /// generator has to get right.
 ///
-/// It builds its JSON by interpolation rather than through `cq.json`, so
+/// It builds its JSON by interpolation rather than through `std.json`, so
 /// nothing but this makes the two agree: a generator whose output its own
 /// reader refuses is the failure most worth catching, and it would not show
 /// up in either half's own tests. The file the first run left behind is
