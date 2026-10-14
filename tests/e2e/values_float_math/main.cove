@@ -1,0 +1,248 @@
+use console.println
+
+/// `Float.exp`, `ln`, `log10`, `sin`, `cos` and `pow` at their edges, on
+/// every tier.
+///
+/// The six are Cove (ADR 0098), so the interpreter, the encoded VM and the
+/// native tier run the same body over the same correctly rounded operations
+/// and must print the same bytes: the harness compares the interpreter with
+/// the VM, and the `native` file asks it to compare the native tier with the
+/// VM too. A marker alone would check nothing, because a function that prints
+/// is refused by the tier and runs on the VM — so every call here happens in
+/// [`computed`], which prints nothing and which the tier compiles.
+///
+/// **Rendering is a pin on all fifty-three bits**: `"{x}"` prints the
+/// shortest decimal that reads back as the same double, so each line below
+/// names one bit pattern. Each row prints `1.0 / value` beside the value,
+/// which is how a zero says which zero it is.
+///
+/// What this golden does not do is say the values are *right*: it says what
+/// the code answers, and a change that moves a bit moves a line. That they
+/// are within one unit in the last place of the exact value is
+/// `crates/cove-runtime/tests/float_math.rs`'s claim, against a 300-bit
+/// reference; the rows here that are exact by contract — `ln(1)`, `log10`
+/// of a power of ten, `pow` of two integers — are exact in that file too.
+export fn main() -> Result<Unit, Error> {
+  exps()?
+  logs()?
+  tens()?
+  sines()?
+  cosines()?
+  powers()?
+  Ok(())
+}
+
+fn exps() -> Result<Unit, Error> {
+  let zero = 0.0
+  let nan = zero / zero
+  let inf = 1.0 / zero
+  show("exp.zero", 0, 0.0, 0.0)?
+  show("exp.negzero", 0, -0.0, 0.0)?
+  show("exp.one", 0, 1.0, 0.0)?
+  show("exp.minusone", 0, -1.0, 0.0)?
+  show("exp.half", 0, 0.5, 0.0)?
+  show("exp.ln2", 0, 0.6931471805599453, 0.0)?
+  show("exp.tiny", 0, 1.0e-300, 0.0)?
+  show("exp.below28", 0, 3.725290298461914e-09, 0.0)?
+  show("exp.hundred", 0, 100.0, 0.0)?
+  show("exp.minushundred", 0, -100.0, 0.0)?
+  show("exp.largest", 0, 709.782712893384, 0.0)?
+  show("exp.overflow", 0, 709.7827128933841, 0.0)?
+  show("exp.leastnormal", 0, -708.3964185322641, 0.0)?
+  show("exp.subnormal", 0, -740.0, 0.0)?
+  show("exp.least", 0, -745.1332191019411, 0.0)?
+  show("exp.underflow", 0, -745.1332191019412, 0.0)?
+  show("exp.inf", 0, inf, 0.0)?
+  show("exp.neginf", 0, -inf, 0.0)?
+  show("exp.nan", 0, nan, 0.0)?
+  Ok(())
+}
+
+fn logs() -> Result<Unit, Error> {
+  let zero = 0.0
+  let nan = zero / zero
+  let inf = 1.0 / zero
+  show("ln.one", 1, 1.0, 0.0)?
+  show("ln.e", 1, 2.718281828459045, 0.0)?
+  show("ln.two", 1, 2.0, 0.0)?
+  show("ln.half", 1, 0.5, 0.0)?
+  show("ln.ten", 1, 10.0, 0.0)?
+  show("ln.above", 1, 1.0000000000000002, 0.0)?
+  show("ln.below", 1, 0.9999999999999999, 0.0)?
+  show("ln.least", 1, 5.0e-324, 0.0)?
+  show("ln.leastnormal", 1, 2.2250738585072014e-308, 0.0)?
+  show("ln.largest", 1, 1.7976931348623157e308, 0.0)?
+  show("ln.zero", 1, 0.0, 0.0)?
+  show("ln.negzero", 1, -0.0, 0.0)?
+  show("ln.negative", 1, -1.0, 0.0)?
+  show("ln.inf", 1, inf, 0.0)?
+  show("ln.neginf", 1, -inf, 0.0)?
+  show("ln.nan", 1, nan, 0.0)?
+  Ok(())
+}
+
+fn tens() -> Result<Unit, Error> {
+  let zero = 0.0
+  let nan = zero / zero
+  let inf = 1.0 / zero
+  show("log10.one", 2, 1.0, 0.0)?
+  show("log10.ten", 2, 10.0, 0.0)?
+  show("log10.thousand", 2, 1000.0, 0.0)?
+  show("log10.e22", 2, 1.0e22, 0.0)?
+  show("log10.e23", 2, 1.0e23, 0.0)?
+  show("log10.e308", 2, 1.0e308, 0.0)?
+  show("log10.tenth", 2, 0.1, 0.0)?
+  show("log10.e-300", 2, 1.0e-300, 0.0)?
+  show("log10.e-307", 2, 1.0e-307, 0.0)?
+  show("log10.two", 2, 2.0, 0.0)?
+  show("log10.half", 2, 0.5, 0.0)?
+  show("log10.least", 2, 5.0e-324, 0.0)?
+  show("log10.largest", 2, 1.7976931348623157e308, 0.0)?
+  show("log10.zero", 2, 0.0, 0.0)?
+  show("log10.negzero", 2, -0.0, 0.0)?
+  show("log10.negative", 2, -10.0, 0.0)?
+  show("log10.inf", 2, inf, 0.0)?
+  show("log10.nan", 2, nan, 0.0)?
+  Ok(())
+}
+
+fn sines() -> Result<Unit, Error> {
+  let zero = 0.0
+  let nan = zero / zero
+  let inf = 1.0 / zero
+  show("sin.zero", 3, 0.0, 0.0)?
+  show("sin.negzero", 3, -0.0, 0.0)?
+  show("sin.tiny", 3, 1.0e-300, 0.0)?
+  show("sin.half", 3, 0.5, 0.0)?
+  show("sin.one", 3, 1.0, 0.0)?
+  show("sin.quarterpi", 3, 0.7853981633974483, 0.0)?
+  show("sin.halfpi", 3, 1.5707963267948966, 0.0)?
+  show("sin.pi", 3, 3.141592653589793, 0.0)?
+  show("sin.minuspi", 3, -3.141592653589793, 0.0)?
+  show("sin.twopi", 3, 6.283185307179586, 0.0)?
+  show("sin.hundred", 3, 100.0, 0.0)?
+  show("sin.belowfar", 3, 1647098.9999999998, 0.0)?
+  show("sin.far", 3, 1647099.0, 0.0)?
+  show("sin.e22", 3, 1.0e22, 0.0)?
+  show("sin.e300", 3, 1.0e300, 0.0)?
+  show("sin.closest", 3, 5.319372648326541e+255, 0.0)?
+  show("sin.largest", 3, 1.7976931348623157e308, 0.0)?
+  show("sin.neglargest", 3, -1.7976931348623157e308, 0.0)?
+  show("sin.inf", 3, inf, 0.0)?
+  show("sin.neginf", 3, -inf, 0.0)?
+  show("sin.nan", 3, nan, 0.0)?
+  Ok(())
+}
+
+fn cosines() -> Result<Unit, Error> {
+  let zero = 0.0
+  let nan = zero / zero
+  let inf = 1.0 / zero
+  show("cos.zero", 4, 0.0, 0.0)?
+  show("cos.negzero", 4, -0.0, 0.0)?
+  show("cos.tiny", 4, 1.0e-300, 0.0)?
+  show("cos.half", 4, 0.5, 0.0)?
+  show("cos.one", 4, 1.0, 0.0)?
+  show("cos.quarterpi", 4, 0.7853981633974483, 0.0)?
+  show("cos.halfpi", 4, 1.5707963267948966, 0.0)?
+  show("cos.pi", 4, 3.141592653589793, 0.0)?
+  show("cos.minuspi", 4, -3.141592653589793, 0.0)?
+  show("cos.twopi", 4, 6.283185307179586, 0.0)?
+  show("cos.hundred", 4, 100.0, 0.0)?
+  show("cos.belowfar", 4, 1647098.9999999998, 0.0)?
+  show("cos.far", 4, 1647099.0, 0.0)?
+  show("cos.e22", 4, 1.0e22, 0.0)?
+  show("cos.e300", 4, 1.0e300, 0.0)?
+  show("cos.closest", 4, 5.319372648326541e+255, 0.0)?
+  show("cos.largest", 4, 1.7976931348623157e308, 0.0)?
+  show("cos.neglargest", 4, -1.7976931348623157e308, 0.0)?
+  show("cos.inf", 4, inf, 0.0)?
+  show("cos.neginf", 4, -inf, 0.0)?
+  show("cos.nan", 4, nan, 0.0)?
+  Ok(())
+}
+
+fn powers() -> Result<Unit, Error> {
+  let zero = 0.0
+  let nan = zero / zero
+  let inf = 1.0 / zero
+  show("pow.twoten", 5, 2.0, 10.0)?
+  show("pow.threethirtythree", 5, 3.0, 33.0)?
+  show("pow.tentwentytwo", 5, 10.0, 22.0)?
+  show("pow.tenminustwo", 5, 10.0, -2.0)?
+  show("pow.sqrttwo", 5, 2.0, 0.5)?
+  show("pow.fourhalf", 5, 4.0, 0.5)?
+  show("pow.nineminushalf", 5, 9.0, -0.5)?
+  show("pow.square", 5, 1.1, 2.0)?
+  show("pow.ethird", 5, 2.718281828459045, 0.3333333333333333)?
+  show("pow.least", 5, 2.0, -1074.0)?
+  show("pow.underflow", 5, 2.0, -1075.0)?
+  show("pow.largest", 5, 2.0, 1023.0)?
+  show("pow.overflow", 5, 2.0, 1024.0)?
+  show("pow.nearone", 5, 1.0000001, 1.0e9)?
+  show("pow.nearoneneg", 5, 0.9999999, -1.0e9)?
+  show("pow.negcube", 5, -2.0, 3.0)?
+  show("pow.negsquare", 5, -2.0, 2.0)?
+  show("pow.negthird", 5, -8.0, 0.3333333333333333)?
+  show("pow.neghalf", 5, -4.0, 0.5)?
+  show("pow.neghuge", 5, -1.5, 1.0e300)?
+  show("pow.anyzero", 5, nan, 0.0)?
+  show("pow.anynegzero", 5, nan, -0.0)?
+  show("pow.onenan", 5, 1.0, nan)?
+  show("pow.nanone", 5, nan, 1.0)?
+  show("pow.twonan", 5, 2.0, nan)?
+  show("pow.minusoneinf", 5, -1.0, inf)?
+  show("pow.minusoneneginf", 5, -1.0, -inf)?
+  show("pow.halfinf", 5, 0.5, inf)?
+  show("pow.halfneginf", 5, 0.5, -inf)?
+  show("pow.twoinf", 5, 2.0, inf)?
+  show("pow.twoneginf", 5, 2.0, -inf)?
+  show("pow.zerofive", 5, 0.0, 5.0)?
+  show("pow.zerominusone", 5, 0.0, -1.0)?
+  show("pow.negzerothree", 5, -0.0, 3.0)?
+  show("pow.negzerominusone", 5, -0.0, -1.0)?
+  show("pow.negzerominustwo", 5, -0.0, -2.0)?
+  show("pow.negzerohalf", 5, -0.0, 0.5)?
+  show("pow.inftwo", 5, inf, 2.0)?
+  show("pow.infminustwo", 5, inf, -2.0)?
+  show("pow.neginfthree", 5, -inf, 3.0)?
+  show("pow.neginfminusthree", 5, -inf, -3.0)?
+  show("pow.neginftwo", 5, -inf, 2.0)?
+  show("pow.neginfhalf", 5, -inf, 0.5)?
+  Ok(())
+}
+
+/// One row: the value and its reciprocal.
+fn show(label: String, which: Int, x: Float, y: Float) -> Result<Unit, Error> {
+  let value = computed(which, x, y, 1)
+  println("{label} {value} {1.0 / value}")?
+  Ok(())
+}
+
+/// One of the six, by number, in a function the native tier compiles.
+///
+/// It calls itself once before it answers, which is what keeps
+/// `cove_ir::lower::inline` from expanding it into [`show`]: a body that
+/// makes a call is not a leaf, and an expanded call would run on the printing
+/// caller's tier — the VM — rather than on this one's.
+fn computed(which: Int, x: Float, y: Float, depth: Int) -> Float {
+  if depth > 0 {
+    return computed(which, x, y, depth - 1)
+  }
+  if which == 0 {
+    return x.exp()
+  }
+  if which == 1 {
+    return x.ln()
+  }
+  if which == 2 {
+    return x.log10()
+  }
+  if which == 3 {
+    return x.sin()
+  }
+  if which == 4 {
+    return x.cos()
+  }
+  x.pow(y)
+}

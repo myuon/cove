@@ -300,7 +300,11 @@ fn agree(source: &str, name: &str, args: Vec<Value>) -> Answer {
 /// with is what it had when the floors were set, and `keeps_a_lot`, whose
 /// last doubling of its vector was already close to the budget, ran out of
 /// memory without it.
-const PRESSURE_HEAP_WORDS: usize = (1 << 12) + 1_222;
+///
+/// ADR 0098's `sin` and `cos` added a second, the 56 digits of `2/π` their
+/// far reduction reads — 224 bytes, 29 words — on top again, for the same
+/// reason and with the same result on `keeps_a_lot` without it.
+const PRESSURE_HEAP_WORDS: usize = (1 << 12) + 1_222 + 29;
 
 /// [`agree`], but the machine runs over a heap bounded to `heap_words`, and
 /// the answer comes back with how many collections it took to produce.

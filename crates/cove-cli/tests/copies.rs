@@ -1937,7 +1937,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// covefmt's new `a_dropped_comma_is_no_column` held out and the fix to
 /// `flatWidth` kept, the corpus answers 7,570, the bound exactly; the test is
 /// the +1, in `tools/covefmt:covefmtBench`'s `ret` (155 to 156).
-const FORWARDABLE_COPIES: usize = 7571;
+///
+/// **7,626 since `Float` has `exp`, `ln`, `log10`, `sin`, `cos` and `pow`**
+/// (issue #648, ADR 0098), a rise of 55 that is all program and no lowering:
+/// with `tests/e2e/values_float_math` and `benches/floatmath` held out the
+/// corpus answers 7,571, the bound exactly, though every program carries the
+/// six functions' bodies (1,470 more instructions each); the e2e case is +25
+/// and the bench +30, the printing standard library a program like each
+/// carries. A first draft of the bodies was **+1,638**, six shapes in every
+/// one of 273 programs: a `match` arm that bound `core.floatTruncate`'s
+/// payload and assigned it on (a copy to the binding and one to the
+/// variable), and a function that ended on a variable rather than returning
+/// it. They hand the payload straight to the call that wants it now, and say
+/// `return`.
+const FORWARDABLE_COPIES: usize = 7626;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

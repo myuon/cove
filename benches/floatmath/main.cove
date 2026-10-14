@@ -1,0 +1,466 @@
+use console.println
+use clock.now
+
+/// What each of `std.float`'s elementary functions costs a call, on the
+/// encoded VM and on the native tier (ADR 0098).
+///
+/// The six are Cove — FreeBSD's fdlibm algorithms over `Float` and `Int`
+/// arithmetic, with no instruction of their own — so their cost is the cost
+/// of the instructions they are made of, and the question this answers is
+/// whether that is a cost a program can pay: a VM call of each is a few
+/// hundred instructions, and a native one a few dozen nanoseconds. `sqrt` is
+/// here for scale, as the one operation among them that is a single machine
+/// instruction.
+///
+/// # The rows
+///
+/// - `exp`, `ln` and `log10` of ordinary operands;
+/// - `sin` and `cos` at three magnitudes, because their cost is not one
+///   number: below `π/4` there is no reduction, below `2^20 · π/2` it is
+///   three-part Cody–Waite, and past that it is the Payne–Hanek reduction
+///   over `Int` limbs, which reads ten digits of `2/π` out of a string;
+/// - `pow` of an ordinary pair, and of two integers.
+///
+/// # The arrangement is `benches/floatsqrt`'s, for its reasons
+///
+/// Each row is a call to a counting callee whose body is the loop, because the
+/// outermost frame is always encoded and a loop written in `main` would be a
+/// VM measurement under `--backend native` too; every counting callee opens
+/// with [`ballast`], a block the count's sign makes unreachable, sized past
+/// `cove_ir::lower::inline`'s `HOT_LIMIT` so that it is not expanded into its
+/// caller. [`countBare`] is the loop with the call taken out, and every row is
+/// read from it by difference.
+///
+/// Run it as `cove run floatmath` from `benches/`, and with
+/// `--backend native` on a host the native tier runs on.
+fn turns() -> Int {
+  200000
+}
+
+/// Instructions a counting callee carries so that it is not expanded into its
+/// caller.
+///
+/// `turns` is never negative at any call site, so none of this runs; nothing
+/// in the lowering can prove that, so none of it is folded away either.
+fn ballast(turns: Int) -> Int {
+  var dead = 0
+  if turns < 0 {
+    dead = dead + 1
+    dead = dead + 2
+    dead = dead + 3
+    dead = dead + 4
+    dead = dead + 5
+    dead = dead + 6
+    dead = dead + 7
+    dead = dead + 8
+    dead = dead + 9
+    dead = dead + 10
+    dead = dead + 11
+    dead = dead + 12
+    dead = dead + 13
+    dead = dead + 14
+    dead = dead + 15
+    dead = dead + 16
+    dead = dead + 17
+    dead = dead + 18
+    dead = dead + 19
+    dead = dead + 20
+    dead = dead + 21
+    dead = dead + 22
+    dead = dead + 23
+    dead = dead + 24
+  }
+  dead
+}
+
+/// `turns` calls of `Float.exp`, and nothing else in the loop.
+fn countExp(x: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    out = x.exp()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// `turns` calls of `Float.ln`.
+fn countLn(x: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    out = x.ln()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// `turns` calls of `Float.log10`.
+fn countLog10(x: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    out = x.log10()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// `turns` calls of `Float.sin`.
+fn countSin(x: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    out = x.sin()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// `turns` calls of `Float.cos`.
+fn countCos(x: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    out = x.cos()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// `turns` calls of `Float.pow`.
+fn countPow(x: Float, y: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    out = x.pow(y)
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// `turns` calls of `Float.sqrt`, the one machine instruction among them, for scale.
+fn countSqrt(x: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    out = x.sqrt()
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// The loop with the operation taken out and **nothing** put in its place.
+fn countBare(x: Float, turns: Int) -> Float {
+  var guard = ballast(turns)
+  var out = x
+  var i = 0
+  if turns < 0 {
+    guard = guard + 1
+    guard = guard + 2
+    guard = guard + 3
+    guard = guard + 4
+    guard = guard + 5
+    guard = guard + 6
+    guard = guard + 7
+    guard = guard + 8
+    guard = guard + 9
+    guard = guard + 10
+    guard = guard + 11
+    guard = guard + 12
+    guard = guard + 13
+    guard = guard + 14
+    guard = guard + 15
+    guard = guard + 16
+    guard = guard + 17
+    guard = guard + 18
+    guard = guard + 19
+    guard = guard + 20
+    guard = guard + 21
+    guard = guard + 22
+    guard = guard + 23
+    guard = guard + 24
+  }
+  while i < turns {
+    i = i + 1
+  }
+  if guard < 0 {
+    out = x
+  }
+  out
+}
+
+/// How long a row took, in microseconds, and the last value its loop wrote.
+struct Row {
+  micros: Int
+  witness: Float
+}
+
+/// Which counting callee a row times, by number, so that one function does
+/// the timing for all of them.
+fn timed(which: Int, x: Float, y: Float, turns: Int) -> Row {
+  let from = now()
+  var witness = 0.0
+  if which == 0 {
+    witness = countBare(x, turns)
+  } else if which == 1 {
+    witness = countExp(x, turns)
+  } else if which == 2 {
+    witness = countLn(x, turns)
+  } else if which == 3 {
+    witness = countLog10(x, turns)
+  } else if which == 4 {
+    witness = countSin(x, turns)
+  } else if which == 5 {
+    witness = countCos(x, turns)
+  } else if which == 6 {
+    witness = countPow(x, y, turns)
+  } else {
+    witness = countSqrt(x, turns)
+  }
+  Row(micros: (now() - from).micros(), witness: witness)
+}
+
+/// What one call cost, in nanoseconds, over `turns` turns of which `bare`
+/// microseconds were the loop itself.
+fn perCall(micros: Int, bare: Int, turns: Int) -> Int {
+  (micros - bare) * 1000 / turns
+}
+
+fn line(label: String, row: Row, bare: Int, turns: Int) -> Result<Unit, Error> {
+  println("{label} {perCall(row.micros, bare, turns)}    {row.witness}")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  let n = turns()
+  let bare = timed(0, 0.75, 0.0, n)
+  println(
+    "bare loop         {bare.micros * 1000000 / n} ps/turn over {n} turn(s)",
+  )?
+  println("")?
+  println("row               ns/call    witness")?
+  line("exp(0.75)        ", timed(1, 0.75, 0.0, n), bare.micros, n)?
+  line("ln(3.7)          ", timed(2, 3.7, 0.0, n), bare.micros, n)?
+  line("log10(3.7)       ", timed(3, 3.7, 0.0, n), bare.micros, n)?
+  line("sin(0.6)         ", timed(4, 0.6, 0.0, n), bare.micros, n)?
+  line("sin(10.0)        ", timed(4, 10.0, 0.0, n), bare.micros, n)?
+  line("sin(1.0e300)     ", timed(4, 1.0e300, 0.0, n), bare.micros, n)?
+  line("cos(0.6)         ", timed(5, 0.6, 0.0, n), bare.micros, n)?
+  line("cos(10.0)        ", timed(5, 10.0, 0.0, n), bare.micros, n)?
+  line("cos(1.0e300)     ", timed(5, 1.0e300, 0.0, n), bare.micros, n)?
+  line("pow(1.7, 3.3)    ", timed(6, 1.7, 3.3, n), bare.micros, n)?
+  line("pow(3.0, 20.0)   ", timed(6, 3.0, 20.0, n), bare.micros, n)?
+  line("sqrt(2.0)        ", timed(7, 2.0, 0.0, n), bare.micros, n)?
+  Ok(())
+}
