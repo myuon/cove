@@ -262,6 +262,15 @@ export fn text(source: String, token: Token) -> String {
 /// range `sliceBytes` declines, so zero is the width it would have measured;
 /// a token the lexer produced never names such a range, and `byteAt` traps
 /// where `sliceBytes` merely declines.
+///
+/// **A string written over lines is as wide as its first line and its last
+/// together**, ADR 0100. Counted whole, a `"""` literal of three lines was
+/// as wide as all three, and every group around it was judged over the limit
+/// for text that is not on its line. Its first line is what stands on the
+/// line the literal opens on and its last is what the line it closes on
+/// begins with; the lines between are on lines of their own and are no
+/// line's width but their own. `cove_syntax::format`'s `flat_width` is the
+/// same rule.
 export fn tokenWidth(source: String, token: Token) -> Int {
   let limit = source.byteLength()
   let end = if token.to > limit {
@@ -275,12 +284,58 @@ export fn tokenWidth(source: String, token: Token) -> Int {
     token.from
   }
   var count = 0
+  var first = -1
+  let lines = token.kind == Kind.Str
   while at < end {
     let byte = source.byteAt(at)
-    if byte < 128 || byte >= 192 {
+    if lines && byte == '\n' {
+      if first < 0 {
+        first = count
+      }
+      count = 0
+    } else if byte < 128 || byte >= 192 {
       count = count + 1
     }
     at = at + 1
   }
-  count
+  if first < 0 {
+    return count
+  }
+  return first + count
+}
+
+/// How wide the last line of a string written over lines is, in characters,
+/// or `-1` for a token that holds no line break.
+///
+/// The column a line is at once such a string is written, ADR 0100: the line
+/// it closes on begins with its last line, whatever stood in front of its
+/// first. [`tokenWidth`] is the question of how much room it takes; this is
+/// the question of where it leaves the cursor.
+export fn lastLineWidth(source: String, token: Token) -> Int {
+  if token.kind != Kind.Str {
+    return -1
+  }
+  let limit = source.byteLength()
+  var at = if token.to > limit {
+    limit
+  } else {
+    token.to
+  }
+  let from = if token.from < 0 {
+    0
+  } else {
+    token.from
+  }
+  var count = 0
+  while at > from {
+    at = at - 1
+    let byte = source.byteAt(at)
+    if byte == '\n' {
+      return count
+    }
+    if byte < 128 || byte >= 192 {
+      count = count + 1
+    }
+  }
+  -1
 }

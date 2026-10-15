@@ -269,6 +269,9 @@ impl Scan {
   /// the middle. `\{` is not an interpolation; the escape above it takes that
   /// case before this one sees it.
   fn quoted(self, from: Int, closer: Int) -> Int {
+    if closer == '"' && self.at(from + 1) == '"' && self.at(from + 2) == '"' {
+      return self.tripleQuoted(from)
+    }
     var at = from + 1
     while true {
       let c = self.at(at)
@@ -284,6 +287,36 @@ impl Scan {
         at = self.interpolation(at)
       } else if c == closer {
         return at + 1
+      } else {
+        at = at + 1
+      }
+    }
+    at
+  }
+
+  /// The end of the `"""` literal whose opener begins at `from`, ADR 0100.
+  ///
+  /// [`Scan::quoted`]'s rule with one difference: a lone `"` is text, and
+  /// only the next unescaped `"""` closes it. Everything else — the escape
+  /// pair, `\u\{...\}`, an interpolation holding more Cove — is read as it is
+  /// in `"..."`, which is what the language says of the two forms. What is
+  /// in it is not looked at: the margin and the lines are the lexer's
+  /// business, and the formatter copies the literal as it was written.
+  fn tripleQuoted(self, from: Int) -> Int {
+    var at = from + 3
+    while true {
+      let c = self.at(at)
+      if c < 0 {
+        return at
+      }
+      if c == '\\' && self.at(at + 1) == 'u' && self.at(at + 2) == '\{' {
+        at = self.unicodeEscape(at + 3)
+      } else if c == '\\' {
+        at = at + 2
+      } else if c == '\{' {
+        at = self.interpolation(at)
+      } else if c == '"' && self.at(at + 1) == '"' && self.at(at + 2) == '"' {
+        return at + 3
       } else {
         at = at + 1
       }

@@ -714,6 +714,38 @@ mod tests {
         );
     }
 
+    /// A `"""` literal is one token, so it is one piece, newlines and all
+    /// (ADR 0100); the `"` and the `//` inside it are text, not code.
+    #[test]
+    fn a_triple_quoted_literal_is_one_piece_over_its_lines() {
+        let literal = "\"\"\"\n  <a href=\"x\">// {name}</a>\n  \"\"\"";
+        let source = format!("let a = {literal}\nlet b = 1");
+        let held = coloured(&source);
+        assert!(paint(&source).ok);
+        assert!(held.contains(&(literal.to_string(), Kind::Str)), "{held:?}");
+        assert!(
+            !held.iter().any(|(_, kind)| *kind == Kind::Comment),
+            "{held:?}"
+        );
+    }
+
+    /// While one is being typed it does not lex, and the page still tiles.
+    #[test]
+    fn an_open_or_malformed_triple_quoted_literal_still_tiles() {
+        for source in [
+            "let a = \"\"\"",
+            "let a = \"\"\"\n  <p>",
+            "let a = \"\"\"x\"\"\"\nlet b = 1",
+            "let a = \"\"\"\n  x\"\"\"",
+            "let a = \"\"\"\n    x\n  y\n    \"\"\"",
+            "let a = \"\"\"\n  {b",
+        ] {
+            let painting = paint(source);
+            assert!(!painting.ok, "`{source}` does not lex");
+            tiles(source, &painting);
+        }
+    }
+
     #[test]
     fn a_duration_and_a_float_are_numbers() {
         assert_eq!(

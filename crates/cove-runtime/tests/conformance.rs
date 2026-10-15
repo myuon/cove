@@ -134,6 +134,26 @@ static RULES: &[Rule] = &[
         value: "a2b",
         foreign: "Int",
     },
+    // ADR 0100: the closer's indentation is the margin, a `"` is text, and
+    // a `\` ending a line eats the newline — in a `"…"` too.
+    Rule {
+        section: "Literals",
+        decls: "",
+        body: "  \"\"\"\n    <a href=\"x\">{1 + 1}</a>\\\n      b\n    \"\"\"",
+        ty: "String",
+        value: "<a href=\"x\">2</a>  b",
+        foreign: "Int",
+    },
+    Rule {
+        section: "Literals",
+        decls: "",
+        // The suite indents a body's lines by two, and a `"…"` keeps the
+        // indentation of the line after a `\`: one space before it, two after.
+        body: "\"a \\\nb\"",
+        ty: "String",
+        value: "a   b",
+        foreign: "Int",
+    },
     Rule {
         section: "Literals",
         decls: "",
@@ -561,6 +581,21 @@ static RULES: &[Rule] = &[
 
 /// Every program the reference does not admit.
 static REJECTIONS: &[Rejection] = &[
+    Rejection {
+        section: "Literals",
+        source: "/// Writes a line of a `\"\"\"` literal left of its closer.\nexport fn probe() -> String {\n  \"\"\"\n    a\n   b\n    \"\"\"\n}\n",
+        code: "cove::lex::literal_margin",
+    },
+    Rejection {
+        section: "Literals",
+        source: "/// Writes text after a `\"\"\"` on its line.\nexport fn probe() -> String {\n  \"\"\"a\"\"\"\n}\n",
+        code: "cove::lex::triple_quote_opener",
+    },
+    Rejection {
+        section: "Literals",
+        source: "/// Writes text in front of a `\"\"\"` literal's closer.\nexport fn probe() -> String {\n  \"\"\"\n    a\"\"\"\n}\n",
+        code: "cove::lex::triple_quote_closer",
+    },
     Rejection {
         section: "`if`",
         source: "/// Asks an `if` with no `else` for a value.\nexport fn probe() -> Int {\n  if true {\n    1\n  }\n}\n",

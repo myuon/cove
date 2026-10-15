@@ -10,11 +10,30 @@ use cove_diag::{Diagnostic, FileId, SourceMap, Span};
 use crate::token::{Keyword, StringPart, Token, TokenKind};
 
 /// One level of the nesting [`Lexer::skip_interpolation_body`] steps over: a
-/// `{` that opened an interpolation, or a `"` that opened a string literal.
+/// `{` that opened an interpolation, a `"` or a `"""` that opened a string
+/// literal, or a `'` that opened a code point.
 enum Unclosed {
     Brace,
     Quote,
+    TripleQuote,
     Apostrophe,
+}
+
+/// Where the scan for a `"""` literal's closer stopped. See
+/// [`Lexer::find_triple_closer`].
+enum TripleEnd {
+    /// The byte offset of the closing `"""`.
+    Closer(usize),
+    /// End of file, with no closer.
+    Eof,
+    /// An interpolation opened at this offset was never closed.
+    OpenHole(usize),
+}
+
+/// Whether `c` is horizontal whitespace: what a `"""` literal's margin is
+/// made of, and what it drops from the end of a line.
+fn is_horizontal_space(c: char) -> bool {
+    c == ' ' || c == '\t'
 }
 
 /// Lexes `file` out of `sources` into a token stream.
@@ -165,6 +184,14 @@ impl<'a> Lexer<'a> {
 
             if c == '/' {
                 if let Some(kind) = self.handle_slash() {
+                    self.push_token(kind, start);
+                }
+                continue;
+            }
+
+            if c == '"' && self.text[self.pos..].starts_with("\"\"\"") {
+                self.pos += 3;
+                if let Some(kind) = self.lex_triple_string(start) {
                     self.push_token(kind, start);
                 }
                 continue;
@@ -557,47 +584,25 @@ impl<'a> Lexer<'a> {
                             self.unterminated_string(quote_start);
                             return None;
                         }
+                        // A `\` ending a line eats the newline, ADR 0100. In
+                        // `"…"` that is all it does: the next line's
+                        // indentation is content, as it always was.
+                        Some('\n') => {
+                            self.bump();
+                        }
+                        Some('\r') if self.peek_char_at(1) == Some('\n') => {
+                            self.bump();
+                            self.bump();
+                        }
                         Some(escaped) => {
                             self.bump();
-                            if escaped == 'u' {
-                                if let Some(character) = self.unicode_escape(esc_start) {
-                                    current.push(character);
-                                }
-                            } else {
-                                match escaped_char(escaped) {
-                                    Some(character) => current.push(character),
-                                    None => self.unknown_escape(escaped, esc_start),
-                                }
-                            }
+                            self.escape(escaped, esc_start, &mut current);
                         }
                     }
                 }
                 Some('{') => {
-                    let brace_start = self.pos;
-                    self.bump();
-                    if !current.is_empty() {
-                        parts.push(StringPart::Text(std::mem::take(&mut current)));
-                    }
-                    let interp_start = self.pos;
-                    match self.skip_interpolation_body() {
-                        Ok(()) => {
-                            let interp_end = self.pos - 1;
-                            let source = self.text[interp_start..interp_end].to_string();
-                            let span = Span::new(self.file, interp_start as u32, interp_end as u32);
-                            parts.push(StringPart::Interpolation { source, span });
-                        }
-                        Err(()) => {
-                            let span = Span::new(self.file, brace_start as u32, self.pos as u32);
-                            self.diagnostics.push(
-                                Diagnostic::error(
-                                    "cove::lex::unterminated_interpolation",
-                                    "string interpolation is never closed",
-                                )
-                                .at(span)
-                                .help("Add a matching `}`."),
-                            );
-                            return None;
-                        }
+                    if !self.interpolation(&mut parts, &mut current) {
+                        return None;
                     }
                 }
                 Some(c) => {
@@ -606,6 +611,337 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+    }
+
+    /// Resolves the escape `\{escaped}` beginning at `esc_start`, both
+    /// characters already consumed, onto `current` — or reports it.
+    ///
+    /// One arm for both string forms, because ADR 0100 says a `"""` literal's
+    /// escapes are exactly a `"…"` literal's.
+    fn escape(&mut self, escaped: char, esc_start: usize, current: &mut String) {
+        if escaped == 'u' {
+            if let Some(character) = self.unicode_escape(esc_start) {
+                current.push(character);
+            }
+        } else {
+            match escaped_char(escaped) {
+                Some(character) => current.push(character),
+                None => self.unknown_escape(escaped, esc_start),
+            }
+        }
+    }
+
+    /// Reads the interpolation whose `{` is the next character, pushing the
+    /// text before it and then the hole onto `parts`. Answers `false` (after
+    /// recording a diagnostic) if the hole is never closed.
+    ///
+    /// The hole is kept as the source text between its braces, with that
+    /// text's own span, and is re-parsed by the parser from there. So a hole
+    /// in a `"""` literal is untouched by the margin: what is stripped is the
+    /// literal's text, and a hole is not text.
+    fn interpolation(&mut self, parts: &mut Vec<StringPart>, current: &mut String) -> bool {
+        let brace_start = self.pos;
+        self.bump();
+        if !current.is_empty() {
+            parts.push(StringPart::Text(std::mem::take(current)));
+        }
+        let interp_start = self.pos;
+        match self.skip_interpolation_body() {
+            Ok(()) => {
+                let interp_end = self.pos - 1;
+                let source = self.text[interp_start..interp_end].to_string();
+                let span = Span::new(self.file, interp_start as u32, interp_end as u32);
+                parts.push(StringPart::Interpolation { source, span });
+                true
+            }
+            Err(()) => {
+                self.unterminated_interpolation(brace_start);
+                false
+            }
+        }
+    }
+
+    fn unterminated_interpolation(&mut self, brace_start: usize) {
+        let span = Span::new(self.file, brace_start as u32, self.pos as u32);
+        self.diagnostics.push(
+            Diagnostic::error(
+                "cove::lex::unterminated_interpolation",
+                "string interpolation is never closed",
+            )
+            .at(span)
+            .help("Add a matching `}`."),
+        );
+    }
+
+    /// Lexes a `"""` literal, having already consumed its opening `"""` at
+    /// `quote_start`. [ADR 0100](../../../docs/adr/0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md).
+    ///
+    /// The opener is followed by a newline, which is not content. The closer
+    /// stands on a line of its own, and the whitespace in front of it is the
+    /// **margin**: it is removed from the front of every line, compared
+    /// character for character, and a line that does not begin with it is an
+    /// error rather than a guess — except a line of nothing but whitespace,
+    /// which is an empty line. The newline before the closer's line is not
+    /// content either. Trailing spaces and tabs on a line are dropped, and
+    /// then a line ending in an unescaped `\` loses the `\` and its newline.
+    /// Inside, `"` is content and everything else is what it is in `"…"`.
+    ///
+    /// All of it happens here, so the token's parts are already the stripped
+    /// text: what [ADR 0045](../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+    /// calls the literal is that, and nothing is computed at run time.
+    ///
+    /// It reads the literal twice, because the margin is set by the *end* of
+    /// it: once to find the closer, and once to strip and resolve the lines in
+    /// front of it. Returns `None` (after recording a diagnostic) when there is
+    /// no literal to answer — no newline after the opener, no closer, a closer
+    /// with something in front of it on its line, or a hole never closed.
+    fn lex_triple_string(&mut self, quote_start: usize) -> Option<TokenKind> {
+        let opener_end = self.pos;
+
+        // The opener: optional spaces and tabs, then the line ends.
+        while matches!(self.peek_char(), Some(c) if is_horizontal_space(c)) {
+            self.bump();
+        }
+        let opened = match self.peek_char() {
+            Some('\n') => {
+                self.bump();
+                true
+            }
+            Some('\r') if self.peek_char_at(1) == Some('\n') => {
+                self.bump();
+                self.bump();
+                true
+            }
+            _ => false,
+        };
+        if !opened {
+            let span = Span::new(self.file, quote_start as u32, opener_end as u32);
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "cove::lex::triple_quote_opener",
+                    "a `\"\"\"` literal must begin a new line after its opening `\"\"\"`",
+                )
+                .at(span)
+                .rule(
+                    "`\"\"\"` opens a literal only when nothing but spaces follows it on its \
+                     line; the text begins on the next line.",
+                )
+                .help("Move the text to the next line, or write a one-line literal with `\"`."),
+            );
+            // Step over the rest as far as a closer, so that one mistake is
+            // one diagnostic rather than the rest of the file misread.
+            self.pos = opener_end;
+            if let TripleEnd::Closer(closer) = self.find_triple_closer() {
+                self.pos = closer + 3;
+            } else {
+                self.pos = self.text.len();
+            }
+            return None;
+        }
+        let content_start = self.pos;
+
+        let closer = match self.find_triple_closer() {
+            TripleEnd::Closer(closer) => closer,
+            TripleEnd::Eof => {
+                self.unterminated_triple_string(quote_start);
+                return None;
+            }
+            TripleEnd::OpenHole(brace_start) => {
+                self.unterminated_interpolation(brace_start);
+                return None;
+            }
+        };
+        // The closer's line begins after the last newline in front of it,
+        // which is at worst the opener's own.
+        let line_start = self.text[..closer].rfind('\n').map_or(0, |n| n + 1);
+        let margin = &self.text[line_start..closer];
+        if !margin.chars().all(is_horizontal_space) {
+            self.pos = closer + 3;
+            let span = Span::new(self.file, closer as u32, self.pos as u32);
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "cove::lex::triple_quote_closer",
+                    "a `\"\"\"` literal's closing `\"\"\"` must stand on a line of its own",
+                )
+                .at(span)
+                .rule(
+                    "The closing `\"\"\"` has only spaces in front of it on its line, and \
+                     they are the margin taken off every line of the literal.",
+                )
+                .help(
+                    "Put the closing `\"\"\"` on the next line, or write a `\"` inside the \
+                     literal as `\\\"`.",
+                ),
+            );
+            return None;
+        }
+        // The newline in front of the closer's line is not content. When the
+        // closer is on the line after the opener there is no content at all.
+        let content_end = if line_start <= content_start {
+            content_start
+        } else if self.text[..line_start - 1].ends_with('\r') {
+            line_start - 2
+        } else {
+            line_start - 1
+        };
+
+        self.pos = content_start;
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        // Spaces and tabs read but not yet known not to be trailing.
+        let mut spaces = String::new();
+        let mut at_line_start = true;
+        while self.pos < content_end {
+            if at_line_start {
+                at_line_start = false;
+                let line_begin = self.pos;
+                let rest = &self.text[line_begin..content_end];
+                let indent_len = rest.len() - rest.trim_start_matches(is_horizontal_space).len();
+                let indent_end = line_begin + indent_len;
+                let blank = indent_end == content_end
+                    || self.text[indent_end..].starts_with('\n')
+                    || self.text[indent_end..].starts_with("\r\n");
+                if blank {
+                    self.pos = indent_end;
+                } else if self.text[line_begin..indent_end].starts_with(margin) {
+                    self.pos = line_begin + margin.len();
+                } else {
+                    self.pos = indent_end;
+                    self.literal_margin(line_begin, indent_end, margin);
+                }
+                continue;
+            }
+            let Some(c) = self.peek_char() else { break };
+            match c {
+                '\n' => {
+                    self.bump();
+                    spaces.clear();
+                    current.push('\n');
+                    at_line_start = true;
+                }
+                '\r' if self.peek_char_at(1) == Some('\n') => {
+                    self.bump();
+                    self.bump();
+                    spaces.clear();
+                    current.push_str("\r\n");
+                    at_line_start = true;
+                }
+                c if is_horizontal_space(c) => {
+                    self.bump();
+                    spaces.push(c);
+                }
+                '\\' => {
+                    current.push_str(&spaces);
+                    spaces.clear();
+                    let esc_start = self.pos;
+                    self.bump();
+                    // A `\` that ends the line, trailing spaces aside, eats
+                    // the newline. The line after it still loses its margin.
+                    let rest = &self.text[self.pos..content_end];
+                    let after =
+                        self.pos + rest.len() - rest.trim_start_matches(is_horizontal_space).len();
+                    if after == content_end || self.text[after..].starts_with('\n') {
+                        self.pos = (after + 1).min(content_end);
+                        at_line_start = true;
+                    } else if self.text[after..].starts_with("\r\n") {
+                        self.pos = (after + 2).min(content_end);
+                        at_line_start = true;
+                    } else if let Some(escaped) = self.bump() {
+                        self.escape(escaped, esc_start, &mut current);
+                    }
+                }
+                '{' => {
+                    current.push_str(&spaces);
+                    spaces.clear();
+                    if !self.interpolation(&mut parts, &mut current) {
+                        return None;
+                    }
+                }
+                c => {
+                    self.bump();
+                    current.push_str(&spaces);
+                    spaces.clear();
+                    current.push(c);
+                }
+            }
+        }
+        self.pos = closer + 3;
+        if !current.is_empty() {
+            parts.push(StringPart::Text(current));
+        }
+        Some(TokenKind::Str(parts))
+    }
+
+    /// Scans forward from the cursor, which is inside a `"""` literal, to the
+    /// first unescaped `"""` outside an interpolation, and answers where it
+    /// is. The cursor is left wherever the scan stopped.
+    fn find_triple_closer(&mut self) -> TripleEnd {
+        loop {
+            match self.peek_char() {
+                None => return TripleEnd::Eof,
+                Some('"') if self.text[self.pos..].starts_with("\"\"\"") => {
+                    return TripleEnd::Closer(self.pos);
+                }
+                Some('\\') => {
+                    self.bump();
+                    // A `\u{...}` escape's brace opens no interpolation.
+                    if self.bump() == Some('u') && self.peek_char() == Some('{') {
+                        self.bump();
+                        while matches!(self.peek_char(), Some(c) if c.is_ascii_alphanumeric()) {
+                            self.bump();
+                        }
+                        if self.peek_char() == Some('}') {
+                            self.bump();
+                        }
+                    }
+                }
+                Some('{') => {
+                    let brace_start = self.pos;
+                    self.bump();
+                    if self.skip_interpolation_body().is_err() {
+                        return TripleEnd::OpenHole(brace_start);
+                    }
+                }
+                Some(_) => {
+                    self.bump();
+                }
+            }
+        }
+    }
+
+    /// Reports a line of a `"""` literal, from `line_begin` to the end of its
+    /// indentation at `indent_end`, that does not begin with `margin`.
+    fn literal_margin(&mut self, line_begin: usize, indent_end: usize, margin: &str) {
+        let span = Span::new(self.file, line_begin as u32, indent_end as u32);
+        let shown = margin.replace('\t', "\\t");
+        self.diagnostics.push(
+            Diagnostic::error(
+                "cove::lex::literal_margin",
+                "this line of a `\"\"\"` literal does not begin with the literal's margin",
+            )
+            .at(span)
+            .rule(
+                "The whitespace in front of the closing `\"\"\"` is the margin, and every \
+                 line of the literal that is not blank begins with exactly that whitespace, \
+                 character for character.",
+            )
+            .help(format!(
+                "Indent this line at least as far as the closing `\"\"\"`, with the same \
+                 characters (`{shown}`), or move the closing `\"\"\"` left."
+            )),
+        );
+    }
+
+    fn unterminated_triple_string(&mut self, quote_start: usize) {
+        let span = Span::new(self.file, quote_start as u32, self.pos as u32);
+        self.diagnostics.push(
+            Diagnostic::error(
+                "cove::lex::unterminated_string",
+                "string literal is never closed",
+            )
+            .at(span)
+            .help("Add a closing `\"\"\"` on a line of its own."),
+        );
     }
 
     /// A code-point literal: `'a'`, whose value is a Unicode scalar value and
@@ -803,7 +1139,8 @@ impl<'a> Lexer<'a> {
             Diagnostic::error("cove::lex::unknown_escape", message)
                 .at(span)
                 .help(
-                    "Use one of the supported escapes: \\\\, \\\", \\', \\n, \\t, \\r, \\0, \\{, \\}, \\u{...}.",
+                    "Use one of the supported escapes: \\\\, \\\", \\', \\n, \\t, \\r, \\0, \\{, \\}, \\u{...}, \
+                     or a \\ that ends its line.",
                 ),
         );
     }
@@ -844,7 +1181,11 @@ impl<'a> Lexer<'a> {
             // same case — a nested string may itself interpolate — which is
             // why only the apostrophe suppresses it.
             let inside_scalar = matches!(innermost, Unclosed::Apostrophe);
-            let escaping = matches!(innermost, Unclosed::Quote | Unclosed::Apostrophe);
+            let escaping = matches!(
+                innermost,
+                Unclosed::Quote | Unclosed::TripleQuote | Unclosed::Apostrophe
+            );
+            let in_text = matches!(innermost, Unclosed::Quote | Unclosed::TripleQuote);
             match self.peek_char() {
                 None => return Err(()),
                 Some('\\') if escaping => {
@@ -865,6 +1206,23 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
+                // A `"""` in code opens a literal in which a lone `"` is
+                // text, and only another `"""` closes it, ADR 0100.
+                Some('"')
+                    if matches!(innermost, Unclosed::Brace)
+                        && self.text[self.pos..].starts_with("\"\"\"") =>
+                {
+                    self.pos += 3;
+                    unclosed.push(Unclosed::TripleQuote);
+                }
+                Some('"') if matches!(innermost, Unclosed::TripleQuote) => {
+                    if self.text[self.pos..].starts_with("\"\"\"") {
+                        self.pos += 3;
+                        unclosed.pop();
+                    } else {
+                        self.bump();
+                    }
+                }
                 Some('"') if !inside_scalar => {
                     self.bump();
                     if matches!(innermost, Unclosed::Quote) {
@@ -875,7 +1233,7 @@ impl<'a> Lexer<'a> {
                 }
                 // An apostrophe inside a string is ordinary text, so only a
                 // brace's body opens one and only its own closes it.
-                Some('\'') if !matches!(innermost, Unclosed::Quote) => {
+                Some('\'') if !in_text => {
                     self.bump();
                     if inside_scalar {
                         unclosed.pop();
@@ -1392,6 +1750,280 @@ mod tests {
         let diags = lex_err("\"never closed");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "cove::lex::unterminated_string");
+    }
+
+    // ADR 0100: `"""` literals, and `\` ending a line.
+
+    /// The one error `src` lexes to, by code.
+    fn only_error(src: &str) -> String {
+        let diags = lex_err(src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected one error from `{src}`, got {diags:?}"
+        );
+        diags[0].code.clone()
+    }
+
+    #[test]
+    fn a_triple_quoted_literal_takes_its_margin_from_the_closer() {
+        assert_eq!(
+            text_of("\"\"\"\n  <p class=\"lead\">hi</p>\n  \"\"\""),
+            "<p class=\"lead\">hi</p>"
+        );
+        // Deeper lines keep what they have past the margin.
+        assert_eq!(
+            text_of("\"\"\"\n    a\n      b\n    c\n    \"\"\""),
+            "a\n  b\nc"
+        );
+        // A closer at column zero is no margin at all.
+        assert_eq!(text_of("\"\"\"\n  a\nb\n\"\"\""), "  a\nb");
+        // Tabs are a margin too, compared as tabs.
+        assert_eq!(text_of("\"\"\"\n\t\ta\n\t\t\tb\n\t\t\"\"\""), "a\n\tb");
+    }
+
+    #[test]
+    fn the_newlines_around_a_triple_quoted_literal_are_not_content() {
+        assert_eq!(text_of("\"\"\"\n  one\n  \"\"\""), "one");
+        // Spaces after the opener are allowed and are not content either.
+        assert_eq!(text_of("\"\"\"  \t\n  one\n  \"\"\""), "one");
+        // A closer on the line after the opener is the empty string.
+        assert_eq!(text_of("\"\"\"\n  \"\"\""), "");
+        assert_eq!(text_of("\"\"\"\n\"\"\""), "");
+        // A blank line before the closer is one newline of content.
+        assert_eq!(text_of("\"\"\"\n  a\n\n  \"\"\""), "a\n");
+    }
+
+    #[test]
+    fn a_blank_line_in_a_triple_quoted_literal_is_an_empty_line() {
+        // Shorter than the margin, longer than it, or empty: all three are
+        // empty lines.
+        assert_eq!(
+            text_of("\"\"\"\n    a\n\n  \n        \n    b\n    \"\"\""),
+            "a\n\n\n\nb"
+        );
+    }
+
+    #[test]
+    fn trailing_spaces_on_a_line_of_a_triple_quoted_literal_are_dropped() {
+        assert_eq!(text_of("\"\"\"\n  a  \n  b\t\n  \"\"\""), "a\nb");
+        // An escape is not trailing space, which is how to keep some.
+        assert_eq!(text_of("\"\"\"\n  a\\t\n  b \\u{20}\n  \"\"\""), "a\t\nb  ");
+        // Spaces before a hole are not trailing.
+        let tokens = kinds("\"\"\"\n  a {b}  \n  \"\"\"");
+        let [TokenKind::Str(parts)] = tokens.as_slice() else {
+            panic!("one string, got {tokens:?}");
+        };
+        assert_eq!(parts[0], StringPart::Text("a ".into()));
+        assert_eq!(parts.len(), 2, "{parts:?}");
+    }
+
+    #[test]
+    fn a_quote_is_content_in_a_triple_quoted_literal() {
+        assert_eq!(text_of("\"\"\"\n  \"a\" \"\"b\n  \"\"\""), "\"a\" \"\"b");
+        // An escaped quote is still a quote, and is how `"""` is written.
+        assert_eq!(text_of("\"\"\"\n  \\\"\"\"\n  \"\"\""), "\"\"\"");
+    }
+
+    #[test]
+    fn escapes_and_holes_in_a_triple_quoted_literal_are_those_of_a_plain_one() {
+        assert_eq!(
+            text_of("\"\"\"\n  \\\\ \\n \\t \\r \\0 \\{ \\} \\' \\u{e9}\n  \"\"\""),
+            "\\ \n \t \r \0 { } ' \u{e9}"
+        );
+        let diags = lex_err("\"\"\"\n  \\q\n  \"\"\"");
+        assert_eq!(diags[0].code, "cove::lex::unknown_escape");
+    }
+
+    #[test]
+    fn a_hole_in_a_triple_quoted_literal_keeps_its_source_span() {
+        let src = "\"\"\"\n  <b>{name}</b>\n  \"\"\"";
+        let tokens = kinds(src);
+        let start = src.find("name").unwrap() as u32;
+        assert_eq!(
+            tokens,
+            vec![TokenKind::Str(vec![
+                StringPart::Text("<b>".into()),
+                StringPart::Interpolation {
+                    source: "name".into(),
+                    span: Span::new(FileId(0), start, start + 4),
+                },
+                StringPart::Text("</b>".into()),
+            ])]
+        );
+    }
+
+    /// A hole may hold a string, and a `"""` one too, which has a closer and
+    /// a margin of its own.
+    #[test]
+    fn a_hole_may_hold_a_triple_quoted_literal() {
+        let src = "\"\"\"\n  a{f(\"\"\"\n    \"x\"\n    \"\"\")}b\n  \"\"\"";
+        let tokens = kinds(src);
+        let [TokenKind::Str(parts)] = tokens.as_slice() else {
+            panic!("one string, got {tokens:?}");
+        };
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert_eq!(parts[2], StringPart::Text("b".into()));
+    }
+
+    #[test]
+    fn a_backslash_ending_a_line_eats_the_newline() {
+        let src = "\"\"\"\n  <tr>\\\n    <td>{a}</td>\\\n  </tr>\n  \"\"\"";
+        let tokens = kinds(src);
+        let start = src.find("{a}").unwrap() as u32 + 1;
+        assert_eq!(
+            tokens,
+            vec![TokenKind::Str(vec![
+                StringPart::Text("<tr>  <td>".into()),
+                StringPart::Interpolation {
+                    source: "a".into(),
+                    span: Span::new(FileId(0), start, start + 1),
+                },
+                StringPart::Text("</td></tr>".into()),
+            ])]
+        );
+        // Trailing spaces go first, so a `\` followed by spaces still joins.
+        assert_eq!(text_of("\"\"\"\n  a\\  \n  b\n  \"\"\""), "ab");
+        // Spaces in front of the `\` are not trailing and are kept.
+        assert_eq!(text_of("\"\"\"\n  a \\\n  b\n  \"\"\""), "a b");
+        // On the last line it has no newline left to eat.
+        assert_eq!(text_of("\"\"\"\n  a\\\n  \"\"\""), "a");
+    }
+
+    #[test]
+    fn a_doubled_backslash_ending_a_line_is_a_backslash() {
+        assert_eq!(text_of("\"\"\"\n  a\\\\\n  b\n  \"\"\""), "a\\\nb");
+        assert_eq!(text_of("\"a\\\\\nb\""), "a\\\nb");
+    }
+
+    /// A hole may span the line a `\` joins, and its span is still its own.
+    #[test]
+    fn a_hole_spanning_a_joined_line_keeps_its_source_span() {
+        let src = "\"\"\"\n  x{1 +\n      2}\\\n  y\n  \"\"\"";
+        let tokens = kinds(src);
+        let start = src.find("1 +").unwrap() as u32;
+        let end = src.find("2}").unwrap() as u32 + 1;
+        assert_eq!(
+            tokens,
+            vec![TokenKind::Str(vec![
+                StringPart::Text("x".into()),
+                StringPart::Interpolation {
+                    source: "1 +\n      2".into(),
+                    span: Span::new(FileId(0), start, end),
+                },
+                StringPart::Text("y".into()),
+            ])]
+        );
+    }
+
+    #[test]
+    fn a_backslash_ending_a_line_of_a_plain_literal_eats_only_the_newline() {
+        assert_eq!(text_of("\"a\\\nb\""), "ab");
+        // The next line's indentation is content, as it always was.
+        assert_eq!(text_of("\"a\\\n  b\""), "a  b");
+        // Trailing spaces are content too, and a `\` before them is an escape.
+        assert_eq!(text_of("\"a \\\nb\""), "a b");
+        assert_eq!(only_error("\"a\\ \nb\""), "cove::lex::unknown_escape");
+        // `\r\n` is a newline as well.
+        assert_eq!(text_of("\"a\\\r\nb\""), "ab");
+        // And a plain literal keeps its unescaped newlines.
+        assert_eq!(text_of("\"a\n  b\""), "a\n  b");
+    }
+
+    #[test]
+    fn a_triple_quoted_literal_reads_crlf_lines() {
+        assert_eq!(
+            text_of("\"\"\"\r\n  a\r\n  b\\\r\n  c\r\n  \"\"\""),
+            "a\r\nbc"
+        );
+    }
+
+    #[test]
+    fn a_line_short_of_the_margin_is_an_error() {
+        assert_eq!(
+            only_error("\"\"\"\n    a\n  b\n    \"\"\""),
+            "cove::lex::literal_margin"
+        );
+        // Tabs and spaces are not interchangeable.
+        assert_eq!(
+            only_error("\"\"\"\n\ta\n  \"\"\""),
+            "cove::lex::literal_margin"
+        );
+        assert_eq!(
+            only_error("\"\"\"\n  \ta\n\t\"\"\""),
+            "cove::lex::literal_margin"
+        );
+        // One error per line.
+        let diags = lex_err("\"\"\"\n a\n b\n  \"\"\"");
+        assert_eq!(diags.len(), 2);
+        assert_eq!(diags[0].primary, Some(Span::new(FileId(0), 4, 5)));
+    }
+
+    #[test]
+    fn a_triple_quote_followed_by_text_is_an_error() {
+        assert_eq!(
+            only_error("\"\"\"x\"\"\""),
+            "cove::lex::triple_quote_opener"
+        );
+        assert_eq!(
+            only_error("\"\"\"x\n  y\n  \"\"\""),
+            "cove::lex::triple_quote_opener"
+        );
+        // The rest of the literal is stepped over: what follows still lexes.
+        let mut sources = SourceMap::new();
+        let file = sources.add("test.cove", "\"\"\"x\"\"\" + 1");
+        let (tokens, diagnostics) = lex_recovered(&sources, file);
+        assert_eq!(diagnostics.len(), 1);
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![TokenKind::Plus, TokenKind::Int(1), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn a_closer_with_text_before_it_is_an_error() {
+        assert_eq!(
+            only_error("\"\"\"\n  a\"\"\""),
+            "cove::lex::triple_quote_closer"
+        );
+        assert_eq!(
+            only_error("\"\"\"\n  a\n  b \"\"\""),
+            "cove::lex::triple_quote_closer"
+        );
+        // Including a hole's closing brace.
+        assert_eq!(
+            only_error("\"\"\"\n  a{1 +\n  2}\"\"\""),
+            "cove::lex::triple_quote_closer"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_triple_quoted_literal_is_an_error() {
+        assert_eq!(
+            only_error("\"\"\"\n  a\n"),
+            "cove::lex::unterminated_string"
+        );
+        assert_eq!(
+            only_error("\"\"\"\n  a\"\""),
+            "cove::lex::unterminated_string"
+        );
+        assert_eq!(
+            only_error("\"\"\"\n  {a\n  \"\"\""),
+            "cove::lex::unterminated_interpolation"
+        );
+    }
+
+    /// A `"""` literal is one token, and the line break inside it is not a
+    /// line break between tokens: the statement-break rule sees through it.
+    #[test]
+    fn a_triple_quoted_literal_is_one_token() {
+        let tokens = lex_ok("f(\"\"\"\n  a\n  \"\"\", b)\nc");
+        let kinds: Vec<&TokenKind> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(kinds.len(), 8, "{kinds:?}");
+        assert!(matches!(kinds[2], TokenKind::Str(_)));
+        assert!(!tokens[3].preceded_by_newline);
+        assert!(tokens[6].preceded_by_newline);
     }
 
     #[test]

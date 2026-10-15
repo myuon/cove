@@ -1950,7 +1950,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// variable), and a function that ended on a variable rather than returning
 /// it. They hand the payload straight to the call that wants it now, and say
 /// `return`.
-const FORWARDABLE_COPIES: usize = 7626;
+///
+/// **7,629 since a literal may be written over lines** (ADR 0100), a rise of
+/// 3 that is all program and no lowering: the change is to the lexer, and with
+/// `tools/covefmt`'s part of it held out the corpus answers 7,626, the bound
+/// exactly — `tests/e2e/values_string`'s new `"""` cases included, which add
+/// none. The 3 are `tools/covefmt:covefmtBench` (84 to 85 in `prod`, 156 to
+/// 158 in `ret`), the code covefmt grew to read a `"""` literal and measure a
+/// string written over lines: `Scan::tripleQuoted`, which `quoted` answers
+/// with, and `lastLineWidth`.
+const FORWARDABLE_COPIES: usize = 7629;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

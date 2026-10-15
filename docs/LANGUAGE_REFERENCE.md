@@ -202,6 +202,7 @@ it leaves.
 | `true` | `Bool` | a boolean |
 | `500ms` | `Duration` | nanoseconds, rendered in the largest unit that divides it exactly |
 | `"a{x}b"` | `String` | the parts concatenated left to right |
+| `"""` … `"""` over lines | `String` | the same, with the closer's margin taken off every line |
 | `()` | `()` | the unit value |
 | `[1, 2]` | `Array<T>` | a fresh immutable array |
 
@@ -239,6 +240,48 @@ computed at run time.
 
 An interpolation `{expr}` renders any value and constrains none, so it is
 checked but not required to be a `String`.
+
+A **`\` at the end of a line eats that line's newline**, in either literal
+form: `"one \` followed by a line holding `two"` is `"one two"`. In a `"…"`
+that is all it does — the next line's indentation is content, as is any
+newline written without a `\` ([ADR 0100](adr/0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md)).
+
+A **`"""` literal** is written over lines, and the indentation the source
+needed is not part of it:
+
+```cove
+let row = """
+  <tr class="row">\
+    <td>{h(name)}</td>\
+  </tr>
+  """
+```
+
+- `"""` opens one only when nothing but spaces and tabs follows it on its
+  line, and the text begins on the next line; `"""x"""` on one line is
+  `cove::lex::triple_quote_opener`. The newline after the opener is not
+  content.
+- Any unescaped `"""` closes it, and the closer stands on a line of its own:
+  something other than spaces and tabs in front of it is
+  `cove::lex::triple_quote_closer`. The newline before the closer's line is
+  not content either, so the literal above has no trailing newline.
+- **The whitespace in front of the closer is the margin**, and it is taken off
+  the start of every line, compared character for character: a line that does
+  not begin with it — indented less, or with a tab where the margin has a
+  space — is `cove::lex::literal_margin`. A line of nothing but whitespace is
+  an empty line whatever its length. What a line has past the margin stays,
+  so the literal above is `<tr class="row">  <td>…</td></tr>`: the two spaces
+  in front of `<td>` are past the margin.
+- Spaces and tabs at the end of a line are dropped. Then a line ending in an
+  unescaped `\` loses the `\` and its newline, so `\\` at the end of a line
+  is a backslash and the newline stays.
+- A `"` inside is text. Every escape and every `{expr}` is what it is in
+  `"…"`, and a `"""` in the text is written `\"""`.
+
+All of this happens when the source is read, so the literal is the stripped
+text and a `"""` literal with no holes is one constant like any other. An
+unclosed one is `cove::lex::unterminated_string`. `cove fmt` writes one back
+exactly as it was written.
 
 An array literal takes its element type from the expectation when there is
 one, and otherwise from its elements, each checked against what the ones

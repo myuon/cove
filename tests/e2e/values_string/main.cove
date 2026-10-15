@@ -9,6 +9,42 @@ export fn main() -> Result<Unit, Error> {
   let escapes = "\\\"\n\t\r\0\{\}"
   println("one string of eight escapes has length {escapes.length()}")?
 
+  // ADR 0100: a `"""` literal takes its margin from its closer, a `"` in it
+  // is content, and a `\` ending a line eats the newline, in either form.
+  let who = "cove"
+  let page = """
+    <p class="lead">Hello, {who}!</p>
+      <em>indented "two"</em>
+
+    end
+    """
+  println("page [{page}] has length {page.length()}")?
+  let row = """
+    <tr>\
+      <td class="n">{1 +
+        1}</td>\
+    </tr>
+    """
+  println("row [{row}]")?
+  let kept = """
+    a backslash \\
+    and three quotes \"""
+    """
+  println("kept [{kept}]")?
+  let joined = "one \
+two"
+  println("joined [{joined}]")?
+  println("nested [{"""
+    in a hole
+    """}]")?
+  println("""
+    called with "{who}"
+    """)?
+  let same = """
+    x
+    """ == "x"
+  println("same {same}")?
+
   let sentence = "  the quick  brown fox  "
   println("length {sentence.length()}")?
   println("words {sentence.words()}")?
