@@ -41,6 +41,14 @@ fn is_horizontal_space(c: char) -> bool {
     c == ' ' || c == '\t'
 }
 
+/// The tag under which a multi-line `"""` literal's line breaks are spacing
+/// rather than text, [ADR 0103](../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md).
+///
+/// The lexer reads it as a name and nothing more: whether `html` names
+/// `std.html` where it is written is the checker's question, as it is for
+/// any tag (`cove_sema::stdlib::literal_tag`).
+pub const MARKUP_TAG: &str = "html";
+
 /// Lexes `file` out of `sources` into a token stream.
 ///
 /// The returned stream always ends with exactly one [`TokenKind::Eof`] whose
@@ -195,7 +203,7 @@ impl<'a> Lexer<'a> {
             }
 
             if c == '"' {
-                if let Some(parts) = self.lex_any_string() {
+                if let Some(parts) = self.lex_any_string(false) {
                     self.push_token(TokenKind::Str(parts), start);
                 }
                 continue;
@@ -222,7 +230,10 @@ impl<'a> Lexer<'a> {
                     // 0101: adjacency changes the token, as a duration's
                     // suffix does.
                     TokenKind::Ident(tag) if self.peek_char() == Some('"') => {
-                        if let Some(parts) = self.lex_any_string() {
+                        // In a multi-line `html"""` a line break is spacing,
+                        // ADR 0103, and the tag is known only here.
+                        let markup = tag == MARKUP_TAG;
+                        if let Some(parts) = self.lex_any_string(markup) {
                             self.push_token(TokenKind::Tagged { tag, parts }, start);
                         }
                     }
@@ -564,11 +575,14 @@ impl<'a> Lexer<'a> {
 
     /// Lexes the string literal whose opening `"` or `"""` is at the cursor,
     /// in whichever of the two forms it is, and answers its parts.
-    fn lex_any_string(&mut self) -> Option<Vec<StringPart>> {
+    ///
+    /// `markup` says the literal is tagged [`MARKUP_TAG`], which changes what
+    /// a line break of the multi-line `"""` form is and nothing else.
+    fn lex_any_string(&mut self, markup: bool) -> Option<Vec<StringPart>> {
         let quote_start = self.pos;
         if self.text[self.pos..].starts_with("\"\"\"") {
             self.pos += 3;
-            self.lex_triple_string(quote_start)
+            self.lex_triple_string(quote_start, markup)
         } else {
             self.bump();
             self.lex_string(quote_start)
@@ -719,6 +733,16 @@ impl<'a> Lexer<'a> {
     /// that line must still begin with the margin.
     /// Inside, `"` is content and everything else is what it is in `"…"`.
     ///
+    /// When `markup` — the literal is tagged [`MARKUP_TAG`] — a line break
+    /// that no `\` ate is not a newline but spacing,
+    /// [ADR 0103](../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md):
+    /// with the whole of the next line's indentation it is **nothing** when
+    /// the line before ends with `>` or with the `}` that closes a hole and
+    /// the line after begins with `<` or with the `{` that opens one, and
+    /// **one space** otherwise. A run of blank lines is one break. An escape
+    /// is text and never an edge, so `\}` closes nothing and `\n` is still a
+    /// newline.
+    ///
     /// All of it happens here, so the token's parts are already the stripped
     /// text: what [ADR 0045](../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
     /// calls the literal is that, and nothing is computed at run time.
@@ -728,7 +752,7 @@ impl<'a> Lexer<'a> {
     /// front of it. Returns `None` (after recording a diagnostic) when there is
     /// no literal to answer — no closer, a closer with something in front of
     /// it on its line, or a hole never closed.
-    fn lex_triple_string(&mut self, quote_start: usize) -> Option<Vec<StringPart>> {
+    fn lex_triple_string(&mut self, quote_start: usize, markup: bool) -> Option<Vec<StringPart>> {
         let opener_end = self.pos;
 
         // The opener: optional spaces and tabs, then the line ends.
@@ -807,6 +831,12 @@ impl<'a> Lexer<'a> {
         // Whether the line about to start follows a continuation `\`, and so
         // loses all of its indentation rather than only the margin.
         let mut continued = false;
+        // ADR 0103, for `markup` only: whether what was last read is an edge
+        // a line break may vanish against — a `>`, or the `}` closing a hole
+        // — and the break waiting for the next line that is not blank, with
+        // whether its line ended on such an edge.
+        let mut on_edge = false;
+        let mut pending_break: Option<bool> = None;
         while self.pos < content_end {
             if at_line_start {
                 at_line_start = false;
@@ -821,7 +851,7 @@ impl<'a> Lexer<'a> {
                 if blank {
                     self.pos = indent_end;
                 } else if self.text[line_begin..indent_end].starts_with(margin) {
-                    self.pos = if continued {
+                    self.pos = if continued || pending_break.is_some() {
                         indent_end
                     } else {
                         line_begin + margin.len()
@@ -830,22 +860,30 @@ impl<'a> Lexer<'a> {
                     self.pos = indent_end;
                     self.literal_margin(line_begin, indent_end, margin);
                 }
+                if !blank {
+                    if let Some(after_edge) = pending_break.take() {
+                        let opens_edge = matches!(self.peek_char(), Some('<' | '{'));
+                        if !(after_edge && opens_edge) {
+                            current.push(' ');
+                        }
+                    }
+                }
                 continue;
             }
             let Some(c) = self.peek_char() else { break };
             match c {
-                '\n' => {
-                    self.bump();
+                '\n' | '\r' if c == '\n' || self.peek_char_at(1) == Some('\n') => {
+                    let newline = if c == '\n' { "\n" } else { "\r\n" };
+                    self.pos += newline.len();
                     spaces.clear();
-                    current.push('\n');
                     at_line_start = true;
-                }
-                '\r' if self.peek_char_at(1) == Some('\n') => {
-                    self.bump();
-                    self.bump();
-                    spaces.clear();
-                    current.push_str("\r\n");
-                    at_line_start = true;
+                    if markup {
+                        // A run of blank lines is one break, decided by the
+                        // line before the first of them.
+                        pending_break.get_or_insert(on_edge);
+                    } else {
+                        current.push_str(newline);
+                    }
                 }
                 c if is_horizontal_space(c) => {
                     self.bump();
@@ -871,6 +909,9 @@ impl<'a> Lexer<'a> {
                         at_line_start = true;
                         continued = true;
                     } else if let Some(escaped) = self.bump() {
+                        // An escaped character is text, never an edge: `\}`
+                        // closes no hole.
+                        on_edge = false;
                         self.escape(escaped, esc_start, &mut current);
                     }
                 }
@@ -880,14 +921,21 @@ impl<'a> Lexer<'a> {
                     if !self.interpolation(&mut parts, &mut current) {
                         return None;
                     }
+                    on_edge = true;
                 }
                 c => {
                     self.bump();
                     current.push_str(&spaces);
                     spaces.clear();
                     current.push(c);
+                    on_edge = c == '>';
                 }
             }
+        }
+        // Blank lines in front of the closer's line are a break with nothing
+        // after it, which is not an edge.
+        if pending_break.is_some() {
+            current.push(' ');
         }
         self.pos = closer + 3;
         if !current.is_empty() {
@@ -2210,6 +2258,145 @@ mod tests {
     fn an_unclosed_tagged_literal_is_an_unclosed_literal() {
         assert_eq!(only_error("html\"never"), "cove::lex::unterminated_string");
         assert_eq!(only_error("html\"\"\"x"), "cove::lex::unterminated_string");
+    }
+
+    // ADR 0103: in a multi-line `html"""`, a line break is spacing.
+
+    /// The parts of the one tagged literal `src` lexes to, the holes written
+    /// as `{source}` so that a test reads as the text it expects.
+    fn markup_of(src: &str) -> String {
+        match kinds(src).as_slice() {
+            [TokenKind::Tagged { parts, .. }] => parts
+                .iter()
+                .map(|part| match part {
+                    StringPart::Text(text) => text.clone(),
+                    StringPart::Interpolation { source, .. } => format!("{{{source}}}"),
+                })
+                .collect(),
+            other => panic!("expected one tagged literal in `{src}`, got {other:?}"),
+        }
+    }
+
+    /// `html"""` with `lines` as its content, each at the margin of a closer
+    /// indented by two.
+    fn html_over(lines: &[&str]) -> String {
+        let body: String = lines.iter().map(|line| format!("  {line}\n")).collect();
+        format!("html\"\"\"\n{body}  \"\"\"")
+    }
+
+    #[test]
+    fn a_break_between_two_edges_is_nothing() {
+        // `>` then `<`.
+        assert_eq!(
+            markup_of(&html_over(&["<tr>", "  <td>a</td>", "</tr>"])),
+            "<tr><td>a</td></tr>"
+        );
+        // `>` then a hole's `{`; a hole's `}` then `<`; `}` then `{`.
+        assert_eq!(
+            markup_of(&html_over(&["<td>", "{a}", "</td>"])),
+            "<td>{a}</td>"
+        );
+        assert_eq!(markup_of(&html_over(&["{a}", "{b}"])), "{a}{b}");
+    }
+
+    #[test]
+    fn a_break_anywhere_else_is_one_space() {
+        // Text on either side, or on one side of a tag or a hole.
+        assert_eq!(
+            markup_of(&html_over(&["What is", "made of"])),
+            "What is made of"
+        );
+        assert_eq!(
+            markup_of(&html_over(&["its", "<code>x</code>"])),
+            "its <code>x</code>"
+        );
+        assert_eq!(
+            markup_of(&html_over(&["<b>x</b>", "rows"])),
+            "<b>x</b> rows"
+        );
+        assert_eq!(markup_of(&html_over(&["of {a}", "rows"])), "of {a} rows");
+        assert_eq!(markup_of(&html_over(&["of", "{a}"])), "of {a}");
+        // The indentation of the next line goes with the break, past the
+        // margin too, and trailing spaces are dropped as ever.
+        assert_eq!(markup_of(&html_over(&["a   ", "        b"])), "a b");
+    }
+
+    #[test]
+    fn an_escaped_brace_is_not_an_edge() {
+        assert_eq!(markup_of(&html_over(&["<i>", "\\{x}"])), "<i> {x}");
+        assert_eq!(markup_of(&html_over(&["a\\}", "<i>"])), "a} <i>");
+        // An escape is text even where it spells a `>`.
+        assert_eq!(markup_of(&html_over(&["a\\u{3e}", "<i>"])), "a> <i>");
+    }
+
+    #[test]
+    fn a_run_of_blank_lines_is_one_break() {
+        assert_eq!(markup_of(&html_over(&["<p>", "", "  ", "<p>"])), "<p><p>");
+        assert_eq!(markup_of(&html_over(&["a", "", "", "b"])), "a b");
+    }
+
+    #[test]
+    fn a_backslash_still_joins_with_nothing_and_takes_precedence() {
+        assert_eq!(markup_of(&html_over(&["un\\", "  done"])), "undone");
+        assert_eq!(
+            markup_of(&html_over(&["<b>x</b> \\", "<i>y</i>"])),
+            "<b>x</b> <i>y</i>"
+        );
+    }
+
+    #[test]
+    fn an_escaped_newline_is_still_a_newline() {
+        assert_eq!(
+            markup_of(&html_over(&["<pre>a\\nb</pre>"])),
+            "<pre>a\nb</pre>"
+        );
+        assert_eq!(
+            markup_of(&html_over(&["<pre>a\\n", "b</pre>"])),
+            "<pre>a\n b</pre>"
+        );
+    }
+
+    #[test]
+    fn a_markup_break_still_checks_the_margin() {
+        assert_eq!(
+            only_error("html\"\"\"\n    <p>\n  <p>\n    \"\"\""),
+            "cove::lex::literal_margin"
+        );
+    }
+
+    #[test]
+    fn a_markup_break_is_html_only() {
+        // A plain `"""` keeps its line breaks as text, and so does another tag.
+        assert_eq!(text_of("\"\"\"\n  <p>\n  <p>\n  \"\"\""), "<p>\n<p>");
+        assert_eq!(
+            kinds("sql\"\"\"\n  a\n  b\n  \"\"\""),
+            vec![TokenKind::Tagged {
+                tag: "sql".into(),
+                parts: vec![StringPart::Text("a\nb".into())],
+            }]
+        );
+        // CRLF lines break the same way.
+        assert_eq!(markup_of("html\"\"\"\r\n  <p>\r\n  x\r\n  \"\"\""), "<p> x");
+    }
+
+    #[test]
+    fn a_hole_after_a_markup_break_keeps_its_source_span() {
+        let src = "html\"\"\"\n  <td>\n    {name}\n  </td>\n  \"\"\"";
+        let at = src.find("name").unwrap() as u32;
+        assert_eq!(
+            kinds(src),
+            vec![TokenKind::Tagged {
+                tag: "html".into(),
+                parts: vec![
+                    StringPart::Text("<td>".into()),
+                    StringPart::Interpolation {
+                        source: "name".into(),
+                        span: Span::new(FileId(0), at, at + 4),
+                    },
+                    StringPart::Text("</td>".into()),
+                ],
+            }]
+        );
     }
 
     #[test]
