@@ -35,7 +35,7 @@ use std::collections::HashSet;
 
 use cove_schema::builtins::FreeBuiltinKind;
 use cove_sema::resolve::{CallPrecision, FnKey, Program as Checked};
-use cove_sema::stdlib::{literal_tag, TaggedPiece};
+use cove_sema::stdlib::{literal_tag, LiteralTag, TaggedPiece};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Block, Expr, ExprKind, StmtKind, StrPart};
 
@@ -353,17 +353,29 @@ impl Scan<'_> {
             match part {
                 StrPart::Text(text) => self.literal(text),
                 StrPart::Interpolation(inner) => {
-                    match known.piece(self.ty(inner)) {
-                        TaggedPiece::Markup => self.named((known.module, known.markup)),
-                        TaggedPiece::EachMarkup => self.named((known.module, known.each)),
-                        TaggedPiece::Text => self.named((known.module, known.escape)),
-                        TaggedPiece::Rendered => {
-                            self.named((known.module, known.escape));
-                            self.piece(inner);
-                        }
-                    }
+                    let checked = self.checked;
+                    self.tagged_piece(known, checked.facts.ty(inner.span.file, inner.id));
                     self.expr(inner);
                 }
+            }
+        }
+    }
+
+    /// `Body::append_tagged_as`'s calls for a hole whose type as written is
+    /// `ty`: an `Option`'s are its payload's, ADR 0104.
+    fn tagged_piece(&mut self, known: &'static LiteralTag, ty: Option<&Ty>) {
+        match known.piece(ty) {
+            TaggedPiece::Markup => self.named((known.module, known.markup)),
+            TaggedPiece::EachMarkup => self.named((known.module, known.each)),
+            TaggedPiece::Text => self.named((known.module, known.escape)),
+            TaggedPiece::Optional => {
+                if let Some(Ty::Option(payload)) = ty {
+                    self.tagged_piece(known, Some(payload));
+                }
+            }
+            TaggedPiece::Rendered => {
+                self.named((known.module, known.escape));
+                self.rendering(ty);
             }
         }
     }
@@ -380,7 +392,13 @@ impl Scan<'_> {
     /// `Body::append_piece`'s call, for the types whose call is one function
     /// of the standard library; a walk or a box is left to the rounds.
     fn piece(&mut self, piece: &Expr) {
-        match self.ty(piece) {
+        let checked = self.checked;
+        self.rendering(checked.facts.ty(piece.span.file, piece.id));
+    }
+
+    /// [`Scan::piece`]'s question of a type rather than of an expression.
+    fn rendering(&mut self, ty: Option<&Ty>) {
+        match ty {
             Some(Ty::Str) => self.named(TEXT_APPEND),
             Some(Ty::Int) => self.named(INT_RENDERING),
             Some(Ty::Float) => self.named(FLOAT_TEXT),

@@ -311,3 +311,111 @@ test fn aBackslashAndAnEscapedNewlineKeepTheirMeaning() -> Result<Unit, Error> {
   assertEqual(page.render(), "<p>undone</p><pre>a\nb</pre>")?
   Ok(())
 }
+
+// ------------------------------------------------------- an absent value
+
+/// An `Option<Html>` is its markup for `Some` and nothing for `None`.
+test fn anOptionalHtmlIsItsMarkupOrNothing() -> Result<Unit, Error> {
+  let seen: Option<Html> = Some(html"<em>now</em>")
+  let unseen: Option<Html> = None
+  assertEqual(html"<li>x{seen}</li>".render(), "<li>x<em>now</em></li>")?
+  assertEqual(html"<li>x{unseen}</li>".render(), "<li>x</li>")?
+  Ok(())
+}
+
+/// An `Option<String>` is its text escaped for `Some` and nothing for `None`.
+test fn anOptionalStringIsEscapedOrNothing() -> Result<Unit, Error> {
+  let note: Option<String> = Some("<script>&\"'")
+  let none: Option<String> = None
+  assertEqual(
+    html"<p>{note}</p>".render(),
+    "<p>&lt;script&gt;&amp;&quot;&#39;</p>",
+  )?
+  assertEqual(html"<p>{none}</p>".render(), "<p></p>")?
+  Ok(())
+}
+
+/// An `Option<Int>` is its digits or nothing.
+test fn anOptionalIntIsItsDigitsOrNothing() -> Result<Unit, Error> {
+  let count: Option<Int> = Some(-42)
+  let none: Option<Int> = None
+  assertEqual(html"<td>{count}</td>".render(), "<td>-42</td>")?
+  assertEqual(html"<td>{none}</td>".render(), "<td></td>")?
+  Ok(())
+}
+
+/// An `Option<Array<Html>>` is its elements in order or nothing.
+test fn anOptionalArrayOfHtmlIsItsElementsOrNothing() -> Result<Unit, Error> {
+  let items: Option<Array<Html>> = Some([html"<li>a</li>", html"<li>b</li>"])
+  let none: Option<Array<Html>> = None
+  assertEqual(html"<ul>{items}</ul>".render(), "<ul><li>a</li><li>b</li></ul>")?
+  assertEqual(html"<ul>{none}</ul>".render(), "<ul></ul>")?
+  Ok(())
+}
+
+/// The rule applies twice to an option of an option: `Some(None)` is nothing.
+test fn anOptionOfAnOptionIsAskedTwice() -> Result<Unit, Error> {
+  let both: Option<Option<String>> = Some(Some("a&b"))
+  let inner: Option<Option<String>> = Some(None)
+  let outer: Option<Option<String>> = None
+  assertEqual(html"[{both}]".render(), "[a&amp;b]")?
+  assertEqual(html"[{inner}]".render(), "[]")?
+  assertEqual(html"[{outer}]".render(), "[]")?
+  Ok(())
+}
+
+/// Inside a quoted attribute value an `Option` adds its text or nothing.
+test fn anOptionInsideAQuotedAttributeAddsNothingForNone(
+) -> Result<Unit, Error> {
+  let suffix: Option<String> = Some("-\"x\"")
+  let none: Option<String> = None
+  assertEqual(
+    html"""<p class="v{suffix}">x</p>""".render(),
+    "<p class=\"v-&quot;x&quot;\">x</p>",
+  )?
+  assertEqual(
+    html"""<p class="v{none}">x</p>""".render(),
+    "<p class=\"v\">x</p>",
+  )?
+  Ok(())
+}
+
+/// A plain literal still writes an `Option` as `Some(…)` or `None`.
+test fn aPlainLiteralStillRendersAnOption() -> Result<Unit, Error> {
+  let note: Option<String> = Some("a")
+  let none: Option<String> = None
+  assertEqual("{note} {none}", "Some(a) None")?
+  Ok(())
+}
+
+/// A hole of a type parameter is decided by the type as written, so an
+/// `Option` that a parameter turns out to be is rendered and escaped.
+fn shown<T>(value: T) -> Html {
+  html"<b>{value}</b>"
+}
+
+test fn anOptionBehindATypeParameterIsRenderedAndEscaped(
+) -> Result<Unit, Error> {
+  let note: Option<String> = Some("<i>")
+  assertEqual(shown(note).render(), "<b>Some(&lt;i&gt;)</b>")?
+  Ok(())
+}
+
+/// `only` is the markup when the condition holds.
+test fn onlyIsTheMarkupWhenItHolds() -> Result<Unit, Error> {
+  assertEqual(html.only(true, html"<b>x</b>").render(), "<b>x</b>")?
+  Ok(())
+}
+
+/// `only` is no markup when the condition does not hold.
+test fn onlyIsNothingWhenItDoesNotHold() -> Result<Unit, Error> {
+  assertEqual(html.only(false, html"<b>x</b>") == html"", true)?
+  Ok(())
+}
+
+/// `only` in a hole of a larger literal adds its markup or nothing.
+test fn onlyInAHoleAddsItsMarkupOrNothing() -> Result<Unit, Error> {
+  let shown = html"<p>{html.only(true, html"<i>a</i>")}|{html.only(false, html"<i>b</i>")}</p>"
+  assertEqual(shown.render(), "<p><i>a</i>|</p>")?
+  Ok(())
+}

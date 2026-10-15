@@ -68,13 +68,16 @@
 //! tag's markup is appended as it is, an `Array` of it is appended element by
 //! element, a `String` is escaped straight into the buffer, and anything else
 //! is rendered exactly as above into a scratch buffer of its own and that
-//! text escaped. The literal text between the holes is appended raw, and the
+//! text escaped. An `Option` is [ADR 0104]'s switch on its case: nothing for
+//! `None`, and for `Some` the same question asked of the payload. The literal
+//! text between the holes is appended raw, and the
 //! finished `String` is wrapped as the tag's type. Every one of those calls
 //! is a function of the tag's module named by the one row
 //! [`cove_sema::stdlib::literal_tag`] answers, so what escaping means is
 //! `std.html`'s Cove and nothing here.
 //!
 //! [ADR 0101]: ../../../../docs/adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md
+//! [ADR 0104]: ../../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md
 //! [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
 //!
 //! [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
@@ -180,15 +183,37 @@ impl Body<'_> {
         inner: &Expr,
         value: &Val,
     ) {
-        let span = inner.span;
-        let piece = known.piece(self.raw_ty(inner));
+        let raw = self.raw_ty(inner).cloned();
+        let ty = self.ty(inner);
+        self.append_tagged_as(
+            known,
+            assembly,
+            raw.as_ref(),
+            ty.as_ref(),
+            value,
+            inner.span,
+        );
+    }
+
+    /// [`Body::append_tagged`] for a value whose type as written is `raw` and
+    /// as this instantiation settles it `ty`: the hole itself, or the payload
+    /// of an `Option` hole.
+    fn append_tagged_as(
+        &mut self,
+        known: &'static LiteralTag,
+        assembly: &mut Assembly,
+        raw: Option<&Ty>,
+        ty: Option<&Ty>,
+        value: &Val,
+        span: Span,
+    ) {
         let module = known.module;
-        match piece {
+        match known.piece(raw) {
             TaggedPiece::Markup => self.append_by((module, known.markup), assembly, value, span),
             TaggedPiece::EachMarkup => self.append_by((module, known.each), assembly, value, span),
             TaggedPiece::Text => self.append_by((module, known.escape), assembly, value, span),
+            TaggedPiece::Optional => self.append_optional(known, assembly, raw, ty, value, span),
             TaggedPiece::Rendered => {
-                let ty = self.ty(inner);
                 // An `Int`'s text is digits and a sign, which escaping
                 // leaves as they are, so it is written straight in.
                 if matches!(ty, Some(Ty::Int)) && value.layout == shapes::INT {
@@ -198,11 +223,60 @@ impl Body<'_> {
                 // ADR 0101's "a rendered value into a scratch run": the walk
                 // writes a buffer of its own, and that text is escaped.
                 let mut scratch = self.assembly_open(0, 1, span);
-                self.append_piece(&mut scratch, ty.as_ref(), value, span);
+                self.append_piece(&mut scratch, ty, value, span);
                 let text = self.assembly_finish(scratch, None, span);
                 self.append_by((module, known.escape), assembly, &text, span);
                 self.release(text, span);
             }
+        }
+    }
+
+    /// An `Option` hole, [ADR 0104]: a switch on its case, past everything
+    /// for `None`, and for `Some` its payload appended as a hole of the
+    /// payload's type — read where it lies in the value, not consumed.
+    ///
+    /// [ADR 0104]: ../../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md
+    fn append_optional(
+        &mut self,
+        known: &'static LiteralTag,
+        assembly: &mut Assembly,
+        raw: Option<&Ty>,
+        ty: Option<&Ty>,
+        value: &Val,
+        span: Span,
+    ) {
+        let (Some(Ty::Option(raw_payload)), Some(option @ Ty::Option(payload))) = (raw, ty) else {
+            self.errors.push(super::gap::gap(
+                "an `Option` hole whose instantiated type is not an `Option`",
+                span,
+            ));
+            return;
+        };
+        let found =
+            shapes::case_at(self.checked, self.module, option, "Some").and_then(|(index, _)| {
+                Some((index, self.case_of(value.layout, index)?.0.first()?.clone()))
+            });
+        let Some((index, part)) = found else {
+            self.errors.push(super::gap::gap(
+                "an `Option` hole whose layout has no `Some` payload",
+                span,
+            ));
+            return;
+        };
+        let mut missed = Vec::new();
+        self.test_case(value.slot, value.layout, index, span, &mut missed);
+        let payload_value = Val::borrowed(value.slot + 1 + part.at, part.layout);
+        self.append_tagged_as(
+            known,
+            assembly,
+            Some(raw_payload),
+            Some(payload),
+            &payload_value,
+            span,
+        );
+        let end = self.here();
+        for at in missed {
+            self.patch(at, end);
         }
     }
 

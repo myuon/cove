@@ -14,7 +14,8 @@
 - Decides: that a hole whose static type is `Option<T>` puts in **nothing for
   `None`** and, for `Some(v)`, **whatever a hole of type `T` would put in for
   `v`** — markup whole, anything else escaped — so that a value that may be
-  absent is written as one, with no `html""` standing in for it
+  absent is written as one, with no `html""` standing in for it; and that
+  `std.html` adds `only(when, page)`, JSX's `c && <X/>`
 
 ## Context
 
@@ -61,6 +62,16 @@ is a type parameter is decided by the type as written: a `T` that turns out
 to be an `Option` is rendered and escaped.
 
 This is JSX's behaviour for `{null}` and `{undefined}`, which render nothing.
+
+### `html.only`
+
+`std.html` adds `only(when: Bool, page: Html) -> Html`: `page` when `when`
+holds, no markup when it does not — JSX's `c && <X/>`, without an `else` to
+write. Unlike `&&`, it is a function, so `page` is built whether or not
+`when` holds. That is a little waste for markup that is cheap to build, and
+it is wrong for markup that is only safe to build when `when` holds — one
+that unwraps an `Option`, say — which is written with `if`, or as an
+`Option` hole.
 
 ## Consequences
 
