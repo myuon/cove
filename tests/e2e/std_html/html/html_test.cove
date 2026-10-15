@@ -170,7 +170,8 @@ test fn aLiteralOverLinesIsOneLine() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// A space wanted between two inline elements is written before the `\`.
+/// A space wanted between two inline elements may be written before the `\`;
+/// the line breaks around them, between tags, are nothing (ADR 0103).
 test fn aSpaceAtAJoinIsWrittenBeforeTheBackslash() -> Result<Unit, Error> {
   let figure = 3
   let page = html"""
@@ -181,7 +182,7 @@ test fn aSpaceAtAJoinIsWrittenBeforeTheBackslash() -> Result<Unit, Error> {
     """
   assertEqual(
     page.render(),
-    "<p>\n  <b>3</b> <span class=muted>rows</span>\n</p>",
+    "<p><b>3</b> <span class=muted>rows</span></p>",
   )?
   Ok(())
 }
@@ -261,5 +262,55 @@ test fn isUsableAsAQualifiedModule() -> Result<Unit, Error> {
   assertEqual(html.markup("<b>x</b>").render(), "<b>x</b>")?
   assertEqual(html"<i>{count}</i>".render(), "<i>42</i>")?
   assertEqual(html.join([html"a", html"b"], html"").render(), "ab")?
+  Ok(())
+}
+
+// ----------------------------------- a line break in html""" (ADR 0103)
+
+/// Between two tags, or a tag and a hole, a line break and the indentation
+/// after it are nothing.
+test fn aBreakBetweenTagsIsNothing() -> Result<Unit, Error> {
+  let name = "<q>"
+  let page = html"""
+    <tr>
+      <td class=title><code>{name}</code></td>
+      <td>
+        {name}
+      </td>
+    </tr>
+    """
+  assertEqual(
+    page.render(),
+    "<tr><td class=title><code>&lt;q&gt;</code></td><td>&lt;q&gt;</td></tr>",
+  )?
+  Ok(())
+}
+
+/// Anywhere else a line break is one space, so prose wraps as prose.
+test fn aBreakInProseIsOneSpace() -> Result<Unit, Error> {
+  let version = "1.2"
+  let page = html"""
+    What <code>{version}</code> is made of: its
+    <code>app.toml</code>, its
+    {version}
+
+
+    and more
+    """
+  assertEqual(
+    page.render(),
+    "What <code>1.2</code> is made of: its <code>app.toml</code>, its 1.2 and more",
+  )?
+  Ok(())
+}
+
+/// A `\` still joins with nothing, and `\n` is still a newline.
+test fn aBackslashAndAnEscapedNewlineKeepTheirMeaning() -> Result<Unit, Error> {
+  let page = html"""
+    <p>un\
+      done</p>
+    <pre>a\nb</pre>
+    """
+  assertEqual(page.render(), "<p>undone</p><pre>a\nb</pre>")?
   Ok(())
 }

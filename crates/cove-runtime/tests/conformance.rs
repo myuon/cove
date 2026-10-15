@@ -176,6 +176,16 @@ static RULES: &[Rule] = &[
         value: "<p class=\"x\">&lt;a &amp; &#39;b&#39;&gt;2<i></p>",
         foreign: "Int",
     },
+    // ADR 0103: in a multi-line `html"""` a line break is nothing between
+    // two tag-or-hole edges and one space anywhere else.
+    Rule {
+        section: "Tagged literals",
+        decls: "use std.html\n\n",
+        body: "let name = \"x\"\nhtml\"\"\"\n  <p>\n    {name}\n  </p>\n  its\n  <i>y</i>\n  \"\"\".render()",
+        ty: "String",
+        value: "<p>x</p> its <i>y</i>",
+        foreign: "Int",
+    },
     // ADR 0102: `join` puts markup between each two parts and nothing around
     // them, and no markup is `html""`.
     Rule {
