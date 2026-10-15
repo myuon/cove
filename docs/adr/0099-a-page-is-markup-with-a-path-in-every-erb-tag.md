@@ -14,8 +14,11 @@
   `fill(template, data)`, whose holes are written `<%= path %>` — ERB's
   delimiters, naming a path into `data`; that **the type of what a path
   reaches decides whether it is escaped**, so an `Html` goes in whole and
-  everything else is escaped; and that markup stays markup while loops and
-  conditions stay in Cove
+  everything else is escaped; that **`render` is fallible and `fill` is
+  not**, so a hole whose path names no field is recorded on the `Html`,
+  propagated through composition, and refused once per page rather than
+  written onto it; and that markup stays markup while loops and conditions
+  stay in Cove
 
 ## Context
 
@@ -25,11 +28,36 @@ rather than describing:
 
 - `apps/admin/pages.cove` is **2,018 lines**, almost all of it string
   building.
-- It calls its escaping helper **259 times**. One missed call is an injection,
-  in the one app that may change the host's settings, and nothing in the type
-  system says which of its 581 interpolations need it. One 480-character
-  expression has six: four escaped, two deliberately raw markup. Telling them
-  apart means reading each callee.
+- It calls its escaping helper **179 times**, and **175 of those are inside an
+  interpolation** — `{h(app.name)}`. One missed call is an injection, in the
+  one app that may change the host's settings, and nothing in the type system
+  says which of its interpolations need it. One 480-character expression has
+  six: four escaped, two deliberately raw markup. Telling them apart means
+  reading each callee.
+
+  **This bullet said 259, and 259 was a miscount — twice over.** It is written
+  out rather than quietly adjusted, because a measurement a decision rests on
+  should not move under the decision without saying so. First, the figure came
+  from `grep -c 'h('`, which counts *lines* rather than calls and which
+  matches `push(`, `length(` and `match(` as well as `h(`; counting the token
+  instead, with `grep -oE '(^|[^A-Za-z0-9_])h\('`, gives 180 occurrences, one
+  of which is `fn h(`'s own definition — so **179** calls, of which 175 sit
+  inside a `{…}`. Second, 259 is not even that grep against the file this
+  bullet measures: on the 2,018-line version, minicloud `b80c6276`,
+  `grep -c 'h('` answers **239**; **259** is the same grep against
+  `87a4a17e`, a 2,241-line version of the file committed later the same day.
+  The bullet reported two trees at once.
+
+  **This bullet also gave a count of the file's interpolations, and that
+  figure is withdrawn rather than corrected.** It could not be reproduced:
+  two scanners of the same 2,018-line tree disagree with it and with each
+  other. A third number nobody has checked would be worse than none, and the
+  argument does not rest on it — what it rests on is that every one of those
+  interpolations has to be decided about by hand.
+
+  None of this changes the decision. 179 places a reader has to decide about
+  is the same argument 259 was, and the argument was never about the
+  magnitude: it is that *no* number of them is checked by anything.
 - The compactness is an illusion. The median line is **28** characters, but
   **49** are over 200, **22** over 300, and the longest is **1,109**. That
   line cannot be reviewed or diffed.
@@ -87,7 +115,7 @@ export opaque struct Html { … }
 export fn fill(template: String, data: Any) -> Html
 export fn markup(said: String) -> Html     // the one way past escaping
 export fn empty() -> Html
-export fn render(page: Html) -> String
+export fn render(page: Html) -> Result<String, Error>
 ```
 
 **A hole is `<%=`, a path, and `%>`** — ERB's delimiters, and the path is
@@ -174,21 +202,73 @@ Two ways this is stricter than Rails. `Html` is `opaque`, so unlike a
 be imported by name, so the opt-out shows in the import list as well as at its
 call site.
 
-**A hole that goes wrong is loud, and the closing delimiter is what makes that
-possible.** A path that reaches nothing renders
-`[no such path: what.was.asked]`, and a `<%=` that is never closed renders
-`[unclosed <%=: …]` naming the tail it swallowed; both go through the same
-escaper as every other hole, so both are inert between tags and inside an
-attribute's quotes. A silent empty string would hide the one kind of mistake
-this design can still make, and answering a `Result` would poison every call
-site of a function used once per element.
+**A hole that goes wrong makes `render` refuse, and `fill` stays infallible.**
+A path that names no field is a mistake in the template; `fill` *records* it
+on the `Html` it answers and `render` hands back `Err(Error(…))` naming the
+path and the template it was in.
+
+This paragraph said something else and was wrong, so what it said is kept
+here and the reason it failed is recorded with it. **It said the hole was
+loud**: a path that reached nothing rendered `[no such path: what.was.asked]`,
+a `<%=` that was never closed rendered `[unclosed <%=: …]`, both escaped and
+so inert wherever they landed; a silent empty string would have hidden the
+one mistake this design can still make, and a `Result` would have poisoned
+every call site of a function used once per element.
+
+**What that got wrong is where "loud" has to be.** A marker is loud in the
+output and silent in every gate a program has. It was measured in the program
+this ADR is measured against: one hole in `apps/admin` was changed from
+`<%= name %>` to `<%= nmae %>`, in a chart legend that renders on every view
+of that page, and then `minicloud check` reported 0 warnings and 0 refusals
+and `minicloud test` reported 58 passed. Nothing failed. The page would have
+shipped reading `[no such path: nmae]`, having passed everything it had to
+pass. Before that page used `std.html` the compiler checked the field
+reference, because the page named the field in Cove; the template took the
+check away and the marker did not put it back. Loud where a person might
+happen to look and silent where a machine does look is the wrong way round.
+
+**`render` is fallible and `fill` is not**, and the objection above survives
+exactly half of itself. It is about `fill`, which runs once per row and once
+per cell and whose value is that it reads like the markup it makes; a `?`
+there is a `?` at every element. `render` is the single boundary where markup
+becomes a response — once per page, at a site that is already fallible for
+half a dozen other reasons — so the check costs one `?` and buys back what
+the compiler used to do.
+
+`Html` is opaque, so it has somewhere to keep the problem, and composition
+propagates it: an `Html` carrying a problem, put into another template through
+a hole or arriving in a list of markup, hands the problem to the result. The
+**first** one is kept — a page with two bad holes is one bug report and the
+first is the one to go and look at. A hole that goes wrong puts in nothing;
+there is no marker any more, because once `render` refuses, the text of a
+broken `Html` cannot be observed at all.
+
+**A path that does not reach a value is an error.** One rule, with no second
+kind. A segment that names no field of what it is applied to — `<%= nmae %>`,
+or `<%= who.said %>` into an opaque value — is a mistake in the template,
+because a struct's fields are settled when it is declared.
+
+**An index past the end is not an exception**, and an earlier draft of this
+paragraph said it was: `<%= items[5] %>` against three items was to put in
+nothing, on the grounds that the length depends on the data and a short list
+is something a page legitimately renders. That does not survive contact with
+the notation. A fixed index is the template *asserting* there is a sixth
+item — a claim about the shape of the data — and a false claim is a mistake
+like a misspelt field. A page whose length really varies loops in Cove and
+hands over an `Array<Html>`, which is what a list hole and `<%= . %>` are
+for. Letting the index through would also have left one hole still doing the
+thing this whole decision stopped doing: rendering something and failing
+nothing, where a hole that quietly contributes nothing is a hole nobody
+notices. (An empty list put in whole still puts in nothing — no rows is no
+markup. It is indexing that makes a claim.)
 
 Because a hole has an end, the text between the two is a path or it is
 nothing: a trailing `.`, a bracket with no number, a space in the middle of a
-name are each refused with that same marker. A sigil has no end to stop at, so
-a scanner could only read as far as it understood and leave the rest standing
-in the markup: `$.limits.maxQued` failed loudly and `$.limits.max Qued` not
-at all. And an unclosed hole was not an error anybody could report.
+name are each refused like a path that names no field. A sigil has no end to
+stop at, so a scanner could only read as far as it understood and leave the
+rest standing in the markup: `$.limits.maxQued` failed loudly and
+`$.limits.max Qued` not at all. And an unclosed hole was not an error anybody
+could report.
 
 **Paths, not positions.** An earlier draft used `$1`, `$2`. A path does not
 move when the markup is rearranged — reordering columns, adding a cell —
@@ -211,7 +291,7 @@ three reasons that are not style:
 ## Consequences
 
 **Escaping stops being a decision.** Every path escapes unless what it reaches
-is an `Html`, including inside an attribute value, where `"` matters. The 259
+is an `Html`, including inside an attribute value, where `"` matters. The 179
 places a reader must reason about become none.
 
 **One loader, two renderings.** The function that answers the page's data
@@ -256,11 +336,20 @@ with `"{value}"` for everything a page carries; where `std.dynamic` uses the
 path to notice a vector holding itself, this bounds depth at sixteen and
 writes `…` past it.
 
-**The binding is a run-time check, and that is a deliberate trade.** A path
-that reaches nothing is a programming error a test catches, and `fill` can say
-so loudly because it knows the field names. Compile-time binding would need
-either a macro system or syntax, and ADR authors before this one have declined
-both for less.
+**The binding is a run-time check, and the run-time check is `render`'s.**
+This paragraph said the trade was safe because "a path that reaches nothing is
+a programming error a test catches", and `fill` could say so loudly because it
+knows the field names. **The second half was true and the first half was
+false.** No test catches it, because a marker is text: the program this ADR is
+measured against was given one misspelt hole on a page that renders on every
+view of it, and `check` reported nothing and all 58 tests passed. A page would
+have shipped with the marker in it.
+
+So the check is still at run time — compile-time binding would need either a
+macro system or syntax, and ADR authors before this one have declined both for
+less — but it is a *failing* check and not a visible one. `fill` records what
+it knows and `render` answers `Err`, which is the one shape a test and a
+request both already understand.
 
 ### What it does to the program it was measured on
 
@@ -269,7 +358,7 @@ that the embedder hands over with its fields named, so they need no loader at
 all: `{h(app.name)}` becomes `<%= name %>`.
 
 It is **not a line-count win and should not be sold as one** — roughly flat.
-What moves is that 259 escaping decisions become none, and that markup
+What moves is that 179 escaping decisions become none, and that markup
 repeated by hand collapses: `<p class=muted>` appears 24 times in that one
 file, and the four figures of its "Now" strip are four copies of one template.
 What is added is a small view-model struct wherever a value is computed rather
@@ -284,6 +373,17 @@ page it was *longer*, not shorter.
 
 **A template language.** Control flow in markup, a second syntax to parse,
 check, format and colour, to express what `if` and `for` already express.
+
+**A fallible `fill`.** This entry is narrower than the one it replaces. The
+first draft of this ADR rejected `Result` outright, on the grounds that it
+would poison every call site of a function used once per element — and that
+is right *about `fill`*, which is called once per row and once per cell in
+code whose whole value is that it reads like the markup it makes. It is not
+an argument about `render`, which is called once per page at the boundary
+where markup becomes a response, and where one `?` sits beside the half dozen
+already there. Generalising the objection from the one to the other is what
+left a programming error with no gate to fail, so what is rejected here is a
+fallible `fill`, and `render` is fallible.
 
 **A second sigil for parts** (`$$n`, with a `parts: Array<Html>` argument).
 It put the escaping decision in the template's punctuation, where a reader
@@ -321,7 +421,8 @@ counting, but they swap silently when markup is rearranged.
 
 - **An `Html` is recognised by its shape, not its identity.**
   `core.dynamicTypeName` answers a declared name with no module on it, so
-  `fill` asks instead for an opaque struct named `Html` holding one `String`.
+  `fill` asks instead for an opaque struct named `Html` holding two `String`s,
+  the markup and the problem.
   A program that declares the same shape is indistinguishable — which costs
   nothing it did not already have, since such a program could call `markup`
   and be believed. A qualified type name would close it, and that is a
@@ -334,15 +435,32 @@ counting, but they swap silently when markup is rearranged.
   thing to drop if it is used for branching.
 - **`Json` needs one branch**, since its fields are a `Map` inside an enum
   case rather than a struct's.
+- **A problem propagates only where an `Html` is put in as markup.** An
+  `Html` reached through the rendering path instead — inside a struct put in
+  whole, or in a list that is markup only in part — prints as the opaque type
+  name and its problem is dropped. Propagating from data that was never put
+  in would be worse, since it would refuse a page for a fragment it did not
+  use, so this stands; it is recorded because it is the one seam in
+  "composition propagates it".
 - ~~This is unverified end to end.~~ **It is implemented**, in
-  `crates/cove-sema/std/html.cove`, with 25 cases in `tests/e2e/std_html`
+  `crates/cove-sema/std/html.cove`, with 28 cases in `tests/e2e/std_html`
   passing on both backends: escaping between tags and inside an attribute's
   quotes, a nested path, an index, an `Html` field going in whole, an
   `Array<Html>`, `<%= . %>` as the data, the space inside the delimiters
   trimmed, a template holding `$5.00`, `?over=hour`, `[[x]]`, `$(y)`, `100%`
-  and `{` untouched, both markers, and a non-`String` scalar. The hole
+  and `{` untouched, a non-`String` scalar, and — since the markers were
+  replaced by a refusal — a bad field name making `render` answer `Err`, the
+  `Err` naming the path and the template, a bad hole inside a nested fragment
+  still reaching the outer `render`, an index past the end refused too, and
+  two bad holes answering the first. The hole
   notation is the one part of the Decision that changed under implementation,
   and it changed twice: a bare `$` could not coexist with a literal dollar,
   and `$.`, which fixed only that, gave way to `<%= %>`, which fixes the rest
   and is somebody's convention. Both are recorded under "Alternatives
   rejected" rather than removed.
+- ~~What `fill` does with a path that reaches nothing.~~ **Decided**, and the
+  decision is in the Decision: a path that names no field makes `render`
+  refuse, and so does an index past the end, and the marker is gone. This
+  item is listed as closed rather than deleted because the first answer —
+  recorded there — was the wrong one, and the way it was wrong is the useful
+  part of the record.
