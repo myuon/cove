@@ -58,6 +58,10 @@
 //   whether or not `c` holds, so what is only safe to build when it does is
 //   an `if`, or an `Option` hole.
 // - `dangerouslySetInnerHTML`: [`markup`]`(s)`, the one way past escaping.
+// - and `cove check` points at the two of these an `if` is most often
+//   written in place of: an `if` with `html""` for a branch is `html.only`,
+//   and an `if` between two literals of the same markup is the `if` in a
+//   hole where they differ — each warning's help is the rewrite (ADR 0105).
 //
 // And what is different on purpose:
 //

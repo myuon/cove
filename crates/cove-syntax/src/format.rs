@@ -86,6 +86,12 @@ pub fn format_expr(expr: &Expr) -> String {
     Formatter::new("").flat(expr, 0)
 }
 
+/// Renders one block on a single line, from the tree alone, as
+/// [`format_expr`] renders an expression.
+pub fn format_block(block: &Block) -> String {
+    Formatter::new("").flat_block(block)
+}
+
 /// Formats `unit`, which must be the tree parsed from `source`.
 ///
 /// Reading the source alongside the tree is what lets the formatter keep

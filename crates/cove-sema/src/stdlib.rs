@@ -308,6 +308,18 @@ impl LiteralTag {
         }
     }
 
+    /// Whether a hole of type `ty` puts markup in: the module's type, an
+    /// `Array` of it, or an `Option` of either — what an `if` moved into a
+    /// hole as a `String` would render as text instead
+    /// ([ADR 0105](../../../docs/adr/0105-an-if-that-chooses-markup-says-what-it-chooses.md)).
+    pub fn puts_markup(&self, ty: &Ty) -> bool {
+        match self.piece(Some(ty)) {
+            TaggedPiece::Markup | TaggedPiece::EachMarkup => true,
+            TaggedPiece::Optional => matches!(ty, Ty::Option(inner) if self.puts_markup(inner)),
+            TaggedPiece::Text | TaggedPiece::Rendered => false,
+        }
+    }
+
     fn is_markup(&self, name: &str) -> bool {
         name.strip_prefix(self.module)
             .and_then(|rest| rest.strip_prefix('.'))
