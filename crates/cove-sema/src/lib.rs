@@ -15,6 +15,7 @@ pub mod compile;
 pub mod config;
 pub mod facts;
 mod library;
+mod markup_if;
 pub mod package;
 pub mod resolve;
 pub mod stdlib;

@@ -2317,6 +2317,10 @@ struct Checker<'a> {
     /// Whether the walk currently running is a `Checker::probe`, whose
     /// diagnostics are discarded.
     probing: bool,
+    /// Where each `if` written as an `else if` is: the last link of a chain
+    /// is an `if` with an `else` like any other, and ADR 0105's notes are not
+    /// about a chain.
+    else_ifs: Vec<Span>,
     /// Whether the expression about to be walked is one whose value is
     /// discarded: a statement, or the last expression of a loop body or of a
     /// discarded branch. [`Checker::expr_type`] takes it, so it is only ever
@@ -2464,6 +2468,7 @@ impl<'a> Checker<'a> {
             assigned_place: None,
             ret_stated: false,
             probing: false,
+            else_ifs: Vec::new(),
             facts: Facts::default(),
             vars: Vec::new(),
             body_mark: 0,
@@ -6290,6 +6295,11 @@ impl<'a> Checker<'a> {
             }
             return Ty::Unit;
         };
+        if matches!(else_branch.kind, ExprKind::If { .. })
+            && !self.else_ifs.contains(&else_branch.span)
+        {
+            self.else_ifs.push(else_branch.span);
+        }
         // With no expectation the branches are only answerable to each other,
         // and either of them may be the one that says what the value is:
         // `if c { None } else { Some(1) }` is an `Option<Int>` and nothing in
@@ -6333,7 +6343,200 @@ impl<'a> Checker<'a> {
         if expected.is_none() && !then_ty.matches(&else_ty) {
             self.branches_disagree(then_branch.span, else_branch.span, &then_ty, &else_ty);
         }
+        if !self.probing {
+            self.markup_if(
+                condition,
+                then_branch,
+                else_branch,
+                span,
+                &then_ty,
+                &else_ty,
+            );
+        }
         then_ty.join(&else_ty)
+    }
+
+    /// `condition` negated, as the help of ADR 0105's `html.only` rewrite
+    /// writes it: a negation loses its `!`, `==` and `!=` trade places, and so
+    /// do the orderings of a type every two values of which are ordered — not
+    /// `Float`, where `!(a < b)` holds for a NaN and `a >= b` does not. A
+    /// name, field or call takes a bare `!`; anything else is parenthesised.
+    fn negated(&self, condition: &Expr) -> String {
+        use cove_syntax::format::format_expr;
+
+        match &condition.kind {
+            ExprKind::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => format_expr(operand),
+            ExprKind::Binary { op, lhs, rhs } => {
+                let total = || {
+                    matches!(
+                        self.facts.ty(lhs.span.file, lhs.id),
+                        Some(Ty::Int | Ty::Str | Ty::Duration)
+                    )
+                };
+                let opposite = match op {
+                    BinaryOp::Eq => Some("!="),
+                    BinaryOp::Ne => Some("=="),
+                    BinaryOp::Lt if total() => Some(">="),
+                    BinaryOp::Le if total() => Some(">"),
+                    BinaryOp::Gt if total() => Some("<="),
+                    BinaryOp::Ge if total() => Some("<"),
+                    _ => None,
+                };
+                match opposite {
+                    Some(opposite) => {
+                        format!("{} {opposite} {}", format_expr(lhs), format_expr(rhs))
+                    }
+                    None => format!("!({})", format_expr(condition)),
+                }
+            }
+            ExprKind::Ident(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Bool(_) => {
+                format!("!{}", format_expr(condition))
+            }
+            _ => format!("!({})", format_expr(condition)),
+        }
+    }
+
+    /// The two notes of [ADR 0105] on an `if` that chooses markup: one
+    /// branch `html""` and the other markup, which is `html.only`; and two
+    /// `html` literals that differ only in text, which is one literal with
+    /// the `if` in a hole. [`crate::markup_if`] compares and writes the
+    /// rewrite; this decides which `if`s are asked — exactly an `if` and an
+    /// `else`, never an `else if` — and what each hole's type is.
+    ///
+    /// [ADR 0105]: ../../../docs/adr/0105-an-if-that-chooses-markup-says-what-it-chooses.md
+    fn markup_if(
+        &mut self,
+        condition: &Expr,
+        then_branch: &Block,
+        else_branch: &Expr,
+        span: Span,
+        then_ty: &Ty,
+        else_ty: &Ty,
+    ) {
+        use crate::markup_if::{
+            only_help, same_markup_help, Atom, Shape, EMPTY_BRANCH, SAME_MARKUP,
+        };
+        use cove_syntax::format::format_expr;
+
+        let ExprKind::Block(else_block) = &else_branch.kind else {
+            return;
+        };
+        if self.else_ifs.contains(&span) {
+            return;
+        }
+        let Some(known) = crate::stdlib::literal_tag("html") else {
+            return;
+        };
+        fn lone(block: &Block) -> Option<&Expr> {
+            block
+                .tail
+                .as_deref()
+                .filter(|_| block.statements.is_empty())
+        }
+        fn literal<'b>(block: &'b Block, tag_name: &str) -> Option<&'b [StrPart]> {
+            match lone(block).map(|tail| &tail.kind) {
+                Some(ExprKind::Tagged { tag, parts }) if tag.node == tag_name => Some(parts),
+                _ => None,
+            }
+        }
+        let is_empty = |parts: &[StrPart]| {
+            parts
+                .iter()
+                .all(|part| matches!(part, StrPart::Text(text) if text.is_empty()))
+        };
+        let markup = |ty: &Ty| known.piece(Some(ty)) == crate::stdlib::TaggedPiece::Markup;
+        if !markup(then_ty) || !markup(else_ty) {
+            return;
+        }
+        let (then_literal, else_literal) = (
+            literal(then_branch, known.tag),
+            literal(else_block, known.tag),
+        );
+        let then_empty = then_literal.is_some_and(is_empty);
+        let else_empty = else_literal.is_some_and(is_empty);
+
+        // A — one branch is no markup. When both are, the two are the same
+        // literal and B says so.
+        if then_empty != else_empty {
+            let (empty, other) = if then_empty {
+                (then_branch, else_block)
+            } else {
+                (else_block, then_branch)
+            };
+            let shown_condition = if then_empty {
+                self.negated(condition)
+            } else {
+                format_expr(condition)
+            };
+            // A block with statements does not read on one line inside a
+            // call, so the help names the move instead of pasting it.
+            let shown_other = lone(other).map(format_expr);
+            let empty_span = lone(empty).map_or(empty.span, |tail| tail.span);
+            self.diagnostics.push(
+                Diagnostic::note(EMPTY_BRANCH, "one branch of this `if` is no markup")
+                    .at(span)
+                    .label(empty_span, "this branch is no markup")
+                    .rule("An `if` that chooses between markup and no markup is `html.only` (ADR 0105).")
+                    .help(only_help(&shown_condition, shown_other.as_deref())),
+            );
+            return;
+        }
+
+        // B — the same markup with different text.
+        let (Some(then_literal), Some(else_literal)) = (then_literal, else_literal) else {
+            return;
+        };
+        let atoms = |parts: &[StrPart]| -> Vec<Atom> {
+            let mut out = Vec::new();
+            for part in parts {
+                match part {
+                    StrPart::Text(text) => out.extend(text.chars().map(Atom::Char)),
+                    StrPart::Interpolation(hole) => {
+                        // A hole whose type is not known well enough to say
+                        // it is not markup is treated as markup: it stays.
+                        let markup = match self.facts.ty(hole.span.file, hole.id) {
+                            Some(ty) if !ty.is_wild() && !ty.holds_var() => known.puts_markup(ty),
+                            _ => true,
+                        };
+                        out.push(Atom::Hole {
+                            source: format_expr(hole),
+                            markup,
+                        });
+                    }
+                }
+            }
+            out
+        };
+        let Some((shape, help)) = same_markup_help(
+            &format_expr(condition),
+            &self.negated(condition),
+            &atoms(then_literal),
+            &atoms(else_literal),
+        ) else {
+            return;
+        };
+        let (message, rule) = match shape {
+            Shape::Differs => (
+                "both branches of this `if` are the same markup",
+                "An `if` between two literals of the same markup is written where they differ, inside one literal (ADR 0105).",
+            ),
+            Shape::Added => (
+                "one branch of this `if` is the other with something added",
+                "An `if` between a literal and the same literal with something added is `html.only` of what is added, where it goes (ADR 0105).",
+            ),
+        };
+        self.diagnostics.push(
+            Diagnostic::note(SAME_MARKUP, message)
+                .at(span)
+                .rule(rule)
+                .help(help),
+        );
     }
 
     fn branches_disagree(&mut self, first: Span, second: Span, first_ty: &Ty, second_ty: &Ty) {

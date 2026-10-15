@@ -403,6 +403,28 @@ Errors: `cove::type::unknown_literal_tag` for any other name against a quote;
 `cove::type::unknown_field` for a field the struct does not have,
 `cove::type::unknown_name` for a name nothing declares.
 
+Notes — suggestions, which print and stop nothing, not even under
+`--deny-warnings` — on an `if` with exactly an `if` and an `else` branch
+(not `else if`) that chooses markup
+([ADR 0105](adr/0105-an-if-that-chooses-markup-says-what-it-chooses.md)),
+each with the rewrite in its help:
+`cove::type::html_if_empty_branch` when one branch is `html""` and the other
+is `Html` — write `html.only(c, …)`, negating `c` when `html""` is the `if`
+branch, or an `Option` hole when the markup is only safe to build when `c`
+holds (a branch that is a block with statements is named, not pasted: move
+it into a function answering `Html`); `cove::type::html_if_same_markup` when
+both branches are `html` literals and either one is the other with something
+added — write `html.only` of what is added, in a hole where it goes:
+`html"<ul{html.only(open == 0, html" class=tree")}>"` — or, once their
+common beginning is cut back to end at a `>` and their common end to start
+at a `<` (so that a run of text, holes included, moves whole; a cut inside a
+tag stays where it is), what differs holds none of `<`, `>`, `&`, `"` and
+`'` and no hole of type `Html`, `Array<Html>` or an `Option` of either —
+write one literal with the `if` in a hole, choosing between plain strings:
+`html"<span class=state>{if up { "up" } else { "down" }}</span>"`. Neither
+reads the markup: the comparison is of text, with a hole compared by its
+source.
+
 ### Names
 
 `name`
