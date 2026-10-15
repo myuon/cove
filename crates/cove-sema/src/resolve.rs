@@ -2522,10 +2522,12 @@ fn mentions_opaque(expr: &Expr, walk: &BodyWalk) -> bool {
             mentions_opaque(lhs, walk) || mentions_opaque(rhs, walk)
         }
         ExprKind::ArrayLit(items) => any(items),
-        ExprKind::Str(parts) => parts.iter().any(|part| match part {
-            StrPart::Interpolation(inner) => mentions_opaque(inner, walk),
-            StrPart::Text(_) => false,
-        }),
+        ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
+            parts.iter().any(|part| match part {
+                StrPart::Interpolation(inner) => mentions_opaque(inner, walk),
+                StrPart::Text(_) => false,
+            })
+        }
         ExprKind::Block(block) | ExprKind::Scope { body: block, .. } => {
             block_mentions_opaque(block, walk)
         }
@@ -2935,7 +2937,7 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
                 walk.calls.push(CallShape::Reference(name.clone()));
             }
         }
-        ExprKind::Str(parts) => {
+        ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
             for part in parts {
                 if let StrPart::Interpolation(inner) = part {
                     walk_expr(inner, walk);

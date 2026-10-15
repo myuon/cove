@@ -33,6 +33,7 @@ use std::time::Duration;
 use cove_diag::{SourceMap, Span};
 use cove_schema::builtins::{FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_sema::resolve::{Program, ResolvedModule};
+use cove_sema::stdlib::TaggedPiece;
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, Param, Pattern,
     PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
@@ -48,7 +49,8 @@ use crate::schema::TypeSchema;
 use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Tasking, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{
-    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, Repr, StructValue, Value,
+    ByteBufferStorage, Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, Repr,
+    StructValue, Value,
 };
 use crate::wallclock::Instant;
 
@@ -256,6 +258,27 @@ impl From<RuntimeError> for Control {
 }
 
 type Eval = Result<Value, Control>;
+
+/// How a hole of a tagged literal is appended, decided from its value, for a
+/// program the checker recorded no type for.
+///
+/// A program that was only resolved carries no facts (`Program::facts`), and
+/// such a program is still run here — the conformance suite runs one. A value
+/// carries its nominal type, so what the checker would have settled for a
+/// hole that is markup is read off it instead. Every program the commands run
+/// was checked, and for those [`cove_sema::stdlib::LiteralTag::piece`] decides
+/// from the static type, exactly as the lowering does.
+fn piece_of_value(known: &cove_sema::stdlib::LiteralTag, value: &Value) -> TaggedPiece {
+    let markup = |value: &Value| matches!(&value.0, Repr::Struct(found) if *found.type_name == known.qualified_type());
+    match &value.0 {
+        Repr::Str(_) => TaggedPiece::Text,
+        _ if markup(value) => TaggedPiece::Markup,
+        Repr::Array(items) if !items.is_empty() && items.iter().all(markup) => {
+            TaggedPiece::EachMarkup
+        }
+        _ => TaggedPiece::Rendered,
+    }
+}
 
 /// Converts a completed call back into an ordinary result.
 ///
@@ -2038,6 +2061,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value(Repr::Str(text.into())))
             }
+            ExprKind::Tagged { tag, parts } => self.eval_tagged(env, &tag.node, parts, span),
             ExprKind::Ident(name) => self.eval_ident(env, name, span),
             ExprKind::ArrayLit(items) => {
                 let mut values = Vec::with_capacity(items.len());
@@ -3353,6 +3377,105 @@ impl<'a> Interpreter<'a> {
         )?)
     }
 
+    /// A string literal tagged `tag`, ADR 0101: what `cove_ir`'s
+    /// `Body::tagged_expr` lowers it to, evaluated.
+    ///
+    /// A byte buffer the literal text goes into as it is, and each hole into
+    /// it through the function of the tag's module that
+    /// [`cove_sema::stdlib::LiteralTag::piece`] picks from the hole's checked
+    /// type — the same Cove the linear-memory backend calls, so the escaping
+    /// is not written twice. A hole that is neither markup nor a `String` is
+    /// rendered as a plain literal renders it and that text escaped. The
+    /// finished text is wrapped as the tag's type.
+    fn eval_tagged(&mut self, env: &mut Env, tag: &str, parts: &[StrPart], span: Span) -> Eval {
+        let Some(known) = cove_sema::stdlib::literal_tag(tag) else {
+            // `cove_sema`'s checker refuses any other tag.
+            return Err(
+                RuntimeError::new(format!("`{tag}` is not a string literal tag"))
+                    .at(span)
+                    .into(),
+            );
+        };
+        let storage = ByteBufferStorage::new(0);
+        let buffer = Value(Repr::ByteBuffer(storage.clone()));
+        for part in parts {
+            match part {
+                StrPart::Text(literal) => storage
+                    .bytes
+                    .borrow_mut()
+                    .extend_from_slice(literal.as_bytes()),
+                StrPart::Interpolation(inner) => {
+                    let value = self.eval(env, inner)?;
+                    let piece = match self.program.facts.ty(inner.span.file, inner.id) {
+                        Some(ty) => known.piece(Some(ty)),
+                        None => piece_of_value(known, &value),
+                    };
+                    let (function, piece) = match piece {
+                        TaggedPiece::Markup => (known.markup, value),
+                        TaggedPiece::EachMarkup => (known.each, value),
+                        TaggedPiece::Text => (known.escape, value),
+                        TaggedPiece::Rendered => {
+                            (known.escape, Value(Repr::Str(value.to_string().into())))
+                        }
+                    };
+                    self.call_library(known.module, function, vec![buffer.clone(), piece], span)?;
+                }
+            }
+        }
+        let said = String::from_utf8(std::mem::take(&mut *storage.bytes.borrow_mut()))
+            .map_err(|_| RuntimeError::new("a tagged literal assembled text that is not UTF-8"))?;
+        Ok(self.call_library(
+            known.module,
+            known.wrap,
+            vec![Value(Repr::Str(said.into()))],
+            span,
+        )?)
+    }
+
+    /// A call of the standard-library function `module.name` over `args`,
+    /// which the program did not write: a tagged literal's assembly.
+    fn call_library(
+        &mut self,
+        module: &str,
+        name: &'static str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let Some((owner, decl)) = self.find_function(module, name) else {
+            // As in `call_std_binding`: reachable only if a caller resolved
+            // a package without attaching the standard library.
+            return Err(RuntimeError::new(format!(
+                "`{module}.{name}` names no function — the package is missing the standard \
+                 library module `cove_sema::stdlib::attach` adds"
+            ))
+            .at(span));
+        };
+        let evaluated = args
+            .into_iter()
+            .map(|value| EvaluatedArg {
+                label: None,
+                spread: false,
+                slot: ArgSlot::Value(value),
+                span,
+            })
+            .collect();
+        self.call_target(
+            &Target {
+                name,
+                params: &decl.params,
+                body: &decl.body,
+                module: owner,
+                receiver: decl.receiver,
+                is_async: decl.is_async,
+                captures: &[],
+                return_type: decl.return_type.as_ref(),
+            },
+            None,
+            evaluated,
+            span,
+        )
+    }
+
     /// Struct initialization is a synthesized labeled call.
     fn init_struct(
         &mut self,
@@ -4297,7 +4420,7 @@ fn mention_expr(expr: &Expr, out: &mut BTreeSet<String>) {
         | ExprKind::Bool(_)
         | ExprKind::Duration(_)
         | ExprKind::Unit => {}
-        ExprKind::Str(parts) => {
+        ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
             for part in parts {
                 if let StrPart::Interpolation(inner) = part {
                     mention_expr(inner, out);

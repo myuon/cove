@@ -182,7 +182,9 @@ fn category(kind: &TokenKind) -> Kind {
     match kind {
         TokenKind::Keyword(_) | TokenKind::Bool(_) => Kind::Keyword,
         TokenKind::Int(_) | TokenKind::Float(_) | TokenKind::Duration(_) => Kind::Number,
-        TokenKind::Str(_) => Kind::Str,
+        // A tagged literal, `html"…"`, is one token and one piece, tag and
+        // all (ADR 0101).
+        TokenKind::Str(_) | TokenKind::Tagged { .. } => Kind::Str,
         TokenKind::DocComment(_) => Kind::Comment,
         TokenKind::Ident(name) => {
             if name.chars().next().is_some_and(char::is_uppercase) {
@@ -253,9 +255,16 @@ impl Tiling<'_> {
         let opens = start + (text.len() - body.len());
         let closes = opens + body.trim_end().len();
 
+        // A name against the quote is a tagged literal being typed: the
+        // lexer skipped the tag with the string.
+        let tag = body
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            .count();
         let kind = match body.as_bytes().first() {
             Some(b'/') => Kind::Comment,
             Some(b'"') => Kind::Str,
+            Some(_) if tag > 0 && body.as_bytes().get(tag) == Some(&b'"') => Kind::Str,
             _ => Kind::Plain,
         };
         self.take(start, opens, Kind::Plain);
@@ -743,6 +752,33 @@ mod tests {
             let painting = paint(source);
             assert!(!painting.ok, "`{source}` does not lex");
             tiles(source, &painting);
+        }
+    }
+
+    /// `html"…"` is one token, so it is one piece, tag and all (ADR 0101),
+    /// and a `"""` one is too; open, it still tiles and is still a string.
+    #[test]
+    fn a_tagged_literal_is_one_piece_tag_and_all() {
+        let literal = "html\"<a href=\\\"x\\\">{name}</a>\"";
+        let source = format!("let a = {literal}\nlet b = 1");
+        let held = coloured(&source);
+        assert!(paint(&source).ok);
+        assert!(held.contains(&(literal.to_string(), Kind::Str)), "{held:?}");
+
+        let literal = "html\"\"\"\n  <p>{name}</p>\n  \"\"\"";
+        let held = coloured(&format!("let a = {literal}"));
+        assert!(held.contains(&(literal.to_string(), Kind::Str)), "{held:?}");
+
+        for source in ["let a = html\"<p>", "let a = html\"\"\"\n  <p>", "html\""] {
+            let painting = paint(source);
+            assert!(!painting.ok, "`{source}` does not lex");
+            tiles(source, &painting);
+            let held = coloured(source);
+            assert_eq!(
+                held.last().map(|(_, kind)| *kind),
+                Some(Kind::Str),
+                "{held:?}"
+            );
         }
     }
 

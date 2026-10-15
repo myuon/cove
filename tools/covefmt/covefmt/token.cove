@@ -22,7 +22,8 @@ export enum Kind {
   DocComment
   /// A `"..."` literal, interpolations and all. What is inside `{ }` is one
   /// more expression and is the parser's to take apart; as a *run of source*
-  /// it belongs to the literal.
+  /// it belongs to the literal. A tag written against its quote, `html"…"`,
+  /// belongs to it too (ADR 0101).
   Str
   /// A `'a'` code-point literal, which is an `Int` — ADR 0047.
   Char

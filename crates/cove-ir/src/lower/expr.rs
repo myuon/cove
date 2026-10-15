@@ -267,6 +267,7 @@ impl Body<'_> {
             }
             ExprKind::Unit => self.constant(expr, want, |dst| Inst::Unit { dst }),
             ExprKind::Str(parts) => self.string_expr(expr, parts, want),
+            ExprKind::Tagged { tag, parts } => self.tagged_expr(expr, &tag.node, parts),
             ExprKind::Ident(name) => self.name(expr, name),
             ExprKind::Unary { op, operand } => self.unary(expr, *op, operand, want),
             ExprKind::Binary { op, lhs, rhs } => self.binary(expr, *op, lhs, rhs, want),
@@ -520,13 +521,7 @@ impl Body<'_> {
             return dst;
         }
 
-        let (literal, pieces) = parts
-            .iter()
-            .fold((0, 0), |(bytes, pieces), part| match part {
-                StrPart::Text(text) => (bytes + text.len(), pieces),
-                StrPart::Interpolation(_) => (bytes, pieces + 1),
-            });
-        let mut assembly = self.assembly_open(literal, pieces, expr.span);
+        let mut assembly = self.assembly_for(parts, expr.span);
         for part in parts {
             match part {
                 StrPart::Text(text) => self.append_literal(&mut assembly, text, expr.span),

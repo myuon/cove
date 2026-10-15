@@ -159,6 +159,12 @@ export fn lex(source: String) -> Lexed {
     } else if startsWord(c) {
       kind = Kind.Word
       to = scan.word(at)
+      // A name against a quote tags the literal, ADR 0101: `html"…"` is one
+      // literal and is copied as one, so no space can come between the two.
+      if scan.at(to) == '"' && !readsAsItself(source, at, to) {
+        kind = Kind.Str
+        to = scan.quoted(to, '"')
+      }
     } else if isDigit(c) {
       kind = Kind.Number
       to = scan.number(at)
@@ -208,6 +214,53 @@ export fn lex(source: String) -> Lexed {
     at = to
   }
   Lexed(tokens: out.freeze(), trailing: trailing)
+}
+
+/// Whether the word `from..to` is one the language reads as itself — a
+/// keyword, `true`, `false` or `_` — which a quote written against it does
+/// not tag: `return"x"` is `return` and a string, as `cove_syntax::lexer`
+/// reads it.
+///
+/// Asked only of a word with a quote against it, which is rare enough that
+/// the list is not worth a faster shape.
+fn readsAsItself(source: String, from: Int, to: Int) -> Bool {
+  let word = match source.sliceBytes(from, to) {
+    Ok(held) => held
+    Err(_) => ""
+  }
+  match word {
+    "async" => true
+    "await" => true
+    "break" => true
+    "continue" => true
+    "dyn" => true
+    "else" => true
+    "enum" => true
+    "export" => true
+    "fn" => true
+    "for" => true
+    "if" => true
+    "impl" => true
+    "in" => true
+    "is" => true
+    "let" => true
+    "match" => true
+    "opaque" => true
+    "return" => true
+    "scope" => true
+    "self" => true
+    "struct" => true
+    "test" => true
+    "trait" => true
+    "type" => true
+    "use" => true
+    "var" => true
+    "while" => true
+    "true" => true
+    "false" => true
+    "_" => true
+    _ => false
+  }
 }
 
 /// Whether `held` tiles `source`.

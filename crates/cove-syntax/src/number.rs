@@ -123,7 +123,7 @@ impl Numberer {
             | ExprKind::Unit
             | ExprKind::Ident(_)
             | ExprKind::Continue => {}
-            ExprKind::Str(parts) => {
+            ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
                 for part in parts {
                     match part {
                         StrPart::Text(_) => {}
@@ -360,7 +360,7 @@ export fn main(limit: Int = 1 + 1) -> Result<Unit, Error> {
             | ExprKind::Unit
             | ExprKind::Ident(_)
             | ExprKind::Continue => {}
-            ExprKind::Str(parts) => {
+            ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
                 for part in parts {
                     if let StrPart::Interpolation(inner) = part {
                         collect_expr(inner, found);

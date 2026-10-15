@@ -155,6 +155,17 @@ static RULES: &[Rule] = &[
         value: "a b",
         foreign: "Int",
     },
+    // ADR 0101: a hole of an `html"…"` literal is escaped unless its type is
+    // `Html`, and the literal's text is not. Its value is an `Html`, which
+    // renders as its name alone, so the rule pins the text `render` gives.
+    Rule {
+        section: "Tagged literals",
+        decls: "use std.html\n\n",
+        body: "let name = \"<a & 'b'>\"\nlet n = 2\nhtml.render(html\"<p class=\\\"x\\\">{name}{n}{html.markup(\"<i>\")}</p>\")",
+        ty: "String",
+        value: "<p class=\"x\">&lt;a &amp; &#39;b&#39;&gt;2<i></p>",
+        foreign: "Int",
+    },
     Rule {
         section: "Literals",
         decls: "",
@@ -596,6 +607,31 @@ static REJECTIONS: &[Rejection] = &[
         section: "Literals",
         source: "/// Writes text in front of a `\"\"\"` literal's closer.\nexport fn probe() -> String {\n  \"\"\"\n    a\"\"\"\n}\n",
         code: "cove::lex::triple_quote_closer",
+    },
+    Rejection {
+        section: "Tagged literals",
+        source: "/// Tags a literal with a name that is not a tag.\nexport fn probe() -> String {\n  sql\"x\"\n}\n",
+        code: "cove::type::unknown_literal_tag",
+    },
+    Rejection {
+        section: "Tagged literals",
+        source: "/// Writes an `html` literal in a module that does not `use std.html`.\nexport fn probe() -> String {\n  html\"x\"\n}\n",
+        code: "cove::type::literal_tag_unimported",
+    },
+    Rejection {
+        section: "Tagged literals",
+        source: "use std.html\n\n/// Hides the module behind a local of the same name.\nexport fn probe() -> String {\n  let html = 1\n  \"{html\"x\"}\"\n}\n",
+        code: "cove::type::literal_tag_unimported",
+    },
+    Rejection {
+        section: "Tagged literals",
+        source: "use std.html\nuse std.html.Html\n\nstruct Line {\n  at: String\n}\n\n/// Misspells a field in a hole.\nexport fn probe() -> Html {\n  let line = Line(at: \"x\")\n  html\"<td>{line.att}</td>\"\n}\n",
+        code: "cove::type::unknown_field",
+    },
+    Rejection {
+        section: "Tagged literals",
+        source: "use std.html\nuse std.html.Html\n\nstruct Line {\n  at: String\n}\n\n/// Misspells a binding in a hole.\nexport fn probe() -> Html {\n  let line = Line(at: \"x\")\n  html\"<td>{lne.at}</td>\"\n}\n",
+        code: "cove::type::unknown_name",
     },
     Rejection {
         section: "`if`",
@@ -1046,6 +1082,7 @@ forms! {
     ExprKind::Bool(..) => "Bool",
     ExprKind::Duration(..) => "Duration",
     ExprKind::Str(..) => "Str",
+    ExprKind::Tagged { .. } => "Tagged",
     ExprKind::Unit => "Unit",
     ExprKind::Ident(..) => "Ident",
     ExprKind::ArrayLit(..) => "ArrayLit",
@@ -1152,7 +1189,7 @@ impl Coverage {
             | ExprKind::Continue => {}
             // An interpolation is an expression the literal encloses, and
             // more than one rule above hides a form inside one.
-            ExprKind::Str(parts) => {
+            ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
                 for part in parts {
                     if let StrPart::Interpolation(expr) = part {
                         self.expression(expr);

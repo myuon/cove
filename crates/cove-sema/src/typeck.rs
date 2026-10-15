@@ -4843,6 +4843,16 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Str
             }
+            ExprKind::Tagged { tag, parts } => {
+                // A hole of a tagged literal is checked exactly as a plain
+                // one is: rendered or appended, so constrained by nothing.
+                for part in parts {
+                    if let StrPart::Interpolation(inner) = part {
+                        self.expr(inner, None);
+                    }
+                }
+                self.tagged_literal(tag)
+            }
             ExprKind::Ident(name) => self.ident(name, span, expected),
             ExprKind::ArrayLit(items) => self.array_literal(items, span, expected),
             ExprKind::Field { base, name } => self.field(base, name, span),
@@ -5193,6 +5203,77 @@ impl<'a> Checker<'a> {
             operation.params.iter().map(host_ty).collect(),
             host_ty(&operation.result),
         )
+    }
+
+    /// The type of a literal tagged `tag`: the type its module declares, when
+    /// the tag is one there is and names that module here. ADR 0101.
+    ///
+    /// Which tags there are is [`crate::stdlib::literal_tag`]'s answer and
+    /// nobody else's; this asks only whether the name resolves, where it is
+    /// written, to the module the tag belongs to — the rule every qualified
+    /// name keeps, that a program which does not `use` a module does not
+    /// have it.
+    fn tagged_literal(&mut self, tag: &Ident) -> Ty {
+        let Some(known) = crate::stdlib::literal_tag(&tag.node) else {
+            let tags: Vec<String> = crate::stdlib::literal_tags()
+                .map(|known| format!("`{}\"…\"` (after `use {}`)", known.tag, known.module))
+                .collect();
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "cove::type::unknown_literal_tag",
+                    format!("`{}` is not a tag a string literal can carry", tag.node),
+                )
+                .at(tag.span)
+                .rule(
+                    "A name written against a string's opening quote tags the literal, and \
+                     only a tag the language defines may: the one there is is `html`.",
+                )
+                .help(format!(
+                    "Write {}, or put a space between `{}` and the string if they are two \
+                     things.",
+                    tags.join(" or "),
+                    tag.node
+                )),
+            );
+            return Ty::recovery();
+        };
+        let local = self.lookup(&tag.node).is_some();
+        let imported = self.module.module_imports.get(tag.node.as_str());
+        if local || imported.map(String::as_str) != Some(known.module) {
+            let found = if local {
+                format!("here `{}` is a local binding", tag.node)
+            } else if let Some(other) = imported {
+                format!("here `{}` is the module `{other}`", tag.node)
+            } else {
+                format!("this module does not `use {}`", known.module)
+            };
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "cove::type::literal_tag_unimported",
+                    format!(
+                        "`{}\"…\"` needs `{}` to name the module `{}`, and {found}",
+                        known.tag, known.tag, known.module
+                    ),
+                )
+                .at(tag.span)
+                .rule(format!(
+                    "A literal tagged `{}` belongs to `{}`, and is written where the name \
+                     `{}` resolves to that module: a program that does not `use` a module \
+                     does not have it.",
+                    known.tag, known.module, known.tag
+                ))
+                .help(if local {
+                    format!(
+                        "Rename the local binding `{}`, which hides the module here.",
+                        tag.node
+                    )
+                } else {
+                    format!("Add `use {}` to this module.", known.module)
+                }),
+            );
+            return Ty::recovery();
+        }
+        Ty::Struct(known.qualified_type().into(), Vec::new())
     }
 
     /// The type of a name nothing in scope explains.

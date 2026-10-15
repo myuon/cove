@@ -1124,7 +1124,7 @@ export fn broken() -> Int {
             | ExprKind::Unit
             | ExprKind::Ident(_)
             | ExprKind::Continue => {}
-            ExprKind::Str(parts) => {
+            ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
                 for part in parts {
                     if let StrPart::Interpolation(inner) = part {
                         expr_exprs(inner, found);

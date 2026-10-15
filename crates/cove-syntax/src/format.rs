@@ -250,6 +250,15 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
     i
 }
 
+/// `text` when it is spelled as a string literal, quote to quote.
+fn string_text_of(text: &str) -> Option<&str> {
+    if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+        Some(text)
+    } else {
+        None
+    }
+}
+
 fn skip_interpolation(bytes: &[u8], from: usize) -> usize {
     let mut i = from;
     while i < bytes.len() {
@@ -615,12 +624,7 @@ impl<'a> Formatter<'a> {
     /// included. A string is reproduced rather than rebuilt because its
     /// interpolations cannot be broken across lines.
     fn string_text(&self, span: Span) -> Option<&'a str> {
-        let text = self.text(span)?;
-        if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
-            Some(text)
-        } else {
-            None
-        }
+        string_text_of(self.text(span)?)
     }
 
     /// The span of `expr` without the parentheses the source wrote around
@@ -1317,6 +1321,7 @@ impl Formatter<'_> {
             | ExprKind::Bool(_)
             | ExprKind::Duration(_)
             | ExprKind::Str(_)
+            | ExprKind::Tagged { .. }
             | ExprKind::Unit
             | ExprKind::Ident(_) => false,
             ExprKind::ArrayLit(elements) => elements.iter().any(|e| self.breaks(e)),
@@ -1987,6 +1992,17 @@ impl Formatter<'_> {
                 .string_text(span)
                 .map(str::to_string)
                 .unwrap_or_else(|| self.string_from_parts(parts)),
+            // A tagged literal is copied as written, tag and all, as a plain
+            // one is; with no source, the tag goes against the rebuilt quote.
+            ExprKind::Tagged { tag, parts } => self
+                .text(span)
+                .filter(|text| {
+                    text.strip_prefix(tag.node.as_str())
+                        .and_then(string_text_of)
+                        .is_some()
+                })
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}{}", tag.node, self.string_from_parts(parts))),
             ExprKind::Unit => "()".to_string(),
             ExprKind::Ident(name) => name.clone(),
             ExprKind::ArrayLit(elements) => {
@@ -2810,6 +2826,31 @@ fn f() -> Bool {{
         assert_eq!(
             format_unit(&unit),
             "fn a() -> String {\n  \"<p class=\\\"x\\\">{1}</p>\\nbc\"\n}\n"
+        );
+    }
+
+    /// A tagged literal is copied as it was written, tag against the quote
+    /// (ADR 0101), in either form; with no source, the tag is written against
+    /// the rebuilt `"…"`.
+    #[test]
+    fn a_tagged_literal_is_kept_as_written() {
+        formatted(
+            r#"
+fn page(name: String) -> Html {
+  let cell = html"<td class=\"n\">{name}</td>"
+  html"""
+    <tr>\
+      {cell}\
+      {html"<td>{name}</td>"}\
+    </tr>
+    """
+}
+"#,
+        );
+        let unit = parse("fn a() -> Html {\n  html\"<p class=\\\"x\\\">{1}</p>\"\n}\n");
+        assert_eq!(
+            format_unit(&unit),
+            "fn a() -> Html {\n  html\"<p class=\\\"x\\\">{1}</p>\"\n}\n"
         );
     }
 

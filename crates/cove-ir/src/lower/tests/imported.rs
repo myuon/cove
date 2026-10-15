@@ -83,3 +83,52 @@ fn a_function_reached_only_as_a_value_is_lowered() {
         );
     }
 }
+
+/// The names of `std.html`'s functions that have a body in `program`.
+fn html_bodies(program: &Program) -> Vec<String> {
+    program
+        .functions
+        .iter()
+        .filter(|f| &*f.module == "std.html" && !f.is_stub())
+        .map(|f| f.name.to_string())
+        .collect()
+}
+
+/// `std.html` is named by the lowering, but only to assemble an `html"…"`
+/// literal (ADR 0101), so it stays a module a program has only by importing
+/// it: a package that writes none lowers none of it, even when it imports it.
+#[test]
+fn a_package_with_no_html_literal_lowers_none_of_std_html() {
+    let program = package("fn f() -> Int { 1 }");
+    assert_eq!(html_bodies(&program), Vec::<String>::new());
+    let program = package(
+        "use std.html\n\
+         fn f() -> String { \"{1}\" }",
+    );
+    assert_eq!(html_bodies(&program), Vec::<String>::new());
+}
+
+/// A package that writes one has what its assembly calls, and only that: a
+/// literal whose holes are a `String` and an `Int` escapes and wraps, and
+/// appends no markup.
+#[test]
+fn an_html_literal_lowers_what_its_assembly_calls() {
+    let program = package(
+        "use std.html\n\
+         use std.html.Html\n\
+         fn f(name: String, count: Int) -> Html { html\"<b>{name}</b>{count}\" }",
+    );
+    let bodies = html_bodies(&program);
+    for name in ["appendEscaped", "assembled"] {
+        assert!(
+            bodies.iter().any(|body| body == name),
+            "`std.html.{name}` has no body: {bodies:?}"
+        );
+    }
+    for name in ["appendMarkup", "appendEach", "render"] {
+        assert!(
+            !bodies.iter().any(|body| body == name),
+            "`std.html.{name}` lowered though nothing reaches it: {bodies:?}"
+        );
+    }
+}

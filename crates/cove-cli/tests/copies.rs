@@ -1959,7 +1959,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// 158 in `ret`), the code covefmt grew to read a `"""` literal and measure a
 /// string written over lines: `Scan::tripleQuoted`, which `quoted` answers
 /// with, and `lastLineWidth`.
-const FORWARDABLE_COPIES: usize = 7629;
+///
+/// **7,632 since `html"…"` escapes a hole unless its type is `Html`** (ADR
+/// 0101), a rise of 3 that is all program and no lowering. No program this
+/// survey lowers writes a tagged literal — `tests/e2e/std_html`, the one
+/// package that does, has no `[run]` entry and is not lowered here, as
+/// `std_json` is not — and `std.html` stays a module a program has only by
+/// importing it, so with `tools/covefmt`'s part held out the corpus answers
+/// 7,629, the bound exactly, with the new lowering, the oracle's new arm and
+/// the rewritten `std.html` all in place. The 3 are
+/// `tools/covefmt:covefmtBench`: +2 in `prod` (85 to 87) for the lexer's
+/// fusing a name against a quote into the literal, `readsAsItself`'s `match`
+/// on the word it slices out; and +1 in `ret` (158 to 159) for the new test,
+/// `a_tagged_literal_is_one_token`.
+const FORWARDABLE_COPIES: usize = 7632;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

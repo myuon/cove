@@ -189,18 +189,9 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            if c == '"' && self.text[self.pos..].starts_with("\"\"\"") {
-                self.pos += 3;
-                if let Some(kind) = self.lex_triple_string(start) {
-                    self.push_token(kind, start);
-                }
-                continue;
-            }
-
             if c == '"' {
-                self.bump();
-                if let Some(kind) = self.lex_string(start) {
-                    self.push_token(kind, start);
+                if let Some(parts) = self.lex_any_string() {
+                    self.push_token(TokenKind::Str(parts), start);
                 }
                 continue;
             }
@@ -221,7 +212,17 @@ impl<'a> Lexer<'a> {
 
             if is_ident_start(c) {
                 let kind = self.lex_ident(start);
-                self.push_token(kind, start);
+                match kind {
+                    // A name written against a quote tags the literal, ADR
+                    // 0101: adjacency changes the token, as a duration's
+                    // suffix does.
+                    TokenKind::Ident(tag) if self.peek_char() == Some('"') => {
+                        if let Some(parts) = self.lex_any_string() {
+                            self.push_token(TokenKind::Tagged { tag, parts }, start);
+                        }
+                    }
+                    kind => self.push_token(kind, start),
+                }
                 continue;
             }
 
@@ -556,10 +557,23 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Lexes the string literal whose opening `"` or `"""` is at the cursor,
+    /// in whichever of the two forms it is, and answers its parts.
+    fn lex_any_string(&mut self) -> Option<Vec<StringPart>> {
+        let quote_start = self.pos;
+        if self.text[self.pos..].starts_with("\"\"\"") {
+            self.pos += 3;
+            self.lex_triple_string(quote_start)
+        } else {
+            self.bump();
+            self.lex_string(quote_start)
+        }
+    }
+
     /// Lexes a string literal, having already consumed its opening `"` at
     /// `quote_start`. Returns `None` (after recording a diagnostic) if the
     /// string or one of its interpolations is never closed.
-    fn lex_string(&mut self, quote_start: usize) -> Option<TokenKind> {
+    fn lex_string(&mut self, quote_start: usize) -> Option<Vec<StringPart>> {
         let mut parts = Vec::new();
         let mut current = String::new();
 
@@ -574,7 +588,7 @@ impl<'a> Lexer<'a> {
                     if !current.is_empty() {
                         parts.push(StringPart::Text(current));
                     }
-                    return Some(TokenKind::Str(parts));
+                    return Some(parts);
                 }
                 Some('\\') => {
                     let esc_start = self.pos;
@@ -705,7 +719,7 @@ impl<'a> Lexer<'a> {
     /// front of it. Returns `None` (after recording a diagnostic) when there is
     /// no literal to answer — no newline after the opener, no closer, a closer
     /// with something in front of it on its line, or a hole never closed.
-    fn lex_triple_string(&mut self, quote_start: usize) -> Option<TokenKind> {
+    fn lex_triple_string(&mut self, quote_start: usize) -> Option<Vec<StringPart>> {
         let opener_end = self.pos;
 
         // The opener: optional spaces and tabs, then the line ends.
@@ -890,7 +904,7 @@ impl<'a> Lexer<'a> {
         if !current.is_empty() {
             parts.push(StringPart::Text(current));
         }
-        Some(TokenKind::Str(parts))
+        Some(parts)
     }
 
     /// Scans forward from the cursor, which is inside a `"""` literal, to the
@@ -1966,6 +1980,90 @@ mod tests {
         assert_eq!(
             text_of("\"\"\"\r\n  a\r\n  b\\\r\n    c\r\n  \"\"\""),
             "a\r\nbc"
+        );
+    }
+
+    // ADR 0101: a name against a quote tags the literal.
+
+    #[test]
+    fn a_name_against_a_quote_is_one_tagged_literal() {
+        let src = "html\"<p>{x}</p>\"";
+        let tokens = lex_ok(src);
+        let start = src.find('x').unwrap() as u32;
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::Tagged {
+                tag: "html".into(),
+                parts: vec![
+                    StringPart::Text("<p>".into()),
+                    StringPart::Interpolation {
+                        source: "x".into(),
+                        span: Span::new(FileId(0), start, start + 1),
+                    },
+                    StringPart::Text("</p>".into()),
+                ],
+            }
+        );
+        // The token's span is the tag and the literal together.
+        assert_eq!(tokens[0].span, Span::new(FileId(0), 0, src.len() as u32));
+        assert_eq!(tokens.len(), 2, "{tokens:?}");
+    }
+
+    #[test]
+    fn a_name_against_a_triple_quote_tags_that_literal_too() {
+        assert_eq!(
+            kinds("html\"\"\"\n  <tr>\\\n    <td>a</td>\n  \"\"\""),
+            vec![TokenKind::Tagged {
+                tag: "html".into(),
+                parts: vec![StringPart::Text("<tr><td>a</td>".into())],
+            }]
+        );
+        // Any name is lexed as a tag; which ones mean anything is the
+        // checker's question.
+        assert_eq!(
+            kinds("sql\"x\""),
+            vec![TokenKind::Tagged {
+                tag: "sql".into(),
+                parts: vec![StringPart::Text("x".into())],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_space_between_a_name_and_a_quote_is_two_tokens() {
+        assert_eq!(
+            kinds("html \"x\""),
+            vec![
+                TokenKind::Ident("html".into()),
+                TokenKind::Str(vec![StringPart::Text("x".into())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_keyword_against_a_quote_is_not_a_tag() {
+        assert_eq!(
+            kinds("return\"x\""),
+            vec![
+                TokenKind::Keyword(Keyword::Return),
+                TokenKind::Str(vec![StringPart::Text("x".into())]),
+            ]
+        );
+        assert_eq!(
+            kinds("true\"x\""),
+            vec![
+                TokenKind::Bool(true),
+                TokenKind::Str(vec![StringPart::Text("x".into())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_tagged_literal_is_an_unclosed_literal() {
+        assert_eq!(only_error("html\"never"), "cove::lex::unterminated_string");
+        assert_eq!(
+            only_error("html\"\"\"x\"\"\""),
+            "cove::lex::triple_quote_opener"
         );
     }
 
