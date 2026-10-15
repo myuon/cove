@@ -241,10 +241,11 @@ computed at run time.
 An interpolation `{expr}` renders any value and constrains none, so it is
 checked but not required to be a `String`.
 
-A **`\` at the end of a line eats that line's newline**, in either literal
-form: `"one \` followed by a line holding `two"` is `"one two"`. In a `"…"`
-that is all it does — the next line's indentation is content, as is any
-newline written without a `\` ([ADR 0100](adr/0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md)).
+A **`\` at the end of a line eats that line's newline and all of the next
+line's leading spaces and tabs**, in either literal form: `"one \` followed
+by a line holding `    two"` is `"one two"`. A space wanted at the join is
+written before the `\`. A newline written without a `\` is content in a
+`"…"`, and so is the indentation after it ([ADR 0100](adr/0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md)).
 
 A **`"""` literal** is written over lines, and the indentation the source
 needed is not part of it:
@@ -269,12 +270,12 @@ let row = """
   the start of every line, compared character for character: a line that does
   not begin with it — indented less, or with a tab where the margin has a
   space — is `cove::lex::literal_margin`. A line of nothing but whitespace is
-  an empty line whatever its length. What a line has past the margin stays,
-  so the literal above is `<tr class="row">  <td>…</td></tr>`: the two spaces
-  in front of `<td>` are past the margin.
+  an empty line whatever its length. What a line has past the margin stays.
 - Spaces and tabs at the end of a line are dropped. Then a line ending in an
-  unescaped `\` loses the `\` and its newline, so `\\` at the end of a line
-  is a backslash and the newline stays.
+  unescaped `\` loses the `\`, its newline, and the whole of the next line's
+  indentation — past the margin too, though that line must still begin with
+  the margin. So the literal above is `<tr class="row"><td>…</td></tr>`, and
+  `\\` at the end of a line is a backslash and the newline stays.
 - A `"` inside is text. Every escape and every `{expr}` is what it is in
   `"…"`, and a `"""` in the text is written `\"""`.
 

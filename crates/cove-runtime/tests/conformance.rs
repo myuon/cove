@@ -135,23 +135,24 @@ static RULES: &[Rule] = &[
         foreign: "Int",
     },
     // ADR 0100: the closer's indentation is the margin, a `"` is text, and
-    // a `\` ending a line eats the newline — in a `"…"` too.
+    // a `\` ending a line eats the newline and the next line's indentation —
+    // in a `"…"` too.
     Rule {
         section: "Literals",
         decls: "",
         body: "  \"\"\"\n    <a href=\"x\">{1 + 1}</a>\\\n      b\n    \"\"\"",
         ty: "String",
-        value: "<a href=\"x\">2</a>  b",
+        value: "<a href=\"x\">2</a>b",
         foreign: "Int",
     },
     Rule {
         section: "Literals",
         decls: "",
-        // The suite indents a body's lines by two, and a `"…"` keeps the
-        // indentation of the line after a `\`: one space before it, two after.
+        // The suite indents a body's lines by two, and the `\` eats them: the
+        // one space is the one written before it.
         body: "\"a \\\nb\"",
         ty: "String",
-        value: "a   b",
+        value: "a b",
         foreign: "Int",
     },
     Rule {

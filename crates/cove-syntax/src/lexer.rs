@@ -584,15 +584,16 @@ impl<'a> Lexer<'a> {
                             self.unterminated_string(quote_start);
                             return None;
                         }
-                        // A `\` ending a line eats the newline, ADR 0100. In
-                        // `"…"` that is all it does: the next line's
-                        // indentation is content, as it always was.
+                        // A `\` ending a line eats the newline and the next
+                        // line's leading spaces and tabs, ADR 0100.
                         Some('\n') => {
                             self.bump();
+                            self.skip_horizontal_space();
                         }
                         Some('\r') if self.peek_char_at(1) == Some('\n') => {
                             self.bump();
                             self.bump();
+                            self.skip_horizontal_space();
                         }
                         Some(escaped) => {
                             self.bump();
@@ -610,6 +611,13 @@ impl<'a> Lexer<'a> {
                     current.push(c);
                 }
             }
+        }
+    }
+
+    /// Steps over spaces and tabs: the indentation a continuation `\` eats.
+    fn skip_horizontal_space(&mut self) {
+        while matches!(self.peek_char(), Some(c) if is_horizontal_space(c)) {
+            self.bump();
         }
     }
 
@@ -683,7 +691,9 @@ impl<'a> Lexer<'a> {
     /// error rather than a guess — except a line of nothing but whitespace,
     /// which is an empty line. The newline before the closer's line is not
     /// content either. Trailing spaces and tabs on a line are dropped, and
-    /// then a line ending in an unescaped `\` loses the `\` and its newline.
+    /// then a line ending in an unescaped `\` loses the `\`, its newline, and
+    /// the whole of the next line's indentation — past the margin too, though
+    /// that line must still begin with the margin.
     /// Inside, `"` is content and everything else is what it is in `"…"`.
     ///
     /// All of it happens here, so the token's parts are already the stripped
@@ -791,9 +801,13 @@ impl<'a> Lexer<'a> {
         // Spaces and tabs read but not yet known not to be trailing.
         let mut spaces = String::new();
         let mut at_line_start = true;
+        // Whether the line about to start follows a continuation `\`, and so
+        // loses all of its indentation rather than only the margin.
+        let mut continued = false;
         while self.pos < content_end {
             if at_line_start {
                 at_line_start = false;
+                let continued = std::mem::take(&mut continued);
                 let line_begin = self.pos;
                 let rest = &self.text[line_begin..content_end];
                 let indent_len = rest.len() - rest.trim_start_matches(is_horizontal_space).len();
@@ -804,7 +818,11 @@ impl<'a> Lexer<'a> {
                 if blank {
                     self.pos = indent_end;
                 } else if self.text[line_begin..indent_end].starts_with(margin) {
-                    self.pos = line_begin + margin.len();
+                    self.pos = if continued {
+                        indent_end
+                    } else {
+                        line_begin + margin.len()
+                    };
                 } else {
                     self.pos = indent_end;
                     self.literal_margin(line_begin, indent_end, margin);
@@ -836,16 +854,19 @@ impl<'a> Lexer<'a> {
                     let esc_start = self.pos;
                     self.bump();
                     // A `\` that ends the line, trailing spaces aside, eats
-                    // the newline. The line after it still loses its margin.
+                    // the newline and the whole of the next line's
+                    // indentation, which must still begin with the margin.
                     let rest = &self.text[self.pos..content_end];
                     let after =
                         self.pos + rest.len() - rest.trim_start_matches(is_horizontal_space).len();
                     if after == content_end || self.text[after..].starts_with('\n') {
                         self.pos = (after + 1).min(content_end);
                         at_line_start = true;
+                        continued = true;
                     } else if self.text[after..].starts_with("\r\n") {
                         self.pos = (after + 2).min(content_end);
                         at_line_start = true;
+                        continued = true;
                     } else if let Some(escaped) = self.bump() {
                         self.escape(escaped, esc_start, &mut current);
                     }
@@ -1867,14 +1888,14 @@ mod tests {
     }
 
     #[test]
-    fn a_backslash_ending_a_line_eats_the_newline() {
+    fn a_backslash_ending_a_line_eats_the_newline_and_the_next_indentation() {
         let src = "\"\"\"\n  <tr>\\\n    <td>{a}</td>\\\n  </tr>\n  \"\"\"";
         let tokens = kinds(src);
         let start = src.find("{a}").unwrap() as u32 + 1;
         assert_eq!(
             tokens,
             vec![TokenKind::Str(vec![
-                StringPart::Text("<tr>  <td>".into()),
+                StringPart::Text("<tr><td>".into()),
                 StringPart::Interpolation {
                     source: "a".into(),
                     span: Span::new(FileId(0), start, start + 1),
@@ -1888,6 +1909,16 @@ mod tests {
         assert_eq!(text_of("\"\"\"\n  a \\\n  b\n  \"\"\""), "a b");
         // On the last line it has no newline left to eat.
         assert_eq!(text_of("\"\"\"\n  a\\\n  \"\"\""), "a");
+        // All of the next line's indentation goes, past the margin too.
+        assert_eq!(text_of("\"\"\"\n  a\\\n        b\n  \"\"\""), "ab");
+        assert_eq!(text_of("\"\"\"\n  a\\\n  \t b\n  \"\"\""), "ab");
+        // A joined line that is blank keeps its newline.
+        assert_eq!(text_of("\"\"\"\n  a\\\n\n  b\n  \"\"\""), "a\nb");
+        // A joined line still has to begin with the margin.
+        assert_eq!(
+            only_error("\"\"\"\n    a\\\n  b\n    \"\"\""),
+            "cove::lex::literal_margin"
+        );
     }
 
     #[test]
@@ -1917,15 +1948,15 @@ mod tests {
     }
 
     #[test]
-    fn a_backslash_ending_a_line_of_a_plain_literal_eats_only_the_newline() {
+    fn a_backslash_ending_a_line_of_a_plain_literal_eats_the_next_indentation() {
         assert_eq!(text_of("\"a\\\nb\""), "ab");
-        // The next line's indentation is content, as it always was.
-        assert_eq!(text_of("\"a\\\n  b\""), "a  b");
+        // The next line's leading spaces and tabs go with the newline.
+        assert_eq!(text_of("\"a\\\n  \t b\""), "ab");
         // Trailing spaces are content too, and a `\` before them is an escape.
         assert_eq!(text_of("\"a \\\nb\""), "a b");
         assert_eq!(only_error("\"a\\ \nb\""), "cove::lex::unknown_escape");
         // `\r\n` is a newline as well.
-        assert_eq!(text_of("\"a\\\r\nb\""), "ab");
+        assert_eq!(text_of("\"a\\\r\n  b\""), "ab");
         // And a plain literal keeps its unescaped newlines.
         assert_eq!(text_of("\"a\n  b\""), "a\n  b");
     }
@@ -1933,7 +1964,7 @@ mod tests {
     #[test]
     fn a_triple_quoted_literal_reads_crlf_lines() {
         assert_eq!(
-            text_of("\"\"\"\r\n  a\r\n  b\\\r\n  c\r\n  \"\"\""),
+            text_of("\"\"\"\r\n  a\r\n  b\\\r\n    c\r\n  \"\"\""),
             "a\r\nbc"
         );
     }

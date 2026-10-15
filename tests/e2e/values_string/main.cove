@@ -10,7 +10,8 @@ export fn main() -> Result<Unit, Error> {
   println("one string of eight escapes has length {escapes.length()}")?
 
   // ADR 0100: a `"""` literal takes its margin from its closer, a `"` in it
-  // is content, and a `\` ending a line eats the newline, in either form.
+  // is content, and a `\` ending a line eats the newline and the next
+  // line's indentation, in either form.
   let who = "cove"
   let page = """
     <p class="lead">Hello, {who}!</p>
@@ -32,7 +33,7 @@ export fn main() -> Result<Unit, Error> {
     """
   println("kept [{kept}]")?
   let joined = "one \
-two"
+    two"
   println("joined [{joined}]")?
   println("nested [{"""
     in a hole
