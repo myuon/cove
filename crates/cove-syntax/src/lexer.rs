@@ -15,7 +15,12 @@ use crate::token::{Keyword, StringPart, Token, TokenKind};
 enum Unclosed {
     Brace,
     Quote,
-    TripleQuote,
+    /// A `"""`, and whether it opened the one-line form (ADR 0102), which a
+    /// run of three or more quotes closes, rather than the form written over
+    /// lines, which the next `"""` closes.
+    TripleQuote {
+        one_line: bool,
+    },
     Apostrophe,
 }
 
@@ -698,8 +703,12 @@ impl<'a> Lexer<'a> {
     /// Lexes a `"""` literal, having already consumed its opening `"""` at
     /// `quote_start`. [ADR 0100](../../../docs/adr/0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md).
     ///
-    /// The opener is followed by a newline, which is not content. The closer
-    /// stands on a line of its own, and the whitespace in front of it is the
+    /// An opener followed by anything but a newline (spaces aside) opens the
+    /// one-line form instead, [ADR 0102](../../../docs/adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md),
+    /// which [`Lexer::lex_one_line_triple_string`] reads.
+    ///
+    /// In the multi-line form the opener is followed by a newline, which is
+    /// not content. The closer stands on a line of its own, and the whitespace in front of it is the
     /// **margin**: it is removed from the front of every line, compared
     /// character for character, and a line that does not begin with it is an
     /// error rather than a guess — except a line of nothing but whitespace,
@@ -717,8 +726,8 @@ impl<'a> Lexer<'a> {
     /// It reads the literal twice, because the margin is set by the *end* of
     /// it: once to find the closer, and once to strip and resolve the lines in
     /// front of it. Returns `None` (after recording a diagnostic) when there is
-    /// no literal to answer — no newline after the opener, no closer, a closer
-    /// with something in front of it on its line, or a hole never closed.
+    /// no literal to answer — no closer, a closer with something in front of
+    /// it on its line, or a hole never closed.
     fn lex_triple_string(&mut self, quote_start: usize) -> Option<Vec<StringPart>> {
         let opener_end = self.pos;
 
@@ -739,28 +748,8 @@ impl<'a> Lexer<'a> {
             _ => false,
         };
         if !opened {
-            let span = Span::new(self.file, quote_start as u32, opener_end as u32);
-            self.diagnostics.push(
-                Diagnostic::error(
-                    "cove::lex::triple_quote_opener",
-                    "a `\"\"\"` literal must begin a new line after its opening `\"\"\"`",
-                )
-                .at(span)
-                .rule(
-                    "`\"\"\"` opens a literal only when nothing but spaces follows it on its \
-                     line; the text begins on the next line.",
-                )
-                .help("Move the text to the next line, or write a one-line literal with `\"`."),
-            );
-            // Step over the rest as far as a closer, so that one mistake is
-            // one diagnostic rather than the rest of the file misread.
             self.pos = opener_end;
-            if let TripleEnd::Closer(closer) = self.find_triple_closer() {
-                self.pos = closer + 3;
-            } else {
-                self.pos = self.text.len();
-            }
-            return None;
+            return self.lex_one_line_triple_string(quote_start);
         }
         let content_start = self.pos;
 
@@ -905,6 +894,143 @@ impl<'a> Lexer<'a> {
             parts.push(StringPart::Text(current));
         }
         Some(parts)
+    }
+
+    /// Lexes a one-line `"""` literal, the cursor just past its opening
+    /// `"""` at `quote_start`, [ADR 0102](../../../docs/adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md).
+    ///
+    /// The content is the text up to the closer exactly as written: no
+    /// margin, no trailing spaces dropped, `"` is content, and escapes and
+    /// holes are those of `"…"` — so `\"` is still a quote. The closer is
+    /// Kotlin's: a run of N ≥ 3 unescaped quotes closes the literal, and the
+    /// first N − 3 of them are content, so `""" class="x""""` is ` class="x"`
+    /// and `""""""` is empty. A run of one or two is content.
+    ///
+    /// The literal may not reach a second line. A newline in its text — a
+    /// `\` in front of it included, which in `"…"` would be a continuation —
+    /// is reported as `cove::lex::one_line_literal_newline`, see
+    /// [`Lexer::one_line_literal_newline`] for what is skipped. A newline inside a hole
+    /// is code, not text, and is allowed as it is in `"…"`.
+    fn lex_one_line_triple_string(&mut self, quote_start: usize) -> Option<Vec<StringPart>> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        loop {
+            match self.peek_char() {
+                None => {
+                    self.unterminated_one_line_string(quote_start);
+                    return None;
+                }
+                Some('\n') => {
+                    self.one_line_literal_newline(quote_start, self.pos);
+                    return None;
+                }
+                Some('\r') if self.peek_char_at(1) == Some('\n') => {
+                    self.one_line_literal_newline(quote_start, self.pos);
+                    return None;
+                }
+                Some('"') => {
+                    let run = self.text[self.pos..]
+                        .bytes()
+                        .take_while(|byte| *byte == b'"')
+                        .count();
+                    self.pos += run;
+                    let content = if run >= 3 { run - 3 } else { run };
+                    current.extend(std::iter::repeat_n('"', content));
+                    if run >= 3 {
+                        if !current.is_empty() {
+                            parts.push(StringPart::Text(current));
+                        }
+                        return Some(parts);
+                    }
+                }
+                Some('\\') => {
+                    let esc_start = self.pos;
+                    self.bump();
+                    match self.peek_char() {
+                        None => {
+                            self.unterminated_one_line_string(quote_start);
+                            return None;
+                        }
+                        Some('\n') => {
+                            self.one_line_literal_newline(quote_start, self.pos);
+                            return None;
+                        }
+                        Some('\r') if self.peek_char_at(1) == Some('\n') => {
+                            self.one_line_literal_newline(quote_start, self.pos);
+                            return None;
+                        }
+                        Some(escaped) => {
+                            self.bump();
+                            self.escape(escaped, esc_start, &mut current);
+                        }
+                    }
+                }
+                Some('{') => {
+                    if !self.interpolation(&mut parts, &mut current) {
+                        return None;
+                    }
+                }
+                Some(c) => {
+                    self.bump();
+                    current.push(c);
+                }
+            }
+        }
+    }
+
+    /// Reports the line break at `at` inside the one-line `"""` literal
+    /// opened at `quote_start`, and steps over the rest of it.
+    ///
+    /// The likeliest mistake is a literal meant to be written over lines with
+    /// text on its opener's line, so the rest is stepped over as far as the
+    /// next `"""` — that literal's closer — and one mistake is one
+    /// diagnostic, not a second literal opened by the closer. With no `"""`
+    /// further on, the cursor stays on the newline and the next line is code.
+    fn one_line_literal_newline(&mut self, quote_start: usize, at: usize) {
+        let width = if self.text[at..].starts_with("\r\n") {
+            2
+        } else {
+            1
+        };
+        let span = Span::new(self.file, at as u32, (at + width) as u32);
+        let opener = Span::new(self.file, quote_start as u32, (quote_start + 3) as u32);
+        self.diagnostics.push(
+            Diagnostic::error(
+                "cove::lex::one_line_literal_newline",
+                "a one-line `\"\"\"` literal runs onto a second line here",
+            )
+            .at(span)
+            .label(
+                opener,
+                "this `\"\"\"` has text after it, so it opens a one-line literal",
+            )
+            .rule(
+                "A `\"\"\"` with text after it on its line opens a one-line literal, \
+                 which closes on the same line; only a `\"\"\"` followed by a newline \
+                 opens one written over lines.",
+            )
+            .help(
+                "Close the literal on this line, or move its text to the line after the \
+                 opening `\"\"\"` to write it over lines.",
+            ),
+        );
+        self.pos = at;
+        self.pos = match self.find_triple_closer() {
+            TripleEnd::Closer(closer) => closer + 3,
+            TripleEnd::Eof | TripleEnd::OpenHole(_) => at,
+        };
+    }
+
+    fn unterminated_one_line_string(&mut self, quote_start: usize) {
+        let span = Span::new(self.file, quote_start as u32, self.pos as u32);
+        self.diagnostics.push(
+            Diagnostic::error(
+                "cove::lex::unterminated_string",
+                "string literal is never closed",
+            )
+            .at(span)
+            .help("Add a closing `\"\"\"` on the same line."),
+        );
     }
 
     /// Scans forward from the cursor, which is inside a `"""` literal, to the
@@ -1218,9 +1344,9 @@ impl<'a> Lexer<'a> {
             let inside_scalar = matches!(innermost, Unclosed::Apostrophe);
             let escaping = matches!(
                 innermost,
-                Unclosed::Quote | Unclosed::TripleQuote | Unclosed::Apostrophe
+                Unclosed::Quote | Unclosed::TripleQuote { .. } | Unclosed::Apostrophe
             );
-            let in_text = matches!(innermost, Unclosed::Quote | Unclosed::TripleQuote);
+            let in_text = matches!(innermost, Unclosed::Quote | Unclosed::TripleQuote { .. });
             match self.peek_char() {
                 None => return Err(()),
                 Some('\\') if escaping => {
@@ -1242,15 +1368,37 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 // A `"""` in code opens a literal in which a lone `"` is
-                // text, and only another `"""` closes it, ADR 0100.
+                // text, ADR 0100. Followed by a newline, only another `"""`
+                // closes it; followed by text, it is the one-line form, and
+                // a run of three or more quotes closes it, ADR 0102.
                 Some('"')
                     if matches!(innermost, Unclosed::Brace)
                         && self.text[self.pos..].starts_with("\"\"\"") =>
                 {
                     self.pos += 3;
-                    unclosed.push(Unclosed::TripleQuote);
+                    let rest = self.text[self.pos..].trim_start_matches(is_horizontal_space);
+                    let one_line = !(rest.starts_with('\n') || rest.starts_with("\r\n"));
+                    unclosed.push(Unclosed::TripleQuote { one_line });
                 }
-                Some('"') if matches!(innermost, Unclosed::TripleQuote) => {
+                Some('"') if matches!(innermost, Unclosed::TripleQuote { one_line: true }) => {
+                    let run = self.text[self.pos..]
+                        .bytes()
+                        .take_while(|byte| *byte == b'"')
+                        .count();
+                    self.pos += run;
+                    if run >= 3 {
+                        unclosed.pop();
+                    }
+                }
+                // A one-line literal does not reach a second line: the
+                // lexer refuses it when the hole is read, and stepping over
+                // the newline as code keeps that one mistake from running
+                // the hole, and the literal around it, to the end of file.
+                Some('\n') if matches!(innermost, Unclosed::TripleQuote { one_line: true }) => {
+                    self.bump();
+                    unclosed.pop();
+                }
+                Some('"') if matches!(innermost, Unclosed::TripleQuote { one_line: false }) => {
                     if self.text[self.pos..].starts_with("\"\"\"") {
                         self.pos += 3;
                         unclosed.pop();
@@ -2061,10 +2209,7 @@ mod tests {
     #[test]
     fn an_unclosed_tagged_literal_is_an_unclosed_literal() {
         assert_eq!(only_error("html\"never"), "cove::lex::unterminated_string");
-        assert_eq!(
-            only_error("html\"\"\"x\"\"\""),
-            "cove::lex::triple_quote_opener"
-        );
+        assert_eq!(only_error("html\"\"\"x"), "cove::lex::unterminated_string");
     }
 
     #[test]
@@ -2088,26 +2233,142 @@ mod tests {
         assert_eq!(diags[0].primary, Some(Span::new(FileId(0), 4, 5)));
     }
 
+    // ADR 0102: a `"""` followed by text on its line is a one-line literal.
+
     #[test]
-    fn a_triple_quote_followed_by_text_is_an_error() {
+    fn a_triple_quote_followed_by_text_opens_a_one_line_literal() {
+        assert_eq!(text_of(r#""""x""""#), "x");
+        // Exactly as written: leading and trailing spaces are content, and
+        // there is no margin.
+        assert_eq!(text_of(r#"""" class=x  """"#), " class=x  ");
+        assert_eq!(text_of(r#""""  <p>"""  "#), "  <p>");
+        // A lone `"`, and a pair, are content.
+        assert_eq!(text_of(r#""""a "b" c""""#), r#"a "b" c"#);
+        assert_eq!(text_of(r#""""a""b""""#), r#"a""b"#);
+        // A tag tags it.
         assert_eq!(
-            only_error("\"\"\"x\"\"\""),
-            "cove::lex::triple_quote_opener"
+            kinds(r#"html""" <i>x</i>""""#),
+            vec![TokenKind::Tagged {
+                tag: "html".into(),
+                parts: vec![StringPart::Text(" <i>x</i>".into())],
+            }]
         );
+    }
+
+    /// A run of N ≥ 3 quotes closes a one-line literal, and the first N − 3
+    /// of them are content: Kotlin's rule.
+    #[test]
+    fn a_run_of_quotes_closes_a_one_line_literal_on_its_last_three() {
+        // Three, four, five and six quotes after the text.
+        assert_eq!(text_of(r#"""" class="x""""#), r#" class="x"#);
+        assert_eq!(text_of(r#"""" class="x"""""#), r#" class="x""#);
+        assert_eq!(text_of(r##"""" class="x""""""##), r#" class="x"""#);
+        assert_eq!(text_of(r##"""" class="x"""""""##), r#" class="x""""#);
+        // Six quotes in all is the empty string; seven or eight hold one or
+        // two quotes.
+        assert_eq!(text_of(r#""""""""#), "");
+        assert_eq!(text_of(r##"""""""""##), "\"");
+        assert_eq!(text_of(r##""""""""""##), "\"\"");
+        // What follows the closer is code again.
+        assert_eq!(
+            kinds(r#""""a"""" + b"#),
+            vec![
+                TokenKind::Str(vec![StringPart::Text("a\"".into())]),
+                TokenKind::Plus,
+                TokenKind::Ident("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn escapes_in_a_one_line_literal_are_those_of_a_plain_one() {
+        assert_eq!(
+            text_of(r#""""\\ \n \t \{ \} \u{e9}""""#),
+            "\\ \n \t { } \u{e9}"
+        );
+        // `\"` is still a quote, and an escaped quote is not part of a run.
+        assert_eq!(text_of(r#""""a\"""""#), "a\"");
+        assert_eq!(text_of(r#""""\"\"\"""""#), "\"\"\"");
+        assert_eq!(only_error(r#""""\q""""#), "cove::lex::unknown_escape");
+    }
+
+    #[test]
+    fn a_hole_in_a_one_line_literal_keeps_its_source_span() {
+        let src = r#"x = html"""<a href="{at}/kv">{name}</a>""""#;
+        let at = src.find("at}").unwrap() as u32;
+        let name = src.find("name").unwrap() as u32;
+        let tokens = kinds(src);
+        assert_eq!(
+            tokens[2],
+            TokenKind::Tagged {
+                tag: "html".into(),
+                parts: vec![
+                    StringPart::Text("<a href=\"".into()),
+                    StringPart::Interpolation {
+                        source: "at".into(),
+                        span: Span::new(FileId(0), at, at + 2),
+                    },
+                    StringPart::Text("/kv\">".into()),
+                    StringPart::Interpolation {
+                        source: "name".into(),
+                        span: Span::new(FileId(0), name, name + 4),
+                    },
+                    StringPart::Text("</a>".into()),
+                ],
+            }
+        );
+        // A hole may hold a one-line literal, whose quotes close it and not
+        // the literal around it.
+        let src = r#""""a{f(""" "x" """")}b""""#;
+        let tokens = kinds(src);
+        let [TokenKind::Str(parts)] = tokens.as_slice() else {
+            panic!("one string, got {tokens:?}");
+        };
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert_eq!(parts[2], StringPart::Text("b".into()));
+    }
+
+    #[test]
+    fn a_one_line_literal_that_reaches_a_second_line_is_an_error() {
         assert_eq!(
             only_error("\"\"\"x\n  y\n  \"\"\""),
-            "cove::lex::triple_quote_opener"
+            "cove::lex::one_line_literal_newline"
         );
-        // The rest of the literal is stepped over: what follows still lexes.
+        // A `\` in front of the newline is no continuation here.
+        assert_eq!(
+            only_error("\"\"\"x\\\n  y\"\"\""),
+            "cove::lex::one_line_literal_newline"
+        );
+        assert_eq!(
+            only_error("\"\"\"x\r\ny\"\"\""),
+            "cove::lex::one_line_literal_newline"
+        );
+        // The diagnostic is on the newline; with no `"""` further on, the
+        // next line is code again.
         let mut sources = SourceMap::new();
-        let file = sources.add("test.cove", "\"\"\"x\"\"\" + 1");
+        let file = sources.add("test.cove", "a = \"\"\"x\nb + 1");
         let (tokens, diagnostics) = lex_recovered(&sources, file);
         assert_eq!(diagnostics.len(), 1);
-        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(diagnostics[0].primary, Some(Span::new(file, 8, 9)));
+        let recovered: Vec<TokenKind> = tokens.iter().map(|t| t.kind.clone()).collect();
         assert_eq!(
-            kinds,
-            vec![TokenKind::Plus, TokenKind::Int(1), TokenKind::Eof]
+            recovered,
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Eq,
+                TokenKind::Ident("b".into()),
+                TokenKind::Plus,
+                TokenKind::Int(1),
+                TokenKind::Eof
+            ]
         );
+        // Unclosed at the end of the file.
+        assert_eq!(only_error("\"\"\"x\"\""), "cove::lex::unterminated_string");
+        // A newline inside a hole is code, not text, as it is in `"…"`.
+        assert!(matches!(
+            kinds("\"\"\"{\"a\" +\n\"b\"}\"\"\"").as_slice(),
+            [TokenKind::Str(parts)] if parts.len() == 1
+        ));
     }
 
     #[test]
