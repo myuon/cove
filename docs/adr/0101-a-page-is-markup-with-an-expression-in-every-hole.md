@@ -248,8 +248,9 @@ the nearest thing this has to a convention.
 
 **There is nothing left for `render` to refuse**, so `render(page: Html) ->
 String` is infallible and `Html` no longer carries a `wrong`. A hole naming a
-field that does not exist is `cove::type::unknown_name` at the hole's span,
-which is where it was before `std.html` existed.
+field that does not exist is `cove::type::unknown_field` at the hole's span —
+and a misspelt binding `cove::type::unknown_name` — which is where both were
+before `std.html` existed.
 
 **`fill` goes, with its notation and its 28 e2e cases.** A template is never
 loaded at run time in this embedder — an app is distributed as source and
