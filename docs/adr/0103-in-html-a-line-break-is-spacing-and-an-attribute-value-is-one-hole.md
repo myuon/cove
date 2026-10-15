@@ -31,13 +31,12 @@ pages byte-identical, and the cost is one `\` per line: **458** of them in
 
 | the join | count | renders today |
 | --- | ---: | --- |
-| a tag or a hole on both sides (`>` or `}` ⏎ `<` or `{`) | 298 | nothing |
+| a tag or a hole on both sides (`>` or `}` ⏎ `<` or `{`) | 342 | nothing |
 | a space written before the `\` (prose) | 115 | one space |
-| anything else | 45 | nothing |
+| anything else | 1 | nothing |
 
 Under the rule decided below, **457 of the 458 render exactly as they do
-today**; the 45 "anything else" are all tag-or-hole edges once a hole's `}`
-and `{` count as edges, except one: `…of <code>{action}</code>:` ⏎ `<pre>`,
+today**. The one that does not is `…of <code>{action}</code>:` ⏎ `<pre>`,
 which gains a space before a block element and renders the same.
 
 **A value inside a tag is written three ways.** 68 attribute values hold a
