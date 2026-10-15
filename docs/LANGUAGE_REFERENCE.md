@@ -340,19 +340,30 @@ and continuation `\` are what they are untagged
   `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, wherever the hole sits.
   The type is the one the checker settled for the hole as written, so a hole
   whose type is a type parameter is escaped whatever the parameter becomes.
-- `std.html.render` gives the text of an `Html`, and `std.html.markup` is the
-  one way to make one from a `String` without escaping it.
+- `page.render()` — a method of `Html` — gives the text of one, and
+  `std.html.markup` is the one way to make one from a `String` without
+  escaping it. `html""` is no markup at all, and `==` compares markup as it
+  does any value. `std.html.join(parts, between)` is `parts` with `between`
+  between each two and nothing around them; no parts is `html""`
+  ([ADR 0102](adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md)).
 
 ```cove
 use std.html
 
 fn row(name: String, count: Int) -> String {
-  html.render(html"""
+  html"""
     <tr>\
       <td class="name">{name}</td>\
       <td>{count}</td>\
     </tr>
-    """)
+    """.render()
+}
+
+fn links(names: Array<String>) -> String {
+  let each = names.map(fn(name) {
+    html"""<a href="/{name}">{name}</a>"""
+  })
+  html.join(each, html" · ").render()
 }
 ```
 
