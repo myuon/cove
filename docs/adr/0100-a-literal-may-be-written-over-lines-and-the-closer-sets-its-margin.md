@@ -17,9 +17,9 @@
   closing delimiter**, so the indentation the source needed is not part of
   the string; that inside one a `"` is **content**, needing no escape, while
   escapes and interpolation behave exactly as they do in `"…"`; and that a
-  `\` ending a line **eats that line's newline**, in either literal form, so
-  that text whose bytes matter can be laid out over source lines without
-  changing a byte of it
+  `\` ending a line **eats that line's newline and the next line's
+  indentation**, in either literal form, so that text whose bytes matter can
+  be laid out — and nested — over source lines without changing a byte of it
 
 ## Context
 
@@ -125,13 +125,27 @@ in source and in a diff, and `cove fmt` promises a file with none
 (`print.cove:834-837`) would put in direct conflict with a literal allowed to
 hold it.
 
-**A `\` at the end of a line eats that line's newline**, in both literal
-forms. Today `\` followed by a newline is `cove::lex::unknown_escape`
-(verified by compiling it), so the spelling is free. A line's content is read
-from after the margin, trailing horizontal whitespace is dropped, and if what
-remains ends in an unescaped `\` then the `\` and the newline are both
-dropped. A space wanted at such a join is written at the **start of the next
-line**, where the margin rule keeps it.
+**A `\` at the end of a line eats that line's newline and all of the next
+line's leading whitespace**, in both literal forms. Today `\` followed by a
+newline is `cove::lex::unknown_escape` (verified by compiling it), so the
+spelling is free. A line's content is read from after the margin, trailing
+horizontal whitespace is dropped, and if what remains ends in an unescaped
+`\` then the `\`, the newline, and the leading horizontal whitespace of the
+line that follows are all dropped — the whole of it, not only the margin, so
+markup can be indented as deeply as it nests. A continued line must still sit
+at or beyond the margin; the rule refuses what it would otherwise refuse. A
+space wanted at such a join is written **before the `\`**: the line then ends
+in the `\`, so there is no trailing whitespace for the rule above to drop.
+
+**This paragraph said something else before the ADR was merged, and was
+wrong.** It had the `\` eat only the newline, with the next line keeping
+whatever indentation it had beyond the margin, and it put a wanted space at
+the start of the next line. Under that rule the example below renders
+`<tr>  <td …>` — the two spaces of nesting leak into the page — while the
+ADR claimed `<tr><td …>`. The example was right about what markup needs and
+the rule was not; implementing it is what showed the two disagree. It was
+corrected on the branch, before acceptance reached `main`, rather than by a
+superseding ADR.
 
 This is the rule that makes the form usable for markup, and without it `"""`
 would be half a feature: the margin alone removes the indentation and leaves
@@ -149,7 +163,16 @@ let row = """
 
 renders `<tr><td class=title …></td><td class=nums …>…</td></tr>` — one line
 of output, six lines of source, byte for byte what the one-line literal
-rendered.
+rendered. Where two inline elements need the space between them:
+
+```cove
+let said = """
+  <b>{figure}</b> \
+  <span class=muted>{unit}</span>
+  """
+```
+
+is `<b>…</b> <span class=muted>…</span>`.
 
 **The margin is removed at compile time**, so what ADR 0045 calls the literal
 is the stripped text. Nothing is computed at run time, and a `"""` literal
