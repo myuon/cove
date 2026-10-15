@@ -203,6 +203,7 @@ it leaves.
 | `500ms` | `Duration` | nanoseconds, rendered in the largest unit that divides it exactly |
 | `"a{x}b"` | `String` | the parts concatenated left to right |
 | `"""` … `"""` over lines | `String` | the same, with the closer's margin taken off every line |
+| `"""a"b"""` on one line | `String` | the same, `"` as text, closed by the last three quotes of a run |
 | `html"a{x}b"` | `std.html.Html` | see [Tagged literals](#tagged-literals) |
 | `()` | `()` | the unit value |
 | `[1, 2]` | `Array<T>` | a fresh immutable array |
@@ -259,10 +260,10 @@ let row = """
   """
 ```
 
-- `"""` opens one only when nothing but spaces and tabs follows it on its
-  line, and the text begins on the next line; `"""x"""` on one line is
-  `cove::lex::triple_quote_opener`. The newline after the opener is not
-  content.
+- `"""` opens one over lines when nothing but spaces and tabs follows it on
+  its line, and the text begins on the next line. The newline after the
+  opener is not content. Followed by anything else, it opens a **one-line**
+  literal, below.
 - Any unescaped `"""` closes it, and the closer stands on a line of its own:
   something other than spaces and tabs in front of it is
   `cove::lex::triple_quote_closer`. The newline before the closer's line is
@@ -285,6 +286,29 @@ text and a `"""` literal with no holes is one constant like any other. An
 unclosed one is `cove::lex::unterminated_string`. `cove fmt` writes one back
 exactly as it was written.
 
+A `"""` with text after it on its line is a **one-line literal**, for a
+fragment that holds a `"`
+([ADR 0102](adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md)):
+
+```cove
+let link = """<a href="{at}/kv">{name}</a>"""
+let attr = """ class="is-{level}""""
+```
+
+- Its text is everything up to the closer **exactly as written**: there is
+  no margin, and spaces at either end are content.
+- A `"` inside is text, and every escape and every `{expr}` is what it is in
+  `"…"` — `\"` is still a quote.
+- **The closer is the last three quotes of a run**: where the literal can
+  close, a run of three or more unescaped `"` closes it, and the ones before
+  the last three are content. So `""" class="x""""` is ` class="x"`,
+  `""""""` is the empty string, and a run of one or two is text.
+- It does not reach a second line. A newline in its text — one after a `\`
+  included, which here is not a continuation — is
+  `cove::lex::one_line_literal_newline`, pointed at the newline. A newline
+  inside a hole is code, not text, and is allowed as in `"…"`. An unclosed
+  one is `cove::lex::unterminated_string`.
+
 An array literal takes its element type from the expectation when there is
 one, and otherwise from its elements, each checked against what the ones
 before it inferred; an empty literal's element type is unknown. Elements are
@@ -294,7 +318,8 @@ Errors: `cove::type::mismatch` on an element that disagrees.
 
 ### Tagged literals
 
-`html"<td>{name}</td>"`, and `html"""` … `"""` over lines
+`html"<td>{name}</td>"`, `html"""<a href="{at}">x</a>"""` on one line, and
+`html"""` … `"""` over lines
 
 A name written **against** a string literal's opening quote, with no space,
 tags it: `html"x"` is one literal, and `html "x"` is a name followed by a
@@ -315,19 +340,30 @@ and continuation `\` are what they are untagged
   `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, wherever the hole sits.
   The type is the one the checker settled for the hole as written, so a hole
   whose type is a type parameter is escaped whatever the parameter becomes.
-- `std.html.render` gives the text of an `Html`, and `std.html.markup` is the
-  one way to make one from a `String` without escaping it.
+- `page.render()` — a method of `Html` — gives the text of one, and
+  `std.html.markup` is the one way to make one from a `String` without
+  escaping it. `html""` is no markup at all, and `==` compares markup as it
+  does any value. `std.html.join(parts, between)` is `parts` with `between`
+  between each two and nothing around them; no parts is `html""`
+  ([ADR 0102](adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md)).
 
 ```cove
 use std.html
 
 fn row(name: String, count: Int) -> String {
-  html.render(html"""
+  html"""
     <tr>\
       <td class="name">{name}</td>\
       <td>{count}</td>\
     </tr>
-    """)
+    """.render()
+}
+
+fn links(names: Array<String>) -> String {
+  let each = names.map(fn(name) {
+    html"""<a href="/{name}">{name}</a>"""
+  })
+  html.join(each, html" · ").render()
 }
 ```
 

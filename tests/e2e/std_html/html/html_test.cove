@@ -1,8 +1,6 @@
 use std.html
 use std.html.Html
-use std.html.empty
 use std.html.markup
-use std.html.render
 
 /// One line of a log, as a page shows it.
 struct Line {
@@ -40,7 +38,7 @@ fn row(line: Line) -> Html {
 /// A `String` in a hole is escaped, because its type is not `Html`.
 test fn escapesAStringBetweenTags() -> Result<Unit, Error> {
   let title = hostile()
-  assertEqual(render(html"<td>{title}</td>"), "<td>{escaped()}</td>")?
+  assertEqual(html"<td>{title}</td>".render(), "<td>{escaped()}</td>")?
   Ok(())
 }
 
@@ -49,7 +47,7 @@ test fn escapesAStringBetweenTags() -> Result<Unit, Error> {
 test fn escapesAStringInsideAQuotedAttribute() -> Result<Unit, Error> {
   let title = hostile()
   assertEqual(
-    render(html"<a title=\"{title}\">x</a>"),
+    html"<a title=\"{title}\">x</a>".render(),
     "<a title=\"{escaped()}\">x</a>",
   )?
   Ok(())
@@ -59,7 +57,7 @@ test fn escapesAStringInsideAQuotedAttribute() -> Result<Unit, Error> {
 test fn aScriptInTheDataIsNotAScript() -> Result<Unit, Error> {
   let said = "<script>&\"'"
   assertEqual(
-    render(html"<td class=said>{said}</td>"),
+    html"<td class=said>{said}</td>".render(),
     "<td class=said>&lt;script&gt;&amp;&quot;&#39;</td>",
   )?
   Ok(())
@@ -69,7 +67,7 @@ test fn aScriptInTheDataIsNotAScript() -> Result<Unit, Error> {
 /// written, quotes and all.
 test fn theLiteralTextIsNotEscaped() -> Result<Unit, Error> {
   assertEqual(
-    render(html"<p class=\"a&b\">'x'</p>"),
+    html"<p class=\"a&b\">'x'</p>".render(),
     "<p class=\"a&b\">'x'</p>",
   )?
   Ok(())
@@ -80,7 +78,7 @@ test fn theLiteralTextIsNotEscaped() -> Result<Unit, Error> {
 /// An `Html` in a hole goes in whole: it is already markup.
 test fn anHtmlHoleGoesInWhole() -> Result<Unit, Error> {
   let cell = markup("<td>&amp;</td>")
-  assertEqual(render(html"<tr>{cell}</tr>"), "<tr><td>&amp;</td></tr>")?
+  assertEqual(html"<tr>{cell}</tr>".render(), "<tr><td>&amp;</td></tr>")?
   Ok(())
 }
 
@@ -92,11 +90,11 @@ test fn anArrayOfHtmlGoesInOneAfterAnother() -> Result<Unit, Error> {
     html"<td>{word}</td>"
   })
   assertEqual(
-    render(html"<tr>{cells}</tr>"),
+    html"<tr>{cells}</tr>".render(),
     "<tr><td>a&lt;</td><td>b&amp;</td></tr>",
   )?
   let none: Array<Html> = []
-  assertEqual(render(html"<tr>{none}</tr>"), "<tr></tr>")?
+  assertEqual(html"<tr>{none}</tr>".render(), "<tr></tr>")?
   Ok(())
 }
 
@@ -104,7 +102,7 @@ test fn anArrayOfHtmlGoesInOneAfterAnother() -> Result<Unit, Error> {
 /// that text escaped.
 test fn anArrayThatIsNotMarkupIsEscaped() -> Result<Unit, Error> {
   let words = ["<b>", "&"]
-  assertEqual(render(html"{words}"), "[&lt;b&gt;, &amp;]")?
+  assertEqual(html"{words}".render(), "[&lt;b&gt;, &amp;]")?
   Ok(())
 }
 
@@ -112,7 +110,7 @@ test fn anArrayThatIsNotMarkupIsEscaped() -> Result<Unit, Error> {
 test fn aNestedLiteralGoesInWhole() -> Result<Unit, Error> {
   let name = "<i>"
   assertEqual(
-    render(html"<p>{html"<b>{name}</b>"}</p>"),
+    html"<p>{html"<b>{name}</b>"}</p>".render(),
     "<p><b>&lt;i&gt;</b></p>",
   )?
   Ok(())
@@ -123,16 +121,16 @@ test fn aNestedLiteralGoesInWhole() -> Result<Unit, Error> {
 test fn anIfInAHoleIsAnExpression() -> Result<Unit, Error> {
   let set = true
   assertEqual(
-    render(html"<button>{if set { "Replace" } else { "<Set>" }}</button>"),
+    html"<button>{if set { "Replace" } else { "<Set>" }}</button>".render(),
     "<button>Replace</button>",
   )?
   let unset = false
   assertEqual(
-    render(html"<button>{if unset { "Replace" } else { "<Set>" }}</button>"),
+    html"<button>{if unset { "Replace" } else { "<Set>" }}</button>".render(),
     "<button>&lt;Set&gt;</button>",
   )?
   assertEqual(
-    render(html"<p>{if set { markup("<b>on</b>") } else { empty() }}</p>"),
+    html"<p>{if set { markup("<b>on</b>") } else { html"" }}</p>".render(),
     "<p><b>on</b></p>",
   )?
   Ok(())
@@ -143,7 +141,7 @@ test fn anIntAndABoolAreWrittenAsEver() -> Result<Unit, Error> {
   let count = -42
   let live = true
   assertEqual(
-    render(html"<td>{count}</td><td>{live}</td>"),
+    html"<td>{count}</td><td>{live}</td>".render(),
     "<td>-42</td><td>true</td>",
   )?
   Ok(())
@@ -153,7 +151,7 @@ test fn anIntAndABoolAreWrittenAsEver() -> Result<Unit, Error> {
 test fn aFieldOfAStructIsAHole() -> Result<Unit, Error> {
   let line = Line(at: "09:00 & on", said: "hi", who: markup("<td>me</td>"))
   assertEqual(
-    render(html"<td>{line.at}</td>{line.who}"),
+    html"<td>{line.at}</td>{line.who}".render(),
     "<td>09:00 &amp; on</td><td>me</td>",
   )?
   Ok(())
@@ -166,7 +164,7 @@ test fn aFieldOfAStructIsAHole() -> Result<Unit, Error> {
 test fn aLiteralOverLinesIsOneLine() -> Result<Unit, Error> {
   let line = Line(at: "09:00", said: hostile(), who: markup("<td>me</td>"))
   assertEqual(
-    render(row(line)),
+    row(line).render(),
     "<tr><td class=\"at\">09:00</td><td>me</td><td>{escaped()}</td></tr>",
   )?
   Ok(())
@@ -182,7 +180,7 @@ test fn aSpaceAtAJoinIsWrittenBeforeTheBackslash() -> Result<Unit, Error> {
     </p>
     """
   assertEqual(
-    render(page),
+    page.render(),
     "<p>\n  <b>3</b> <span class=muted>rows</span>\n</p>",
   )?
   Ok(())
@@ -190,31 +188,78 @@ test fn aSpaceAtAJoinIsWrittenBeforeTheBackslash() -> Result<Unit, Error> {
 
 /// A literal with no hole is itself.
 test fn aLiteralWithNoHoleIsItself() -> Result<Unit, Error> {
-  assertEqual(render(html"<hr>"), "<hr>")?
-  assertEqual(render(html""), "")?
+  assertEqual(html"<hr>".render(), "<hr>")?
+  assertEqual(html"".render(), "")?
   Ok(())
 }
 
-// ------------------------------------------------- markup, empty, render
+// ----------------------------------------------- one-line """ literals
+
+/// A `"""` with text after it on its line is a one-line literal (ADR 0102):
+/// a quote in it is the template's own character, as in the form over lines.
+test fn aOneLineLiteralHoldsQuotesAsWritten() -> Result<Unit, Error> {
+  let at = "/a&b"
+  let name = "<kv>"
+  assertEqual(
+    html"""<a href="{at}/kv">{name}</a>""".render(),
+    "<a href=\"/a&amp;b/kv\">&lt;kv&gt;</a>",
+  )?
+  Ok(())
+}
+
+/// Its leading space is content, and a fragment may end on an attribute's
+/// closing quote: the last three quotes of a run close it.
+test fn aOneLineLiteralKeepsItsSpacesAndItsLastQuote() -> Result<Unit, Error> {
+  let level = "warn"
+  assertEqual(html""" class="is-{level}"""".render(), " class=\"is-warn\"")?
+  assertEqual(
+    html"<p{html""" class="is-{level}""""}>x</p>".render(),
+    "<p class=\"is-warn\">x</p>",
+  )?
+  assertEqual(html"""""".render(), "")?
+  Ok(())
+}
+
+// ----------------------------------------------- markup, nothing, join, render
 
 /// `markup` takes text at its word, and is the one way past escaping.
 test fn markupIsTakenAtItsWord() -> Result<Unit, Error> {
-  assertEqual(render(markup("<b>&</b>")), "<b>&</b>")?
+  assertEqual(markup("<b>&</b>").render(), "<b>&</b>")?
   Ok(())
 }
 
-/// `empty` is no markup at all.
-test fn emptyIsNoMarkupAtAll() -> Result<Unit, Error> {
-  assertEqual(render(empty()), "")?
-  assertEqual(render(html"<p>{empty()}</p>"), "<p></p>")?
+/// `html""` is no markup at all, and is what a page puts where a part is
+/// absent; `==` tells it from markup that is there.
+test fn anEmptyLiteralIsNoMarkupAtAll() -> Result<Unit, Error> {
+  assertEqual(html"".render(), "")?
+  assertEqual(html"<p>{html""}</p>".render(), "<p></p>")?
+  assertEqual(html"" == markup(""), true)?
+  assertEqual(html"" == html"<p>", false)?
+  Ok(())
+}
+
+/// `join` puts markup between each two parts and nothing around them.
+test fn joinPutsMarkupBetweenEachTwo() -> Result<Unit, Error> {
+  let names = ["a", "<b>", "c"]
+  let links = names.map(fn(name) {
+    html"<a>{name}</a>"
+  })
+  assertEqual(
+    html.join(links, html" · ").render(),
+    "<a>a</a> · <a>&lt;b&gt;</a> · <a>c</a>",
+  )?
+  let one = [html"<i>x</i>"]
+  assertEqual(html.join(one, html", ").render(), "<i>x</i>")?
+  let none: Array<Html> = []
+  assertEqual(html.join(none, html", "), html"")?
   Ok(())
 }
 
 /// The module is usable qualified, as any module is.
 test fn isUsableAsAQualifiedModule() -> Result<Unit, Error> {
   let count = 42
-  assertEqual(html.render(html.markup("<b>x</b>")), "<b>x</b>")?
-  assertEqual(html.render(html"<i>{count}</i>"), "<i>42</i>")?
-  assertEqual(html.render(html.empty()), "")?
+  assertEqual(html.markup("<b>x</b>").render(), "<b>x</b>")?
+  assertEqual(html"<i>{count}</i>".render(), "<i>42</i>")?
+  assertEqual(html.join([html"a", html"b"], html"").render(), "ab")?
   Ok(())
 }

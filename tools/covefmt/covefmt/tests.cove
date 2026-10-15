@@ -111,6 +111,11 @@ test fn an_interpolation_stays_inside_its_literal() -> Result<Unit, Error> {
 /// A `"""` literal is one token, ADR 0100: a lone `"` in it is text, so
 /// neither the quotes of an attribute nor a `//` after them are code, and
 /// only the next `"""` ends it. An escaped quote is how one is written.
+///
+/// A `"""` with text after it on its line is a one-line literal, ADR 0102,
+/// and a run of three or more quotes closes it, the whole run with it. Its
+/// cases are here rather than in a test of their own because a test function
+/// is a copy into the answer it returns, which `copies.rs` counts.
 test fn a_triple_quoted_literal_is_one_token() -> Result<Unit, Error> {
   assertEqual(
     shape("\"\"\"\n  <a href=\"x\">//</a>\n  \"\"\" // c"),
@@ -120,6 +125,14 @@ test fn a_triple_quoted_literal_is_one_token() -> Result<Unit, Error> {
   assertEqual(
     shape("\"\"\"\n  \{f(\"\"\"\n    a\n    \"\"\")\}\n  \"\"\""),
     "str",
+  )?
+  assertEqual(shape("\"\"\" class=\"x\"\"\"\" // c"), "str space line")?
+  assertEqual(shape("\"\"\"\"\"\" x"), "str space word")?
+  assertEqual(shape("\"\"\"a\"\"\"\"\"\" x"), "str space word")?
+  assertEqual(shape("html\"\"\"<a href=\"\{at\}\">//</a>\"\"\""), "str")?
+  assertEqual(
+    shape("\"\"\"a\{f(\"\"\"\"b\"\"\"\")\}\"\"\" x"),
+    "str space word",
   )?
   Ok(())
 }

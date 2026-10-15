@@ -1,0 +1,14 @@
+use std.html
+
+/// A program that imports the module and not the type still renders a page:
+/// `render` is a method of `Html`, found through the value (ADR 0102).
+test fn rendersWithoutImportingTheType() -> Result<Unit, Error> {
+  let name = "<b>"
+  let page = html"""<p class="x">{name}</p>"""
+  assertEqual(page.render(), "<p class=\"x\">&lt;b&gt;</p>")?
+  assertEqual(
+    html.join([page, html"<hr>"], html"\n").render(),
+    "<p class=\"x\">&lt;b&gt;</p>\n<hr>",
+  )?
+  Ok(())
+}

@@ -302,8 +302,19 @@ impl Scan {
   /// in `"..."`, which is what the language says of the two forms. What is
   /// in it is not looked at: the margin and the lines are the lexer's
   /// business, and the formatter copies the literal as it was written.
+  ///
+  /// A `"""` with text after it on its line is the one-line form, ADR 0102,
+  /// and a run of three or more quotes closes it, the whole run with it:
+  /// ended at its first three, `""" class="x""""` would leave a `"` behind
+  /// to open a phantom string.
   fn tripleQuoted(self, from: Int) -> Int {
     var at = from + 3
+    var past = from + 3
+    while self.at(past) == ' ' || self.at(past) == '\t' {
+      past = past + 1
+    }
+    let oneLine = !(self.at(past) == '\n' ||
+      (self.at(past) == '\r' && self.at(past + 1) == '\n'))
     while true {
       let c = self.at(at)
       if c < 0 {
@@ -315,6 +326,15 @@ impl Scan {
         at = at + 2
       } else if c == '\{' {
         at = self.interpolation(at)
+      } else if c == '"' && oneLine {
+        var run = 0
+        while self.at(at + run) == '"' {
+          run = run + 1
+        }
+        at = at + run
+        if run >= 3 {
+          return at
+        }
       } else if c == '"' && self.at(at + 1) == '"' && self.at(at + 2) == '"' {
         return at + 3
       } else {

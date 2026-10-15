@@ -224,9 +224,21 @@ fn line_end(bytes: &[u8], from: usize) -> usize {
 /// text, and only the next unescaped `"""` ends it (ADR 0100). Read as `""`
 /// and then `"`, the quotes of `<p class="lead">` would end it early and let
 /// a `//` in its text be taken for a comment.
+///
+/// A `"""` with text after it on its line is the one-line form (ADR 0102),
+/// which a run of three or more quotes closes, the whole run with it: read
+/// as ending at its first three, `""" class="x""""` would leave a `"` behind
+/// to open a phantom string.
 fn skip_string(bytes: &[u8], start: usize) -> usize {
     let triple = bytes[start..].starts_with(b"\"\"\"");
     let mut i = start + if triple { 3 } else { 1 };
+    let one_line = triple && {
+        let mut j = i;
+        while matches!(bytes.get(j), Some(b' ' | b'\t')) {
+            j += 1;
+        }
+        !(bytes[j..].starts_with(b"\n") || bytes[j..].starts_with(b"\r\n"))
+    };
     while i < bytes.len() {
         match bytes[i] {
             // A `\u{...}` escape's brace is its own, not an interpolation's
@@ -242,6 +254,13 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
             }
             b'\\' => i += 2,
             b'"' if !triple => return i + 1,
+            b'"' if one_line => {
+                let run = bytes[i..].iter().take_while(|byte| **byte == b'"').count();
+                i += run;
+                if run >= 3 {
+                    return i;
+                }
+            }
             b'"' if bytes[i..].starts_with(b"\"\"\"") => return i + 3,
             b'{' => i = skip_interpolation(bytes, i + 1),
             _ => i += 1,
@@ -2852,6 +2871,38 @@ fn page(name: String) -> Html {
             format_unit(&unit),
             "fn a() -> Html {\n  html\"<p class=\\\"x\\\">{1}</p>\"\n}\n"
         );
+    }
+
+    /// A one-line `"""` literal is copied as written, quotes and spaces and
+    /// all (ADR 0102); with no source it is the `"…"` that denotes its text.
+    #[test]
+    fn a_one_line_triple_quoted_literal_is_kept_as_written() {
+        formatted(
+            r#"
+fn page(at: String, name: String, level: String) -> Html {
+  let a = html"""<a href="{at}/kv">{name}</a>"""
+  let b = html""" class="is-{level}""""
+  let c = html""" <span title="x">(changed)</span>  """
+  let d = """"""
+  let e = f(""""a" // not a comment""", """""""")
+  html"{a}{b}{c}{d}{e}"
+}
+"#,
+        );
+        let unit = parse("fn a() -> String {\n  \"\"\" class=\"x\"\"\"\"\n}\n");
+        assert_eq!(
+            format_unit(&unit),
+            "fn a() -> String {\n  \" class=\\\"x\\\"\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_comment_after_a_one_line_triple_quoted_literal_is_found() {
+        let source = "let a = \"\"\" \"x\"\"\"\" // yes\nlet b = \"\"\"\"\"\" // too\n";
+        let comments = scan_comments(source);
+        assert_eq!(comments.len(), 2, "{comments:?}");
+        assert_eq!(comments[0].text, "// yes");
+        assert_eq!(comments[1].text, "// too");
     }
 
     #[test]

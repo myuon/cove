@@ -1,18 +1,22 @@
+ok    bare.rendersWithoutImportingTheType
 ok    html.aFieldOfAStructIsAHole
 ok    html.aLiteralOverLinesIsOneLine
 ok    html.aLiteralWithNoHoleIsItself
 ok    html.aNestedLiteralGoesInWhole
+ok    html.aOneLineLiteralHoldsQuotesAsWritten
+ok    html.aOneLineLiteralKeepsItsSpacesAndItsLastQuote
 ok    html.aScriptInTheDataIsNotAScript
 ok    html.aSpaceAtAJoinIsWrittenBeforeTheBackslash
 ok    html.anArrayOfHtmlGoesInOneAfterAnother
 ok    html.anArrayThatIsNotMarkupIsEscaped
+ok    html.anEmptyLiteralIsNoMarkupAtAll
 ok    html.anHtmlHoleGoesInWhole
 ok    html.anIfInAHoleIsAnExpression
 ok    html.anIntAndABoolAreWrittenAsEver
-ok    html.emptyIsNoMarkupAtAll
 ok    html.escapesAStringBetweenTags
 ok    html.escapesAStringInsideAQuotedAttribute
 ok    html.isUsableAsAQualifiedModule
+ok    html.joinPutsMarkupBetweenEachTwo
 ok    html.markupIsTakenAtItsWord
 ok    html.theLiteralTextIsNotEscaped
-ran 17 test(s), 17 passed
+ran 21 test(s), 21 passed

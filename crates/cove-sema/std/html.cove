@@ -57,8 +57,25 @@
 // expression, so a condition is an `if` expression and a list is a `map`;
 // a loop stays in Cove. There is no element tree either: `<td class=at>` is
 // written as `<td class=at>`, not translated into a call. And nothing here
-// serves a page — [`render`] hands back the text, and what is done with it
-// belongs to whatever is serving.
+// serves a page — `page.render()` hands back the text, and what is done with
+// it belongs to whatever is serving.
+//
+// # Nothing, lists, and the text
+//
+// No markup is `html""`: the literal with nothing in it is the value a page
+// puts where a part is absent, and `page == html""` asks whether a part is
+// there, because `==` is structural for `Html` as for every type. A list
+// goes in a hole as an `Array<Html>`, one element after another;
+// [`join`] puts markup between them — `html.join(links, html" · ")`. And
+// `page.render()` is the one way out, as [`markup`] is the one way in.
+// [ADR 0102](../../../docs/adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md)
+// is the record of those three, and of the one-line `"""` literal a fragment
+// holding a quote is written as:
+//
+// ```cove
+// html"""<a href="{at}/kv">{name}</a>"""
+// html""" class="is-{level}""""
+// ```
 //
 // # What escaping does not cover
 //
@@ -89,22 +106,36 @@ export fn markup(said: String) -> Html {
   Html(said: said)
 }
 
-/// No markup at all: what a page puts where a part is absent.
-///
-/// A hole of type `Html` has to be given something, and `""` would be
-/// escaped text rather than markup, so this is what a `None` becomes.
-export fn empty() -> Html {
-  Html(said: "")
+impl Html {
+  /// The text of a page: `page.render()`.
+  ///
+  /// The one way out, as [`markup`] is the one way in. Everything between the
+  /// two is `Html`, so nothing in the middle of building a page is a `String`
+  /// that somebody might concatenate unescaped. There is nothing for it to
+  /// refuse: every hole was checked by the checker when the page was
+  /// compiled.
+  ///
+  /// It is a method rather than a function of this module, [ADR 0102], so
+  /// that a test reads left to right:
+  /// `steps(at).render().contains("<b>the last day</b>")`.
+  ///
+  /// [ADR 0102]: ../../../docs/adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md
+  export fn render(self) -> String {
+    self.said
+  }
 }
 
-/// The text of a page.
+/// `parts` one after another with `between` between each two of them, and
+/// nothing in front of the first or after the last: the `" · ".join(…)` of
+/// markup, [ADR 0102].
 ///
-/// The one way out, as [`markup`] is the one way in. Everything between the
-/// two is `Html`, so nothing in the middle of building a page is a `String`
-/// that somebody might concatenate unescaped. There is nothing for it to
-/// refuse: every hole was checked by the checker when the page was compiled.
-export fn render(page: Html) -> String {
-  page.said
+/// No parts is no markup, and one part is that part.
+///
+/// [ADR 0102]: ../../../docs/adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md
+export fn join(parts: Array<Html>, between: Html) -> Html {
+  Html(said: between.said.join(parts.map(fn(part) {
+    part.said
+  })))
 }
 
 /// Appends `text` to `buffer` with the five characters that mean something

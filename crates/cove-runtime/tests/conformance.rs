@@ -155,15 +155,35 @@ static RULES: &[Rule] = &[
         value: "a b",
         foreign: "Int",
     },
+    // ADR 0102: a `"""` with text after it is a one-line literal, exactly as
+    // written, and a run of N ≥ 3 quotes closes it on its last three.
+    Rule {
+        section: "Literals",
+        decls: "",
+        body: "let a = \"\"\" class=\"is-{1 + 1}\"\"\"\"\nlet b = \"\"\"\"\"\"\nlet c = \"\"\"\\\"\"\"\"\n\"{a}{b}{c}\"",
+        ty: "String",
+        value: " class=\"is-2\"\"",
+        foreign: "Int",
+    },
     // ADR 0101: a hole of an `html"…"` literal is escaped unless its type is
     // `Html`, and the literal's text is not. Its value is an `Html`, which
     // renders as its name alone, so the rule pins the text `render` gives.
     Rule {
         section: "Tagged literals",
         decls: "use std.html\n\n",
-        body: "let name = \"<a & 'b'>\"\nlet n = 2\nhtml.render(html\"<p class=\\\"x\\\">{name}{n}{html.markup(\"<i>\")}</p>\")",
+        body: "let name = \"<a & 'b'>\"\nlet n = 2\nhtml\"<p class=\\\"x\\\">{name}{n}{html.markup(\"<i>\")}</p>\".render()",
         ty: "String",
         value: "<p class=\"x\">&lt;a &amp; &#39;b&#39;&gt;2<i></p>",
+        foreign: "Int",
+    },
+    // ADR 0102: `join` puts markup between each two parts and nothing around
+    // them, and no markup is `html""`.
+    Rule {
+        section: "Tagged literals",
+        decls: "use std.html\nuse std.html.Html\n\n",
+        body: "let links = [html\"<a>1</a>\", html\"<a>&</a>\"]\nlet none: Array<Html> = []\nlet joined = html.join(links, html\" · \").render()\n\"{joined}|{html.join(none, html\"x\") == html\"\"}\"",
+        ty: "String",
+        value: "<a>1</a> · <a>&</a>|true",
         foreign: "Int",
     },
     Rule {
@@ -600,8 +620,8 @@ static REJECTIONS: &[Rejection] = &[
     },
     Rejection {
         section: "Literals",
-        source: "/// Writes text after a `\"\"\"` on its line.\nexport fn probe() -> String {\n  \"\"\"a\"\"\"\n}\n",
-        code: "cove::lex::triple_quote_opener",
+        source: "/// Runs a one-line `\"\"\"` literal onto a second line.\nexport fn probe() -> String {\n  \"\"\"a\n  b\"\"\"\n}\n",
+        code: "cove::lex::one_line_literal_newline",
     },
     Rejection {
         section: "Literals",

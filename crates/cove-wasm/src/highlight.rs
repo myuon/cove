@@ -738,13 +738,34 @@ mod tests {
         );
     }
 
+    /// A one-line `"""` literal is one piece too (ADR 0102), the whole run
+    /// of quotes that closes it included, and what follows it is code.
+    #[test]
+    fn a_one_line_triple_quoted_literal_is_one_piece() {
+        for literal in [
+            "\"\"\" class=\"x\"\"\"\"",
+            "\"\"\"\"\"\"",
+            "html\"\"\"<a href=\"{at}\">// {name}</a>\"\"\"",
+        ] {
+            let source = format!("let a = {literal} // c\nlet b = 1");
+            let held = coloured(&source);
+            assert!(paint(&source).ok, "`{source}` lexes");
+            assert!(held.contains(&(literal.to_string(), Kind::Str)), "{held:?}");
+            assert!(
+                held.contains(&("// c".to_string(), Kind::Comment)),
+                "{held:?}"
+            );
+        }
+    }
+
     /// While one is being typed it does not lex, and the page still tiles.
     #[test]
     fn an_open_or_malformed_triple_quoted_literal_still_tiles() {
         for source in [
             "let a = \"\"\"",
             "let a = \"\"\"\n  <p>",
-            "let a = \"\"\"x\"\"\"\nlet b = 1",
+            "let a = \"\"\"x\nlet b = 1",
+            "let a = \"\"\" x\"\"",
             "let a = \"\"\"\n  x\"\"\"",
             "let a = \"\"\"\n    x\n  y\n    \"\"\"",
             "let a = \"\"\"\n  {b",

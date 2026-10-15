@@ -45,6 +45,15 @@ export fn main() -> Result<Unit, Error> {
     x
     """ == "x"
   println("same {same}")?
+  // ADR 0102: a `"""` with text after it on its line is a one-line literal,
+  // exactly as written, closed by the last three quotes of a run.
+  let attr = """ class="is-{who}""""
+  println("attr [{attr}]")?
+  let spaced = """  two in front, two behind  """
+  println("spaced [{spaced}]")?
+  println("runs [{""""""}] [{"""""""}] [{""""""""}] [{"""a"b""c"""}]")?
+  println("escaped [{"""\"\t\u{e9}\{x\}"""}]")?
+  println("held [{"""<a href="{"""{who}/x"""}">{who}</a>"""}]")?
 
   let sentence = "  the quick  brown fox  "
   println("length {sentence.length()}")?
