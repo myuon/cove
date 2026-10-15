@@ -59,8 +59,28 @@
 // does not. `<% %>` without the `=` — ERB's statement form — has no meaning
 // here for the same reason, and is text. There is no element tree either:
 // `<td class=at>` is written as `<td class=at>`, not translated into a call.
-// And nothing here renders a page — `render` hands back the text, and what is
+// And nothing here serves a page — `render` hands back the text, and what is
 // done with it belongs to whatever is serving.
+//
+// # Where a bad hole is answered
+//
+// A template takes a check away. `{h(app.nmae)}` was a compile error, because
+// the page named the field in Cove; `<%= nmae %>` is a string, and nothing
+// above the run can read it. Something has to put that check back, and this
+// module puts it in `render`, which answers a `Result`.
+//
+// `fill` does not, and the asymmetry is the point. `fill` runs once per row
+// and once per cell, so making it fallible would put a `?` at every one of
+// those sites, in code whose whole value is that it reads like the markup it
+// makes. `render` runs once per page, at the boundary where markup becomes a
+// response — a place that is already fallible. So a bad hole is written down
+// on the `Html`, travels with it through every composition, and is answered
+// once.
+//
+// What is refused is a path that does not reach a value — one rule, with no
+// exception for an index past the end. A struct's fields are settled when it
+// is declared and a fixed index is a claim about the shape of the data, so
+// either way a path that misses is a mistake in the template.
 
 use std.stringbuilder.StringBuilder
 
@@ -69,11 +89,30 @@ use std.stringbuilder.StringBuilder
 /// It is `opaque`, which is the whole of its safety. The only values of this
 /// type are ones [`fill`] built and ones [`markup`] was told about, so
 /// `markup` is the single way text can reach a page unescaped — one name for a
-/// review to grep for, where an escaping helper called at 259 sites is 259
+/// review to grep for, where an escaping helper called at 179 sites is 179
 /// places a reader has to decide about.
+///
+/// It carries a second thing, and that is what lets [`render`] refuse. A hole
+/// whose path names no field is a mistake in the template and there is no
+/// input that makes it one, so somebody has to be told. `fill` cannot be the
+/// one to tell them — it runs once per row and once per cell — so it writes
+/// the problem down here and `render`, which runs once per page, answers it.
 export opaque struct Html {
   /// The markup, as it will be written.
   said: String
+
+  /// The first thing that went wrong building it, or `""` where nothing did.
+  ///
+  /// The *first* and not all of them: a page with two bad holes is one bug
+  /// report, and the hole to name is the one a reader will find first in the
+  /// template.
+  ///
+  /// It survives composition, which is the property the whole arrangement
+  /// rests on. An `Html` put into another template through a hole hands its
+  /// problem to the `Html` that comes out, and so does one that arrives in a
+  /// list of markup, so a mistake in the innermost fragment is still there to
+  /// be answered at the outermost `render`.
+  wrong: String
 }
 
 /// Markup that was written by hand, taken at its word.
@@ -83,7 +122,7 @@ export opaque struct Html {
 /// Text that came from outside the program goes through [`fill`] as data,
 /// where it is escaped because its type is not this one.
 export fn markup(said: String) -> Html {
-  Html(said: said)
+  Html(said: said, wrong: "")
 }
 
 /// No markup at all: what a page puts where a part is absent.
@@ -91,16 +130,39 @@ export fn markup(said: String) -> Html {
 /// A field of type `Html` has to hold something, and `""` is not an `Html`, so
 /// this is what a `None` becomes on the way into a view model.
 export fn empty() -> Html {
-  Html(said: "")
+  Html(said: "", wrong: "")
 }
 
-/// The text of a page, for whatever is going to serve it.
+/// The text of a page, or the first thing that went wrong building it.
 ///
 /// The one way out, as [`markup`] is the one way in. Everything between the
 /// two is `Html`, so nothing in the middle of building a page is a `String`
 /// that somebody might concatenate unescaped.
-export fn render(page: Html) -> String {
-  page.said
+///
+/// **This is where a bad hole is answered, and it is the only place it could
+/// be.** What it refuses is a template that asks for something its data
+/// cannot have — `<%= nmae %>` against a struct with a `name`. That is a
+/// programming error, no request can cause it, and before this module existed
+/// the compiler caught it, because the page named the field in Cove. A
+/// template takes that check away, so something has to put it back, and the
+/// only honest place is a failing call: a test goes red and a request answers
+/// 500, instead of a page shipping with a marker in it.
+///
+/// The rule is one sentence — a path that does not reach a value is an error
+/// — and [`fill`] says why an index past the end is not the exception it
+/// looks like.
+///
+/// **Fallible here and not in `fill`** is the whole of the trade. `fill` runs
+/// once per row and once per cell, so a `Result` there would put a `?` or a
+/// `match` into code whose point is that it reads like the markup it makes.
+/// `render` runs once per page: one `?` at the boundary where markup becomes
+/// a response, which is a place that is already fallible for half a dozen
+/// other reasons.
+export fn render(page: Html) -> Result<String, Error> {
+  if page.wrong != "" {
+    return Err(Error(page.wrong))
+  }
+  Ok(page.said)
 }
 
 /// `template` with every hole filled from `data`.
@@ -143,35 +205,65 @@ export fn render(page: Html) -> String {
 /// list a page loops over is usually a list of rows and no rows should be no
 /// markup.
 ///
-/// # A hole that goes wrong is loud
+/// # A path that does not reach a value is an error
 ///
-/// A path that reaches nothing renders `[no such path: whatever.was.asked]`,
-/// and a `<%=` that is never closed renders `[unclosed <%=: …]` naming what it
-/// opened. Both are escaped like any other hole, so neither can open a tag.
+/// That is the whole of the rule, and it is one sentence on purpose. A
+/// segment that names no field — `<%= nmae %>` against a struct with a
+/// `name`, or `<%= who.said %>` reaching into an opaque value — is a mistake
+/// in the template, because a struct's fields are fixed when it is declared.
+/// So is text between the delimiters that is not a path at all: a trailing
+/// `.`, a bracket with no number in it, a space in the middle of a name. So
+/// is a `<%=` that is never closed. Each is written down on the `Html` and
+/// [`render`] refuses with it.
 ///
-/// They are visible markers and not silent empty strings because a misspelt
-/// field — `<%= nmae %>` — is a programming error, and a page that quietly
-/// loses a column looks exactly like a page whose column was empty. A marker
-/// is the one form of that error a test, or a glance at the page, cannot miss.
+/// **An index past the end is not the exception it looks like.** It is
+/// tempting to let `<%= items[5] %>` against three items put in nothing, on
+/// the grounds that the length depends on the data and a short list is
+/// something a page legitimately shows. But a fixed index is the template
+/// *asserting* there is a sixth item — a claim about the shape of the data,
+/// and a claim that is false is a mistake like any other. A page whose length
+/// really does vary loops in Cove and hands over an `Array<Html>`, which is
+/// what a list hole and `<%= . %>` are for. (An empty list put in whole still
+/// puts in nothing; no rows is no markup. It is indexing that makes a claim.)
+///
+/// Letting it through would also have been the very shape this module stopped
+/// doing: renders something, fails nothing. A hole that quietly contributes
+/// nothing is a hole nobody notices, which is the marker's problem wearing
+/// different clothes.
 ///
 /// **The delimiters are what make this possible, and that is the second thing
 /// they buy.** A hole has a beginning and an end, so the text between them is
-/// a path or it is nothing: a malformed path is refused with the same marker
-/// as a path that misses. Under a sigil the scanner could only read as far as
-/// it understood and leave the rest as text, so `$.limits.maxQued` and
-/// `$.limits.max Qued` failed in two different ways, one loudly and one not at
-/// all.
+/// a path or it is nothing, and a malformed path is refused like a path that
+/// misses. Under a sigil the scanner could only read as far as it understood
+/// and leave the rest as text, so `$.limits.maxQued` and `$.limits.max Qued`
+/// failed in two different ways, one loudly and one not at all.
 ///
-/// **And it is a marker rather than a `Result`.** `fill` is called once per
-/// row and once per cell, so answering a `Result` would put a `?` or a `match`
-/// at every one of those sites, in code whose whole point is that it reads
-/// like the markup it produces — for an error that no input can cause and that
-/// the first run finds. The binding is checked at run time either way; this is
-/// only about who pays for it (ADR 0099's "The binding is a run-time check").
+/// # Why a hole that goes wrong puts in nothing
+///
+/// It used to put in `[no such path: nmae]`, a marker loud enough that a
+/// glance at the page would catch it. The marker is gone, and what replaced
+/// it is not a quieter version of the same thing but a louder one in a
+/// different place.
+///
+/// A marker is loud in the output and silent everywhere a program is checked.
+/// That was measured and not supposed: one hole misspelt on a page that
+/// renders on every view of it, and the program's `check` reported nothing
+/// and its 58 tests all passed. A page would have shipped reading
+/// `[no such path: nmae]`, having passed every gate it had. Loud where a
+/// person might look and silent where a machine does look is exactly the
+/// wrong way round.
+///
+/// So the problem is carried instead, and `render` refuses. Once it does, the
+/// text of a broken `Html` cannot be observed at all — `render` is the only
+/// way out of this type, and a broken `Html` composed into a whole page
+/// breaks that page too — so a marker in it would be text nobody can read.
+/// Nothing is put in, and the problem goes to the one place that can answer
+/// it.
 export fn fill(template: String, data: Any) -> Html {
   let end = template.byteLength()
   var out = StringBuilder.withCapacity(end + 32)
   let root = core.dynamicOpen(data)
+  var wrong = ""
   var at = 0
   var copied = 0
   while at < end {
@@ -180,12 +272,17 @@ export fn fill(template: String, data: Any) -> Html {
       let inner = at + opener().byteLength()
       let close = core.stringFind(template, closer(), inner)
       if close < 0 {
-        let rest = core.stringSlice(template, inner, end - inner)
-        out.append(unclosed(rest.trim()))
+        if wrong == "" {
+          wrong = unclosed(template)
+        }
         at = end
       } else {
         let path = core.stringSlice(template, inner, close - inner)
-        out.append(place(root, path.trim()))
+        let hole = place(root, path.trim(), template)
+        out.append(hole.said)
+        if wrong == "" {
+          wrong = hole.wrong
+        }
         at = close + closer().byteLength()
       }
       copied = at
@@ -194,7 +291,39 @@ export fn fill(template: String, data: Any) -> Html {
     }
   }
   out.appendSlice(template, copied, end)
-  Html(said: out.finish())
+  Html(said: out.finish(), wrong: wrong)
+}
+
+/// What a hole put into the page, and what went wrong putting it there.
+///
+/// Two fields because a hole has three outcomes and not two: some text,
+/// nothing at all, and a problem. Both empty is the middle one, and since an
+/// index past the end became an error there is exactly one way to reach it —
+/// a list with no elements, put in whole.
+struct Hole {
+  said: String
+  wrong: String
+}
+
+/// A hole that found nothing to put in and nothing to complain about.
+///
+/// An empty list of markup, and nothing else. A list a page loops over is a
+/// list of rows and no rows is no markup, which is a page doing its job —
+/// unlike `<%= rows[0] %>` against the same list, where the template claimed
+/// there was a first row.
+fn nothing() -> Hole {
+  Hole(said: "", wrong: "")
+}
+
+/// A hole whose path asked for something `data` cannot have.
+///
+/// The message names the path, which is what has to be fixed, and the
+/// template it was in, which is where to fix it. The template goes in whole
+/// rather than quoted around the hole: this is read once, by whoever is
+/// looking at the failing test, and the markup around a hole is how they will
+/// recognise which of a page's templates it is.
+fn noSuchPath(path: String, template: String) -> Hole {
+  Hole(said: "", wrong: "no such path `{path}` in template \"{template}\"")
 }
 
 /// What opens a hole.
@@ -287,19 +416,25 @@ fn isDigitByte(byte: Int) -> Bool {
 }
 
 /// What the hole whose path is `path` puts in, escaped or not as the type the
-/// path reaches decides.
+/// path reaches decides, and the problem it ran into if it ran into one.
 ///
 /// `path` is the text between the delimiters with its space trimmed off, so
 /// this reads a path and nothing else: `.`, or a name, or a name with `[n]`
 /// after it, joined by `.`. **The whole of it has to be a path.** A trailing
 /// `.`, a bracket with no number in it, a space in the middle — each is a
-/// programming error and answers [`missing`], where a scanner that had no
-/// closing delimiter to stop at could only read as far as it understood and
-/// leave the rest as markup.
-fn place(root: DynamicView, path: String) -> String {
+/// mistake in the template and answers [`noSuchPath`], where a scanner that
+/// had no closing delimiter to stop at could only read as far as it
+/// understood and leave the rest as markup. So is an index past the end: the
+/// walk stops at the index rather than carrying on into a child that is not
+/// there, so `<%= rows[9].at %>` against four rows is refused for `rows[9]`
+/// and never asks about `at`.
+///
+/// `template` is carried only so a message can name it. It is read on the
+/// failing path and nowhere else.
+fn place(root: DynamicView, path: String, template: String) -> Hole {
   let end = path.byteLength()
   if end == 0 {
-    return missing(path)
+    return noSuchPath(path, template)
   }
   if end == 1 && path.byteAt(0) == '.' {
     return placed(root)
@@ -309,17 +444,17 @@ fn place(root: DynamicView, path: String) -> String {
   while at < end {
     if at > 0 {
       if path.byteAt(at) != '.' {
-        return missing(path)
+        return noSuchPath(path, template)
       }
       at = at + 1
     }
     let stop = nameEnd(path, at, end)
     if stop == at {
-      return missing(path)
+      return noSuchPath(path, template)
     }
     let field = fieldOf(view, core.stringSlice(path, at, stop - at))
     if field < 0 {
-      return missing(path)
+      return noSuchPath(path, template)
     }
     view = core.dynamicChild(view, field)
     at = stop
@@ -329,14 +464,14 @@ fn place(root: DynamicView, path: String) -> String {
       }
       let digits = digitEnd(path, at + 1, end)
       if digits == at + 1 || digits >= end || path.byteAt(digits) != ']' {
-        return missing(path)
+        return noSuchPath(path, template)
       }
       if !isList(core.dynamicKind(view)) {
-        return missing(path)
+        return noSuchPath(path, template)
       }
       let index = number(path, at + 1, digits)
       if index >= core.dynamicChildCount(view) {
-        return missing(path)
+        return noSuchPath(path, template)
       }
       view = core.dynamicChild(view, index)
       at = digits + 1
@@ -345,29 +480,44 @@ fn place(root: DynamicView, path: String) -> String {
   placed(view)
 }
 
-/// The text a view puts in: markup whole, a list of markup one after another,
-/// and anything else rendered and escaped.
-fn placed(view: DynamicView) -> String {
+/// What a view puts in: markup whole, a list of markup one after another, and
+/// anything else rendered and escaped.
+///
+/// **This is where a problem propagates.** An `Html` carries one, so a
+/// fragment built from a template with a bad hole in it hands that problem to
+/// whatever puts the fragment in, and a list of markup hands on the first
+/// problem any of its parts carries. The page the outermost `fill` answers is
+/// therefore refused by `render` wherever in the composition the mistake was
+/// written, which is the only arrangement worth having: a page is assembled
+/// out of a dozen small templates and the broken one is rarely the outer.
+fn placed(view: DynamicView) -> Hole {
   if isHtml(view) {
-    return core.dynamicString(core.dynamicChild(view, 0))
+    return Hole(
+      said: core.dynamicString(core.dynamicChild(view, 0)),
+      wrong: core.dynamicString(core.dynamicChild(view, 1)),
+    )
   }
   if isList(core.dynamicKind(view)) {
     let count = core.dynamicChildCount(view)
     if count == 0 {
-      return ""
+      return nothing()
     }
     if everyChildIsHtml(view, count) {
       var out = StringBuilder.withCapacity(16 * count)
+      var wrong = ""
       var at = 0
       while at < count {
         let part = core.dynamicChild(view, at)
         out.append(core.dynamicString(core.dynamicChild(part, 0)))
+        if wrong == "" {
+          wrong = core.dynamicString(core.dynamicChild(part, 1))
+        }
         at = at + 1
       }
-      return out.finish()
+      return Hole(said: out.finish(), wrong: wrong)
     }
   }
-  escape(renderValue(view, maxDepth()))
+  Hole(said: escape(renderValue(view, maxDepth())), wrong: "")
 }
 
 /// Whether `kind` is an `Array` or a `Vector`, the two a `$.items[2]` indexes
@@ -393,35 +543,24 @@ fn everyChildIsHtml(view: DynamicView, count: Int) -> Bool {
   true
 }
 
-/// `[no such path: …]`, naming the path the hole asked for.
+/// What [`render`] says about a `<%=` that is never closed.
 ///
-/// Escaped like every other hole, so a marker is inert wherever it lands —
-/// between tags or inside an attribute's quotes. The path came out of the
-/// template rather than out of the data, so there is nothing hostile in it to
-/// escape; escaping it anyway means there is no second rule to get wrong the
-/// day a marker learns to quote something that did.
-fn missing(path: String) -> String {
-  escape("[no such path: {path}]")
-}
-
-/// `[unclosed <%=: …]`, naming the text a hole was opened in front of.
-///
-/// The rest of the template is inside the hole, because nothing closed it, so
-/// the rest of the template is what the marker names — which makes the page
-/// obviously broken rather than subtly short, and loses none of it. Escaped,
-/// so a tail full of markup arrives as text.
-fn unclosed(rest: String) -> String {
-  escape("[unclosed {opener()}: {rest}]")
+/// Nothing escapes any of this. A message goes to whoever is reading a
+/// failing test, not onto a page, so the one rule about where a marker could
+/// land and what it could close is gone with the marker — which is a rule
+/// fewer to get wrong.
+fn unclosed(template: String) -> String {
+  "an unclosed `{opener()}` in template \"{template}\""
 }
 
 /// The number the digits from `at` up to `to` spell, stopping at
 /// [`tooFarAlong`].
 ///
 /// A template is text somebody typed, so the digits in it are not bounded by
-/// anything, and `$.words[99999999999999999999]` must answer the marker rather
-/// than stop the run on an overflow. Nothing is lost by stopping: an index at
-/// the bound is past the end of every collection a run can hold, so it reaches
-/// nothing either way.
+/// anything, and `<%= words[99999999999999999999] %>` must be refused as a
+/// path that misses rather than stop the run on an overflow. Nothing is lost
+/// by stopping: an index at the bound is past the end of every collection a
+/// run can hold, so it reaches nothing either way.
 fn number(template: String, at: Int, to: Int) -> Int {
   var value = 0
   var scan = at
@@ -468,12 +607,12 @@ fn fieldOf(view: DynamicView, name: String) -> Int {
 ///
 /// There is no type identity to ask for — `core.dynamicTypeName` answers a
 /// declared name with no module on it — so this asks for the whole shape this
-/// module's declaration has: an `opaque` struct called `Html` with one field,
-/// a `String`. A program that declares its own `export opaque struct Html {
-/// said: String }` would be taken for this one; nothing can tell them apart
-/// from here, and the cost of being wrong is that a program's own type is
-/// trusted as markup, which is a thing that program could have done with
-/// [`markup`] anyway.
+/// module's declaration has: an `opaque` struct called `Html` with two
+/// `String` fields, the markup and the problem. A program that declares its
+/// own `export opaque struct Html { said: String, wrong: String }` would be
+/// taken for this one; nothing can tell them apart from here, and the cost of
+/// being wrong is that a program's own type is trusted as markup, which is a
+/// thing that program could have done with [`markup`] anyway.
 fn isHtml(view: DynamicView) -> Bool {
   // Struct
   if core.dynamicKind(view) != 6 {
@@ -485,11 +624,15 @@ fn isHtml(view: DynamicView) -> Bool {
   if core.dynamicTypeName(view) != "Html" {
     return false
   }
-  if core.dynamicChildCount(view) != 1 {
+  if core.dynamicChildCount(view) != 2 {
     return false
   }
   // String
-  core.dynamicKind(core.dynamicChild(view, 0)) == 5
+  if core.dynamicKind(core.dynamicChild(view, 0)) != 5 {
+    return false
+  }
+  // String
+  core.dynamicKind(core.dynamicChild(view, 1)) == 5
 }
 
 /// `text` with the five characters that mean something to a parser written as
