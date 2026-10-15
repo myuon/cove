@@ -6,7 +6,7 @@
   [ADR 0100](0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md)'s
   line breaks as content, **for `html"""…"""` only**; and
   [ADR 0101](0101-a-page-is-markup-with-an-expression-in-every-hole.md)'s
-  holes anywhere in markup — a hole inside a tag is now `name={…}` or refused
+  hole lowering, for a hole that is an attribute's whole value
 - Refers to:
   [ADR 0102](0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md);
   minicloud's `apps/admin` as of `0ec48da` (v0.28.0), where every figure
@@ -14,9 +14,10 @@
 - Decides: that in a multi-line `html"""` a line break, with the indentation
   around it, is **nothing between two tag-or-hole edges and one space
   anywhere else**, so markup is laid out without a `\` on every line; and that
-  inside a tag a value goes in **only as `name={expr}`, the whole value** —
-  quoted and escaped by the lowering, or, for a `Bool` or an `Option`, the
-  attribute present or absent — with any other hole inside a tag refused
+  an attribute whose whole value is a hole, **`name={expr}`**, is quoted and
+  escaped by the lowering — or, for a `Bool` or an `Option`, present or
+  absent — and is **the spelling the language recommends** for a value in an
+  attribute, by convention and documentation rather than by refusal
 
 ## Context
 
@@ -45,8 +46,8 @@ hole inside quotes (`href="{base}/kv?prefix={p}"`: `href` 32, `class` 11,
 is not escaped and the hole's is; and the attributes that are there or not
 are `Html` fragments that begin with a space — `current(here)` answering
 `html" aria-current=page"`, `mark` answering `html" checked"`, and
-`<li{mark}>`. The owner wants one way, JSX's: `class={…}`, and wants the
-others refused rather than discouraged.
+`<li{mark}>`. The owner wants one way to be the way people write it, JSX's:
+`class={…}` — as a convention, not a rule the compiler enforces.
 
 ## Decision
 
@@ -93,16 +94,14 @@ between two tags that holds a line break goes, and elsewhere it is one space.
 JSX's rule — a line break next to a tag goes — was the other candidate and
 is rejected below.
 
-### Inside a tag, a value is `name={expr}`
+### An attribute's value is written `name={expr}`
 
 The lowering reads an `html` literal's text far enough to know whether a
 position is **inside a tag**: `<` followed by a letter, `/` or `!` opens one,
 `>` outside quotes closes it, and inside it `"` and `'` open and close a
-quoted value. Inside a tag:
-
-- **`name={expr}`** — `=` directly before the hole, and whitespace, `>` or `/`
-  directly after it — is the value of attribute `name`, decided by the type
-  of `expr`:
+quoted value. Inside a tag, **`name={expr}`** — `=` directly before the hole,
+and whitespace, `>` or `/` directly after it — is the value of attribute
+`name`, decided by the type of `expr`:
 
   | `expr`'s type | what is written |
   | --- | --- |
@@ -118,15 +117,16 @@ quoted value. Inside a tag:
   html"""<li class={if item.level == "" { None } else { Some("is-{item.level}") }}>"""
   ```
 
-  The value is built as an ordinary `String` — interpolation, `if`, a call —
-  and escaped **once**, as a whole, so `&after=` is written as `&after=` and
-  comes out `&amp;after=`.
+The value is built as an ordinary `String` — interpolation, `if`, a call —
+and escaped **once**, as a whole, so `&after=` is written as `&after=` and
+comes out `&amp;after=`.
 
-- **Any other hole inside a tag is refused**, with a diagnostic that shows the
-  `name={…}` spelling: a hole inside a quoted value (`class="state {x}"`), as
-  part of an unquoted one (`class=v{x}`), where an attribute's name goes
-  (`<li{mark}>`), or in a tag's name. **It is an error, not a warning**: there
-  is one way to put a value in an attribute, and the compiler is the linter.
+**This is the recommended spelling, and nothing else changes.** A hole inside
+a quoted value (`class="state {x}"`) still works exactly as ADR 0101 lowers
+it, escaped where it sits, and so does any other hole; the language reference
+and `std.html`'s documentation write attributes as `name={…}` and say why,
+and code in this repository follows that. Whether a lint should ask for it is
+left Open.
 
 A static attribute is untouched — `class=title`, `class="state removed"`,
 `type=checkbox checked` are text, as before. A hole between tags is untouched
@@ -134,9 +134,9 @@ A static attribute is untouched — `class=title`, `class="state removed"`,
 
 This is JSX's notation (`className={…}`, `checked={x}`, an `undefined` value
 leaving the attribute out) and the familiar one for the effect the owner asked
-for. It also settles part of ADR 0101's Open item on context: **a value can no
-longer reach an unquoted attribute**, because the lowering writes the quotes,
-and a hole can no longer sit where an attribute's name goes.
+for. Written this way, a value never reaches an unquoted attribute, because
+the lowering writes the quotes — which narrows ADR 0101's Open item on context
+for code that follows the convention, and does not close it.
 
 ## Consequences
 
@@ -151,9 +151,9 @@ fragments go, and the hand-written `&amp;` goes.
 **The tag tracking is HTML knowledge in the compiler**, which ADR 0101 avoided
 by having the lowering know only types. It is kept as small as the decision
 needs — the five transitions above, no element names, no nesting, no
-validation of the markup — and every rendering choice still calls `std.html`.
-Cove has no compile-time evaluation of Cove, so a check that must refuse at
-compile time has nowhere else to live.
+validation of the markup, no refusals — and every rendering choice still calls
+`std.html`. It is needed only so that `a={x}` in a sentence between tags is not
+taken for an attribute.
 
 ## Alternatives rejected
 
@@ -161,10 +161,11 @@ compile time has nowhere else to live.
 `its` ⏎ `<code>` renders `its<code>`, and JSX code writes `{" "}` to put the
 space back. Prose wrapped before an inline tag is common in the admin's pages.
 
-**A warning instead of an error** for a hole inside a quoted value. It is
-safe — the hole is escaped — so a warning would be defensible. Rejected
-because the point is one spelling, and a warning is a second spelling the
-compiler tolerates.
+**Refusing every other hole inside a tag**, so that `name={…}` is the only
+spelling the compiler accepts. Drafted first, and withdrawn on the owner's
+word: the recommended spelling is a convention, a hole inside a quoted value
+is safe — it is escaped — and making the compiler police style is a larger
+thing than this needs.
 
 **`class` lists** (Vue's `:class="[a, {b: cond}]"`, Svelte's
 `class:name={cond}`). The admin builds class values with an `if` in a
@@ -178,5 +179,6 @@ either. Left Open.
 
 - Holes inside `<script>` / `<style>`, and `javascript:` in a URL value: still
   ADR 0101's Open item.
-- Whether `\` at the end of a line in `html"""`, now nearly always redundant,
-  should itself become an error.
+- A lint asking for `name={…}` over a hole inside a quoted value, and for no
+  `\` at the end of a line in `html"""` where the line-break rule already
+  gives the same bytes. Neither is decided here.
