@@ -3,13 +3,15 @@
 //! an `if`/`else` one of whose branches is `html""`, which is `html.only`,
 //! and an `if`/`else` whose branches are `html` literals that differ only in
 //! text between the same markup, which is one literal with the `if` in a
+//! hole — or by something one of them adds, which is `html.only` of it in a
 //! hole.
 //!
 //! What is here is the comparison and the rewrite, over a literal already
 //! reduced to [`Atom`]s: the checker decides which `if`s qualify — exactly
 //! an `if` and an `else`, branch types — and what each hole's source and type
 //! are. Nothing here reads the markup. A literal is compared as text, a
-//! character at a time, and a differing part is looked at for five
+//! character at a time, the cut between what is common and what differs
+//! is placed by `<` and `>`, and a differing part is looked at for five
 //! characters, which is the line
 //! [ADR 0103](../../../docs/adr/0103-in-html-a-line-break-is-spacing.md)
 //! drew.
@@ -117,19 +119,38 @@ pub(crate) fn split(a: &[Atom], b: &[Atom]) -> Split {
 
 /// The help for an `if` one of whose branches is `html""`: `condition` is
 /// already negated when the empty branch was the `if` branch, and `markup`
-/// is the other branch as written.
-pub(crate) fn only_help(condition: &str, markup: &str) -> String {
-    format!(
-        "write `html.only({condition}, {markup})` — or, if that markup is only safe to build \
-         when the condition holds, an `Option` hole (ADR 0104)"
-    )
+/// is the other branch as written, or `None` when it is a block with
+/// statements — which would not read on one line inside a call.
+pub(crate) fn only_help(condition: &str, markup: Option<&str>) -> String {
+    let rest = "— or, if that markup is only safe to build when the condition holds, an `Option` \
+                hole (ADR 0104)";
+    match markup {
+        Some(markup) => format!("write `html.only({condition}, {markup})` {rest}"),
+        None => format!(
+            "move this branch into a function answering `Html`, then write \
+             `html.only({condition}, thatFunction(…))` {rest}"
+        ),
+    }
 }
 
 /// The help for an `if` whose branches are the two `html` literals `a` (the
 /// `if` branch) and `b` (the `else`), or `None` when the `if` does not have
-/// the shape: what differs holds one of the five characters a hole escapes,
-/// or a hole that puts markup in.
-pub(crate) fn same_markup_help(condition: &str, a: &[Atom], b: &[Atom]) -> Option<String> {
+/// the shape. `condition` is the condition as written and `negated` its
+/// negation.
+///
+/// When one literal is the other with something added, the help is
+/// `html.only` of what is added, in a hole where it goes. Otherwise the
+/// common beginning is cut back to end at a tag's `>` and the common end to
+/// start at a `<` — so the part that moves is never half a run of text —
+/// and the help is a choice between two `String`s in a hole, unless what
+/// differs holds one of the five characters a hole escapes, or a hole that
+/// puts markup in.
+pub(crate) fn same_markup_help(
+    condition: &str,
+    negated: &str,
+    a: &[Atom],
+    b: &[Atom],
+) -> Option<(Shape, String)> {
     let Split { prefix, suffix } = split(a, b);
     let middle_a = &a[prefix..a.len() - suffix];
     let middle_b = &b[prefix..b.len() - suffix];
@@ -140,21 +161,113 @@ pub(crate) fn same_markup_help(condition: &str, a: &[Atom], b: &[Atom]) -> Optio
         } else {
             format!(": `html\"{whole}\"`")
         };
-        return Some(format!(
-            "both branches are the same markup, so the `if` can go and either branch stand in \
-             its place{shown}"
+        return Some((
+            Shape::Differs,
+            format!(
+                "both branches are the same markup, so the `if` can go and either branch stand \
+                 in its place{shown}"
+            ),
         ));
     }
+    if middle_a.is_empty() || middle_b.is_empty() {
+        let (longer, condition) = if middle_a.is_empty() {
+            (b, negated)
+        } else {
+            (a, condition)
+        };
+        if let Some(at) = insertion(longer, prefix, longer.len() - prefix - suffix) {
+            let added = &longer[at..at + longer.len() - prefix - suffix];
+            let before = elided_end(&longer[..at]);
+            let after = elided_start(&longer[at + added.len()..]);
+            return Some((
+                Shape::Added,
+                format!(
+                    "add it with `html.only` where it goes: \
+                     `html\"{before}{{html.only({condition}, html\"{}\")}}{after}\"`",
+                    written(added),
+                ),
+            ));
+        }
+    }
+    let prefix = at_a_tag_end(&a[..prefix]);
+    let suffix = suffix - at_a_tag_start(&a[a.len() - suffix..]);
+    let middle_a = &a[prefix..a.len() - suffix];
+    let middle_b = &b[prefix..b.len() - suffix];
     if !middle_a.iter().chain(middle_b).all(Atom::movable) {
         return None;
     }
     let before = elided_end(&a[..prefix]);
     let after = elided_start(&a[a.len() - suffix..]);
-    Some(format!(
-        "put the `if` where they differ: `html\"{before}{{if {condition} {{ \"{}\" }} else {{ \"{}\" }}}}{after}\"`",
-        written(middle_a),
-        written(middle_b),
+    Some((
+        Shape::Differs,
+        format!(
+            "put the `if` where they differ: `html\"{before}{{if {condition} {{ \"{}\" }} else {{ \"{}\" }}}}{after}\"`",
+            written(middle_a),
+            written(middle_b),
+        ),
     ))
+}
+
+/// Which of B's two shapes an `if` has, which the message names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shape {
+    /// The two literals differ in text between the same markup, or not at
+    /// all.
+    Differs,
+    /// One literal is the other with something added.
+    Added,
+}
+
+fn is_char(atom: &Atom, c: char) -> bool {
+    matches!(atom, Atom::Char(x) if *x == c)
+}
+
+fn is_bracket(atom: &Atom) -> bool {
+    is_char(atom, '<') || is_char(atom, '>')
+}
+
+/// Where the `count` atoms that `longer` holds at `at` and the other literal
+/// does not are taken to start, or `None` when no reading of them is whole
+/// markup or plain text. The comparison puts an insertion as late as it can
+/// go, so `<p>a</p>` against `<p>a<br></p>` finds `br><`; sliding it back
+/// while the atom before it is the same as its last finds `<br>`.
+fn insertion(longer: &[Atom], mut at: usize, count: usize) -> Option<usize> {
+    let whole = |at: usize| {
+        let added = &longer[at..at + count];
+        !added.iter().any(is_bracket)
+            || (is_char(&added[0], '<') && is_char(&added[count - 1], '>'))
+    };
+    loop {
+        if whole(at) {
+            return Some(at);
+        }
+        if at == 0 || !longer[at - 1].same(&longer[at + count - 1]) {
+            return None;
+        }
+        at -= 1;
+    }
+}
+
+/// How much of a common beginning to keep so that it does not stop in the
+/// middle of a run of text: all of it when it stops inside a tag, which is
+/// not text; otherwise up to just after its last `>`, or none of it.
+fn at_a_tag_end(prefix: &[Atom]) -> usize {
+    match prefix.iter().rposition(is_bracket) {
+        Some(at) if is_char(&prefix[at], '<') => prefix.len(),
+        Some(at) => at + 1,
+        None => 0,
+    }
+}
+
+/// How many atoms to drop from the front of a common end so that it does
+/// not start in the middle of a run of text: none when it starts inside a
+/// tag; otherwise everything before its first `<`, or all of it.
+fn at_a_tag_start(suffix: &[Atom]) -> usize {
+    match suffix.iter().position(is_bracket) {
+        Some(at) if is_char(&suffix[at], '>') => 0,
+        Some(at) => at,
+        None => suffix.len(),
+    }
 }
 
 /// A common beginning as written, with all but its last few characters
@@ -223,7 +336,7 @@ mod tests {
     }
 
     fn help(a: &str, b: &str) -> Option<String> {
-        same_markup_help("up", &atoms(a), &atoms(b))
+        same_markup_help("up", "!up", &atoms(a), &atoms(b)).map(|(_, help)| help)
     }
 
     #[test]
@@ -308,21 +421,46 @@ mod tests {
     }
 
     #[test]
-    fn one_side_may_be_empty() {
+    fn what_one_side_adds_is_html_only_where_it_goes() {
         assert_eq!(
             help("<b>x</b>", "<b></b>").unwrap(),
-            "put the `if` where they differ: `html\"<b>{if up { \"x\" } else { \"\" }}</b>\"`"
+            "add it with `html.only` where it goes: `html\"<b>{html.only(up, html\"x\")}</b>\"`"
         );
+        // Added inside a tag, it is still markup, so it stays `html`.
+        assert_eq!(
+            help("<ul class=tree>", "<ul>").unwrap(),
+            "add it with `html.only` where it goes: `html\"<ul{html.only(up, html\" class=tree\")}>\"`"
+        );
+        // Added by the `else`, under the negated condition.
+        assert_eq!(
+            help("<ul>", "<ul class=tree>").unwrap(),
+            "add it with `html.only` where it goes: `html\"<ul{html.only(!up, html\" class=tree\")}>\"`"
+        );
+        // What is added may hold any character, since it stays markup.
+        assert!(help("<p>a &amp; b</p>", "<p>a</p>")
+            .unwrap()
+            .contains("{html.only(up, html\" &amp; b\")}"),);
+    }
+
+    #[test]
+    fn an_added_tag_is_found_whole() {
+        // The comparison alone finds `br><` between `<p>a<` and `/p>`.
+        assert_eq!(
+            help("<p>a</p>", "<p>a<br></p>").unwrap(),
+            "add it with `html.only` where it goes: `html\"<p>a{html.only(!up, html\"<br>\")}</p>\"`"
+        );
+        // An addition that is text and part of a tag, however it is slid,
+        // is no one thing, and is left alone.
+        assert_eq!(help("<p></p>", "<p>x<b></p>"), None);
     }
 
     #[test]
     fn a_difference_holding_an_escaped_character_is_left_alone() {
         for (a, b) in [
             ("<b>x</b>", "<i>x</i>"),
-            ("<p>a</p>", "<p>a<br></p>"),
-            ("<p>a &amp; b</p>", "<p>a</p>"),
+            ("<p>a &amp; b</p>", "<p>a | b</p>"),
             ("<p>say \"hi\"</p>", "<p>hi</p>"),
-            ("<p>it's</p>", "<p>its</p>"),
+            ("<p>it's on</p>", "<p>its off</p>"),
         ] {
             assert_eq!(help(a, b), None, "{a} against {b}");
         }
@@ -331,8 +469,31 @@ mod tests {
     #[test]
     fn a_difference_holding_a_markup_hole_is_left_alone() {
         assert_eq!(help("<p>{!icon} up</p>", "<p>down</p>"), None);
-        // A markup hole both sides share is common, and does not move.
-        assert!(help("<p>{!icon} up</p>", "<p>{!icon} down</p>").is_some());
+        // A hole in a run of text is part of the text, so a markup hole the
+        // two share moves with the words beside it, and keeps the `if` out.
+        assert_eq!(help("<p>{!icon} up</p>", "<p>{!icon} down</p>"), None);
+        // Between tags of its own it is common, and stays where it is.
+        assert!(help("<p>{!icon}<b>up</b></p>", "<p>{!icon}<b>down</b></p>").is_some());
+    }
+
+    #[test]
+    fn a_run_of_text_moves_whole() {
+        // The two sentences share a beginning and a final `.`; neither is cut.
+        assert_eq!(
+            help("<p>The service is up.</p>", "<p>The service is down.</p>").unwrap(),
+            "put the `if` where they differ: `html\"<p>{if up { \"The service is up.\" } \
+             else { \"The service is down.\" }}</p>\"`"
+        );
+        // Text after a tag inside the same element moves from that tag on.
+        assert_eq!(
+            help(
+                "<p><b>Note:</b> it is up.</p>",
+                "<p><b>Note:</b> it is down.</p>"
+            )
+            .unwrap(),
+            "put the `if` where they differ: `html\"<p><b>Note:</b>{if up { \" it is up.\" } \
+             else { \" it is down.\" }}</p>\"`"
+        );
     }
 
     #[test]
@@ -350,7 +511,7 @@ mod tests {
         let tail = format!("</span>{}</div>", "y".repeat(70));
         let shown = help(&format!("{head}on{tail}"), &format!("{head}off{tail}")).unwrap();
         assert!(
-            shown.contains("{if up { \"n\" } else { \"ff\" }}"),
+            shown.contains("{if up { \"on\" } else { \"off\" }}"),
             "{shown}"
         );
         assert!(shown.contains("`html\"…"), "{shown}");
@@ -361,17 +522,23 @@ mod tests {
     #[test]
     fn only_names_the_condition_and_the_markup() {
         assert_eq!(
-            only_help("app.isAdmin", "html\"<b>x</b>\""),
+            only_help("app.isAdmin", Some("html\"<b>x</b>\"")),
             "write `html.only(app.isAdmin, html\"<b>x</b>\")` — or, if that markup is only \
              safe to build when the condition holds, an `Option` hole (ADR 0104)"
         );
+        assert_eq!(
+            only_help("app.isAdmin", None),
+            "move this branch into a function answering `Html`, then write \
+             `html.only(app.isAdmin, thatFunction(…))` — or, if that markup is only safe to \
+             build when the condition holds, an `Option` hole (ADR 0104)"
+        );
     }
 
-    /// What `cove check` warns about `body`, the body of a function in a
+    /// What `cove check` notes about `body`, the body of a function in a
     /// module that imports `std.html`, with `up: Bool`, `n: Int`,
     /// `name: String`, `icon: Html`, `icons: Array<Html>` and
     /// `note: Option<Html>` in scope — as `(code, message, help)`.
-    fn warnings(body: &str) -> Vec<(String, String, String)> {
+    fn notes(body: &str) -> Vec<(String, String, String)> {
         use std::collections::BTreeMap;
         use std::path::PathBuf;
 
@@ -413,14 +580,14 @@ mod tests {
         assert!(errors.is_empty(), "{body}: {errors:?}");
         diagnostics
             .into_iter()
-            .filter(|d| d.severity == Severity::Warning)
+            .filter(|d| d.severity == Severity::Note)
             .map(|d| (d.code, d.message, d.help.unwrap_or_default()))
             .collect()
     }
 
     #[track_caller]
-    fn warns(body: &str, code: &str) -> String {
-        let found = warnings(body);
+    fn noted(body: &str, code: &str) -> String {
+        let found = notes(body);
         assert_eq!(found.len(), 1, "{body}: {found:?}");
         assert_eq!(found[0].0, code, "{body}: {found:?}");
         found[0].2.clone()
@@ -428,41 +595,41 @@ mod tests {
 
     #[track_caller]
     fn quiet(body: &str) {
-        let found = warnings(body);
+        let found = notes(body);
         assert!(found.is_empty(), "{body}: {found:?}");
     }
 
     #[test]
     fn an_empty_else_is_html_only() {
-        let help = warns(
+        let help = noted(
             r#"if up { html"<b>{n}</b>" } else { html"" }"#,
             EMPTY_BRANCH,
         );
-        assert_eq!(help, only_help("up", r#"html"<b>{n}</b>""#));
+        assert_eq!(help, only_help("up", Some(r#"html"<b>{n}</b>""#)));
     }
 
     #[test]
     fn an_empty_if_branch_is_html_only_of_the_negated_condition() {
-        let help = warns(r#"if up { html"" } else { icon }"#, EMPTY_BRANCH);
-        assert_eq!(help, only_help("!up", "icon"));
-        let help = warns(r#"if up && n > 1 { html"" } else { icon }"#, EMPTY_BRANCH);
-        assert_eq!(help, only_help("!(up && n > 1)", "icon"));
-        let help = warns(
+        let help = noted(r#"if up { html"" } else { icon }"#, EMPTY_BRANCH);
+        assert_eq!(help, only_help("!up", Some("icon")));
+        let help = noted(r#"if up && n > 1 { html"" } else { icon }"#, EMPTY_BRANCH);
+        assert_eq!(help, only_help("!(up && n > 1)", Some("icon")));
+        let help = noted(
             r#"if name.isEmpty() { html"" } else { icon }"#,
             EMPTY_BRANCH,
         );
-        assert_eq!(help, only_help("!name.isEmpty()", "icon"));
+        assert_eq!(help, only_help("!name.isEmpty()", Some("icon")));
     }
 
     #[test]
     fn a_negation_is_not_negated_again() {
-        let help = warns(r#"if !up { html"" } else { icon }"#, EMPTY_BRANCH);
-        assert_eq!(help, only_help("up", "icon"));
-        let help = warns(
+        let help = noted(r#"if !up { html"" } else { icon }"#, EMPTY_BRANCH);
+        assert_eq!(help, only_help("up", Some("icon")));
+        let help = noted(
             r#"if !(up && n > 1) { html"" } else { icon }"#,
             EMPTY_BRANCH,
         );
-        assert_eq!(help, only_help("(up && n > 1)", "icon"));
+        assert_eq!(help, only_help("(up && n > 1)", Some("icon")));
     }
 
     #[test]
@@ -475,20 +642,35 @@ mod tests {
             ("n == 1", "n != 1"),
             (r#"name != """#, r#"name == """#),
         ] {
-            let help = warns(
+            let help = noted(
                 &format!(r#"if {written} {{ html"" }} else {{ icon }}"#),
                 EMPTY_BRANCH,
             );
-            assert_eq!(help, only_help(negated, "icon"), "{written}");
+            assert_eq!(help, only_help(negated, Some("icon")), "{written}");
         }
         // A `Float` is not totally ordered: `!(x < 1.0)` holds for a NaN and
         // `x >= 1.0` does not, so the ordering is kept and wrapped.
-        let help = warns(
+        let help = noted(
             r#"let x = 0.5
   if x < 1.0 { html"" } else { icon }"#,
             EMPTY_BRANCH,
         );
-        assert_eq!(help, only_help("!(x < 1.0)", "icon"));
+        assert_eq!(help, only_help("!(x < 1.0)", Some("icon")));
+    }
+
+    #[test]
+    fn a_branch_with_statements_is_moved_into_a_function_not_pasted() {
+        let help = noted(
+            r#"if up {
+    let label = "x"
+    html"<b>{label}</b>"
+  } else {
+    html""
+  }"#,
+            EMPTY_BRANCH,
+        );
+        assert_eq!(help, only_help("up", None));
+        assert!(!help.contains("let"), "{help}");
     }
 
     #[test]
@@ -516,7 +698,7 @@ mod tests {
 
     #[test]
     fn a_word_between_the_same_markup_is_the_if_in_a_hole() {
-        let help = warns(
+        let help = noted(
             r#"if up { html"<span class=state>up</span>" } else { html"<span class=state>down</span>" }"#,
             SAME_MARKUP,
         );
@@ -528,7 +710,7 @@ mod tests {
 
     #[test]
     fn a_quoted_attribute_value_that_differs_moves() {
-        let help = warns(
+        let help = noted(
             r#"if up { html"""<a class="a">x</a>""" } else { html"""<a class="b">x</a>""" }"#,
             SAME_MARKUP,
         );
@@ -537,7 +719,7 @@ mod tests {
 
     #[test]
     fn a_plain_hole_in_what_differs_moves_and_a_markup_one_does_not() {
-        let help = warns(
+        let help = noted(
             r#"if up { html"<p>{n} up</p>" } else { html"<p>{name} down</p>" }"#,
             SAME_MARKUP,
         );
@@ -548,25 +730,47 @@ mod tests {
         quiet(r#"if up { html"<p>{icon} up</p>" } else { html"<p>down</p>" }"#);
         quiet(r#"if up { html"<p>{icons} up</p>" } else { html"<p>down</p>" }"#);
         quiet(r#"if up { html"<p>{note} up</p>" } else { html"<p>down</p>" }"#);
-        // A markup hole both share is common and stays where it is.
-        warns(
-            r#"if up { html"<p>{icon} up</p>" } else { html"<p>{icon} down</p>" }"#,
+        // A markup hole both share is common and stays where it is, when
+        // it is not in the run of text that differs.
+        noted(
+            r#"if up { html"<p>{icon}<b>up</b></p>" } else { html"<p>{icon}<b>down</b></p>" }"#,
             SAME_MARKUP,
         );
+        quiet(r#"if up { html"<p>{icon} up</p>" } else { html"<p>{icon} down</p>" }"#);
     }
 
     #[test]
     fn a_difference_in_markup_or_an_escaped_character_is_left_alone() {
         quiet(r#"if up { html"<a>x</a>" } else { html"<span>x</span>" }"#);
-        quiet(r#"if up { html"<p>a &amp; b</p>" } else { html"<p>a</p>" }"#);
-        quiet(r#"if up { html"<p>it's</p>" } else { html"<p>its</p>" }"#);
+        quiet(r#"if up { html"<p>a &amp; b</p>" } else { html"<p>a | b</p>" }"#);
+        quiet(r#"if up { html"<p>it's on</p>" } else { html"<p>its off</p>" }"#);
         // A branch that is not a literal is not this shape.
         quiet(r#"if up { icon } else { html"<p>its</p>" }"#);
     }
 
     #[test]
+    fn an_attribute_one_branch_adds_is_html_only_in_the_tag() {
+        let help = noted(
+            r#"if n == 0 { html"<ul class=tree>" } else { html"<ul>" }"#,
+            SAME_MARKUP,
+        );
+        assert_eq!(
+            help,
+            r#"add it with `html.only` where it goes: `html"<ul{html.only(n == 0, html" class=tree")}>"`"#
+        );
+        let help = noted(
+            r#"if n == 0 { html"<ul>" } else { html"<ul class=tree>" }"#,
+            SAME_MARKUP,
+        );
+        assert!(
+            help.contains(r#"{html.only(n != 0, html" class=tree")}"#),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn identical_branches_say_the_if_can_go() {
-        let help = warns(
+        let help = noted(
             r#"if up { html"<b>x</b>" } else { html"<b>x</b>" }"#,
             SAME_MARKUP,
         );

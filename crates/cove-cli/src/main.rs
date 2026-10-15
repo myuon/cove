@@ -3839,9 +3839,9 @@ export fn main() -> Result<Unit, Error> {
         assert!(result.is_ok());
     }
 
-    /// ADR 0105's two warnings, as `cove check` prints them: each names the
-    /// rewrite in its help, and `--deny-warnings` refuses them as it does
-    /// any warning.
+    /// ADR 0105's two notes, as `cove check` prints them: each names the
+    /// rewrite in its help, and, being notes and not warnings,
+    /// `--deny-warnings` lets them through.
     #[test]
     fn check_names_the_rewrite_of_an_if_that_chooses_markup() {
         let dir = TempDir::new("markup-if");
@@ -3860,6 +3860,16 @@ export fn mine(admin: Bool) -> html.Html {
 export fn state(up: Bool) -> html.Html {
   if up { html"<span class=state>up</span>" } else { html"<span class=state>down</span>" }
 }
+
+/// The opening of a list.
+export fn list(open: Int) -> html.Html {
+  if open == 0 { html"<ul class=tree>" } else { html"<ul>" }
+}
+
+/// What a service says.
+export fn says(up: Bool) -> html.Html {
+  if up { html"<p>The service is up.</p>" } else { html"<p>The service is down.</p>" }
+}
 "#,
         );
         let (sources, _, program) = check_fixture(dir.path());
@@ -3869,7 +3879,14 @@ export fn state(up: Bool) -> html.Html {
             .map(|diagnostic| render(&sources, diagnostic))
             .collect::<String>()
             .replace(&dir.path().display().to_string(), "<dir>");
-        let expected = r#"warning[cove::type::html_if_empty_branch]: one branch of this `if` is no markup
+        let expected = r#"note[cove::type::html_if_same_markup]: one branch of this `if` is the other with something added
+  --> <dir>/pages/main.cove:15:3
+   |
+15 |   if open == 0 { html"<ul class=tree>" } else { html"<ul>" }
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  rule: An `if` between a literal and the same literal with something added is `html.only` of what is added, where it goes (ADR 0105).
+  help: add it with `html.only` where it goes: `html"<ul{html.only(open == 0, html" class=tree")}>"`
+note[cove::type::html_if_empty_branch]: one branch of this `if` is no markup
  --> <dir>/pages/main.cove:5:3
   |
 5 |   if admin { html" <span class=muted>(this app)</span>" } else { html"" }
@@ -3880,7 +3897,14 @@ export fn state(up: Bool) -> html.Html {
   |                                                                  ^^^^^^ this branch is no markup
   rule: An `if` that chooses between markup and no markup is `html.only` (ADR 0105).
   help: write `html.only(admin, html" <span class=muted>(this app)</span>")` — or, if that markup is only safe to build when the condition holds, an `Option` hole (ADR 0104)
-warning[cove::type::html_if_same_markup]: both branches of this `if` are the same markup
+note[cove::type::html_if_same_markup]: both branches of this `if` are the same markup
+  --> <dir>/pages/main.cove:20:3
+   |
+20 |   if up { html"<p>The service is up.</p>" } else { html"<p>The service is down.</p>" }
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  rule: An `if` between two literals of the same markup is written where they differ, inside one literal (ADR 0105).
+  help: put the `if` where they differ: `html"<p>{if up { "The service is up." } else { "The service is down." }}</p>"`
+note[cove::type::html_if_same_markup]: both branches of this `if` are the same markup
   --> <dir>/pages/main.cove:10:3
    |
 10 |   if up { html"<span class=state>up</span>" } else { html"<span class=state>down</span>" }
@@ -3892,6 +3916,6 @@ warning[cove::type::html_if_same_markup]: both branches of this `if` are the sam
 
         let path = dir.path().display().to_string();
         let result = cmd_check(&[path, "--deny-warnings".to_string()]);
-        assert!(matches!(result, Err(CliError::WarningsDenied)));
+        assert!(result.is_ok());
     }
 }

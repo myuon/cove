@@ -2318,8 +2318,8 @@ struct Checker<'a> {
     /// diagnostics are discarded.
     probing: bool,
     /// Where each `if` written as an `else if` is: the last link of a chain
-    /// is an `if` with an `else` like any other, and ADR 0105's warnings are
-    /// not about a chain.
+    /// is an `if` with an `else` like any other, and ADR 0105's notes are not
+    /// about a chain.
     else_ifs: Vec<Span>,
     /// Whether the expression about to be walked is one whose value is
     /// discarded: a statement, or the last expression of a loop body or of a
@@ -6402,7 +6402,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The two warnings of [ADR 0105] on an `if` that chooses markup: one
+    /// The two notes of [ADR 0105] on an `if` that chooses markup: one
     /// branch `html""` and the other markup, which is `html.only`; and two
     /// `html` literals that differ only in text, which is one literal with
     /// the `if` in a hole. [`crate::markup_if`] compares and writes the
@@ -6419,8 +6419,10 @@ impl<'a> Checker<'a> {
         then_ty: &Ty,
         else_ty: &Ty,
     ) {
-        use crate::markup_if::{only_help, same_markup_help, Atom, EMPTY_BRANCH, SAME_MARKUP};
-        use cove_syntax::format::{format_block, format_expr};
+        use crate::markup_if::{
+            only_help, same_markup_help, Atom, Shape, EMPTY_BRANCH, SAME_MARKUP,
+        };
+        use cove_syntax::format::format_expr;
 
         let ExprKind::Block(else_block) = &else_branch.kind else {
             return;
@@ -6472,17 +6474,16 @@ impl<'a> Checker<'a> {
             } else {
                 format_expr(condition)
             };
-            let shown_other = match lone(other) {
-                Some(tail) => format_expr(tail),
-                None => format_block(other),
-            };
+            // A block with statements does not read on one line inside a
+            // call, so the help names the move instead of pasting it.
+            let shown_other = lone(other).map(format_expr);
             let empty_span = lone(empty).map_or(empty.span, |tail| tail.span);
             self.diagnostics.push(
-                Diagnostic::warning(EMPTY_BRANCH, "one branch of this `if` is no markup")
+                Diagnostic::note(EMPTY_BRANCH, "one branch of this `if` is no markup")
                     .at(span)
                     .label(empty_span, "this branch is no markup")
                     .rule("An `if` that chooses between markup and no markup is `html.only` (ADR 0105).")
-                    .help(only_help(&shown_condition, &shown_other)),
+                    .help(only_help(&shown_condition, shown_other.as_deref())),
             );
             return;
         }
@@ -6512,17 +6513,28 @@ impl<'a> Checker<'a> {
             }
             out
         };
-        let Some(help) = same_markup_help(
+        let Some((shape, help)) = same_markup_help(
             &format_expr(condition),
+            &self.negated(condition),
             &atoms(then_literal),
             &atoms(else_literal),
         ) else {
             return;
         };
+        let (message, rule) = match shape {
+            Shape::Differs => (
+                "both branches of this `if` are the same markup",
+                "An `if` between two literals of the same markup is written where they differ, inside one literal (ADR 0105).",
+            ),
+            Shape::Added => (
+                "one branch of this `if` is the other with something added",
+                "An `if` between a literal and the same literal with something added is `html.only` of what is added, where it goes (ADR 0105).",
+            ),
+        };
         self.diagnostics.push(
-            Diagnostic::warning(SAME_MARKUP, "both branches of this `if` are the same markup")
+            Diagnostic::note(SAME_MARKUP, message)
                 .at(span)
-                .rule("An `if` between two literals of the same markup is written where they differ, inside one literal (ADR 0105).")
+                .rule(rule)
                 .help(help),
         );
     }
