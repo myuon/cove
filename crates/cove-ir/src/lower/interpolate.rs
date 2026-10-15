@@ -74,17 +74,6 @@
 //! [`cove_sema::stdlib::literal_tag`] answers, so what escaping means is
 //! `std.html`'s Cove and nothing here.
 //!
-//! [ADR 0103]'s attribute holes, `name={x}`, are found by
-//! [`cove_sema::stdlib::lay_out`] — the oracle and the checker ask the same
-//! function — and written by [`cove_sema::stdlib::LiteralTag::attribute`]'s
-//! answer: a `Bool` by the module's `flag`, which writes the name or
-//! nothing; an `Option` by a switch on its case, and for `Some` its payload
-//! as a value; anything else as a value, by the module's `attribute`, over
-//! the `String` or over its rendering into a scratch run. The quotes and the
-//! escaping are the module's Cove too.
-//!
-//! [ADR 0103]: ../../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md
-//!
 //! [ADR 0101]: ../../../../docs/adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md
 //! [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
 //!
@@ -92,7 +81,7 @@
 //! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 
 use cove_diag::Span;
-use cove_sema::stdlib::{lay_out, literal_tag, AttributeValue, Laid, LiteralTag, TaggedPiece};
+use cove_sema::stdlib::{literal_tag, LiteralTag, TaggedPiece};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Expr, StrPart};
 
@@ -159,18 +148,13 @@ impl Body<'_> {
             return self.gap("a string literal with a tag the checker refuses", expr);
         };
         let mut assembly = self.assembly_for(parts, expr.span);
-        for laid in lay_out(parts) {
-            match laid {
-                Laid::Text(text) => self.append_literal(&mut assembly, text, expr.span),
-                Laid::Hole(inner) => {
+        for part in parts {
+            match part {
+                StrPart::Text(text) => self.append_literal(&mut assembly, text, expr.span),
+                StrPart::Interpolation(inner) => {
                     let value = self.expr(inner);
                     self.append_tagged(known, &mut assembly, inner, &value);
                     self.release(value, inner.span);
-                }
-                Laid::Attribute { name, hole } => {
-                    let value = self.expr(hole);
-                    self.append_attribute(known, &assembly, name, hole, &value);
-                    self.release(value, hole.span);
                 }
             }
         }
@@ -220,148 +204,6 @@ impl Body<'_> {
                 self.release(text, span);
             }
         }
-    }
-
-    /// Appends one evaluated attribute hole of a tagged literal, `name={x}`,
-    /// as [`LiteralTag::attribute`] says, [ADR 0103]: a `Bool` by the
-    /// module's `flag`, an `Option` by a switch on its case and then its
-    /// payload as a value, and anything else as a value.
-    ///
-    /// `name` is the attribute's name with the whitespace in front of it, a
-    /// constant the module's functions write or leave out. The type is
-    /// asked as [`Body::append_tagged`] asks it, of the hole as written.
-    ///
-    /// [ADR 0103]: ../../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md
-    fn append_attribute(
-        &mut self,
-        known: &'static LiteralTag,
-        assembly: &Assembly,
-        name: &str,
-        inner: &Expr,
-        value: &Val,
-    ) {
-        let span = inner.span;
-        match known.attribute(self.raw_ty(inner)) {
-            AttributeValue::Flag => {
-                let name = self.constant_text(name, span);
-                if let Some(unit) = self.call_library(
-                    known.module,
-                    known.flag,
-                    &[&assembly.buffer, &name, value],
-                    span,
-                ) {
-                    self.release(unit, span);
-                }
-                self.release(name, span);
-            }
-            AttributeValue::Value(piece) => {
-                let ty = self.ty(inner);
-                self.append_attribute_value(known, assembly, name, piece, ty.as_ref(), value, span);
-            }
-            AttributeValue::Optional(piece) => {
-                let ty = self.ty(inner);
-                let Some(Ty::Option(payload_ty)) = ty else {
-                    self.errors.push(super::gap::gap(
-                        "an `Option` attribute hole whose instantiated type is not an `Option`",
-                        span,
-                    ));
-                    return;
-                };
-                let found = shapes::case_at(
-                    self.checked,
-                    self.module,
-                    &Ty::Option(payload_ty.clone()),
-                    "Some",
-                )
-                .and_then(|(index, _)| Some((index, self.case_of(value.layout, index)?.0)));
-                let Some((index, parts)) = found else {
-                    self.errors.push(super::gap::gap(
-                        "an `Option` attribute hole whose layout has no `Some` case",
-                        span,
-                    ));
-                    return;
-                };
-                let Some(part) = parts.first() else {
-                    return;
-                };
-                // `None` jumps past the attribute; `Some` writes its payload,
-                // read where it lies in the value and not consumed.
-                let mut missed = Vec::new();
-                self.test_case(value.slot, value.layout, index, span, &mut missed);
-                let payload = Val::borrowed(value.slot + 1 + part.at, part.layout);
-                self.append_attribute_value(
-                    known,
-                    assembly,
-                    name,
-                    piece,
-                    Some(&payload_ty),
-                    &payload,
-                    span,
-                );
-                let end = self.here();
-                for at in missed {
-                    self.patch(at, end);
-                }
-            }
-            // `cove_sema`'s checker refuses markup as an attribute's value.
-            AttributeValue::Markup => self.errors.push(super::gap::gap(
-                "markup as an attribute's value, which the checker refuses",
-                span,
-            )),
-        }
-    }
-
-    /// Appends ` name="…"` with `value` as the value: by the module's
-    /// `attribute` over the value itself when it is a `String`, and over its
-    /// rendering, into a scratch run as [`Body::append_tagged`] renders,
-    /// otherwise.
-    #[allow(clippy::too_many_arguments)]
-    fn append_attribute_value(
-        &mut self,
-        known: &'static LiteralTag,
-        assembly: &Assembly,
-        name: &str,
-        piece: TaggedPiece,
-        ty: Option<&Ty>,
-        value: &Val,
-        span: Span,
-    ) {
-        let rendered = match piece {
-            TaggedPiece::Text => None,
-            _ => {
-                let mut scratch = self.assembly_open(0, 1, span);
-                self.append_piece(&mut scratch, ty, value, span);
-                Some(self.assembly_finish(scratch, None, span))
-            }
-        };
-        let name = self.constant_text(name, span);
-        let text = rendered.as_ref().unwrap_or(value);
-        if let Some(unit) = self.call_library(
-            known.module,
-            known.attribute,
-            &[&assembly.buffer, &name, text],
-            span,
-        ) {
-            self.release(unit, span);
-        }
-        self.release(name, span);
-        if let Some(rendered) = rendered {
-            self.release(rendered, span);
-        }
-    }
-
-    /// A `String` constant from the pool, in a temporary of its own.
-    fn constant_text(&mut self, text: &str, span: Span) -> Val {
-        let id = self.string(text);
-        let literal = self.temp(shapes::STR);
-        self.emit(
-            Inst::Str {
-                dst: literal.slot,
-                text: id,
-            },
-            span,
-        );
-        literal
     }
 
     /// A byte buffer with room for `literal` bytes and `pieces` values of

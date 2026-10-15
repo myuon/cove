@@ -45,8 +45,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use cove_diag::{Diagnostic, SourceMap};
 
 use crate::package::{Module, Unit};
-use cove_syntax::ast::{Expr, StrPart};
-
 use crate::typeck::Ty;
 
 /// One embedded standard-library source file and the module it belongs to.
@@ -279,14 +277,6 @@ pub struct LiteralTag {
     pub each: &'static str,
     /// `(said: String) -> <ty>`: the finished text as the module's type.
     pub wrap: &'static str,
-    /// `(buffer: ByteBuffer, name: String, value: String)`: an attribute
-    /// whose whole value is a hole, `name={expr}` ([`Laid::Attribute`]):
-    /// `name` — the whitespace in front of it included — then `="`, `value`
-    /// escaped, and `"`. [ADR 0103](../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md).
-    pub attribute: &'static str,
-    /// `(buffer: ByteBuffer, name: String, on: Bool)`: the same for a `Bool`
-    /// hole, which is `name` alone when `on` and nothing at all otherwise.
-    pub flag: &'static str,
 }
 
 impl LiteralTag {
@@ -313,24 +303,6 @@ impl LiteralTag {
         }
     }
 
-    /// How an attribute hole, `name={expr}`, whose checked type is `ty` is
-    /// written: ADR 0103's table. A `Bool` is there or not, an `Option` is
-    /// there for `Some` and its payload is the value, markup is refused, and
-    /// anything else is the value — a `String` as it is, the rest rendered.
-    pub fn attribute(&self, ty: Option<&Ty>) -> AttributeValue {
-        let value = |ty: Option<&Ty>| match self.piece(ty) {
-            TaggedPiece::Markup | TaggedPiece::EachMarkup => None,
-            piece => Some(piece),
-        };
-        match ty {
-            Some(Ty::Bool) => AttributeValue::Flag,
-            Some(Ty::Option(inner)) => {
-                value(Some(inner)).map_or(AttributeValue::Markup, AttributeValue::Optional)
-            }
-            ty => value(ty).map_or(AttributeValue::Markup, AttributeValue::Value),
-        }
-    }
-
     fn is_markup(&self, name: &str) -> bool {
         name.strip_prefix(self.module)
             .and_then(|rest| rest.strip_prefix('.'))
@@ -354,132 +326,6 @@ pub enum TaggedPiece {
     Rendered,
 }
 
-/// What [`LiteralTag::attribute`] answers for an attribute hole.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AttributeValue {
-    /// A `Bool`: the name alone, or nothing, by [`LiteralTag::flag`].
-    Flag,
-    /// An `Option`: nothing for `None`, and for `Some` its payload written
-    /// as [`AttributeValue::Value`] writes a value whose piece is this one.
-    Optional(TaggedPiece),
-    /// Anything else: by [`LiteralTag::attribute`], over the value itself
-    /// when the piece is [`TaggedPiece::Text`] and over its rendering when
-    /// it is [`TaggedPiece::Rendered`].
-    Value(TaggedPiece),
-    /// Markup — the module's type, an `Array` of it, or an `Option` of
-    /// either — which an attribute's value cannot be: refused by the checker
-    /// as `cove::type::markup_in_attribute`.
-    Markup,
-}
-
-/// One piece of a tagged literal as its assembly lays it out: ADR 0101's
-/// text and holes, with ADR 0103's attribute holes told apart.
-#[derive(Clone, Copy, Debug)]
-pub enum Laid<'a> {
-    /// Literal text, appended as it is. In front of an attribute hole it is
-    /// the text with the attribute's whitespace, name and `=` taken off.
-    Text(&'a str),
-    /// A hole, appended as [`LiteralTag::piece`] says.
-    Hole(&'a Expr),
-    /// `name={expr}`: a hole that is an attribute's whole value, written as
-    /// [`LiteralTag::attribute`] says. `name` is the attribute's name with
-    /// the whitespace written in front of it, exactly as in the source.
-    Attribute { name: &'a str, hole: &'a Expr },
-}
-
-/// Where a position in a literal's text is, as far as [`lay_out`] reads
-/// markup: between tags, inside a tag, or inside a quoted value in a tag.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Within {
-    Text,
-    Tag,
-    Quoted(u8),
-}
-
-/// Whether `byte` may be part of an attribute's name, as ADR 0103 reads one.
-fn is_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
-}
-
-/// `parts` laid out for assembly under a markup tag, ADR 0103.
-///
-/// The text is read just far enough to know whether a hole is **inside a
-/// tag**: `<` followed by an ASCII letter, `/` or `!` opens one, `>` closes
-/// it, and inside it `"` and `'` open and close a quoted value, within which
-/// `>` is text. A hole changes none of that. A hole is an attribute's whole
-/// value when it is inside a tag and outside quotes, the text in front of it
-/// ends in whitespace, a name and `=`, and the text after it begins with
-/// whitespace, `>` or `/`. Every other hole — between tags, inside quotes,
-/// against another hole — is a [`Laid::Hole`], exactly as ADR 0101 lowers
-/// it.
-///
-/// That is all the HTML the compiler knows: no element names, no nesting, and
-/// nothing is refused for the way it is written.
-pub fn lay_out(parts: &[StrPart]) -> Vec<Laid<'_>> {
-    let mut within = Within::Text;
-    let mut laid = Vec::with_capacity(parts.len());
-    for (index, part) in parts.iter().enumerate() {
-        let hole = match part {
-            StrPart::Text(text) => {
-                let bytes = text.as_bytes();
-                for (at, &byte) in bytes.iter().enumerate() {
-                    within = match within {
-                        Within::Text
-                            if byte == b'<'
-                                && bytes.get(at + 1).is_some_and(|next| {
-                                    next.is_ascii_alphabetic() || matches!(next, b'/' | b'!')
-                                }) =>
-                        {
-                            Within::Tag
-                        }
-                        Within::Tag if byte == b'>' => Within::Text,
-                        Within::Tag if matches!(byte, b'"' | b'\'') => Within::Quoted(byte),
-                        Within::Quoted(quote) if byte == quote => Within::Tag,
-                        unchanged => unchanged,
-                    };
-                }
-                laid.push(Laid::Text(text));
-                continue;
-            }
-            StrPart::Interpolation(hole) => hole,
-        };
-        let followed = matches!(
-            parts.get(index + 1),
-            Some(StrPart::Text(after))
-                if after.bytes().next().is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
-        );
-        let attribute = match (within, followed, laid.last_mut()) {
-            (Within::Tag, true, Some(Laid::Text(before))) => attribute_name(before).map(|at| {
-                let text: &str = before;
-                *before = &text[..at];
-                &text[at..text.len() - 1]
-            }),
-            _ => None,
-        };
-        laid.push(match attribute {
-            Some(name) => Laid::Attribute { name, hole },
-            None => Laid::Hole(hole),
-        });
-    }
-    laid
-}
-
-/// Where the attribute `text` ends in begins — its whitespace, then its
-/// name, then `=` — or `None` when `text` does not end in one.
-fn attribute_name(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let equals = bytes.len().checked_sub(1).filter(|at| bytes[*at] == b'=')?;
-    let name = bytes[..equals]
-        .iter()
-        .rposition(|byte| !is_name_byte(*byte))
-        .map_or(0, |at| at + 1);
-    let space = bytes[..name]
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map_or(0, |at| at + 1);
-    (name < equals && space < name).then_some(space)
-}
-
 /// Every tag a string literal may carry. See [`LiteralTag`].
 const LITERAL_TAGS: &[LiteralTag] = &[LiteralTag {
     tag: "html",
@@ -489,8 +335,6 @@ const LITERAL_TAGS: &[LiteralTag] = &[LiteralTag {
     markup: "appendMarkup",
     each: "appendEach",
     wrap: "assembled",
-    attribute: "appendAttribute",
-    flag: "appendFlag",
 }];
 
 /// The tag `tag` names, or `None` when a string literal may not carry it.
@@ -665,132 +509,6 @@ fn parse(sources: &mut SourceMap) -> Result<Vec<(String, Module)>, Vec<Diagnosti
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ADR 0103: an attribute's whole value is a hole.
-
-    /// The parts of a literal written as `text{name}text…`, each hole a bare
-    /// name.
-    fn parts_of(written: &str) -> Vec<StrPart> {
-        let mut parts = Vec::new();
-        let mut rest = written;
-        while let Some(open) = rest.find('{') {
-            let close = open + rest[open..].find('}').expect("a closed hole");
-            if open > 0 {
-                parts.push(StrPart::Text(rest[..open].to_string()));
-            }
-            parts.push(StrPart::Interpolation(Expr {
-                id: cove_syntax::ast::ExprId::UNSET,
-                kind: cove_syntax::ast::ExprKind::Ident(rest[open + 1..close].to_string()),
-                span: cove_diag::Span::new(cove_diag::FileId(0), 0, 0),
-                parens: 0,
-            }));
-            rest = &rest[close + 1..];
-        }
-        if !rest.is_empty() {
-            parts.push(StrPart::Text(rest.to_string()));
-        }
-        parts
-    }
-
-    /// [`lay_out`] written back as text: an attribute hole as `[name|hole]`,
-    /// any other hole as `{hole}`.
-    fn laid(written: &str) -> String {
-        lay_out(&parts_of(written))
-            .into_iter()
-            .map(|laid| {
-                let hole = |expr: &Expr| match &expr.kind {
-                    cove_syntax::ast::ExprKind::Ident(name) => name.clone(),
-                    _ => unreachable!(),
-                };
-                match laid {
-                    Laid::Text(text) => text.to_string(),
-                    Laid::Hole(expr) => format!("{{{}}}", hole(expr)),
-                    Laid::Attribute { name, hole: expr } => format!("[{name}|{}]", hole(expr)),
-                }
-            })
-            .collect()
-    }
-
-    #[test]
-    fn a_hole_that_is_an_attributes_whole_value_is_an_attribute() {
-        // The whitespace in front of the name goes with it, as written.
-        assert_eq!(laid("<a href={x}>"), "<a[ href|x]>");
-        assert_eq!(laid("<a  href={x}>"), "<a[  href|x]>");
-        assert_eq!(laid("<input\tchecked={on}/>"), "<input[\tchecked|on]/>");
-        assert_eq!(laid("<i x={a} y={b}>"), "<i[ x|a][ y|b]>");
-        // A name is letters, digits, `-`, `_`, `:` and `.`.
-        assert_eq!(
-            laid("<a aria-current={c} xml:lang={l} a.b_c={d}>"),
-            "<a[ aria-current|c][ xml:lang|l][ a.b_c|d]>"
-        );
-        // A closing tag, a declaration and an unquoted value all close.
-        assert_eq!(laid("</a x={y}>"), "</a[ x|y]>");
-        assert_eq!(laid("<!x y={z}>"), "<!x[ y|z]>");
-        assert_eq!(laid("<a class=x href={y}>"), "<a class=x[ href|y]>");
-        // A quoted value before it is closed by then.
-        assert_eq!(
-            laid("<a title=\"a>b\" href={y}>"),
-            "<a title=\"a>b\"[ href|y]>"
-        );
-        assert_eq!(laid("<a title='x' href={y}>"), "<a title='x'[ href|y]>");
-    }
-
-    #[test]
-    fn every_other_hole_is_a_hole() {
-        // Between tags, even written `a={x}`.
-        assert_eq!(laid("<p>a={x} b</p>"), "<p>a={x} b</p>");
-        assert_eq!(laid("a={x} b"), "a={x} b");
-        // Inside a quoted value.
-        assert_eq!(laid("<p class=\"s {x}\">"), "<p class=\"s {x}\">");
-        assert_eq!(laid("<p class=\" a={x} \">"), "<p class=\" a={x} \">");
-        assert_eq!(laid("<p class=' a={x} '>"), "<p class=' a={x} '>");
-        // Not followed by whitespace, `>` or `/`.
-        assert_eq!(laid("<p class={x}y>"), "<p class={x}y>");
-        assert_eq!(laid("<p class={x}{y}>"), "<p class={x}{y}>");
-        assert_eq!(laid("<p class={x}"), "<p class={x}");
-        // Not preceded by whitespace and a name.
-        assert_eq!(laid("<p ={x}>"), "<p ={x}>");
-        assert_eq!(laid("<p{a}b={x}>"), "<p{a}b={x}>");
-        assert_eq!(laid("<p class=\"a\"b={x}>"), "<p class=\"a\"b={x}>");
-        // Not a tag: `<` against a space or a digit, or a tag already closed.
-        assert_eq!(laid("1 < 2 a={x} b"), "1 < 2 a={x} b");
-        assert_eq!(laid("<2 a={x} b"), "<2 a={x} b");
-        assert_eq!(laid("<p> a={x} </p>"), "<p> a={x} </p>");
-        // A hole in place of the whole tag's contents, and markup between.
-        assert_eq!(laid("<p {x}>{y}</p>"), "<p {x}>{y}</p>");
-    }
-
-    #[test]
-    fn an_attributes_value_is_decided_by_its_type() {
-        let html = literal_tag("html").expect("the html tag");
-        let markup = Ty::Struct("std.html.Html".into(), Vec::new());
-        let markups = Ty::Array(Box::new(markup.clone()));
-        assert_eq!(html.attribute(Some(&Ty::Bool)), AttributeValue::Flag);
-        assert_eq!(
-            html.attribute(Some(&Ty::Str)),
-            AttributeValue::Value(TaggedPiece::Text)
-        );
-        assert_eq!(
-            html.attribute(Some(&Ty::Int)),
-            AttributeValue::Value(TaggedPiece::Rendered)
-        );
-        assert_eq!(
-            html.attribute(Some(&Ty::Option(Box::new(Ty::Str)))),
-            AttributeValue::Optional(TaggedPiece::Text)
-        );
-        assert_eq!(
-            html.attribute(Some(&Ty::Option(Box::new(Ty::Bool)))),
-            AttributeValue::Optional(TaggedPiece::Rendered)
-        );
-        for refused in [
-            markup.clone(),
-            markups.clone(),
-            Ty::Option(Box::new(markup)),
-            Ty::Option(Box::new(markups)),
-        ] {
-            assert_eq!(html.attribute(Some(&refused)), AttributeValue::Markup);
-        }
-    }
 
     /// A kept parse is the parse: the same trees, with the same spans and
     /// the same expression ids, as parsing the text again at the same ids —

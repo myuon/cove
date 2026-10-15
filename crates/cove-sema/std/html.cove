@@ -15,9 +15,9 @@
 //
 // fn row(line: Line) -> Html {
 //   html"""
-//     <tr class={if line.late { Some("late") } else { None }}>
-//       <td class=at>{line.at}</td>
-//       <td title={line.said}>{line.said}</td>
+//     <tr>\
+//       <td class=at>{line.at}</td>\
+//       <td>{line.said}</td>\
 //     </tr>
 //     """
 // }
@@ -35,41 +35,13 @@
 // branches on, once, when the literal is lowered. Nothing inspects a value's
 // shape while the page is being built. What this module supplies is what
 // each branch *does*: [`appendEscaped`] for text, [`appendMarkup`] and
-// [`appendEach`] for markup, [`appendAttribute`] and [`appendFlag`] for an
-// attribute, and [`assembled`] for the finished literal.
-// `cove_sema::stdlib::LiteralTag` names those six and is the only thing
+// [`appendEach`] for markup, and [`assembled`] for the finished literal.
+// `cove_sema::stdlib::LiteralTag` names those four and is the only thing
 // that does; none of them is exported, because nothing but a literal's
 // assembly calls them.
 //
 // The literal text between the holes is the template's own characters, so
 // it goes in as written and is not escaped.
-//
-// # Laying markup out, and writing an attribute
-//
-// [ADR 0103](../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md)
-// adds two rules, both above: in an `html"""` written over lines, a line
-// break and the indentation after it are **nothing** between two tags — a
-// `>` or a hole's `}` before it, a `<` or a hole's `{` after it — and **one
-// space** anywhere else, so markup is laid out one element to a line and
-// prose wraps as prose; and **`name={expr}`**, a hole that is an attribute's
-// whole value, is written by the hole's type. A `Bool` is the name alone or
-// nothing at all, an `Option` is the attribute for `Some` and nothing for
-// `None`, markup is refused, and anything else is ` name="…"`, escaped once
-// and quoted for you.
-//
-// That is the recommended way to write an attribute's value. The value is
-// built as an ordinary `String` and escaped as a whole, so `&` in a URL is
-// written `&` and arrives as `&amp;`; the quotes are written for you, so no
-// value reaches an unquoted attribute; and an attribute that is there or not
-// is a `Bool` or an `Option`, not a fragment beginning with a space:
-//
-// ```cove
-// html"<a href={"{at}/kv?prefix={p}&after={last}"}>more</a>"
-// html"<input type=checkbox name={"cap.{capability}"} checked={granted}>"
-// ```
-//
-// A hole inside a quoted value, `class="state {x}"`, still works, escaped
-// where it sits; nothing is refused for the way it is written.
 //
 // # The one way past escaping
 //
@@ -101,18 +73,16 @@
 // holding a quote is written as:
 //
 // ```cove
-// html"""<a href={"{at}/kv"} title="the {name} store">{name}</a>"""
+// html"""<a href="{at}/kv">{name}</a>"""
 // html""" class="is-{level}""""
 // ```
 //
 // # What escaping does not cover
 //
 // One rule — five characters to entities — applies wherever a hole sits.
-// That is right between tags, inside a quoted attribute value, and in
-// `name={…}`, whose quotes the literal writes. It is not enough for a hole
-// written into an unquoted attribute value by hand, inside `<script>` or
-// `<style>`, or for a URL whose scheme is the danger; ADR 0101 and ADR 0103
-// leave those open.
+// That is right between tags and inside a quoted attribute value. It is not
+// enough inside an unquoted attribute value, inside `<script>` or `<style>`,
+// or for a URL whose scheme is the danger; ADR 0101 leaves those open.
 
 use std.stringbuilder
 
@@ -229,33 +199,6 @@ fn appendMarkup(buffer: ByteBuffer, piece: Html) {
 fn appendEach(buffer: ByteBuffer, pieces: Array<Html>) {
   for piece in pieces {
     stringbuilder.appendText(buffer, piece.said)
-  }
-}
-
-/// Appends the attribute `name` with `value` as its value: an `html"…"`
-/// literal's `name={expr}`, [ADR 0103], when the hole is not a `Bool`.
-///
-/// `name` is the attribute's name with the whitespace written in front of it
-/// in the literal, so an attribute is written where it stood. The value is
-/// escaped once, as a whole, inside double quotes this function writes, so
-/// nothing in it can end the attribute or begin another.
-///
-/// [ADR 0103]: ../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md
-fn appendAttribute(buffer: ByteBuffer, name: String, value: String) {
-  stringbuilder.appendText(buffer, name)
-  stringbuilder.appendText(buffer, "=\"")
-  appendEscaped(buffer, value)
-  stringbuilder.appendByteInto(buffer, '"')
-}
-
-/// Appends the attribute `name` alone when `on`, and nothing at all — not
-/// the name, not the space in front of it — when not: an `html"…"`
-/// literal's `name={expr}` whose hole is a `Bool`, [ADR 0103].
-///
-/// [ADR 0103]: ../../../docs/adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md
-fn appendFlag(buffer: ByteBuffer, name: String, on: Bool) {
-  if on {
-    stringbuilder.appendText(buffer, name)
   }
 }
 

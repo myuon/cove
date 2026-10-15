@@ -180,7 +180,10 @@ test fn aSpaceAtAJoinIsWrittenBeforeTheBackslash() -> Result<Unit, Error> {
       <span class=muted>rows</span>
     </p>
     """
-  assertEqual(page.render(), "<p><b>3</b> <span class=muted>rows</span></p>")?
+  assertEqual(
+    page.render(),
+    "<p><b>3</b> <span class=muted>rows</span></p>",
+  )?
   Ok(())
 }
 
@@ -309,89 +312,5 @@ test fn aBackslashAndAnEscapedNewlineKeepTheirMeaning() -> Result<Unit, Error> {
     <pre>a\nb</pre>
     """
   assertEqual(page.render(), "<p>undone</p><pre>a\nb</pre>")?
-  Ok(())
-}
-
-// ----------------------------------------- name={…} (ADR 0103)
-
-/// A value in `name={…}` is escaped once, as a whole, inside quotes the
-/// literal writes.
-test fn anAttributeHoleIsQuotedAndEscaped() -> Result<Unit, Error> {
-  let at = "/a"
-  let last = "x\"y"
-  assertEqual(
-    html"""<a href={"{at}/kv?p=1&after={last}"}>more</a>""".render(),
-    "<a href=\"/a/kv?p=1&amp;after=x&quot;y\">more</a>",
-  )?
-  let title = hostile()
-  assertEqual(html"<i title={title}/>".render(), "<i title=\"{escaped()}\"/>")?
-  // Anything else is rendered as a plain literal renders it.
-  let count = 3
-  assertEqual(
-    html"<td colspan={count} class=x>".render(),
-    "<td colspan=\"3\" class=x>",
-  )?
-  Ok(())
-}
-
-/// A `Bool` is the name alone, or nothing at all — not even the space.
-test fn aBoolAttributeIsThereOrNot() -> Result<Unit, Error> {
-  let granted = true
-  let denied = false
-  assertEqual(
-    html"<input type=checkbox checked={granted}>".render(),
-    "<input type=checkbox checked>",
-  )?
-  assertEqual(
-    html"<input type=checkbox checked={denied}>".render(),
-    "<input type=checkbox>",
-  )?
-  assertEqual(
-    html"<input checked={denied} disabled={granted}/>".render(),
-    "<input disabled/>",
-  )?
-  Ok(())
-}
-
-/// An `Option` is the attribute for `Some` and nothing for `None`.
-test fn anOptionAttributeIsThereForSome() -> Result<Unit, Error> {
-  let here = Some("page")
-  let elsewhere: Option<String> = None
-  assertEqual(
-    html"<a aria-current={here} href=x>".render(),
-    "<a aria-current=\"page\" href=x>",
-  )?
-  assertEqual(html"<a aria-current={elsewhere} href=x>".render(), "<a href=x>")?
-  let width: Option<Int> = Some(-4)
-  assertEqual(html"<col span={width}>".render(), "<col span=\"-4\">")?
-  let level = ""
-  let item = html"""<li class={if level == "" { None } else { Some("is-{level}") }}>"""
-  assertEqual(item.render(), "<li>")?
-  Ok(())
-}
-
-/// A hole that is not an attribute's whole value is ADR 0101's, unchanged:
-/// between tags, inside a quoted value, or against more text.
-test fn otherHolesAreAsTheyWere() -> Result<Unit, Error> {
-  let x = "<b>"
-  assertEqual(html"<p>a={x} b</p>".render(), "<p>a=&lt;b&gt; b</p>")?
-  assertEqual(html"<p class=\"s {x}\">".render(), "<p class=\"s &lt;b&gt;\">")?
-  assertEqual(html"<p class={x}y>".render(), "<p class=&lt;b&gt;y>")?
-  let on = true
-  assertEqual(html"<p>checked={on}</p>".render(), "<p>checked=true</p>")?
-  Ok(())
-}
-
-/// Laid out over lines, an attribute keeps the one space the break became.
-test fn anAttributeOverLinesKeepsItsSpace() -> Result<Unit, Error> {
-  let on = false
-  let href = "/x"
-  let page = html"""
-    <a
-      href={href}
-      hidden={on}
-      class=more>more</a>
-    """
-  assertEqual(page.render(), "<a href=\"/x\" class=more>more</a>")?
   Ok(())
 }

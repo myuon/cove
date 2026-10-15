@@ -462,7 +462,7 @@ impl Body<'_> {
     /// The jump between the switch and the matching path is what the caller
     /// patches: a failure's destination is not known until the arms after
     /// this one have been laid out, and a table is placed once.
-    pub(super) fn test_case(
+    fn test_case(
         &mut self,
         subject: Slot,
         layout: LayoutId,

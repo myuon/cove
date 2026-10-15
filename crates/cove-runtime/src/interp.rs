@@ -33,7 +33,7 @@ use std::time::Duration;
 use cove_diag::{SourceMap, Span};
 use cove_schema::builtins::{FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_sema::resolve::{Program, ResolvedModule};
-use cove_sema::stdlib::{lay_out, AttributeValue, Laid, TaggedPiece};
+use cove_sema::stdlib::TaggedPiece;
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, Param, Pattern,
     PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
@@ -277,26 +277,6 @@ fn piece_of_value(known: &cove_sema::stdlib::LiteralTag, value: &Value) -> Tagge
             TaggedPiece::EachMarkup
         }
         _ => TaggedPiece::Rendered,
-    }
-}
-
-/// How an attribute hole, `name={x}`, is written, decided from its value,
-/// for a program the checker recorded no type for: [`piece_of_value`]'s
-/// arrangement for [`cove_sema::stdlib::LiteralTag::attribute`].
-fn attribute_of_value(known: &cove_sema::stdlib::LiteralTag, value: &Value) -> AttributeValue {
-    let as_value = |value: &Value| match piece_of_value(known, value) {
-        TaggedPiece::Markup | TaggedPiece::EachMarkup => None,
-        piece => Some(piece),
-    };
-    match &value.0 {
-        Repr::Bool(_) => AttributeValue::Flag,
-        Repr::Enum(found) if *found.type_name == *OPTION.name => match value.some_payload() {
-            Some([payload]) => {
-                as_value(payload).map_or(AttributeValue::Markup, AttributeValue::Optional)
-            }
-            _ => AttributeValue::Optional(TaggedPiece::Rendered),
-        },
-        _ => as_value(value).map_or(AttributeValue::Markup, AttributeValue::Value),
     }
 }
 
@@ -3418,56 +3398,13 @@ impl<'a> Interpreter<'a> {
         };
         let storage = ByteBufferStorage::new(0);
         let buffer = Value(Repr::ByteBuffer(storage.clone()));
-        for laid in lay_out(parts) {
-            match laid {
-                Laid::Text(literal) => storage
+        for part in parts {
+            match part {
+                StrPart::Text(literal) => storage
                     .bytes
                     .borrow_mut()
                     .extend_from_slice(literal.as_bytes()),
-                Laid::Attribute { name, hole } => {
-                    let value = self.eval(env, hole)?;
-                    let attribute = match self.program.facts.ty(hole.span.file, hole.id) {
-                        Some(ty) => known.attribute(Some(ty)),
-                        None => attribute_of_value(known, &value),
-                    };
-                    let name = Value(Repr::Str(name.into()));
-                    // ADR 0103: the lowering's `Body::append_attribute`, the
-                    // same calls over the same values.
-                    let (piece, value) = match attribute {
-                        AttributeValue::Flag => {
-                            self.call_library(
-                                known.module,
-                                known.flag,
-                                vec![buffer.clone(), name, value],
-                                span,
-                            )?;
-                            continue;
-                        }
-                        AttributeValue::Value(piece) => (piece, value),
-                        AttributeValue::Optional(piece) => match value.some_payload() {
-                            Some([payload]) => (piece, payload.clone()),
-                            _ => continue,
-                        },
-                        AttributeValue::Markup => {
-                            return Err(RuntimeError::new(
-                                "markup as an attribute's value, which the checker refuses",
-                            )
-                            .at(hole.span)
-                            .into());
-                        }
-                    };
-                    let text = match piece {
-                        TaggedPiece::Text => value,
-                        _ => Value(Repr::Str(value.to_string().into())),
-                    };
-                    self.call_library(
-                        known.module,
-                        known.attribute,
-                        vec![buffer.clone(), name, text],
-                        span,
-                    )?;
-                }
-                Laid::Hole(inner) => {
+                StrPart::Interpolation(inner) => {
                     let value = self.eval(env, inner)?;
                     let piece = match self.program.facts.ty(inner.span.file, inner.id) {
                         Some(ty) => known.piece(Some(ty)),
