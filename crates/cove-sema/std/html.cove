@@ -520,8 +520,8 @@ fn placed(view: DynamicView) -> Hole {
   Hole(said: escape(renderValue(view, maxDepth())), wrong: "")
 }
 
-/// Whether `kind` is an `Array` or a `Vector`, the two a `$.items[2]` indexes
-/// and the two that can hold a list of markup.
+/// Whether `kind` is an `Array` or a `Vector`, the two that
+/// `<%= items[2] %>` indexes and the two that can hold a list of markup.
 fn isList(kind: Int) -> Bool {
   // Array, Vector
   kind == 8 || kind == 9
@@ -583,7 +583,7 @@ fn tooFarAlong() -> Int {
 ///
 /// Only a struct has fields, and an `opaque` struct publishes none: a path
 /// stops at one rather than reading what its module did not export, which is
-/// what keeps `$.who.said` from reaching inside an [`Html`].
+/// what keeps `<%= who.said %>` from reaching inside an [`Html`].
 fn fieldOf(view: DynamicView, name: String) -> Int {
   // Struct
   if core.dynamicKind(view) != 6 {
@@ -640,8 +640,8 @@ fn isHtml(view: DynamicView) -> Bool {
 ///
 /// `&` first, because the others are written with one. `"` and `'` are here
 /// and not only `<` and `>`, because a hole is as likely to be an attribute's
-/// value as it is to be between tags, and `<a title="$.said">` has to hold a
-/// quote without ending the attribute.
+/// value as it is to be between tags, and `<a title="<%= said %>">` has to
+/// hold a quote without ending the attribute.
 ///
 /// Nothing is copied until the first character that needs one: text with none
 /// of the five — which most text is — is appended in one piece at the end.
