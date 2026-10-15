@@ -272,6 +272,7 @@ fn piece_of_value(known: &cove_sema::stdlib::LiteralTag, value: &Value) -> Tagge
     let markup = |value: &Value| matches!(&value.0, Repr::Struct(found) if *found.type_name == known.qualified_type());
     match &value.0 {
         Repr::Str(_) => TaggedPiece::Text,
+        Repr::Enum(found) if *found.type_name == *OPTION.name => TaggedPiece::Optional,
         _ if markup(value) => TaggedPiece::Markup,
         Repr::Array(items) if !items.is_empty() && items.iter().all(markup) => {
             TaggedPiece::EachMarkup
@@ -3406,19 +3407,8 @@ impl<'a> Interpreter<'a> {
                     .extend_from_slice(literal.as_bytes()),
                 StrPart::Interpolation(inner) => {
                     let value = self.eval(env, inner)?;
-                    let piece = match self.program.facts.ty(inner.span.file, inner.id) {
-                        Some(ty) => known.piece(Some(ty)),
-                        None => piece_of_value(known, &value),
-                    };
-                    let (function, piece) = match piece {
-                        TaggedPiece::Markup => (known.markup, value),
-                        TaggedPiece::EachMarkup => (known.each, value),
-                        TaggedPiece::Text => (known.escape, value),
-                        TaggedPiece::Rendered => {
-                            (known.escape, Value(Repr::Str(value.to_string().into())))
-                        }
-                    };
-                    self.call_library(known.module, function, vec![buffer.clone(), piece], span)?;
+                    let ty = self.program.facts.ty(inner.span.file, inner.id);
+                    self.append_tagged(known, &buffer, ty, value, span)?;
                 }
             }
         }
@@ -3430,6 +3420,47 @@ impl<'a> Interpreter<'a> {
             vec![Value(Repr::Str(said.into()))],
             span,
         )?)
+    }
+
+    /// Appends one hole of a tagged literal whose type as written is `ty`,
+    /// as the lowering's `Body::append_tagged_as` does: the same calls over
+    /// the same values, and for an `Option` ([ADR 0104]) nothing for `None`
+    /// and the payload, asked again, for `Some`.
+    ///
+    /// [ADR 0104]: ../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md
+    fn append_tagged(
+        &mut self,
+        known: &'static cove_sema::stdlib::LiteralTag,
+        buffer: &Value,
+        ty: Option<&cove_sema::typeck::Ty>,
+        value: Value,
+        span: Span,
+    ) -> Result<(), Control> {
+        let piece = match ty {
+            Some(ty) => known.piece(Some(ty)),
+            None => piece_of_value(known, &value),
+        };
+        let (function, piece) = match piece {
+            TaggedPiece::Markup => (known.markup, value),
+            TaggedPiece::EachMarkup => (known.each, value),
+            TaggedPiece::Text => (known.escape, value),
+            TaggedPiece::Optional => {
+                let payload_ty = match ty {
+                    Some(cove_sema::typeck::Ty::Option(payload)) => Some(&**payload),
+                    _ => None,
+                };
+                return match value.some_payload() {
+                    Some([payload]) => {
+                        let payload = payload.clone();
+                        self.append_tagged(known, buffer, payload_ty, payload, span)
+                    }
+                    _ => Ok(()),
+                };
+            }
+            TaggedPiece::Rendered => (known.escape, Value(Repr::Str(value.to_string().into()))),
+        };
+        self.call_library(known.module, function, vec![buffer.clone(), piece], span)?;
+        Ok(())
     }
 
     /// A call of the standard-library function `module.name` over `args`,

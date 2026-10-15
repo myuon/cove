@@ -287,7 +287,11 @@ impl LiteralTag {
     }
 
     /// How a hole whose checked type is `ty` is appended: in whole when the
-    /// type says it is already the module's markup, escaped otherwise.
+    /// type says it is already the module's markup, escaped otherwise — and
+    /// an `Option` as its payload or not at all, [ADR 0104], which asks this
+    /// again of the payload's type.
+    ///
+    /// [ADR 0104]: ../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md
     ///
     /// The type is the one the checker settled for the hole as written, in
     /// the declaration's own terms — a type parameter is a type parameter
@@ -298,6 +302,7 @@ impl LiteralTag {
         match ty {
             Some(ty) if markup(ty) => TaggedPiece::Markup,
             Some(Ty::Array(element)) if markup(element) => TaggedPiece::EachMarkup,
+            Some(Ty::Option(_)) => TaggedPiece::Optional,
             Some(Ty::Str) => TaggedPiece::Text,
             _ => TaggedPiece::Rendered,
         }
@@ -321,6 +326,14 @@ pub enum TaggedPiece {
     /// A `String`: escaped straight into the buffer, by
     /// [`LiteralTag::escape`].
     Text,
+    /// An `Option`, [ADR 0104]: nothing for `None`, and for `Some` its
+    /// payload, appended as a hole of the payload's type is — the piece
+    /// [`LiteralTag::piece`] answers for `Option`'s argument. The case is
+    /// switched on where the value is, so no function of the module is named
+    /// for it.
+    ///
+    /// [ADR 0104]: ../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md
+    Optional,
     /// Anything else: rendered exactly as a plain literal renders it, and
     /// that text escaped.
     Rendered,
@@ -640,5 +653,28 @@ mod tests {
                 binding.receiver, binding.method, binding.module, binding.function
             );
         }
+    }
+
+    /// ADR 0104: an `Option` hole is the payload's question asked again,
+    /// whatever the payload is; a type parameter is not looked through.
+    #[test]
+    fn an_option_hole_is_its_payload_or_nothing() {
+        let html = literal_tag("html").expect("`html` is a tag");
+        let markup = Ty::Struct("std.html.Html".into(), Vec::new());
+        for payload in [
+            markup.clone(),
+            Ty::Str,
+            Ty::Int,
+            Ty::Array(Box::new(markup.clone())),
+            Ty::Option(Box::new(Ty::Str)),
+        ] {
+            let option = Ty::Option(Box::new(payload));
+            assert_eq!(html.piece(Some(&option)), TaggedPiece::Optional);
+        }
+        assert_eq!(html.piece(Some(&markup)), TaggedPiece::Markup);
+        assert_eq!(
+            html.piece(Some(&Ty::Param("T".into()))),
+            TaggedPiece::Rendered
+        );
     }
 }

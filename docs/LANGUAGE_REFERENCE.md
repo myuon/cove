@@ -339,11 +339,16 @@ except that a line break in a multi-line `html"""` is spacing
 - **Evaluates to** the markup assembled left to right, as a plain literal is:
   the literal's own text goes in as written, and each hole is appended by its
   **checked type** — an `Html` as it is; an `Array<Html>` element by element
-  in order; a `String` escaped; anything else rendered exactly as `"{x}"`
-  renders it, then escaped. Escaping writes `&`, `<`, `>`, `"` and `'` as
+  in order; an `Option<T>` as nothing for `None` and, for `Some(v)`, as a
+  hole of type `T` puts in `v`
+  ([ADR 0104](adr/0104-in-html-an-absent-value-is-no-markup.md)), so
+  `Option<Html>` is markup or nothing, `Option<String>` escaped text or
+  nothing, and `Some(None)` nothing; a `String` escaped; anything else
+  rendered exactly as `"{x}"` renders it, then escaped. Escaping writes `&`, `<`, `>`, `"` and `'` as
   `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, wherever the hole sits.
   The type is the one the checker settled for the hole as written, so a hole
-  whose type is a type parameter is escaped whatever the parameter becomes.
+  whose type is a type parameter is escaped whatever the parameter becomes —
+  an `Option` included. A plain `"{opt}"` still renders `Some(…)` or `None`.
 - **A line break in a multi-line `html"""` is spacing.** A line break that
   no `\` ate, with the whole of the next line's indentation, is **nothing**
   when the line before ends with `>` or with the `}` that closes a hole and
@@ -363,9 +368,14 @@ except that a line break in a multi-line `html"""` is spacing
 - `page.render()` — a method of `Html` — gives the text of one, and
   `std.html.markup` is the one way to make one from a `String` without
   escaping it. `html""` is no markup at all, and `==` compares markup as it
-  does any value. `std.html.join(parts, between)` is `parts` with `between`
+  does any value; a part that may be absent is better an `Option<Html>`
+  in the hole. `std.html.join(parts, between)` is `parts` with `between`
   between each two and nothing around them; no parts is `html""`
   ([ADR 0102](adr/0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md)).
+  `html.only(c, html"…")` is the markup when `c` holds and `html""` when it
+  does not; the markup is evaluated either way, so one that is only safe to
+  build when `c` holds is written with `if` or as an `Option` hole
+  ([ADR 0104](adr/0104-in-html-an-absent-value-is-no-markup.md)).
 
 ```cove
 use std.html

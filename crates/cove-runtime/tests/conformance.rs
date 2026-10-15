@@ -196,6 +196,17 @@ static RULES: &[Rule] = &[
         value: "<a>1</a> · <a>&</a>|true",
         foreign: "Int",
     },
+    // ADR 0104: an `Option` hole is nothing for `None` and for `Some` what a
+    // hole of its payload's type puts in, applied twice to an option of an
+    // option; a plain literal still renders `Some(…)` and `None`.
+    Rule {
+        section: "Tagged literals",
+        decls: "use std.html\nuse std.html.Html\n\n",
+        body: "let seen: Option<Html> = Some(html\"<em>\")\nlet note: Option<String> = Some(\"<&>\")\nlet none: Option<String> = None\nlet nested: Option<Option<Int>> = Some(None)\nlet page = html\"[{seen}|{note}|{none}|{nested}]\".render()\n\"{page}{note}{none}\"",
+        ty: "String",
+        value: "[<em>|&lt;&amp;&gt;||]Some(<&>)None",
+        foreign: "Int",
+    },
     Rule {
         section: "Literals",
         decls: "",

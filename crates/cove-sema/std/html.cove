@@ -2,9 +2,10 @@
 //
 // A page is a string literal tagged `html`, and **the type of what goes in a
 // hole decides whether it is escaped**: an `Html` goes in whole because it is
-// already markup, an `Array<Html>` goes in element by element, and everything
-// else is rendered as a plain literal renders it and then escaped. The
-// literal's value is an `Html`, so a page is built out of pages.
+// already markup, an `Array<Html>` goes in element by element, an `Option`
+// goes in as nothing for `None` and as its payload would for `Some`, and
+// everything else is rendered as a plain literal renders it and then
+// escaped. The literal's value is an `Html`, so a page is built out of pages.
 // [ADR 0101](../../../docs/adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md)
 // is the record of that, and of the template notation it replaced
 // ([ADR 0099](../../../docs/adr/0099-a-page-is-markup-with-a-path-in-every-erb-tag.md)).
@@ -33,6 +34,41 @@
 // so the row above is `<tr><td class=at>…</td><td>…</td></tr>`. The lexer
 // decides it from the characters either side of the break; nothing here, and
 // nothing in the compiler, reads the markup.
+//
+// # For a reader who knows JSX
+//
+// What JSX reaches for, and how it is written here:
+//
+// - `{x}`, escaped by default: the same — a hole is escaped unless its type
+//   is `Html`.
+// - an element as a value, a component: a function answering `Html`, called
+//   in a hole — `{row(item)}`, not `<Row item={x}/>`.
+// - a list, `{items.map(i => <li>…</li>)}`:
+//   `{items.map(fn(i) { html"<li>…</li>" })}`, an `Array<Html>`.
+// - a condition, `{c ? <A/> : <B/>}`: `{if c { html"…" } else { html"…" }}`.
+// - nothing when there is nothing, `{x ?? null}`: `{x}` where `x` is an
+//   `Option`
+//   ([ADR 0104](../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md)).
+// - a fragment, `<>…</>`: the markup side by side in one `html"…"`.
+// - nested markup laid out over lines: `html"""…"""`, where a line break is
+//   nothing between two tags or holes and one space elsewhere (ADR 0103) —
+//   nearer Vue's whitespace rule than JSX's, so prose wrapped before an
+//   inline tag keeps its space.
+// - `c && <X/>`: `{html.only(c, html"…")}` — but the markup is built
+//   whether or not `c` holds, so what is only safe to build when it does is
+//   an `if`, or an `Option` hole.
+// - `dangerouslySetInnerHTML`: [`markup`]`(s)`, the one way past escaping.
+//
+// And what is different on purpose:
+//
+// - **An attribute is text in the markup, not syntax.** A value goes inside
+//   quotes, `class="state {x}"`; there is no `checked={x}` and no attribute
+//   that disappears for `undefined`, because knowing a hole is an
+//   attribute's value needs the markup read, which neither this module nor
+//   the compiler does (ADR 0103's withdrawn alternative). A present-or-absent
+//   attribute is a fragment, `html" checked"`, or an `Option<Html>` of one.
+// - **A component is a call, not a tag**, for the same reason as attributes:
+//   a tag would need the markup read.
 //
 // # Where the decision is made
 //
@@ -69,9 +105,16 @@
 //
 // # Nothing, lists, and the text
 //
-// No markup is `html""`: the literal with nothing in it is the value a page
-// puts where a part is absent, and `page == html""` asks whether a part is
-// there, because `==` is structural for `Html` as for every type. A list
+// No markup is `html""`: the literal with nothing in it, and `page ==
+// html""` asks whether a part is there, because `==` is structural for
+// `Html` as for every type. A part that may be absent is an `Option`, and a
+// hole puts in nothing for `None` and for `Some(v)` what a hole of `v`'s
+// type would — `Option<Html>` markup or nothing, `Option<String>` escaped
+// text or nothing, `Some(None)` nothing — so `{item.seen}` with `seen:
+// Option<Html>` needs no `html""` standing in for the absence. In a plain
+// `"{opt}"` an `Option` still renders as `Some(…)` or `None`.
+// [ADR 0104](../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md)
+// is the record of that. A list
 // goes in a hole as an `Array<Html>`, one element after another;
 // [`join`] puts markup between them — `html.join(links, html" · ")`. And
 // `page.render()` is the one way out, as [`markup`] is the one way in.
@@ -143,6 +186,24 @@ export fn join(parts: Array<Html>, between: Html) -> Html {
   Html(said: between.said.join(parts.map(fn(part) {
     part.said
   })))
+}
+
+/// `page` when `when` holds and no markup when it does not: JSX's
+/// `c && <X/>`, without an `else` to write, [ADR 0104].
+///
+/// It is a function, so `page` is evaluated whether or not `when` holds —
+/// Cove evaluates arguments first. That suits markup that is cheap and safe
+/// to build either way; markup that is only safe to build when the condition
+/// holds, such as one that unwraps an `Option`, is written with `if`, or as
+/// an `Option` hole.
+///
+/// [ADR 0104]: ../../../docs/adr/0104-in-html-an-absent-value-is-no-markup.md
+export fn only(when: Bool, page: Html) -> Html {
+  if when {
+    page
+  } else {
+    Html(said: "")
+  }
 }
 
 /// Appends `text` to `buffer` with the five characters that mean something

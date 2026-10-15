@@ -8,6 +8,7 @@ ok    html.aLiteralWithNoHoleIsItself
 ok    html.aNestedLiteralGoesInWhole
 ok    html.aOneLineLiteralHoldsQuotesAsWritten
 ok    html.aOneLineLiteralKeepsItsSpacesAndItsLastQuote
+ok    html.aPlainLiteralStillRendersAnOption
 ok    html.aScriptInTheDataIsNotAScript
 ok    html.aSpaceAtAJoinIsWrittenBeforeTheBackslash
 ok    html.anArrayOfHtmlGoesInOneAfterAnother
@@ -16,10 +17,20 @@ ok    html.anEmptyLiteralIsNoMarkupAtAll
 ok    html.anHtmlHoleGoesInWhole
 ok    html.anIfInAHoleIsAnExpression
 ok    html.anIntAndABoolAreWrittenAsEver
+ok    html.anOptionBehindATypeParameterIsRenderedAndEscaped
+ok    html.anOptionInsideAQuotedAttributeAddsNothingForNone
+ok    html.anOptionOfAnOptionIsAskedTwice
+ok    html.anOptionalArrayOfHtmlIsItsElementsOrNothing
+ok    html.anOptionalHtmlIsItsMarkupOrNothing
+ok    html.anOptionalIntIsItsDigitsOrNothing
+ok    html.anOptionalStringIsEscapedOrNothing
 ok    html.escapesAStringBetweenTags
 ok    html.escapesAStringInsideAQuotedAttribute
 ok    html.isUsableAsAQualifiedModule
 ok    html.joinPutsMarkupBetweenEachTwo
 ok    html.markupIsTakenAtItsWord
+ok    html.onlyInAHoleAddsItsMarkupOrNothing
+ok    html.onlyIsNothingWhenItDoesNotHold
+ok    html.onlyIsTheMarkupWhenItHolds
 ok    html.theLiteralTextIsNotEscaped
-ran 24 test(s), 24 passed
+ran 35 test(s), 35 passed
