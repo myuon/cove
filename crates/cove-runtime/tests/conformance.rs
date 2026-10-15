@@ -186,6 +186,17 @@ static RULES: &[Rule] = &[
         value: "<p>x</p> its <i>y</i>",
         foreign: "Int",
     },
+    // ADR 0103: `name={x}` is an attribute written by the hole's type — a
+    // value quoted and escaped, a `Bool` there or not, an `Option` there for
+    // `Some` — and a hole between tags is ADR 0101's.
+    Rule {
+        section: "Tagged literals",
+        decls: "use std.html\n\n",
+        body: "let t = \"a\\\"&\"\nlet on = false\nlet c: Option<String> = None\nhtml\"<a title={t} hidden={on} class={c} data-n={2} lang={Some(\"en\")}>a={t}</a>\".render()",
+        ty: "String",
+        value: "<a title=\"a&quot;&amp;\" data-n=\"2\" lang=\"en\">a=a&quot;&amp;</a>",
+        foreign: "Int",
+    },
     // ADR 0102: `join` puts markup between each two parts and nothing around
     // them, and no markup is `html""`.
     Rule {
@@ -642,6 +653,11 @@ static REJECTIONS: &[Rejection] = &[
         section: "Tagged literals",
         source: "/// Tags a literal with a name that is not a tag.\nexport fn probe() -> String {\n  sql\"x\"\n}\n",
         code: "cove::type::unknown_literal_tag",
+    },
+    Rejection {
+        section: "Tagged literals",
+        source: "use std.html\nuse std.html.Html\n\n/// Puts markup in an attribute's whole value.\nexport fn probe(page: Html) -> Html {\n  html\"<a title={page}>x</a>\"\n}\n",
+        code: "cove::type::markup_in_attribute",
     },
     Rejection {
         section: "Tagged literals",

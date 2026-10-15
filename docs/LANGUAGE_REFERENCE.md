@@ -278,6 +278,8 @@ let row = """
   indentation — past the margin too, though that line must still begin with
   the margin. So the literal above is `<tr class="row"><td>…</td></tr>`, and
   `\\` at the end of a line is a backslash and the newline stays.
+- A line break that no `\` ate is a newline, except in `html"""`, where it
+  is spacing — see [Tagged literals](#tagged-literals).
 - A `"` inside is text. Every escape and every `{expr}` is what it is in
   `"…"`, and a `"""` in the text is written `\"""`.
 
@@ -325,7 +327,10 @@ A name written **against** a string literal's opening quote, with no space,
 tags it: `html"x"` is one literal, and `html "x"` is a name followed by a
 string. Either literal form takes a tag, and its text, escapes, holes, margin
 and continuation `\` are what they are untagged
-([ADR 0101](adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md)).
+([ADR 0101](adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md)),
+except for the two rules of
+[ADR 0103](adr/0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md)
+below: a line break is spacing, and `name={expr}` is an attribute.
 
 - **There is one tag, `html`**, and it is written where the name `html`
   resolves to the module `std.html` — after `use std.html`, with no local
@@ -340,6 +345,45 @@ and continuation `\` are what they are untagged
   `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, wherever the hole sits.
   The type is the one the checker settled for the hole as written, so a hole
   whose type is a type parameter is escaped whatever the parameter becomes.
+- **A line break in a multi-line `html"""` is spacing.** A line break that
+  no `\` ate, with the whole of the next line's indentation, is **nothing**
+  when the line before ends with `>` or with the `}` that closes a hole and
+  the line after begins with `<` or with the `{` that opens one, and **one
+  space** anywhere else — so markup is laid out one element to a line and
+  prose wraps as prose. An escaped `\{` or `\}` is text, not an edge. A run
+  of blank lines is one break, and blank lines just before the closer are one
+  space. The margin is checked as ever, a `\` ending a line still joins with
+  nothing and takes precedence, and `\n` is still a newline — which is how a
+  `<pre>` keeps one. A one-line `html"""…"""`, an `html"…"`, and a `"""`
+  with no tag keep their line breaks as text.
+- **`name={expr}` is an attribute, written by the hole's type.** The
+  literal's text is read just far enough to know whether a hole is inside a
+  tag: `<` followed by an ASCII letter, `/` or `!` opens one, `>` closes it,
+  and inside it `"` and `'` open and close a quoted value. A hole inside a
+  tag and outside quotes, with whitespace, a name (letters, digits, `-`, `_`,
+  `:`, `.`) and `=` directly in front of it and whitespace, `>` or `/`
+  directly after it, is that attribute's whole value, and the attribute — the
+  whitespace written before the name, the name, `=` and the value — is
+  written as the hole's checked type says:
+
+  | the hole's type | what is written |
+  | --- | --- |
+  | `Bool` | ` name` when `true`; nothing at all — not the name, not the space before it — when `false` |
+  | `Option<T>` | for `Some(v)`, what `v` would write; nothing for `None` |
+  | `Html`, `Array<Html>` (or an `Option` of one) | refused, `cove::type::markup_in_attribute` |
+  | anything else | ` name="…"`: rendered as `"{x}"` renders it, escaped once as a whole, inside double quotes the literal writes |
+
+  Every other hole — between tags (so `a={x}` in a sentence is text), inside
+  a quoted value, against other text — is appended as above. That is all the
+  HTML the compiler reads: no element names and no validation.
+- **`name={…}` is the recommended way to write an attribute's value.** The
+  value is built as an ordinary `String` — interpolation, an `if`, a call —
+  and escaped **once**, as a whole, so `&` in it is written `&` and comes out
+  `&amp;`; the quotes are written for you, so a value never reaches an
+  unquoted attribute; and a `Bool` or an `Option` says whether the attribute
+  is there at all. A hole inside a quoted value, `class="state {x}"`, still
+  works and is escaped where it sits; nothing is refused for the way it is
+  written.
 - `page.render()` — a method of `Html` — gives the text of one, and
   `std.html.markup` is the one way to make one from a `String` without
   escaping it. `html""` is no markup at all, and `==` compares markup as it
@@ -350,26 +394,32 @@ and continuation `\` are what they are untagged
 ```cove
 use std.html
 
-fn row(name: String, count: Int) -> String {
+fn row(name: String, count: Int, done: Bool) -> String {
   html"""
-    <tr>\
-      <td class="name">{name}</td>\
-      <td>{count}</td>\
+    <tr class={if done { Some("done") } else { None }}>
+      <td class=name>{name}</td>
+      <td>{count}</td>
+      <td><input type=checkbox checked={done} disabled></td>
     </tr>
     """.render()
 }
 
 fn links(names: Array<String>) -> String {
   let each = names.map(fn(name) {
-    html"""<a href="/{name}">{name}</a>"""
+    html"<a href={"/{name}?from=list&page=1"}>{name}</a>"
   })
   html.join(each, html" · ").render()
 }
 ```
 
+`row("a&b", 2, false)` is `<tr><td class=name>a&amp;b</td><td>2</td><td><input type=checkbox disabled></td></tr>`
+— the line breaks between tags gone, the `class` and `checked` absent — and
+each link is `<a href="/…?from=list&amp;page=1">…</a>`.
+
 Errors: `cove::type::unknown_literal_tag` for any other name against a quote;
 `cove::type::literal_tag_unimported` for `html"…"` where `html` does not name
-`std.html`. A mistake in a hole is the error it would be anywhere —
+`std.html`; `cove::type::markup_in_attribute` for an `Html`, an
+`Array<Html>`, or an `Option` of either as an attribute's whole value. A mistake in a hole is the error it would be anywhere —
 `cove::type::unknown_field` for a field the struct does not have,
 `cove::type::unknown_name` for a name nothing declares.
 

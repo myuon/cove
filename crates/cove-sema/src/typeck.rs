@@ -454,6 +454,9 @@ use crate::resolve::{Conformance, Program, ResolvedModule, TraitEntry};
 /// An argument's type does not match the parameter, field, or payload it is
 /// given to.
 pub const MISMATCH: &str = "cove::type::mismatch";
+/// Markup as an attribute's whole value in a tagged literal, `name={page}`:
+/// ADR 0103.
+pub const MARKUP_IN_ATTRIBUTE: &str = "cove::type::markup_in_attribute";
 /// A call passes more arguments than the callee declares parameters.
 pub const ARITY: &str = "cove::type::arity";
 /// A call omits a parameter that has no default.
@@ -4846,12 +4849,19 @@ impl<'a> Checker<'a> {
             ExprKind::Tagged { tag, parts } => {
                 // A hole of a tagged literal is checked exactly as a plain
                 // one is: rendered or appended, so constrained by nothing.
+                let mut holes = Vec::new();
                 for part in parts {
                     if let StrPart::Interpolation(inner) = part {
-                        self.expr(inner, None);
+                        holes.push((inner.span, self.expr(inner, None)));
                     }
                 }
-                self.tagged_literal(tag)
+                let ty = self.tagged_literal(tag);
+                if let Some(known) = crate::stdlib::literal_tag(&tag.node) {
+                    if !matches!(ty, Ty::Unknown(Unknown::Recovery)) {
+                        self.attribute_holes(known, parts, &holes);
+                    }
+                }
+                ty
             }
             ExprKind::Ident(name) => self.ident(name, span, expected),
             ExprKind::ArrayLit(items) => self.array_literal(items, span, expected),
@@ -5213,6 +5223,50 @@ impl<'a> Checker<'a> {
     /// written, to the module the tag belongs to — the rule every qualified
     /// name keeps, that a program which does not `use` a module does not
     /// have it.
+    /// Refuses markup as an attribute's whole value, ADR 0103: a hole
+    /// `name={expr}` of a tagged literal is written as text — quoted and
+    /// escaped, or present or absent — so an `Html` there is a mistake.
+    ///
+    /// `holes` are the literal's holes in order with the types they checked
+    /// at. Nothing else about how a hole is written is refused: a hole inside
+    /// a quoted value, or between tags, is ADR 0101's and stays legal.
+    fn attribute_holes(
+        &mut self,
+        known: &crate::stdlib::LiteralTag,
+        parts: &[StrPart],
+        holes: &[(Span, Ty)],
+    ) {
+        for laid in crate::stdlib::lay_out(parts) {
+            let crate::stdlib::Laid::Attribute { name, hole } = laid else {
+                continue;
+            };
+            let Some((_, ty)) = holes.iter().find(|(span, _)| *span == hole.span) else {
+                continue;
+            };
+            if known.attribute(Some(ty)) != crate::stdlib::AttributeValue::Markup {
+                continue;
+            }
+            let name = name.trim_start();
+            self.diagnostics.push(
+                Diagnostic::error(
+                    MARKUP_IN_ATTRIBUTE,
+                    format!("the value of attribute `{name}` is markup, of type `{ty}`"),
+                )
+                .at(hole.span)
+                .rule(
+                    "A hole written as an attribute's whole value, `name={expr}`, is written \
+                     as text: quoted and escaped, or there or not for a `Bool` or an \
+                     `Option`. An attribute's value is text, so markup there is a mistake.",
+                )
+                .help(format!(
+                    "Put the text the attribute should hold in the hole — a `String`, or \
+                     anything rendered as one — or move the markup between tags, where \
+                     `{name}` is not."
+                )),
+            );
+        }
+    }
+
     fn tagged_literal(&mut self, tag: &Ident) -> Ty {
         let Some(known) = crate::stdlib::literal_tag(&tag.node) else {
             let tags: Vec<String> = crate::stdlib::literal_tags()

@@ -1,5 +1,6 @@
 ok    bare.rendersWithoutImportingTheType
 ok    html.aBackslashAndAnEscapedNewlineKeepTheirMeaning
+ok    html.aBoolAttributeIsThereOrNot
 ok    html.aBreakBetweenTagsIsNothing
 ok    html.aBreakInProseIsOneSpace
 ok    html.aFieldOfAStructIsAHole
@@ -12,14 +13,18 @@ ok    html.aScriptInTheDataIsNotAScript
 ok    html.aSpaceAtAJoinIsWrittenBeforeTheBackslash
 ok    html.anArrayOfHtmlGoesInOneAfterAnother
 ok    html.anArrayThatIsNotMarkupIsEscaped
+ok    html.anAttributeHoleIsQuotedAndEscaped
+ok    html.anAttributeOverLinesKeepsItsSpace
 ok    html.anEmptyLiteralIsNoMarkupAtAll
 ok    html.anHtmlHoleGoesInWhole
 ok    html.anIfInAHoleIsAnExpression
 ok    html.anIntAndABoolAreWrittenAsEver
+ok    html.anOptionAttributeIsThereForSome
 ok    html.escapesAStringBetweenTags
 ok    html.escapesAStringInsideAQuotedAttribute
 ok    html.isUsableAsAQualifiedModule
 ok    html.joinPutsMarkupBetweenEachTwo
 ok    html.markupIsTakenAtItsWord
+ok    html.otherHolesAreAsTheyWere
 ok    html.theLiteralTextIsNotEscaped
-ran 24 test(s), 24 passed
+ran 29 test(s), 29 passed

@@ -35,7 +35,7 @@ use std::collections::HashSet;
 
 use cove_schema::builtins::FreeBuiltinKind;
 use cove_sema::resolve::{CallPrecision, FnKey, Program as Checked};
-use cove_sema::stdlib::{literal_tag, TaggedPiece};
+use cove_sema::stdlib::{lay_out, literal_tag, AttributeValue, Laid, TaggedPiece};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Block, Expr, ExprKind, StmtKind, StrPart};
 
@@ -349,10 +349,10 @@ impl Scan<'_> {
             return;
         };
         self.named((known.module, known.wrap));
-        for part in parts {
-            match part {
-                StrPart::Text(text) => self.literal(text),
-                StrPart::Interpolation(inner) => {
+        for laid in lay_out(parts) {
+            match laid {
+                Laid::Text(text) => self.literal(text),
+                Laid::Hole(inner) => {
                     match known.piece(self.ty(inner)) {
                         TaggedPiece::Markup => self.named((known.module, known.markup)),
                         TaggedPiece::EachMarkup => self.named((known.module, known.each)),
@@ -363,6 +363,24 @@ impl Scan<'_> {
                         }
                     }
                     self.expr(inner);
+                }
+                // `Body::append_attribute`'s calls: the flag, or the
+                // attribute over the value or over its rendering — of the
+                // payload, for an `Option`, whose walk is left to the rounds.
+                Laid::Attribute { hole, .. } => {
+                    match known.attribute(self.ty(hole)) {
+                        AttributeValue::Flag => self.named((known.module, known.flag)),
+                        AttributeValue::Value(piece) | AttributeValue::Optional(piece) => {
+                            self.named((known.module, known.attribute));
+                            if piece == TaggedPiece::Rendered
+                                && !matches!(self.ty(hole), Some(Ty::Option(_)))
+                            {
+                                self.piece(hole);
+                            }
+                        }
+                        AttributeValue::Markup => {}
+                    }
+                    self.expr(hole);
                 }
             }
         }
