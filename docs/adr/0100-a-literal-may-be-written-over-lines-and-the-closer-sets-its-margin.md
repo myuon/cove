@@ -1,7 +1,8 @@
 # ADR 0100: A literal may be written over lines, and the closer sets its margin
 
 - Status: Accepted; superseded in part by
-  [ADR 0102](0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md): the rule that `"""` must be followed by a newline
+  [ADR 0102](0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md): the rule that `"""` must be followed by a newline;
+  superseded in part by [ADR 0103](0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md): line breaks as content, for `html"""…"""` only
 - Date: 2026-10-15
 - Refers to:
   [ADR 0045](0045-a-literal-is-there-before-the-program-runs.md), which owns

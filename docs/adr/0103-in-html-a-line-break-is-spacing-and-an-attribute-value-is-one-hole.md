@@ -1,6 +1,6 @@
 # ADR 0103: In `html"…"`, a line break is spacing and an attribute's value is one hole
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-15
 - Supersedes:
   [ADR 0100](0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md)'s

@@ -1,7 +1,8 @@
 # ADR 0101: A page is markup with an expression in every hole
 
 - Status: Accepted; superseded in part by
-  [ADR 0102](0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md): `render(page)` as a free function, and `empty()`
+  [ADR 0102](0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md): `render(page)` as a free function, and `empty()`;
+  superseded in part by [ADR 0103](0103-in-html-a-line-break-is-spacing-and-an-attribute-value-is-one-hole.md): the hole lowering, for a hole that is an attribute's whole value
 - Date: 2026-10-15
 - Supersedes:
   [ADR 0099](0099-a-page-is-markup-with-a-path-in-every-erb-tag.md)'s hole
