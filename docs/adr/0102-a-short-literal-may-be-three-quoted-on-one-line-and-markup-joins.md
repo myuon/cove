@@ -1,6 +1,6 @@
 # ADR 0102: A short literal may be three-quoted on one line, and markup joins
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-15
 - Supersedes:
   [ADR 0100](0100-a-literal-may-be-written-over-lines-and-the-closer-sets-its-margin.md)'s

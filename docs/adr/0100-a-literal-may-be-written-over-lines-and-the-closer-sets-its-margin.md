@@ -1,6 +1,7 @@
 # ADR 0100: A literal may be written over lines, and the closer sets its margin
 
-- Status: Accepted
+- Status: Accepted; superseded in part by
+  [ADR 0102](0102-a-short-literal-may-be-three-quoted-on-one-line-and-markup-joins.md): the rule that `"""` must be followed by a newline
 - Date: 2026-10-15
 - Refers to:
   [ADR 0045](0045-a-literal-is-there-before-the-program-runs.md), which owns
