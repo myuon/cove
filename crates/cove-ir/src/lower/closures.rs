@@ -916,7 +916,7 @@ fn mention_expr(expr: &Expr, out: &mut BTreeSet<String>) {
         ExprKind::Ident(name) => {
             out.insert(name.clone());
         }
-        ExprKind::Str(parts) => {
+        ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
             for part in parts {
                 if let StrPart::Interpolation(inner) = part {
                     mention_expr(inner, out);

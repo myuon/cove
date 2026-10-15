@@ -45,6 +45,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use cove_diag::{Diagnostic, SourceMap};
 
 use crate::package::{Module, Unit};
+use crate::typeck::Ty;
 
 /// One embedded standard-library source file and the module it belongs to.
 struct StdSource {
@@ -234,7 +235,121 @@ pub fn is_library_module(module: &str) -> bool {
 /// the corpus surveys that count every program's functions (ADR 0097). A
 /// sliced lowering — what `cove run` and `cove test` do — never lowered them
 /// unreached in the first place.
+///
+/// `std.html` is named by the lowering, but only to assemble an `html"…"`
+/// literal ([`LiteralTag`]), which a module can write only where it imports
+/// `std.html`. So a program that never writes one still never reaches it,
+/// and it stays here: the lowering's call is a round's `wanted` like any call
+/// the graph did not draw, and adds the module's functions only to a package
+/// that holds such a literal.
 const IMPORTED: &[&str] = &["std.json", "std.html"];
+
+/// A string-literal tag: the module that gives `tag"…"` its meaning, and the
+/// functions of that module the lowering assembles one with.
+/// [ADR 0101](../../../docs/adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md).
+///
+/// There is one, `html`, and this table is where that is so. The checker asks
+/// [`literal_tag`] whether a tag means anything, and the lowering and the
+/// tree-walking oracle call the functions named here and no others — so a
+/// second tag would be a second row, and a tag a module declares for itself
+/// would be a lookup in place of [`literal_tag`]. What escaping *means* is
+/// the module's Cove source; this names only where to find it.
+///
+/// Every function here is the module's own and not exported: nothing but the
+/// assembly of a literal calls them, and a module-private declaration of the
+/// standard library is one the lowering may name ([`reaches_private`]).
+#[derive(Debug)]
+pub struct LiteralTag {
+    /// The name written against the quote.
+    pub tag: &'static str,
+    /// The module the tag must name where it is written.
+    pub module: &'static str,
+    /// The type the literal answers, declared by `module`.
+    pub ty: &'static str,
+    /// `(buffer: ByteBuffer, text: String)`: appends text that is not
+    /// markup, escaped.
+    pub escape: &'static str,
+    /// `(buffer: ByteBuffer, piece: <ty>)`: appends a value of the module's
+    /// type as it is.
+    pub markup: &'static str,
+    /// `(buffer: ByteBuffer, pieces: Array<<ty>>)`: the same, for every
+    /// element in order.
+    pub each: &'static str,
+    /// `(said: String) -> <ty>`: the finished text as the module's type.
+    pub wrap: &'static str,
+}
+
+impl LiteralTag {
+    /// The literal's type, qualified as the checker names a struct:
+    /// `std.html.Html`.
+    pub fn qualified_type(&self) -> String {
+        format!("{}.{}", self.module, self.ty)
+    }
+
+    /// How a hole whose checked type is `ty` is appended: in whole when the
+    /// type says it is already the module's markup, escaped otherwise.
+    ///
+    /// The type is the one the checker settled for the hole as written, in
+    /// the declaration's own terms — a type parameter is a type parameter
+    /// whatever an instantiation makes it — so the lowering and the oracle
+    /// decide every hole the same way.
+    pub fn piece(&self, ty: Option<&Ty>) -> TaggedPiece {
+        let markup = |ty: &Ty| matches!(ty, Ty::Struct(name, args) if args.is_empty() && self.is_markup(name));
+        match ty {
+            Some(ty) if markup(ty) => TaggedPiece::Markup,
+            Some(Ty::Array(element)) if markup(element) => TaggedPiece::EachMarkup,
+            Some(Ty::Str) => TaggedPiece::Text,
+            _ => TaggedPiece::Rendered,
+        }
+    }
+
+    fn is_markup(&self, name: &str) -> bool {
+        name.strip_prefix(self.module)
+            .and_then(|rest| rest.strip_prefix('.'))
+            == Some(self.ty)
+    }
+}
+
+/// What [`LiteralTag::piece`] answers for one hole of a tagged literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaggedPiece {
+    /// The module's own type: appended as it is, by [`LiteralTag::markup`].
+    Markup,
+    /// An `Array` of it: each element appended as it is, by
+    /// [`LiteralTag::each`].
+    EachMarkup,
+    /// A `String`: escaped straight into the buffer, by
+    /// [`LiteralTag::escape`].
+    Text,
+    /// Anything else: rendered exactly as a plain literal renders it, and
+    /// that text escaped.
+    Rendered,
+}
+
+/// Every tag a string literal may carry. See [`LiteralTag`].
+const LITERAL_TAGS: &[LiteralTag] = &[LiteralTag {
+    tag: "html",
+    module: "std.html",
+    ty: "Html",
+    escape: "appendEscaped",
+    markup: "appendMarkup",
+    each: "appendEach",
+    wrap: "assembled",
+}];
+
+/// The tag `tag` names, or `None` when a string literal may not carry it.
+///
+/// **The one place a tag is accepted or refused**, ADR 0101's "the check that
+/// the tag is `html` sits in one place". Whether the name also resolves to the
+/// tag's module where it is written is the checker's question.
+pub fn literal_tag(tag: &str) -> Option<&'static LiteralTag> {
+    LITERAL_TAGS.iter().find(|known| known.tag == tag)
+}
+
+/// The tags there are, for a diagnostic that names them.
+pub fn literal_tags() -> impl Iterator<Item = &'static LiteralTag> {
+    LITERAL_TAGS.iter()
+}
 
 /// Whether `module` is a standard-library module a program has only by
 /// importing it: the modules named in this file's `IMPORTED`, for the reason

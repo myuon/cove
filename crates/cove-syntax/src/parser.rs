@@ -312,6 +312,7 @@ fn ends_expression(kind: &TokenKind) -> bool {
             | TokenKind::Bool(_)
             | TokenKind::Duration(_)
             | TokenKind::Str(_)
+            | TokenKind::Tagged { .. }
             | TokenKind::RParen
             | TokenKind::RBracket
             | TokenKind::RBrace
@@ -359,7 +360,7 @@ fn rebase_span(span: Span, file: FileId, offset: u32) -> Span {
 /// file that contains the string literal.
 fn rebase_token(mut token: Token, file: FileId, offset: u32) -> Token {
     token.span = rebase_span(token.span, file, offset);
-    if let TokenKind::Str(parts) = &mut token.kind {
+    if let TokenKind::Str(parts) | TokenKind::Tagged { parts, .. } = &mut token.kind {
         for part in parts {
             if let StringPart::Interpolation { span, .. } = part {
                 *span = rebase_span(*span, file, offset);
@@ -2077,6 +2078,17 @@ impl Parser<'_> {
                 let parts = self.parse_str_parts(&parts);
                 Ok(expr(ExprKind::Str(parts), start))
             }
+            TokenKind::Tagged { tag, parts } => {
+                self.bump();
+                // The tag is the name written against the opening quote, so
+                // its span is the token's first `tag.len()` bytes.
+                let tag = Spanned {
+                    span: Span::new(start.file, start.start, start.start + tag.len() as u32),
+                    node: tag,
+                };
+                let parts = self.parse_str_parts(&parts);
+                Ok(expr(ExprKind::Tagged { tag, parts }, start))
+            }
             TokenKind::Ident(name) => {
                 self.bump();
                 Ok(expr(ExprKind::Ident(name), start))
@@ -2177,6 +2189,7 @@ impl Parser<'_> {
                 | TokenKind::Bool(_)
                 | TokenKind::Duration(_)
                 | TokenKind::Str(_)
+                | TokenKind::Tagged { .. }
                 | TokenKind::Ident(_)
                 | TokenKind::LParen
                 | TokenKind::LBracket
@@ -3369,6 +3382,52 @@ mod tests {
                 kind: ExprKind::Binary { .. },
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn parses_a_tagged_literal() {
+        let source = "fn main() {\n  html\"<b>{name}</b>\"\n}";
+        let unit = ok(source);
+        let tail = fn_decl(&unit.items[0]).body.tail.as_deref().unwrap();
+        let ExprKind::Tagged { tag, parts } = &tail.kind else {
+            panic!("expected a tagged literal, got {:?}", tail.kind);
+        };
+        assert_eq!(tag.node, "html");
+        let start = source.find("html").unwrap() as u32;
+        assert_eq!((tag.span.start, tag.span.end), (start, start + 4));
+        assert_eq!(parts.len(), 3);
+        let StrPart::Interpolation(value) = &parts[1] else {
+            panic!("expected an interpolation");
+        };
+        let name = source.find("name").unwrap() as u32;
+        assert_eq!((value.span.start, value.span.end), (name, name + 4));
+    }
+
+    /// A tagged literal is an operand like any literal: it can be an
+    /// argument, and one can sit in a hole of another.
+    #[test]
+    fn a_tagged_literal_is_an_operand() {
+        let value = tail_expr("f(html\"a{html\"<b>{x}</b>\"}\")");
+        let ExprKind::Call { args, .. } = &value.kind else {
+            panic!("expected a call");
+        };
+        let ExprKind::Tagged { parts, .. } = &args[0].value.kind else {
+            panic!("expected a tagged literal");
+        };
+        assert!(matches!(
+            &parts[1],
+            StrPart::Interpolation(Expr {
+                kind: ExprKind::Tagged { .. },
+                ..
+            })
+        ));
+        // Separated by a space, the name and the string are two statements.
+        let unit = ok("fn main() {\n  html \"x\"\n}");
+        let body = &fn_decl(&unit.items[0]).body;
+        assert!(matches!(
+            body.tail.as_deref().map(|tail| &tail.kind),
+            Some(ExprKind::Str(_))
         ));
     }
 

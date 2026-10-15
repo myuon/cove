@@ -417,6 +417,16 @@ pub enum ExprKind {
     Duration(i64),
     /// A string literal with its interpolated expressions already parsed.
     Str(Vec<StrPart>),
+    /// `html"<p>{name}</p>"`: a string literal tagged with a name, its
+    /// interpolations parsed as a plain literal's are.
+    ///
+    /// The parser accepts any tag; `cove_sema` decides which ones mean
+    /// something, and today that is `html` where it names `std.html` ([ADR
+    /// 0101](../../../docs/adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md)).
+    Tagged {
+        tag: Ident,
+        parts: Vec<StrPart>,
+    },
     /// `()`
     Unit,
     /// A bare name.

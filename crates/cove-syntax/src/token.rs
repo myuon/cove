@@ -137,6 +137,17 @@ pub enum TokenKind {
     /// A duration literal such as `500ms` or `5s`, normalised to nanoseconds.
     Duration(i64),
     Str(Vec<StringPart>),
+    /// A string literal with a name written against its opening quote:
+    /// `html"<p>{name}</p>"`, or the same over lines with `"""`. One token,
+    /// because adjacency is what makes it one — `html "x"` is a name and a
+    /// string. [ADR 0101](../../../docs/adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md).
+    ///
+    /// The lexer fuses any identifier this way; which tags mean anything is
+    /// the checker's question (`cove_sema::stdlib::literal_tag`).
+    Tagged {
+        tag: String,
+        parts: Vec<StringPart>,
+    },
     /// `/// text` attached to the following declaration.
     DocComment(String),
 
@@ -196,6 +207,7 @@ impl TokenKind {
             TokenKind::Float(_) => "float literal".into(),
             TokenKind::Duration(_) => "duration literal".into(),
             TokenKind::Str(_) => "string literal".into(),
+            TokenKind::Tagged { tag, .. } => format!("`{tag}` string literal"),
             TokenKind::DocComment(_) => "doc comment".into(),
             TokenKind::Eof => "end of file".into(),
             other => format!("`{}`", other.symbol().unwrap_or("?")),

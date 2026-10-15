@@ -1319,7 +1319,7 @@ impl<'a> Walk<'a, '_> {
                 }
             }
             // An interpolation formats its operand and keeps nothing.
-            ExprKind::Str(parts) => {
+            ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
                 for part in parts {
                     if let StrPart::Interpolation(inner) = part {
                         self.expr(inner, None);

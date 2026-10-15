@@ -60,13 +60,30 @@
 //! the same two bodies, because [`synth::Leaves`] hands it their
 //! `FunctionId`s.
 //!
+//! # A tagged literal: `html"…"`
+//!
+//! [ADR 0101]'s `html"a{x}b"` is the same assembly with one more question per
+//! piece, asked of the piece's checked type by
+//! [`cove_sema::stdlib::LiteralTag::piece`]: a piece that is already the
+//! tag's markup is appended as it is, an `Array` of it is appended element by
+//! element, a `String` is escaped straight into the buffer, and anything else
+//! is rendered exactly as above into a scratch buffer of its own and that
+//! text escaped. The literal text between the holes is appended raw, and the
+//! finished `String` is wrapped as the tag's type. Every one of those calls
+//! is a function of the tag's module named by the one row
+//! [`cove_sema::stdlib::literal_tag`] answers, so what escaping means is
+//! `std.html`'s Cove and nothing here.
+//!
+//! [ADR 0101]: ../../../../docs/adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md
 //! [ADR 0064]: ../../../../docs/adr/0064-an-intrinsic-names-a-machine-not-a-method.md
 //!
 //! [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
 //! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 
 use cove_diag::Span;
+use cove_sema::stdlib::{literal_tag, LiteralTag, TaggedPiece};
 use cove_sema::typeck::Ty;
+use cove_syntax::ast::{Expr, StrPart};
 
 use super::dispatch::{DURATION_TEXT, FLOAT_TEXT};
 use super::frame::Val;
@@ -107,6 +124,88 @@ pub(super) struct Assembly {
 }
 
 impl Body<'_> {
+    /// A byte buffer sized for the literal whose parts are `parts`.
+    pub(super) fn assembly_for(&mut self, parts: &[StrPart], span: Span) -> Assembly {
+        let (literal, pieces) = parts
+            .iter()
+            .fold((0, 0), |(bytes, pieces), part| match part {
+                StrPart::Text(text) => (bytes + text.len(), pieces),
+                StrPart::Interpolation(_) => (bytes, pieces + 1),
+            });
+        self.assembly_open(literal, pieces, span)
+    }
+
+    /// A literal tagged `tag`, ADR 0101: the assembly of a plain literal,
+    /// each hole appended as [`LiteralTag::piece`] says, and the finished
+    /// text wrapped as the tag's type.
+    ///
+    /// A literal with no holes is assembled too, rather than being one
+    /// constant: its value is not a `String` but what the tag's module
+    /// makes of one.
+    pub(super) fn tagged_expr(&mut self, expr: &Expr, tag: &str, parts: &[StrPart]) -> Val {
+        let Some(known) = literal_tag(tag) else {
+            // `cove_sema`'s checker refuses any other tag.
+            return self.gap("a string literal with a tag the checker refuses", expr);
+        };
+        let mut assembly = self.assembly_for(parts, expr.span);
+        for part in parts {
+            match part {
+                StrPart::Text(text) => self.append_literal(&mut assembly, text, expr.span),
+                StrPart::Interpolation(inner) => {
+                    let value = self.expr(inner);
+                    self.append_tagged(known, &mut assembly, inner, &value);
+                    self.release(value, inner.span);
+                }
+            }
+        }
+        let said = self.assembly_finish(assembly, None, expr.span);
+        let wrapped = self.call_library(known.module, known.wrap, &[&said], expr.span);
+        self.release(said, expr.span);
+        // `None` is a round that has not lowered the module's wrap yet; see
+        // [`Body::render_by_walk`]. Its program is discarded.
+        wrapped.unwrap_or_else(|| self.dead(expr))
+    }
+
+    /// Appends one evaluated hole of a tagged literal: whole when its type is
+    /// the tag's markup, escaped otherwise.
+    ///
+    /// The question is asked of the type the checker settled for the hole as
+    /// written, [`Body::raw_ty`], and not of this instantiation's — so a hole
+    /// of a type parameter is escaped whatever the parameter becomes, as the
+    /// tree-walking oracle escapes it.
+    fn append_tagged(
+        &mut self,
+        known: &'static LiteralTag,
+        assembly: &mut Assembly,
+        inner: &Expr,
+        value: &Val,
+    ) {
+        let span = inner.span;
+        let piece = known.piece(self.raw_ty(inner));
+        let module = known.module;
+        match piece {
+            TaggedPiece::Markup => self.append_by((module, known.markup), assembly, value, span),
+            TaggedPiece::EachMarkup => self.append_by((module, known.each), assembly, value, span),
+            TaggedPiece::Text => self.append_by((module, known.escape), assembly, value, span),
+            TaggedPiece::Rendered => {
+                let ty = self.ty(inner);
+                // An `Int`'s text is digits and a sign, which escaping
+                // leaves as they are, so it is written straight in.
+                if matches!(ty, Some(Ty::Int)) && value.layout == shapes::INT {
+                    self.render_by(INT_RENDERING, assembly, value, span);
+                    return;
+                }
+                // ADR 0101's "a rendered value into a scratch run": the walk
+                // writes a buffer of its own, and that text is escaped.
+                let mut scratch = self.assembly_open(0, 1, span);
+                self.append_piece(&mut scratch, ty.as_ref(), value, span);
+                let text = self.assembly_finish(scratch, None, span);
+                self.append_by((module, known.escape), assembly, &text, span);
+                self.release(text, span);
+            }
+        }
+    }
+
     /// A byte buffer with room for `literal` bytes and `pieces` values of
     /// text not known yet.
     pub(super) fn assembly_open(&mut self, literal: usize, pieces: usize, span: Span) -> Assembly {

@@ -35,6 +35,7 @@ use std::collections::HashSet;
 
 use cove_schema::builtins::FreeBuiltinKind;
 use cove_sema::resolve::{CallPrecision, FnKey, Program as Checked};
+use cove_sema::stdlib::{literal_tag, TaggedPiece};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Block, Expr, ExprKind, StmtKind, StrPart};
 
@@ -163,6 +164,7 @@ impl Scan<'_> {
             | ExprKind::Ident(_)
             | ExprKind::Continue => {}
             ExprKind::Str(parts) => self.string(parts),
+            ExprKind::Tagged { tag, parts } => self.tagged(&tag.node, parts),
             ExprKind::ArrayLit(items) => items.iter().for_each(|item| self.expr(item)),
             ExprKind::Field { base, .. } => self.expr(base),
             ExprKind::Call {
@@ -333,6 +335,33 @@ impl Scan<'_> {
                 StrPart::Text(_) => {}
                 StrPart::Interpolation(inner) => {
                     self.piece(inner);
+                    self.expr(inner);
+                }
+            }
+        }
+    }
+
+    /// `Body::tagged_expr`'s calls: every literal run's append, the wrap,
+    /// and for each hole the call [`cove_sema::stdlib::LiteralTag::piece`] picks — a rendered
+    /// one's walk is [`Scan::piece`]'s question, as in a plain literal.
+    fn tagged(&mut self, tag: &str, parts: &[StrPart]) {
+        let Some(known) = literal_tag(tag) else {
+            return;
+        };
+        self.named((known.module, known.wrap));
+        for part in parts {
+            match part {
+                StrPart::Text(text) => self.literal(text),
+                StrPart::Interpolation(inner) => {
+                    match known.piece(self.ty(inner)) {
+                        TaggedPiece::Markup => self.named((known.module, known.markup)),
+                        TaggedPiece::EachMarkup => self.named((known.module, known.each)),
+                        TaggedPiece::Text => self.named((known.module, known.escape)),
+                        TaggedPiece::Rendered => {
+                            self.named((known.module, known.escape));
+                            self.piece(inner);
+                        }
+                    }
                     self.expr(inner);
                 }
             }

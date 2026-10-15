@@ -102,6 +102,45 @@ fn width(text: &str) -> usize {
     text.chars().count()
 }
 
+/// How wide `text`, an expression written flat, is for the question of
+/// whether it fits on a line.
+///
+/// [`width`] for every text without a line break in it, which is every flat
+/// text but one holding a string written over lines. **Such a string is as
+/// wide as its first line and its last together** (ADR 0100): its first line
+/// stands on the line it opens on, its last begins the line it closes on, and
+/// the lines between are no other line's width. Counted whole, a `"""`
+/// literal of three lines made every group around it too wide to fit.
+///
+/// It is covefmt's `tokenWidth`, summed: the literals are found the way
+/// [`scan_comments`] finds them, and whatever is between them is counted a
+/// character at a time.
+fn flat_width(text: &str) -> usize {
+    if !text.contains('\n') {
+        return width(text);
+    }
+    let bytes = text.as_bytes();
+    let mut total = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let end = match bytes[i] {
+            b'"' => skip_string(bytes, i),
+            b'\'' => skip_code_point(bytes, i),
+            _ => i + text[i..].chars().next().map_or(1, char::len_utf8),
+        };
+        let piece = &text[i..end.min(text.len())];
+        total += if bytes[i] == b'"' && piece.contains('\n') {
+            let first = piece.split('\n').next().unwrap_or("");
+            let last = piece.rsplit('\n').next().unwrap_or("");
+            width(first) + width(last)
+        } else {
+            width(piece)
+        };
+        i = end.max(i + 1);
+    }
+    total
+}
+
 // ---------------------------------------------------------------------------
 // Comments
 // ---------------------------------------------------------------------------
@@ -180,8 +219,14 @@ fn line_end(bytes: &[u8], from: usize) -> usize {
 
 /// Skips a string literal, including the interpolations that may nest further
 /// strings inside it, exactly as the lexer does.
+///
+/// A `"""` literal is the same walk with one difference: a lone `"` in it is
+/// text, and only the next unescaped `"""` ends it (ADR 0100). Read as `""`
+/// and then `"`, the quotes of `<p class="lead">` would end it early and let
+/// a `//` in its text be taken for a comment.
 fn skip_string(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 1;
+    let triple = bytes[start..].starts_with(b"\"\"\"");
+    let mut i = start + if triple { 3 } else { 1 };
     while i < bytes.len() {
         match bytes[i] {
             // A `\u{...}` escape's brace is its own, not an interpolation's
@@ -196,12 +241,22 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
                 }
             }
             b'\\' => i += 2,
-            b'"' => return i + 1,
+            b'"' if !triple => return i + 1,
+            b'"' if bytes[i..].starts_with(b"\"\"\"") => return i + 3,
             b'{' => i = skip_interpolation(bytes, i + 1),
             _ => i += 1,
         }
     }
     i
+}
+
+/// `text` when it is spelled as a string literal, quote to quote.
+fn string_text_of(text: &str) -> Option<&str> {
+    if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+        Some(text)
+    } else {
+        None
+    }
 }
 
 fn skip_interpolation(bytes: &[u8], from: usize) -> usize {
@@ -312,9 +367,11 @@ impl Out {
         self.current.push_str(text);
     }
 
-    /// The column the next character would be written at.
+    /// The column the next character would be written at: after the last
+    /// line break in the current line, when a string written over lines has
+    /// put one there.
     fn col(&self) -> usize {
-        width(&self.current)
+        width(self.current.rsplit('\n').next().unwrap_or(""))
     }
 
     /// Attaches `text` to the end of the current line.
@@ -567,12 +624,7 @@ impl<'a> Formatter<'a> {
     /// included. A string is reproduced rather than rebuilt because its
     /// interpolations cannot be broken across lines.
     fn string_text(&self, span: Span) -> Option<&'a str> {
-        let text = self.text(span)?;
-        if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
-            Some(text)
-        } else {
-            None
-        }
+        string_text_of(self.text(span)?)
     }
 
     /// The span of `expr` without the parentheses the source wrote around
@@ -859,11 +911,11 @@ impl<'a> Formatter<'a> {
 
         let flat = format!("({})", entries.join(", "));
         let tail = match return_type {
-            Some(ty) => width(&ty.to_string()) + 4,
+            Some(ty) => flat_width(&ty.to_string()) + 4,
             None => 0,
         };
         // Two more columns for the ` {` that opens the body.
-        if self.out.col() + width(&flat) + tail + 2 <= MAX_WIDTH {
+        if self.out.col() + flat_width(&flat) + tail + 2 <= MAX_WIDTH {
             self.out.write(&flat);
             return;
         }
@@ -1066,7 +1118,7 @@ impl<'a> Formatter<'a> {
     /// the whole type does not fit.
     fn type_ref(&mut self, ty: &Type, indent: usize) {
         let flat = ty.to_string();
-        if self.out.col() + width(&flat) <= MAX_WIDTH {
+        if self.out.col() + flat_width(&flat) <= MAX_WIDTH {
             self.out.write(&flat);
             return;
         }
@@ -1269,6 +1321,7 @@ impl Formatter<'_> {
             | ExprKind::Bool(_)
             | ExprKind::Duration(_)
             | ExprKind::Str(_)
+            | ExprKind::Tagged { .. }
             | ExprKind::Unit
             | ExprKind::Ident(_) => false,
             ExprKind::ArrayLit(elements) => elements.iter().any(|e| self.breaks(e)),
@@ -1334,7 +1387,7 @@ impl Formatter<'_> {
         }
         if !self.breaks(expr) {
             let flat = self.flat_bare(expr);
-            if self.out.col() + width(&flat) <= MAX_WIDTH {
+            if self.out.col() + flat_width(&flat) <= MAX_WIDTH {
                 self.out.write(&flat);
                 return;
             }
@@ -1480,7 +1533,7 @@ impl Formatter<'_> {
             return;
         }
         let flat = self.flat(rhs, level + 1);
-        if self.out.col() + 1 + width(&flat) <= MAX_WIDTH {
+        if self.out.col() + 1 + flat_width(&flat) <= MAX_WIDTH {
             self.out.write(" ");
             self.out.write(&flat);
         } else {
@@ -1638,7 +1691,7 @@ impl Formatter<'_> {
         let reserved = if has_trailing { 2 } else { 0 };
         if !commented
             && !args.iter().any(|arg| self.breaks(&arg.value))
-            && self.out.col() + width(&flat) + reserved <= MAX_WIDTH
+            && self.out.col() + flat_width(&flat) + reserved <= MAX_WIDTH
         {
             self.out.write(&flat);
             return;
@@ -1653,7 +1706,7 @@ impl Formatter<'_> {
                 && only.label.is_none()
                 && !only.is_var
                 && !only.spread
-                && indent + INDENT + width(&value) + 1 > MAX_WIDTH
+                && indent + INDENT + flat_width(&value) + 1 > MAX_WIDTH
             {
                 self.out.write(&flat);
                 return;
@@ -1758,15 +1811,15 @@ impl Formatter<'_> {
             prefix.push_str(", ");
         }
         prefix.push_str(&self.arg_prefix_text(last));
-        let column = self.out.col() + width(&prefix);
-        if column + width(&inner_head) > MAX_WIDTH {
+        let column = self.out.col() + flat_width(&prefix);
+        if column + flat_width(&inner_head) > MAX_WIDTH {
             return false;
         }
         // Hugging only helps when the argument really does expand below the
         // head; one that still fits on this line would leave the call as long
         // as it already was.
         if !self.breaks(&last.value)
-            && column + width(&self.flat(&last.value, prec::RETURN)) <= MAX_WIDTH
+            && column + flat_width(&self.flat(&last.value, prec::RETURN)) <= MAX_WIDTH
         {
             return false;
         }
@@ -1939,6 +1992,17 @@ impl Formatter<'_> {
                 .string_text(span)
                 .map(str::to_string)
                 .unwrap_or_else(|| self.string_from_parts(parts)),
+            // A tagged literal is copied as written, tag and all, as a plain
+            // one is; with no source, the tag goes against the rebuilt quote.
+            ExprKind::Tagged { tag, parts } => self
+                .text(span)
+                .filter(|text| {
+                    text.strip_prefix(tag.node.as_str())
+                        .and_then(string_text_of)
+                        .is_some()
+                })
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}{}", tag.node, self.string_from_parts(parts))),
             ExprKind::Unit => "()".to_string(),
             ExprKind::Ident(name) => name.clone(),
             ExprKind::ArrayLit(elements) => {
@@ -2690,6 +2754,112 @@ fn codePoints() {
 }
 ",
         );
+    }
+
+    /// A `"""` literal is copied as it was written, its lines and its margin
+    /// with it, and the layout around it is judged by its first and last
+    /// lines rather than by all of them (ADR 0100).
+    #[test]
+    fn a_triple_quoted_literal_is_kept_as_written() {
+        formatted(
+            r#"
+fn page(name: String) -> String {
+  let row = """
+    <tr>\
+      <td class="n">{name}</td>\
+    </tr>
+    """
+  let called = f("""
+    <p class="lead">{name} // not a comment</p>
+    """)
+  let after = """
+    x
+    """.length()
+  "{row}{called}{after}"
+}
+"#,
+        );
+        // Re-indenting the line it opens on leaves its lines alone, since the
+        // closer, not the indentation, is what sets the margin.
+        reformats(
+            r#"
+fn page() -> String {
+"""
+    a
+  """
+}
+"#,
+            r#"
+fn page() -> String {
+  """
+    a
+  """
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn the_cursor_after_a_triple_quoted_literal_is_on_its_last_line() {
+        // The last line is 79 columns on the line it is on, and fits there,
+        // however long the literal's lines are.
+        let tail = "m".repeat(58);
+        formatted(&format!(
+            "
+fn f() -> Bool {{
+  \"\"\"
+    {long}
+\"\"\" == \"suffix\" || \"{tail}\"
+}}
+",
+            long = "x".repeat(100)
+        ));
+    }
+
+    /// With no source to copy, a `"""` literal is written as the `"…"` that
+    /// denotes the same text: the margin is gone from its parts already.
+    #[test]
+    fn a_triple_quoted_literal_without_its_source_is_written_with_escapes() {
+        let unit = parse(
+            "fn a() -> String {\n  \"\"\"\n    <p class=\"x\">{1}</p>\n    b\\\n    c\n    \"\"\"\n}\n",
+        );
+        assert_eq!(
+            format_unit(&unit),
+            "fn a() -> String {\n  \"<p class=\\\"x\\\">{1}</p>\\nbc\"\n}\n"
+        );
+    }
+
+    /// A tagged literal is copied as it was written, tag against the quote
+    /// (ADR 0101), in either form; with no source, the tag is written against
+    /// the rebuilt `"…"`.
+    #[test]
+    fn a_tagged_literal_is_kept_as_written() {
+        formatted(
+            r#"
+fn page(name: String) -> Html {
+  let cell = html"<td class=\"n\">{name}</td>"
+  html"""
+    <tr>\
+      {cell}\
+      {html"<td>{name}</td>"}\
+    </tr>
+    """
+}
+"#,
+        );
+        let unit = parse("fn a() -> Html {\n  html\"<p class=\\\"x\\\">{1}</p>\"\n}\n");
+        assert_eq!(
+            format_unit(&unit),
+            "fn a() -> Html {\n  html\"<p class=\\\"x\\\">{1}</p>\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_comment_after_a_triple_quoted_literal_is_found() {
+        let source = "let a = \"\"\"\n  \" // no\n  \"\"\" // yes\n";
+        let comments = scan_comments(source);
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert_eq!(comments[0].text, "// yes");
     }
 
     #[test]

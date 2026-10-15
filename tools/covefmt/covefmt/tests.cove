@@ -108,6 +108,46 @@ test fn an_interpolation_stays_inside_its_literal() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// A `"""` literal is one token, ADR 0100: a lone `"` in it is text, so
+/// neither the quotes of an attribute nor a `//` after them are code, and
+/// only the next `"""` ends it. An escaped quote is how one is written.
+test fn a_triple_quoted_literal_is_one_token() -> Result<Unit, Error> {
+  assertEqual(
+    shape("\"\"\"\n  <a href=\"x\">//</a>\n  \"\"\" // c"),
+    "str space line",
+  )?
+  assertEqual(shape("\"\"\"\n  \\\"\"\"\n  \"\"\" x"), "str space word")?
+  assertEqual(
+    shape("\"\"\"\n  \{f(\"\"\"\n    a\n    \"\"\")\}\n  \"\"\""),
+    "str",
+  )?
+  Ok(())
+}
+
+/// A name against a quote tags the literal, ADR 0101, so the two are one
+/// token and nothing can come between them; a keyword is still a keyword, and
+/// a space still makes two.
+test fn a_tagged_literal_is_one_token() -> Result<Unit, Error> {
+  assertEqual(shape("f(html\"<b>\{x\}</b>\")"), "word punct str punct")?
+  assertEqual(shape("html\"\"\"\n  <p>\n  \"\"\""), "str")?
+  assertEqual(shape("html \"x\""), "word space str")?
+  assertEqual(shape("return\"x\""), "word str")?
+  Ok(())
+}
+
+/// A string written over lines is as wide as its first line and its last,
+/// and the lines between are no line's width (ADR 0100).
+test fn a_string_over_lines_is_as_wide_as_its_first_and_last_lines(
+) -> Result<Unit, Error> {
+  let source = "\"\"\"\n    a long line in the middle\n  \"\"\""
+  let token = Token(kind: Kind.Str, from: 0, to: source.byteLength())
+  assertEqual(tokenWidth(source, token), 8)?
+  assertEqual(lastLineWidth(source, token), 5)?
+  let flat = Token(kind: Kind.Str, from: 0, to: 4)
+  assertEqual(lastLineWidth("\"ab\"", flat), -1)?
+  Ok(())
+}
+
 /// The longest operator wins: `..<` is one token and not three.
 test fn the_longest_operator_wins() -> Result<Unit, Error> {
   assertEqual(shape("0..<n"), "number punct word")?

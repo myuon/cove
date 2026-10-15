@@ -159,6 +159,12 @@ export fn lex(source: String) -> Lexed {
     } else if startsWord(c) {
       kind = Kind.Word
       to = scan.word(at)
+      // A name against a quote tags the literal, ADR 0101: `html"…"` is one
+      // literal and is copied as one, so no space can come between the two.
+      if scan.at(to) == '"' && !readsAsItself(source, at, to) {
+        kind = Kind.Str
+        to = scan.quoted(to, '"')
+      }
     } else if isDigit(c) {
       kind = Kind.Number
       to = scan.number(at)
@@ -208,6 +214,53 @@ export fn lex(source: String) -> Lexed {
     at = to
   }
   Lexed(tokens: out.freeze(), trailing: trailing)
+}
+
+/// Whether the word `from..to` is one the language reads as itself — a
+/// keyword, `true`, `false` or `_` — which a quote written against it does
+/// not tag: `return"x"` is `return` and a string, as `cove_syntax::lexer`
+/// reads it.
+///
+/// Asked only of a word with a quote against it, which is rare enough that
+/// the list is not worth a faster shape.
+fn readsAsItself(source: String, from: Int, to: Int) -> Bool {
+  let word = match source.sliceBytes(from, to) {
+    Ok(held) => held
+    Err(_) => ""
+  }
+  match word {
+    "async" => true
+    "await" => true
+    "break" => true
+    "continue" => true
+    "dyn" => true
+    "else" => true
+    "enum" => true
+    "export" => true
+    "fn" => true
+    "for" => true
+    "if" => true
+    "impl" => true
+    "in" => true
+    "is" => true
+    "let" => true
+    "match" => true
+    "opaque" => true
+    "return" => true
+    "scope" => true
+    "self" => true
+    "struct" => true
+    "test" => true
+    "trait" => true
+    "type" => true
+    "use" => true
+    "var" => true
+    "while" => true
+    "true" => true
+    "false" => true
+    "_" => true
+    _ => false
+  }
 }
 
 /// Whether `held` tiles `source`.
@@ -262,6 +315,15 @@ export fn text(source: String, token: Token) -> String {
 /// range `sliceBytes` declines, so zero is the width it would have measured;
 /// a token the lexer produced never names such a range, and `byteAt` traps
 /// where `sliceBytes` merely declines.
+///
+/// **A string written over lines is as wide as its first line and its last
+/// together**, ADR 0100. Counted whole, a `"""` literal of three lines was
+/// as wide as all three, and every group around it was judged over the limit
+/// for text that is not on its line. Its first line is what stands on the
+/// line the literal opens on and its last is what the line it closes on
+/// begins with; the lines between are on lines of their own and are no
+/// line's width but their own. `cove_syntax::format`'s `flat_width` is the
+/// same rule.
 export fn tokenWidth(source: String, token: Token) -> Int {
   let limit = source.byteLength()
   let end = if token.to > limit {
@@ -275,12 +337,58 @@ export fn tokenWidth(source: String, token: Token) -> Int {
     token.from
   }
   var count = 0
+  var first = -1
+  let lines = token.kind == Kind.Str
   while at < end {
     let byte = source.byteAt(at)
-    if byte < 128 || byte >= 192 {
+    if lines && byte == '\n' {
+      if first < 0 {
+        first = count
+      }
+      count = 0
+    } else if byte < 128 || byte >= 192 {
       count = count + 1
     }
     at = at + 1
   }
-  count
+  if first < 0 {
+    return count
+  }
+  return first + count
+}
+
+/// How wide the last line of a string written over lines is, in characters,
+/// or `-1` for a token that holds no line break.
+///
+/// The column a line is at once such a string is written, ADR 0100: the line
+/// it closes on begins with its last line, whatever stood in front of its
+/// first. [`tokenWidth`] is the question of how much room it takes; this is
+/// the question of where it leaves the cursor.
+export fn lastLineWidth(source: String, token: Token) -> Int {
+  if token.kind != Kind.Str {
+    return -1
+  }
+  let limit = source.byteLength()
+  var at = if token.to > limit {
+    limit
+  } else {
+    token.to
+  }
+  let from = if token.from < 0 {
+    0
+  } else {
+    token.from
+  }
+  var count = 0
+  while at > from {
+    at = at - 1
+    let byte = source.byteAt(at)
+    if byte == '\n' {
+      return count
+    }
+    if byte < 128 || byte >= 192 {
+      count = count + 1
+    }
+  }
+  -1
 }

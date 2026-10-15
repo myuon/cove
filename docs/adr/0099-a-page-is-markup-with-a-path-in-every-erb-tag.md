@@ -1,6 +1,8 @@
 # ADR 0099: A page is markup with a path in every `<%= %>`
 
-- Status: Proposed
+- Status: Proposed; superseded in part by
+  [ADR 0101](0101-a-page-is-markup-with-an-expression-in-every-hole.md):
+  the hole notation `<%= path %>`, `fill`, and the fallible `render`
 - Date: 2026-10-14
 - Refers to:
   [minicloud](https://github.com/myuon/minicloud)'s `apps/admin`, the program

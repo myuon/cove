@@ -527,7 +527,7 @@ fn expr_spans(expr: &Expr, file: FileId, into: &mut BTreeMap<(u32, u32), Span>) 
         | ExprKind::Unit
         | ExprKind::Ident(_)
         | ExprKind::Continue => {}
-        ExprKind::Str(parts) => {
+        ExprKind::Str(parts) | ExprKind::Tagged { parts, .. } => {
             for part in parts {
                 if let StrPart::Interpolation(inner) = part {
                     one(inner, into);

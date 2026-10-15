@@ -3283,7 +3283,20 @@ fn columnAfter(
       i = close + 1
       continue
     }
-    c = c + widthBetween(source, held, i, i + 1)
+    // A string written over lines leaves the line at its last line's end,
+    // as a broken group leaves it at its closing bracket.
+    var last = -1
+    match held.get(i) {
+      Some(token) => {
+        last = lastLineWidth(source, token)
+      }
+      None => { }
+    }
+    if last >= 0 {
+      c = last
+    } else {
+      c = c + widthBetween(source, held, i, i + 1)
+    }
     i = i + 1
   }
   c
