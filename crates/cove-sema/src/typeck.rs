@@ -6356,6 +6356,52 @@ impl<'a> Checker<'a> {
         then_ty.join(&else_ty)
     }
 
+    /// `condition` negated, as the help of ADR 0105's `html.only` rewrite
+    /// writes it: a negation loses its `!`, `==` and `!=` trade places, and so
+    /// do the orderings of a type every two values of which are ordered — not
+    /// `Float`, where `!(a < b)` holds for a NaN and `a >= b` does not. A
+    /// name, field or call takes a bare `!`; anything else is parenthesised.
+    fn negated(&self, condition: &Expr) -> String {
+        use cove_syntax::format::format_expr;
+
+        match &condition.kind {
+            ExprKind::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => format_expr(operand),
+            ExprKind::Binary { op, lhs, rhs } => {
+                let total = || {
+                    matches!(
+                        self.facts.ty(lhs.span.file, lhs.id),
+                        Some(Ty::Int | Ty::Str | Ty::Duration)
+                    )
+                };
+                let opposite = match op {
+                    BinaryOp::Eq => Some("!="),
+                    BinaryOp::Ne => Some("=="),
+                    BinaryOp::Lt if total() => Some(">="),
+                    BinaryOp::Le if total() => Some(">"),
+                    BinaryOp::Gt if total() => Some("<="),
+                    BinaryOp::Ge if total() => Some("<"),
+                    _ => None,
+                };
+                match opposite {
+                    Some(opposite) => {
+                        format!("{} {opposite} {}", format_expr(lhs), format_expr(rhs))
+                    }
+                    None => format!("!({})", format_expr(condition)),
+                }
+            }
+            ExprKind::Ident(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Bool(_) => {
+                format!("!{}", format_expr(condition))
+            }
+            _ => format!("!({})", format_expr(condition)),
+        }
+    }
+
     /// The two warnings of [ADR 0105] on an `if` that chooses markup: one
     /// branch `html""` and the other markup, which is `html.only`; and two
     /// `html` literals that differ only in text, which is one literal with
@@ -6421,19 +6467,10 @@ impl<'a> Checker<'a> {
             } else {
                 (else_block, then_branch)
             };
-            let shown_condition = format_expr(condition);
-            let shown_condition = if !then_empty {
-                shown_condition
-            } else if matches!(
-                condition.kind,
-                ExprKind::Ident(_)
-                    | ExprKind::Field { .. }
-                    | ExprKind::Call { .. }
-                    | ExprKind::Bool(_)
-            ) {
-                format!("!{shown_condition}")
+            let shown_condition = if then_empty {
+                self.negated(condition)
             } else {
-                format!("!({shown_condition})")
+                format_expr(condition)
             };
             let shown_other = match lone(other) {
                 Some(tail) => format_expr(tail),

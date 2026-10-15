@@ -445,13 +445,50 @@ mod tests {
     fn an_empty_if_branch_is_html_only_of_the_negated_condition() {
         let help = warns(r#"if up { html"" } else { icon }"#, EMPTY_BRANCH);
         assert_eq!(help, only_help("!up", "icon"));
-        let help = warns(r#"if n > 1 { html"" } else { icon }"#, EMPTY_BRANCH);
-        assert_eq!(help, only_help("!(n > 1)", "icon"));
+        let help = warns(r#"if up && n > 1 { html"" } else { icon }"#, EMPTY_BRANCH);
+        assert_eq!(help, only_help("!(up && n > 1)", "icon"));
         let help = warns(
             r#"if name.isEmpty() { html"" } else { icon }"#,
             EMPTY_BRANCH,
         );
         assert_eq!(help, only_help("!name.isEmpty()", "icon"));
+    }
+
+    #[test]
+    fn a_negation_is_not_negated_again() {
+        let help = warns(r#"if !up { html"" } else { icon }"#, EMPTY_BRANCH);
+        assert_eq!(help, only_help("up", "icon"));
+        let help = warns(
+            r#"if !(up && n > 1) { html"" } else { icon }"#,
+            EMPTY_BRANCH,
+        );
+        assert_eq!(help, only_help("(up && n > 1)", "icon"));
+    }
+
+    #[test]
+    fn a_comparison_is_negated_by_its_opposite() {
+        for (written, negated) in [
+            ("n > 1", "n <= 1"),
+            ("n >= 1", "n < 1"),
+            ("n < 1", "n >= 1"),
+            ("n <= 1", "n > 1"),
+            ("n == 1", "n != 1"),
+            (r#"name != """#, r#"name == """#),
+        ] {
+            let help = warns(
+                &format!(r#"if {written} {{ html"" }} else {{ icon }}"#),
+                EMPTY_BRANCH,
+            );
+            assert_eq!(help, only_help(negated, "icon"), "{written}");
+        }
+        // A `Float` is not totally ordered: `!(x < 1.0)` holds for a NaN and
+        // `x >= 1.0` does not, so the ordering is kept and wrapped.
+        let help = warns(
+            r#"let x = 0.5
+  if x < 1.0 { html"" } else { icon }"#,
+            EMPTY_BRANCH,
+        );
+        assert_eq!(help, only_help("!(x < 1.0)", "icon"));
     }
 
     #[test]
