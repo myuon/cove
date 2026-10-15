@@ -15,9 +15,9 @@
 //
 // fn row(line: Line) -> Html {
 //   html"""
-//     <tr>\
-//       <td class=at>{line.at}</td>\
-//       <td>{line.said}</td>\
+//     <tr>
+//       <td class=at>{line.at}</td>
+//       <td>{line.said}</td>
 //     </tr>
 //     """
 // }
@@ -26,6 +26,13 @@
 //   html"<table>{lines.map(fn(line) { row(line) })}</table>"
 // }
 // ```
+//
+// A line break in a multi-line `html"""` is spacing
+// ([ADR 0103](../../../docs/adr/0103-in-html-a-line-break-is-spacing.md)):
+// nothing between a tag or hole and a tag or hole, one space anywhere else,
+// so the row above is `<tr><td class=at>…</td><td>…</td></tr>`. The lexer
+// decides it from the characters either side of the break; nothing here, and
+// nothing in the compiler, reads the markup.
 //
 // # Where the decision is made
 //

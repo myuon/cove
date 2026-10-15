@@ -278,6 +278,8 @@ let row = """
   indentation — past the margin too, though that line must still begin with
   the margin. So the literal above is `<tr class="row"><td>…</td></tr>`, and
   `\\` at the end of a line is a backslash and the newline stays.
+- A line break that no `\` ate is a newline, except in `html"""`, where it
+  is spacing — see [Tagged literals](#tagged-literals).
 - A `"` inside is text. Every escape and every `{expr}` is what it is in
   `"…"`, and a `"""` in the text is written `\"""`.
 
@@ -325,7 +327,9 @@ A name written **against** a string literal's opening quote, with no space,
 tags it: `html"x"` is one literal, and `html "x"` is a name followed by a
 string. Either literal form takes a tag, and its text, escapes, holes, margin
 and continuation `\` are what they are untagged
-([ADR 0101](adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md)).
+([ADR 0101](adr/0101-a-page-is-markup-with-an-expression-in-every-hole.md)),
+except that a line break in a multi-line `html"""` is spacing
+([ADR 0103](adr/0103-in-html-a-line-break-is-spacing.md)).
 
 - **There is one tag, `html`**, and it is written where the name `html`
   resolves to the module `std.html` — after `use std.html`, with no local
@@ -340,6 +344,22 @@ and continuation `\` are what they are untagged
   `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, wherever the hole sits.
   The type is the one the checker settled for the hole as written, so a hole
   whose type is a type parameter is escaped whatever the parameter becomes.
+- **A line break in a multi-line `html"""` is spacing.** A line break that
+  no `\` ate, with the whole of the next line's indentation, is **nothing**
+  when the line before ends with `>` or with the `}` that closes a hole and
+  the line after begins with `<` or with the `{` that opens one, and **one
+  space** anywhere else — so markup is laid out one element to a line and
+  prose wraps as prose. It is decided from those two characters alone; the
+  markup is not read. An escaped `\{` or `\}` is text, not an edge. A run of
+  blank lines is one break, and blank lines just before the closer are one
+  space. The margin is checked as ever, a `\` ending a line still joins with
+  nothing and takes precedence — the way to put a hole and a tag together
+  across lines with no space, or to keep the space before a tag after a hole
+  (`{x} \`) — and `\n` is still a newline, which is how a `<pre>` keeps one.
+  A one-line `html"""…"""`, an `html"…"`, and a `"""` with no tag keep their
+  line breaks as text.
+- An attribute's value with a hole in it is written inside quotes,
+  `class="state {x}"`: the hole is escaped where it sits, `"` included.
 - `page.render()` — a method of `Html` — gives the text of one, and
   `std.html.markup` is the one way to make one from a `String` without
   escaping it. `html""` is no markup at all, and `==` compares markup as it
@@ -352,9 +372,9 @@ use std.html
 
 fn row(name: String, count: Int) -> String {
   html"""
-    <tr>\
-      <td class="name">{name}</td>\
-      <td>{count}</td>\
+    <tr>
+      <td class="name">{name}</td>
+      <td>{count}</td>
     </tr>
     """.render()
 }
