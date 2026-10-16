@@ -414,7 +414,10 @@ branch, or an `Option` hole when the markup is only safe to build when `c`
 holds (a branch that is a block with statements is named, not pasted: move
 it into a function answering `Html`); `cove::type::html_if_same_markup` when
 both branches are `html` literals and either one is the other with something
-added — write `html.only` of what is added, in a hole where it goes:
+added that is whole markup or text standing apart from the words beside it
+(each edge at whitespace, a hole, a `<` or `>`, an attribute value's `"`, or
+the literal's start or end — not `'` into `its`) — write `html.only` of what
+is added, in a hole where it goes:
 `html"<ul{html.only(open == 0, html" class=tree")}>"` — or, once their
 common beginning is cut back to end at a `>` and their common end to start
 at a `<` (so that a run of text, holes included, moves whole; a cut inside a

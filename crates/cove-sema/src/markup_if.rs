@@ -138,8 +138,9 @@ pub(crate) fn only_help(condition: &str, markup: Option<&str>) -> String {
 /// the shape. `condition` is the condition as written and `negated` its
 /// negation.
 ///
-/// When one literal is the other with something added, the help is
-/// `html.only` of what is added, in a hole where it goes. Otherwise the
+/// When one literal is the other with something added, and what is added
+/// stands apart from the words beside it, the help is `html.only` of what is
+/// added, in a hole where it goes. Otherwise the
 /// common beginning is cut back to end at a tag's `>` and the common end to
 /// start at a `<` — so the part that moves is never half a run of text —
 /// and the help is a choice between two `String`s in a hole, unless what
@@ -226,16 +227,37 @@ fn is_bracket(atom: &Atom) -> bool {
     is_char(atom, '<') || is_char(atom, '>')
 }
 
+/// Whether `outside` and `inside`, the atoms either side of one edge of
+/// something added, meet at a boundary rather than inside a word: one of
+/// them is whitespace, a hole, `<` or `>`, or the one outside is the `"`
+/// around an attribute value.
+fn boundary(outside: Option<&Atom>, inside: &Atom) -> bool {
+    let Some(outside) = outside else {
+        return true;
+    };
+    let open = |atom: &Atom| match atom {
+        Atom::Char(c) => c.is_whitespace() || *c == '<' || *c == '>',
+        Atom::Hole { .. } => true,
+    };
+    open(outside) || open(inside) || is_char(outside, '"')
+}
+
 /// Where the `count` atoms that `longer` holds at `at` and the other literal
 /// does not are taken to start, or `None` when no reading of them is whole
-/// markup or plain text. The comparison puts an insertion as late as it can
-/// go, so `<p>a</p>` against `<p>a<br></p>` finds `br><`; sliding it back
-/// while the atom before it is the same as its last finds `<br>`.
+/// markup or plain text standing apart from the words beside it. The
+/// comparison puts an insertion as late as it can go, so `<p>a</p>` against
+/// `<p>a<br></p>` finds `br><`, and `<p>an</p>` against `<p>a an</p>` finds
+/// ` a`, which ends inside `an`; sliding it back while the atom before it is
+/// the same as its last finds `<br>` and `a `. An insertion inside a word —
+/// `'` into `its` — is not one, and is left to the other shape.
 fn insertion(longer: &[Atom], mut at: usize, count: usize) -> Option<usize> {
     let whole = |at: usize| {
         let added = &longer[at..at + count];
-        !added.iter().any(is_bracket)
-            || (is_char(&added[0], '<') && is_char(&added[count - 1], '>'))
+        let markup = !added.iter().any(is_bracket)
+            || (is_char(&added[0], '<') && is_char(&added[count - 1], '>'));
+        markup
+            && boundary(at.checked_sub(1).map(|i| &longer[i]), &added[0])
+            && boundary(longer.get(at + count), &added[count - 1])
     };
     loop {
         if whole(at) {
@@ -452,6 +474,42 @@ mod tests {
         // An addition that is text and part of a tag, however it is slid,
         // is no one thing, and is left alone.
         assert_eq!(help("<p></p>", "<p>x<b></p>"), None);
+    }
+
+    #[test]
+    fn an_addition_is_found_at_a_word_boundary() {
+        assert_eq!(
+            help("<p>up</p>", "<p>up now</p>").unwrap(),
+            "add it with `html.only` where it goes: `html\"<p>up{html.only(!up, html\" now\")}</p>\"`"
+        );
+        // ` a` ends inside `an`; slid back, `a ` stands apart.
+        assert_eq!(
+            help("<p>an</p>", "<p>a an</p>").unwrap(),
+            "add it with `html.only` where it goes: `html\"<p>{html.only(!up, html\"a \")}an</p>\"`"
+        );
+        // An element appended after a word: an edge at a tag is a boundary.
+        assert_eq!(
+            help("<p>a<span class=muted>b</span></p>", "<p>a</p>").unwrap(),
+            "add it with `html.only` where it goes: \
+             `html\"<p>a{html.only(up, html\"<span class=muted>b</span>\")}</p>\"`"
+        );
+        // A word added inside a quoted attribute value.
+        assert_eq!(
+            help("<a class=\"a b\">x</a>", "<a class=\"a\">x</a>").unwrap(),
+            "add it with `html.only` where it goes: \
+             `html\"<a class=\\\"a{html.only(up, html\" b\")}\\\">x</a>\"`"
+        );
+    }
+
+    #[test]
+    fn an_addition_inside_a_word_is_not_html_only() {
+        // The whole words are chosen between instead.
+        assert_eq!(
+            help("<p>cat</p>", "<p>cart</p>").unwrap(),
+            "put the `if` where they differ: `html\"<p>{if up { \"cat\" } else { \"cart\" }}</p>\"`"
+        );
+        // And `it's` holds a `'`, which may not move into a hole.
+        assert_eq!(help("<p>it's</p>", "<p>its</p>"), None);
     }
 
     #[test]
@@ -765,6 +823,19 @@ mod tests {
         assert!(
             help.contains(r#"{html.only(n != 0, html" class=tree")}"#),
             "{help}"
+        );
+    }
+
+    #[test]
+    fn an_addition_inside_a_word_has_no_note_when_the_words_cannot_move() {
+        quiet(r#"if up { html"<p>it's</p>" } else { html"<p>its</p>" }"#);
+        let help = noted(
+            r#"if up { html"<p>cat</p>" } else { html"<p>cart</p>" }"#,
+            SAME_MARKUP,
+        );
+        assert_eq!(
+            help,
+            r#"put the `if` where they differ: `html"<p>{if up { "cat" } else { "cart" }}</p>"`"#
         );
     }
 
