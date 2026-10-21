@@ -225,6 +225,13 @@ a character, and the two agree only below 128. A comparison against a
 code-point literal is still how a byte is read — `line.byteAt(at) == '\n'` is
 the idiom — because UTF-8 writes an ASCII character as itself, and every byte
 of a character that is not ASCII is at least 128 and equals no such literal.
+`String.toUtf8` answers all of a string's bytes at once, as an `Array<Int>`,
+and `String.fromUtf8` and `String.fromUtf8Lossy` are the way back. The first
+answers an `Err` for bytes that are not well-formed UTF-8 in Unicode's sense
+(§3.9: no overlong form, no surrogate, nothing past `10FFFF`, no truncated
+sequence, every element 0 to 255); the second replaces each ill-formed part
+with one U+FFFD, choosing the parts as the WHATWG decoder does. A `String` is
+never anything but well-formed UTF-8, so neither has a third answer.
 
 It takes the escapes a string takes and `\'` besides: `\\`, `\"`, `\'`,
 `\n`, `\t`, `\r`, `\0`, `\{`, `\}`, and `\u{...}`. `\'` is legal in a string

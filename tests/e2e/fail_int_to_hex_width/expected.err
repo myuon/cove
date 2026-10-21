@@ -1,0 +1,15 @@
+error[cove::runtime]: `Int.toHex` cannot pad to `-1` digits
+ --> <e2e>/fail_int_to_hex_width/main.cove:7:3
+  |
+7 |   value.toHex(width)
+  |   ^^^^^^^^^^^^^^^^^^
+   --> std/int.cove:360:5
+    |
+360 |     core.refuse(widthRefused(width), widthRule(), "")
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_int_to_hex_width/main.cove:14:13
+   |
+14 |   println("{padded(10, -1)}")?
+   |             ^^^^^^^^^^^^^^ called from here
+  rule: A width is a count of digits, so `width` must be 0 or more.
+1 error(s)

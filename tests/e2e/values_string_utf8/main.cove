@@ -1,0 +1,162 @@
+use console.println
+
+/// The code points of `text`, in hexadecimal and separated by spaces.
+///
+/// Code points rather than the text itself, so that a U+FFFD in an answer is a
+/// `fffd` in the golden file and not a glyph a terminal draws, and a NUL is a
+/// `0` and not a byte nobody can see.
+fn pointsOf(text: String) -> String {
+  var rendered = ""
+  var at = 0
+  let end = text.byteLength()
+  while at < end {
+    let point = text.codePointAtByte(at).unwrapOr(-1)
+    let digits = point.toHex(1)
+    if at == 0 {
+      rendered = digits
+    } else {
+      rendered = "{rendered} {digits}"
+    }
+    at += if point < 128 {
+      1
+    } else if point < 2048 {
+      2
+    } else if point < 65536 {
+      3
+    } else {
+      4
+    }
+  }
+  rendered
+}
+
+/// One byte sequence, read both ways: the strict answer and the lossy one.
+fn show(label: String, bytes: Array<Int>) -> Result<Unit, Error> {
+  let lossy = String.fromUtf8Lossy(bytes)
+  match String.fromUtf8(bytes) {
+    Ok(text) => println(
+      "{label} {bytes} ok [{pointsOf(text)}] lossy [{pointsOf(lossy)}]",
+    )?
+    Err(error) => println(
+      "{label} {bytes} err {error.message} lossy [{pointsOf(lossy)}]",
+    )?
+  }
+  Ok(())
+}
+
+/// Whether `text` survives `toUtf8` and `fromUtf8`, both ways, unchanged.
+fn roundTrips(text: String) -> Bool {
+  let bytes = text.toUtf8()
+  if bytes.length() != text.byteLength() {
+    return false
+  }
+  match String.fromUtf8(bytes) {
+    Ok(back) => back == text && String.fromUtf8Lossy(bytes) == text
+    Err(_) => false
+  }
+}
+
+/// Pins `String.fromUtf8`, `String.fromUtf8Lossy` and `String.toUtf8` (#665):
+/// the well-formed sequences at every width boundary, every ill-formed shape
+/// Unicode §3.9 names, and the U+FFFD substitution of maximal subparts that the
+/// WHATWG decoder makes.
+export fn main() -> Result<Unit, Error> {
+  // Encoding: a `String` is its UTF-8.
+  println("toUtf8 empty {"".toUtf8()}")?
+  println("toUtf8 ascii {"Az~".toUtf8()}")?
+  println("toUtf8 wide {"\u{e9}\u{20ac}\u{1f600}".toUtf8()}")?
+  println("toUtf8 nul {"a\u{0}b".toUtf8()}")?
+
+  // Well-formed, at each end of each width.
+  show("ok.empty", [])?
+  show("ok.one.low", [0])?
+  show("ok.one.high", [127])?
+  show("ok.two.low", [194, 128])?
+  show("ok.two.high", [223, 191])?
+  show("ok.three.low", [224, 160, 128])?
+  show("ok.three.before.surrogates", [237, 159, 191])?
+  show("ok.three.after.surrogates", [238, 128, 128])?
+  show("ok.three.high", [239, 191, 191])?
+  show("ok.four.low", [240, 144, 128, 128])?
+  show("ok.four.high", [244, 143, 191, 191])?
+  show("ok.mixed", [104, 195, 169, 226, 130, 172, 240, 159, 152, 128])?
+  show("ok.bom", [239, 187, 191, 65])?
+  show("ok.replacement.itself", [239, 191, 189])?
+
+  // Overlong forms: a shorter encoding of the same scalar exists.
+  show("overlong.two.nul", [192, 128])?
+  show("overlong.two.high", [193, 191])?
+  show("overlong.three.nul", [224, 128, 128])?
+  show("overlong.three.high", [224, 159, 191])?
+  show("overlong.four.nul", [240, 128, 128, 128])?
+  show("overlong.four.ffff", [240, 143, 191, 191])?
+
+  // Surrogate halves, and past U+10FFFF.
+  show("surrogate.high", [237, 160, 128])?
+  show("surrogate.low", [237, 191, 191])?
+  show("surrogate.pair", [237, 160, 189, 237, 178, 169])?
+  show("beyond.f4", [244, 144, 128, 128])?
+  show("beyond.f5", [245, 128, 128, 128])?
+  show("beyond.ff", [255])?
+
+  // Continuations with no lead, and leads with too few continuations.
+  show("lone.continuation", [128])?
+  show("lone.continuations", [128, 191, 65])?
+  show("truncated.two", [195])?
+  show("truncated.three.one", [226])?
+  show("truncated.three.two", [226, 130])?
+  show("truncated.four.three", [240, 159, 152])?
+  show("truncated.then.ascii", [225, 128, 65])?
+  show("truncated.then.lead", [226, 130, 195, 169])?
+  show("truncated.mid", [97, 240, 159, 98])?
+
+  // Elements that are not bytes at all.
+  show("not.byte.high", [65, 256])?
+  show("not.byte.negative", [-1, 65])?
+  show("not.byte.inside", [226, 300, 172])?
+
+  // Every single byte: 128 are a character, and 128 are one U+FFFD each.
+  var alone = 0
+  var replaced = 0
+  var byte = 0
+  while byte < 256 {
+    let one = [byte]
+    if String.fromUtf8(one).isOk() {
+      alone += 1
+    } else if String.fromUtf8Lossy(one) == "\u{fffd}" {
+      replaced += 1
+    }
+    byte += 1
+  }
+  println("single bytes ok {alone} replaced {replaced}")?
+
+  // Round trips: through `toUtf8` and back, at the width boundaries and over
+  // a stride of the whole code space.
+  for text in [
+    "",
+    "plain",
+    "caf\u{e9}",
+    "\u{7f}\u{80}\u{7ff}\u{800}",
+    "\u{d7ff}\u{e000}\u{ffff}",
+    "\u{10000}\u{10ffff}",
+  ] {
+    println("round trip {text.toUtf8()} {roundTrips(text)}")?
+  }
+  var tried = 0
+  var survived = 0
+  var point = 0
+  while point <= 1114111 {
+    match String.fromCodePoint(point) {
+      Ok(text) => {
+        tried += 1
+        if roundTrips(text) {
+          survived += 1
+        }
+      }
+      Err(_) => { }
+    }
+    point += 997
+  }
+  println("stride round trips {survived} of {tried}")?
+  Ok(())
+}

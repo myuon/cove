@@ -16,8 +16,8 @@ unless the run was granted the capability it names.
 | | |
 | --- | --- |
 | builtin types | 18 |
-| builtin methods | 115 |
-| builtin associated functions | 14 |
+| builtin methods | 118 |
+| builtin associated functions | 16 |
 | free builtins | 7 |
 | host modules | 8 |
 | host operations | 25 |
@@ -221,6 +221,8 @@ written as a namespace.
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
 | `fromCodePoint(codePoint: Int) -> Result<String, Error>` |  |  | `std.string.fromCodePoint` |
+| `fromUtf8(bytes: Array<Int>) -> Result<String, Error>` |  |  | `std.string.fromUtf8` |
+| `fromUtf8Lossy(bytes: Array<Int>) -> String` |  |  | `std.string.fromUtf8Lossy` |
 
 **Methods.**
 
@@ -245,6 +247,7 @@ written as a namespace.
 | `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `std.string.codePointAtByte` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `std.string.sliceBytes` |
+| `toUtf8() -> Array<Int>` |  |  |  | `std.string.toUtf8` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Range`
@@ -315,6 +318,8 @@ written as a namespace.
 | `shiftLeft(count: Int) -> Int` |  |  |  | `machine` |
 | `shiftRight(count: Int) -> Int` |  |  |  | `machine` |
 | `shiftRightLogical(count: Int) -> Int` |  |  |  | `machine` |
+| `toStringRadix(radix: Int) -> String` |  |  |  | `std.int.toStringRadix` |
+| `toHex(width: Int) -> String` |  |  |  | `std.int.toHex` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Float`

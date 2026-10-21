@@ -152,6 +152,12 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   into them, and `String.fromCodePoint(codePoint)` builds one from the number
   that names it, or an `Err` for a number that names none — one out of range,
   or a surrogate half. There is no `Character` type.
+- A `String` is UTF-8, and `text.toUtf8()` answers its bytes as an
+  `Array<Int>`. `String.fromUtf8(bytes)` reads bytes back into one, or an
+  `Err` naming the offset where they stop being well-formed UTF-8 — overlong
+  forms, surrogates, past U+10FFFF, truncations and elements outside 0 to 255
+  included. `String.fromUtf8Lossy(bytes)` never fails: each ill-formed part
+  becomes one U+FFFD, as a browser's decoder replaces it.
 - A `Duration` is a signed count of nanoseconds. `500ms` writes one, and
   `Duration.millis(n)` builds one from a number the program computed — one
   associated function per literal suffix, so `Duration.seconds(1)` is `1s`:
@@ -163,6 +169,11 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   reads one in a radix from 2 to 36. Text that is not a number answers `Err`;
   a radix outside 2 to 36 stops the run, because it is the call that is wrong
   and not the text.
+  `value.toStringRadix(radix)` writes one back, in lowercase and with a `-`
+  before a negative magnitude, so `255.toStringRadix(16)` is `"ff"`.
+  `value.toHex(width)` is radix 16 with zeros in front to make at least
+  `width` digits: `10.toHex(2)` is `"0a"`. A bad radix or a negative width
+  stops the run.
 - An `Int`'s 64 bits are reachable through seven methods: `bitAnd`, `bitOr`,
   `bitXor`, `bitNot`, `shiftLeft`, `shiftRight` (arithmetic: the sign bit is
   shifted in, so `(-3).shiftRight(1)` is `-2`) and `shiftRightLogical` (zeros

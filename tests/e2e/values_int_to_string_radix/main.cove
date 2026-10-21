@@ -1,0 +1,113 @@
+use console.println
+
+/// Whether `Int.parseRadix(text, radix)` answers exactly `value`.
+fn readsBack(text: String, radix: Int, value: Int) -> Bool {
+  match Int.parseRadix(text, radix) {
+    Ok(read) => read == value
+    Err(_) => false
+  }
+}
+
+/// One `toStringRadix` call, and whether `Int.parseRadix` reads it back.
+fn show(value: Int, radix: Int) -> Result<Unit, Error> {
+  let text = value.toStringRadix(radix)
+  let back = readsBack(text, radix, value)
+  println("{value} radix {radix} {text} back {back}")?
+  Ok(())
+}
+
+/// One `toHex` call, and whether `Int.parseRadix` reads it back in 16.
+fn showHex(value: Int, width: Int) -> Result<Unit, Error> {
+  let text = value.toHex(width)
+  let back = readsBack(text, 16, value)
+  println("{value} hex {width} {text} back {back}")?
+  Ok(())
+}
+
+/// Pins `Int.toStringRadix` and `Int.toHex` (#665): lowercase digits, a `-`
+/// before a negative magnitude, both ends of `Int` in every radix, zero
+/// padding to a minimum width, and the round trip through `Int.parseRadix`.
+export fn main() -> Result<Unit, Error> {
+  let greatest = 9223372036854775807
+  let least = -9223372036854775807 - 1
+  for value in [
+    0,
+    1,
+    9,
+    10,
+    15,
+    16,
+    35,
+    36,
+    255,
+    256,
+    -1,
+    -255,
+    greatest,
+    least,
+  ] {
+    show(value, 16)?
+  }
+  for radix in [2, 3, 8, 10, 36] {
+    show(0, radix)?
+    show(radix - 1, radix)?
+    show(radix, radix)?
+    show(greatest, radix)?
+    show(least, radix)?
+  }
+
+  // Ten agrees with interpolation everywhere it is asked.
+  var agrees = true
+  for value in [0, 7, -7, 1000, -1000, greatest, least] {
+    if value.toStringRadix(10) != "{value}" {
+      agrees = false
+    }
+  }
+  println("radix 10 is interpolation {agrees}")?
+
+  // Fixed width: a byte as two digits, a UTF-16 unit as four.
+  for value in [0, 10, 15, 16, 255] {
+    showHex(value, 2)?
+  }
+  showHex(233, 4)?
+  showHex(65535, 4)?
+  showHex(128512, 4)?
+  showHex(10, 0)?
+  showHex(0, 0)?
+  showHex(10, 1)?
+  showHex(-10, 4)?
+  showHex(least, 20)?
+  println("\\u{233.toHex(4)} %{10.toHex(2)}")?
+
+  // Every byte, as two digits, reads back, and is two digits long.
+  var bytes = 0
+  var byte = 0
+  while byte < 256 {
+    let text = byte.toHex(2)
+    if text.byteLength() == 2 && readsBack(text, 16, byte) {
+      bytes += 1
+    }
+    byte += 1
+  }
+  println("bytes as two digits {bytes} of 256")?
+
+  // A stride over `Int` in every radix reads back.
+  var tried = 0
+  var survived = 0
+  var radix = 2
+  while radix <= 36 {
+    var value = least
+    var step = 0
+    while step < 64 {
+      tried += 1
+      if readsBack(value.toStringRadix(radix), radix, value) {
+        survived += 1
+      }
+      value = value / 3 * 2 + step * 7919
+      step += 1
+    }
+    radix += 1
+  }
+  println("stride round trips {survived} of {tried}")?
+  Ok(())
+}

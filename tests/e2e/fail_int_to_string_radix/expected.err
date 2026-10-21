@@ -1,0 +1,16 @@
+error[cove::runtime]: `Int.toStringRadix` cannot write a number in radix `1`
+ --> <e2e>/fail_int_to_string_radix/main.cove:7:3
+  |
+7 |   value.toStringRadix(radix)
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> std/int.cove:336:5
+    |
+336 |     core.refuse(writeRadixRefused(radix), radixRule(), radixHelp())
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_int_to_string_radix/main.cove:14:13
+   |
+14 |   println("{written(255, 1)}")?
+   |             ^^^^^^^^^^^^^^^ called from here
+  rule: A radix is 2 through 36, which is as many digits as the ten numerals and the twenty-six letters afford.
+  help: pass a `radix` between 2 and 36, such as 16 for hexadecimal
+1 error(s)

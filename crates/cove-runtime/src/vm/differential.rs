@@ -304,7 +304,10 @@ fn agree(source: &str, name: &str, args: Vec<Value>) -> Answer {
 /// ADR 0098's `sin` and `cos` added a second, the 56 digits of `2/π` their
 /// far reduction reads — 224 bytes, 29 words — on top again, for the same
 /// reason and with the same result on `keeps_a_lot` without it.
-const PRESSURE_HEAP_WORDS: usize = (1 << 12) + 1_222 + 29;
+///
+/// Issue #665's UTF-8 and radix writers added 38 more, the literals of their
+/// four refusal sentences, and `keeps_a_lot` ran out of memory without them.
+const PRESSURE_HEAP_WORDS: usize = (1 << 12) + 1_222 + 29 + 38;
 
 /// [`agree`], but the machine runs over a heap bounded to `heap_words`, and
 /// the answer comes back with how many collections it took to produce.

@@ -750,7 +750,8 @@ fn needsEscaping(text: String) -> Bool {
 }
 
 /// The escape JSON writes for the byte `byte`: the two-character form where
-/// there is one, and `\u00XX` for every other control character.
+/// there is one, and `\u00XX` for every other control character — lowercase,
+/// as `Int.toHex` writes it.
 fn escaped(byte: Int) -> String {
   match byte {
     '"' => "\\\""
@@ -760,12 +761,7 @@ fn escaped(byte: Int) -> String {
     '\r' => "\\r"
     8 => "\\b"
     12 => "\\f"
-    _ => {
-      let digits = "0123456789abcdef"
-      let high = byte / 16
-      let low = byte - high * 16
-      "\\u00{digits.sliceBytes(high, high + 1).unwrapOr("")}{digits.sliceBytes(low, low + 1).unwrapOr("")}"
-    }
+    _ => "\\u{byte.toHex(4)}"
   }
 }
 

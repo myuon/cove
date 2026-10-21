@@ -1117,6 +1117,32 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "fromCodePoint",
     },
+    // UTF-8 over bytes (#665): `toUtf8` is `byteAt` at every offset, and the
+    // two decoders are one pass of the WHATWG decoder in `std.string`, over
+    // the same `appendByte`-shaped append `fromCodePoint` stands on. The
+    // well-formedness of a byte sequence is a policy over a representation,
+    // ADR 0064's Decision 2, and nothing new is under it (ADR 0106).
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "toUtf8",
+        module: "std.string",
+        function: "toUtf8",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "String",
+        method: "fromUtf8",
+        module: "std.string",
+        function: "fromUtf8",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "String",
+        method: "fromUtf8Lossy",
+        module: "std.string",
+        function: "fromUtf8Lossy",
+    },
     // `sliceBytes`' five checks and its `Result` are Cove; the copy beneath them
     // is `core.stringSlice`, a byte run slice.
     StdBinding {
@@ -1410,6 +1436,22 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "parseRadix",
         module: "std.int",
         function: "parseRadix",
+    },
+    // And its inverse (#665), `renderInto`'s loop with the radix where the
+    // ten was; `toHex` is the same body at radix 16 with padding (ADR 0106).
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Int",
+        method: "toStringRadix",
+        module: "std.int",
+        function: "toStringRadix",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Int",
+        method: "toHex",
+        module: "std.int",
+        function: "toHex",
     },
     // `Float.format` is the first `Float` method in the standard library and
     // `std.float` the file it opened. It was `format!("{:.*}")` behind
@@ -4608,6 +4650,18 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             mutating: false,
             fresh: false,
         },
+        // `toUtf8() -> Array<Int>`, the string's bytes, each 0 through 255
+        // (#665). A `String` is its UTF-8, so this decodes nothing: it is
+        // `byteAt` at every offset, into an array allocated once.
+        MethodSchema {
+            name: "toUtf8",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Array(&BuiltinType::Int),
+            mutating: false,
+            fresh: false,
+        },
         SNAPSHOT,
     ],
     // `String`'s first associated function, and the answer to the question
@@ -4623,18 +4677,52 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
     // `0x10FFFF`, a negative one, and a surrogate half are three ways a
     // number can name no character. A program that read the number out of a
     // file is the program that should be told which.
-    associated: &[MethodSchema {
-        name: "fromCodePoint",
-        generics: &[],
-        params: &[ParamSchema {
-            name: "codePoint",
-            ty: BuiltinType::Int,
-        }],
-        variadic: false,
-        result: BuiltinType::Result(&BuiltinType::String, &BuiltinType::Error),
-        mutating: false,
-        fresh: false,
-    }],
+    associated: &[
+        MethodSchema {
+            name: "fromCodePoint",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "codePoint",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Result(&BuiltinType::String, &BuiltinType::Error),
+            mutating: false,
+            fresh: false,
+        },
+        // `fromUtf8(bytes) -> Result<String, Error>` (#665): the string whose
+        // UTF-8 is `bytes`, held to Unicode's well-formedness exactly —
+        // overlong forms, surrogates, past U+10FFFF, truncations and values
+        // outside 0 through 255 are each an `Err`, for `fromCodePoint`'s
+        // reason: bytes that are not UTF-8 are data that arrived wrong.
+        MethodSchema {
+            name: "fromUtf8",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "bytes",
+                ty: BuiltinType::Array(&BuiltinType::Int),
+            }],
+            variadic: false,
+            result: BuiltinType::Result(&BuiltinType::String, &BuiltinType::Error),
+            mutating: false,
+            fresh: false,
+        },
+        // `fromUtf8Lossy(bytes) -> String`: the same reading with every
+        // ill-formed part replaced by U+FFFD, one per maximal subpart, as the
+        // WHATWG decoder does.
+        MethodSchema {
+            name: "fromUtf8Lossy",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "bytes",
+                ty: BuiltinType::Array(&BuiltinType::Int),
+            }],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+            fresh: false,
+        },
+    ],
 };
 
 // ------------------------------------------------------------------- Range
@@ -4946,6 +5034,38 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             }],
             variadic: false,
             result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // The text `Int.parseRadix(text, radix)` reads back as the receiver
+        // (#665): lowercase digits past nine, a `-` before a negative
+        // magnitude, no prefix and no leading zero. A radix outside 2..=36
+        // stops the run, as it does for `parseRadix`.
+        MethodSchema {
+            name: "toStringRadix",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "radix",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+            fresh: false,
+        },
+        // `toStringRadix(16)` with zeros before the digits to make at least
+        // `width` of them: `10.toHex(2)` is `"0a"`. A second method rather
+        // than a parameter for `parseRadix`'s reason — a builtin parameter has
+        // no default. A negative width stops the run.
+        MethodSchema {
+            name: "toHex",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "width",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::String,
             mutating: false,
             fresh: false,
         },

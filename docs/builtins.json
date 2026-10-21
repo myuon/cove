@@ -179,7 +179,9 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "fromCodePoint", "signature": "fromCodePoint(codePoint: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "codePoint", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "implementedBy": "std.string.fromCodePoint", "host": false}
+        {"name": "fromCodePoint", "signature": "fromCodePoint(codePoint: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "codePoint", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "implementedBy": "std.string.fromCodePoint", "host": false},
+        {"name": "fromUtf8", "signature": "fromUtf8(bytes: Array<Int>) -> Result<String, Error>", "generics": [], "params": [{"name": "bytes", "type": "Array<Int>"}], "variadic": false, "result": "Result<String, Error>", "implementedBy": "std.string.fromUtf8", "host": false},
+        {"name": "fromUtf8Lossy", "signature": "fromUtf8Lossy(bytes: Array<Int>) -> String", "generics": [], "params": [{"name": "bytes", "type": "Array<Int>"}], "variadic": false, "result": "String", "implementedBy": "std.string.fromUtf8Lossy", "host": false}
       ],
       "methods": [
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.string.length", "host": false},
@@ -201,6 +203,7 @@
         {"name": "byteAt", "signature": "byteAt(offset: Int) -> Int", "generics": [], "params": [{"name": "offset", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "codePointAtByte", "signature": "codePointAtByte(offset: Int) -> Option<Int>", "generics": [], "params": [{"name": "offset", "type": "Int"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "std.string.codePointAtByte", "host": false},
         {"name": "sliceBytes", "signature": "sliceBytes(from: Int, to: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "mutating": false, "implementedBy": "std.string.sliceBytes", "host": false},
+        {"name": "toUtf8", "signature": "toUtf8() -> Array<Int>", "generics": [], "params": [], "variadic": false, "result": "Array<Int>", "mutating": false, "implementedBy": "std.string.toUtf8", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },
@@ -270,6 +273,8 @@
         {"name": "shiftLeft", "signature": "shiftLeft(count: Int) -> Int", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "shiftRight", "signature": "shiftRight(count: Int) -> Int", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "shiftRightLogical", "signature": "shiftRightLogical(count: Int) -> Int", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "toStringRadix", "signature": "toStringRadix(radix: Int) -> String", "generics": [], "params": [{"name": "radix", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "implementedBy": "std.int.toStringRadix", "host": false},
+        {"name": "toHex", "signature": "toHex(width: Int) -> String", "generics": [], "params": [{"name": "width", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "implementedBy": "std.int.toHex", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },

@@ -1972,7 +1972,25 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// fusing a name against a quote into the literal, `readsAsItself`'s `match`
 /// on the word it slices out; and +1 in `ret` (158 to 159) for the new test,
 /// `a_tagged_literal_is_one_token`.
-const FORWARDABLE_COPIES: usize = 7632;
+///
+/// **7,704 since `String` reads and writes UTF-8 over bytes and `Int` writes
+/// itself in a radix** (issue #665, ADR 0106), a rise of 72 that is a fall of
+/// 6 in the lowering and 78 of program. Every program carries the five new
+/// bodies — `toUtf8`, `fromUtf8`, `fromUtf8Lossy`, `toStringRadix` and
+/// `toHex` — and they add **none**: with the four new cases held out and
+/// `std.json` as it was, the corpus answers 7,632, the bound exactly. A first
+/// draft was **+530**, two in nearly every one of 275 programs: `refuseUtf8`
+/// bound `bytes.get(at).unwrapOr(0)` before testing it, which was a copy in
+/// itself and instantiated `unwrapOr<Int>`, a second, wherever `std.string`
+/// is lowered. It matches on the `Option` and returns from the arm now.
+/// `std.json`'s `\u00XX` escape writing `toHex(4)` in place of two
+/// `sliceBytes(…).unwrapOr("")` pieces is the −6, two in `prod` in each of
+/// the three rows that import JSON (`examples:cq` and `examples:cqSample`
+/// 105 to 103, `examples:covecheck` 88 to 86). The programs are
+/// `tests/e2e/values_string_utf8` +22, `values_int_to_string_radix` +20,
+/// and `fail_int_to_string_radix` and `fail_int_to_hex_width` +18 each: the
+/// printing standard library each carries.
+const FORWARDABLE_COPIES: usize = 7704;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

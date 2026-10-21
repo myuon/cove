@@ -316,6 +316,134 @@ fn radixHelp() -> String {
   "pass a `radix` between 2 and 36, such as 16 for hexadecimal"
 }
 
+/// `value` written in `radix`: the text [`parseRadix`] reads back as `value`.
+///
+/// Digits past nine are **lowercase** letters — `255.toStringRadix(16)` is
+/// `"ff"` — which is what `std.json` writes in a `\u` escape and what Rust's
+/// `{:x}`, JavaScript's `toString(16)` and Go's `strconv.FormatInt` write.
+/// [`parseRadix`] reads either case, so the choice changes no round trip. A
+/// negative `value` is a `-` and then its magnitude, the notation
+/// [`parseRadix`] reads, so `(-255).toStringRadix(16)` is `"-ff"`; there is
+/// no `+`, no `0x` and no leading zero, and `0` is `"0"`. So
+/// `Int.parseRadix(value.toStringRadix(radix), radix)` is `Ok(value)` for
+/// every `Int` and every radix, the least `Int` included.
+///
+/// A radix outside `2..=36` stops the run, worded as [`parseRadix`] words it
+/// and for its reason: there is no notation to write in, which is the call
+/// being wrong and not an answer to give.
+export fn toStringRadix(value: Int, radix: Int) -> String {
+  if radix < 2 {
+    core.refuse(writeRadixRefused(radix), radixRule(), radixHelp())
+  }
+  if radix > 36 {
+    core.refuse(writeRadixRefused(radix), radixRule(), radixHelp())
+  }
+  return digitsIn(value, radix, 0)
+}
+
+/// `value` in lowercase hexadecimal, with zeros in front of the digits to make
+/// at least `width` of them.
+///
+/// The fixed-width form a byte or a UTF-16 unit is written in:
+/// `10.toHex(2)` is `"0a"` and `233.toHex(4)` is `"00e9"`, so `"%{b.toHex(2)}"`
+/// and `"\\u{unit.toHex(4)}"` are each one call. `width` is a minimum and not
+/// a bound — a value with more digits than that is written whole, so nothing
+/// is cut off — and `0` and `1` both mean no padding. It is
+/// [`toStringRadix`]`(16)` with the padding added, so a negative `value` is
+/// `-` and then the padded magnitude, `(-10).toHex(4)` being `"-000a"`, and
+/// `Int.parseRadix(value.toHex(width), 16)` is `Ok(value)` for every `value`.
+///
+/// A negative `width` names no count of digits, so it stops the run, as a
+/// negative length does for `Vector.filled`.
+export fn toHex(value: Int, width: Int) -> String {
+  if width < 0 {
+    core.refuse(widthRefused(width), widthRule(), "")
+  }
+  return digitsIn(value, 16, width)
+}
+
+/// The digits of `value` in `radix`, zero-padded to `width`, with a `-` in
+/// front of a negative one: the body of [`toStringRadix`] and [`toHex`],
+/// whose callers have already checked both arguments.
+///
+/// [`renderInto`]'s loop with the radix where the ten was, and for its
+/// reason everything happens on the non-positive side of zero, so the least
+/// `Int` needs no magnitude `Int` has not got. The count of digits is known
+/// before the first is written — it is how many times `power` was
+/// multiplied — so the answer is allocated once at exactly its length and
+/// the padding goes in front without moving anything.
+fn digitsIn(value: Int, radix: Int, width: Int) -> String {
+  var rest = if value < 0 {
+    value
+  } else {
+    -value
+  }
+  let part = rest / radix
+  var power = -1
+  var count = 1
+  while part <= power {
+    power = power * radix
+    count += 1
+  }
+  let sign = if value < 0 {
+    1
+  } else {
+    0
+  }
+  var pad = if width > count {
+    width - count
+  } else {
+    0
+  }
+  let buffer = core.bytesAllocate(sign + pad + count)
+  if value < 0 {
+    let minus = '-'
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, minus)
+    core.bytesCommit(buffer, 1)
+  }
+  while pad > 0 {
+    let zero = '0'
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, zero)
+    core.bytesCommit(buffer, 1)
+    pad -= 1
+  }
+  while power < 0 {
+    let digit = rest / power
+    let byte = if digit < 10 {
+      '0' + digit
+    } else {
+      'a' + digit - 10
+    }
+    let at = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, at, byte)
+    core.bytesCommit(buffer, 1)
+    rest = rest - digit * power
+    power = power / radix
+  }
+  return core.bytesFinish(buffer)
+}
+
+/// What [`toStringRadix`] says of a radix it cannot write in. The rule and
+/// the help are [`parseRadix`]'s, because the radixes are.
+fn writeRadixRefused(radix: Int) -> String {
+  "`Int.toStringRadix` cannot write a number in radix `{radix}`"
+}
+
+/// What [`toHex`] says of a negative width.
+fn widthRefused(width: Int) -> String {
+  "`Int.toHex` cannot pad to `{width}` digits"
+}
+
+/// The rule a width is held to.
+fn widthRule() -> String {
+  "A width is a count of digits, so `width` must be 0 or more."
+}
+
 /// Appends the decimal text of `value` to `buffer`: what `"{value}"` shows.
 ///
 /// Not exported, and nothing a program can name: the lowering calls it for
