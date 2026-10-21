@@ -1,0 +1,60 @@
+html: 200
+  content-type: text/html; charset=utf-8
+  [<p>&lt;b&gt;&amp;</p>]
+text: 404
+  content-type: text/plain; charset=utf-8
+  [nothing here
+]
+json: 201
+  content-type: application/json
+  [{"id":7,"tag":"a\"b"}
+]
+redirect: 303
+  location: /base/next?x=1
+  []
+override: 200
+  cache-control: max-age=60
+  content-type: text/html
+  www-authenticate: Basic realm="x"
+  [<p>x</p>]
+withHeaders: 200
+  cache-control: no-store
+  content-security-policy: default-src 'none'
+  content-type: text/plain; charset=utf-8
+  x-frame-options: DENY
+  [t]
+withHeaders none: 303
+  location: /r
+  []
+built: 204
+  x-trace: on
+  []
+header lower/lower: text/plain
+header lower/upper: text/plain
+header mixed/lower: yes
+header mixed/mixed: yes
+header absent: -
+header not a prefix: -
+header kelvin: -
+form name: Jürgen B
+form tags: a, b
+form empty: []
+form pairs: 4
+form of nothing: 0
+sameOrigin 0: true
+sameOrigin 1: true
+sameOrigin 2: false
+sameOrigin 3: false
+sameOrigin 4: true
+sameOrigin 5: true
+sameOrigin 6: true
+sameOrigin 7: false
+sameOrigin 8: false
+sameOrigin 9: false
+sameOrigin 10: false
+sameOrigin 11: false
+sameOrigin 12: false
+sameOrigin 13: true
+prefix: [/webhooks]
+prefix none: []
+prefix json: ""

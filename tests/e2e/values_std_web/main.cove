@@ -1,0 +1,158 @@
+use console.println
+use std.html
+use std.json
+use std.json.Json
+use std.web
+use std.web.Request
+use std.web.Response
+
+/// A request with these headers and this body, to `/a` with no query.
+fn request(
+  method: String,
+  headers: Map<String, String>,
+  body: String,
+) -> Request {
+  Request(
+    method: method,
+    path: "/a",
+    query: Map.of(),
+    headers: headers,
+    body: body,
+  )
+}
+
+/// A request carrying just these headers.
+fn headed(headers: Map<String, String>) -> Request {
+  request("POST", headers, "")
+}
+
+/// Every header of `response`, one `name: value` per line, after its status
+/// and before its body in brackets.
+fn shown(label: String, response: Response) -> Result<Unit, Error> {
+  println("{label}: {response.status}")?
+  for entry in response.headers {
+    println("  {entry.key}: {entry.value}")?
+  }
+  println("  [{response.body}]")
+}
+
+/// `value`, or `-` for none.
+fn either(value: Option<String>) -> String {
+  value.unwrapOr("-")
+}
+
+export fn main() -> Result<Unit, Error> {
+  let name = "<b>&"
+  shown("html", web.html(200, html"<p>{name}</p>"))?
+  shown("text", web.text(404, "nothing here\n"))?
+  shown(
+    "json",
+    web.json(
+      201,
+      Json.Fields(Map.of(MapEntry(key: "id", value: Json.Number(7.0)), MapEntry(key: "tag", value: Json.Text("a\"b")))),
+    ),
+  )?
+  shown("redirect", web.redirect("/base/next?x=1"))?
+
+  // An override replaces whatever case it is written in; a new name is added.
+  shown(
+    "override",
+    web.html(200, html"<p>x</p>")
+      .withHeader("Content-Type", "text/html")
+      .withHeader("WWW-Authenticate", "Basic realm=\"x\"")
+      .withHeader("cache-control", "max-age=60"),
+  )?
+  // An app's own header set, in one call: every name lowercased, and the set
+  // wins over what the response already had.
+  let policy = Map.of(
+    MapEntry(key: "Content-Security-Policy", value: "default-src 'none'"),
+    MapEntry(key: "x-frame-options", value: "DENY"),
+    MapEntry(key: "Cache-Control", value: "no-store"),
+  )
+  shown(
+    "withHeaders",
+    web.text(200, "t")
+      .withHeader("cache-control", "max-age=60")
+      .withHeaders(policy),
+  )?
+  shown("withHeaders none", web.redirect("/r").withHeaders(Map.of()))?
+  shown(
+    "built",
+    Response(status: 204, headers: Map.of(), body: "")
+      .withHeader("X-Trace", "on"),
+  )?
+
+  // A header is read in any case, whichever case the map holds it in.
+  let lower = headed(Map.of(MapEntry(key: "content-type", value: "text/plain")))
+  let mixed = headed(Map.of(MapEntry(key: "X-Thing", value: "yes")))
+  println("header lower/lower: {either(lower.header("content-type"))}")?
+  println("header lower/upper: {either(lower.header("CONTENT-TYPE"))}")?
+  println("header mixed/lower: {either(mixed.header("x-thing"))}")?
+  println("header mixed/mixed: {either(mixed.header("x-THING"))}")?
+  println("header absent: {either(lower.header("accept"))}")?
+  println("header not a prefix: {either(lower.header("content"))}")?
+  // Only ASCII folds: the Kelvin sign lowercases to `k` in Unicode, not here.
+  let kelvin = headed(Map.of(MapEntry(key: "\u{212A}ey", value: "kelvin")))
+  println("header kelvin: {either(kelvin.header("key"))}")?
+
+  // The form is the body's, every pair kept in order.
+  let posted = request("POST", Map.of(), "tag=a&name=J%C3%BCrgen+B&tag=b&empty")
+  let form = posted.form()
+  println("form name: {either(form.get("name"))}")?
+  println("form tags: {", ".join(form.all("tag"))}")?
+  println("form empty: [{either(form.get("empty"))}]")?
+  println("form pairs: {form.pairs.length()}")?
+  println(
+    "form of nothing: {request("GET", Map.of(), "").form().pairs.length()}",
+  )?
+
+  // sameOrigin: `sec-fetch-site` decides alone; then `origin` against the host.
+  let cases = [
+    Map.of(MapEntry(key: "sec-fetch-site", value: "same-origin")),
+    Map.of(MapEntry(key: "sec-fetch-site", value: "none")),
+    Map.of(MapEntry(key: "sec-fetch-site", value: "cross-site")),
+    Map.of(MapEntry(key: "sec-fetch-site", value: "same-site")),
+    Map.of(
+      MapEntry(key: "sec-fetch-site", value: "same-origin"),
+      MapEntry(key: "origin", value: "null"),
+    ),
+    Map.of(
+      MapEntry(key: "origin", value: "http://example.test"),
+      MapEntry(key: "host", value: "example.test"),
+    ),
+    Map.of(
+      MapEntry(key: "origin", value: "https://example.test"),
+      MapEntry(key: "host", value: "example.test"),
+      MapEntry(key: "x-forwarded-proto", value: "https"),
+    ),
+    Map.of(
+      MapEntry(key: "origin", value: "https://example.test"),
+      MapEntry(key: "host", value: "example.test"),
+    ),
+    Map.of(
+      MapEntry(key: "origin", value: "http://evil.test"),
+      MapEntry(key: "host", value: "example.test"),
+    ),
+    Map.of(
+      MapEntry(key: "origin", value: "null"),
+      MapEntry(key: "host", value: "example.test"),
+    ),
+    Map.of(
+      MapEntry(key: "origin", value: "http://"),
+      MapEntry(key: "host", value: ""),
+    ),
+    Map.of(MapEntry(key: "origin", value: "http://example.test")),
+    Map.of(MapEntry(key: "Sec-Fetch-Site", value: "cross-site")),
+    Map.of(),
+  ]
+  var index = 0
+  for headers in cases {
+    println("sameOrigin {index}: {headed(headers).sameOrigin()}")?
+    index += 1
+  }
+
+  // The mount prefix is `x-forwarded-prefix`, and `""` without it.
+  println("prefix: [{headed(Map.of(MapEntry(key: "x-forwarded-prefix", value: "/webhooks"))).prefix()}]")?
+  println("prefix none: [{headed(Map.of()).prefix()}]")?
+  println("prefix json: {json.render(Json.Text(headed(Map.of()).prefix()))}")
+}

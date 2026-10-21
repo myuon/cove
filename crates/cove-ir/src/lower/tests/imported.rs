@@ -212,3 +212,69 @@ fn std_datetime_is_lowered_only_as_far_as_a_package_reaches_it() {
         "`parseIso` lowered though nothing reaches it: {bodies:?}"
     );
 }
+
+/// `std.web` is on the list as well (ADR 0109): a package that does not
+/// import it has none of its bodies and no `Request` or `Response` layout, and
+/// a handler that only answers text has `text` and the header it sets, and
+/// neither `json`'s renderer nor `std.url`'s form reader.
+#[test]
+fn std_web_is_lowered_only_as_far_as_a_package_reaches_it() {
+    let bodies_of = |program: &Program, module: &str| -> Vec<String> {
+        program
+            .functions
+            .iter()
+            .filter(|f| &*f.module == module && !f.is_stub())
+            .map(|f| f.name.to_string())
+            .collect()
+    };
+    let program = package("fn f() -> Int { 1 }");
+    assert_eq!(bodies_of(&program, "std.web"), Vec::<String>::new());
+    assert!(
+        !program
+            .layouts
+            .iter()
+            .any(|layout| layout.name.starts_with("std.web")),
+        "a `std.web` layout in a package that never imports it"
+    );
+
+    let program = package(
+        "use std.web\n\
+         fn f(request: web.Request) -> web.Response { web.text(200, request.path) }",
+    );
+    let bodies = bodies_of(&program, "std.web");
+    for name in ["text", "typed"] {
+        assert!(
+            bodies.iter().any(|body| body == name),
+            "`std.web.{name}` has no body: {bodies:?}"
+        );
+    }
+    for name in ["json", "Request.sameOrigin", "Request.form"] {
+        assert!(
+            !bodies.iter().any(|body| body == name),
+            "`{name}` lowered though nothing reaches it: {bodies:?}"
+        );
+    }
+    assert_eq!(
+        bodies_of(&program, "std.url"),
+        Vec::<String>::new(),
+        "`std.url` lowered for a handler that reads no form"
+    );
+
+    let program = package(
+        "use std.web\n\
+         fn f(request: web.Request) -> Bool { request.form().contains(\"a\") && request.sameOrigin() }",
+    );
+    let bodies = bodies_of(&program, "std.web");
+    for name in ["Request.form", "Request.sameOrigin", "Request.header"] {
+        assert!(
+            bodies.iter().any(|body| body == name),
+            "`std.web.{name}` has no body: {bodies:?}"
+        );
+    }
+    assert!(
+        bodies_of(&program, "std.url")
+            .iter()
+            .any(|body| body == "parseForm"),
+        "a handler that reads a form has `std.url.parseForm`"
+    );
+}

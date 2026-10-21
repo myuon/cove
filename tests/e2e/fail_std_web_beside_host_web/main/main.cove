@@ -1,0 +1,16 @@
+use console.println
+use web
+use std.web
+
+/// Never runs: this case exists to pin the refusal of a module imported
+/// under the name of a host module the same module uses (ADR 0109).
+///
+/// An embedder that registered a host module `web` — minicloud did, for its
+/// `Request` and `Response` — and an app that imports `std.web` both write
+/// `web.` in a qualified call. The checker asks the host first, so without
+/// this error `web.text` would be "host module `web` has no operation
+/// `text`" while `web.Response` found the library's type, and nothing would
+/// say why.
+export fn main() -> Result<Unit, Error> {
+  println(web.text(200, "hello").body)
+}

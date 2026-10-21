@@ -1,0 +1,19 @@
+error[cove::resolve::import_conflict]: `web` is imported from both the host module `web` and the module `std.web`
+ --> <e2e>/fail_std_web_beside_host_web/main/main.cove:3:1
+  |
+3 | use std.web
+  | ^^^^^^^^^^^
+ --> <e2e>/fail_std_web_beside_host_web/main/main.cove:2:1
+  |
+2 | use web
+  | ^^^^^^^ the host module `web` is used here
+  rule: A `use` name must resolve to exactly one declaration or host module.
+  help: drop one of the two `use` declarations; a module that needs both reaches the other one's items by importing them by name, as `use std.web.<name>`
+warning[cove::resolve::unchecked_host]: no Host API schema describes the host module `web`, so calls into it are unchecked
+ --> <e2e>/fail_std_web_beside_host_web/main/main.cove:2:1
+  |
+2 | use web
+  | ^^^^^^^
+  rule: A Host API call is checked against its module's schema; the checker reads the shipped schemas and any an embedder supplies.
+  help: if `web` is an embedder's module, hand its `ModuleSchema` to the compiler with `Compiler::new().with_host_schema(...)`; otherwise check the spelling
+1 error(s)

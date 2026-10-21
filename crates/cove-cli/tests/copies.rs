@@ -2028,7 +2028,29 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `firstNonDigit` and `digitsAt` are inlined into `parseIso`, a `()` the
 /// digit writer made aside, and three answers — two `Ok`s and a `DateTime` —
 /// built to be returned rather than built in the answer by `return`.
-const FORWARDABLE_COPIES: usize = 7787;
+///
+/// **7,839 since `std.web`** (issue #668, ADR 0109), a rise of 52 that is all
+/// one new program and none of it the lowering: with
+/// `tests/e2e/values_std_web` held out the corpus answers 7,787, the bound
+/// exactly. `std.web` is on the imported list, so only a program that `use`s
+/// it lowers it, and `fail_std_web_beside_host_web` does not check and is
+/// not surveyed. The program's 52 are 18 in the printing standard library it
+/// carries — the same 18 as `values_std_url` — 14 in its own `main` and three
+/// fixture helpers, 8 in the libraries `std.web` reaches (2 in `std.json`'s
+/// `quote`; `std.url`'s `parseForm`, `component` and `Form.get`, as in
+/// `values_std_url`; `Option.unwrapOr`; `std.html`'s `assembled` and
+/// `Html.render`), and 12 in `std.web` itself: 2 each in `redirect` and
+/// `typed`, which build a one-entry `Map` and return it or the `Response`
+/// holding it, and 1 each in `html`, `text`, `json`, `Response.withHeader`,
+/// `Response.withHeaders`, `Request.sameOrigin`, `Request.prefix` and
+/// `lowerByte` — a struct built to be returned, an `unwrapOr` inlined, a
+/// match arm's answer. Writing `lowerByte` as an `if` expression rather than
+/// a `return` moved nothing. A first version set six headers on every page
+/// and was also 52: dropping the policy headers and `redirect`'s
+/// `cache-control` changed which entries the maps hold and not how they are
+/// built; `withHeaders` added one, and `Request.header` lost its one when
+/// its fallback walk moved inside the `None` arm.
+const FORWARDABLE_COPIES: usize = 7839;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -265,6 +265,33 @@ or of a date that is not one. `datetime.daysInMonth(year, month)` and
 `datetime.isLeapYear(year)` are the calendar. There is no time-zone database,
 and the module is not `std.time`, because a host module may be called `time`.
 
+HTTP for a handler is the library module `std.web`, which a program has only
+by importing it ([ADR 0109](adr/0109-std-web.md)). It declares the two types
+an HTTP embedder's handler contract names, `export fn handle(request:
+web.Request) -> web.Response`: `web.Request` is `method`, `path`, `query`,
+`headers` and `body`, the two maps `Map<String, String>` with header names
+lowercase, and `web.Response` is `status`, `headers` and `body`. The embedder
+builds a `std.web.Request` value and reads the `std.web.Response` back by
+field name. `web.html(status, page)`, `web.text(status, body)` and
+`web.json(status, value)` build a response with its `content-type` and no
+other header, and `web.redirect(location)` is a `303 See Other` with
+`location` and no other: security and caching headers — a content security
+policy, `x-frame-options`, `cache-control` — are the application's policy,
+and the module sets none. `response.withHeader(name, value)` sets one header,
+replacing one of that name, and `response.withHeaders(map)` sets every header
+of a map, which is how an app applies its own header set in one call; names
+are lowercased. On a request, `request.header(name)` reads a
+header in any case, `request.form()` is the body through `url.parseForm`,
+`request.sameOrigin()` asks `sec-fetch-site` and then `origin` whether a
+request came from the site's own pages, and `request.prefix()` is the mount
+path a proxy put in `x-forwarded-prefix`, `""` without one. A `Map` holds one
+value per header name, so a response cannot set `set-cookie` twice.
+
+A module that imports a module under the name of a host module it also uses —
+`use std.web` beside `use web` — is refused with
+`cove::resolve::import_conflict`, because both would be written `web.` and a
+qualified call is checked against the host first.
+
 It takes the escapes a string takes and `\'` besides: `\\`, `\"`, `\'`,
 `\n`, `\t`, `\r`, `\0`, `\{`, `\}`, and `\u{...}`. `\'` is legal in a string
 too, where the apostrophe needs no escaping, because there is one escape table.
