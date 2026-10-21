@@ -6,7 +6,7 @@
   3339 text both ways, are a standard-library module, **`std.datetime`** — not
   `std.time` — that a program has only by importing it; that its interface is
   one struct, `DateTime`, of eight public fields, with `fromUnixMillis`,
-  `toUnixMillis`, `toIso`, `toIsoDate`, `toIsoTime`, `weekday`, `parseIso`,
+  `toUnixMillis`, `formatIso`, `toIso`, `toIsoDate`, `toIsoTime`, `weekday`, `parseIso`,
   `daysInMonth` and `isLeapYear`; that the calendar is the proleptic
   Gregorian one and an offset is a fixed count of minutes, with no time-zone
   database; that `parseIso` answers milliseconds and an `Err` naming the
@@ -77,6 +77,7 @@ export struct DateTime {
 }
 
 datetime.fromUnixMillis(millis: Int, offsetMinutes: Int) -> DateTime
+datetime.formatIso(millis: Int)         -> String   // fromUnixMillis(millis, 0).toIso()
 at.toUnixMillis()                       -> Result<Int, Error>
 at.toIso()                              -> String   // 2026-10-05T12:29:49.566+09:00
 at.toIsoDate()                          -> String   // 2026-10-05
@@ -101,6 +102,13 @@ stamp. It is not `opaque`, so a program may build one from fields it read;
 `toUnixMillis` is then the check (§4). The offset is a field, so the value
 says which clock it was read at and `toIso` writes the offset that is true —
 admin's JST becomes `fromUnixMillis(millis, 540)`, with `+09:00` on it.
+
+`formatIso(millis)` is `fromUnixMillis(millis, 0).toIso()`, byte for byte.
+It is a shorthand and earns its place by count: a UTC stamp — a JSON field, a
+stored time, a table cell — is what 17 of the copies' call sites write, as
+`text.isoTime(ms)`, and each would otherwise name an offset of `0` and a
+value it never reads. It takes no offset, because a stamp at another offset
+is read off a `DateTime` the caller already wants the fields of.
 
 `toIsoDate` and `toIsoTime` are the two halves `toIso` writes, because the
 callers' slices were of exactly those: every byte is ASCII at a fixed width,
@@ -231,8 +239,7 @@ about 6.6 and 2.0 µs a round trip.
 
 - The four minicloud copies of `isoTime` and `floorDiv`, and ledger's
   `parseIso`, `daysIn` and `daysFromCivil`, can be replaced:
-  `text.isoTime(ms)` is `datetime.fromUnixMillis(ms, 0).toIso()`, with the
-  same bytes. Ledger's `parseIso(text)` becomes
+  `text.isoTime(ms)` is `datetime.formatIso(ms)`, with the same bytes. Ledger's `parseIso(text)` becomes
   `datetime.parseIso(text)`, whose `Err` the schema check can now pass on to
   the client where it answered "not a time". Admin's JST helpers
   read `fromUnixMillis(ms, 540)` and its fields or halves, and `atTime`'s
@@ -243,7 +250,7 @@ about 6.6 and 2.0 µs a round trip.
   encoded VM and the native tier; `values_int_floor_div` pins the two `Int`
   methods; `fail_datetime_offset` pins the stop.
 - `crates/cove-cli/tests/copies.rs` rises by 57, all of it the three new
-  programs.
+  programs; `formatIso` adds none.
 - **An `Instant`.** The host's `time.nowMillis()` and `nowMicros()` answer
   `Int`, which is why no app uses `Duration` and the apps hand-format
   intervals (admin's `queueDuration`). An `Instant` type — a point on the

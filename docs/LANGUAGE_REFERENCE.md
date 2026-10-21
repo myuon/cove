@@ -254,7 +254,9 @@ proleptic Gregorian calendar at a fixed offset east of UTC, for every `Int`,
 before 1970 as after; an offset outside -1439 to 1439 stops the run.
 `at.toUnixMillis()` is the way back, an `Err` naming the first field out of
 range. `at.toIso()` writes RFC 3339, `2026-10-05T12:29:49.566+09:00`, with
-`Z` at offset 0 and a year outside 0 to 9999 as a sign and six digits;
+`Z` at offset 0 and a year outside 0 to 9999 as a sign and six digits, and
+`datetime.formatIso(millis)` is the UTC stamp, `fromUnixMillis(millis, 0)
+.toIso()`;
 `toIsoDate()` and `toIsoTime()` write the two halves, and `weekday()` is 1 for
 Monday to 7 for Sunday. `datetime.parseIso(text)` reads RFC 3339 back to
 milliseconds — an offset is required, a fraction of 1 to 9 digits is truncated

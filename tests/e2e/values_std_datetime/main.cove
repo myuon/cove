@@ -89,6 +89,18 @@ export fn main() -> Result<Unit, Error> {
   println("least east {iso(-9_223_372_036_854_775_807 - 1, 1439)}")?
   println("greatest west {iso(9_223_372_036_854_775_807, -1439)}")?
 
+  // The UTC shorthand writes what `fromUnixMillis(_, 0).toIso()` writes.
+  println("formatIso {datetime.formatIso(0)} {datetime.formatIso(-1)} {datetime.formatIso(1_791_170_989_566)}")?
+  var same = 0
+  var stamp = -62_167_219_200_000
+  while stamp < 253_402_300_800_000 {
+    if datetime.formatIso(stamp) == iso(stamp, 0) {
+      same += 1
+    }
+    stamp += 9_876_543_210_987
+  }
+  println("formatIso agrees {same}")?
+
   // Leap days.
   println("2000-02-29 {iso(951_782_400_000, 0)}")?
   println("2000-03-01 {iso(951_868_800_000, 0)}")?

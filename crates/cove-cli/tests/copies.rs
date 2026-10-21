@@ -2015,7 +2015,10 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `values_int_floor_div` and `fail_datetime_offset` are 18 each, 17 in the
 /// printing standard library and 1 in `main`; `values_std_datetime` is 21,
 /// the same 17 and 1, 2 in its own `roundTrips`, and 1 in `std.datetime`
-/// itself, `digitsAt` handing back the `var` it accumulated.
+/// itself, `digitsAt` handing back the `var` it accumulated. The UTC
+/// shorthand `formatIso`, added afterwards and called there, adds none: it
+/// answers `fromUnixMillis(millis, 0).toIso()` with `return`, so the string
+/// is built where the caller wants it.
 ///
 /// A first draft was **8,371**, and 566 of its 641 were the lowering:
 /// `floorDiv` and `floorMod` each bound their quotient or remainder to a `let`

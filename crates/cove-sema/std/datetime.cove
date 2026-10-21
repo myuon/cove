@@ -15,7 +15,7 @@
 // use std.datetime
 //
 // fn stamp(millis: Int) -> String {
-//   datetime.fromUnixMillis(millis, 0).toIso()        // 2026-10-05T03:29:49.566Z
+//   datetime.formatIso(millis)                        // 2026-10-05T03:29:49.566Z
 // }
 //
 // fn tokyo(millis: Int) -> String {
@@ -204,6 +204,19 @@ export fn fromUnixMillis(millis: Int, offsetMinutes: Int) -> DateTime {
     millisecond: ofDay % 1000,
     offsetMinutes: offsetMinutes,
   )
+}
+
+/// RFC 3339 text for the instant `millis` milliseconds after
+/// 1970-01-01T00:00:00Z, in UTC: `formatIso(1_791_170_989_566)` is
+/// `2026-10-05T03:29:49.566Z`.
+///
+/// The shorthand for `fromUnixMillis(millis, 0).toIso()`, with the same bytes,
+/// because a UTC stamp is what most callers write — a log line, a JSON field,
+/// a stored time — and the code this replaces wrote it at 17 call sites as
+/// `isoTime(millis)`. [`parseIso`] reads every answer back to `millis` while
+/// its year is 0 to 9999, or six digits with a sign.
+export fn formatIso(millis: Int) -> String {
+  return fromUnixMillis(millis, 0).toIso()
 }
 
 /// The instant RFC 3339 text names, in milliseconds since
