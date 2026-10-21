@@ -1,0 +1,95 @@
+use console.println
+
+/// Whether `Int.parse(text)` answers exactly `value`.
+fn readsBack(text: String, value: Int) -> Bool {
+  match Int.parse(text) {
+    Ok(read) => read == value
+    Err(_) => false
+  }
+}
+
+/// One `toDecimal` call, and whether `Int.parse` reads it back.
+fn show(value: Int, width: Int) -> Result<Unit, Error> {
+  let text = value.toDecimal(width)
+  let back = readsBack(text, value)
+  println("{value} width {width} {text} back {back}")?
+  Ok(())
+}
+
+/// Pins `Int.toDecimal` (#674): zeros in front to a minimum width, the sign
+/// before them, a width under the digit count padding nothing, both ends of
+/// `Int`, and the round trip through `Int.parse`.
+export fn main() -> Result<Unit, Error> {
+  let greatest = 9223372036854775807
+  let least = -9223372036854775807 - 1
+  show(0, 0)?
+  show(0, 1)?
+  show(0, 3)?
+  show(7, 2)?
+  show(42, 5)?
+  show(123, 2)?
+  show(123, 3)?
+  show(123, 4)?
+  show(-5, 3)?
+  show(-5, 1)?
+  show(-123, 2)?
+  show(-123, 6)?
+  show(greatest, 0)?
+  show(greatest, 21)?
+  show(least, 0)?
+  show(least, 19)?
+  show(least, 21)?
+
+  // A width of 0 or 1 is interpolation, everywhere it is asked.
+  var agrees = true
+  for value in [0, 7, -7, 10, -10, 1000, -1000, greatest, least] {
+    if value.toDecimal(0) != "{value}" || value.toDecimal(1) != "{value}" {
+      agrees = false
+    }
+  }
+  println("width 0 and 1 are interpolation {agrees}")?
+
+  // A clock and a date, field by field.
+  println("{9.toDecimal(2)}:{5.toDecimal(2)}:{0.toDecimal(2)}.{7.toDecimal(3)}")?
+  println("{2026.toDecimal(4)}-{3.toDecimal(2)}-{1.toDecimal(2)}")?
+
+  // Every value below a thousand, at width three, is three bytes and reads
+  // back.
+  var fixed = 0
+  var value = 0
+  while value < 1000 {
+    let text = value.toDecimal(3)
+    if text.byteLength() == 3 && readsBack(text, value) {
+      fixed += 1
+    }
+    value += 1
+  }
+  println("three digits {fixed} of 1000")?
+
+  // A stride over `Int` at every width up to twenty-one reads back, and is
+  // never shorter than the width plus its sign.
+  var tried = 0
+  var survived = 0
+  var width = 0
+  while width <= 21 {
+    var stride = least
+    var step = 0
+    while step < 64 {
+      tried += 1
+      let text = stride.toDecimal(width)
+      let sign = if stride < 0 {
+        1
+      } else {
+        0
+      }
+      if readsBack(text, stride) && text.byteLength() >= width + sign {
+        survived += 1
+      }
+      stride = stride / 3 * 2 + step * 7919
+      step += 1
+    }
+    width += 1
+  }
+  println("stride round trips {survived} of {tried}")?
+  Ok(())
+}

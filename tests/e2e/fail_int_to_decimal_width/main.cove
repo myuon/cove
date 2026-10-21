@@ -1,0 +1,16 @@
+use console.println
+
+/// `value` in decimal, at least `width` digits. Not the standard library: an
+/// ordinary Cove function with a caller, so that the diagnostic below has a
+/// frame to blame that is neither the entry point nor the machine.
+fn padded(value: Int, width: Int) -> String {
+  value.toDecimal(width)
+}
+
+/// Pins `Int.toDecimal`'s refusal of a negative width, word for word (#674),
+/// as `fail_int_to_hex_width` pins `Int.toHex`'s: a negative count of digits
+/// names no width, so the run stops through `core.refuse`.
+export fn main() -> Result<Unit, Error> {
+  println("{padded(7, -1)}")?
+  Ok(())
+}

@@ -532,6 +532,11 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "Int",
+        name: "toDecimal",
+        body: "  let count = 7\n  count.toDecimal(2).length()",
+    },
+    Exercise {
+        ty: "Int",
         name: "min",
         body: "  let count = 7\n  count.min(3)",
     },

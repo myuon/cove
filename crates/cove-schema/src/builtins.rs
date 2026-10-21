@@ -1469,6 +1469,14 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.int",
         function: "toHex",
     },
+    // `toDecimal` is the same body again at radix 10 (#674).
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Int",
+        method: "toDecimal",
+        module: "std.int",
+        function: "toDecimal",
+    },
     // `Float.format` is the first `Float` method in the standard library and
     // `std.float` the file it opened. It was `format!("{:.*}")` behind
     // `Intrinsic::FloatFormat`, and it waited on issue #461 for its refusal of
@@ -5105,6 +5113,22 @@ pub const INT: BuiltinSchema = BuiltinSchema {
         // no default. A negative width stops the run.
         MethodSchema {
             name: "toHex",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "width",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+            fresh: false,
+        },
+        // `toHex`'s decimal mirror (#674): `"{value}"` with zeros before the
+        // digits to make at least `width` of them, the sign in front of the
+        // zeros, so `7.toDecimal(2)` is `"07"` and `(-5).toDecimal(3)` is
+        // `"-005"`. A negative width stops the run, as it does for `toHex`.
+        MethodSchema {
+            name: "toDecimal",
             generics: &[],
             params: &[ParamSchema {
                 name: "width",

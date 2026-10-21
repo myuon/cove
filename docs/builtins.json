@@ -277,6 +277,7 @@
         {"name": "shiftRightLogical", "signature": "shiftRightLogical(count: Int) -> Int", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "toStringRadix", "signature": "toStringRadix(radix: Int) -> String", "generics": [], "params": [{"name": "radix", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "implementedBy": "std.int.toStringRadix", "host": false},
         {"name": "toHex", "signature": "toHex(width: Int) -> String", "generics": [], "params": [{"name": "width", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "implementedBy": "std.int.toHex", "host": false},
+        {"name": "toDecimal", "signature": "toDecimal(width: Int) -> String", "generics": [], "params": [{"name": "width", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "implementedBy": "std.int.toDecimal", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },
