@@ -1990,7 +1990,21 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `tests/e2e/values_string_utf8` +22, `values_int_to_string_radix` +20,
 /// and `fail_int_to_string_radix` and `fail_int_to_hex_width` +18 each: the
 /// printing standard library each carries.
-const FORWARDABLE_COPIES: usize = 7704;
+///
+/// **7,730 since `std.url`** (issue #666, ADR 0107), a rise of 26 that is
+/// all one new program and none of it the lowering. `std.url` is on
+/// `cove_sema::stdlib`'s imported list, so a program that does not `use` it
+/// lowers none of it: with `tests/e2e/values_std_url` held out the corpus
+/// answers 7,704, the bound exactly. That program's 26 are 18 in the
+/// printing standard library it carries — the same 18 as
+/// `fail_int_to_hex_width` above — 1 in its `main`, and 7 in `std.url`
+/// itself, one each in `component`, `encodeInto`, `encodedLength`,
+/// `parseForm`, `refuseEscape`, `refuseUtf8` and `Form.get`: a returned
+/// accumulator, an `unwrapOr` inlined, a struct built to be returned. A
+/// first draft was 30: `encodedLength` started its count as `var size =
+/// end`, a copy after `byteLength`'s producer in itself and in each of the
+/// three encoders it is inlined into. It counts from zero now.
+const FORWARDABLE_COPIES: usize = 7730;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

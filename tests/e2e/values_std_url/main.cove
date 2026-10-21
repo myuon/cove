@@ -1,0 +1,132 @@
+use console.println
+use std.url
+use std.url.Form
+use std.url.Pair
+
+/// `text`, or the message of the `Err` that decoding it answered.
+fn decoded(text: String) -> String {
+  match url.percentDecode(text) {
+    Ok(value) => "ok [{value}]"
+    Err(error) => "err {error.message}"
+  }
+}
+
+/// Every pair of `form`, as `[name]=[value]` separated by spaces.
+fn pairsOf(form: Form) -> String {
+  var parts = Vector.of()
+  for pair in form.pairs {
+    parts.push("[{pair.name}]=[{pair.value}]")
+  }
+  "{form.pairs.length()}: {" ".join(parts.freeze())}"
+}
+
+/// Whether `text` survives `percentEncode` then `percentDecode` unchanged.
+fn roundTrips(text: String) -> Bool {
+  match url.percentDecode(url.percentEncode(text)) {
+    Ok(back) => back == text
+    Err(_) => false
+  }
+}
+
+/// Pins `std.url` (#666): RFC 3986 percent-encoding with uppercase digits,
+/// strict decoding with the offset of what went wrong, the WHATWG urlencoded
+/// parser with every repeated name kept, and the query writer.
+export fn main() -> Result<Unit, Error> {
+  // Encoding: unreserved bytes as themselves, everything else `%XX`.
+  println("encode empty [{url.percentEncode("")}]")?
+  println("encode unreserved [{url.percentEncode("AZaz09-._~")}]")?
+  println("encode reserved [{url.percentEncode("a b&c=d#e/f?g+h*i%j")}]")?
+  println("encode multibyte [{url.percentEncode("\u{e9}\u{3042}\u{1f600}")}]")?
+  println("encode controls [{url.percentEncode("\u{0}\n\u{7f}")}]")?
+
+  // Strict decoding.
+  println("decode empty {decoded("")}")?
+  println("decode plain {decoded("plain")}")?
+  println("decode space {decoded("a%20b")}")?
+  println("decode plus {decoded("a+b%2Bc")}")?
+  println("decode lower {decoded("%2f%2F%c3%a9")}")?
+  println("decode multibyte {decoded("%C3%A9%E3%81%82%F0%9F%98%80")}")?
+  println("decode mixed {decoded("caf%C3%A9 \u{3042}")}")?
+  println("decode lone percent {decoded("%")}")?
+  println("decode trailing percent {decoded("ab%")}")?
+  println("decode one digit {decoded("ab%4")}")?
+  println("decode not hex {decoded("x%G1")}")?
+  println("decode second not hex {decoded("x%1G")}")?
+  println("decode percent before wide {decoded("%\u{e9}")}")?
+  println("decode not utf8 {decoded("ab%FF")}")?
+  println("decode truncated {decoded("a%C3")}")?
+  println("decode overlong {decoded("%C0%80")}")?
+  println("decode surrogate {decoded("ok%ED%A0%80")}")?
+  println("decode lead then literal {decoded("x%E3\u{e9}")}")?
+  println("decode late {decoded("%41%42%C3%28")}")?
+
+  // Round trips.
+  for text in [
+    "",
+    "plain",
+    "a b&c=d#e/f",
+    "+%=&?",
+    "\u{e9}\u{3042}\u{1f600}",
+    "\u{0}\u{7f}\u{80}\u{ffff}\u{10ffff}",
+  ] {
+    println("round trip [{url.percentEncode(text)}] {roundTrips(text)}")?
+  }
+  var tried = 0
+  var survived = 0
+  var point = 0
+  while point <= 1114111 {
+    match String.fromCodePoint(point) {
+      Ok(text) => {
+        tried += 1
+        if roundTrips("a{text}z") {
+          survived += 1
+        }
+      }
+      Err(_) => { }
+    }
+    point += 997
+  }
+  println("stride round trips {survived} of {tried}")?
+
+  // Forms.
+  println("form empty {pairsOf(url.parseForm(""))}")?
+  println("form separators {pairsOf(url.parseForm("&&&"))}")?
+  println("form one {pairsOf(url.parseForm("a=1"))}")?
+  println("form skips empty {pairsOf(url.parseForm("&a=1&&b=2&"))}")?
+  println("form no equals {pairsOf(url.parseForm("flag&a=&=v&="))}")?
+  println("form equals in value {pairsOf(url.parseForm("eq=a=b=c&e2=%3D"))}")?
+  println("form plus {pairsOf(url.parseForm("name=GitHub+hooks&p=%2B&both=a+%2B+b&n+m=1"))}")?
+  println(
+    "form multibyte {pairsOf(url.parseForm("u=%C3%A9%E3%81%82&raw=\u{e9}"))}",
+  )?
+  println("form lossy {pairsOf(url.parseForm("bad=%FF&stray=%&short=%4&hex=%G1&cut=%C3"))}")?
+  println("form escaped separators {pairsOf(url.parseForm("k%26=v%3D%26"))}")?
+
+  // Repeated names: every pair kept, in order.
+  let tags = url.parseForm("tag=a&x=1&tag=b&tag=&tag")
+  println("repeated pairs {pairsOf(tags)}")?
+  println("repeated get {tags.get("tag")}")?
+  println("repeated all {tags.all("tag")}")?
+  println("repeated contains {tags.contains("tag")} {tags.contains("x")} {tags.contains("y")}")?
+  println("missing get {tags.get("y")}")?
+  println("missing all {tags.all("y")}")?
+
+  // Writing a query.
+  println("query empty [{url.encodeQuery([])}]")?
+  println("query one [{url.encodeQuery([Pair(name: "a", value: "1")])}]")?
+  let written = [
+    Pair(name: "a", value: "1"),
+    Pair(name: "b", value: "x y"),
+    Pair(name: "tag", value: "a&b=c"),
+    Pair(name: "tag", value: "+\u{e9}"),
+    Pair(name: "empty", value: ""),
+    Pair(name: "", value: "nameless"),
+  ]
+  let query = url.encodeQuery(written)
+  println("query [{query}]")?
+  let back = url.parseForm(query)
+  println("query back {pairsOf(back)}")?
+  println("query round trip {pairsOf(back) == pairsOf(Form(pairs: written))}")?
+  println("query again [{url.encodeQuery(back.pairs)}]")?
+  Ok(())
+}

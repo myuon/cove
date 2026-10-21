@@ -1,0 +1,433 @@
+// URLs: percent-encoding, and the form `application/x-www-form-urlencoded`.
+//
+// Five minicloud apps each carried `urlDecode` and `parseForm`, and three of
+// them `urlEncode` in two spellings (#646, items 3 and 4). This is that code
+// taken once, with the copies' two faults left behind: their UTF-8 reading
+// accepted overlong forms (it is `String.fromUtf8` and `fromUtf8Lossy` now,
+// #665), and their `parseForm` kept only the last value of a name written
+// twice. [ADR 0107](../../../docs/adr/0107-std-url.md) is the record of the
+// interface and of that second decision.
+//
+// ```cove
+// use std.url
+//
+// fn tags(body: String) -> Array<String> {
+//   url.parseForm(body).all("tag")
+// }
+//
+// fn link(id: String) -> String {
+//   "/compare?{url.encodeQuery([url.Pair(name: "a", value: id)])}"
+// }
+// ```
+//
+// Every encoder here writes RFC 3986 percent-encoding: the unreserved bytes
+// `A-Z a-z 0-9 - . _ ~` as themselves and every other byte as `%` and two
+// **uppercase** hexadecimal digits (§2.1), so a space is `%20` and never `+`.
+// The form reader is the WHATWG URL Standard's urlencoded parser, which reads
+// `+` as a space as well; see [`parseForm`].
+
+use std.string
+
+/// One name and its value, as a form body or a query string carries them.
+export struct Pair {
+  name: String
+  value: String
+}
+
+/// A form body or a query string, read: every pair it held, in the order it
+/// held them.
+///
+/// **A name may appear more than once, and every appearance is kept.**
+/// `tag=a&tag=b` is two pairs, so `all` answers both values and
+/// `get` answers the first. A `Map` would have to choose one of
+/// them, and the minicloud copies this replaces chose the last without saying
+/// so (#646). There is no tuple, so a pair is a [`Pair`].
+///
+/// The struct is not `opaque`: any array of pairs is a form, so there is no
+/// invariant for it to protect, and a program that has one in hand — a test,
+/// or a query it is building for [`encodeQuery`] — writes `Form(pairs: …)`.
+export struct Form {
+  pairs: Array<Pair>
+}
+
+impl Form {
+  /// The value of the first pair named `name`, or `None` when no pair is.
+  ///
+  /// The first and not the last, as `URLSearchParams.get` answers: the value
+  /// that came first in the text is the one a reader would point at. A name
+  /// that is present with an empty value — `name=` or a bare `name` — is
+  /// `Some("")`, which is how a checkbox that was ticked arrives.
+  export fn get(self, name: String) -> Option<String> {
+    for pair in self.pairs {
+      if pair.name == name {
+        return Some(pair.value)
+      }
+    }
+    None
+  }
+
+  /// The value of every pair named `name`, in order; empty when there is none.
+  export fn all(self, name: String) -> Array<String> {
+    var values = Vector.of()
+    for pair in self.pairs {
+      if pair.name == name {
+        values.push(pair.value)
+      }
+    }
+    values.freeze()
+  }
+
+  /// Whether any pair is named `name`.
+  export fn contains(self, name: String) -> Bool {
+    for pair in self.pairs {
+      if pair.name == name {
+        return true
+      }
+    }
+    false
+  }
+}
+
+/// `text` percent-encoded: each byte of its UTF-8 outside RFC 3986's
+/// unreserved set written as `%XX`.
+///
+/// The unreserved bytes are `A-Z a-z 0-9 - . _ ~`, and they are the only ones
+/// left as they are, so the answer is safe as a path segment, a query name or
+/// value, and a form field alike: `/`, `?`, `&`, `=`, `+`, `#` and a space are
+/// all escaped. The hexadecimal is uppercase, as RFC 3986 §2.1 asks, so
+/// `percentEncode("a b/é")` is `"a%20b%2F%C3%A9"`. [`percentDecode`] reads
+/// every answer back to `text`.
+///
+/// Text with nothing to escape is answered as it is; any other is written
+/// once into a buffer counted to its exact length.
+export fn percentEncode(text: String) -> String {
+  let size = encodedLength(text)
+  if size == core.byteLength(text) {
+    return text
+  }
+  let buffer = core.bytesAllocate(size)
+  encodeInto(buffer, text)
+  return core.bytesFinish(buffer)
+}
+
+/// `text` with each `%XX` read as the byte it names and the bytes read as
+/// UTF-8, or an `Error` saying where it went wrong.
+///
+/// **It is strict on both counts.** A `%` that is not followed by two
+/// hexadecimal digits — `%`, `%4` at the end, `%G1` — is an `Err` naming its
+/// byte offset, and so are escapes whose bytes are not well-formed UTF-8, as
+/// `String.fromUtf8` decides it (`%C3` alone, or the overlong `%C0%80`), the
+/// offset being that of the escape the bad sequence starts at. Either digit
+/// may be either case. `+` is a `+`: reading it as a space is a rule of the
+/// form, and [`parseForm`] is where it applies.
+///
+/// There is no lossy variant to call. A program that must never fail is
+/// reading a form, and [`parseForm`] reads one the way a browser does —
+/// keeping a stray `%` and replacing bad UTF-8 with U+FFFD — which is the
+/// only reading the code this replaces ever needed (ADR 0107).
+export fn percentDecode(text: String) -> Result<String, Error> {
+  let end = core.byteLength(text)
+  var escapes = 0
+  var at = 0
+  while at < end {
+    if text.byteAt(at) == '%' {
+      if escapeAt(text, at, end) < 0 {
+        return refuseEscape(text, at, end)
+      }
+      escapes += 1
+      at += 3
+    } else {
+      at += 1
+    }
+  }
+  if escapes == 0 {
+    return Ok(text)
+  }
+  let bytes = unescaped(text, 0, end, false)
+  let buffer = core.bytesAllocate(core.arrayLength(bytes))
+  let bad = string.decodeInto(bytes, buffer, true)
+  if bad >= 0 {
+    return refuseUtf8(text, bad)
+  }
+  return Ok(core.bytesFinish(buffer))
+}
+
+/// `body` read as `application/x-www-form-urlencoded`: the pairs of a form
+/// body, or of a query string without its `?`.
+///
+/// **This is the WHATWG URL Standard's urlencoded parser (§5.1),
+/// transcribed.** `body` is split on every `&`, and an empty piece is
+/// skipped, so `a=1&&b=2&` is two pairs. A piece is split at its *first*
+/// `=`, so a value may hold `=` (`eq=a=b` is `eq` and `a=b`), and a piece
+/// with no `=` at all is a name with an empty value. In each name and value
+/// `+` is a space and `%XX` the byte it names, and the bytes are read as
+/// UTF-8 with each ill-formed part replaced by U+FFFD, as
+/// `String.fromUtf8Lossy` replaces it. A `%` that does not start a
+/// two-digit escape is kept as it is.
+///
+/// So this never fails, which is the parser's own rule and the one a server
+/// wants: a form a browser sent is read however it was written, and a field
+/// that came out wrong is a value the program checks like any other. The
+/// strict reading of one value is [`percentDecode`].
+///
+/// The one difference from the standard is the input's type. It is defined
+/// over bytes and this takes a `String`, which is already UTF-8; a body that
+/// was not is one the host has already decided how to turn into text.
+///
+/// A name or value with no `+` and no `%` in it is a slice of `body`, not a
+/// copy built a byte at a time.
+export fn parseForm(body: String) -> Form {
+  let end = core.byteLength(body)
+  var pairs = Vector.of()
+  var start = 0
+  while start <= end {
+    var stop = start
+    var equals = -1
+    while stop < end {
+      let byte = body.byteAt(stop)
+      if byte == '&' {
+        break
+      }
+      if byte == '=' && equals < 0 {
+        equals = stop
+      }
+      stop += 1
+    }
+    if stop > start {
+      if equals < 0 {
+        pairs.push(Pair(name: component(body, start, stop), value: ""))
+      } else {
+        pairs.push(Pair(name: component(body, start, equals), value: component(body, equals + 1, stop)))
+      }
+    }
+    start = stop + 1
+  }
+  Form(pairs: pairs.freeze())
+}
+
+/// `pairs` written as a query string, `name=value` joined by `&`, each name
+/// and value through [`percentEncode`]: `a=1&b=x%20y`.
+///
+/// **A space is `%20`, not `+`.** The WHATWG form serializer writes `+`, and
+/// leaves `*` unescaped; this writes every byte outside RFC 3986's unreserved
+/// set as an escape, because the answer goes into URLs, where `%20` is a space
+/// to every reader and `+` is one only to a form reader. A form reader —
+/// [`parseForm`], a browser's, or any server's — decodes both the same, so
+/// the answer is a form body as well, and `parseForm(encodeQuery(pairs))`
+/// is `pairs` again. A pair with an empty value is written `name=`, and no
+/// pairs is `""`. There is no leading `?`.
+export fn encodeQuery(pairs: Array<Pair>) -> String {
+  var size = 0
+  for pair in pairs {
+    size += encodedLength(pair.name) + 1 + encodedLength(pair.value)
+  }
+  if pairs.length() > 1 {
+    size += pairs.length() - 1
+  }
+  let buffer = core.bytesAllocate(size)
+  var first = true
+  for pair in pairs {
+    if !first {
+      appendByte(buffer, '&')
+    }
+    first = false
+    encodeInto(buffer, pair.name)
+    appendByte(buffer, '=')
+    encodeInto(buffer, pair.value)
+  }
+  return core.bytesFinish(buffer)
+}
+
+/// Whether [`percentEncode`] leaves `byte` as it is: RFC 3986's unreserved
+/// set, `A-Z a-z 0-9 - . _ ~`. Every one is ASCII, so no byte of a character
+/// past U+007F is ever left alone.
+fn unreserved(byte: Int) -> Bool {
+  if byte >= 'a' && byte <= 'z' {
+    return true
+  }
+  if byte >= 'A' && byte <= 'Z' {
+    return true
+  }
+  if byte >= '0' && byte <= '9' {
+    return true
+  }
+  byte == '-' || byte == '.' || byte == '_' || byte == '~'
+}
+
+/// How many bytes [`encodeInto`] writes for `text`: one for each byte left as
+/// it is and three for each escaped.
+///
+/// The count starts at zero rather than at the length and adds two per
+/// escape, because a `var` started from another binding is a copy the
+/// lowering cannot forward (issue #302), and this is inlined into every
+/// encoder.
+fn encodedLength(text: String) -> Int {
+  let end = core.byteLength(text)
+  var size = 0
+  var at = 0
+  while at < end {
+    if unreserved(text.byteAt(at)) {
+      size += 1
+    } else {
+      size += 3
+    }
+    at += 1
+  }
+  size
+}
+
+/// Appends `text`, percent-encoded, to `buffer`.
+fn encodeInto(buffer: ByteBuffer, text: String) {
+  let end = core.byteLength(text)
+  var at = 0
+  while at < end {
+    let byte = text.byteAt(at)
+    if unreserved(byte) {
+      appendByte(buffer, byte)
+    } else {
+      let high = byte / 16
+      appendByte(buffer, '%')
+      appendByte(buffer, hexDigit(high))
+      appendByte(buffer, hexDigit(byte - high * 16))
+    }
+    at += 1
+  }
+}
+
+/// The uppercase hexadecimal digit for `value`, `0` to `15`, as a byte.
+///
+/// Not `Int.toHex`, which writes lowercase — what JSON and every language's
+/// own hex formatting write (ADR 0106) — and answers a `String` a call;
+/// percent-encoding asks for uppercase, and two bytes into a buffer already
+/// counted to its length.
+fn hexDigit(value: Int) -> Int {
+  if value < 10 {
+    return '0' + value
+  }
+  'A' + value - 10
+}
+
+/// The value of the hexadecimal digit `byte`, either case, or `-1` when it is
+/// not one.
+fn hexValue(byte: Int) -> Int {
+  if byte >= '0' && byte <= '9' {
+    return byte - '0'
+  }
+  if byte >= 'A' && byte <= 'F' {
+    return byte - 'A' + 10
+  }
+  if byte >= 'a' && byte <= 'f' {
+    return byte - 'a' + 10
+  }
+  -1
+}
+
+/// The byte the escape whose `%` is at `at` names, or `-1` when the two bytes
+/// before `end` that follow it are not both hexadecimal digits.
+fn escapeAt(text: String, at: Int, end: Int) -> Int {
+  if at + 2 >= end {
+    return -1
+  }
+  let high = hexValue(text.byteAt(at + 1))
+  let low = hexValue(text.byteAt(at + 2))
+  if high < 0 || low < 0 {
+    return -1
+  }
+  high * 16 + low
+}
+
+/// The bytes of `text` from `start` to `stop` with each escape read as its
+/// byte, and — when `plus` — each `+` as a space. A `%` that starts no
+/// escape is kept as a `%`, which is the WHATWG percent-decoder's rule and
+/// what [`parseForm`] wants; [`percentDecode`] has already refused one.
+fn unescaped(text: String, start: Int, stop: Int, plus: Bool) -> Array<Int> {
+  let out: Vector<Int> = core.vectorWithCapacity(stop - start)
+  var at = start
+  while at < stop {
+    var byte = text.byteAt(at)
+    var width = 1
+    if byte == '%' {
+      let value = escapeAt(text, at, stop)
+      if value >= 0 {
+        byte = value
+        width = 3
+      }
+    } else if byte == '+' && plus {
+      byte = ' '
+    }
+    let index = core.vectorLength(out)
+    core.vectorEnsure(out, 1)
+    core.vectorStore(out, index, byte)
+    core.vectorCommit(out, 1)
+    at += width
+  }
+  return core.vectorFinish(out)
+}
+
+/// One name or value of a form, `text` from `start` to `stop`, decoded as
+/// [`parseForm`] decodes it.
+///
+/// Both ends are at an `&`, an `=` or an end of `text`, all ASCII and so all
+/// character boundaries: the slice cannot fail, and `unwrapOr` is never
+/// taken.
+fn component(text: String, start: Int, stop: Int) -> String {
+  var at = start
+  while at < stop {
+    let byte = text.byteAt(at)
+    if byte == '%' || byte == '+' {
+      return String.fromUtf8Lossy(unescaped(text, start, stop, true))
+    }
+    at += 1
+  }
+  text.sliceBytes(start, stop).unwrapOr("")
+}
+
+/// One byte onto the end of `buffer`: ADR 0062's ensure, store and commit,
+/// as `std.string`'s `appendUtf8Byte` is.
+fn appendByte(buffer: ByteBuffer, value: Int) {
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, at, value)
+  core.bytesCommit(buffer, 1)
+}
+
+/// The `Err` [`percentDecode`] answers for a `%` at `at` that starts no
+/// escape.
+///
+/// It quotes the `%` and the up to two bytes after it, when those are whole
+/// characters, so `%G1` is shown as written. A function of its own so that
+/// the path that succeeds carries no interpolation, as `std.string`'s
+/// refusals are.
+fn refuseEscape(text: String, at: Int, end: Int) -> Result<String, Error> {
+  let stop = if at + 3 <= end {
+    at + 3
+  } else {
+    end
+  }
+  let shown = text.sliceBytes(at, stop).unwrapOr("%")
+  return Err(Error("`{shown}` at offset {at} is not a percent-escape: `%` must be followed by two hexadecimal digits"))
+}
+
+/// The `Err` [`percentDecode`] answers when the bytes it decoded stop being
+/// UTF-8 at offset `bad` of those bytes.
+///
+/// The offset a caller can use is the one in `text`, so this walks `text`
+/// again — every escape in it is known to be whole by now, three bytes for
+/// one — to the input byte that became decoded byte `bad`. That byte is
+/// always an escape: a byte written as itself is part of a `String`, so it is
+/// a lead its own continuations follow, or a continuation after its own lead,
+/// and neither starts an ill-formed sequence.
+fn refuseUtf8(text: String, bad: Int) -> Result<String, Error> {
+  var at = 0
+  var count = 0
+  while count < bad {
+    if text.byteAt(at) == '%' {
+      at += 3
+    } else {
+      at += 1
+    }
+    count += 1
+  }
+  let shown = text.sliceBytes(at, at + 3).unwrapOr("%")
+  return Err(Error("the bytes from `{shown}` at offset {at} are not UTF-8"))
+}

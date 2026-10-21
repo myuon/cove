@@ -173,6 +173,17 @@ static SOURCES: &[StdSource] = &[
         path: "std/html.cove",
         text: include_str!("../std/html.cove"),
     },
+    // The third library on [`IMPORTED`]: percent-encoding, and the
+    // `application/x-www-form-urlencoded` form read into an ordered `Form`
+    // (ADR 0107). Like `std.json` it binds nothing in
+    // `cove_schema::builtins::STANDARD_LIBRARY` and nothing in the lowering
+    // names it. It reads UTF-8 through `std.string`'s decoder, a private
+    // function one library module may name in another.
+    StdSource {
+        module: "std.url",
+        path: "std/url.cove",
+        text: include_str!("../std/url.cove"),
+    },
 ];
 
 /// The embedded text of the standard-library file [`attach`] adds as `path`,
@@ -242,7 +253,7 @@ pub fn is_library_module(module: &str) -> bool {
 /// and it stays here: the lowering's call is a round's `wanted` like any call
 /// the graph did not draw, and adds the module's functions only to a package
 /// that holds such a literal.
-const IMPORTED: &[&str] = &["std.json", "std.html"];
+const IMPORTED: &[&str] = &["std.json", "std.html", "std.url"];
 
 /// A string-literal tag: the module that gives `tag"…"` its meaning, and the
 /// functions of that module the lowering assembles one with.

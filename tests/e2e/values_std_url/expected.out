@@ -1,0 +1,53 @@
+encode empty []
+encode unreserved [AZaz09-._~]
+encode reserved [a%20b%26c%3Dd%23e%2Ff%3Fg%2Bh%2Ai%25j]
+encode multibyte [%C3%A9%E3%81%82%F0%9F%98%80]
+encode controls [%00%0A%7F]
+decode empty ok []
+decode plain ok [plain]
+decode space ok [a b]
+decode plus ok [a+b+c]
+decode lower ok [//é]
+decode multibyte ok [éあ😀]
+decode mixed ok [café あ]
+decode lone percent err `%` at offset 0 is not a percent-escape: `%` must be followed by two hexadecimal digits
+decode trailing percent err `%` at offset 2 is not a percent-escape: `%` must be followed by two hexadecimal digits
+decode one digit err `%4` at offset 2 is not a percent-escape: `%` must be followed by two hexadecimal digits
+decode not hex err `%G1` at offset 1 is not a percent-escape: `%` must be followed by two hexadecimal digits
+decode second not hex err `%1G` at offset 1 is not a percent-escape: `%` must be followed by two hexadecimal digits
+decode percent before wide err `%é` at offset 0 is not a percent-escape: `%` must be followed by two hexadecimal digits
+decode not utf8 err the bytes from `%FF` at offset 2 are not UTF-8
+decode truncated err the bytes from `%C3` at offset 1 are not UTF-8
+decode overlong err the bytes from `%C0` at offset 0 are not UTF-8
+decode surrogate err the bytes from `%ED` at offset 2 are not UTF-8
+decode lead then literal err the bytes from `%E3` at offset 1 are not UTF-8
+decode late err the bytes from `%C3` at offset 6 are not UTF-8
+round trip [] true
+round trip [plain] true
+round trip [a%20b%26c%3Dd%23e%2Ff] true
+round trip [%2B%25%3D%26%3F] true
+round trip [%C3%A9%E3%81%82%F0%9F%98%80] true
+round trip [%00%7F%C2%80%EF%BF%BF%F4%8F%BF%BF] true
+stride round trips 1116 of 1116
+form empty 0: 
+form separators 0: 
+form one 1: [a]=[1]
+form skips empty 2: [a]=[1] [b]=[2]
+form no equals 4: [flag]=[] [a]=[] []=[v] []=[]
+form equals in value 2: [eq]=[a=b=c] [e2]=[=]
+form plus 4: [name]=[GitHub hooks] [p]=[+] [both]=[a + b] [n m]=[1]
+form multibyte 2: [u]=[éあ] [raw]=[é]
+form lossy 5: [bad]=[�] [stray]=[%] [short]=[%4] [hex]=[%G1] [cut]=[�]
+form escaped separators 1: [k&]=[v=&]
+repeated pairs 5: [tag]=[a] [x]=[1] [tag]=[b] [tag]=[] [tag]=[]
+repeated get Some(a)
+repeated all [a, b, , ]
+repeated contains true true false
+missing get None
+missing all []
+query empty []
+query one [a=1]
+query [a=1&b=x%20y&tag=a%26b%3Dc&tag=%2B%C3%A9&empty=&=nameless]
+query back 6: [a]=[1] [b]=[x y] [tag]=[a&b=c] [tag]=[+é] [empty]=[] []=[nameless]
+query round trip true
+query again [a=1&b=x%20y&tag=a%26b%3Dc&tag=%2B%C3%A9&empty=&=nameless]
