@@ -54,6 +54,30 @@ export fn main() -> Result<Unit, Error> {
   )?
   shown("redirect", web.redirect("/base/next?x=1"))?
 
+  // Any content type, the body as it is given: no newline is added.
+  let id = MapEntry(key: "id", value: Json.Number(7.0))
+  let document = Json.Fields(Map.of(id))
+  shown(
+    "respond pretty",
+    web.respond(200, "application/json", "{json.renderPretty(document)}\n"),
+  )?
+  shown("respond rendered", web.respond(200, "application/json", "[1,2]"))?
+  shown(
+    "respond csv",
+    web.respond(200, "text/csv; charset=utf-8", "a,b\n1,2\n"),
+  )?
+  shown("respond events", web.respond(200, "text/event-stream", "data: x\n\n"))?
+  shown("respond empty", web.respond(204, "", ""))?
+  // The three typed constructors are `respond` with their type.
+  let page = html"<p>{name}</p>"
+  let asHtml = web.html(200, page) ==
+    web.respond(200, "text/html; charset=utf-8", page.render())
+  let asText = web.text(404, "t") ==
+    web.respond(404, "text/plain; charset=utf-8", "t")
+  let asJson = web.json(201, document) ==
+    web.respond(201, "application/json", "{json.render(document)}\n")
+  println("typed constructors are respond: {asHtml} {asText} {asJson}")?
+
   // An override replaces whatever case it is written in; a new name is added.
   shown(
     "override",

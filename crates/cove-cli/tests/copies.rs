@@ -2059,7 +2059,15 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `fail_int_to_decimal_width` is 18, the printing standard library each
 /// carries, the same 18 as `fail_int_to_hex_width`; `values_int_to_decimal`
 /// is 21, those 18 and 3 in its own `main` and fixture helpers.
-const FORWARDABLE_COPIES: usize = 7878;
+///
+/// **7,877 since `web.respond`** (issue #673, ADR 0111), a fall of 1 that is
+/// a fall of 2 in the library and a rise of 1 of program. With
+/// `tests/e2e/values_std_web` as it was, the corpus answers 7,876: `html`,
+/// `text` and `json` each built a `Response` to be returned, one copy apiece
+/// (`values_std_web`'s `ret` 29 to 27), and now answer `respond`'s call, which
+/// builds the one `Response` they share — three copies become one. The cases
+/// the program gained for `respond` are the +1, in its own `main`.
+const FORWARDABLE_COPIES: usize = 7877;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

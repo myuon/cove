@@ -274,7 +274,9 @@ lowercase, and `web.Response` is `status`, `headers` and `body`. The embedder
 builds a `std.web.Request` value and reads the `std.web.Response` back by
 field name. `web.html(status, page)`, `web.text(status, body)` and
 `web.json(status, value)` build a response with its `content-type` and no
-other header, and `web.redirect(location)` is a `303 See Other` with
+other header, and `web.respond(status, contentType, body)` is the same for any
+content type, the body written as given — pretty or already-rendered JSON,
+CSV, an event stream ([ADR 0111](adr/0111-web-respond.md)). `web.redirect(location)` is a `303 See Other` with
 `location` and no other: security and caching headers — a content security
 policy, `x-frame-options`, `cache-control` — are the application's policy,
 and the module sets none. `response.withHeader(name, value)` sets one header,

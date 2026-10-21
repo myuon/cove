@@ -52,9 +52,9 @@ export struct Request {
 
 /// An HTTP response, as the embedder will write it.
 ///
-/// The constructors below — [`html`], [`text`], [`json`] and [`redirect`] —
-/// are the usual way to build one, and [`Response.withHeader`] and
-/// [`Response.withHeaders`] add to what they set. It is a plain struct, so `web.Response(status: 204, headers:
+/// The constructors below — [`html`], [`text`], [`json`], [`respond`] and
+/// [`redirect`] — are the usual way to build one, and [`Response.withHeader`]
+/// and [`Response.withHeaders`] add to what they set. It is a plain struct, so `web.Response(status: 204, headers:
 /// Map.of(), body: "")` is one too, with no header the program did not write.
 export struct Response {
   status: Int
@@ -173,6 +173,26 @@ impl Response {
   }
 }
 
+/// A response of any content type: `body` written as it is given, with
+/// `content-type: <contentType>` and no other header.
+///
+/// It is what [`html`], [`text`] and [`json`] are written over, for a body
+/// none of them builds. Nothing is added to `body` — unlike [`json`], no
+/// newline — and `contentType` is written as it is given:
+///
+/// - JSON that is not compact, or that is already text — pretty for a page
+///   people read, or a document stored as rendered:
+///   `web.respond(200, "application/json", "{json.renderPretty(v)}\n")`;
+/// - CSV: `web.respond(200, "text/csv; charset=utf-8", rows)`;
+/// - an event stream, whose whole body the handler has:
+///   `web.respond(200, "text/event-stream", "data: {line}\n\n")`.
+///
+/// Headers beyond the content type are added with [`Response.withHeader`]
+/// and [`Response.withHeaders`], as for the other constructors.
+export fn respond(status: Int, contentType: String, body: String) -> Response {
+  Response(status: status, headers: typed(contentType), body: body)
+}
+
 /// An HTML page, `page.render()` as the body, with
 /// `content-type: text/html; charset=utf-8` and no other header.
 ///
@@ -180,31 +200,20 @@ impl Response {
 /// `x-frame-options`, `cache-control` — are the application's policy, not
 /// this module's: add them with [`Response.withHeaders`].
 export fn html(status: Int, page: Html) -> Response {
-  Response(
-    status: status,
-    headers: typed("text/html; charset=utf-8"),
-    body: page.render(),
-  )
+  respond(status, "text/html; charset=utf-8", page.render())
 }
 
 /// Plain text, with `content-type: text/plain; charset=utf-8` and no other
 /// header.
 export fn text(status: Int, body: String) -> Response {
-  Response(
-    status: status,
-    headers: typed("text/plain; charset=utf-8"),
-    body: body,
-  )
+  respond(status, "text/plain; charset=utf-8", body)
 }
 
 /// A JSON document, `json.render(value)` and a newline, with
-/// `content-type: application/json` and no other header.
+/// `content-type: application/json` and no other header. For any other
+/// rendering of JSON, [`respond`].
 export fn json(status: Int, value: Json) -> Response {
-  Response(
-    status: status,
-    headers: typed("application/json"),
-    body: "{render(value)}\n",
-  )
+  respond(status, "application/json", "{render(value)}\n")
 }
 
 /// A `303 See Other` to `location`, with no body and no header but
@@ -221,7 +230,7 @@ export fn redirect(location: String) -> Response {
   )
 }
 
-/// The one header [`html`], [`text`] and [`json`] set.
+/// The one header [`respond`] sets, and so [`html`], [`text`] and [`json`].
 fn typed(contentType: String) -> Map<String, String> {
   Map.of(MapEntry(key: "content-type", value: contentType))
 }

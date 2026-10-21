@@ -12,6 +12,29 @@ json: 201
 redirect: 303
   location: /base/next?x=1
   []
+respond pretty: 200
+  content-type: application/json
+  [{
+  "id": 7
+}
+]
+respond rendered: 200
+  content-type: application/json
+  [[1,2]]
+respond csv: 200
+  content-type: text/csv; charset=utf-8
+  [a,b
+1,2
+]
+respond events: 200
+  content-type: text/event-stream
+  [data: x
+
+]
+respond empty: 204
+  content-type: 
+  []
+typed constructors are respond: true true true
 override: 200
   cache-control: max-age=60
   content-type: text/html
