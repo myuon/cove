@@ -363,8 +363,8 @@ export fn toHex(value: Int, width: Int) -> String {
 }
 
 /// The digits of `value` in `radix`, zero-padded to `width`, with a `-` in
-/// front of a negative one: the body of [`toStringRadix`] and [`toHex`],
-/// whose callers have already checked both arguments.
+/// front of a negative one: the body of [`toStringRadix`], [`toHex`] and
+/// [`toDecimal`], whose callers have already checked both arguments.
 ///
 /// [`renderInto`]'s loop with the radix where the ten was, and for its
 /// reason everything happens on the non-positive side of zero, so the least
@@ -551,4 +551,31 @@ export fn floorMod(value: Int, by: Int) -> Int {
     return value % by + by
   }
   value % by
+}
+
+/// `value` in decimal, with zeros in front of the digits to make at least
+/// `width` of them: the decimal mirror of [`toHex`].
+///
+/// The fixed-width form a field of a date, a clock or a sequence number is
+/// written in: `7.toDecimal(2)` is `"07"` and `42.toDecimal(5)` is
+/// `"00042"`. `width` is a minimum and not a bound — a value with more digits
+/// than that is written whole, so nothing is cut off — and `0` and `1` both
+/// mean no padding, so `value.toDecimal(0)` is `"{value}"`. The sign goes
+/// before the padding and the width counts digits, not the sign:
+/// `(-5).toDecimal(3)` is `"-005"`, and the least `Int` is written whole, so
+/// `Int.parse(value.toDecimal(width))` is `Ok(value)` for every `value`.
+///
+/// A negative `width` names no count of digits, so it stops the run, as it
+/// does for [`toHex`].
+export fn toDecimal(value: Int, width: Int) -> String {
+  if width < 0 {
+    core.refuse(decimalWidthRefused(width), widthRule(), "")
+  }
+  return digitsIn(value, 10, width)
+}
+
+/// What [`toDecimal`] says of a negative width. The rule is [`toHex`]'s,
+/// because the widths are.
+fn decimalWidthRefused(width: Int) -> String {
+  "`Int.toDecimal` cannot pad to `{width}` digits"
 }

@@ -355,12 +355,18 @@ fn the_run_writes_the_recording_a_run_writes() {
     // It is 3,102 since issue #665's UTF-8 and radix writers, and the 38 words
     // are the literals their four refusal sentences are built from. This
     // fixture calls none of them, for the reason above.
+    //
+    // It is 3,107 since issue #674's `Int.toDecimal`, and the five words are
+    // one literal: the piece its refusal is interpolated after,
+    // `` `Int.toDecimal` cannot pad to ` ``, 31 bytes as four words and the
+    // one word of its length. The piece after the width and the rule are
+    // `toHex`'s, already placed. This fixture calls neither.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(3102), capacity_words: Some(3102) }"
+            "HeapSummary { collections: 0, allocated_words: Some(3107), capacity_words: Some(3107) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

@@ -307,7 +307,10 @@ scalar's UTF-8 bytes and nothing records that it was written as an escape;
 computed at run time.
 
 An interpolation `{expr}` renders any value and constrains none, so it is
-checked but not required to be a `String`.
+checked but not required to be a `String`. An `Int` renders in decimal with
+no padding; `"{value.toDecimal(2)}"` is the same digits with zeros in front to
+make at least two, the sign before them, and `value.toHex(width)` is its
+hexadecimal twin.
 
 A **`\` at the end of a line eats that line's newline and all of the next
 line's leading spaces and tabs**, in either literal form: `"one \` followed

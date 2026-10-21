@@ -172,8 +172,10 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   `value.toStringRadix(radix)` writes one back, in lowercase and with a `-`
   before a negative magnitude, so `255.toStringRadix(16)` is `"ff"`.
   `value.toHex(width)` is radix 16 with zeros in front to make at least
-  `width` digits: `10.toHex(2)` is `"0a"`. A bad radix or a negative width
-  stops the run.
+  `width` digits: `10.toHex(2)` is `"0a"`. `value.toDecimal(width)` is the
+  same in decimal, the sign before the zeros: `7.toDecimal(2)` is `"07"` and
+  `(-5).toDecimal(3)` is `"-005"`. A bad radix or a negative width stops the
+  run.
 - `/` and `%` round toward zero. `value.floorDiv(by)` rounds toward negative
   infinity instead, and `value.floorMod(by)` is its remainder, with the sign
   of `by`: `(-7).floorDiv(2)` is `-4` and `(-7).floorMod(3)` is `2`. Both trap

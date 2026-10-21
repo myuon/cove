@@ -2050,7 +2050,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `cache-control` changed which entries the maps hold and not how they are
 /// built; `withHeaders` added one, and `Request.header` lost its one when
 /// its fallback walk moved inside the `None` arm.
-const FORWARDABLE_COPIES: usize = 7839;
+///
+/// **7,878 since `Int.toDecimal`** (issue #674), a rise of 39 that is all
+/// program and none of it the lowering: with `tests/e2e/values_int_to_decimal`
+/// and `fail_int_to_decimal_width` held out the corpus answers 7,839, the
+/// bound exactly, though every program carries the new body — it is
+/// `digitsIn` at radix 10, which `toHex` and `toStringRadix` already share.
+/// `fail_int_to_decimal_width` is 18, the printing standard library each
+/// carries, the same 18 as `fail_int_to_hex_width`; `values_int_to_decimal`
+/// is 21, those 18 and 3 in its own `main` and fixture helpers.
+const FORWARDABLE_COPIES: usize = 7878;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

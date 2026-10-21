@@ -16,7 +16,7 @@ unless the run was granted the capability it names.
 | | |
 | --- | --- |
 | builtin types | 18 |
-| builtin methods | 120 |
+| builtin methods | 121 |
 | builtin associated functions | 16 |
 | free builtins | 7 |
 | host modules | 8 |
@@ -322,6 +322,7 @@ written as a namespace.
 | `shiftRightLogical(count: Int) -> Int` |  |  |  | `machine` |
 | `toStringRadix(radix: Int) -> String` |  |  |  | `std.int.toStringRadix` |
 | `toHex(width: Int) -> String` |  |  |  | `std.int.toHex` |
+| `toDecimal(width: Int) -> String` |  |  |  | `std.int.toDecimal` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Float`

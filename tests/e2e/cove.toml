@@ -82,6 +82,14 @@ allow = ["console"]
 entry = "fail_int_to_hex_width.main"
 allow = ["console"]
 
+[run.values_int_to_decimal]
+entry = "values_int_to_decimal.main"
+allow = ["console"]
+
+[run.fail_int_to_decimal_width]
+entry = "fail_int_to_decimal_width.main"
+allow = ["console"]
+
 [run.coll_vector_filled]
 entry = "coll_vector_filled.main"
 allow = ["console"]

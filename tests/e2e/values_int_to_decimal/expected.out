@@ -1,0 +1,22 @@
+0 width 0 0 back true
+0 width 1 0 back true
+0 width 3 000 back true
+7 width 2 07 back true
+42 width 5 00042 back true
+123 width 2 123 back true
+123 width 3 123 back true
+123 width 4 0123 back true
+-5 width 3 -005 back true
+-5 width 1 -5 back true
+-123 width 2 -123 back true
+-123 width 6 -000123 back true
+9223372036854775807 width 0 9223372036854775807 back true
+9223372036854775807 width 21 009223372036854775807 back true
+-9223372036854775808 width 0 -9223372036854775808 back true
+-9223372036854775808 width 19 -9223372036854775808 back true
+-9223372036854775808 width 21 -009223372036854775808 back true
+width 0 and 1 are interpolation true
+09:05:00.007
+2026-03-01
+three digits 1000 of 1000
+stride round trips 1408 of 1408
