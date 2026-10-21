@@ -1,0 +1,100 @@
+epoch 1970-01-01T00:00:00.000Z
+epoch fields 1970 1 1 0 0 0 0 0 w4
+before 1969-12-31T23:59:59.999Z
+before fields 1969 12 31 23 59 59 999 0 w3
+day before 1969-12-31T00:00:00.000Z
+1900 1900-01-01T00:00:00.000Z
+year 1 0001-01-01T00:00:00.000Z
+year 0 0000-01-01T00:00:00.000Z
+1 BC end -000001-12-31T23:59:59.999Z
+year 10000 +010000-01-01T00:00:00.000Z
+year 9999 end 9999-12-31T23:59:59.999Z
+today 2026-10-05T03:29:49.566Z
+least -292275055-05-16T16:47:04.192Z
+greatest +292278994-08-17T07:12:55.807Z
+least east -292275055-05-17T16:46:04.192+23:59
+greatest west +292278994-08-16T07:13:55.807-23:59
+formatIso 1970-01-01T00:00:00.000Z 1969-12-31T23:59:59.999Z 2026-10-05T03:29:49.566Z
+formatIso agrees 32
+2000-02-29 2000-02-29T00:00:00.000Z
+2000-03-01 2000-03-01T00:00:00.000Z
+2024-02-29 2024-02-29T00:00:00.000Z
+1900-03-01 1900-03-01T00:00:00.000Z
+new year 2025-12-31T23:59:59.999Z 2026-01-01T00:00:00.000Z
+1969 to 1970 1969-12-31T23:59:59.999Z 1970-01-01T00:00:00.000Z
+tokyo 2026-01-01T00:00:00.000+09:00
+tokyo fields 2026 1 1 0 0 0 0 540 w4
+tokyo before epoch 1970-01-01T08:59:59.999+09:00
+india west 1969-12-31T18:30:00.000-05:30
+india west fields 1969 12 31 18 30 0 0 -330 w3
+widest 1970-01-01T23:59:00.000+23:59 1969-12-31T00:01:00.000-23:59
+date 2026-10-05
+time 12:29:49.566
+weekday epoch 4
+weekday before 3
+weekday 2000 6
+weekday monday 1
+leap 2000 true 2024 true 1900 false 2026 false 0 true -4 true -100 false
+months 2026 31 28 31 30 31 30 31 31 30 31 30 31
+february 29 28 29
+ok 0
+ok 0
+ok -1
+ok 1791170989566
+ok 1791170989566
+ok 1791170989566
+ok 1791172789566
+ok 1791170989566
+ok 1791170989566
+ok 1791170989566
+ok 1791170989566
+ok 951782400000
+ok 1709164800000
+ok -62167219200000
+ok -62167219200001
+ok 253402300800000
+ok 1791170989500
+ok 1791170989560
+ok 1791170989566
+ok 1791170989566
+ok -1
+err `` is not an RFC 3339 date-time: at byte 0, the year must be four digits
+err `yesterday` is not an RFC 3339 date-time: at byte 0, the year must be four digits
+err `2026-10-05` is not an RFC 3339 date-time: at byte 10, a date with no time names no one instant
+err `2026-10-05T03:29:49` is not an RFC 3339 date-time: at byte 19, expected `Z` or an offset such as `+09:00`: a time with no offset names no one instant
+err `2026-10-05T03:29:49.Z` is not an RFC 3339 date-time: at byte 20, expected a digit after `.`
+err `2026-10-05T03:29:49.5669999999Z` is not an RFC 3339 date-time: at byte 29, a fraction of a second has at most nine digits
+err `2026-13-01T00:00:00Z` is not an RFC 3339 date-time: at byte 5, month 13 is not a month: a month is 01 to 12
+err `2026-00-01T00:00:00Z` is not an RFC 3339 date-time: at byte 5, month 0 is not a month: a month is 01 to 12
+err `2026-02-30T00:00:00Z` is not an RFC 3339 date-time: at byte 8, day 30 is past the end of a month of 28 days
+err `1900-02-29T00:00:00Z` is not an RFC 3339 date-time: at byte 8, day 29 is past the end of a month of 28 days
+err `2026-02-29T00:00:00Z` is not an RFC 3339 date-time: at byte 8, day 29 is past the end of a month of 28 days
+err `2026-04-31T00:00:00Z` is not an RFC 3339 date-time: at byte 8, day 31 is past the end of a month of 30 days
+err `2026-10-00T00:00:00Z` is not an RFC 3339 date-time: at byte 8, day 00 is not a day: the days of a month are counted from 01
+err `2026-10-05T24:00:00Z` is not an RFC 3339 date-time: at byte 11, hour 24 is not an hour: an hour is 00 to 23
+err `2026-10-05T23:60:00Z` is not an RFC 3339 date-time: at byte 14, minute 60 is not a minute: a minute is 00 to 59
+err `2016-12-31T23:59:60Z` is not an RFC 3339 date-time: at byte 17, second 60 is a leap second, and Unix time has no millisecond for one
+err `2026-10-05T03:29:49+24:00` is not an RFC 3339 date-time: at byte 20, an offset of 24 hours is not one: the hours are 00 to 23
+err `2026-10-05T03:29:49+09:60` is not an RFC 3339 date-time: at byte 23, an offset of 60 minutes is not one: the minutes are 00 to 59
+err `2026-10-05T03:29:49+0900` is not an RFC 3339 date-time: at byte 22, expected `:` in the offset
+err `2026-10-05T03:29:49+9:00` is not an RFC 3339 date-time: at byte 21, the offset's hours must be two digits
+err `2026-10-05T03:29:49Zjunk` is not an RFC 3339 date-time: at byte 20, expected the end of the text after the offset
+err `2026-10-05X03:29:49Z` is not an RFC 3339 date-time: at byte 10, expected `T` between the date and the time
+err `2026/10/05T03:29:49Z` is not an RFC 3339 date-time: at byte 4, expected `-` after the year
+err `26-10-05T03:29:49Z` is not an RFC 3339 date-time: at byte 2, the year must be four digits
+err `2026-1-05T03:29:49Z` is not an RFC 3339 date-time: at byte 6, the month must be two digits
+err `-000000-01-01T00:00:00Z` is not an RFC 3339 date-time: at byte 0, the year zero is `0000`, never `-000000`
+err `+10000-01-01T00:00:00Z` is not an RFC 3339 date-time: at byte 6, a sign before the year must be followed by six digits
+err `2026-10-05T03:29:49.566Ａ` is not an RFC 3339 date-time: at byte 23, expected `Z` or an offset such as `+09:00`
+ok 1791170989566
+ok -1
+err `month` is 13, which is not 1 to 12
+err `day` is 29, but month 2 of 2026 has 28 days
+err `hour` is 24, which is not 0 to 23
+err `minute` is 60, which is not 0 to 59
+err `second` is -1, which is not 0 to 59
+err `millisecond` is 1000, which is not 0 to 999
+err `offsetMinutes` is 1440, which is not -1439 to 1439
+out of range written 2026-13-01T00:00:00.000Z
+round trips 160 failed []
+ends true true true true true true true true true

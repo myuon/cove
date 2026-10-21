@@ -512,6 +512,16 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "Int",
+        name: "floorDiv",
+        body: "  let count = -7\n  count.floorDiv(2)",
+    },
+    Exercise {
+        ty: "Int",
+        name: "floorMod",
+        body: "  let count = -7\n  count.floorMod(3)",
+    },
+    Exercise {
+        ty: "Int",
         name: "toStringRadix",
         body: "  let count = 255\n  count.toStringRadix(16).length()",
     },

@@ -16,7 +16,7 @@ unless the run was granted the capability it names.
 | | |
 | --- | --- |
 | builtin types | 18 |
-| builtin methods | 118 |
+| builtin methods | 120 |
 | builtin associated functions | 16 |
 | free builtins | 7 |
 | host modules | 8 |
@@ -309,6 +309,8 @@ written as a namespace.
 | --- | --- | --- | --- | --- |
 | `toFloat() -> Float` |  |  |  | `machine` |
 | `abs() -> Int` |  |  |  | `std.int.abs` |
+| `floorDiv(by: Int) -> Int` |  |  |  | `std.int.floorDiv` |
+| `floorMod(by: Int) -> Int` |  |  |  | `std.int.floorMod` |
 | `min(other: Int) -> Int` |  |  |  | `std.int.min` |
 | `max(other: Int) -> Int` |  |  |  | `std.int.max` |
 | `bitAnd(other: Int) -> Int` |  |  |  | `machine` |

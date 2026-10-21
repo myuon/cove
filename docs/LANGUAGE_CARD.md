@@ -174,6 +174,10 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   `value.toHex(width)` is radix 16 with zeros in front to make at least
   `width` digits: `10.toHex(2)` is `"0a"`. A bad radix or a negative width
   stops the run.
+- `/` and `%` round toward zero. `value.floorDiv(by)` rounds toward negative
+  infinity instead, and `value.floorMod(by)` is its remainder, with the sign
+  of `by`: `(-7).floorDiv(2)` is `-4` and `(-7).floorMod(3)` is `2`. Both trap
+  where `/` and `%` do.
 - An `Int`'s 64 bits are reachable through seven methods: `bitAnd`, `bitOr`,
   `bitXor`, `bitNot`, `shiftLeft`, `shiftRight` (arithmetic: the sign bit is
   shifted in, so `(-3).shiftRight(1)` is `-2`) and `shiftRightLogical` (zeros

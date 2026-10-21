@@ -1,0 +1,746 @@
+// Civil dates and times: an instant in Unix milliseconds read as a calendar
+// date and a clock at a fixed UTC offset, and RFC 3339 text both ways.
+//
+// Four minicloud apps each carried `isoTime` and the `floorDiv` beneath it —
+// Howard Hinnant's `civil_from_days`, transcribed — and one a 110-line
+// `parseIso` (#646, item 5). Their callers wanted the fields more often than
+// the string: they formatted a stamp and sliced the clock back out of it, or
+// added nine hours to a millisecond to read Japan's clock off a stamp that
+// then said `Z`. This is that code taken once, with the fields in a struct
+// and the offset part of the value.
+// [ADR 0108](../../../docs/adr/0108-std-datetime.md) is the record of the
+// interface, of the name, and of where it stops.
+//
+// ```cove
+// use std.datetime
+//
+// fn stamp(millis: Int) -> String {
+//   datetime.formatIso(millis)                        // 2026-10-05T03:29:49.566Z
+// }
+//
+// fn tokyo(millis: Int) -> String {
+//   let at = datetime.fromUnixMillis(millis, 9 * 60)  // the fields, read
+//   "{at.toIsoDate()} {at.toIsoTime().sliceBytes(0, 5).unwrapOr("")}"
+// }
+// ```
+//
+// The calendar is the proleptic Gregorian one, run backwards past 1582 and
+// past year 1 without a gap, so year `0` is 1 BC and year `-1` is 2 BC, as
+// ISO 8601 numbers them. A day is exactly 86,400,000 milliseconds: Unix time
+// has no leap second, so neither does this. An offset is a fixed count of
+// minutes east of UTC; a time-zone database, and the offset that changes with
+// the date, are not here.
+
+/// A calendar date and a time of day, as a clock `offsetMinutes` east of UTC
+/// shows them: `2026-10-05T12:29:49.566+09:00` is year 2026, month 10, day 5,
+/// 12:29:49 and 566 milliseconds, at offset 540.
+///
+/// **`month` is 1 to 12 and `day` 1 to the length of that month**, as they
+/// are written, not counted from zero. `hour` is 0 to 23, `minute` and
+/// `second` 0 to 59 — there is no leap second — and `millisecond` 0 to 999.
+/// `offsetMinutes` is -1439 to 1439, the offsets `±HH:MM` can write, and is
+/// negative west of UTC: New York in winter is -300.
+///
+/// [`fromUnixMillis`] answers only values that hold to that. The struct is not
+/// `opaque`, so a program may build one from fields it read — and then
+/// [`DateTime.toUnixMillis`] is the check, answering an `Err` that names the
+/// first field out of range. The writers [`DateTime.toIso`] and its siblings
+/// write the fields as they are and check nothing, so a value that never
+/// passed through either is written exactly as wrongly as it was built.
+export struct DateTime {
+  year: Int
+  month: Int
+  day: Int
+  hour: Int
+  minute: Int
+  second: Int
+  millisecond: Int
+  offsetMinutes: Int
+}
+
+impl DateTime {
+  /// The instant this names, in milliseconds since 1970-01-01T00:00:00Z, or
+  /// an `Error` naming the first field that is out of range.
+  ///
+  /// The inverse of [`fromUnixMillis`]: `fromUnixMillis(ms, offset)
+  /// .toUnixMillis()` is `Ok(ms)` for every `Int` `ms` and every offset —
+  /// about 292 million years either side of 1970. A field out of range is an
+  /// `Err` rather than a stop, because a struct with public fields is data a
+  /// program may have read: `day: 30` in month 2 is wrong input, not a wrong
+  /// call. Valid fields of an instant past either end of `Int` trap, as any
+  /// `Int` arithmetic that overflows does.
+  export fn toUnixMillis(self) -> Result<Int, Error> {
+    if self.month < 1 || self.month > 12 {
+      return fieldRefused("month", self.month, "1 to 12")
+    }
+    let length = monthLength(self.year, self.month)
+    if self.day < 1 || self.day > length {
+      return dayRefused(self.year, self.month, self.day, length)
+    }
+    if self.hour < 0 || self.hour > 23 {
+      return fieldRefused("hour", self.hour, "0 to 23")
+    }
+    if self.minute < 0 || self.minute > 59 {
+      return fieldRefused("minute", self.minute, "0 to 59")
+    }
+    if self.second < 0 || self.second > 59 {
+      return fieldRefused("second", self.second, "0 to 59")
+    }
+    if self.millisecond < 0 || self.millisecond > 999 {
+      return fieldRefused("millisecond", self.millisecond, "0 to 999")
+    }
+    if self.offsetMinutes < -1439 || self.offsetMinutes > 1439 {
+      return fieldRefused("offsetMinutes", self.offsetMinutes, "-1439 to 1439")
+    }
+    return Ok(instant(self.year, self.month, self.day, self.hour, self.minute, self.second, self.millisecond, self.offsetMinutes))
+  }
+
+  /// The day of the week, ISO 8601's way: `1` is Monday and `7` is Sunday.
+  ///
+  /// Of the date as the offset shows it, so the same instant can be a
+  /// different day at two offsets. Read off the count of days from
+  /// 1970-01-01, which was a Thursday.
+  export fn weekday(self) -> Int {
+    (daysFromCivil(self.year, self.month, self.day) + 3).floorMod(7) + 1
+  }
+
+  /// RFC 3339 text for this value: `2026-10-05T03:29:49.566Z` at offset 0,
+  /// `2026-10-05T12:29:49.566+09:00` at offset 540.
+  ///
+  /// Always the milliseconds, always three digits of them, so every value at
+  /// one offset writes the same length and two of them sort as text in the
+  /// order of their instants. An offset of 0 is `Z`, never `+00:00`.
+  ///
+  /// A year 0 to 9999 is four digits, which is all RFC 3339 writes. Any
+  /// other is ISO 8601's expanded form as JavaScript's `toISOString` writes
+  /// it — a sign and at least six digits, `-000001` for 2 BC and `+010000`
+  /// for the year 10000 — which [`parseIso`] reads back while it is six
+  /// digits.
+  export fn toIso(self) -> String {
+    let buffer = core.bytesAllocate(29)
+    writeDate(buffer, self)
+    appendByte(buffer, 'T')
+    writeClock(buffer, self)
+    if self.offsetMinutes == 0 {
+      appendByte(buffer, 'Z')
+    } else {
+      var minutes = self.offsetMinutes
+      if minutes < 0 {
+        appendByte(buffer, '-')
+        minutes = -minutes
+      } else {
+        appendByte(buffer, '+')
+      }
+      appendDigits(buffer, minutes / 60, 2)
+      appendByte(buffer, ':')
+      appendDigits(buffer, minutes % 60, 2)
+    }
+    return core.bytesFinish(buffer)
+  }
+
+  /// The date alone, as [`toIso`] writes it: `2026-10-05`.
+  export fn toIsoDate(self) -> String {
+    let buffer = core.bytesAllocate(10)
+    writeDate(buffer, self)
+    return core.bytesFinish(buffer)
+  }
+
+  /// The time of day alone, as [`toIso`] writes it and with no offset:
+  /// `12:29:49.566`. Every byte is ASCII and every field has its fixed width,
+  /// so `sliceBytes(0, 5)` of it is the clock to the minute.
+  export fn toIsoTime(self) -> String {
+    let buffer = core.bytesAllocate(12)
+    writeClock(buffer, self)
+    return core.bytesFinish(buffer)
+  }
+}
+
+/// The instant `millis` milliseconds after 1970-01-01T00:00:00Z, as a clock
+/// `offsetMinutes` east of UTC reads it.
+///
+/// `fromUnixMillis(0, 0)` is 1970-01-01 at midnight, `fromUnixMillis(-1, 0)`
+/// is 1969-12-31T23:59:59.999, and `fromUnixMillis(0, 540)` is 09:00 on
+/// 1970-01-01 in Tokyo. It is Howard Hinnant's `civil_from_days` over a day
+/// counted with [`Int.floorDiv`], so an instant before 1970 lands in the day
+/// before rather than the day after.
+///
+/// Every `millis` has an answer, the least and the greatest `Int` included,
+/// at every offset. An offset outside -1439 to 1439 is one that
+/// `±HH:MM` cannot write, and it stops the run, because the offset is the
+/// call's own argument and not something the instant was read from.
+export fn fromUnixMillis(millis: Int, offsetMinutes: Int) -> DateTime {
+  if offsetMinutes < -1439 || offsetMinutes > 1439 {
+    core.refuse(offsetRefused(offsetMinutes), offsetRule(), "")
+  }
+  // The day and the time of day are counted before the offset moves them, so
+  // that no sum reaches past an `Int` at either end of its range: the offset
+  // is added to a time of day, and carried into the day as at most one.
+  let shifted = millis.floorMod(86_400_000) + offsetMinutes * 60_000
+  let days = millis.floorDiv(86_400_000) + shifted.floorDiv(86_400_000)
+  let ofDay = shifted.floorMod(86_400_000)
+  let z = days + 719_468
+  let era = z.floorDiv(146_097)
+  let doe = z - era * 146_097
+  let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp = (5 * doy + 2) / 153
+  let month = if mp < 10 {
+    mp + 3
+  } else {
+    mp - 9
+  }
+  let year = if month <= 2 {
+    yoe + era * 400 + 1
+  } else {
+    yoe + era * 400
+  }
+  return DateTime(
+    year: year,
+    month: month,
+    day: doy - (153 * mp + 2) / 5 + 1,
+    hour: ofDay / 3_600_000,
+    minute: ofDay / 60_000 % 60,
+    second: ofDay / 1000 % 60,
+    millisecond: ofDay % 1000,
+    offsetMinutes: offsetMinutes,
+  )
+}
+
+/// RFC 3339 text for the instant `millis` milliseconds after
+/// 1970-01-01T00:00:00Z, in UTC: `formatIso(1_791_170_989_566)` is
+/// `2026-10-05T03:29:49.566Z`.
+///
+/// The shorthand for `fromUnixMillis(millis, 0).toIso()`, with the same bytes,
+/// because a UTC stamp is what most callers write — a log line, a JSON field,
+/// a stored time — and the code this replaces wrote it at 17 call sites as
+/// `isoTime(millis)`. [`parseIso`] reads every answer back to `millis` while
+/// its year is 0 to 9999, or six digits with a sign.
+export fn formatIso(millis: Int) -> String {
+  return fromUnixMillis(millis, 0).toIso()
+}
+
+/// The instant RFC 3339 text names, in milliseconds since
+/// 1970-01-01T00:00:00Z, or an `Error` saying what is wrong and at which byte.
+///
+/// **The text is RFC 3339's `date-time`**: `YYYY-MM-DDTHH:MM:SS`, then an
+/// optional `.` and 1 to 9 digits of a second, then `Z` or an offset
+/// `±HH:MM`. So `2026-10-05T03:29:49Z`, `2026-10-05T12:29:49.566+09:00` and
+/// `2026-10-04T22:29:49.566123-05:00` are the same instant but for the
+/// millisecond. Digits past the third of a fraction are dropped, not rounded,
+/// so the answer is the millisecond the instant falls in. As RFC 3339 allows,
+/// `t` and `z` may be lowercase and a space may stand for the `T`; `-00:00`
+/// is read as `Z`. A year written as [`DateTime.toIso`] writes one outside
+/// 0 to 9999 — a sign and six digits — is read too, except `-000000`, which
+/// ISO 8601 forbids.
+///
+/// **A date-time with no offset is an `Err`**, and so is a date with no time:
+/// neither names one instant. A date that is not one — month `13`, February
+/// 30th, February 29th of a year that is not a leap year — is an `Err`, and
+/// so is the leap second `:60`, which Unix time has no millisecond for. The
+/// `Err` quotes the text and names the byte where the field that is wrong
+/// starts, so `2026-02-30T00:00:00Z` says the day at byte 8 is past the end
+/// of a month of 28 days.
+export fn parseIso(text: String) -> Result<Int, Error> {
+  let end = core.byteLength(text)
+  let lead = if end > 0 {
+    text.byteAt(0)
+  } else {
+    0
+  }
+  let signed = lead == '+' || lead == '-'
+  let start = if signed {
+    1
+  } else {
+    0
+  }
+  let width = if signed {
+    6
+  } else {
+    4
+  }
+  let magnitude = digitsAt(text, start, width, end)
+  if magnitude < 0 {
+    return refused(text, firstNonDigit(text, start, end), yearShape(signed))
+  }
+  if lead == '-' && magnitude == 0 {
+    return refused(text, 0, "the year zero is `0000`, never `-000000`")
+  }
+  let year = if lead == '-' {
+    -magnitude
+  } else {
+    magnitude
+  }
+  let at = start + width
+  if !byteIs(text, at, end, '-') {
+    return refused(text, at, "expected `-` after the year")
+  }
+  let month = digitsAt(text, at + 1, 2, end)
+  if month < 0 {
+    return refused(
+      text,
+      firstNonDigit(text, at + 1, end),
+      "the month must be two digits",
+    )
+  }
+  if month < 1 || month > 12 {
+    return refused(
+      text,
+      at + 1,
+      "month {month} is not a month: a month is 01 to 12",
+    )
+  }
+  if !byteIs(text, at + 3, end, '-') {
+    return refused(text, at + 3, "expected `-` after the month")
+  }
+  let day = digitsAt(text, at + 4, 2, end)
+  if day < 0 {
+    return refused(
+      text,
+      firstNonDigit(text, at + 4, end),
+      "the day must be two digits",
+    )
+  }
+  if day < 1 {
+    return refused(
+      text,
+      at + 4,
+      "day 00 is not a day: the days of a month are counted from 01",
+    )
+  }
+  let length = monthLength(year, month)
+  if day > length {
+    return refused(
+      text,
+      at + 4,
+      "day {day} is past the end of a month of {length} days",
+    )
+  }
+  // The time, from the byte after the date: `T`, then `HH:MM:SS`.
+  let time = at + 6
+  if time == end {
+    return refused(text, time, "a date with no time names no one instant")
+  }
+  let separator = text.byteAt(time)
+  if separator != 'T' && separator != 't' && separator != ' ' {
+    return refused(text, time, "expected `T` between the date and the time")
+  }
+  let hour = digitsAt(text, time + 1, 2, end)
+  if hour < 0 {
+    return refused(
+      text,
+      firstNonDigit(text, time + 1, end),
+      "the hour must be two digits",
+    )
+  }
+  if hour > 23 {
+    return refused(
+      text,
+      time + 1,
+      "hour {hour} is not an hour: an hour is 00 to 23",
+    )
+  }
+  if !byteIs(text, time + 3, end, ':') {
+    return refused(text, time + 3, "expected `:` after the hour")
+  }
+  let minute = digitsAt(text, time + 4, 2, end)
+  if minute < 0 {
+    return refused(
+      text,
+      firstNonDigit(text, time + 4, end),
+      "the minute must be two digits",
+    )
+  }
+  if minute > 59 {
+    return refused(
+      text,
+      time + 4,
+      "minute {minute} is not a minute: a minute is 00 to 59",
+    )
+  }
+  if !byteIs(text, time + 6, end, ':') {
+    return refused(text, time + 6, "expected `:` after the minute")
+  }
+  let second = digitsAt(text, time + 7, 2, end)
+  if second < 0 {
+    return refused(
+      text,
+      firstNonDigit(text, time + 7, end),
+      "the second must be two digits",
+    )
+  }
+  if second == 60 {
+    return refused(
+      text,
+      time + 7,
+      "second 60 is a leap second, and Unix time has no millisecond for one",
+    )
+  }
+  if second > 59 {
+    return refused(
+      text,
+      time + 7,
+      "second {second} is not a second: a second is 00 to 59",
+    )
+  }
+  // The fraction, from the byte after the seconds: `.` and its digits, or
+  // nothing at all.
+  let fraction = time + 9
+  let zone = if byteIs(text, fraction, end, '.') {
+    firstNonDigit(text, fraction + 1, end)
+  } else {
+    fraction
+  }
+  if zone == fraction + 1 {
+    return refused(text, zone, "expected a digit after `.`")
+  }
+  if zone > fraction + 10 {
+    return refused(
+      text,
+      fraction + 10,
+      "a fraction of a second has at most nine digits",
+    )
+  }
+  let millisecond = fractionMillis(text, fraction + 1, zone)
+  // The offset, from the byte after the fraction: `Z`, or `±HH:MM`.
+  if zone == end {
+    return refused(
+      text,
+      zone,
+      "expected `Z` or an offset such as `+09:00`: a time with no offset names no one instant",
+    )
+  }
+  let mark = text.byteAt(zone)
+  if mark == 'Z' || mark == 'z' {
+    if zone + 1 != end {
+      return refused(
+        text,
+        zone + 1,
+        "expected the end of the text after the offset",
+      )
+    }
+    return Ok(instant(year, month, day, hour, minute, second, millisecond, 0))
+  }
+  if mark != '+' && mark != '-' {
+    return refused(text, zone, "expected `Z` or an offset such as `+09:00`")
+  }
+  let hours = digitsAt(text, zone + 1, 2, end)
+  if hours < 0 {
+    return refused(
+      text,
+      firstNonDigit(text, zone + 1, end),
+      "the offset's hours must be two digits",
+    )
+  }
+  if hours > 23 {
+    return refused(
+      text,
+      zone + 1,
+      "an offset of {hours} hours is not one: the hours are 00 to 23",
+    )
+  }
+  if !byteIs(text, zone + 3, end, ':') {
+    return refused(text, zone + 3, "expected `:` in the offset")
+  }
+  let minutes = digitsAt(text, zone + 4, 2, end)
+  if minutes < 0 {
+    return refused(
+      text,
+      firstNonDigit(text, zone + 4, end),
+      "the offset's minutes must be two digits",
+    )
+  }
+  if minutes > 59 {
+    return refused(
+      text,
+      zone + 4,
+      "an offset of {minutes} minutes is not one: the minutes are 00 to 59",
+    )
+  }
+  if zone + 6 != end {
+    return refused(
+      text,
+      zone + 6,
+      "expected the end of the text after the offset",
+    )
+  }
+  let east = if mark == '-' {
+    -(hours * 60 + minutes)
+  } else {
+    hours * 60 + minutes
+  }
+  return Ok(instant(year, month, day, hour, minute, second, millisecond, east))
+}
+
+/// The milliseconds the fraction digits from `start` to `stop` name: the
+/// first three, with zeros after them to make three, and the rest dropped.
+/// No digits — `stop` before `start` — is no fraction, and `0`.
+fn fractionMillis(text: String, start: Int, stop: Int) -> Int {
+  let first = digitOr(text, start, stop)
+  let second = digitOr(text, start + 1, stop)
+  let third = digitOr(text, start + 2, stop)
+  first * 100 + second * 10 + third
+}
+
+/// The value of the digit at `at` when it is before `stop`, and `0` past it.
+fn digitOr(text: String, at: Int, stop: Int) -> Int {
+  if at < stop {
+    return text.byteAt(at) - '0'
+  }
+  0
+}
+
+/// What [`parseIso`] says of a year that is not written as one.
+fn yearShape(signed: Bool) -> String {
+  if signed {
+    return "a sign before the year must be followed by six digits"
+  }
+  "the year must be four digits"
+}
+
+/// How many days `month` of `year` has: 28 to 31, February's being 29 in a
+/// leap year.
+///
+/// A `month` outside 1 to 12 is no month, and it stops the run: it is the
+/// call that is wrong, and there is no count of days to answer for it.
+export fn daysInMonth(year: Int, month: Int) -> Int {
+  if month < 1 || month > 12 {
+    core.refuse(monthRefused(month), monthRule(), "")
+  }
+  monthLength(year, month)
+}
+
+/// Whether `year` is a leap year of the Gregorian calendar: divisible by 4,
+/// and not by 100 unless by 400. So 2000 and 2024 are and 1900 and 2026 are
+/// not, and year 0 — 1 BC — is, as the proleptic calendar runs.
+export fn isLeapYear(year: Int) -> Bool {
+  year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// [`daysInMonth`] for a `month` already known to be 1 to 12.
+fn monthLength(year: Int, month: Int) -> Int {
+  if month == 2 {
+    if isLeapYear(year) {
+      return 29
+    }
+    return 28
+  }
+  if month == 4 || month == 6 || month == 9 || month == 11 {
+    return 30
+  }
+  31
+}
+
+/// Days since 1970-01-01 of a valid date: Howard Hinnant's
+/// `days_from_civil`, the inverse of the walk in [`fromUnixMillis`].
+fn daysFromCivil(year: Int, month: Int, day: Int) -> Int {
+  let y = if month <= 2 {
+    year - 1
+  } else {
+    year
+  }
+  let era = y.floorDiv(400)
+  let yoe = y - era * 400
+  let mp = if month > 2 {
+    month - 3
+  } else {
+    month + 9
+  }
+  let doy = (153 * mp + 2) / 5 + day - 1
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  era * 146_097 + doe - 719_468
+}
+
+/// The Unix millisecond of fields already checked: the body of
+/// [`DateTime.toUnixMillis`] and the answer of [`parseIso`].
+///
+/// The time of day, less the offset, is carried into the day first, so that
+/// what is multiplied is the day the instant is in. A negative day is then
+/// multiplied one day nearer zero and the day put back as a negative time of
+/// day, because the least `Int` is partway through its day: the start of that
+/// day is not an `Int`, and neither is the day before's, which an offset west
+/// of UTC can name. So every instant [`fromUnixMillis`] can answer comes back,
+/// and only one past an `Int` traps.
+fn instant(
+  year: Int,
+  month: Int,
+  day: Int,
+  hour: Int,
+  minute: Int,
+  second: Int,
+  millisecond: Int,
+  offsetMinutes: Int,
+) -> Int {
+  let clock = ((hour * 60 + minute - offsetMinutes) * 60 + second) * 1000 +
+    millisecond
+  let days = daysFromCivil(year, month, day) + clock.floorDiv(86_400_000)
+  let rest = clock.floorMod(86_400_000)
+  if days < 0 {
+    return (days + 1) * 86_400_000 + (rest - 86_400_000)
+  }
+  days * 86_400_000 + rest
+}
+
+/// Appends `YYYY-MM-DD` to `buffer`, the year as [`DateTime.toIso`] says.
+fn writeDate(buffer: ByteBuffer, at: DateTime) {
+  if at.year < 0 {
+    appendByte(buffer, '-')
+    appendDigits(buffer, -at.year, 6)
+  } else if at.year > 9999 {
+    appendByte(buffer, '+')
+    appendDigits(buffer, at.year, 6)
+  } else {
+    appendDigits(buffer, at.year, 4)
+  }
+  appendByte(buffer, '-')
+  appendDigits(buffer, at.month, 2)
+  appendByte(buffer, '-')
+  appendDigits(buffer, at.day, 2)
+}
+
+/// Appends `HH:MM:SS.sss` to `buffer`.
+fn writeClock(buffer: ByteBuffer, at: DateTime) {
+  appendDigits(buffer, at.hour, 2)
+  appendByte(buffer, ':')
+  appendDigits(buffer, at.minute, 2)
+  appendByte(buffer, ':')
+  appendDigits(buffer, at.second, 2)
+  appendByte(buffer, '.')
+  appendDigits(buffer, at.millisecond, 3)
+}
+
+/// Appends the decimal digits of `value` to `buffer`, with zeros in front to
+/// make at least `width` of them.
+///
+/// `std.int`'s `renderInto` loop, with the count of digits kept so that the
+/// zeros can go first. It works on the non-positive side of zero for that
+/// loop's reason, and so a negative `value` — a field of a `DateTime` built
+/// out of range — is written as `-` and its padded magnitude rather than as
+/// nonsense.
+fn appendDigits(buffer: ByteBuffer, value: Int, width: Int) {
+  var rest = if value < 0 {
+    appendByte(buffer, '-')
+    value
+  } else {
+    -value
+  }
+  let tenth = rest / 10
+  var power = -1
+  var count = 1
+  while tenth <= power {
+    power = power * 10
+    count += 1
+  }
+  while count < width {
+    appendByte(buffer, '0')
+    count += 1
+  }
+  while power < 0 {
+    let digit = rest / power
+    appendByte(buffer, '0' + digit)
+    rest = rest - digit * power
+    power = power / 10
+  }
+  // The answer, written where the call wants it, as `renderInto` writes it.
+  ()
+}
+
+/// One byte onto the end of `buffer`: ADR 0062's ensure, store and commit.
+fn appendByte(buffer: ByteBuffer, value: Int) {
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, at, value)
+  core.bytesCommit(buffer, 1)
+}
+
+/// The value of the `width` decimal digits of `text` at `at`, or `-1` when
+/// they run past `end` or one of them is not a digit.
+fn digitsAt(text: String, at: Int, width: Int, end: Int) -> Int {
+  if at + width > end {
+    return -1
+  }
+  var value = 0
+  var place = 0
+  while place < width {
+    let byte = text.byteAt(at + place)
+    if !isDigit(byte) {
+      return -1
+    }
+    value = value * 10 + byte - '0'
+    place += 1
+  }
+  value
+}
+
+/// The offset of the first byte from `at` that is not a digit, or `end`: where
+/// a run of digits [`digitsAt`] refused stopped being one.
+///
+/// The loop counts from zero rather than from `at`, because a `var` started
+/// from another binding is a copy the lowering cannot forward (issue #302),
+/// and this is inlined at every refusal in [`parseIso`].
+fn firstNonDigit(text: String, at: Int, end: Int) -> Int {
+  var count = 0
+  while at + count < end && isDigit(text.byteAt(at + count)) {
+    count += 1
+  }
+  at + count
+}
+
+/// Whether `text` has `byte` at `at`, which is before `end`.
+fn byteIs(text: String, at: Int, end: Int, byte: Int) -> Bool {
+  at < end && text.byteAt(at) == byte
+}
+
+/// Whether `byte` is one of the ten ASCII digits.
+fn isDigit(byte: Int) -> Bool {
+  byte >= '0' && byte <= '9'
+}
+
+/// The `Err` [`parseIso`] answers: the text, quoted, and what is wrong at
+/// `at`. A function of its own so that the path that succeeds carries no
+/// interpolation.
+fn refused(text: String, at: Int, reason: String) -> Result<Int, Error> {
+  return Err(Error(
+    "`{text}` is not an RFC 3339 date-time: at byte {at}, {reason}",
+  ))
+}
+
+/// The `Err` [`DateTime.toUnixMillis`] answers for a field out of its range.
+fn fieldRefused(
+  field: String,
+  value: Int,
+  range: String,
+) -> Result<Int, Error> {
+  return Err(Error("`{field}` is {value}, which is not {range}"))
+}
+
+/// The `Err` [`DateTime.toUnixMillis`] answers for a day past its month.
+fn dayRefused(
+  year: Int,
+  month: Int,
+  day: Int,
+  length: Int,
+) -> Result<Int, Error> {
+  return Err(Error(
+    "`day` is {day}, but month {month} of {year} has {length} days",
+  ))
+}
+
+/// What [`fromUnixMillis`] says of an offset `±HH:MM` cannot write.
+fn offsetRefused(offset: Int) -> String {
+  "`datetime.fromUnixMillis` cannot read a clock at an offset of `{offset}` minutes"
+}
+
+/// The rule an offset is held to.
+fn offsetRule() -> String {
+  "An offset is -1439 to 1439 minutes, which is every offset `±HH:MM` can write."
+}
+
+/// What [`daysInMonth`] says of a month that is not one.
+fn monthRefused(month: Int) -> String {
+  "`datetime.daysInMonth` has no month `{month}`"
+}
+
+/// The rule a month is held to.
+fn monthRule() -> String {
+  "A month is 1 through 12."
+}

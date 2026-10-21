@@ -1,0 +1,244 @@
+use console.println
+use std.datetime
+use std.datetime.DateTime
+
+/// `millis` at `offset`, as RFC 3339 text.
+fn iso(millis: Int, offset: Int) -> String {
+  datetime.fromUnixMillis(millis, offset).toIso()
+}
+
+/// What `parseIso` answers for `text`: the millisecond, or the message.
+fn parsed(text: String) -> String {
+  match datetime.parseIso(text) {
+    Ok(millis) => "ok {millis}"
+    Err(error) => "err {error.message}"
+  }
+}
+
+/// What `toUnixMillis` answers for `at`.
+fn instantOf(at: DateTime) -> String {
+  match at.toUnixMillis() {
+    Ok(millis) => "ok {millis}"
+    Err(error) => "err {error.message}"
+  }
+}
+
+/// Every field of `at`, and its weekday.
+fn fields(at: DateTime) -> String {
+  "{at.year} {at.month} {at.day} {at.hour} {at.minute} {at.second} {at.millisecond} {at.offsetMinutes} w{at.weekday()}"
+}
+
+/// Whether `millis` at `offset` survives format, then parse, and fields, then
+/// `toUnixMillis`.
+fn roundTrips(millis: Int, offset: Int) -> Bool {
+  let at = datetime.fromUnixMillis(millis, offset)
+  let back = match datetime.parseIso(at.toIso()) {
+    Ok(value) => value
+    Err(_) => return false
+  }
+  let again = match at.toUnixMillis() {
+    Ok(value) => value
+    Err(_) => return false
+  }
+  back == millis && again == millis
+}
+
+/// A `DateTime` with every field given, for the checks of `toUnixMillis`.
+fn civil(
+  year: Int,
+  month: Int,
+  day: Int,
+  hour: Int,
+  minute: Int,
+  second: Int,
+  millisecond: Int,
+  offset: Int,
+) -> DateTime {
+  return DateTime(
+    year: year,
+    month: month,
+    day: day,
+    hour: hour,
+    minute: minute,
+    second: second,
+    millisecond: millisecond,
+    offsetMinutes: offset,
+  )
+}
+
+/// Pins `std.datetime` (#667): civil fields from Unix milliseconds at a fixed
+/// offset, before 1970 as after; RFC 3339 written and read, with the byte of
+/// what is wrong; the calendar's leap years; and the round trips.
+export fn main() -> Result<Unit, Error> {
+  // The epoch, and the millisecond before it.
+  println("epoch {iso(0, 0)}")?
+  println("epoch fields {fields(datetime.fromUnixMillis(0, 0))}")?
+  println("before {iso(-1, 0)}")?
+  println("before fields {fields(datetime.fromUnixMillis(-1, 0))}")?
+  println("day before {iso(-86_400_000, 0)}")?
+  println("1900 {iso(-2_208_988_800_000, 0)}")?
+  println("year 1 {iso(-62_135_596_800_000, 0)}")?
+  println("year 0 {iso(-62_167_219_200_000, 0)}")?
+  println("1 BC end {iso(-62_167_219_200_001, 0)}")?
+  println("year 10000 {iso(253_402_300_800_000, 0)}")?
+  println("year 9999 end {iso(253_402_300_799_999, 0)}")?
+  println("today {iso(1_791_170_989_566, 0)}")?
+  // Every `Int` is an instant, the least and the greatest included.
+  println("least {iso(-9_223_372_036_854_775_807 - 1, 0)}")?
+  println("greatest {iso(9_223_372_036_854_775_807, 0)}")?
+  println("least east {iso(-9_223_372_036_854_775_807 - 1, 1439)}")?
+  println("greatest west {iso(9_223_372_036_854_775_807, -1439)}")?
+
+  // The UTC shorthand writes what `fromUnixMillis(_, 0).toIso()` writes.
+  println("formatIso {datetime.formatIso(0)} {datetime.formatIso(-1)} {datetime.formatIso(1_791_170_989_566)}")?
+  var same = 0
+  var stamp = -62_167_219_200_000
+  while stamp < 253_402_300_800_000 {
+    if datetime.formatIso(stamp) == iso(stamp, 0) {
+      same += 1
+    }
+    stamp += 9_876_543_210_987
+  }
+  println("formatIso agrees {same}")?
+
+  // Leap days.
+  println("2000-02-29 {iso(951_782_400_000, 0)}")?
+  println("2000-03-01 {iso(951_868_800_000, 0)}")?
+  println("2024-02-29 {iso(1_709_164_800_000, 0)}")?
+  println("1900-03-01 {iso(-2_203_891_200_000, 0)}")?
+
+  // Year boundaries.
+  println("new year {iso(1_767_225_599_999, 0)} {iso(1_767_225_600_000, 0)}")?
+  println("1969 to 1970 {iso(-1, 0)} {iso(0, 0)}")?
+
+  // Offsets, across the date line both ways.
+  println("tokyo {iso(1_767_193_200_000, 540)}")?
+  println(
+    "tokyo fields {fields(datetime.fromUnixMillis(1_767_193_200_000, 540))}",
+  )?
+  println("tokyo before epoch {iso(-1, 540)}")?
+  println("india west {iso(0, -330)}")?
+  println("india west fields {fields(datetime.fromUnixMillis(0, -330))}")?
+  println("widest {iso(0, 1439)} {iso(0, -1439)}")?
+  println("date {datetime.fromUnixMillis(1_791_170_989_566, 540).toIsoDate()}")?
+  println("time {datetime.fromUnixMillis(1_791_170_989_566, 540).toIsoTime()}")?
+
+  // Weekdays: 1970-01-01 was a Thursday, 2000-01-01 a Saturday.
+  println("weekday epoch {datetime.fromUnixMillis(0, 0).weekday()}")?
+  println("weekday before {datetime.fromUnixMillis(-1, 0).weekday()}")?
+  println(
+    "weekday 2000 {datetime.fromUnixMillis(946_684_800_000, 0).weekday()}",
+  )?
+  println(
+    "weekday monday {datetime.fromUnixMillis(1_791_158_400_000, 0).weekday()}",
+  )?
+
+  // The calendar.
+  println("leap 2000 {datetime.isLeapYear(2000)} 2024 {datetime.isLeapYear(2024)} 1900 {datetime.isLeapYear(1900)} 2026 {datetime.isLeapYear(2026)} 0 {datetime.isLeapYear(0)} -4 {datetime.isLeapYear(-4)} -100 {datetime.isLeapYear(-100)}")?
+  var lengths = Vector.of()
+  for month in 1..12 {
+    lengths.push("{datetime.daysInMonth(2026, month)}")
+  }
+  println("months 2026 {" ".join(lengths.freeze())}")?
+  println("february {datetime.daysInMonth(2024, 2)} {datetime.daysInMonth(1900, 2)} {datetime.daysInMonth(2000, 2)}")?
+
+  // Parsing what was written, and what RFC 3339 allows besides.
+  println(parsed("1970-01-01T00:00:00Z"))?
+  println(parsed("1970-01-01T00:00:00.000Z"))?
+  println(parsed("1969-12-31T23:59:59.999Z"))?
+  println(parsed("2026-10-05T03:29:49.566Z"))?
+  println(parsed("2026-10-05T12:29:49.566+09:00"))?
+  println(parsed("2026-10-04T22:29:49.566-05:00"))?
+  println(parsed("2026-10-05T09:29:49.566+05:30"))?
+  println(parsed("2026-10-04T21:59:49.566-05:30"))?
+  println(parsed("2026-10-05t03:29:49.566z"))?
+  println(parsed("2026-10-05 03:29:49.566Z"))?
+  println(parsed("2026-10-05T03:29:49.566-00:00"))?
+  println(parsed("2000-02-29T00:00:00Z"))?
+  println(parsed("2024-02-29T00:00:00Z"))?
+  println(parsed("0000-01-01T00:00:00Z"))?
+  println(parsed("-000001-12-31T23:59:59.999Z"))?
+  println(parsed("+010000-01-01T00:00:00Z"))?
+
+  // Fractions: one to nine digits, truncated to the millisecond.
+  println(parsed("2026-10-05T03:29:49.5Z"))?
+  println(parsed("2026-10-05T03:29:49.56Z"))?
+  println(parsed("2026-10-05T03:29:49.5669Z"))?
+  println(parsed("2026-10-05T03:29:49.566999999Z"))?
+  println(parsed("1969-12-31T23:59:59.9999Z"))?
+
+  // What is not a date-time.
+  println(parsed(""))?
+  println(parsed("yesterday"))?
+  println(parsed("2026-10-05"))?
+  println(parsed("2026-10-05T03:29:49"))?
+  println(parsed("2026-10-05T03:29:49.Z"))?
+  println(parsed("2026-10-05T03:29:49.5669999999Z"))?
+  println(parsed("2026-13-01T00:00:00Z"))?
+  println(parsed("2026-00-01T00:00:00Z"))?
+  println(parsed("2026-02-30T00:00:00Z"))?
+  println(parsed("1900-02-29T00:00:00Z"))?
+  println(parsed("2026-02-29T00:00:00Z"))?
+  println(parsed("2026-04-31T00:00:00Z"))?
+  println(parsed("2026-10-00T00:00:00Z"))?
+  println(parsed("2026-10-05T24:00:00Z"))?
+  println(parsed("2026-10-05T23:60:00Z"))?
+  println(parsed("2016-12-31T23:59:60Z"))?
+  println(parsed("2026-10-05T03:29:49+24:00"))?
+  println(parsed("2026-10-05T03:29:49+09:60"))?
+  println(parsed("2026-10-05T03:29:49+0900"))?
+  println(parsed("2026-10-05T03:29:49+9:00"))?
+  println(parsed("2026-10-05T03:29:49Zjunk"))?
+  println(parsed("2026-10-05X03:29:49Z"))?
+  println(parsed("2026/10/05T03:29:49Z"))?
+  println(parsed("26-10-05T03:29:49Z"))?
+  println(parsed("2026-1-05T03:29:49Z"))?
+  println(parsed("-000000-01-01T00:00:00Z"))?
+  println(parsed("+10000-01-01T00:00:00Z"))?
+  println(parsed("2026-10-05T03:29:49.566\u{ff21}"))?
+
+  // Fields checked by `toUnixMillis`.
+  println(instantOf(civil(2026, 10, 5, 12, 29, 49, 566, 540)))?
+  println(instantOf(civil(1969, 12, 31, 23, 59, 59, 999, 0)))?
+  println(instantOf(civil(2026, 13, 1, 0, 0, 0, 0, 0)))?
+  println(instantOf(civil(2026, 2, 29, 0, 0, 0, 0, 0)))?
+  println(instantOf(civil(2026, 1, 1, 24, 0, 0, 0, 0)))?
+  println(instantOf(civil(2026, 1, 1, 0, 60, 0, 0, 0)))?
+  println(instantOf(civil(2026, 1, 1, 0, 0, -1, 0, 0)))?
+  println(instantOf(civil(2026, 1, 1, 0, 0, 0, 1000, 0)))?
+  println(instantOf(civil(2026, 1, 1, 0, 0, 0, 0, 1440)))?
+  println("out of range written {civil(2026, 13, 1, 0, 0, 0, 0, 0).toIso()}")?
+
+  // Round trips, over a stride of instants either side of 1970 and offsets.
+  var trips = 0
+  var failed = Vector.of()
+  var millis = -62_167_219_200_000
+  while millis < 253_402_300_800_000 {
+    for offset in [0, 540, -330, 1439, -1439] {
+      if roundTrips(millis, offset) {
+        trips += 1
+      } else {
+        failed.push("{millis}@{offset}")
+      }
+    }
+    millis += 9_876_543_210_987
+  }
+  println("round trips {trips} failed [{" ".join(failed.freeze())}]")?
+  // And at both ends of `Int`, where a day's start is not an `Int`.
+  var ends = Vector.of()
+  for edge in [
+    -9_223_372_036_854_775_807 - 1,
+    -9_223_372_036_854_775_807,
+    9_223_372_036_854_775_807,
+  ] {
+    for offset in [0, 1439, -1439] {
+      let back = match datetime.fromUnixMillis(edge, offset).toUnixMillis() {
+        Ok(value) => value == edge
+        Err(_) => false
+      }
+      ends.push("{back}")
+    }
+  }
+  println("ends {" ".join(ends.freeze())}")?
+  Ok(())
+}

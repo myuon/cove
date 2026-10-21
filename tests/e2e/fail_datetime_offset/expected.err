@@ -1,0 +1,15 @@
+error[cove::runtime]: `datetime.fromUnixMillis` cannot read a clock at an offset of `1440` minutes
+ --> <e2e>/fail_datetime_offset/main.cove:8:3
+  |
+8 |   datetime.fromUnixMillis(millis, offset).toIso()
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> std/datetime.cove:173:5
+    |
+173 |     core.refuse(offsetRefused(offsetMinutes), offsetRule(), "")
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_datetime_offset/main.cove:16:11
+   |
+16 |   println(shown(0, 1440))?
+   |           ^^^^^^^^^^^^^^ called from here
+  rule: An offset is -1439 to 1439 minutes, which is every offset `±HH:MM` can write.
+1 error(s)

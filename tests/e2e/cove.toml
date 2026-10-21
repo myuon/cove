@@ -54,6 +54,18 @@ allow = ["console"]
 entry = "values_std_url.main"
 allow = ["console"]
 
+[run.values_std_datetime]
+entry = "values_std_datetime.main"
+allow = ["console"]
+
+[run.values_int_floor_div]
+entry = "values_int_floor_div.main"
+allow = ["console"]
+
+[run.fail_datetime_offset]
+entry = "fail_datetime_offset.main"
+allow = ["console"]
+
 [run.values_int_to_string_radix]
 entry = "values_int_to_string_radix.main"
 allow = ["console"]

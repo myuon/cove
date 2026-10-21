@@ -1,0 +1,18 @@
+use console.println
+use std.datetime
+
+/// `millis` at `offset` minutes east of UTC. Not the standard library: an
+/// ordinary Cove function with a caller, so that the diagnostic below has a
+/// frame to blame that is neither the entry point nor the machine.
+fn shown(millis: Int, offset: Int) -> String {
+  datetime.fromUnixMillis(millis, offset).toIso()
+}
+
+/// Pins `datetime.fromUnixMillis`' refusal of an offset `±HH:MM` cannot write,
+/// word for word (#667): the offset is the call's own argument, so the run
+/// stops through `core.refuse`, as `fail_int_to_hex_width` does for a width.
+export fn main() -> Result<Unit, Error> {
+  println(shown(0, 1439))?
+  println(shown(0, 1440))?
+  Ok(())
+}

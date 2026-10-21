@@ -172,3 +172,43 @@ fn std_url_is_lowered_only_as_far_as_a_package_reaches_it() {
         "`percentDecode` lowered though nothing reaches it: {bodies:?}"
     );
 }
+
+/// `std.datetime` is on the list too (ADR 0108): a package that does not
+/// import it has none of its bodies and no `DateTime` layout, and one that
+/// only formats has the writers and not `parseIso`.
+#[test]
+fn std_datetime_is_lowered_only_as_far_as_a_package_reaches_it() {
+    let datetime_bodies = |program: &Program| -> Vec<String> {
+        program
+            .functions
+            .iter()
+            .filter(|f| &*f.module == "std.datetime" && !f.is_stub())
+            .map(|f| f.name.to_string())
+            .collect()
+    };
+    let program = package("fn f() -> Int { 1 }");
+    assert_eq!(datetime_bodies(&program), Vec::<String>::new());
+    assert!(
+        !program
+            .layouts
+            .iter()
+            .any(|layout| layout.name.starts_with("std.datetime")),
+        "a `std.datetime` layout in a package that never imports it"
+    );
+
+    let program = package(
+        "use std.datetime\n\
+         fn f(millis: Int) -> String { datetime.fromUnixMillis(millis, 0).toIso() }",
+    );
+    let bodies = datetime_bodies(&program);
+    for name in ["fromUnixMillis", "writeDate", "appendDigits"] {
+        assert!(
+            bodies.iter().any(|body| body == name),
+            "`std.datetime.{name}` has no body: {bodies:?}"
+        );
+    }
+    assert!(
+        !bodies.iter().any(|body| body == "parseIso"),
+        "`parseIso` lowered though nothing reaches it: {bodies:?}"
+    );
+}
