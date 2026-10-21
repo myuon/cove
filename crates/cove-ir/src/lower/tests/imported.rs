@@ -132,3 +132,43 @@ fn an_html_literal_lowers_what_its_assembly_calls() {
         );
     }
 }
+
+/// `std.url` is on the same list (ADR 0107): a package that does not import
+/// it has none of its bodies and none of its layouts, and one that calls
+/// `parseForm` has what `parseForm` reaches and not `percentDecode`.
+#[test]
+fn std_url_is_lowered_only_as_far_as_a_package_reaches_it() {
+    let url_bodies = |program: &Program| -> Vec<String> {
+        program
+            .functions
+            .iter()
+            .filter(|f| &*f.module == "std.url" && !f.is_stub())
+            .map(|f| f.name.to_string())
+            .collect()
+    };
+    let program = package("fn f() -> Int { 1 }");
+    assert_eq!(url_bodies(&program), Vec::<String>::new());
+    assert!(
+        !program
+            .layouts
+            .iter()
+            .any(|layout| layout.name.starts_with("std.url")),
+        "a `std.url` layout in a package that never imports it"
+    );
+
+    let program = package(
+        "use std.url\n\
+         fn f(body: String) -> Array<String> { url.parseForm(body).all(\"tag\") }",
+    );
+    let bodies = url_bodies(&program);
+    for name in ["parseForm", "component", "unescaped"] {
+        assert!(
+            bodies.iter().any(|body| body == name),
+            "`std.url.{name}` has no body: {bodies:?}"
+        );
+    }
+    assert!(
+        !bodies.iter().any(|body| body == "percentDecode"),
+        "`percentDecode` lowered though nothing reaches it: {bodies:?}"
+    );
+}

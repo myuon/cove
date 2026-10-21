@@ -233,6 +233,18 @@ sequence, every element 0 to 255); the second replaces each ill-formed part
 with one U+FFFD, choosing the parts as the WHATWG decoder does. A `String` is
 never anything but well-formed UTF-8, so neither has a third answer.
 
+Text in a URL is the library module `std.url`, which a program has only by
+importing it ([ADR 0107](adr/0107-std-url.md)). `url.percentEncode(text)`
+writes every byte outside RFC 3986's unreserved set (`A-Z a-z 0-9 - . _ ~`)
+as `%` and two uppercase digits, so a space is `%20`; `url.percentDecode`
+reads that back, answering an `Err` that names the offset of a malformed
+escape or of escapes that are not UTF-8. `url.parseForm(body)` reads
+`application/x-www-form-urlencoded` as the WHATWG parser does — `+` is a
+space, a stray `%` is kept, bad UTF-8 is U+FFFD — and never fails. It answers
+a `url.Form` that keeps every `url.Pair` in order: `form.get(name)` is the
+first value, `form.all(name)` every one, and `form.pairs` the lot.
+`url.encodeQuery(pairs)` writes `a=1&b=x%20y`, which `parseForm` reads back.
+
 It takes the escapes a string takes and `\'` besides: `\\`, `\"`, `\'`,
 `\n`, `\t`, `\r`, `\0`, `\{`, `\}`, and `\u{...}`. `\'` is legal in a string
 too, where the apostrophe needs no escaping, because there is one escape table.

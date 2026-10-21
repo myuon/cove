@@ -50,6 +50,10 @@ allow = ["console"]
 entry = "values_string_utf8.main"
 allow = ["console"]
 
+[run.values_std_url]
+entry = "values_std_url.main"
+allow = ["console"]
+
 [run.values_int_to_string_radix]
 entry = "values_int_to_string_radix.main"
 allow = ["console"]
