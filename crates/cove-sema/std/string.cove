@@ -2436,3 +2436,208 @@ fn casedRanges() -> String {
 fn ignorableRanges() -> String {
   "00017010001>010001J010002N01000300100058010005=010005?010005D010005G02000E@60000KD02000KJ01000L402000L7010014307001:I01001:O01001<A1=001=O01001>102001>402001>701001?D01001@006001@@0;001@L01001B001001B;0E001C@01001FF08001FO0:001G:04001H?01001HA01001I@0K001M60;001O;0;001OJ01001OM010020F0H0022I0300248010024@020024G09002691J0029J010029L01002:108002:=01002:A07002;202002;A01002<101002=L01002>104002>=01002?202002?N01002@102002AL01002B102002B702002B;03002BA01002C@02002CE01002D102002EL01002F105002F702002F=01002G202002GJ06002H101002IL01002IO01002J104002J=01002JE02002K202002L201002N001002N=01003000100304010031L010031N0300326030032:040032E02003320200341010035L010035O0100366010036<02003720200380020039K02003:104003:=01003;202003<101003>:01003>B03003>F01003AA01003AD07003B609003EA01003ED09003F601003F807003HH02003IE01003IG01003II01003KA0>003L005003L602003L=0;003LI14003N6010041=040041B060041I020041M020042H020042N030043A04004420100445020044=010044M010047L01004JM03005HB03005IB02005JB02005KB02005MD02005MG07005N601005N90;005NG01005NM010060;05006230100645020065901006900300697020069B010069I03006@G02006@K01006BF01006BH07006C001006C201006C508006CC0:006CO01006E701006E@1>006G00<006H004006ID01006IF05006IL01006J201006K;09006L002006M204006M802006M;03006O601006O802006O=01006O?030071<080071F020073H060076@030076D0=00772070077=010077D010077H020079<1O007;H01007<K35007MM01007MO03007N=03007NM03007O=03007OM020080;050080H02008140100817010081:050083005008360:0083A010083O010084@0=0086@1100;3L0200;7?0300;;?0100;;O0100;?01000;A?0100<050100<1:0400<1A0500<1K0100<4I0600<7L030180E010197H06019@<01019C?04019CD0:019CO01019DL04019G@02019H012019K@01019L803019OA04019OH0201:020101:060101:0;0101:150201:1<0101:640201:700B01:7O0101:960801::70;01:<00301:=C0101:=F0401:=L0201:>?0101:?50201:A90601:AA0201:AE0201:B30101:B<0101:C@0101:CL0101:E@0101:EB0301:EG0201:EN0201:F10101:FM0101:G<0201:GC0201:GF0101:JK0501:K90301:O50101:O80101:O=0101NHN0101NMB0A01O@00@01O@C0101OA00@01OBB0101OBE0101OGO0101OH70101OH>0101OHJ0101OIN0101OJ00101OK@0101OLN0201OO30101OOI03020?M01020G001020KF05021L006021L71:021MB09022@103022@502022@<04022AH03022AO01022G5020239404023:>01023;905023;?01023E;02023F501023GJ06023J60;023L20402401010241H0?0243@010243C020243O030245C040245I020245M0102462010246=01024800302497050249=08024;C01024<002024=F09024>904024>?01024A?03024AD01024AF02024AN01024B101024FO01024G308024H002024IK02024J001024K607024K@05024MK06024N>01024N@01024NB01024O1020251H08025220302526010252N010255C060255J010255O020256202025=B04025=L02025=O02025>L02025AC08025AM01025AO02025E;01025E=01025E@06025EG01025HM01025HO01025I204025I7050261?090261I020269K020269N01026:301026>D04026>J02026?001026@10:026AC06026AK04026B701026BA06026BI03026D:0=026DH02026K001026K203026K6010271@070271H060271O010274B0F0275:070275B020275E020279A060279J010279L020279O07027:701027<@02027<E01027<G01027>I01027GC02027H002027IF05027J001027J201027JJ0102=1@0A02=270?02H8N0<02H9=0302JG@0502JI@0702JJ00402K:00302K;;0202KJ?0102KL?0A02KO00202KO30202KOB0203;O@0403;OE0703;OM0203?4M0203?500403CH01>03CI@0G03D;70303D;C0@03D<50703D=:0403DB20303F@01G03FAK1B03FCE0103FD40103FDK0503FE10?03H000703H080A03H0K0703H130203H160503H1@1N03H4?0103H9@0>03HE>0103HG<0403I7;0503I?>0203IG30103IG60103IG>0203IGE0103IGO0103J6@0703J:40803LOK050L001010L010300L0807@"
 }
+
+/// The bytes of this string's UTF-8 encoding, in order, each `0` through `255`.
+///
+/// A `String` *is* its UTF-8 encoding — valid and in shortest form, because
+/// nothing makes one from anything else — so this decodes nothing and checks
+/// nothing: it is [`byteLength`] loads of `byteAt`, one per element, each
+/// appended by ADR 0062's ensure, store and commit — the index is the
+/// vector's own length, which is the only write a reservation admits — into
+/// an array allocated once at exactly that length. `"é".toUtf8()` is
+/// `[195, 169]`, and `String.fromUtf8(text.toUtf8())` is `Ok(text)` for every
+/// `text` there is.
+///
+/// Before this, a program that had a `String` and wanted its bytes wrote this
+/// loop itself over `byteAt`; the inverse, below, it wrote wrongly (#646).
+export fn toUtf8(text: String) -> Array<Int> {
+  let length = core.byteLength(text)
+  let out: Vector<Int> = core.vectorWithCapacity(length)
+  var at = 0
+  while at < length {
+    let byte = text.byteAt(at)
+    let index = core.vectorLength(out)
+    core.vectorEnsure(out, 1)
+    core.vectorStore(out, index, byte)
+    core.vectorCommit(out, 1)
+    at += 1
+  }
+  return core.vectorFinish(out)
+}
+
+/// The `String` whose UTF-8 encoding is `bytes`, or an `Error` saying where
+/// `bytes` stops being UTF-8.
+///
+/// **Well-formed means Unicode's definition, Table 3-7 of §3.9, and nothing
+/// looser.** Every element is a byte, `0` through `255`, and the bytes are a
+/// sequence of shortest-form encodings of scalar values. So an overlong form
+/// is refused — `[192, 128]` and `[224, 128, 128]` both spell U+0000 the long
+/// way — as are a surrogate half (`[237, 160, 128]`, U+D800), anything past
+/// U+10FFFF (`[244, 144, 128, 128]`), a continuation byte with no lead, a lead
+/// with too few continuations, and a value outside `0` through `255`. The
+/// answer, when there is one, holds exactly `bytes`: `fromUtf8(b)` is
+/// `Ok(text)` only where `text.toUtf8() == b`.
+///
+/// The `Err`'s message names the byte offset at which the first ill-formed
+/// sequence begins, and says so differently when the element there is not a
+/// byte at all. It is an `Err` and not a refusal for `fromCodePoint`'s
+/// reason: bytes that are not UTF-8 are data that arrived wrong, not a call
+/// the program got wrong.
+///
+/// [`fromUtf8Lossy`] is the reading that never fails. Both are one pass of
+/// [`decodeInto`] over one buffer allocated at `bytes.length()`, so text that
+/// is valid costs one append a byte and no `String` per character.
+export fn fromUtf8(bytes: Array<Int>) -> Result<String, Error> {
+  let buffer = core.bytesAllocate(core.arrayLength(bytes))
+  let bad = decodeInto(bytes, buffer, true)
+  if bad >= 0 {
+    return refuseUtf8(bytes, bad)
+  }
+  return Ok(core.bytesFinish(buffer))
+}
+
+/// `bytes` read as UTF-8, with each ill-formed part replaced by U+FFFD.
+///
+/// **Which bytes one U+FFFD stands for is the WHATWG Encoding Standard's
+/// decoder, which is Unicode's "maximal subpart" practice (§3.9, U+FFFD
+/// Substitution of Maximal Subparts)**: a lead byte and as many of the
+/// continuations that could still have completed it as are present become
+/// one U+FFFD, and the byte that showed it would not be completed is read
+/// again as the start of what follows. So `[225, 128, 65]` is `"\u{FFFD}A"`
+/// — a truncated three-byte form, then the `A` that cut it short — and
+/// `[224, 128, 128]`, an overlong U+0000, is three U+FFFDs, because `128`
+/// cannot follow `224` at all and each of the three bytes is a maximal
+/// subpart of length one. That is what browsers, Rust's
+/// `String::from_utf8_lossy` and Python's `errors="replace"` answer, so text
+/// decoded here is replaced where every other reader would replace it.
+///
+/// An element outside `0` through `255` is not a byte, and is one U+FFFD of
+/// its own. Well-formed input answers exactly what [`fromUtf8`] answers.
+export fn fromUtf8Lossy(bytes: Array<Int>) -> String {
+  let buffer = core.bytesAllocate(core.arrayLength(bytes))
+  let ignored = decodeInto(bytes, buffer, false)
+  return core.bytesFinish(buffer)
+}
+
+/// Decodes `bytes` as UTF-8 onto the end of `buffer`, and answers `-1`, or —
+/// when `strict` — stops at the first ill-formed sequence and answers the
+/// offset it begins at.
+///
+/// The decoder is the WHATWG Encoding Standard's, transcribed: `needed`
+/// continuation bytes are still to come, `seen` of them have, and `lower` and
+/// `upper` bound the next one. The bounds are what make the check exact
+/// rather than a lead-byte table. After `E0` the next byte is at least `A0`,
+/// or the form is overlong; after `ED` at most `9F`, or it is a surrogate;
+/// after `F0` at least `90`, or overlong; after `F4` at most `8F`, or past
+/// U+10FFFF; and `C0`, `C1` and `F5` upward lead nothing. The minicloud
+/// copies this replaces (#646) checked only the lead, which is why every one
+/// of them read `E0 80 80` as U+0000.
+///
+/// **A byte outside the bounds is not consumed by the sequence it broke.**
+/// The sequence so far is the ill-formed part, and the byte is read again as
+/// a lead — the WHATWG decoder's "prepend to the stream" — which here is the
+/// `needed > 0` arm falling through into the lead arm rather than
+/// `continue`-ing. Nothing is ever read twice from `bytes`.
+///
+/// A sequence that completes is written by [`writePoint`] from the code point
+/// it accumulated, which is the same bytes it was read from: a well-formed
+/// sequence is the one encoding of its scalar. So a valid input is appended
+/// to `buffer` byte for byte, and `core.bytesFinish`'s validation, which runs
+/// after this, can only agree.
+fn decodeInto(bytes: Array<Int>, buffer: ByteBuffer, strict: Bool) -> Int {
+  var point = 0
+  var needed = 0
+  var seen = 0
+  var lower = 128
+  var upper = 191
+  var start = 0
+  var at = 0
+  for byte in bytes {
+    if needed > 0 {
+      if byte >= lower {
+        if byte <= upper {
+          lower = 128
+          upper = 191
+          point = point * 64 + byte - 128
+          seen += 1
+          if seen == needed {
+            writePoint(buffer, point)
+            needed = 0
+          }
+          at += 1
+          continue
+        }
+      }
+      if strict {
+        return start
+      }
+      writeReplacement(buffer)
+      needed = 0
+      lower = 128
+      upper = 191
+    }
+    start = at
+    seen = 0
+    if byte >= 0 && byte < 128 {
+      appendUtf8Byte(buffer, byte)
+    } else if byte >= 194 && byte < 224 {
+      needed = 1
+      point = byte - 192
+    } else if byte >= 224 && byte < 240 {
+      if byte == 224 {
+        lower = 160
+      }
+      if byte == 237 {
+        upper = 159
+      }
+      needed = 2
+      point = byte - 224
+    } else if byte >= 240 && byte < 245 {
+      if byte == 240 {
+        lower = 144
+      }
+      if byte == 244 {
+        upper = 143
+      }
+      needed = 3
+      point = byte - 240
+    } else {
+      if strict {
+        return at
+      }
+      writeReplacement(buffer)
+    }
+    at += 1
+  }
+  if needed > 0 {
+    if strict {
+      return start
+    }
+    writeReplacement(buffer)
+  }
+  return -1
+}
+
+/// Appends U+FFFD REPLACEMENT CHARACTER, `EF BF BD`, to `buffer`.
+fn writeReplacement(buffer: ByteBuffer) {
+  appendUtf8Byte(buffer, 239)
+  appendUtf8Byte(buffer, 191)
+  appendUtf8Byte(buffer, 189)
+}
+
+/// The `Err` [`fromUtf8`] answers for `bytes`, whose first ill-formed sequence
+/// [`decodeInto`] found at offset `at`.
+///
+/// A function of its own for [`refuseRange`]'s reason: the path that succeeds
+/// carries no interpolation.
+fn refuseUtf8(bytes: Array<Int>, at: Int) -> Result<String, Error> {
+  match bytes.get(at) {
+    Some(value) => {
+      if value < 0 || value > 255 {
+        return Err(Error("`{value}` at offset {at} is not a byte, so these bytes are not UTF-8"))
+      }
+    }
+    None => { }
+  }
+  return Err(Error("these bytes are not UTF-8 from offset {at}"))
+}

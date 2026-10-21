@@ -337,6 +337,21 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "String",
+        name: "fromUtf8",
+        body: "  String.fromUtf8([104, 105]).unwrapOr(\"\").length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "fromUtf8Lossy",
+        body: "  String.fromUtf8Lossy([104, 255]).length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "toUtf8",
+        body: "  let text = \"h\u{e9}\"\n  text.toUtf8().length()",
+    },
+    Exercise {
+        ty: "String",
         name: "split",
         body: "  let text = \"a,b\"\n  text.split(\",\").length()",
     },
@@ -494,6 +509,16 @@ static EXERCISES: &[Exercise] = &[
         ty: "Int",
         name: "abs",
         body: "  let count = -7\n  count.abs()",
+    },
+    Exercise {
+        ty: "Int",
+        name: "toStringRadix",
+        body: "  let count = 255\n  count.toStringRadix(16).length()",
+    },
+    Exercise {
+        ty: "Int",
+        name: "toHex",
+        body: "  let count = 10\n  count.toHex(2).length()",
     },
     Exercise {
         ty: "Int",

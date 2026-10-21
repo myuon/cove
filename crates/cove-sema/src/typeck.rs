@@ -12700,7 +12700,7 @@ fn run() -> Counter {
             "`String` has `length`, `isEmpty`, `words`, `chars`, `split`, `join`, `slice`, \
              `trim`, `contains`, `startsWith`, `endsWith`, `indexOf`, `replace`, `toUpper`, \
              `toLower`, `byteLength`, `byteAt`, `codePointAtByte`, `sliceBytes`, \
-             `snapshot`"
+             `toUtf8`, `snapshot`"
         );
     }
 
@@ -12737,7 +12737,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Vector.filled`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
+            "A builtin type's associated functions are `Vector.of`, `Vector.filled`, `Map.of`, `Set.of`, `String.fromCodePoint`, `String.fromUtf8`, `String.fromUtf8Lossy`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
         );
     }
 

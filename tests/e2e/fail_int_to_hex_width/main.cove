@@ -1,0 +1,16 @@
+use console.println
+
+/// `value` in hexadecimal, at least `width` digits. Not the standard library:
+/// an ordinary Cove function with a caller, so that the diagnostic below has a
+/// frame to blame that is neither the entry point nor the machine.
+fn padded(value: Int, width: Int) -> String {
+  value.toHex(width)
+}
+
+/// Pins `Int.toHex`'s refusal of a negative width, word for word (#665): a
+/// negative count of digits names no width, so the run stops through
+/// `core.refuse`, as `fail_vector_filled_negative` does for a length.
+export fn main() -> Result<Unit, Error> {
+  println("{padded(10, -1)}")?
+  Ok(())
+}

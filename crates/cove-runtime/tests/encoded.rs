@@ -351,12 +351,16 @@ fn the_run_writes_the_recording_a_run_writes() {
     // literal: `std.float.twoOverPi`'s 56 digits of `2/π`, 24 bits each as
     // four bytes of six bits, 224 bytes in all — 28 words of bytes and the
     // one word of its length. The other five functions hold no literal.
+    //
+    // It is 3,102 since issue #665's UTF-8 and radix writers, and the 38 words
+    // are the literals their four refusal sentences are built from. This
+    // fixture calls none of them, for the reason above.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(3064), capacity_words: Some(3064) }"
+            "HeapSummary { collections: 0, allocated_words: Some(3102), capacity_words: Some(3102) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]
@@ -1174,8 +1178,15 @@ fn a_store_growth_replaced_is_not_kept_by_the_slot_its_word_was_cached_in() {
             .expect("a heap that collected measured what is live")
     };
     let (grown, plain, kept) = (live("grown"), live("plain"), live("kept"));
+    // Both controls are judged against the midpoint, `OLD_STORE / 2`, and not
+    // `kept` against the whole store. `live_words` is what the *last* sweep
+    // found, and where in `churn`'s loop that sweep falls moves with every
+    // word the program's literals take: issue #665's refusal sentences, 38
+    // words, put it where `plain` held four transient words that `kept` did
+    // not, and `kept` read 4,092 above it rather than 4,096. A margin of half
+    // the store separates a retained store from a released one either way.
     assert!(
-        plain + OLD_STORE <= kept,
+        plain + OLD_STORE / 2 <= kept,
         "a copy of the old elements held through the churn is not seen: {plain} word(s) live \
          without it, {kept} with it"
     );

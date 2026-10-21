@@ -304,6 +304,15 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             // first non-generic library function that does, so whole-package
             // lowering declares it before anything else can.
             "Option",
+            // `String.toUtf8`'s `Array<Int>`, and `fromUtf8`'s and
+            // `fromUtf8Lossy`'s parameter (issue #665): the first non-generic
+            // library signature to name an array of *scalars*. It is a second
+            // `Array` row and not the one above: that row is the run of
+            // one-word references, an `Int` element is a word that is not a
+            // reference, and a layout is the words it describes. Their
+            // bindings sit between `codePointAtByte`'s and `sliceBytes`', and
+            // so does the row.
+            "Array",
             // `std.string.sliceBytes`' `Result<String, Error>`, which is a
             // **second** `Result` row and not the one above: a `Result`'s
             // layout is the words it holds, and an `Ok` that is an `Int` is a

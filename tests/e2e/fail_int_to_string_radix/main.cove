@@ -1,0 +1,16 @@
+use console.println
+
+/// `value` in `radix`. Not the standard library: an ordinary Cove function
+/// with a caller, so that the diagnostic below has a frame to blame that is
+/// neither the entry point nor the machine.
+fn written(value: Int, radix: Int) -> String {
+  value.toStringRadix(radix)
+}
+
+/// Pins `Int.toStringRadix`'s refusal of a radix outside `2..=36`, word for
+/// word (#665): the call is wrong rather than the value, so the run stops
+/// through `core.refuse`, as `fail_int_parse_radix` does for the reading.
+export fn main() -> Result<Unit, Error> {
+  println("{written(255, 1)}")?
+  Ok(())
+}
