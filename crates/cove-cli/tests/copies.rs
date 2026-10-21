@@ -2040,12 +2040,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `quote`; `std.url`'s `parseForm`, `component` and `Form.get`, as in
 /// `values_std_url`; `Option.unwrapOr`; `std.html`'s `assembled` and
 /// `Html.render`), and 12 in `std.web` itself: 2 each in `redirect` and
-/// `defaults`, which build a `Map` and the `Response` holding it to return,
-/// and 1 each in `html`, `text`, `json`, `Response.withHeader`,
-/// `Request.header`, `Request.sameOrigin`, `Request.prefix` and
+/// `typed`, which build a one-entry `Map` and return it or the `Response`
+/// holding it, and 1 each in `html`, `text`, `json`, `Response.withHeader`,
+/// `Response.withHeaders`, `Request.sameOrigin`, `Request.prefix` and
 /// `lowerByte` — a struct built to be returned, an `unwrapOr` inlined, a
 /// match arm's answer. Writing `lowerByte` as an `if` expression rather than
-/// a `return` moved nothing.
+/// a `return` moved nothing. A first version set six headers on every page
+/// and was also 52: dropping the policy headers and `redirect`'s
+/// `cache-control` changed which entries the maps hold and not how they are
+/// built; `withHeaders` added one, and `Request.header` lost its one when
+/// its fallback walk moved inside the `None` arm.
 const FORWARDABLE_COPIES: usize = 7839;
 
 #[test]

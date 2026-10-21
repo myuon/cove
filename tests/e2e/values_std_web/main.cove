@@ -58,13 +58,24 @@ export fn main() -> Result<Unit, Error> {
   shown(
     "override",
     web.html(200, html"<p>x</p>")
-      .withHeader(
-        "Content-Security-Policy",
-        "default-src 'none'; script-src 'self'",
-      )
+      .withHeader("Content-Type", "text/html")
       .withHeader("WWW-Authenticate", "Basic realm=\"x\"")
       .withHeader("cache-control", "max-age=60"),
   )?
+  // An app's own header set, in one call: every name lowercased, and the set
+  // wins over what the response already had.
+  let policy = Map.of(
+    MapEntry(key: "Content-Security-Policy", value: "default-src 'none'"),
+    MapEntry(key: "x-frame-options", value: "DENY"),
+    MapEntry(key: "Cache-Control", value: "no-store"),
+  )
+  shown(
+    "withHeaders",
+    web.text(200, "t")
+      .withHeader("cache-control", "max-age=60")
+      .withHeaders(policy),
+  )?
+  shown("withHeaders none", web.redirect("/r").withHeaders(Map.of()))?
   shown(
     "built",
     Response(status: 204, headers: Map.of(), body: "")

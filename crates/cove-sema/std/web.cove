@@ -2,14 +2,17 @@
 // reads back, the constructors every app wrote for itself, and the request
 // helpers beside them.
 //
-// Four minicloud apps each carried a `pageHeaders` — the same security policy,
-// copied — and the `htmlResponse`, `textResponse`, `jsonResponse` and
-// `redirect` over it; three carried `sameOrigin` and the mount prefix (#668).
-// This is that code taken once, and the two types it is about with it: an
-// embedder's handler contract names `std.web.Request` and `std.web.Response`
-// rather than declaring types of its own.
+// Four minicloud apps each carried an `htmlResponse`, `textResponse`,
+// `jsonResponse` and `redirect`, and three `sameOrigin` and the mount prefix
+// (#668). This module sets only the content type: the security and caching
+// headers each app put beside it differed from app to app, and are the app's
+// policy to write, with `withHeaders`. The rest is that code taken once, and
+// the two types it is about with it: an embedder's handler contract names
+// `std.web.Request` and `std.web.Response` rather than declaring types of its
+// own.
 // [ADR 0109](../../../docs/adr/0109-std-web.md) is the record of who owns the
-// types, of the headers, and of what a `Map` of headers cannot say.
+// types, of why no policy header is set here, and of what a `Map` of headers
+// cannot say.
 //
 // ```cove
 // use std.web
@@ -50,8 +53,8 @@ export struct Request {
 /// An HTTP response, as the embedder will write it.
 ///
 /// The constructors below — [`html`], [`text`], [`json`] and [`redirect`] —
-/// are the usual way to build one, and [`Response.withHeader`] adds to what
-/// they set. It is a plain struct, so `web.Response(status: 204, headers:
+/// are the usual way to build one, and [`Response.withHeader`] and
+/// [`Response.withHeaders`] add to what they set. It is a plain struct, so `web.Response(status: 204, headers:
 /// Map.of(), body: "")` is one too, with no header the program did not write.
 export struct Response {
   status: Int
@@ -140,7 +143,7 @@ impl Request {
 
 impl Response {
   /// This response with the header `name` set to `value`, replacing one of
-  /// that name already set: `web.html(200, page).withHeader("content-security-policy", "…")`.
+  /// that name already set: `web.html(200, page).withHeader("cache-control", "no-store")`.
   ///
   /// The name is lowercased first (ASCII), so it replaces a header the
   /// constructors set whatever case it is written in, and the map holds one
@@ -152,73 +155,75 @@ impl Response {
       body: self.body,
     )
   }
+
+  /// This response with every header of `headers` set, as
+  /// [`Response.withHeader`] sets one: each name lowercased, each replacing
+  /// a header of that name.
+  ///
+  /// It is how an app applies a header set of its own — its security policy,
+  /// its caching — to every answer in one call:
+  /// `web.html(200, page).withHeaders(pageHeaders())`. Where `headers` and
+  /// the response both name a header, `headers` wins.
+  export fn withHeaders(self, headers: Map<String, String>) -> Response {
+    var merged = self.headers
+    for entry in headers {
+      merged = merged.inserted(asciiLower(entry.key), entry.value)
+    }
+    Response(status: self.status, headers: merged, body: self.body)
+  }
 }
 
-/// An HTML page, `page.render()` as the body, with the default headers.
+/// An HTML page, `page.render()` as the body, with
+/// `content-type: text/html; charset=utf-8` and no other header.
+///
+/// Security and caching headers — a content security policy,
+/// `x-frame-options`, `cache-control` — are the application's policy, not
+/// this module's: add them with [`Response.withHeaders`].
 export fn html(status: Int, page: Html) -> Response {
   Response(
     status: status,
-    headers: defaults("text/html; charset=utf-8"),
+    headers: typed("text/html; charset=utf-8"),
     body: page.render(),
   )
 }
 
-/// Plain text, with the default headers: a browser shows it as text whatever
-/// it holds.
+/// Plain text, with `content-type: text/plain; charset=utf-8` and no other
+/// header.
 export fn text(status: Int, body: String) -> Response {
   Response(
     status: status,
-    headers: defaults("text/plain; charset=utf-8"),
+    headers: typed("text/plain; charset=utf-8"),
     body: body,
   )
 }
 
-/// A JSON document, `json.render(value)` and a newline, with the default
-/// headers and `content-type: application/json`.
+/// A JSON document, `json.render(value)` and a newline, with
+/// `content-type: application/json` and no other header.
 export fn json(status: Int, value: Json) -> Response {
   Response(
     status: status,
-    headers: defaults("application/json"),
+    headers: typed("application/json"),
     body: "{render(value)}\n",
   )
 }
 
-/// A `303 See Other` to `location`, with `cache-control: no-store` and no
-/// body: the answer to a form that was posted, so that reloading the page it
-/// leads to does not post it again.
+/// A `303 See Other` to `location`, with no body and no header but
+/// `location`: the answer to a form that was posted, so that reloading the
+/// page it leads to does not post it again.
 ///
 /// `location` is written as it is given; a link to the app itself starts with
 /// [`Request.prefix`].
 export fn redirect(location: String) -> Response {
   Response(
     status: 303,
-    headers: Map.of(
-      MapEntry(key: "location", value: location),
-      MapEntry(key: "cache-control", value: "no-store"),
-    ),
+    headers: Map.of(MapEntry(key: "location", value: location)),
     body: "",
   )
 }
 
-/// The headers [`html`], [`text`] and [`json`] set: the content type, and a
-/// policy that lets a page load its own stylesheet, images and form targets
-/// and nothing else — no script at all, inline or not, no framing, no
-/// sniffing, no caching, and no referrer to another site.
-///
-/// A page with a script of its own replaces the policy with
-/// [`Response.withHeader`]; one that may be cached replaces `cache-control`.
-fn defaults(contentType: String) -> Map<String, String> {
-  Map.of(
-    MapEntry(key: "content-type", value: contentType),
-    MapEntry(
-      key: "content-security-policy",
-      value: "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-    ),
-    MapEntry(key: "x-content-type-options", value: "nosniff"),
-    MapEntry(key: "x-frame-options", value: "DENY"),
-    MapEntry(key: "referrer-policy", value: "same-origin"),
-    MapEntry(key: "cache-control", value: "no-store"),
-  )
+/// The one header [`html`], [`text`] and [`json`] set.
+fn typed(contentType: String) -> Map<String, String> {
+  Map.of(MapEntry(key: "content-type", value: contentType))
 }
 
 /// Whether `a` and `b` are the same text with ASCII letters compared without

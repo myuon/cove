@@ -273,14 +273,14 @@ web.Request) -> web.Response`: `web.Request` is `method`, `path`, `query`,
 lowercase, and `web.Response` is `status`, `headers` and `body`. The embedder
 builds a `std.web.Request` value and reads the `std.web.Response` back by
 field name. `web.html(status, page)`, `web.text(status, body)` and
-`web.json(status, value)` build a response with its content type and a
-default set of security headers — a `content-security-policy` that allows no
-script and only the site's own styles, images and form targets,
-`x-content-type-options: nosniff`, `x-frame-options: DENY`,
-`referrer-policy: same-origin` and `cache-control: no-store` — and
-`web.redirect(location)` is a `303 See Other` with `cache-control: no-store`.
-`response.withHeader(name, value)` sets one header, replacing one of that
-name; the name is lowercased. On a request, `request.header(name)` reads a
+`web.json(status, value)` build a response with its `content-type` and no
+other header, and `web.redirect(location)` is a `303 See Other` with
+`location` and no other: security and caching headers — a content security
+policy, `x-frame-options`, `cache-control` — are the application's policy,
+and the module sets none. `response.withHeader(name, value)` sets one header,
+replacing one of that name, and `response.withHeaders(map)` sets every header
+of a map, which is how an app applies its own header set in one call; names
+are lowercased. On a request, `request.header(name)` reads a
 header in any case, `request.form()` is the body through `url.parseForm`,
 `request.sameOrigin()` asks `sec-fetch-site` and then `origin` whether a
 request came from the site's own pages, and `request.prefix()` is the mount

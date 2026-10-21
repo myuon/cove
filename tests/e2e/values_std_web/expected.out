@@ -1,42 +1,31 @@
 html: 200
-  cache-control: no-store
-  content-security-policy: default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
   content-type: text/html; charset=utf-8
-  referrer-policy: same-origin
-  x-content-type-options: nosniff
-  x-frame-options: DENY
   [<p>&lt;b&gt;&amp;</p>]
 text: 404
-  cache-control: no-store
-  content-security-policy: default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
   content-type: text/plain; charset=utf-8
-  referrer-policy: same-origin
-  x-content-type-options: nosniff
-  x-frame-options: DENY
   [nothing here
 ]
 json: 201
-  cache-control: no-store
-  content-security-policy: default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
   content-type: application/json
-  referrer-policy: same-origin
-  x-content-type-options: nosniff
-  x-frame-options: DENY
   [{"id":7,"tag":"a\"b"}
 ]
 redirect: 303
-  cache-control: no-store
   location: /base/next?x=1
   []
 override: 200
   cache-control: max-age=60
-  content-security-policy: default-src 'none'; script-src 'self'
-  content-type: text/html; charset=utf-8
-  referrer-policy: same-origin
+  content-type: text/html
   www-authenticate: Basic realm="x"
-  x-content-type-options: nosniff
-  x-frame-options: DENY
   [<p>x</p>]
+withHeaders: 200
+  cache-control: no-store
+  content-security-policy: default-src 'none'
+  content-type: text/plain; charset=utf-8
+  x-frame-options: DENY
+  [t]
+withHeaders none: 303
+  location: /r
+  []
 built: 204
   x-trace: on
   []

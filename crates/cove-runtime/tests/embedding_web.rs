@@ -16,7 +16,8 @@
 //!
 //! - a request the host built reaches the handler and its headers are read
 //!   in any case; the response comes back as a `std.web.Response` whose
-//!   fields, including the default security headers, are read by name;
+//!   fields are read by name, and carry the content type and what the
+//!   handler added — no header `std.web` chose as policy;
 //! - a request built under the old host type's name, `web.Request`, is
 //!   refused before anything runs, naming the type it should have been —
 //!   the one mistake an embedder migrating from a host type will make;
@@ -194,32 +195,16 @@ fn an_embedder_builds_a_std_web_request_and_reads_the_response() {
         assert_eq!(status, 200, "{backend:?}");
         assert_eq!(body, "<p>/a/b for curl/8</p>", "{backend:?}");
         assert_eq!(
-            headers.get("content-type").map(String::as_str),
-            Some("text/html; charset=utf-8"),
-            "{backend:?}"
-        );
-        assert_eq!(
-            headers.get("x-handled-by").map(String::as_str),
-            Some("cove"),
-            "{backend:?}: `withHeader` lowercases the name it sets"
-        );
-        for (name, value) in [
-            ("x-content-type-options", "nosniff"),
-            ("x-frame-options", "DENY"),
-            ("referrer-policy", "same-origin"),
-            ("cache-control", "no-store"),
-        ] {
-            assert_eq!(
-                headers.get(name).map(String::as_str),
-                Some(value),
-                "{backend:?}: {name}"
-            );
-        }
-        assert!(
-            headers
-                .get("content-security-policy")
-                .is_some_and(|policy| policy.starts_with("default-src 'none';")),
-            "{backend:?}: {headers:?}"
+            headers,
+            BTreeMap::from([
+                (
+                    "content-type".to_string(),
+                    "text/html; charset=utf-8".to_string()
+                ),
+                ("x-handled-by".to_string(), "cove".to_string()),
+            ]),
+            "{backend:?}: the content type, the one header the handler added with its \
+             name lowercased, and no policy header std.web chose"
         );
     }
 }
@@ -241,9 +226,12 @@ fn a_posted_form_is_read_and_answered_with_a_redirect_under_the_prefix() {
         ]);
         assert_eq!(status, 303, "{backend:?}");
         assert_eq!(
-            headers.get("location").map(String::as_str),
-            Some("/hello-app/hello/J%C3%BCrgen"),
-            "{backend:?}"
+            headers,
+            BTreeMap::from([(
+                "location".to_string(),
+                "/hello-app/hello/J%C3%BCrgen".to_string()
+            )]),
+            "{backend:?}: a redirect sets `location` and nothing else"
         );
         assert_eq!(body, "", "{backend:?}");
 

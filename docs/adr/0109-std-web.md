@@ -1,4 +1,4 @@
-# ADR 0109: `std.web` owns `Request` and `Response`, and the handler plumbing over them
+# ADR 0109: `std.web` owns `Request` and `Response`; it sets only the content type
 
 - Status: Accepted
 - Date: 2026-10-21
@@ -12,8 +12,10 @@
   changes for it; that a module imported under the name of a host module
   the same module uses is refused, `cove::resolve::import_conflict`; that the
   interface is `html`, `text`, `json`, `redirect`, `Response.withHeader`,
-  `Request.header`, `Request.form`, `Request.sameOrigin` and
-  `Request.prefix`, with a default set of security headers; that the mount
+  `Response.withHeaders`, `Request.header`, `Request.form`,
+  `Request.sameOrigin` and `Request.prefix`; that **the constructors set only
+  the content type** (and `redirect` only `location`), because security and
+  caching headers are application policy; that the mount
   prefix is a helper that reads `x-forwarded-prefix`, not a field; and that
   there are no status constants. Recorded for
   [issue #668](https://github.com/myuon/cove/issues/668)
@@ -55,9 +57,10 @@ in `crates/minicloud/src/hosts.rs` with two types and no operations:
 | webhooks | `default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` — a script, no images | `same-origin` | `no-store` |
 | algo | `default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` | **`no-referrer`** | `no-store` |
 
-So they are one policy with each app's exceptions written into its copy,
-which is the case for a default that an app overrides rather than for four
-copies.
+So there is no one policy to take: each app chose its own script, image,
+referrer and caching rules for the pages it serves, and two of the four
+would have had to override any default the library picked. That is the
+evidence for §4.
 
 The `sameOrigin`s differ by one detail: webhooks compares `origin` against
 `{scheme}://{host}` with `host` defaulting to `localhost`, admin and ledger
@@ -170,12 +173,13 @@ works whether or not the host module is still registered.
 ### 3. The interface
 
 ```cove
-web.html(status: Int, page: Html) -> Response       // page.render(), the defaults
-web.text(status: Int, body: String) -> Response     // text/plain; charset=utf-8, the defaults
-web.json(status: Int, value: Json) -> Response      // json.render(value) + "\n", the defaults
-web.redirect(location: String) -> Response          // 303, location, cache-control: no-store
+web.html(status: Int, page: Html) -> Response       // page.render(); content-type text/html; charset=utf-8
+web.text(status: Int, body: String) -> Response     // content-type text/plain; charset=utf-8
+web.json(status: Int, value: Json) -> Response      // json.render(value) + "\n"; content-type application/json
+web.redirect(location: String) -> Response          // 303 and location, nothing else
 
 response.withHeader(name: String, value: String) -> Response
+response.withHeaders(headers: Map<String, String>) -> Response
 
 request.header(name: String) -> Option<String>      // any case
 request.form() -> url.Form                          // url.parseForm(request.body)
@@ -185,14 +189,17 @@ request.prefix() -> String                          // x-forwarded-prefix, or ""
 
 `json` takes a `std.json` value rather than a rendered `String`, as the issue
 asked: the two copies' callers rendered just before calling. It writes the
-newline after the document both copies wrote. `redirect` sets exactly what
-the two copies did and nothing else; a `303` has no body to protect.
+newline after the document both copies wrote. `redirect` sets the status
+and `location`; the copies' `cache-control: no-store` is policy (§4).
 
 `withHeader` lowercases the name (ASCII) and replaces a header of that name,
-so `withHeader("Content-Security-Policy", …)` replaces the default and the
-map keeps one spelling of each. It is the one way to add or override, and it
-reads as a chain on the constructor: admin's `401` is
+so the map keeps one spelling of each, and it reads as a chain on the
+constructor: admin's `401` is
 `web.text(401, …).withHeader("www-authenticate", "Basic realm=…")`.
+`withHeaders(map)` is the same for every entry of a map, the map winning
+where both name a header, so an app keeps its own header set in one place
+and applies it in one call: `web.html(200, page).withHeaders(pageHeaders())`.
+It is a loop of `withHeader`'s insert, and cheap enough to have.
 
 `header` is the case-insensitive lookup HTTP asks for, comparing ASCII
 letters only — a Unicode case fold would match `"\u{212A}ey"`, with a KELVIN
@@ -212,28 +219,29 @@ not from a browser and is admitted. It differs from webhooks' copy in one
 case: an `origin` with no `host`, or an empty one, is refused rather than
 compared with `localhost` or with `http://`.
 
-### 4. The default headers, and why there is no script in them
+### 4. The constructors set only the content type
 
-`html`, `text` and `json` set the content type and:
+`html`, `text` and `json` set `content-type` and nothing else; `redirect`
+sets `location` and nothing else. **No content security policy,
+`x-content-type-options`, `x-frame-options`, `referrer-policy` or
+`cache-control`** is set by the library.
 
-```text
-content-security-policy: default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
-x-content-type-options:  nosniff
-x-frame-options:         DENY
-referrer-policy:         same-origin
-cache-control:           no-store
-```
+These headers are the application's policy, not a library's. The table in
+the Context is the evidence: four apps, three content security policies,
+two referrer policies, and one app that set no `cache-control` at all.
+Each of them was right for the pages it served — a policy says which
+scripts, images and connections a page may use, and whether it may be
+cached, and only the app knows. A default chosen here would be one of the
+four, wrong for the others, and invisible at the call site, so an app that
+read `web.html(200, page)` could not tell what policy it was sending; one
+that forgot to override it would send the wrong one silently.
 
-The policy is admin's and ledger's, the strictest of the four that still
-serves a page with a stylesheet and an image of its own: **no script, inline
-or from anywhere**. A default should be the policy an app has to loosen, not
-one it has to remember to tighten, and two of the four apps run no script.
-Webhooks and algo, which do, replace it with `withHeader`. Ledger, which set
-no `cache-control`, gets `no-store`; a page that may be cached says so.
+So an app writes its own set once — the `pageHeaders` it already has, less
+the content type — and applies it with `withHeaders`. What the library
+removes is the copying of the constructors, not the decision.
 
-They are the same on every constructor, `json` and `text` included, because
-the copies did that and a header that costs nothing on a non-page response
-is not worth a second policy to describe.
+A first draft of this ADR set admin's and ledger's set as a default on every
+constructor; @myuon decided on review that std.web must not impose it.
 
 ### 5. The mount prefix is a helper that names the header
 
@@ -294,9 +302,10 @@ renderer (`crates/cove-ir/src/lower/tests/imported.rs`). It binds nothing in
 - minicloud can delete its `web` host module. Its `request_value` names
   `std.web.Request` instead of `web.Request`, and `response_of` is
   unchanged. Each app replaces `use web` with `use std.web`; the copies of
-  `pageHeaders`, `htmlResponse`, `textResponse`, `jsonResponse`,
-  `redirect`, `text`, `sameOrigin` and `base` go, webhooks and algo add a
-  `withHeader` for their script policy, and algo one for `no-referrer`.
+  `htmlResponse`, `textResponse`, `jsonResponse`, `redirect`, `text`,
+  `sameOrigin` and `base` go. Each app keeps its `pageHeaders`, without the
+  content type, and applies it with `withHeaders`; admin and webhooks add
+  `cache-control: no-store` to their redirects the same way.
   `jsonResponse(status, body)` callers pass the `Json` they were rendering.
   An app that writes both `use web` and `use std.web` during the change is
   told so (§2).

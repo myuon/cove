@@ -215,7 +215,7 @@ fn std_datetime_is_lowered_only_as_far_as_a_package_reaches_it() {
 
 /// `std.web` is on the list as well (ADR 0109): a package that does not
 /// import it has none of its bodies and no `Request` or `Response` layout, and
-/// a handler that only answers text has `text` and the headers it sets, and
+/// a handler that only answers text has `text` and the header it sets, and
 /// neither `json`'s renderer nor `std.url`'s form reader.
 #[test]
 fn std_web_is_lowered_only_as_far_as_a_package_reaches_it() {
@@ -242,7 +242,7 @@ fn std_web_is_lowered_only_as_far_as_a_package_reaches_it() {
          fn f(request: web.Request) -> web.Response { web.text(200, request.path) }",
     );
     let bodies = bodies_of(&program, "std.web");
-    for name in ["text", "defaults"] {
+    for name in ["text", "typed"] {
         assert!(
             bodies.iter().any(|body| body == name),
             "`std.web.{name}` has no body: {bodies:?}"
