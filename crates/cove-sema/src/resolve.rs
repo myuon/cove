@@ -1332,6 +1332,10 @@ fn resolve_uses(
     let mut uses = ModuleUses::default();
     let mut bound: BTreeMap<String, (Bound, Span)> = BTreeMap::new();
     let own = surfaces.get(name);
+    // The first `use` of each host module and of each whole module, by the
+    // name a qualified call is written with, for [`host_and_module`].
+    let mut host_spans: BTreeMap<String, Span> = BTreeMap::new();
+    let mut module_spans: BTreeMap<String, (String, Span)> = BTreeMap::new();
 
     for unit in &module.units {
         for use_decl in &unit.ast.uses {
@@ -1359,6 +1363,9 @@ fn resolve_uses(
                     errors,
                 );
                 uses.module_imports.insert(last.to_string(), path.clone());
+                module_spans
+                    .entry(last.to_string())
+                    .or_insert_with(|| (path.clone(), span));
                 uses.edges.push(ImportEdge {
                     from: name.to_string(),
                     to: path,
@@ -1407,11 +1414,13 @@ fn resolve_uses(
             match segments.len() {
                 1 => {
                     warn_unchecked_host_once(&path, schemas, span, warned_hosts, warnings);
+                    host_spans.entry(path.clone()).or_insert(span);
                     uses.host_uses.insert(path);
                 }
                 2 => {
                     let host = segments[0].to_string();
                     warn_unchecked_host_once(&host, schemas, span, warned_hosts, warnings);
+                    host_spans.entry(host.clone()).or_insert(span);
                     uses.host_uses.insert(host.clone());
                     bind(
                         &mut bound,
@@ -1430,7 +1439,42 @@ fn resolve_uses(
         }
     }
 
+    for (qualifier, (module, span)) in &module_spans {
+        if let Some(host_span) = host_spans.get(qualifier) {
+            errors.push(host_and_module(qualifier, module, *span, *host_span));
+        }
+    }
+
     uses
+}
+
+/// Refuses a module imported under the name of a host module the same module
+/// also uses: `use std.web` beside `use web`.
+///
+/// Both would be written `web.` in a qualified call, and the checker asks the
+/// host first, so every call into the imported module would be checked as a
+/// host operation — "host module `web` has no operation `text`" — while a
+/// qualified *type* went the other way and found the module (ADR 0108 §2).
+/// [`bind`] does not see it, because a host module's `use` binds no name of
+/// its own, and [`shadowed_host`] does not, because the module's name is
+/// `std.web` and not `web`. So it is refused here, once per name and module,
+/// at the module's `use` (ADR 0109).
+fn host_and_module(qualifier: &str, module: &str, span: Span, host_span: Span) -> Diagnostic {
+    Diagnostic::error(
+        "cove::resolve::import_conflict",
+        format!(
+            "`{qualifier}` is imported from both the host module `{qualifier}` and the module `{module}`"
+        ),
+    )
+    .at(span)
+    .label(
+        host_span,
+        format!("the host module `{qualifier}` is used here"),
+    )
+    .rule("A `use` name must resolve to exactly one declaration or host module.")
+    .help(format!(
+        "drop one of the two `use` declarations; a module that needs both reaches the other one's items by importing them by name, as `use {module}.<name>`"
+    ))
 }
 
 /// Records that `use` binds `name` in the importing module, reporting a name
@@ -4914,6 +4958,48 @@ impl Show for B {
             "cove::resolve::import_conflict",
         );
         assert!(diagnostic.message.contains("both"));
+    }
+
+    /// A module imported under the name of a host module the same module
+    /// uses would have every qualified call checked against the host
+    /// (ADR 0108 §2), so the two `use`s are refused together (ADR 0109) —
+    /// whether the host is named alone or through one of its operations, and
+    /// in either order.
+    #[test]
+    fn a_module_imported_under_a_host_modules_name_is_rejected_beside_it() {
+        let lib = (
+            "lib.console",
+            "/// Says hello.\nexport fn hello() -> String {\n  \"hi\"\n}\n",
+        );
+        for app in [
+            "use console\nuse lib.console\n",
+            "use lib.console\nuse console\n",
+            "use console.println\nuse lib.console\n",
+        ] {
+            let diagnostic = resolve_err(&[lib, ("app", app)], "cove::resolve::import_conflict");
+            assert_eq!(
+                diagnostic.message,
+                "`console` is imported from both the host module `console` and the module `lib.console`",
+                "{app:?}"
+            );
+            assert!(
+                diagnostic
+                    .help
+                    .as_deref()
+                    .unwrap()
+                    .contains("use lib.console.<name>"),
+                "{app:?}"
+            );
+        }
+        // Either alone is fine, and so is an item of the module beside the host.
+        resolve_ok(&[lib, ("app", "use lib.console\n")]);
+        resolve_ok(&[lib, ("app", "use lib.console.hello\nuse console\n")]);
+        // Two modules of one package keep their own `use`s.
+        resolve_ok(&[
+            lib,
+            ("app", "use lib.console\n"),
+            ("other", "use console\n"),
+        ]);
     }
 
     #[test]

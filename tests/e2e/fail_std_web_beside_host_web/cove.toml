@@ -1,0 +1,3 @@
+[run.fail_std_web_beside_host_web]
+entry = "main.main"
+allow = ["console"]

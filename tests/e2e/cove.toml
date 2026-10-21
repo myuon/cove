@@ -58,6 +58,10 @@ allow = ["console"]
 entry = "values_std_datetime.main"
 allow = ["console"]
 
+[run.values_std_web]
+entry = "values_std_web.main"
+allow = ["console"]
+
 [run.values_int_floor_div]
 entry = "values_int_floor_div.main"
 allow = ["console"]

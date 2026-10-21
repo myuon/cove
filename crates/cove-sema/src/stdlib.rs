@@ -196,6 +196,17 @@ static SOURCES: &[StdSource] = &[
         path: "std/datetime.cove",
         text: include_str!("../std/datetime.cove"),
     },
+    // The fifth library on [`IMPORTED`]: HTTP for a handler (ADR 0109). It
+    // declares the `Request` and `Response` an embedder's handler contract
+    // names — `std.web.Request` in, `std.web.Response` out — and the
+    // constructors and request helpers over them. It binds nothing in
+    // `cove_schema::builtins::STANDARD_LIBRARY`; it reads forms through
+    // `std.url` and renders through `std.html` and `std.json`.
+    StdSource {
+        module: "std.web",
+        path: "std/web.cove",
+        text: include_str!("../std/web.cove"),
+    },
 ];
 
 /// The embedded text of the standard-library file [`attach`] adds as `path`,
@@ -265,7 +276,7 @@ pub fn is_library_module(module: &str) -> bool {
 /// and it stays here: the lowering's call is a round's `wanted` like any call
 /// the graph did not draw, and adds the module's functions only to a package
 /// that holds such a literal.
-const IMPORTED: &[&str] = &["std.json", "std.html", "std.url", "std.datetime"];
+const IMPORTED: &[&str] = &["std.json", "std.html", "std.url", "std.datetime", "std.web"];
 
 /// A string-literal tag: the module that gives `tag"…"` its meaning, and the
 /// functions of that module the lowering assembles one with.

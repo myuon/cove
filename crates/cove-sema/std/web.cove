@@ -1,0 +1,277 @@
+// HTTP for a handler: the `Request` an embedder hands in, the `Response` it
+// reads back, the constructors every app wrote for itself, and the request
+// helpers beside them.
+//
+// Four minicloud apps each carried a `pageHeaders` — the same security policy,
+// copied — and the `htmlResponse`, `textResponse`, `jsonResponse` and
+// `redirect` over it; three carried `sameOrigin` and the mount prefix (#668).
+// This is that code taken once, and the two types it is about with it: an
+// embedder's handler contract names `std.web.Request` and `std.web.Response`
+// rather than declaring types of its own.
+// [ADR 0109](../../../docs/adr/0109-std-web.md) is the record of who owns the
+// types, of the headers, and of what a `Map` of headers cannot say.
+//
+// ```cove
+// use std.web
+// use std.html
+// use std.url
+//
+// export fn handle(request: web.Request) -> web.Response {
+//   if request.method == "POST" && !request.sameOrigin() {
+//     return web.text(403, "not from this site\n")
+//   }
+//   match request.form().get("name") {
+//     Some(name) => web.redirect("{request.prefix()}/hello/{url.percentEncode(name)}")
+//     None => web.html(200, html"<p>Hello from {request.path}</p>")
+//   }
+// }
+// ```
+
+use std.url
+use std.html.Html
+use std.json.Json
+use std.json.render
+
+/// An HTTP request, as the embedder read it off the wire.
+///
+/// **Header names are lowercase** and a header sent more than once is one
+/// entry, its values joined with `, ` — that is what the embedder is asked
+/// to hand over, and [`Request.header`] reads a name in any case either way.
+/// `path` is the path below where the app is mounted, starting with `/`, and
+/// `query` the decoded query pairs, the last of a repeated name kept.
+export struct Request {
+  method: String
+  path: String
+  query: Map<String, String>
+  headers: Map<String, String>
+  body: String
+}
+
+/// An HTTP response, as the embedder will write it.
+///
+/// The constructors below — [`html`], [`text`], [`json`] and [`redirect`] —
+/// are the usual way to build one, and [`Response.withHeader`] adds to what
+/// they set. It is a plain struct, so `web.Response(status: 204, headers:
+/// Map.of(), body: "")` is one too, with no header the program did not write.
+export struct Response {
+  status: Int
+  headers: Map<String, String>
+  body: String
+}
+
+impl Request {
+  /// The value of the header `name`, in any case: `header("Content-Type")`
+  /// and `header("content-type")` are the same lookup.
+  ///
+  /// HTTP header names are case-insensitive, and the comparison is ASCII
+  /// only, as a header name is. A name the map holds lowercase — which is
+  /// every name an embedder that follows [`Request`] hands over — is found
+  /// with one lookup; any other is found by walking the headers.
+  export fn header(self, name: String) -> Option<String> {
+    match self.headers.get(name) {
+      Some(value) => Some(value)
+      None => {
+        for entry in self.headers {
+          if sameAscii(entry.key, name) {
+            return Some(entry.value)
+          }
+        }
+        None
+      }
+    }
+  }
+
+  /// The body read as an `application/x-www-form-urlencoded` form, with
+  /// `url.parseForm`: every pair, in order, a repeated name kept each time.
+  ///
+  /// It reads the body whatever the method and the content type say, as the
+  /// copies it replaces did, so a body that is not a form is a form with odd
+  /// names; the query is [`Request`]'s `query`.
+  export fn form(self) -> url.Form {
+    url.parseForm(self.body)
+  }
+
+  /// Whether a request came from a page of this site, which is what a form
+  /// that changes something has to ask before a browser's stored login can
+  /// be trusted with it.
+  ///
+  /// `sec-fetch-site` decides alone when it is present: a browser sets it, a
+  /// page cannot forge it, and it is `same-origin` where `origin` would be
+  /// serialized as `null` (a form posted from a page with `Referrer-Policy:
+  /// no-referrer`). `none` — the user typed the address — is this site too.
+  /// Only without it does `origin` decide, against
+  /// `{x-forwarded-proto}://{host}`, `http` when the proxy did not say; a
+  /// `null` origin, or one with no `host` or an empty one to compare it with,
+  /// is refused. A request with neither header is not from a browser, so
+  /// there is no stored login for another site to borrow, and it answers
+  /// `true`.
+  export fn sameOrigin(self) -> Bool {
+    match self.header("sec-fetch-site") {
+      Some(site) => site == "same-origin" || site == "none"
+      None => {
+        match self.header("origin") {
+          Some(from) => {
+            match self.header("host") {
+              Some(host) => {
+                let scheme = self.header("x-forwarded-proto").unwrapOr("http")
+                host != "" && from == "{scheme}://{host}"
+              }
+              None => false
+            }
+          }
+          None => true
+        }
+      }
+    }
+  }
+
+  /// Where the app is mounted, for a link to itself: `/webhooks` for a
+  /// request that reached `/webhooks/admin` with `path` `/admin`, and `""`
+  /// when nothing said.
+  ///
+  /// It reads `x-forwarded-prefix`, which is a proxy convention and not part
+  /// of HTTP — the header Spring, Traefik and minicloud use for the path a
+  /// proxy stripped. An embedder that mounts an app under a path sets it,
+  /// replacing whatever the client sent.
+  export fn prefix(self) -> String {
+    self.header("x-forwarded-prefix").unwrapOr("")
+  }
+}
+
+impl Response {
+  /// This response with the header `name` set to `value`, replacing one of
+  /// that name already set: `web.html(200, page).withHeader("content-security-policy", "…")`.
+  ///
+  /// The name is lowercased first (ASCII), so it replaces a header the
+  /// constructors set whatever case it is written in, and the map holds one
+  /// spelling of each name.
+  export fn withHeader(self, name: String, value: String) -> Response {
+    Response(
+      status: self.status,
+      headers: self.headers.inserted(asciiLower(name), value),
+      body: self.body,
+    )
+  }
+}
+
+/// An HTML page, `page.render()` as the body, with the default headers.
+export fn html(status: Int, page: Html) -> Response {
+  Response(
+    status: status,
+    headers: defaults("text/html; charset=utf-8"),
+    body: page.render(),
+  )
+}
+
+/// Plain text, with the default headers: a browser shows it as text whatever
+/// it holds.
+export fn text(status: Int, body: String) -> Response {
+  Response(
+    status: status,
+    headers: defaults("text/plain; charset=utf-8"),
+    body: body,
+  )
+}
+
+/// A JSON document, `json.render(value)` and a newline, with the default
+/// headers and `content-type: application/json`.
+export fn json(status: Int, value: Json) -> Response {
+  Response(
+    status: status,
+    headers: defaults("application/json"),
+    body: "{render(value)}\n",
+  )
+}
+
+/// A `303 See Other` to `location`, with `cache-control: no-store` and no
+/// body: the answer to a form that was posted, so that reloading the page it
+/// leads to does not post it again.
+///
+/// `location` is written as it is given; a link to the app itself starts with
+/// [`Request.prefix`].
+export fn redirect(location: String) -> Response {
+  Response(
+    status: 303,
+    headers: Map.of(
+      MapEntry(key: "location", value: location),
+      MapEntry(key: "cache-control", value: "no-store"),
+    ),
+    body: "",
+  )
+}
+
+/// The headers [`html`], [`text`] and [`json`] set: the content type, and a
+/// policy that lets a page load its own stylesheet, images and form targets
+/// and nothing else — no script at all, inline or not, no framing, no
+/// sniffing, no caching, and no referrer to another site.
+///
+/// A page with a script of its own replaces the policy with
+/// [`Response.withHeader`]; one that may be cached replaces `cache-control`.
+fn defaults(contentType: String) -> Map<String, String> {
+  Map.of(
+    MapEntry(key: "content-type", value: contentType),
+    MapEntry(
+      key: "content-security-policy",
+      value: "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    ),
+    MapEntry(key: "x-content-type-options", value: "nosniff"),
+    MapEntry(key: "x-frame-options", value: "DENY"),
+    MapEntry(key: "referrer-policy", value: "same-origin"),
+    MapEntry(key: "cache-control", value: "no-store"),
+  )
+}
+
+/// Whether `a` and `b` are the same text with ASCII letters compared without
+/// their case: the comparison HTTP makes of two header names.
+fn sameAscii(a: String, b: String) -> Bool {
+  let end = core.byteLength(a)
+  if end != core.byteLength(b) {
+    return false
+  }
+  var at = 0
+  while at < end {
+    if lowerByte(a.byteAt(at)) != lowerByte(b.byteAt(at)) {
+      return false
+    }
+    at += 1
+  }
+  true
+}
+
+/// `text` with `A` to `Z` written `a` to `z`, and every other byte as it is;
+/// `text` itself when it has no uppercase ASCII letter.
+fn asciiLower(text: String) -> String {
+  let end = core.byteLength(text)
+  var at = 0
+  while at < end {
+    let byte = text.byteAt(at)
+    if byte >= 'A' && byte <= 'Z' {
+      break
+    }
+    at += 1
+  }
+  if at == end {
+    return text
+  }
+  let buffer = core.bytesAllocate(end)
+  var index = 0
+  while index < end {
+    // The byte first: ADR 0062's ensure, store and commit are one block, and
+    // a call inside the store would end it.
+    let byte = lowerByte(text.byteAt(index))
+    let slot = core.bytesLength(buffer)
+    core.bytesEnsure(buffer, 1)
+    core.bytesStore(buffer, slot, byte)
+    core.bytesCommit(buffer, 1)
+    index += 1
+  }
+  return core.bytesFinish(buffer)
+}
+
+/// `byte` lowercased if it is an ASCII capital, and as it is otherwise.
+fn lowerByte(byte: Int) -> Int {
+  if byte >= 'A' && byte <= 'Z' {
+    return byte + 32
+  }
+  byte
+}

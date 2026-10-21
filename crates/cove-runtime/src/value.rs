@@ -1103,7 +1103,10 @@ impl Value {
     /// `type_name` is the qualified name the declaring module gives it, such
     /// as `rules.policy.PullRequest`: that is the name every value of a
     /// declared type carries, and the name an invocation and the Host API
-    /// boundary both check against.
+    /// boundary both check against. A standard-library type is named the
+    /// same way — `std.web.Request` is what an HTTP embedder hands a handler
+    /// (ADR 0109) — and is checked against its declaration as a package's
+    /// own type is.
     ///
     /// This exists so that a host building an argument for
     /// [`Vm::invoke`](crate::Vm::invoke) does not have to name
