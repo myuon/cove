@@ -184,6 +184,18 @@ static SOURCES: &[StdSource] = &[
         path: "std/url.cove",
         text: include_str!("../std/url.cove"),
     },
+    // The fourth library on [`IMPORTED`]: an instant in Unix milliseconds read
+    // as a civil date and clock at a fixed offset, and RFC 3339 text both
+    // ways (ADR 0108). It binds nothing in
+    // `cove_schema::builtins::STANDARD_LIBRARY` either; the `Int.floorDiv`
+    // and `floorMod` it counts days with are `std.int`'s. It is not
+    // `std.time`, because a host module may be named `time` and a `use` of
+    // each in one file would leave the library's functions unreachable.
+    StdSource {
+        module: "std.datetime",
+        path: "std/datetime.cove",
+        text: include_str!("../std/datetime.cove"),
+    },
 ];
 
 /// The embedded text of the standard-library file [`attach`] adds as `path`,
@@ -253,7 +265,7 @@ pub fn is_library_module(module: &str) -> bool {
 /// and it stays here: the lowering's call is a round's `wanted` like any call
 /// the graph did not draw, and adds the module's functions only to a package
 /// that holds such a literal.
-const IMPORTED: &[&str] = &["std.json", "std.html", "std.url"];
+const IMPORTED: &[&str] = &["std.json", "std.html", "std.url", "std.datetime"];
 
 /// A string-literal tag: the module that gives `tag"…"` its meaning, and the
 /// functions of that module the lowering assembles one with.

@@ -245,6 +245,24 @@ a `url.Form` that keeps every `url.Pair` in order: `form.get(name)` is the
 first value, `form.all(name)` every one, and `form.pairs` the lot.
 `url.encodeQuery(pairs)` writes `a=1&b=x%20y`, which `parseForm` reads back.
 
+Dates and times are the library module `std.datetime`, which a program has
+only by importing it ([ADR 0108](adr/0108-std-datetime.md)).
+`datetime.fromUnixMillis(millis, offsetMinutes)` reads an instant in Unix
+milliseconds as a `datetime.DateTime` — `year`, `month` (1 to 12), `day`,
+`hour`, `minute`, `second`, `millisecond` and `offsetMinutes` — on the
+proleptic Gregorian calendar at a fixed offset east of UTC, for every `Int`,
+before 1970 as after; an offset outside -1439 to 1439 stops the run.
+`at.toUnixMillis()` is the way back, an `Err` naming the first field out of
+range. `at.toIso()` writes RFC 3339, `2026-10-05T12:29:49.566+09:00`, with
+`Z` at offset 0 and a year outside 0 to 9999 as a sign and six digits;
+`toIsoDate()` and `toIsoTime()` write the two halves, and `weekday()` is 1 for
+Monday to 7 for Sunday. `datetime.parseIso(text)` reads RFC 3339 back to
+milliseconds — an offset is required, a fraction of 1 to 9 digits is truncated
+to the millisecond — and answers an `Err` naming the byte of a malformed field
+or of a date that is not one. `datetime.daysInMonth(year, month)` and
+`datetime.isLeapYear(year)` are the calendar. There is no time-zone database,
+and the module is not `std.time`, because a host module may be called `time`.
+
 It takes the escapes a string takes and `\'` besides: `\\`, `\"`, `\'`,
 `\n`, `\t`, `\r`, `\0`, `\{`, `\}`, and `\u{...}`. `\'` is legal in a string
 too, where the apostrophe needs no escaping, because there is one escape table.
@@ -542,7 +560,9 @@ source.
   `identity is not available for <type>`.
 
 `Int` arithmetic traps rather than wrapping, and traps on division or
-remainder by zero. `Float` arithmetic is IEEE 754 and traps on nothing:
+remainder by zero. `/` rounds toward zero and `%` has the sign of its left
+operand; `Int.floorDiv` and `Int.floorMod` are the pair that round toward
+negative infinity, the remainder having the sign of the divisor. `Float` arithmetic is IEEE 754 and traps on nothing:
 `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `NaN`, and a comparison against `NaN` is
 `false`. `Duration` arithmetic traps on overflow.
 

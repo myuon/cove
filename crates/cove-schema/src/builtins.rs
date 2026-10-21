@@ -1400,6 +1400,22 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.int",
         function: "abs",
     },
+    // Division and remainder rounded toward negative infinity (#667): `/` and
+    // `%` and a correction, which every date conversion before 1970 needs.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Int",
+        method: "floorDiv",
+        module: "std.int",
+        function: "floorDiv",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Int",
+        method: "floorMod",
+        module: "std.int",
+        function: "floorMod",
+    },
     // `Int`'s first **associated** binding, and the second of any receiver:
     // it is written on the type's name rather than on a value, so
     // `cove_ir`'s `Body::call_associated` resolves it and not
@@ -4903,6 +4919,36 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             name: "abs",
             generics: &[],
             params: &[],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // The receiver divided by `by`, rounded toward negative infinity
+        // rather than toward zero as `/` is: `(-7).floorDiv(2)` is `-4`
+        // (#667). It traps where `/` does, on a zero `by` and on the least
+        // `Int` over `-1`.
+        MethodSchema {
+            name: "floorDiv",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "by",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // The remainder that goes with `floorDiv`, with the sign of `by`:
+        // `(-7).floorMod(3)` is `2`. It traps where `%` does.
+        MethodSchema {
+            name: "floorMod",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "by",
+                ty: BuiltinType::Int,
+            }],
             variadic: false,
             result: BuiltinType::Int,
             mutating: false,

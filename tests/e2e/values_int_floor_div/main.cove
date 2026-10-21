@@ -1,0 +1,51 @@
+use console.println
+
+/// `value.floorDiv(by)` and `value.floorMod(by)`, beside `/` and `%`.
+fn row(value: Int, by: Int) -> String {
+  "{value} {by}: / {value / by} % {value % by} floorDiv {value.floorDiv(by)} floorMod {value.floorMod(by)}"
+}
+
+/// Pins `Int.floorDiv` and `Int.floorMod` (#667): division rounded toward
+/// negative infinity and the remainder with the sign of the divisor, agreeing
+/// with `/` and `%` wherever the signs agree or the division is exact, and
+/// `value == value.floorDiv(by) * by + value.floorMod(by)` throughout.
+export fn main() -> Result<Unit, Error> {
+  let least = -9_223_372_036_854_775_807 - 1
+  let greatest = 9_223_372_036_854_775_807
+  for value in [7, -7, 6, -6, 0, 1, -1] {
+    for by in [2, -2, 3, -3, 1, -1] {
+      println(row(value, by))?
+    }
+  }
+  println(row(least, 2))?
+  println(row(least, -2))?
+  println(row(least, 3))?
+  println(row(least, greatest))?
+  println(row(greatest, least))?
+  println(row(greatest, -2))?
+  println(row(-1, 86_400_000))?
+  println(row(-86_400_000, 86_400_000))?
+  println(row(-86_400_001, 86_400_000))?
+  var checked = 0
+  var broken = 0
+  var value = -1000
+  while value <= 1000 {
+    for by in [1, 2, 7, 60, 1000, -1, -2, -7, -60, -1000] {
+      let q = value.floorDiv(by)
+      let r = value.floorMod(by)
+      let inRange = if by > 0 {
+        r >= 0 && r < by
+      } else {
+        r <= 0 && r > by
+      }
+      if q * by + r == value && inRange {
+        checked += 1
+      } else {
+        broken += 1
+      }
+    }
+    value += 13
+  }
+  println("identity {checked} broken {broken}")?
+  Ok(())
+}

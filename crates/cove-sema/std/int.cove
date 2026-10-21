@@ -521,3 +521,34 @@ fn renderInto(value: Int, buffer: ByteBuffer) {
   // `()` made aside and copied, which every expanded call site would keep.
   ()
 }
+
+/// The receiver divided by `by`, rounded toward negative infinity.
+///
+/// `/` rounds toward zero, so the two differ only when the signs differ and
+/// the division is not exact: `-7 / 2` is `-3` and `(-7).floorDiv(2)` is `-4`.
+/// This is the division that keeps counting in steps across zero — the day a
+/// millisecond before 1970 falls in is day `-1`, not day `0` — and it is what
+/// every hand-written date conversion needed and wrote out beside itself
+/// (issue #667). It traps exactly where `/` traps: on a zero `by`, and on the
+/// least `Int` divided by `-1`, whose answer `Int` has not got.
+export fn floorDiv(value: Int, by: Int) -> Int {
+  if value % by != 0 && (value % by < 0) != (by < 0) {
+    return value / by - 1
+  }
+  value / by
+}
+
+/// The remainder that goes with [`floorDiv`]: the receiver minus
+/// `value.floorDiv(by) * by`, which has the sign of `by`.
+///
+/// `%` answers the remainder of `/`, which has the sign of the receiver, so
+/// `-7 % 3` is `-1` and `(-7).floorMod(3)` is `2`. For a positive `by` the
+/// answer is always `0` to `by - 1`, which is what an index into a cycle — an
+/// hour of the day, a day of the week — wants. It traps exactly where `%`
+/// traps: on a zero `by`, and on the least `Int` and `-1`.
+export fn floorMod(value: Int, by: Int) -> Int {
+  if value % by != 0 && (value % by < 0) != (by < 0) {
+    return value % by + by
+  }
+  value % by
+}
