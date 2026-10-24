@@ -18,6 +18,8 @@ may not).
 and the `#[ignore]`d cases, which together are more than half of a warm
 `cargo test --workspace` and which CI runs in steps of their own.
 
+[docs/ISOLATION_TESTING.md](docs/ISOLATION_TESTING.md) is what a run after a failed one, and a run's capabilities, are tested against (ADR 0114); its known findings are `#[ignore]`d and run only with `COVE_KNOWN_FINDINGS=1`.
+
 **Never run a bare `cargo test`.** Both aliases carry `--profile checked`,
 and a direct `cargo test` — including `cargo test -p … --test …` for a single
 file — silently drops it and runs unoptimised, which on this suite costs 4x
