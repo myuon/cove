@@ -356,6 +356,72 @@ export fn keeper(n: Int) -> fn(Int) -> Int {
   }
 }
 
+/// Mints `n` tickets and redeems each, so one run is handed `n` resources.
+export fn tickets(n: Int) -> Int {
+  var total = 0
+  for i in 0..<n {
+    total += probe.redeem(probe.ticket(i))
+  }
+  total
+}
+
+/// A closure whose environment holds a closure with a ticket for `n` in
+/// its own.
+export fn nest(n: Int) -> fn(Int) -> Int {
+  let inner = keeper(n)
+  fn(x) {
+    inner(x) * 2
+  }
+}
+
+/// A closure over a vector of `n` tickets, answering the sum of what they
+/// were minted with plus `x`.
+export fn keeperOf(n: Int) -> fn(Int) -> Int {
+  var held = Vector.of(probe.ticket(0))
+  for i in 1..<n {
+    held.push(probe.ticket(i))
+  }
+  fn(x) {
+    var total = x
+    for ticket in held {
+      total += probe.redeem(ticket)
+    }
+    total
+  }
+}
+
+/// A value with a closure in it, the closure with a ticket for `n`.
+export struct Holder {
+  label: Int
+  f: fn(Int) -> Int
+}
+
+/// A `Holder` whose closure redeems a ticket for `n`.
+export fn holder(n: Int) -> Holder {
+  Holder(label: n, f: keeper(n))
+}
+
+/// Calls the closure a `Holder` holds.
+export fn applyHolder(held: Holder, x: Int) -> Int {
+  let f = held.f
+  f(x)
+}
+
+/// A closure over a cell holding a ticket for `n`: each call answers what
+/// the ticket in the cell was minted with and puts a new one, for `x`, in
+/// its place.
+export fn rotating(n: Int) -> fn(Int) -> Int {
+  let cell = Shared(probe.ticket(n))
+  fn(x) {
+    let next = probe.ticket(x)
+    cell.lock(fn(var held) {
+      let was = probe.redeem(held)
+      held = next
+      was
+    })
+  }
+}
+
 /// An entry: two host calls, for the ways in that take process arguments.
 export fn twoCalls() -> Int {
   calls(2)
@@ -1655,6 +1721,166 @@ fn a_kept_handle_still_names_its_resource_encoded() {
 #[test]
 fn a_kept_handle_still_names_its_resource_native() {
     a_kept_handle_still_names_its_resource(Tier::Native);
+}
+
+/// How many names the table may hold beyond the ones a held object reaches:
+/// a trim waits for this many new ones (`TRIM_FLOOR` in `src/vm/exec.rs`)
+/// before it walks what the embedder holds.
+const TRIM_SLACK: usize = 32;
+
+/// While the embedder holds a closure with a handle in it, the table keeps
+/// that handle's name and no other: a thousand runs each handed a new
+/// resource leave it bounded, a run handed a hundred leaves exactly the one
+/// name, the closure's handle still names its own resource, and dropping
+/// the closure empties the table (issue #694).
+fn a_held_closure_keeps_only_the_names_it_reaches(tier: Tier) {
+    on_stack(|| {
+        let world = world();
+        let mut vm = world.machine(tier, HEAP);
+        let kept = vm.invoke("app", "keeper", int_arg(100)).expect("a closure");
+        for n in 0..1_000 {
+            assert_eq!(
+                shown(&vm.invoke("app", "ticket", int_arg(n))),
+                n.to_string()
+            );
+            assert!(
+                vm.resources_held() <= 1 + TRIM_SLACK,
+                "{tier:?}: after run {n} the table holds {}",
+                vm.resources_held()
+            );
+        }
+        assert_eq!(
+            shown(&vm.invoke("app", "tickets", int_arg(100))),
+            (0..100).sum::<i64>().to_string()
+        );
+        assert_eq!(
+            vm.resources_held(),
+            1,
+            "{tier:?}: only the name the closure reaches survives the run"
+        );
+        let applied = vm.invoke("app", "apply", vec![kept.clone(), Value::int(1)]);
+        assert_eq!(shown(&applied), "101", "{tier:?}: the closure's own ticket");
+        // The closure's run was handed its own name back, not a new one.
+        assert_eq!(vm.resources_held(), 1, "{tier:?}: after the closure ran");
+
+        // A hundred handles in a vector in a closure's environment: walked
+        // at the vector's stride, every one kept.
+        let many = vm
+            .invoke("app", "keeperOf", int_arg(100))
+            .expect("a closure");
+        assert_eq!(
+            shown(&vm.invoke("app", "tickets", int_arg(100))),
+            (0..100).sum::<i64>().to_string()
+        );
+        assert_eq!(vm.resources_held(), 101, "{tier:?}: the vector's names");
+        let applied = vm.invoke("app", "apply", vec![many.clone(), Value::int(1)]);
+        assert_eq!(
+            shown(&applied),
+            (1 + (0..100).sum::<i64>()).to_string(),
+            "{tier:?}: each of the vector's tickets is its own"
+        );
+        drop(many);
+        assert_eq!(
+            shown(&vm.invoke("app", "tickets", int_arg(100))),
+            (0..100).sum::<i64>().to_string()
+        );
+        assert_eq!(vm.resources_held(), 1, "{tier:?}: the vector's names went");
+
+        drop(kept);
+        assert_eq!(shown(&vm.invoke("app", "ticket", int_arg(3))), "3");
+        assert_eq!(
+            vm.resources_held(),
+            0,
+            "{tier:?}: the first edge after the closure went empties the table"
+        );
+    });
+}
+
+#[test]
+fn a_held_closure_keeps_only_the_names_it_reaches_encoded() {
+    a_held_closure_keeps_only_the_names_it_reaches(Tier::Encoded);
+}
+
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+#[test]
+fn a_held_closure_keeps_only_the_names_it_reaches_native() {
+    a_held_closure_keeps_only_the_names_it_reaches(Tier::Native);
+}
+
+/// A handle reached through a closure inside a closure, through a closure
+/// inside a struct the embedder holds, and through a cell a closure updates
+/// on every call, each keeps its name while it is reachable and loses it
+/// when it is not — including a name the cell no longer holds, while the
+/// closure that held it is still held.
+fn a_name_is_kept_while_any_held_value_reaches_it(tier: Tier) {
+    on_stack(|| {
+        let world = world();
+        let mut vm = world.machine(tier, HEAP);
+        let sweep = |vm: &mut OwnedVm| {
+            assert_eq!(
+                shown(&vm.invoke("app", "tickets", int_arg(100))),
+                (0..100).sum::<i64>().to_string()
+            );
+            vm.resources_held()
+        };
+
+        let nested = vm.invoke("app", "nest", int_arg(7)).expect("a closure");
+        let holder = vm.invoke("app", "holder", int_arg(8)).expect("a holder");
+        let rotating = vm.invoke("app", "rotating", int_arg(9)).expect("a closure");
+        assert_eq!(sweep(&mut vm), 3, "{tier:?}: one name each");
+
+        // Each call puts a new ticket in the cell; the one it replaced is
+        // reachable from nothing.
+        for (x, was) in [(10, 9), (11, 10), (12, 11)] {
+            let called = vm.invoke("app", "apply", vec![rotating.clone(), Value::int(x)]);
+            assert_eq!(
+                shown(&called),
+                was.to_string(),
+                "{tier:?}: the cell's ticket"
+            );
+        }
+        assert_eq!(
+            sweep(&mut vm),
+            3,
+            "{tier:?}: the cell's old tickets are gone, its current one kept"
+        );
+
+        let applied = vm.invoke("app", "apply", vec![nested.clone(), Value::int(1)]);
+        assert_eq!(
+            shown(&applied),
+            "16",
+            "{tier:?}: the nested closure's ticket"
+        );
+        let applied = vm.invoke("app", "applyHolder", vec![holder.clone(), Value::int(1)]);
+        assert_eq!(shown(&applied), "9", "{tier:?}: the held struct's closure");
+
+        drop(nested);
+        assert_eq!(
+            sweep(&mut vm),
+            2,
+            "{tier:?}: the nested closure's name went"
+        );
+        let applied = vm.invoke("app", "applyHolder", vec![holder.clone(), Value::int(2)]);
+        assert_eq!(shown(&applied), "10", "{tier:?}: beside a dropped closure");
+        let called = vm.invoke("app", "apply", vec![rotating.clone(), Value::int(13)]);
+        assert_eq!(shown(&called), "12", "{tier:?}: the cell kept its ticket");
+
+        drop(holder);
+        assert_eq!(sweep(&mut vm), 1, "{tier:?}: the struct's name went");
+        drop(rotating);
+        assert_eq!(sweep(&mut vm), 0, "{tier:?}: nothing is held");
+    });
+}
+
+#[test]
+fn a_name_is_kept_while_any_held_value_reaches_it_encoded() {
+    a_name_is_kept_while_any_held_value_reaches_it(Tier::Encoded);
+}
+
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+#[test]
+fn a_name_is_kept_while_any_held_value_reaches_it_native() {
+    a_name_is_kept_while_any_held_value_reaches_it(Tier::Native);
 }
 
 // ------------------------------------------------------ a randomised storm

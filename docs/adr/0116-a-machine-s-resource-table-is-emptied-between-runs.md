@@ -1,6 +1,10 @@
 # ADR 0116: A machine's resource table is emptied between runs
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0119](0119-a-held-closure-keeps-only-the-resource-names-it-reaches.md),
+  which replaces decision 2 (the table kept whole while anything is pinned)
+  with a trim to the names the pinned objects reach
 - Date: 2026-10-24
 - Decides: that the table of host resource names a linear-memory machine
   keeps (`Machine::resources`, the table a `Repr::Host` word indexes) is

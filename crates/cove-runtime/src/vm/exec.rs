@@ -432,10 +432,13 @@ pub(crate) struct Machine<'a> {
     /// [issue #685](https://github.com/myuon/cove/issues/685)), because a
     /// machine outlives its runs (ADR 0114) and a resident one handed a new
     /// handle every request would otherwise grow by one name a request for
-    /// its whole life. It is emptied only when no heap object is pinned for
-    /// an embedder: a word in a closure's environment that the embedder kept
+    /// its whole life. It is emptied whole when no heap object is pinned for
+    /// an embedder. A word in a closure's environment that the embedder kept
     /// indexes this table, and emptying it under that closure would make the
-    /// word name whatever the next run was handed first. A handle that
+    /// word name whatever the next run was handed first, so while one is
+    /// pinned the table keeps exactly the names the pinned objects reach, at
+    /// the words that name them, and drops the rest
+    /// ([issue #694](https://github.com/myuon/cove/issues/694)). A handle that
     /// *left* a run as a value is not such a word — crossing out turned it
     /// into the name itself — so it survives an emptied table and is written
     /// down afresh when it is handed back.
@@ -2291,26 +2294,44 @@ impl<'a> Machine<'a> {
         self.held_resources().word_of(handle)
     }
 
-    /// Empties the resource table at a run's edge, unless an embedder holds
-    /// an object of this heap.
+    /// Drops, at a run's edge, every resource name nothing an embedder holds
+    /// can reach.
     ///
-    /// [`Machine::resources`] is why the condition is the pinned set: the
-    /// only words naming a resource that can outlive a run are inside an
-    /// object an embedder kept, and every such object is pinned for as long
-    /// as the embedder keeps it. With none pinned, no word that indexes the
-    /// table is reachable by anything — a frame is gone with its run, and an
-    /// unreachable object is never read, a new one's payload being zeroed —
-    /// so the names can go. With one pinned the table is kept whole: which of
-    /// its names the kept objects reach is not known without walking them,
-    /// and it is emptied at the first edge after the last of them is dropped.
+    /// [`Machine::resources`] is why the roots are the pinned set: the only
+    /// words naming a resource that can outlive a run are inside an object an
+    /// embedder kept, and every such object is pinned for as long as the
+    /// embedder keeps it. A frame is gone with its run, and an unreachable
+    /// object is never read, a new one's payload being zeroed. So with none
+    /// pinned every name can go, and the table is emptied without a walk —
+    /// the case of every run whose embedder keeps no closure, which costs
+    /// what it did before [issue #694](https://github.com/myuon/cove/issues/694).
+    ///
+    /// With one pinned, the kept objects are walked for the [`Repr::Host`]
+    /// words they reach and only those names stay, each at the word that
+    /// names it (ADR 0119). The walk is paced by [`Resources::trim_due`]: it
+    /// is not taken at an edge where the table has not grown, and it is taken
+    /// once the names it could drop are worth what it reads.
     ///
     /// Called by [`crate::Vm`] where an entry begins and where it leaves, so
     /// a run parked or yielded in between keeps its table.
     pub(crate) fn release_resources(&mut self) {
-        if self.mem.holds_pinned() {
+        if !self.mem.holds_pinned() {
+            self.held_resources().clear();
             return;
         }
-        self.held_resources().clear();
+        if !self.held_resources().trim_due() {
+            return;
+        }
+        // A word past the table is not one of its names, and is not marked.
+        let mut reached = vec![false; self.held_resources().slots()];
+        let walked = self
+            .mem
+            .pinned_host_words(&self.program.layouts, &mut |word| {
+                if let Some(slot) = reached.get_mut(word.wrapping_sub(1) as usize) {
+                    *slot = true;
+                }
+            });
+        self.held_resources().trim(&reached, walked);
     }
 
     /// How many names the resource table holds now: a test's measure of
@@ -5249,6 +5270,154 @@ impl Reentry for Back<'_, '_, '_> {
     }
 }
 
+/// The host resources a run has been handed, by the word that names each.
+///
+/// See [`Machine::resources`] for why this is a table of the machine's and
+/// not objects in the heap. Two things are kept: the names, at the index a
+/// [`Repr::Host`] word is one past, and an index from a resource's id to the
+/// entries that carry it, so that interning a handle is a hash lookup and
+/// not a scan of everything the table holds.
+///
+/// A slot may be vacant. [`Resources::trim`] drops the names nothing an
+/// embedder holds can reach and leaves the ones it can **at the index they
+/// had**, because the words naming them are in the embedder's objects and
+/// are not rewritten (ADR 0119). A later name takes a vacant slot before the
+/// table grows.
+#[derive(Default)]
+pub(crate) struct Resources {
+    names: Vec<Option<Arc<ResourceHandle>>>,
+    by_id: HashMap<u64, Vec<u32>>,
+    /// The vacant slots, the lowest last.
+    vacant: Vec<u32>,
+    /// How many slots hold a name.
+    live: usize,
+    /// How many names the last trim kept, and what the walk that found them
+    /// cost: what [`Resources::trim_due`] paces the next one by.
+    kept: usize,
+    walked: u64,
+}
+
+/// How many words of an embedder's objects a trim may read for each name it
+/// can drop. See [`Resources::trim_due`].
+const TRIM_WORDS_PER_NAME: u64 = 16;
+
+/// How many new names a trim waits for however little the embedder holds:
+/// what spreads a walk's fixed cost — its locks and its sets — over enough
+/// runs that a run handed one resource does not pay it every time. See
+/// [`Resources::trim_due`].
+const TRIM_FLOOR: u64 = 32;
+
+impl Resources {
+    /// The resource word `word` names, or `None` for a word that names none.
+    fn get(&self, word: u64) -> Option<Arc<ResourceHandle>> {
+        self.names.get(word.checked_sub(1)? as usize)?.clone()
+    }
+
+    /// The word naming `handle`, writing it down the first time.
+    ///
+    /// Ids are unique among one host's resources of one kind, so the list an
+    /// id leads to is almost always one entry long: two hosts, or two kinds,
+    /// that happen to issue the same number are what make it longer.
+    fn word_of(&mut self, handle: &ResourceHandle) -> u64 {
+        let names = &mut self.names;
+        let same = self.by_id.entry(handle.id).or_default();
+        if let Some(&at) = same.iter().find(|&&at| {
+            names[at as usize]
+                .as_ref()
+                .is_some_and(|kept| kept.names_same(handle))
+        }) {
+            return u64::from(at) + 1;
+        }
+        let name = Some(Arc::new(handle.clone()));
+        let at = match self.vacant.pop() {
+            Some(at) => {
+                names[at as usize] = name;
+                at
+            }
+            None => {
+                let at = u32::try_from(names.len()).expect("fewer than 2^32 resources at once");
+                names.push(name);
+                at
+            }
+        };
+        same.push(at);
+        self.live += 1;
+        // One past the index, because a zeroed slot has to mean no resource.
+        u64::from(at) + 1
+    }
+
+    /// Forgets every name, keeping the storage for the next run.
+    fn clear(&mut self) {
+        self.names.clear();
+        self.by_id.clear();
+        self.vacant.clear();
+        self.live = 0;
+        self.kept = 0;
+        self.walked = 0;
+    }
+
+    /// Whether a [`Resources::trim`] is worth its walk now.
+    ///
+    /// What grows the table is a name written down since the last trim, so
+    /// with none the table is no larger than that trim left it, and a run
+    /// that was handed no new resource pays nothing more at its edge. (A name
+    /// that trim kept and that has since become unreachable — the embedder
+    /// dropped one of two closures — is dropped by the next trim; it is not
+    /// growth.) With some, the walk is paid once their count reaches a
+    /// sixteenth of what the last walk read. The walk costs what the
+    /// embedder holds, and pacing it by the names it can drop makes that a
+    /// constant number of words a name, which is the class interning the
+    /// name already is. The table then holds the reachable names and at most
+    /// a sixteenth of the held words more.
+    fn trim_due(&self) -> bool {
+        let new = self.live.saturating_sub(self.kept) as u64;
+        new >= TRIM_FLOOR && new * TRIM_WORDS_PER_NAME >= self.walked
+    }
+
+    /// How many slots the table has, vacant or not: the length of the
+    /// `reached` a [`Resources::trim`] takes.
+    fn slots(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Keeps the names whose slots `reached` marks and vacates the rest,
+    /// recording that the walk which marked them read `walked` words.
+    ///
+    /// Only a dropped name touches the id index, so the index costs what
+    /// writing the name down cost; the rest is one pass over the slots.
+    fn trim(&mut self, reached: &[bool], walked: u64) {
+        for (at, name) in self.names.iter_mut().enumerate() {
+            if reached.get(at).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(dropped) = name.take() else { continue };
+            if let Some(same) = self.by_id.get_mut(&dropped.id) {
+                same.retain(|&other| other as usize != at);
+                if same.is_empty() {
+                    self.by_id.remove(&dropped.id);
+                }
+            }
+        }
+        while matches!(self.names.last(), Some(None)) {
+            self.names.pop();
+        }
+        self.vacant.clear();
+        self.vacant.extend(
+            (0..self.names.len() as u32)
+                .rev()
+                .filter(|&at| self.names[at as usize].is_none()),
+        );
+        self.live = self.names.len() - self.vacant.len();
+        self.kept = self.live;
+        self.walked = walked;
+    }
+
+    /// How many names are written down.
+    fn len(&self) -> usize {
+        self.live
+    }
+}
+
 /// One spawned task's thread, from the closure in to the answer written.
 ///
 /// `crate::interp::run_task` is the oracle's, and the shape is the same: an
@@ -5264,57 +5433,6 @@ impl Reentry for Back<'_, '_, '_> {
 /// **not** traced as completed here; it is traced as cancelled by whoever
 /// waits for it, which is the only place that knows it stopped rather than
 /// finished. That is `crate::task::finished`'s rule, kept.
-/// The host resources a run has been handed, by the word that names each.
-///
-/// See [`Machine::resources`] for why this is a table of the machine's and
-/// not objects in the heap. Two things are kept: the names, in the order a
-/// [`Repr::Host`] word indexes them, and an index from a resource's id to the
-/// entries that carry it, so that interning a handle is a hash lookup and
-/// not a scan of everything the table holds.
-#[derive(Default)]
-pub(crate) struct Resources {
-    names: Vec<Arc<ResourceHandle>>,
-    by_id: HashMap<u64, Vec<u32>>,
-}
-
-impl Resources {
-    /// The resource word `word` names, or `None` for a word that names none.
-    fn get(&self, word: u64) -> Option<Arc<ResourceHandle>> {
-        self.names.get(word.checked_sub(1)? as usize).cloned()
-    }
-
-    /// The word naming `handle`, writing it down the first time.
-    ///
-    /// Ids are unique among one host's resources of one kind, so the list an
-    /// id leads to is almost always one entry long: two hosts, or two kinds,
-    /// that happen to issue the same number are what make it longer.
-    fn word_of(&mut self, handle: &ResourceHandle) -> u64 {
-        let same = self.by_id.entry(handle.id).or_default();
-        if let Some(&at) = same
-            .iter()
-            .find(|&&at| self.names[at as usize].names_same(handle))
-        {
-            return u64::from(at) + 1;
-        }
-        let at = u32::try_from(self.names.len()).expect("fewer than 2^32 resources in one run");
-        same.push(at);
-        self.names.push(Arc::new(handle.clone()));
-        // One past the index, because a zeroed slot has to mean no resource.
-        u64::from(at) + 1
-    }
-
-    /// Forgets every name, keeping the storage for the next run.
-    fn clear(&mut self) {
-        self.names.clear();
-        self.by_id.clear();
-    }
-
-    /// How many names are written down.
-    fn len(&self) -> usize {
-        self.names.len()
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_task(
     program: &Program,

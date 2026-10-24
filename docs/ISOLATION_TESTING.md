@@ -79,7 +79,8 @@ same instructions, allocated words and host calls charged.
 Per-run, and must not survive: frames, stack, tasks, held cells, the parked
 request, the budget's accounting and cancellation flag, the yield request,
 every heap word the run did not hand out, and the resource table's names
-(ADR 0116: kept only while the embedder holds an object of the heap).
+(ADR 0116; while the embedder holds an object of the heap, ADR 0119 keeps
+the names that object reaches and no others).
 Survives by design: the heap arena and the machine's cumulative counters; values the embedder kept (a closure
 pins its environment, and only its own machine may call it); a host's own
 state (per registry); everything immutable (preparation, grants, the
@@ -232,6 +233,26 @@ the gate and the `#[ignore]`. None is gated now.
    a value and a closure kept with a handle inside it, each used after runs
    that were handed other resources; the table emptied at the first edge after
    the closure is dropped).
+
+   The exception was a residue: while the embedder held a closure the table
+   was kept whole, so a machine whose embedder kept one for its whole life
+   still grew by a name a run — 20,001 names after 20,000 runs. Since
+   [issue #694](https://github.com/myuon/cove/issues/694) and
+   [ADR 0119](adr/0119-a-held-closure-keeps-only-the-resource-names-it-reaches.md)
+   the pinned objects are walked for their `Repr::Host` words at an edge and
+   only the names they reach are kept, each at its own word; the walk is
+   paced by the names it can drop (at least 32, and a sixteenth of what the
+   last walk read), so the same 20,000 runs end with 2 names and cost what
+   they did (3.8 to 4.0 µs a run against 3.8 to 4.2). Tested by
+   `lifecycle.rs`'s `a_held_closure_keeps_only_the_names_it_reaches_{encoded,native}`
+   (a thousand runs bounded, a run handed a hundred resources leaving exactly
+   the closure's name, a closure over a vector of a hundred handles keeping
+   all of them, each handle still naming its own resource, the table emptied
+   once the closure goes) and
+   `a_name_is_kept_while_any_held_value_reaches_it_{encoded,native}` (a
+   closure in a closure, a closure in a struct and a cell a closure rewrites,
+   each name dropped once nothing held reaches it), and the walk itself by
+   `mem.rs`'s `the_resource_words_a_pinned_object_reaches_are_found_and_no_others`.
 3. **A handle carries no registry identity** (S4, ADR 0114's alternatives).
    Handed by an embedder to a run over another registry that grants its
    capability, it names whatever that registry's host has under the same id.
