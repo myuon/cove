@@ -9,6 +9,10 @@ use console.println
 /// inspects what a closure stores.
 ///
 /// It replaces `fail_shared_cycle`, which pinned the refusal the ADR removed.
+/// `alone` is the shortest ring, a cell holding a handle to itself, which the
+/// interpreter went on refusing after the linear-memory backend ran it, until
+/// issue #695. Renaming the cell through the handle it holds and reading the
+/// new name back through the cell is what shows the handle is that cell.
 /// What a corpus case can show is that the program *runs* on the backend that
 /// runs it; that the ring is reclaimed once nothing names it is
 /// `cove_runtime::vm::cell`'s to show, because only a test that runs the
@@ -31,6 +35,24 @@ export fn main() -> Result<Unit, Error> {
 
   println("one step: {step(first)}")?
   println("two steps: {step(second)}")?
+
+  let alone = Shared(Node(next: None, label: "alone"))
+  alone.lock(fn(var value) {
+    value = Node(next: Some(alone), label: "alone")
+  })
+  let inner = alone.lock(fn(value) {
+    value.next
+  })
+  match inner {
+    Some(cell) => cell.lock(fn(var value) {
+      value = Node(next: value.next, label: "renamed through itself")
+    })
+    None => { }
+  }
+  let label = alone.lock(fn(value) {
+    value.label
+  })
+  println("itself: {label}")?
   Ok(())
 }
 

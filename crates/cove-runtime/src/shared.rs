@@ -25,21 +25,23 @@
 //!
 //! # Cycles
 //!
-//! A cell may hold another cell, including itself, and ADR 0011 says plainly
-//! that nothing reclaims such an `Arc` cycle: cells outlive every task that
-//! holds one, so collecting a cycle among them needs a collector that stops
-//! every thread, which the per-task collector rules out by design. The ADR's
-//! amendment picks a narrower, cheaper policy: `lock` rejects the one shape
-//! of cycle it can see for free — the cell ending up holding a handle to
-//! itself — and leaves everything wider as a documented, accepted leak. See
-//! `Transfer::reaches` and `direct_cycle`.
+//! A cell may hold another cell, including itself. ADR 0011 said nothing
+//! reclaims such an `Arc` cycle — cells outlive every task that holds one, so
+//! collecting a cycle among them needs a collector that stops every thread,
+//! which the per-task collector rules out by design — and its amendment had
+//! `lock` refuse the one shape it could see for free, a cell coming to hold a
+//! handle to itself.
 //!
-//! ADR 0115 closes that leak where it can be closed without stopping a thread: when a
-//! run's entry has returned, every task of the run has been joined, and
-//! [`Cells::reclaim`] collects the run's cells as one graph — the same
-//! reference-counting argument the per-task heap makes, over cells instead of
-//! vectors. A cycle among cells therefore outlives the run that built it only
-//! if something outside the cells still reaches it.
+//! ADR 0115 closed that leak where it can be closed without stopping a
+//! thread: when a run's entry has returned, every task of the run has been
+//! joined, and [`Cells::reclaim`] collects the run's cells as one graph — the
+//! same reference-counting argument the per-task heap makes, over cells
+//! instead of vectors. A cycle among cells therefore outlives the run that
+//! built it only if something outside the cells still reaches it. A cell
+//! holding itself is the shortest such cycle, so ADR 0118 removed the
+//! refusal, as ADR 0037 had on the linear-memory backend: `lock` stores what
+//! the closure leaves whatever cells it names, and only the reentrancy rule
+//! is about which cell is which.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -150,18 +152,10 @@ impl SharedCell {
         // being held before another task can acquire it.
         let _held = Held::new(&self.holder, tag);
         let (result, updated) = body(guard.clone().into_value())?;
+        // A value naming this very cell is stored like any other (ADR 0118):
+        // converting it copies the handle and never looks inside a cell, so
+        // nothing here takes the lock this call already holds.
         let transfer = Transfer::of(&updated).map_err(|found| cannot_store(&found, span))?;
-        // ADR 0011's amendment: a cell holding a handle to itself is an `Arc`
-        // cycle no collector reclaims, and this is the one shape of that
-        // cycle cheap to catch — `transfer` is the value already walked in
-        // full to check task-safety, so asking it whether it names this same
-        // cell costs one more pass over a tree already built, not a new
-        // walk of the heap. A cycle through a second cell is not caught
-        // here; it is reclaimed when the run ends instead (ADR 0115,
-        // `Cells::reclaim`).
-        if transfer.reaches(self as *const SharedCell) {
-            return Err(direct_cycle(span));
-        }
         *guard = transfer;
         Ok(result)
     }
@@ -362,35 +356,6 @@ fn reentrant_lock(span: Span) -> RuntimeError {
             "`lock` holds the value for the whole of the closure it is given, so a `lock` on the same `Shared` inside it can never be granted.",
         )
         .with_help("do the whole read-modify-write in one `lock`")
-}
-
-/// The Language Card sentence [`direct_cycle`] quotes.
-///
-/// ADR 0011's amendment names this the one shape of `Shared` cycle worth
-/// rejecting: cheap to detect, because it falls out of the walk `lock`
-/// already does to check task-safety, and cheap to explain, because it is
-/// exactly "do not store a handle to this cell back into itself."
-const SHARED_ACYCLIC_RULE: &str = "`Shared` ownership must stay acyclic. A cell may not come to hold a handle to itself; `lock` rejects a closure that would leave the cell reachable from its own new value. A cycle through two or more cells is not detected and leaks.";
-
-/// A `lock` whose closure left behind a value that reaches the very cell
-/// being locked — `n.lock(fn(var value) { value = Node(cell: Some(n)) })`,
-/// in ADR 0011's own example.
-///
-/// Nothing reclaims an `Arc` cycle among `Shared` cells, so this is refused
-/// at the point of assignment rather than left to leak silently. A cycle
-/// closed through a *second* cell is not caught here — that would mean
-/// locking another cell mid-walk to see what it already holds, which risks
-/// exactly the deadlock `lock` elsewhere guards against. ADR 0011 left that
-/// wider cycle as an accepted leak; since ADR 0115 [`Cells::reclaim`] frees
-/// it when the run ends, and this refusal is kept only because ADR 0037
-/// leaves the interpreter's `lock` as it was.
-fn direct_cycle(span: Span) -> RuntimeError {
-    RuntimeError::new(
-        "this `lock` would leave the cell holding a handle to itself, and no collector reclaims that cycle",
-    )
-    .at(span)
-    .with_rule(SHARED_ACYCLIC_RULE)
-    .with_help("keep the reference outside the cell, or restructure so the value never stores a handle back to its own `Shared`")
 }
 
 #[cfg(test)]

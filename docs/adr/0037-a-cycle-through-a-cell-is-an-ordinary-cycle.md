@@ -1,6 +1,7 @@
 # ADR 0037: A cycle through a `Shared` cell is an ordinary cycle
 
 - Status: Accepted
+- Superseded in part by [ADR 0118](0118-the-interpreter-lets-a-cell-hold-itself.md): its consequence that the predecessor keeps its behaviour, for the interpreter's refusal of a cell that would hold itself. Everything else stands
 - Date: 2026-09-02
 - Supersedes: [ADR 0011](0011-garbage-collection.md)'s
   "Amendment (2026-08-25): a policy for cycles among cells", which made

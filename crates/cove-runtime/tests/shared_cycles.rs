@@ -9,6 +9,11 @@
 //! ask the run's cell table instead, which works on every host: after the
 //! entry returns, a cell is alive only if something outside the cells still
 //! reaches it.
+//!
+//! The shortest ring is one cell holding a handle to itself, which the
+//! interpreter's `lock` refused until
+//! [issue #695](https://github.com/myuon/cove/issues/695) (ADR 0118). It is
+//! stored now, as on the linear-memory backend, and reclaimed the same way.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,6 +68,34 @@ export fn dropped() -> String {
 /// Builds a ring and hands it to the embedder.
 export fn kept() -> Node {
   ring()
+}
+
+/// A cell that holds a handle to itself, renamed through that handle and
+/// read back through the cell.
+fn alone() -> Shared<Node> {
+  let cell = Shared(Node(next: None, label: \"alone\"))
+  cell.lock(fn(var value) {
+    value = Node(next: Some(cell), label: \"alone\")
+  })
+  let inner = cell.lock(fn(value) { value.next })
+  match inner {
+    Some(next) => next.lock(fn(var value) {
+      value = Node(next: value.next, label: \"renamed\")
+    })
+    None => {}
+  }
+  cell
+}
+
+/// Builds a cell that holds itself, reads it, and drops it.
+export fn itself() -> String {
+  alone().lock(fn(value) { value.label })
+}
+
+/// Builds a cell that holds itself and hands it to the embedder inside a
+/// node.
+export fn itselfKept() -> Node {
+  Node(next: Some(alone()), label: \"outer\")
 }
 
 /// Builds a ring on a spawned task's thread, so its cells are registered from
@@ -160,4 +193,36 @@ fn a_ring_a_task_built_is_freed_when_the_entry_returns() {
     })
     .expect("the entry's thread starts");
     assert_eq!(answer, (Some("second".to_string()), 0));
+}
+
+#[test]
+fn a_cell_holding_itself_is_stored_and_freed_when_the_entry_returns() {
+    let runtime = runtime();
+    let answer = Interpreter::new(&runtime)
+        .run_entry("m", "itself", Vec::<Rc<str>>::new())
+        .expect("the run succeeds");
+    assert_eq!(answer.as_str(), Some("renamed"));
+    assert_eq!(runtime.cells().live(), 0, "the cell outlived its run");
+}
+
+#[test]
+fn a_cell_holding_itself_the_answer_keeps_survives_until_the_answer_goes() {
+    let runtime = runtime();
+    let answer = Interpreter::new(&runtime)
+        .run_entry("m", "itselfKept", Vec::<Rc<str>>::new())
+        .expect("the run succeeds");
+    assert_eq!(
+        runtime.cells().live(),
+        1,
+        "a cell the answer reaches was freed"
+    );
+    assert_eq!(runtime.cells().reclaim(), 0);
+    drop(answer);
+    assert_eq!(
+        runtime.cells().live(),
+        1,
+        "only a reclamation frees a cycle"
+    );
+    assert_eq!(runtime.cells().reclaim(), 1);
+    assert_eq!(runtime.cells().live(), 0);
 }
