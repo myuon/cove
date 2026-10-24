@@ -239,6 +239,12 @@ impl OwnedVm {
         self.step(outcome)
     }
 
+    /// [`Vm::resources_held`]. Not an API.
+    #[doc(hidden)]
+    pub fn resources_held(&self) -> usize {
+        self.vm.resources_held()
+    }
+
     /// [`Vm::instructions`].
     pub fn instructions(&self) -> u64 {
         self.vm.instructions()

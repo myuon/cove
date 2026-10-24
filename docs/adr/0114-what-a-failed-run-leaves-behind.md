@@ -1,6 +1,9 @@
 # ADR 0114: What a failed run leaves behind, and whose authority a run has
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0116](0116-a-machine-s-resource-table-is-emptied-between-runs.md),
+  which makes the resource table per-run state rather than the machine's
 - Date: 2026-10-24
 - Decides: what the runtime promises the run after a failed one — on the same
   machine, the same preparation, the same registry and the same worker — and
