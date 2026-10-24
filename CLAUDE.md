@@ -83,6 +83,20 @@ quadratic in file size, and it grows with the corpus: **26.9s over the cores**
 as of 2026-10-12 (20.8s on 2026-09-28, 80.1s on 2026-09-25 and 78.6s on 2026-09-22),
 against 9s when this paragraph was written.
 
+### Fuzzing is outside the gate, and its findings are inside it
+
+[docs/FUZZING.md](docs/FUZZING.md) is the manual (ADR 0112). The harnesses are
+`crates/cove-fuzz`, a stable workspace member; `fuzz/` is the cargo-fuzz crate
+over them, needs nightly, and is **not** a workspace member, so no command
+above builds it — `cargo +nightly fuzz build` in `fuzz/` does, and
+`scripts/fuzz.sh <target> [seconds]` runs one target under ASan. What `cargo t`
+does run is `crates/cove-fuzz/tests/regressions.rs`, which replays every
+committed input under `fuzz/seeds/` and `fuzz/regressions/` and holds the
+program generator to typechecking. A change to the language surface the
+generator uses can therefore fail `cargo t` there, with the generated program
+in the message: fix the generator, not the test. Fuzz inputs never have a
+`.cove` extension, so none of the repository surveys below sees them.
+
 ### Adding a program to the repository trips a ratchet in `cargo t`
 
 `crates/cove-cli/tests/copies.rs` surveys **every program in the repository**

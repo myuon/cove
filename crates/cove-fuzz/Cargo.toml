@@ -1,0 +1,28 @@
+[package]
+name = "cove-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The fuzz harnesses of issue 681, as an ordinary library so a stable `cargo t` can replay what a fuzzer found."
+
+# Every harness lives here and `fuzz/` is a thin cargo-fuzz wrapper around it
+# (ADR 0112). That split is what lets a crash input be replayed by
+# `tests/regressions.rs` on stable Rust, under `--profile checked`, by a
+# contributor who has never installed nightly or cargo-fuzz.
+
+# The native tier, forwarded to `cove-runtime`. Off here for the reason it is
+# off in `cove-runtime`; the workspace build turns it on anyway through
+# `cove-cli` (ADR 0076), and `fuzz/` turns it on explicitly, because a fuzz
+# build is not a workspace build and would otherwise run no compiled code.
+[features]
+default = []
+template = ["cove-runtime/template"]
+
+[dependencies]
+arbitrary = "1.4"
+cove-diag.workspace = true
+cove-ir.workspace = true
+cove-runtime.workspace = true
+cove-sema.workspace = true
+cove-syntax.workspace = true
