@@ -10,7 +10,6 @@
 //! cove-fuzz explain FILE...                                how a source ends on each tier
 //! cove-fuzz explain-generated FILE...                      the same, for the program FILE generates
 //! cove-fuzz image-seed OUT_DIR FILE...                     write image bodies of sources
-//! cove-fuzz verify-image FILE...                           decode an image body and verify it
 //! ```
 
 use std::path::Path;
@@ -20,7 +19,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((command, rest)) = args.split_first() else {
         eprintln!(
-            "usage: cove-fuzz <TARGET|generate|generate-differential|diff|diff-generated|check|explain|explain-generated|image-seed|verify-image> FILE...\ntargets: {}",
+            "usage: cove-fuzz <TARGET|generate|generate-differential|diff|diff-generated|check|explain|explain-generated|image-seed> FILE...\ntargets: {}",
             cove_fuzz::TARGETS.join(", ")
         );
         return ExitCode::from(2);
@@ -65,12 +64,6 @@ fn main() -> ExitCode {
             }
             if disagreed {
                 return ExitCode::FAILURE;
-            }
-        }
-        "verify-image" => {
-            for path in rest {
-                cove_fuzz::image_verified(&read(path));
-                eprintln!("{path}: ok");
             }
         }
         "explain" => {

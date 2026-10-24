@@ -35,6 +35,8 @@
 //! that such a bug is a loud failure at lowering time instead of a quiet one
 //! at collection time.
 
+mod indices;
+
 use crate::inst::{CmpOp, Compare, Inst, Len, Num, Slot};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
@@ -63,8 +65,16 @@ impl std::fmt::Display for Invalid {
 /// Checks every function of `program`, reporting every fault rather than the
 /// first: one lowering bug usually shows up in several places, and seeing
 /// all of them is what says which one is the cause.
+///
+/// It answers for **any** `Program`, including one that did not come from the
+/// lowering, such as what `serial::decode` returns: ids are checked against
+/// their tables first (see `indices`), and nothing else is looked at if one
+/// is out of range.
 pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
-    let mut faults = Vec::new();
+    let mut faults = indices::check(program);
+    if !faults.is_empty() {
+        return Err(faults);
+    }
     for (index, function) in program.functions.iter().enumerate() {
         Check {
             program,
@@ -3830,6 +3840,17 @@ mod tests {
             faults(&program(vec![f])),
             vec!["names string 3, and there are 0"]
         );
+    }
+
+    /// Issue #683: a parameter whose layout id is past the layout table was a
+    /// panic in `Function::param_words`, not a fault.
+    #[test]
+    fn a_layout_id_outside_its_table_is_a_fault_and_not_a_panic() {
+        let mut f = function(vec![Repr::Int], INT, vec![Inst::Return { src: 0 }]);
+        f.params = vec![LayoutId(9999)];
+        let found = faults(&program(vec![f]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with("a parameter's layout is layout9999"));
     }
 
     #[test]
