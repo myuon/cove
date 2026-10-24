@@ -484,10 +484,10 @@ What would close those gaps, and whether it is worth it:
   module, not this process.
 - **Running decoded images.** The `image` target decodes and verifies what
   it decoded and does not run it. `verify` refuses a program whose ids are out
-  of range (ADR 0115), but it checks well-formedness as the lowering
+  of range (ADR 0117), but it checks well-formedness as the lowering
   establishes it, not that the VM and the code generator are safe on every
   program it accepts, and nobody claims that. ADR 0112 §5, in part superseded
-  by ADR 0115.
+  by ADR 0117.
 - **Multi-module packages, `cove test`, `cove fmt`.** The source targets
   compile one file as one module. covefmt is a Cove program the `run` corpus
   already includes.

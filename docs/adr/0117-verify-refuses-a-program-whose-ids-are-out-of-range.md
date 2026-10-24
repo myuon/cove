@@ -1,4 +1,4 @@
-# ADR 0115: `verify` refuses a program whose ids are out of range
+# ADR 0117: `verify` refuses a program whose ids are out of range
 
 - Status: Accepted
 - Date: 2026-10-24

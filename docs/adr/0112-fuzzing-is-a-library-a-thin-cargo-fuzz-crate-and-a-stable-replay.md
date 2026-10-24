@@ -1,6 +1,6 @@
 # ADR 0112: Fuzzing is a library, a thin cargo-fuzz crate, and a stable replay
 
-- Status: Accepted. Superseded in part by [ADR 0115](0115-verify-refuses-a-program-whose-ids-are-out-of-range.md): the decision that a decoded image is not verified
+- Status: Accepted. Superseded in part by [ADR 0117](0117-verify-refuses-a-program-whose-ids-are-out-of-range.md): the decision that a decoded image is not verified
 - Date: 2026-10-24
 - Decides: that Cove's fuzz harnesses live in a workspace library,
   `crates/cove-fuzz`, and that `fuzz/` — the cargo-fuzz crate — is one line a

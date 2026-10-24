@@ -221,7 +221,7 @@ pub fn structured(data: &[u8]) {
 /// bytes it can recognise as wrong and promises never to panic, and it does not
 /// check what the ids in an accepted image mean. `cove_ir::verify` is the
 /// check that does, and it promises to answer for any program `decode`
-/// returns with an `Err`, never a panic ([ADR 0115](../../docs/adr/0115-verify-refuses-a-program-whose-ids-are-out-of-range.md)):
+/// returns with an `Err`, never a panic ([ADR 0117](../../docs/adr/0117-verify-refuses-a-program-whose-ids-are-out-of-range.md)):
 /// that promise is what this tests, on both halves.
 ///
 /// What is not tested is running a program that verified. `verify` checks that
