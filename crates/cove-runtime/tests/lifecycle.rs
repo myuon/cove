@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cove_diag::SourceMap;
+use cove_runtime::interp::Interpreter;
 use cove_runtime::trace::RunOutcome;
 use cove_runtime::{
     Budget, Cancellation, Console, Effect, Grants, HostAnswer, HostApi, HostRegistry, HostType,
@@ -294,6 +295,11 @@ export fn adder(n: Int) -> fn(Int) -> Int {
 export fn apply(f: fn(Int) -> Int, x: Int) -> Int {
   f(x)
 }
+
+/// An entry: two host calls, for the ways in that take process arguments.
+export fn twoCalls() -> Int {
+  calls(2)
+}
 ";
 
 // ----------------------------------------------------------------- the world
@@ -321,11 +327,19 @@ struct World {
 }
 
 fn world() -> World {
+    world_over(None)
+}
+
+/// The world, over a registry with `budget` installed in it.
+fn world_over(budget: Option<Budget>) -> World {
     let probe = Arc::new(Probe::default());
     let out = Sink::default();
     let mut hosts = HostRegistry::new(Grants::new(["console", "probe"]));
     hosts.register(Box::new(Registered(Arc::clone(&probe))));
     hosts.register(Box::new(Console::new(out.clone(), out.clone())));
+    if let Some(budget) = budget {
+        hosts.set_budget(budget);
+    }
     let schemas = HostSchemas::only(hosts.module_schemas());
     let (sources, package) = packaged(SOURCE);
     let render = |items: Vec<cove_diag::Diagnostic>| {
@@ -1292,64 +1306,183 @@ fn a_closure_handed_out_is_callable_by_its_own_machine_alone() {
 
 // ---------------------------------------------------------- the budget's owner
 
-/// Whether to run the cases that reproduce a finding not yet fixed.
-///
-/// They are `#[ignore]`d so that `cargo t` stays green, and they return at
-/// once unless `COVE_KNOWN_FINDINGS` is set so that `cargo ratchet`, which
-/// runs every ignored case, does too. `COVE_KNOWN_FINDINGS=1 cargo test
-/// --profile checked -p cove-runtime --test lifecycle -- --ignored` is the
-/// reproduction. A fix deletes the gate and the `#[ignore]`.
-fn known_findings() -> bool {
-    std::env::var_os("COVE_KNOWN_FINDINGS").is_some()
+/// A run that spends its budget one way: what it leaves on the machine is
+/// what an unbudgeted way in must not inherit.
+struct Spent {
+    what: &'static str,
+    budget: fn() -> Budget,
+    name: &'static str,
+    args: fn() -> Vec<Value>,
 }
 
-/// `invoke` — the way in with no budget of its own — after an `invoke_within`
-/// whose budget was cancelled. The specification says the next run cannot
-/// tell the last one happened; what happens is that `invoke` runs under the
-/// meter the last `invoke_within` left on the machine, so it starts
-/// cancelled. The same holds for a deadline that passed and a host-call
-/// count that was spent, on both backends (`Vm::budget` and
-/// `Interpreter::budget` are replaced only by a way in that brings a
-/// budget).
-#[test]
-#[ignore = "issue 681: `invoke` after `invoke_within` runs under the previous run's budget (its cancellation, deadline and host-call count); fails until fixed, so it runs only with COVE_KNOWN_FINDINGS=1"]
-fn an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget() {
-    if !known_findings() {
-        return;
+fn spent() -> Vec<Spent> {
+    vec![
+        Spent {
+            what: "a cancelled run",
+            budget: || {
+                let cancellation = Cancellation::new();
+                cancellation.cancel();
+                Budget::with_cancellation(Limits::default(), cancellation)
+            },
+            name: "spin",
+            args: Vec::new,
+        },
+        Spent {
+            what: "a run past its deadline",
+            budget: || limits(|l| l.deadline = Some(Duration::ZERO)),
+            name: "spin",
+            args: Vec::new,
+        },
+        Spent {
+            what: "a run that spent its host-call limit",
+            budget: || limits(|l| l.max_host_calls = Some(1)),
+            name: "calls",
+            args: || int_arg(1),
+        },
+    ]
+}
+
+/// The ways into an `OwnedVm` that bring no budget of their own.
+const UNBUDGETED: &[&str] = &[
+    "invoke",
+    "run_entry",
+    "invoke_parkable",
+    "run_entry_parkable",
+];
+
+/// Runs two host calls on `vm` through the way in named `how`.
+fn unbudgeted(mut vm: OwnedVm, how: &str) -> (OwnedVm, Result<Value, RuntimeError>) {
+    match how {
+        "invoke" => {
+            let answer = vm.invoke("app", "calls", int_arg(2));
+            (vm, answer)
+        }
+        "run_entry" => {
+            let answer = vm.run_entry("app", "twoCalls", Vec::new());
+            (vm, answer)
+        }
+        "invoke_parkable" => finish(vm.invoke_parkable("app", "calls", int_arg(2))),
+        "run_entry_parkable" => finish(vm.run_entry_parkable("app", "twoCalls", Vec::new())),
+        other => unreachable!("`{other}` is not a way in"),
     }
+}
+
+/// Every way in with no budget of its own, after every way a budget can be
+/// spent, runs as it does on a fresh machine: issue #684. It used to run
+/// under the meter the last `invoke_within` left on the machine, so it
+/// started cancelled, past the deadline, or over the host-call count.
+fn an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget(tier: Tier) {
     on_stack(|| {
         let world = world();
-        let mut vm = world.machine(Tier::Encoded, HEAP);
-        let cancellation = Cancellation::new();
-        cancellation.cancel();
-        let cancelled = vm.invoke_within(
-            Budget::with_cancellation(Limits::default(), cancellation),
-            "app",
-            "spin",
-            vec![],
-        );
-        assert_eq!(cancelled.unwrap_err().outcome, RunOutcome::Cancelled);
-        let next = vm.invoke("app", "work", int_arg(10));
-        assert!(
-            next.is_ok(),
-            "the next run started cancelled: {}",
-            shown(&next)
-        );
+        for how in UNBUDGETED {
+            let (_, fresh) = unbudgeted(world.machine(tier, HEAP), how);
+            let fresh = shown(&fresh);
+            assert_eq!(fresh, "4", "{tier:?}: `{how}` on a fresh machine");
+            for spent in spent() {
+                let mut vm = world.machine(tier, HEAP);
+                let first = vm.invoke_within((spent.budget)(), "app", spent.name, (spent.args)());
+                if spent.name == "spin" {
+                    assert!(first.is_err(), "{tier:?}: {} stopped", spent.what);
+                }
+                let (vm, next) = unbudgeted(vm, how);
+                assert_eq!(
+                    shown(&next),
+                    fresh,
+                    "{tier:?}: `{how}` after {} inherited its budget",
+                    spent.what
+                );
+                assert_eq!(
+                    vm.meter().host_calls(),
+                    2,
+                    "{tier:?}: `{how}` after {} is charged on a meter of its own",
+                    spent.what
+                );
+            }
+        }
+    });
+}
 
-        let mut vm = world.machine(Tier::Encoded, HEAP);
-        let spent = vm.invoke_within(
-            limits(|l| l.max_host_calls = Some(1)),
-            "app",
-            "calls",
-            int_arg(1),
+#[test]
+fn an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget_encoded() {
+    an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget(Tier::Encoded);
+}
+
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+#[test]
+fn an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget_native() {
+    an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget(Tier::Native);
+}
+
+/// The interpreter's two ways in with no budget, after the same three.
+#[test]
+fn an_unbudgeted_interpretation_does_not_inherit_the_last_run_s_budget() {
+    on_stack(|| {
+        let world = world();
+        for how in ["invoke", "run_entry"] {
+            for spent in spent() {
+                let mut interpreter = Interpreter::new(&world.runtime);
+                let _ =
+                    interpreter.invoke_within((spent.budget)(), "app", spent.name, (spent.args)());
+                let next = match how {
+                    "invoke" => interpreter.invoke("app", "calls", int_arg(2)),
+                    _ => interpreter.run_entry("app", "twoCalls", Vec::new()),
+                };
+                assert_eq!(
+                    shown(&next),
+                    "4",
+                    "interpreter: `{how}` after {} inherited its budget",
+                    spent.what
+                );
+                assert_eq!(
+                    interpreter.meter().map(|meter| meter.host_calls()),
+                    None,
+                    "interpreter: `{how}` after {} runs with no budget, as a fresh one does",
+                    spent.what
+                );
+            }
+        }
+    });
+}
+
+/// A budget installed in the *registry* is the registry's, for every run over
+/// it and for its whole life — `cove run`'s — so an unbudgeted way in on a
+/// reused machine charges it exactly as a fresh machine's first run does:
+/// counted across runs, and once raised, stopping both.
+#[test]
+fn an_unbudgeted_invocation_charges_the_registry_s_budget_as_a_fresh_machine_does() {
+    on_stack(|| {
+        let cancellation = Cancellation::new();
+        let world = world_over(Some(Budget::with_cancellation(
+            Limits::default(),
+            cancellation.clone(),
+        )));
+        let registry_calls = || {
+            world
+                .hosts
+                .with_budget(|budget| budget.meter().host_calls())
+        };
+        let mut reused = world.machine(Tier::Encoded, HEAP);
+        assert_eq!(shown(&reused.invoke("app", "calls", int_arg(2))), "4");
+        assert_eq!(registry_calls(), Some(2), "charged to the registry");
+        let own = reused.invoke_within(Budget::new(Limits::default()), "app", "calls", int_arg(1));
+        assert_eq!(shown(&own), "1");
+        assert_eq!(registry_calls(), Some(2), "a budget of its own is not");
+        assert_eq!(shown(&reused.invoke("app", "calls", int_arg(2))), "4");
+        assert_eq!(
+            registry_calls(),
+            Some(4),
+            "and the next unbudgeted run is again"
         );
-        assert!(spent.is_ok());
-        let next = vm.invoke("app", "calls", int_arg(1));
-        assert!(
-            next.is_ok(),
-            "the next run was charged to the last one's limit: {}",
-            shown(&next)
-        );
+        cancellation.cancel();
+        let fresh = world
+            .machine(Tier::Encoded, HEAP)
+            .invoke("app", "calls", int_arg(2));
+        let again = reused.invoke("app", "calls", int_arg(2));
+        assert_eq!(fresh.unwrap_err().outcome, RunOutcome::Cancelled);
+        assert_eq!(again.unwrap_err().outcome, RunOutcome::Cancelled);
+        let mut interpreter = Interpreter::new(&world.runtime);
+        let interpreted = interpreter.invoke("app", "calls", int_arg(2));
+        assert_eq!(interpreted.unwrap_err().outcome, RunOutcome::Cancelled);
     });
 }
 

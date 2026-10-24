@@ -6,13 +6,12 @@
 //! the bounded one, and an application serving requests mixes them on one
 //! session. `docs/ISOLATION_TESTING.md` says a run that failed leaves nothing
 //! the next run can see; `crates/cove-runtime/tests/lifecycle.rs`
-//! (`an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget`) found
-//! that the budget is the exception, and this is the same finding through
-//! this crate's public surface: an `evaluate` after an `evaluate_within`
-//! whose deadline passed runs under that passed deadline, and fails at once.
-//!
-//! It fails until the runtime is fixed, so it is `#[ignore]`d and returns at
-//! once unless `COVE_KNOWN_FINDINGS` is set.
+//! (`an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget_*`)
+//! found that the budget was the exception — an `evaluate` after an
+//! `evaluate_within` whose deadline passed ran under that passed deadline,
+//! and failed at once — and this holds the fix of
+//! [#684](https://github.com/myuon/cove/issues/684) to this crate's public
+//! surface.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,11 +29,7 @@ fn oversized() -> PullRequest {
 }
 
 #[test]
-#[ignore = "issue 681: an unbounded `evaluate` after an `evaluate_within` that ran out runs under the spent budget; fails until fixed, so it runs only with COVE_KNOWN_FINDINGS=1"]
 fn an_unbounded_evaluation_after_a_bounded_one_that_ran_out_is_not_bounded_by_it() {
-    if std::env::var_os("COVE_KNOWN_FINDINGS").is_none() {
-        return;
-    }
     for vm in [true, false] {
         let (stopped, next) = cove_runtime::on_cove_stack(|| {
             let package = RulePackage::load(&package_root(), REVIEWS).expect("the rules check");
