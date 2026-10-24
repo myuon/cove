@@ -1,0 +1,54 @@
+use console.println
+
+struct P {
+  a: Int
+  b: Int
+}
+
+fn g(x: Int) -> Int {
+  x + 1
+}
+
+fn negated(x: Int) -> Int {
+  if x > 0 {
+    !return negated(x - 1)
+  }
+  x
+}
+
+fn summed(x: Int) -> Int {
+  let y = g(x) + g(return x * 10)
+  y
+}
+
+fn compared(x: Int) -> Int {
+  if 1 < (return x + 100) { 1 } else { 2 }
+}
+
+fn bound(x: Int) -> Int {
+  let y = -(return x + 1000)
+  g(y)
+}
+
+fn looped(x: Int) -> Int {
+  var n = 0
+  var m = 0
+  while n < 5 {
+    n += 1
+    if n == 2 {
+      let s = "{g(continue)}"
+      println(s)
+    }
+    m += P(a: g(n), b: if n == 4 { break } else { n }).a
+  }
+  n * 100 + m
+}
+
+fn early(b: Bool) -> String {
+  if !(return "early") { "a" } else { "b" }
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("{negated(3)} {summed(2)} {compared(3)} {bound(4)} {looped(0)} {early(true)}")?
+  Ok(())
+}

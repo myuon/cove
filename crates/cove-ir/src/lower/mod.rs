@@ -93,6 +93,7 @@ mod switches;
 pub(crate) mod synth;
 mod tails;
 mod tasks;
+mod unreached;
 mod walks;
 
 #[cfg(test)]
@@ -2420,7 +2421,7 @@ impl Body<'_> {
     /// so `dst == self.answer` names exactly the function's own tail and no
     /// nested form's destination.
     fn store(&mut self, dst: Dest, value: &Val, from: &Expr) {
-        if self.diverges(from) || value.slot == dst.slot {
+        if self.leaves_early(from) || value.slot == dst.slot {
             return;
         }
         // Where the two disagree the value is erased on the way in, and

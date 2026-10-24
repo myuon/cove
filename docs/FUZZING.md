@@ -71,7 +71,10 @@ program that type-checks. The module documentation of
   0..=63, radix and width arguments out of range;
 - bounded loops with `break`, helpers that call earlier helpers, recursion to
   a depth the program computes, closures to `map`, `filter`, `fold` and
-  `sorted`.
+  `sorted`;
+- now and then an operand that leaves — a `return` or a `break` as the
+  operand of `+`, of `-`, or of a method's argument — after which the rest of
+  the form is unreachable ([issue 698](https://github.com/myuon/cove/issues/698)).
 
 `ByteBuffer` itself cannot be named by a program — `core.bytes*` is the
 standard library's alone (ADR 0058) — so it is reached through

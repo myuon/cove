@@ -244,6 +244,11 @@ impl Body<'_> {
     /// The value a construct produces, before the checker's type is
     /// reconciled with it. See [`Body::expr`].
     fn lowered(&mut self, expr: &Expr, want: Option<Dest>) -> Val {
+        // An operand that leaves makes the rest of the form unreachable, and
+        // the form is not lowered past it. See `lower::unreached`.
+        if let Some(dead) = self.unreached(expr) {
+            return dead;
+        }
         let span = expr.span;
         match &expr.kind {
             ExprKind::Int(value) => {
@@ -357,6 +362,10 @@ impl Body<'_> {
     /// statement whose only effect is to write a zero into a slot nothing
     /// reads.
     pub(super) fn discard(&mut self, expr: &Expr) {
+        if let Some(dead) = self.unreached(expr) {
+            self.release(dead, expr.span);
+            return;
+        }
         match &expr.kind {
             ExprKind::Assign { op, target, value } => self.assign(*op, target, value, expr.span),
             ExprKind::Block(block) => self.scoped_block(block, None),
@@ -1703,8 +1712,9 @@ impl Body<'_> {
                 let returns = self.returns.clone();
                 let answer = self.erase(answer, value, &returns);
                 // `return return x` leaves through the inner one, and the
-                // outer has nothing to name.
-                if !self.diverges(value) {
+                // outer has nothing to name — and so does `return -(return
+                // x)`, whose operand leaves before the negation is reached.
+                if !self.leaves_early(value) {
                     // Leaving a scope waits for or cancels its children
                     // whichever way it is left, and a `return` is one of the
                     // ways. The answer is evaluated first, because that is
@@ -2398,7 +2408,7 @@ impl Body<'_> {
     /// The question is answered the way the interpreter answers it: a name
     /// the frame binds is a value, and anything else in that position is an
     /// enum's own name, a host module, or a module imported whole.
-    fn is_namespace(&self, base: &Expr) -> bool {
+    pub(super) fn is_namespace(&self, base: &Expr) -> bool {
         match &base.kind {
             ExprKind::Ident(name) => self.frame.lookup(name).is_none(),
             _ => false,

@@ -1,0 +1,10 @@
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  println("{f(1)}")?
+  Ok(())
+}
+
+fn f(x: Int) -> Int {
+  !return x
+}

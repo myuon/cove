@@ -32,10 +32,25 @@ impl Body<'_> {
     /// The scope is the caller's, because a function body's scope has to
     /// hold the parameters as well and the block did not declare those.
     pub(super) fn block(&mut self, block: &Block, dst: Option<Dest>) {
+        // A statement that leaves makes the rest of the block unreachable,
+        // and the rest is not lowered: a binding of a diverging initialiser
+        // has `Never`'s layout, and a later use of it where an `Int` goes is
+        // a conversion `Body::fit` would report about code that never runs.
+        // A declaration is still lowered, because it is not evaluated where
+        // it is written. See `lower::unreached`.
+        let mut left = false;
         for stmt in &block.statements {
+            if left && !matches!(stmt.kind, StmtKind::Item(_)) {
+                continue;
+            }
             self.stmt(stmt);
+            left |= match &stmt.kind {
+                StmtKind::Let { value, .. } | StmtKind::Expr(value) => self.leaves_early(value),
+                StmtKind::Item(_) => false,
+            };
         }
-        match (&block.tail, dst) {
+        let tail = if left { None } else { block.tail.as_ref() };
+        match (tail, dst) {
             (Some(tail), Some(dst)) => self.expr_into(tail, dst),
             (Some(tail), None) => self.discard(tail),
             (None, Some(dst)) => {
