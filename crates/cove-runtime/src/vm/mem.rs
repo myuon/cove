@@ -145,6 +145,7 @@
 //! committed stay committed — compiled code holds their addresses — so pacing
 //! bounds how far a heap grows, not how far it shrinks.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
@@ -1710,6 +1711,91 @@ impl Space {
         }
     }
 
+    /// Hands `found` every [`Repr::Host`] word reachable from the pinned set,
+    /// answering how many objects and words the walk read to find them.
+    ///
+    /// [`Space::trace`]'s walk asked a different question: not which objects
+    /// a reference reaches but which resource words they hold. It is a walk
+    /// of its own rather than a mode of the collector's, because the
+    /// collector's is the hot one and its leaf test, `Layout::may_hold_refs`,
+    /// is the wrong test here — a struct of two handles holds no reference
+    /// and is exactly what this has to read. The shapes are matched
+    /// exhaustively in both, so a new one cannot be added to the collector
+    /// and forgotten here.
+    ///
+    /// Only the pinned set is a root. That is the point: this is asked at a
+    /// run's edge, where no frame exists, and what an embedder holds is the
+    /// only thing a later run can read a word out of (see
+    /// `Machine::release_resources`). It marks in a set of its own rather
+    /// than the collector's bitmap, so its cost is what the embedder holds
+    /// and not the size of the heap, and it takes the allocator's lock so
+    /// that no sweep rewrites a header under it.
+    fn pinned_host_words(&self, layouts: &[Layout], found: &mut dyn FnMut(u64)) -> u64 {
+        let roots = self.pinned().clone();
+        let alloc = self.allocator();
+        let bump = STACK_WORDS + alloc.bump;
+        let mut walk = HostWalk {
+            bump,
+            seen: HashSet::new(),
+            work: Vec::new(),
+            read: 0,
+        };
+        for addr in roots {
+            walk.enqueue(addr);
+        }
+        while let Some(addr) = walk.work.pop() {
+            walk.read += 1;
+            let layout = &layouts[self.object_layout(addr).index()];
+            let len = self.object_len(addr);
+            match &layout.shape {
+                Shape::Free | Shape::Str | Shape::Bytes | Shape::IdentityTable => {}
+                Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {
+                    walk.run(self, addr, 0, &layout.words, found)
+                }
+                Shape::Elements { elem, .. } | Shape::Members { elem } => {
+                    let elem = &layouts[elem.index()];
+                    if holds_names(&elem.words) {
+                        let stride = elem.width();
+                        for at in 0..len {
+                            walk.run(self, addr, at * stride, &elem.words, found);
+                        }
+                    }
+                }
+                Shape::Vector { .. } | Shape::ByteBuffer => walk.enqueue(self.payload(addr, 1)),
+                Shape::Entries { key, value } => {
+                    let (key, value) = (&layouts[key.index()], &layouts[value.index()]);
+                    if holds_names(&key.words) || holds_names(&value.words) {
+                        let stride = key.width() + value.width();
+                        for at in 0..len {
+                            walk.run(self, addr, at * stride, &key.words, found);
+                            walk.run(self, addr, at * stride + key.width(), &value.words, found);
+                        }
+                    }
+                }
+                Shape::Shared { value } => {
+                    let value = &layouts[value.index()];
+                    walk.run(self, addr, SHARED_VALUE, &value.words, found)
+                }
+                Shape::Closure { captures, .. } => {
+                    let mut at = 1;
+                    for id in captures {
+                        let capture = &layouts[id.index()];
+                        walk.run(self, addr, at, &capture.words, found);
+                        at += capture.width();
+                    }
+                }
+                Shape::Boxed => {
+                    let held = LayoutId(self.payload(addr, 0) as u32);
+                    if let Some(held) = layouts.get(held.index()) {
+                        walk.run(self, addr, 1, &held.words, found);
+                    }
+                }
+            }
+        }
+        drop(alloc);
+        walk.read
+    }
+
     /// Payload word `at` of the object whose header is at `addr`.
     #[inline]
     fn payload(&self, addr: u64, at: u32) -> u64 {
@@ -2041,6 +2127,62 @@ impl Drop for Rooted {
 impl std::fmt::Debug for Rooted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Rooted({})", self.addr)
+    }
+}
+
+/// Whether a run of `words` holds anything [`Space::pinned_host_words`] has
+/// to read: a reference to follow or a resource word to report.
+fn holds_names(words: &[Repr]) -> bool {
+    words
+        .iter()
+        .any(|repr| repr.is_ref() || matches!(repr, Repr::Host))
+}
+
+/// The state of one [`Space::pinned_host_words`] walk.
+struct HostWalk {
+    bump: u64,
+    seen: HashSet<u64>,
+    work: Vec<u64>,
+    /// Objects visited and words read: the walk's cost, which the resource
+    /// table paces itself by.
+    read: u64,
+}
+
+impl HostWalk {
+    /// Queues `addr` the first time it is seen. Null, a stack address and an
+    /// address past the bump pointer name no object, as in [`reachable`].
+    fn enqueue(&mut self, addr: u64) {
+        if reachable(addr, self.bump) && self.seen.insert(addr) {
+            self.work.push(addr);
+        }
+    }
+
+    /// Reads the run of `words` beginning at payload word `at` of `addr`:
+    /// follows its references and reports its resource words.
+    fn run(
+        &mut self,
+        space: &Space,
+        addr: u64,
+        at: u32,
+        words: &[Repr],
+        found: &mut dyn FnMut(u64),
+    ) {
+        for (offset, repr) in words.iter().enumerate() {
+            match repr {
+                Repr::Ref => {
+                    self.read += 1;
+                    self.enqueue(space.payload(addr, at + offset as u32));
+                }
+                Repr::Host => {
+                    self.read += 1;
+                    let word = space.payload(addr, at + offset as u32);
+                    if word != 0 {
+                        found(word);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -2794,6 +2936,12 @@ impl Memory {
     /// embedder holds. See `Space::pinned`.
     pub(crate) fn holds_pinned(&self) -> bool {
         self.space.holds_pinned()
+    }
+
+    /// Hands `found` every resource word an object pinned for an embedder
+    /// reaches, answering what the walk cost. See `Space::pinned_host_words`.
+    pub(crate) fn pinned_host_words(&self, layouts: &[Layout], found: &mut dyn FnMut(u64)) -> u64 {
+        self.space.pinned_host_words(layouts, found)
     }
 
     /// Whether `rooted` names an object of *this* memory.
@@ -3624,6 +3772,65 @@ mod tests {
     /// A closure's captures are inline in its environment, each at its own
     /// width, which is what "a struct inside a closure environment is laid
     /// out the way a struct in a frame is" means when the collector reads it.
+    #[test]
+    fn the_resource_words_a_pinned_object_reaches_are_found_and_no_others() {
+        let mut table = Table::new();
+        let host = table.inline("Ticket", Shape::Word(Repr::Host), vec![Repr::Host]);
+        // A struct of a handle and a count: no reference, so a leaf to the
+        // collector, and exactly what the walk has to read.
+        let pair = table.structure("Pair", &[("ticket", host), ("count", INT)]);
+        let pairs = table.object(
+            "Array",
+            Shape::Elements {
+                elem: pair,
+                growable: false,
+            },
+        );
+        let boxed = table.object("Any", Shape::Boxed);
+        let closure = table.object(
+            "closure",
+            Shape::Closure {
+                function: cove_ir::FunctionId(0),
+                captures: vec![host, REF, INT, REF],
+            },
+        );
+
+        let mut mem = Memory::new(256);
+        let array = alloc(&mut mem, &table, pairs, 2);
+        // Payload: [Host, Int, Host, Int].
+        mem.set_payload(array, 0, 3);
+        mem.set_payload(array, 1, 900);
+        mem.set_payload(array, 2, 4);
+        mem.set_payload(array, 3, 901);
+        let holder = alloc(&mut mem, &table, boxed, 1);
+        mem.set_payload(holder, 0, host.0 as u64);
+        mem.set_payload(holder, 1, 5);
+        // Held by nothing pinned: its word is not reported.
+        let lost = alloc(&mut mem, &table, boxed, 1);
+        mem.set_payload(lost, 0, host.0 as u64);
+        mem.set_payload(lost, 1, 6);
+        let object = alloc(&mut mem, &table, closure, 0);
+        // Payload: [callee, Host, Ref, Int, Ref]. The `Int` is a number that
+        // would be a word if it were read as one.
+        mem.set_payload(object, 1, 2);
+        mem.set_payload(object, 2, array);
+        mem.set_payload(object, 3, 7);
+        mem.set_payload(object, 4, holder);
+
+        let found = |mem: &Memory| {
+            let mut found = Vec::new();
+            mem.pinned_host_words(table.layouts(), &mut |word| found.push(word));
+            found.sort_unstable();
+            found
+        };
+        assert_eq!(found(&mem), Vec::<u64>::new(), "nothing is pinned");
+        let pinned = mem.pin(object);
+        let twice = pinned.clone();
+        assert_eq!(found(&mem), vec![2, 3, 4, 5]);
+        drop((pinned, twice));
+        assert_eq!(found(&mem), Vec::<u64>::new());
+    }
+
     #[test]
     fn a_closures_captures_are_walked_inline() {
         let mut table = Table::new();

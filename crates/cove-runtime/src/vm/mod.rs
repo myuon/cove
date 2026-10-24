@@ -858,8 +858,9 @@ impl<'a> Vm<'a> {
 
     /// How many host resource names the machine's table holds: what a test
     /// reads to see that a reused machine does not accumulate them (issue
-    /// #685). Not an API; zero between runs unless a closure the embedder
-    /// keeps pins the heap.
+    /// #685). Not an API; zero between runs unless the embedder keeps a
+    /// closure, and then the names that closure reaches and a bounded slack
+    /// (issue #694, ADR 0119).
     #[doc(hidden)]
     pub fn resources_held(&self) -> usize {
         self.machine.resources_held()
