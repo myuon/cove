@@ -6,12 +6,13 @@
 #   scripts/fuzz-seed-corpus.sh                 # every target
 #   scripts/fuzz-seed-corpus.sh run structured  # just these
 #
-# - parse, compile, run: every .cove file under tests/e2e, examples, benches
-#   and tools/covefmt, and the standard library's own sources;
+# - parse, compile, run, differential_source: every .cove file under
+#   tests/e2e, examples, benches and tools/covefmt, and the standard library's
+#   own sources;
 # - image: the image body each of those lowers to, written by the stable
 #   `cove-fuzz image-seed` command (so asking for `image` builds `cove-fuzz`);
-# - structured: nothing from the tree, since its input is a stream of choices
-#   rather than a program; the committed seeds start it.
+# - structured, differential: nothing from the tree, since the input is a
+#   stream of choices rather than a program; the committed seeds start it.
 #
 # Every target also gets fuzz/seeds/<target>/ and fuzz/regressions/<target>/,
 # so a fresh corpus already covers each input that once found a bug.
@@ -25,7 +26,7 @@ cd "$root"
 corpus=fuzz/corpus
 
 if [ $# -eq 0 ]; then
-  set -- parse compile run structured image
+  set -- parse compile run structured image differential differential_source
 fi
 
 sources=()
@@ -37,7 +38,7 @@ done < <(find tests/e2e examples benches tools/covefmt crates/cove-sema/std \
 for target in "$@"; do
   mkdir -p "$corpus/$target"
   case "$target" in
-    parse | compile | run)
+    parse | compile | run | differential_source)
       for file in "${sources[@]}"; do
         # One flat directory: the path, with separators made safe, is the name.
         cp "$file" "$corpus/$target/$(echo "$file" | tr '/.' '__')"
@@ -47,9 +48,9 @@ for target in "$@"; do
       cargo build --profile checked -p cove-fuzz --quiet
       ./target/checked/cove-fuzz image-seed "$corpus/image" "${sources[@]}"
       ;;
-    structured) ;;
+    structured | differential) ;;
     *)
-      echo "no target \`$target\`: parse, compile, run, structured, image" >&2
+      echo "no target \`$target\`: parse, compile, run, structured, image, differential, differential_source" >&2
       exit 2
       ;;
   esac

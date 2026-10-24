@@ -1,0 +1,72 @@
+use console.println
+use console.eprintln
+use clock
+
+struct Pt {
+  x: Int
+  s: String
+}
+
+enum Shape {
+  Dot
+  Line(Int)
+  Box(Int, String)
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+  f(x)
+}
+
+fn adder(n: Int) -> fn(Int) -> Int {
+  fn(x) { x + n }
+}
+
+fn fallible(a: Int) -> Result<Int, Error> {
+  if a < 0 {
+    return Err(Error("negative {a}"))
+  }
+  Ok(a * 2)
+}
+
+fn optional(a: Int) -> Option<Int> {
+  let v = [1, 2].get(a)?
+  Some(v + 1)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let f: Float = 1.5
+  let g = 0.0 / 0.0
+  let h = 1.0 / 0.0
+  let z = -0.0
+  let big = 1.0e308
+  let tiny = 5.0e-324
+  println("{f} {g} {h} {z} {big} {tiny} {-h}")?
+  println("{f.format(3)} {(f * 2.0).sqrt()} {f.round()} {z.abs()} {f.min(g)} {f.max(g)}")?
+  println("{Float.parse("nan").unwrapOr(0.0)} {Float.parse("-0").unwrapOr(1.0)} {(3).toFloat()}")?
+  println("{h.toInt().unwrapOr(-1)} {f.toInt().unwrapOr(-1)} {g == g} {z == 0.0} {f < g}")?
+  println("{f.exp()} {f.ln()} {f.log10()} {f.sin()} {f.cos()} {f.pow(2.0)}")?
+  let p = Pt(x: 3, s: "a")
+  let q = Pt(x: 3, s: "a")
+  println("{p.x} {p.s} {p == q}")?
+  let sh = Shape.Box(2, "b")
+  let n = match sh {
+    Shape.Dot => 0
+    Shape.Line(k) => k
+    Shape.Box(k, t) => k + t.byteLength()
+  }
+  let a5 = adder(5)
+  let id: fn(Int) -> Int = fn(x) { x }
+  println("{n} {apply(a5, 1)} {apply(id, 2)} {apply(fn(x) { x * 3 }, 4)}")?
+  let r = fallible(3)?
+  let o = optional(1).unwrapOr(-1)
+  let m = match fallible(-1) {
+    Ok(v) => v
+    Err(e) => e.message.byteLength()
+  }
+  eprintln("err {r} {o} {m} {fallible(-2).mapError(fn(e) { Error("x{e.message}") }).isOk()}")?
+  let t0 = clock.now()
+  clock.sleep(5ms)?
+  println("{clock.now() - t0}")?
+  fallible(-5)?
+  Ok(())
+}

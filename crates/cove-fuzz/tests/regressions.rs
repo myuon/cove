@@ -154,3 +154,68 @@ fn degenerate_inputs() {
         harness(&[b'('; 4096]);
     }
 }
+
+#[test]
+fn differential_replays() {
+    replay("differential");
+}
+
+#[test]
+fn differential_source_replays() {
+    replay("differential_source");
+}
+
+/// The differential generator's promise, held as [`generated_programs_check`]
+/// holds the other's: every program it writes checks and lowers.
+#[test]
+fn differential_programs_check() {
+    for seed in 0..48 {
+        let program =
+            cove_fuzz::generate::differential_from_bytes(&choices(seed, 64 + 48 * seed as usize));
+        if let Err(why) = cove_fuzz::diagnose(&program) {
+            panic!("seed {seed} generated a program that was refused:\n{why}\n{program}");
+        }
+    }
+}
+
+/// Every mode agrees over fixed inputs, and the comparison is not vacuous: a
+/// share of the programs reach the end on the interpreter, so that more than
+/// a stop is compared, and the small-heap modes collect at least sometimes.
+#[test]
+fn the_modes_agree_over_fixed_inputs() {
+    use cove_fuzz::differential::Mode;
+
+    let seeds = 0..32u64;
+    let (mut finished, mut collected) = (0, 0);
+    for seed in seeds.clone() {
+        let program =
+            cove_fuzz::generate::differential_from_bytes(&choices(seed, 256 + 64 * seed as usize));
+        let report = cove_fuzz::differential::compare(&program)
+            .unwrap_or_else(|why| panic!("seed {seed} was refused:\n{why}\n{program}"));
+        assert!(
+            report.mismatch.is_none(),
+            "seed {seed}:\n{program}\n{}",
+            report.describe()
+        );
+        let ast = report.observed.iter().find(|o| o.mode == Mode::Ast);
+        if ast.is_some_and(|o| o.stopped.is_none() && o.outcome.as_str() != "invariant") {
+            finished += 1;
+        }
+        if report
+            .observed
+            .iter()
+            .any(|o| o.mode == Mode::VmGc && o.collections.unwrap_or(0) > 0)
+        {
+            collected += 1;
+        }
+    }
+    let total = seeds.count();
+    assert!(
+        finished * 4 >= total,
+        "only {finished} of {total} generated programs reached the end on the interpreter"
+    );
+    assert!(
+        collected > 0,
+        "no generated program collected on the small heap"
+    );
+}

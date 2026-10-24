@@ -7,6 +7,7 @@ and are not replayed; each has a line below. See `docs/FUZZING.md`.
 
 | Input | Found | What it was |
 |---|---|---|
+| `differential/generator-vector-chain-nests-too-deep` | 2026-10-24, `differential`, session without ASan | A generator bug, not a toolchain one: `fresh_vector` built its array at a fixed depth, and an array can be a fresh vector's `toArray()`, so the pair could chain without the depth growing — here 54 `.toVector()).toArray()` links, which the parser refuses (`cove::parse::nesting_too_deep`, correctly). The generated program was refused and `differential` panicked as it should. `fresh_vector` now takes the depth. |
 | `image/span-delta-overflow` | 2026-10-24, `image`, ASan session | `serial::decode` added a span's start delta to the previous span's start, and the end delta to that, unchecked: an `i64` delta near the limits overflowed and panicked (`attempt to add with overflow`, `serial.rs`). Now checked and refused as "a span lands outside a file". |
 
 An `image` input carries the hashes of the standard-library files it names,
