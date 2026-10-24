@@ -254,5 +254,12 @@ $ MIRIFLAGS=-Zmiri-disable-isolation CARGO_TARGET_DIR=target/miri \
     cargo +nightly miri test -p cove-runtime --test owned_lifetimes
 ```
 
-`-Zmiri-disable-isolation` because a budget reads the clock. The front end
-runs under Miri too, so this takes minutes rather than milliseconds.
+`-Zmiri-disable-isolation` because a budget reads the clock. It builds and
+starts, but the front end — checking the whole standard library to get the
+program the cases run — runs under Miri too: on 2026-10-24 it was still inside
+the first case after 46 minutes of CPU on an x86-64 Mac, with nothing
+reported, and was stopped. So `OwnedVm`'s `unsafe` has **not** been checked
+by Miri yet. What would make it practical is a program that does not go
+through the checker — a lowered image read back with `cove_ir::serial`, as
+`cove fmt` reads covefmt's, run with `Vm::invoke_lowered` — which this file
+leaves for the next step.

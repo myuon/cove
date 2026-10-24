@@ -8,7 +8,8 @@
 //! while it lives — through every way an embedder can move, park, resume,
 //! cancel and drop one. This drives each of those once over the smallest
 //! program that parks, so that `cargo +nightly miri test -p cove-runtime --test
-//! owned_lifetimes` (see `docs/ISOLATION_TESTING.md`) checks the borrows under
+//! owned_lifetimes` (see `docs/ISOLATION_TESTING.md`, which says why it has not
+//! finished yet: the front end runs under Miri too) checks the borrows under
 //! Stacked Borrows and the frees with Miri's allocator, and an ordinary `cargo
 //! t` runs the same cases in a few milliseconds.
 //!
