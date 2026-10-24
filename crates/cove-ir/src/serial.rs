@@ -966,8 +966,18 @@ impl Reader<'_> {
 
     fn span(&mut self, last: &mut Span) -> Result<Span, Unreadable> {
         let file = FileId(self.u32()?);
-        let start = i64::from(last.start) + self.i64()?;
-        let end = start + self.i64()?;
+        // Checked, because a delta is whatever the bytes say: an `i64` read
+        // from a damaged image can overflow the sum, and a reader refuses
+        // wrong bytes rather than panicking on them (issue #681's `image`
+        // target found this one).
+        let start = i64::from(last.start).checked_add(self.i64()?);
+        let end = match start {
+            Some(start) => start.checked_add(self.i64()?),
+            None => None,
+        };
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(self.malformed("a span lands outside a file"));
+        };
         let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
             return Err(self.malformed("a span lands outside a file"));
         };
