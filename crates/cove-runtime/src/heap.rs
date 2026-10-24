@@ -140,8 +140,12 @@
 //! itself, and that is an `Arc` cycle no heap here can see. Cells are
 //! reachable from every task that was given one and outlive all of them, so
 //! collecting cycles among them would need a collector that stops every
-//! thread — which ADR 0011 rules out under "no concurrent collection". It is
-//! a real leak, and the ADR now says so under "What this leaves uncollected".
+//! thread — which ADR 0011 rules out under "no concurrent collection". It
+//! was a real leak, and the ADR says so under "What this leaves uncollected".
+//! ADR 0115 closes it without stopping anyone: when the entry returns every
+//! task has been joined, and [`crate::shared::Cells::reclaim`] collects the
+//! run's cells as one graph by the same reference-counting argument this
+//! module makes for vectors.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

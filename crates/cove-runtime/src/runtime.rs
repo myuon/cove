@@ -18,6 +18,7 @@ use cove_sema::resolve::Program;
 
 use crate::heap::HeapStats;
 use crate::host::HostRegistry;
+use crate::shared::{Cells, SharedCell};
 use crate::trace::{NullSink, TraceEvent, TraceSink};
 
 /// The task id the entry runs under.
@@ -46,6 +47,10 @@ pub struct Runtime {
     /// contended here while a task runs: a thread accumulates locally and
     /// takes this lock once, when its heap ends.
     heap: Arc<Mutex<HeapStats>>,
+    /// Every `Shared` cell the run's interpreter made, so a cycle among them
+    /// is reclaimed when the run ends rather than left behind (ADR 0115).
+    /// Shared by every clone, so the last one to go reclaims what is left.
+    cells: Arc<Cells>,
 }
 
 impl Runtime {
@@ -59,6 +64,7 @@ impl Runtime {
             trace: Arc::new(NullSink),
             next_task_id: Arc::new(AtomicU64::new(1)),
             heap: Arc::new(Mutex::new(HeapStats::default())),
+            cells: Arc::new(Cells::default()),
         }
     }
 
@@ -115,6 +121,17 @@ impl Runtime {
     /// [`Interpreter::heap_stats`]: crate::interp::Interpreter::heap_stats
     pub fn retire_heap(&self, stats: &HeapStats) {
         self.locked_heap().merge(stats);
+    }
+
+    /// Records a `Shared` cell this run made; see [`Cells`].
+    pub fn register_cell(&self, cell: &Arc<SharedCell>) {
+        self.cells.register(cell);
+    }
+
+    /// The run's `Shared` cells, for reclaiming the ones nothing outside them
+    /// reaches and for asking how many are still alive.
+    pub fn cells(&self) -> &Cells {
+        &self.cells
     }
 
     /// What every heap retired so far has done.

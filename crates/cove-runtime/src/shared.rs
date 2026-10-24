@@ -33,10 +33,17 @@
 //! of cycle it can see for free — the cell ending up holding a handle to
 //! itself — and leaves everything wider as a documented, accepted leak. See
 //! `Transfer::reaches` and `direct_cycle`.
+//!
+//! ADR 0115 closes that leak where it can be closed without stopping a thread: when a
+//! run's entry has returned, every task of the run has been joined, and
+//! [`Cells::reclaim`] collects the run's cells as one graph — the same
+//! reference-counting argument the per-task heap makes, over cells instead of
+//! vectors. A cycle among cells therefore outlives the run that built it only
+//! if something outside the cells still reaches it.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 
 use cove_diag::Span;
 
@@ -150,12 +157,166 @@ impl SharedCell {
         // full to check task-safety, so asking it whether it names this same
         // cell costs one more pass over a tree already built, not a new
         // walk of the heap. A cycle through a second cell is not caught
-        // here; see the ADR for why that stays an accepted, documented leak.
+        // here; it is reclaimed when the run ends instead (ADR 0115,
+        // `Cells::reclaim`).
         if transfer.reaches(self as *const SharedCell) {
             return Err(direct_cycle(span));
         }
         *guard = transfer;
         Ok(result)
+    }
+}
+
+/// Every [`SharedCell`] one run's interpreter made, so that a cycle among them
+/// can be reclaimed when the run ends.
+///
+/// The per-task heap never looks inside a cell (see `crate::heap`), so a ring
+/// of cells — `a` holding `b` and `b` holding `a` — is an `Arc` cycle nothing
+/// on a task's thread can free. It is reclaimed here instead, at the two
+/// moments no task of the run can be inside a `lock`: when the entry has
+/// returned ([`crate::interp::Interpreter`] calls [`Cells::reclaim`] after
+/// its last heap is retired), and when the last handle to the run's
+/// [`crate::Runtime`] goes.
+///
+/// The table holds [`Weak`] handles for the heap's reason: a strong one would
+/// keep every cell alive and make every count below one too high.
+#[derive(Default)]
+pub struct Cells {
+    list: Mutex<CellList>,
+}
+
+#[derive(Default)]
+struct CellList {
+    cells: Vec<Weak<SharedCell>>,
+    /// The length at which [`Cells::register`] next drops the handles of
+    /// cells `Arc` has already freed, so a run that makes and drops cells in
+    /// a loop keeps a table the size of what is live rather than of what it
+    /// ever made. Doubling makes the pruning linear in the cells made.
+    prune_at: usize,
+}
+
+/// The fewest entries the table holds before it prunes.
+const MIN_CELLS_BEFORE_PRUNING: usize = 64;
+
+impl Cells {
+    /// Records a cell this run made.
+    pub fn register(&self, cell: &Arc<SharedCell>) {
+        let mut list = self.locked();
+        if list.cells.len() >= list.prune_at.max(MIN_CELLS_BEFORE_PRUNING) {
+            list.cells.retain(|cell| cell.strong_count() > 0);
+            list.prune_at = list.cells.len() * 2;
+        }
+        list.cells.push(Arc::downgrade(cell));
+    }
+
+    /// How many cells the table still names that are alive.
+    pub fn live(&self) -> usize {
+        self.locked()
+            .cells
+            .iter()
+            .filter(|cell| cell.strong_count() > 0)
+            .count()
+    }
+
+    /// Frees every cell this run made that nothing outside the run's cells
+    /// still reaches, and answers how many it emptied.
+    ///
+    /// The argument is the per-task heap's: for each cell, count the handles
+    /// to it that sit inside cells, and compare that with `Arc::strong_count`.
+    /// A shortfall is a handle held somewhere else — a value the embedder
+    /// kept, a task's local, a host's state — so that cell is a root, and so
+    /// is every cell its contents reach. What is left is reachable only from
+    /// cells that are themselves unreachable, and emptying one drops the
+    /// handles that held the others, so `Arc` frees the lot.
+    ///
+    /// Every cell is locked for the whole of the count, with `try_lock`: a
+    /// cell some thread is inside cannot be read, so if one is held the
+    /// reclamation is skipped rather than waited for. With every lock held no
+    /// contents can change, and a handle outside the cells can only be copied
+    /// from another such handle, so a cell found with none has none for as
+    /// long as the locks are held, and emptying it is safe from any thread.
+    pub fn reclaim(&self) -> usize {
+        let cells: Vec<Arc<SharedCell>> = {
+            let mut list = self.locked();
+            list.cells.retain(|cell| cell.strong_count() > 0);
+            list.cells.iter().filter_map(Weak::upgrade).collect()
+        };
+        if cells.is_empty() {
+            return 0;
+        }
+        let mut guards: Vec<MutexGuard<'_, Transfer>> = Vec::with_capacity(cells.len());
+        for cell in &cells {
+            match cell.value.try_lock() {
+                Ok(guard) => guards.push(guard),
+                Err(TryLockError::Poisoned(poisoned)) => guards.push(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => return 0,
+            }
+        }
+        let index: std::collections::HashMap<*const SharedCell, usize> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| (Arc::as_ptr(cell), i))
+            .collect();
+        // Handles to each cell from inside the cells. A handle to a cell
+        // another run made is not in `index`, and is not counted: that cell
+        // is not this table's to free.
+        let mut inside = vec![0usize; cells.len()];
+        for guard in &guards {
+            guard.each_cell(&mut |child| {
+                if let Some(&i) = index.get(&Arc::as_ptr(child)) {
+                    inside[i] += 1;
+                }
+            });
+        }
+        // `cells` holds one handle to each, and is not a root.
+        let mut stack: Vec<usize> = (0..cells.len())
+            .filter(|&i| Arc::strong_count(&cells[i]) - 1 > inside[i])
+            .collect();
+        let mut live = vec![false; cells.len()];
+        for &i in &stack {
+            live[i] = true;
+        }
+        while let Some(i) = stack.pop() {
+            guards[i].each_cell(&mut |child| {
+                if let Some(&j) = index.get(&Arc::as_ptr(child)) {
+                    if !live[j] {
+                        live[j] = true;
+                        stack.push(j);
+                    }
+                }
+            });
+        }
+        // Emptied under the locks, dropped after them: dropping a cell's
+        // contents may free another cell, whose guard must be gone by then.
+        let mut garbage = Vec::new();
+        for (i, guard) in guards.iter_mut().enumerate() {
+            if !live[i] {
+                garbage.push(std::mem::replace(&mut **guard, Transfer::Unit));
+            }
+        }
+        drop(guards);
+        let freed = garbage.len();
+        drop(garbage);
+        drop(cells);
+        freed
+    }
+
+    /// A poisoned table only means a thread panicked while pushing to it; the
+    /// handles in it are still the cells that were made.
+    fn locked(&self) -> MutexGuard<'_, CellList> {
+        self.list
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The last handle to a run's [`crate::Runtime`] going is the second moment
+/// nothing of the run can be inside a `lock`, and the one that catches a ring
+/// whose last outside handle — a value the embedder kept past the entry —
+/// went after the entry's own reclamation.
+impl Drop for Cells {
+    fn drop(&mut self) {
+        self.reclaim();
     }
 }
 
@@ -219,8 +380,10 @@ const SHARED_ACYCLIC_RULE: &str = "`Shared` ownership must stay acyclic. A cell 
 /// at the point of assignment rather than left to leak silently. A cycle
 /// closed through a *second* cell is not caught here — that would mean
 /// locking another cell mid-walk to see what it already holds, which risks
-/// exactly the deadlock `lock` elsewhere guards against — and remains an
-/// accepted, documented leak.
+/// exactly the deadlock `lock` elsewhere guards against. ADR 0011 left that
+/// wider cycle as an accepted leak; since ADR 0115 [`Cells::reclaim`] frees
+/// it when the run ends, and this refusal is kept only because ADR 0037
+/// leaves the interpreter's `lock` as it was.
 fn direct_cycle(span: Span) -> RuntimeError {
     RuntimeError::new(
         "this `lock` would leave the cell holding a handle to itself, and no collector reclaims that cycle",
@@ -228,4 +391,63 @@ fn direct_cycle(span: Span) -> RuntimeError {
     .at(span)
     .with_rule(SHARED_ACYCLIC_RULE)
     .with_help("keep the reference outside the cell, or restructure so the value never stores a handle back to its own `Shared`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `a` holding `b` and `b` holding `a`, registered in `cells`.
+    fn ring(cells: &Cells) -> (Weak<SharedCell>, Weak<SharedCell>) {
+        let a = SharedCell::new(Transfer::Unit);
+        let b = SharedCell::new(Transfer::Shared(Arc::clone(&a)));
+        *a.value.lock().unwrap() = Transfer::Array(vec![Transfer::Shared(Arc::clone(&b))]);
+        cells.register(&a);
+        cells.register(&b);
+        (Arc::downgrade(&a), Arc::downgrade(&b))
+    }
+
+    #[test]
+    fn dropping_the_table_frees_a_ring_nothing_else_holds() {
+        let cells = Cells::default();
+        let (a, b) = ring(&cells);
+        assert_eq!(cells.live(), 2, "a ring keeps itself alive");
+        drop(cells);
+        assert!(a.upgrade().is_none() && b.upgrade().is_none());
+    }
+
+    #[test]
+    fn a_cell_held_from_outside_keeps_what_it_reaches() {
+        let cells = Cells::default();
+        let (a, b) = ring(&cells);
+        let held = b.upgrade().unwrap();
+        assert_eq!(cells.reclaim(), 0);
+        assert_eq!(cells.live(), 2);
+        drop(held);
+        assert_eq!(cells.reclaim(), 2);
+        assert!(a.upgrade().is_none() && b.upgrade().is_none());
+    }
+
+    #[test]
+    fn a_cell_some_thread_is_inside_stops_the_reclamation() {
+        let cells = Cells::default();
+        let (a, _b) = ring(&cells);
+        let cell = a.upgrade().unwrap();
+        let guard = cell.value.lock().unwrap();
+        // `cell` is a handle from outside, so the ring would be kept in any
+        // case; the lock is what is under test, and it must not be waited for.
+        assert_eq!(cells.reclaim(), 0);
+        drop(guard);
+        drop(cell);
+        assert_eq!(cells.reclaim(), 2);
+    }
+
+    #[test]
+    fn the_table_prunes_cells_arc_already_freed() {
+        let cells = Cells::default();
+        for _ in 0..10 * MIN_CELLS_BEFORE_PRUNING {
+            cells.register(&SharedCell::new(Transfer::Int(1)));
+        }
+        assert!(cells.locked().cells.len() <= MIN_CELLS_BEFORE_PRUNING + 1);
+    }
 }

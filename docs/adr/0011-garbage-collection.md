@@ -1,6 +1,7 @@
 # ADR 0011: Garbage collection
 
 - Status: Accepted
+- Superseded in part by [ADR 0115](0115-the-interpreter-reclaims-a-cell-cycle-when-its-run-ends.md): its "What this leaves uncollected", for the interpreter. Everything else stands
 - Date: 2026-08-25
 - Amends: [ADR 0001](0001-mvp-language-design.md), whose memory management is
   narrowed to the interpreter until a native backend exists, and
