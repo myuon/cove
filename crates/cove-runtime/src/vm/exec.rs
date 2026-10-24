@@ -979,6 +979,29 @@ impl Prepared {
     /// encode is held here as the refusal, and every machine built from this
     /// preparation raises it before a frame is pushed.
     pub(crate) fn of(program: &Program) -> Prepared {
+        // The program itself first, before anything below indexes one of its
+        // tables: `cove_ir::verify` answers for any `Program`, however it was
+        // made (ADR 0120), and every table here, the encoder and the bytecode
+        // verifier read ids and widths freely. A program that does not verify
+        // is held as the refusal, with empty tables nothing will read, because
+        // `Machine::run` raises the refusal before it reads any of them.
+        if let Err(faults) = cove_ir::verify(program) {
+            return Prepared::refused(encoded::unverified(&faults));
+        }
+        Prepared::trusting(program)
+    }
+
+    /// `program` encoded and its tables built **without** `cove_ir::verify`:
+    /// for this crate's tests of the run-time checks that stand behind the
+    /// verifier, which a verified program cannot reach. Nothing else may call
+    /// it; [`Prepared::of`] is the boundary.
+    #[cfg(test)]
+    pub(crate) fn unverified(program: &Program) -> Prepared {
+        Prepared::trusting(program)
+    }
+
+    /// The preparation proper, over a program already known to verify.
+    fn trusting(program: &Program) -> Prepared {
         Prepared {
             // Encoded and verified here, once per program — not once per
             // machine — because nothing it reads is a machine's, and because
@@ -999,6 +1022,23 @@ impl Prepared {
             reflection: dynamic::tables(program),
         }
     }
+
+    /// A preparation that holds only `why`: what [`Prepared::of`] answers for
+    /// a program that does not verify.
+    fn refused(why: RuntimeError) -> Prepared {
+        Prepared {
+            encoded: Err(why),
+            widths: Arc::from([]),
+            word_runs: Arc::from([]),
+            fixed_payload_words: Arc::from([]),
+            reflection: dynamic::empty_tables(),
+        }
+    }
+
+    /// Whether the program this was prepared from may be run at all.
+    pub(crate) fn is_runnable(&self) -> bool {
+        self.encoded.is_ok()
+    }
 }
 
 impl<'a> Machine<'a> {
@@ -1011,6 +1051,19 @@ impl<'a> Machine<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(program: &'a Program, heap_words: usize) -> Machine<'a> {
         Machine::with_hosts(program, heap_words, None)
+    }
+
+    /// [`Machine::new`] over a program `cove_ir::verify` was not asked about:
+    /// see [`Prepared::unverified`].
+    #[cfg(test)]
+    pub(crate) fn unverified(program: &'a Program, heap_words: usize) -> Machine<'a> {
+        Machine::for_run(
+            program,
+            &Prepared::unverified(program),
+            heap_words,
+            None,
+            None,
+        )
     }
 
     /// A machine that calls hosts through `hosts`, with nothing above it.
@@ -1106,7 +1159,11 @@ impl<'a> Machine<'a> {
             tier: None,
             counting: None,
         };
-        machine.literal_addrs = machine.place_literals();
+        // A program that was refused is never run, so its literals are not
+        // placed: placing them reads the layout table `verify` refused.
+        if prepared.is_runnable() {
+            machine.literal_addrs = machine.place_literals();
+        }
         machine
     }
 
@@ -1452,6 +1509,14 @@ impl<'a> Machine<'a> {
     /// is borrowed mutably, and a run's tasks share the one encoding anyway.
     fn code(&self) -> Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError> {
         self.encoded.clone()
+    }
+
+    /// The refusal of a program this machine will not run, if it is one: what
+    /// [`Machine::run`] raises first, for a caller that has work to do before
+    /// it calls that — converting an entry's arguments — and must not do it
+    /// over a program that was refused.
+    pub(crate) fn runnable(&self) -> Result<(), RuntimeError> {
+        self.encoded.as_ref().map(|_| ()).map_err(Clone::clone)
     }
 
     /// The address of every program literal, or the refusal placing them

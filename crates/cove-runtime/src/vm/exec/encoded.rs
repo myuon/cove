@@ -509,6 +509,22 @@ pub(crate) fn prepare(program: &Program) -> Result<Arc<Encoded>, RuntimeError> {
     Ok(Arc::new(encoded))
 }
 
+/// What a program `cove_ir::verify` refused is refused with, before it is
+/// encoded: the first fault, as the verifier words it.
+///
+/// [ADR 0120](../../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md):
+/// the machine's boundary is the verifier, so a `Program` that was not made by
+/// the lowering — read back from an image, or built by hand — is held to the
+/// same check the lowering holds its own output to, once per program.
+pub(crate) fn unverified(faults: &[cove_ir::Invalid]) -> RuntimeError {
+    let first = faults
+        .first()
+        .map_or_else(|| "it is not well formed".to_string(), ToString::to_string);
+    RuntimeError::new(format!("this program does not verify: {first}")).with_rule(
+        "The machine runs only a program `cove_ir::verify` accepts, however the program was made.",
+    )
+}
+
 /// What an opcode this loop does not run is refused with.
 ///
 /// It names the operation, the function, the pc and the instruction as the
@@ -8990,7 +9006,12 @@ mod tests {
                 cove_ir::verify(&program).is_err(),
                 "the static rule refuses a commit with no window"
             );
-            let mut machine = Machine::new(&program, 1 << 16);
+            // And so does the machine, before it runs a thing (ADR 0120)...
+            let mut refusing = Machine::new(&program, 1 << 16);
+            assert!(message(refusing.run(alloc, &[0], &budget())).contains("does not verify"));
+            // ...so the run-time check behind the rule is reached only by a
+            // machine that was not told to ask.
+            let mut machine = Machine::unverified(&program, 1 << 16);
             let buffer = machine.run(alloc, &[0], &budget()).unwrap()[0];
             let capacity = u64::from(
                 machine

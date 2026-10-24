@@ -424,6 +424,14 @@ pub(crate) fn tables(program: &Program) -> std::sync::Arc<Tables> {
     })
 }
 
+/// The tables of a program that is never run: see `Prepared::refused`.
+pub(crate) fn empty_tables() -> std::sync::Arc<Tables> {
+    std::sync::Arc::new(Tables {
+        descriptors: std::sync::Arc::from([]),
+        children: Box::from([]),
+    })
+}
+
 /// Where every layout's children are: the table
 /// `cove_native::NativeCtx::dyn_children` publishes to compiled code, whose
 /// documentation is the format.
