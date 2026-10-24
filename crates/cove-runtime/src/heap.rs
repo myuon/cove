@@ -145,7 +145,9 @@
 //! ADR 0115 closes it without stopping anyone: when the entry returns every
 //! task has been joined, and [`crate::shared::Cells::reclaim`] collects the
 //! run's cells as one graph by the same reference-counting argument this
-//! module makes for vectors.
+//! module makes for vectors. ADR 0118 then let a cell hold a handle to
+//! itself, which ADR 0011's amendment had refused, since the same collection
+//! frees that cycle too.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

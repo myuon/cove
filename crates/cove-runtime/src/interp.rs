@@ -9937,39 +9937,67 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(run.output, "3\n");
     }
 
-    /// ADR 0011's amendment: nothing reclaims an `Arc` cycle among `Shared`
-    /// cells, so `lock` rejects the one shape of that cycle it can see for
-    /// free — a cell ending up holding a handle to itself — rather than
-    /// leaving it to leak silently. This is the ADR's own example.
+    /// A closure that stores a handle to its own cell is stored like any
+    /// other: ADR 0011's amendment refused it, ADR 0037 stopped refusing it
+    /// on the linear-memory backend, and ADR 0118 stopped here, because
+    /// `Cells::reclaim` frees the cycle when the run ends (ADR 0115). This is
+    /// ADR 0011's own example, and the handle the cell holds is the cell:
+    /// writing through it is read back through the original.
     #[test]
-    fn a_lock_refuses_a_closure_that_stores_a_handle_to_its_own_cell() {
+    fn a_lock_stores_a_closure_that_holds_a_handle_to_its_own_cell() {
+        let source = r#"
+struct Node {
+  cell: Option<Shared<Node>>
+  n: Int
+}
+
+export fn main() -> Int {
+  let n = Shared(Node(cell: None, n: 1))
+  n.lock(fn(var value) {
+    value = Node(cell: Some(n), n: 2)
+  })
+  let inner = n.lock(fn(value) { value.cell })
+  match inner {
+    Some(cell) => cell.lock(fn(var value) { value = Node(cell: value.cell, n: 3) })
+    None => {}
+  }
+  n.lock(fn(value) { value.n })
+}
+"#;
+        let run = run_entry_of(source, "main", &[]);
+        assert_eq!(run.value().to_string(), "3");
+    }
+
+    /// Storing a handle to the cell being locked never locks it a second
+    /// time; only a `lock` on it inside the closure does, and that is still
+    /// the reentrancy error rather than a hang.
+    #[test]
+    fn a_cell_holding_itself_is_still_not_locked_twice() {
         let source = r#"
 struct Node {
   cell: Option<Shared<Node>>
 }
 
-export fn main() -> Result<Unit, Error> {
+export fn main() -> Int {
   let n = Shared(Node(cell: None))
   n.lock(fn(var value) {
     value = Node(cell: Some(n))
+    match value.cell {
+      Some(cell) => cell.lock(fn(inner) { 0 })
+      None => 1
+    }
   })
-  Ok(())
 }
 "#;
         let error = run_entry_of(source, "main", &[]).error();
         assert_eq!(
             error.message,
-            "this `lock` would leave the cell holding a handle to itself, and no collector reclaims that cycle"
+            "this task already holds this `Shared`, so `lock` would wait for itself"
         );
-        assert!(error
-            .rule
-            .unwrap()
-            .contains("`Shared` ownership must stay acyclic"));
     }
 
-    /// The check only catches a cell reaching *itself*: a cell that ends up
-    /// holding a handle to a *different* cell is an ordinary, permitted
-    /// `Shared` graph, not the direct cycle `lock` refuses.
+    /// A cell that ends up holding a handle to a *different* cell is an
+    /// ordinary `Shared` graph.
     #[test]
     fn a_lock_allows_a_closure_that_stores_a_handle_to_a_different_cell() {
         let source = r#"

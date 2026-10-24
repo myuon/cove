@@ -1711,19 +1711,17 @@ export fn f() -> Int {
 }
 
 /// A cell that comes to hold a handle to itself runs, and is an ordinary
-/// object-graph cycle.
+/// object-graph cycle, on both evaluators.
 ///
-/// This is the one case here that is **not** `agree`, and the reason is
-/// [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md).
-/// The ADR replaced ADR 0011's amendment, which had `lock` refuse the one
-/// cycle it could see; the oracle and the frozen predecessor still make that
-/// refusal and keep it until they are deleted, and this backend does not. So
-/// asking the two to agree would be asking the machine to reconstruct a walk
-/// the ADR says not to reconstruct.
+/// [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+/// removed ADR 0011's refusal of this cycle on this backend and left the
+/// oracle refusing it, so this was once the one case here that was not
+/// `agree`. Since [ADR 0118](../../../../docs/adr/0118-the-interpreter-lets-a-cell-hold-itself.md)
+/// the oracle runs it too, and reclaims the cycle when the run ends.
 ///
-/// What is reclaimed and when is `cove_runtime::vm::cell`'s to show, because
-/// it can run the collection; what this shows is that the program *runs*,
-/// which is the half a source-level test can see.
+/// What is reclaimed and when is `cove_runtime::vm::cell`'s and
+/// `tests/shared_cycles.rs`'s to show, because they can run the collection;
+/// what this shows is that the program *runs*, and says the same on both.
 #[test]
 fn a_cell_may_come_to_hold_itself() {
     let source = r#"
@@ -1736,10 +1734,7 @@ export fn f() -> Int {
   n.lock(fn(value) { value.n })
 }
 "#;
-    assert_eq!(
-        on_a_deep_stack(move || on_the_machine(source, "f", vec![])),
-        Answer::Value("8".to_string())
-    );
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("8".to_string()));
 }
 
 // ---- `async fn` -----------------------------------------------------------

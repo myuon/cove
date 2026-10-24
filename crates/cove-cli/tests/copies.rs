@@ -2067,7 +2067,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// (`values_std_web`'s `ret` 29 to 27), and now answer `respond`'s call, which
 /// builds the one `Response` they share — three copies become one. The cases
 /// the program gained for `respond` are the +1, in its own `main`.
-const FORWARDABLE_COPIES: usize = 7877;
+///
+/// **7,881 since a cell may hold itself on the interpreter** (issue #695,
+/// ADR 0118), a rise of 4 that is all program and none of it the lowering:
+/// the change is to the interpreter's `lock`, which lowers nothing, and with
+/// `tests/e2e/shared_cycle` as it was the corpus answers 7,877, the bound
+/// exactly. The 4 are in that program's own `main`, which gained a cell that
+/// holds itself and is renamed through the handle it holds: two closures that
+/// each build a `Node` to store, one that answers the handle, and one that
+/// answers the label.
+const FORWARDABLE_COPIES: usize = 7881;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
