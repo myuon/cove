@@ -32,7 +32,10 @@
 # - `-dict`: Cove's keywords and operators, for the source targets.
 # - `-detect_leaks=0`: LeakSanitizer (Linux only) would report memory a
 #   process-lifetime cache keeps; leaks across runs are issue 681's
-#   priority 3, not a memory-safety finding.
+#   priority 3, not a memory-safety finding. The flag only stops
+#   libFuzzer's per-input check: LeakSanitizer's own check at process exit
+#   still runs and fails the job (it did, on #687's `differential_source`
+#   smoke, on Linux only), so `ASAN_OPTIONS` turns that off too.
 #
 # The process has no network and no file system to reach through the
 # harness: a run is granted `console`, writing into a sink or a buffer, and
@@ -63,6 +66,8 @@ esac
 if [ ! -d "$root/fuzz/corpus/$target" ]; then
   "$root/scripts/fuzz-seed-corpus.sh" "$target"
 fi
+
+export ASAN_OPTIONS="detect_leaks=0${ASAN_OPTIONS:+:$ASAN_OPTIONS}"
 
 # cargo-fuzz itself points `-artifact_prefix` at fuzz/artifacts/<target>/.
 cd "$root/fuzz"
