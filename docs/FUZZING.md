@@ -220,7 +220,11 @@ A **finding** is anything else:
   toolchain itself — the fuzz build is optimised with both checks on, as
   `[profile.checked]` is;
 - an abort, a segmentation fault, a stack overflow;
-- an AddressSanitizer report;
+- an AddressSanitizer report, a LeakSanitizer one included (Linux only): a
+  run that leaves memory behind leaves a reference behind, which
+  [ADR 0114](adr/0114-what-a-failed-run-leaves-behind.md) says a run may not
+  do, and [ADR 0115](adr/0115-the-interpreter-reclaims-a-cell-cycle-when-its-run-ends.md)
+  is the one this has found so far;
 - an input that runs past libFuzzer's `-timeout=10` (a "timeout" artifact);
 - an input that pushes the process past `-rss_limit_mb` or makes one
   allocation over `-malloc_limit_mb` (an "oom" artifact): the run's heap is
@@ -262,6 +266,7 @@ The fuzzer, per session (`scripts/fuzz.sh`):
 | `-max_len` | 64 KiB source, 4 KiB generator choices, 256 KiB image | the largest program in the tree fits |
 | `-dict` | `fuzz/dictionaries/cove.dict` | source targets only |
 | `-len_control=0` | `structured` and `differential` | their choices are read from the front; a short input is a short program |
+| leaks | on | LeakSanitizer's per-input check names the input that leaked, and its check at exit catches the rest; there is no suppression file, because nothing the process keeps on purpose is reported |
 
 Nothing in a run depends on the wall clock except the deadline, and that can
 only turn a long run into a stopped one. A run does not touch the network or
@@ -435,9 +440,15 @@ It does **not** cover:
   next object in the same chunk is a valid access to ASan, from compiled code
   and from the interpreter loop alike. ASan's unit is the Rust allocation,
   not the Cove object.
-- **leaks.** LeakSanitizer is not supported on macOS; on Linux CI it runs at
-  exit, but a leak in a long-lived process is not a memory-safety bug here and
-  is not what this is for.
+- **leaks, on macOS.** LeakSanitizer is Linux only. On Linux it is on, per
+  input and at exit, and the CI smoke runs there; it found
+  [issue #688](https://github.com/myuon/cove/issues/688), a ring of `Shared`
+  cells the interpreter never freed, on its first run with leak checking
+  left on — it had been switched off, on the reasoning that a leak is not a
+  memory-safety bug. On a Mac, a leak shows
+  only as a test that counts what is still alive, like
+  `crates/cove-runtime/tests/shared_cycles.rs`, or by running the target in
+  a Linux container.
 
 What would close those gaps, and whether it is worth it:
 

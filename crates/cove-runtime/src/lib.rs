@@ -69,7 +69,7 @@ pub use schema::{
     Admits, Effect, FieldSchema, HostType, Mismatch, ModuleSchema, OperationSchema, Part,
     ResourceSchema, TypeSchema,
 };
-pub use shared::SharedCell;
+pub use shared::{Cells, SharedCell};
 pub use task::Transfer;
 pub use trace::{
     create_trace_file, value_to_json, HostOutcome, JsonlSink, NullSink, RecordedValue,

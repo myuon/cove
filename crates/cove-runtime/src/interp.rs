@@ -1234,6 +1234,10 @@ impl<'a> Interpreter<'a> {
         // for or cancels its children — so every heap but this one has been
         // retired and the totals are complete.
         self.retire_heap();
+        // And for the same reason no task is inside a `lock`, so a cycle
+        // among the run's `Shared` cells, which no task's heap can see, is
+        // reclaimed here (ADR 0115). What the answer still holds is a root.
+        self.runtime.cells().reclaim();
         let heap = self.heap_stats();
         // The object half of the event and none of the word half: this heap
         // is a set of `Rc`-ed objects and counts objects, and issue #240's
@@ -2785,7 +2789,11 @@ impl<'a> Interpreter<'a> {
                         FreeBuiltinKind::Constructor => {
                             let args = self.eval_args(env, args, trailing)?;
                             let mut values = plain_values(args, name)?;
-                            Ok(builtins::call_constructor(name, &mut values, span)?)
+                            let value = builtins::call_constructor(name, &mut values, span)?;
+                            if let Value(Repr::Shared(cell)) = &value {
+                                self.runtime.register_cell(cell);
+                            }
+                            Ok(value)
                         }
                     };
                 }

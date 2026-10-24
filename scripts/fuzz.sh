@@ -30,12 +30,13 @@
 # - `-max_len`: 64 KiB of source (the largest program in the tree is under
 #   that), 256 KiB of image body, 4 KiB of generator choices.
 # - `-dict`: Cove's keywords and operators, for the source targets.
-# - `-detect_leaks=0`: LeakSanitizer (Linux only) would report memory a
-#   process-lifetime cache keeps; leaks across runs are issue 681's
-#   priority 3, not a memory-safety finding. The flag only stops
-#   libFuzzer's per-input check: LeakSanitizer's own check at process exit
-#   still runs and fails the job (it did, on #687's `differential_source`
-#   smoke, on Linux only), so `ASAN_OPTIONS` turns that off too.
+# - leaks: LeakSanitizer (Linux only; macOS has none) is left on, both
+#   libFuzzer's per-input check, which names the input, and the check at
+#   process exit. A cycle a run leaves behind is a reference ADR 0114 says a
+#   run may not leave; issue #688's ring of `Shared` cells was one, and ADR
+#   0115 turned it back on after it had been passed `-detect_leaks=0`. A
+#   deliberate process-lifetime cache that LeakSanitizer reports would go in
+#   a suppression file passed through `LSAN_OPTIONS`; there is none yet.
 #
 # The process has no network and no file system to reach through the
 # harness: a run is granted `console`, writing into a sink or a buffer, and
@@ -67,8 +68,6 @@ if [ ! -d "$root/fuzz/corpus/$target" ]; then
   "$root/scripts/fuzz-seed-corpus.sh" "$target"
 fi
 
-export ASAN_OPTIONS="detect_leaks=0${ASAN_OPTIONS:+:$ASAN_OPTIONS}"
-
 # cargo-fuzz itself points `-artifact_prefix` at fuzz/artifacts/<target>/.
 cd "$root/fuzz"
 mkdir -p "artifacts/$target" logs
@@ -78,7 +77,6 @@ cargo +nightly fuzz run "$target" "corpus/$target" -- \
   -rss_limit_mb=4096 \
   -malloc_limit_mb=1024 \
   -max_len="$max_len" \
-  -detect_leaks=0 \
   -print_final_stats=1 \
   ${extra[@]+"${extra[@]}"} \
   "$@" 2>&1 | tee "logs/$target.log"

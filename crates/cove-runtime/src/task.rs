@@ -886,6 +886,46 @@ impl Transfer {
         }
     }
 
+    /// Calls `visit` with every cell this value holds a handle to, without
+    /// looking inside any of them — once per handle, so a cell named twice
+    /// is visited twice.
+    ///
+    /// This is the edge list [`crate::shared::Cells::reclaim`] counts and
+    /// marks with, so it must yield the same handles every time it is asked
+    /// and must not skip one it then marks through: a handle it missed would
+    /// only make its cell look held from outside, which keeps it, but a
+    /// handle it yielded to one pass and not the other would not.
+    pub(crate) fn each_cell(&self, visit: &mut dyn FnMut(&Arc<SharedCell>)) {
+        match self {
+            Transfer::Shared(cell) => visit(cell),
+            Transfer::Array(items) => items.iter().for_each(|item| item.each_cell(visit)),
+            Transfer::Map(entries) => entries.values().for_each(|item| item.each_cell(visit)),
+            Transfer::Struct { fields, .. } => {
+                fields.iter().for_each(|(_, item)| item.each_cell(visit))
+            }
+            Transfer::Enum { payload, .. } => payload.iter().for_each(|item| item.each_cell(visit)),
+            Transfer::Dyn { value, .. } => value.each_cell(visit),
+            Transfer::Closure(closure) => closure
+                .captures
+                .iter()
+                .for_each(|(_, item)| item.each_cell(visit)),
+            // A set's members are map keys, and a key cannot be a `Shared`:
+            // `Set.of` refuses a cell (tests/e2e/fail_key_known_shared).
+            Transfer::Unit
+            | Transfer::Bool(_)
+            | Transfer::Int(_)
+            | Transfer::Float(_)
+            | Transfer::Duration(_)
+            | Transfer::Str(_)
+            | Transfer::Set(_)
+            | Transfer::HostModule(_)
+            | Transfer::HostFn { .. }
+            | Transfer::Type(_)
+            | Transfer::Range { .. }
+            | Transfer::Resource(_) => {}
+        }
+    }
+
     /// `path` names how the value was reached, and is extended as the walk
     /// descends, so a diagnostic can point at the capture rather than at the
     /// closure as a whole.
