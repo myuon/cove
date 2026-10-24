@@ -1,0 +1,65 @@
+[package]
+name = "cove-fuzz-targets"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The cargo-fuzz half of ADR 0112: one `fuzz_target!` per harness in
+# `crates/cove-fuzz`, and nothing else. It is a workspace of its own — the
+# root manifest lists it under `exclude` — because it needs nightly and
+# `-Zsanitizer=address`, which no ordinary workspace command may require.
+#
+# Build and run with `scripts/fuzz.sh`, or by hand from this directory:
+#
+#   cargo +nightly fuzz build
+#   cargo +nightly fuzz run run -- -max_total_time=60
+#
+# `cargo fuzz build` compiles with optimisations and, unless given `-O`, with
+# debug assertions and overflow checks on — the same checks
+# `[profile.checked]` keeps — and with AddressSanitizer by default.
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `template` so the `run` and `structured` targets reach compiled code; a
+# fuzz build is not a workspace build, so nothing else would turn it on.
+cove-fuzz = { path = "../crates/cove-fuzz", features = ["template"] }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compile"
+path = "fuzz_targets/compile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run"
+path = "fuzz_targets/run.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structured"
+path = "fuzz_targets/structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image"
+path = "fuzz_targets/image.rs"
+test = false
+doc = false
+bench = false

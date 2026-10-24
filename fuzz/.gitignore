@@ -1,0 +1,10 @@
+# What a fuzzing session makes. None of it is committed: the corpus is
+# rebuilt from the repository's own programs by `scripts/fuzz-seed-corpus.sh`,
+# and a crash input that matters is minimised and copied into `regressions/`,
+# which is committed (see docs/FUZZING.md).
+target/
+corpus/
+artifacts/
+coverage/
+logs/
+fuzz-*.log

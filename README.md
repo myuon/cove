@@ -80,6 +80,8 @@ and others.
 - [Language Card](docs/LANGUAGE_CARD.md) — the language on one page
 - [Language Reference](docs/LANGUAGE_REFERENCE.md) — the rules in full
 - [Builtins and the Host API](docs/BUILTINS.md)
+- [Fuzzing](docs/FUZZING.md) — what is fuzzed, how to run it, and what
+  AddressSanitizer can and cannot see
 - [Architecture decisions](docs/adr/) — every design decision, why it was
   made, and what later changed it. This is where the project's history lives
 - [API documentation](https://myuon.github.io/cove/) — rustdoc for the crates

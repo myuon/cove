@@ -16,6 +16,11 @@ members = [
   "crates/cove-cli",
   "crates/cove-wasm",
   "crates/cove-bench",
+  # The fuzz harnesses of issue 681 (ADR 0112), as a library so that
+  # `tests/regressions.rs` replays every committed crash input on stable Rust.
+  # `fuzz/`, the cargo-fuzz crate that drives them, is not a member: it needs
+  # nightly and `-Zsanitizer`, and `exclude` below keeps it out.
+  "crates/cove-fuzz",
   # The embedding half of `examples/rules`: a Rust host that compiles the
   # rule package once and invokes it many times. It is a workspace member so
   # that `cargo test --workspace` runs its tests and `cargo clippy` sees it,
@@ -29,6 +34,7 @@ members = [
   # `PreparedProgram` building against the API it demonstrates.
   "examples/edge/host",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
