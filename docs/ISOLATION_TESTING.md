@@ -78,8 +78,9 @@ same instructions, allocated words and host calls charged.
 
 Per-run, and must not survive: frames, stack, tasks, held cells, the parked
 request, the budget's accounting and cancellation flag, the yield request,
-every heap word the run did not hand out. Survives by design: the heap arena
-and the machine's cumulative counters; values the embedder kept (a closure
+every heap word the run did not hand out, and the resource table's names
+(ADR 0116: kept only while the embedder holds an object of the heap).
+Survives by design: the heap arena and the machine's cumulative counters; values the embedder kept (a closure
 pins its environment, and only its own machine may call it); a host's own
 state (per registry); everything immutable (preparation, grants, the
 standard library cache, per-thread interned names).
@@ -205,14 +206,32 @@ the gate and the `#[ignore]`. None is gated now.
    before and 4.14 and 5.00 µs after — inside the run-to-run spread — with the
    same 21 allocations a turn, the rules embedding's registry having a budget
    installed.
-2. **A machine's resource table is never trimmed.** `Machine::resource_word`
-   interns every handle a run is handed into a table that lives as long as the
-   machine and that nothing removes from (`src/vm/exec.rs`). A resident machine
-   handed a new handle per request grows by one entry a request, and every
-   resource operation scans the table linearly, so the cost of a handle
-   operation grows with the machine's age. Not an authority leak — the grant
-   check is per call — and not observable through the public API, so it is not
-   a test; found by reading the code.
+2. **A machine's resource table was never trimmed** — **fixed**,
+   [issue #685](https://github.com/myuon/cove/issues/685),
+   [ADR 0116](adr/0116-a-machine-s-resource-table-is-emptied-between-runs.md).
+   `Machine::resource_word` interned every handle a run was handed into a
+   table that lived as long as the machine and that nothing removed from
+   (`src/vm/exec.rs`), and every resource operation scanned it linearly, so a
+   resident machine handed a new handle per request grew by one entry a
+   request and a handle operation got slower with the machine's age: a run
+   minting and redeeming one ticket went from 21 µs to 420 µs a run over
+   20,000 runs of one machine. Not an authority leak — the grant check is per
+   call. Found by reading the code.
+
+   The table is now per-run state: emptied at both edges of every entry,
+   unless an object of the heap is pinned for a value the embedder holds — a
+   kept closure may have a handle's word in its environment, and emptying the
+   table under it makes that word name nothing or the wrong resource — and
+   found by a hash lookup on the id. The same run costs 8 µs on its 20,000th
+   run as on its first. A handle kept as a value is the name itself and
+   survives an emptied table. Tested by
+   `lifecycle.rs`'s `a_reused_machine_keeps_no_resource_from_its_earlier_runs_{encoded,native}`
+   (1,000 runs, a failed one and a parkable one, the table empty after each,
+   read through the `#[doc(hidden)]` `resources_held`) and
+   `a_kept_handle_still_names_its_resource_{encoded,native}` (a handle kept as
+   a value and a closure kept with a handle inside it, each used after runs
+   that were handed other resources; the table emptied at the first edge after
+   the closure is dropped).
 3. **A handle carries no registry identity** (S4, ADR 0114's alternatives).
    Handed by an embedder to a run over another registry that grants its
    capability, it names whatever that registry's host has under the same id.

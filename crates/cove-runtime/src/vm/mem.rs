@@ -959,6 +959,11 @@ impl Space {
         self.pinned().push(addr);
     }
 
+    /// Whether any object is pinned for a holder outside the run's frames.
+    fn holds_pinned(&self) -> bool {
+        !self.pinned().is_empty()
+    }
+
     /// Gives back one holder's claim on `addr`.
     ///
     /// One occurrence, not every one: the table is a multiset, so a second
@@ -2783,6 +2788,12 @@ impl Memory {
             space: Arc::clone(&self.space),
             addr,
         }
+    }
+
+    /// Whether any object of this memory is pinned for a [`crate::Value`] an
+    /// embedder holds. See `Space::pinned`.
+    pub(crate) fn holds_pinned(&self) -> bool {
+        self.space.holds_pinned()
     }
 
     /// Whether `rooted` names an object of *this* memory.
