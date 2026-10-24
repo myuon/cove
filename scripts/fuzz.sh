@@ -2,7 +2,8 @@
 # Runs one fuzz target under AddressSanitizer with the limits docs/FUZZING.md
 # describes, and leaves a crash input in fuzz/artifacts/<target>/.
 #
-#   scripts/fuzz.sh <parse|compile|run|structured|image> [seconds] [-- libFuzzer flags...]
+#   scripts/fuzz.sh <target> [seconds] [-- libFuzzer flags...]
+#   targets: parse compile run structured image differential differential_source
 #
 #   scripts/fuzz.sh run 300           # five minutes of `run`
 #   scripts/fuzz.sh structured 60 -- -jobs=4 -workers=4
@@ -14,11 +15,12 @@
 #
 # - `-max_total_time`: the session's length, the second argument (default 60).
 # - `-timeout=10`: seconds one input may take before libFuzzer calls it a hang.
-#   The harness's own deadline is 150 ms a run and there are at most two runs
-#   (VM, native) after a front end of a few tens of milliseconds, so ten
-#   seconds is reached only by a loop the runtime's deadline cannot stop —
-#   which is a finding, not a slow input. (Under ASan everything is ~2-3x
-#   slower; the margin covers it.)
+#   The harness's own deadline is 150 ms a run and there are at most six runs
+#   (the differential targets' ast, vm, native, vm-gc, native-gc and image)
+#   after a front end of a few tens of milliseconds, so ten seconds is reached
+#   only by a loop the runtime's deadline cannot stop — which is a finding,
+#   not a slow input. (Under ASan everything is ~2-3x slower; the margin
+#   covers it.)
 # - `-rss_limit_mb=4096`: the process's memory. A run's heap is capped at two
 #   mebibytes by the harness, so this is reached only by memory the runtime
 #   allocates outside its heap — a host-side `Vec` sized by a guest number —
@@ -30,10 +32,14 @@
 # - `-dict`: Cove's keywords and operators, for the source targets.
 # - `-detect_leaks=0`: LeakSanitizer (Linux only) would report memory a
 #   process-lifetime cache keeps; leaks across runs are issue 681's
-#   priority 3, not a memory-safety finding.
+#   priority 3, not a memory-safety finding. The flag only stops
+#   libFuzzer's per-input check: LeakSanitizer's own check at process exit
+#   still runs and fails the job (it did, on #687's `differential_source`
+#   smoke, on Linux only), so `ASAN_OPTIONS` turns that off too.
 #
 # The process has no network and no file system to reach through the
-# harness: a run is granted `console` alone, writing into a sink.
+# harness: a run is granted `console`, writing into a sink or a buffer, and
+# in the differential targets the virtual clock.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,14 +51,14 @@ if [ "${1:-}" = "--" ]; then
 fi
 
 case "$target" in
-  parse | compile | run) max_len=65536 extra=(-dict=dictionaries/cove.dict) ;;
+  parse | compile | run | differential_source) max_len=65536 extra=(-dict=dictionaries/cove.dict) ;;
   # A generator reads its choices from the front, so a short input is a
   # short program; `-len_control=0` lets libFuzzer use the whole length at
   # once rather than growing towards it over the first hours.
-  structured) max_len=4096 extra=(-len_control=0) ;;
+  structured | differential) max_len=4096 extra=(-len_control=0) ;;
   image) max_len=262144 extra=() ;;
   *)
-    echo "no target \`$target\`: parse, compile, run, structured, image" >&2
+    echo "no target \`$target\`: parse, compile, run, structured, image, differential, differential_source" >&2
     exit 2
     ;;
 esac
@@ -60,6 +66,8 @@ esac
 if [ ! -d "$root/fuzz/corpus/$target" ]; then
   "$root/scripts/fuzz-seed-corpus.sh" "$target"
 fi
+
+export ASAN_OPTIONS="detect_leaks=0${ASAN_OPTIONS:+:$ASAN_OPTIONS}"
 
 # cargo-fuzz itself points `-artifact_prefix` at fuzz/artifacts/<target>/.
 cd "$root/fuzz"

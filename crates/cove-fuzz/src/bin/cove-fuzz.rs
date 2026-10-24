@@ -1,8 +1,11 @@
 //! Replays fuzz inputs without cargo-fuzz, and prints what the generator made.
 //!
 //! ```text
-//! cove-fuzz <parse|compile|run|structured|image> FILE...   replay each file
+//! cove-fuzz <TARGET> FILE...                               replay each file through a target
 //! cove-fuzz generate FILE...                               print the program FILE generates
+//! cove-fuzz generate-differential FILE...                  the same, as the differential target generates it
+//! cove-fuzz diff FILE...                                   a source's run in every mode, and whether they agree
+//! cove-fuzz diff-generated FILE...                         the program a differential input generates, and the same
 //! cove-fuzz check FILE...                                  print a source's diagnostics
 //! cove-fuzz explain FILE...                                how a source ends on each tier
 //! cove-fuzz explain-generated FILE...                      the same, for the program FILE generates
@@ -17,7 +20,8 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((command, rest)) = args.split_first() else {
         eprintln!(
-            "usage: cove-fuzz <parse|compile|run|structured|image|generate|check|image-seed> FILE..."
+            "usage: cove-fuzz <TARGET|generate|generate-differential|diff|diff-generated|check|explain|explain-generated|image-seed|verify-image> FILE...\ntargets: {}",
+            cove_fuzz::TARGETS.join(", ")
         );
         return ExitCode::from(2);
     };
@@ -26,6 +30,41 @@ fn main() -> ExitCode {
         "generate" => {
             for path in rest {
                 print!("{}", cove_fuzz::generate::from_bytes(&read(path)));
+            }
+        }
+        "generate-differential" => {
+            for path in rest {
+                print!(
+                    "{}",
+                    cove_fuzz::generate::differential_from_bytes(&read(path))
+                );
+            }
+        }
+        // A stable report: the program, then each mode's observation, then
+        // `agree` or the first mismatch. Exits non-zero on a mismatch, so a
+        // script can minimise against it as well as libFuzzer can.
+        "diff" | "diff-generated" => {
+            let mut disagreed = false;
+            for path in rest {
+                let text = if command == "diff" {
+                    String::from_utf8_lossy(&read(path)).into_owned()
+                } else {
+                    cove_fuzz::generate::differential_from_bytes(&read(path))
+                };
+                println!("=== {path}");
+                if command == "diff-generated" {
+                    println!("--- program ---\n{text}--- runs ---");
+                }
+                match cove_fuzz::differential::compare(&text) {
+                    Ok(report) => {
+                        print!("{}", report.describe());
+                        disagreed |= report.mismatch.is_some();
+                    }
+                    Err(why) => println!("refused:\n{why}"),
+                }
+            }
+            if disagreed {
+                return ExitCode::FAILURE;
             }
         }
         "verify-image" => {

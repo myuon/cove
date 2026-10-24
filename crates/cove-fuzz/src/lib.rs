@@ -33,6 +33,11 @@
 //! refuses is a bug — in the generator, or in the checker — and panics with the
 //! program's text.
 //!
+//! The differential harnesses, [`differential`](fn@differential) and
+//! [`differential_source`] (issue 681's priority 2; see the
+//! [`differential`](mod@differential) module), add a second kind of finding:
+//! two ways of running one program that answer differently.
+//!
 //! # Bytes and text
 //!
 //! The source harnesses read their bytes with [`std::str::from_utf8`] and
@@ -46,7 +51,8 @@
 //! # What a run may touch
 //!
 //! A run is granted `console` and nothing else, and its console writes into
-//! [`std::io::sink`]. No file, network, process, environment, database or
+//! [`std::io::sink`] (the differential harnesses write into buffers, and grant
+//! the virtual clock as well). No file, network, process, environment, database or
 //! clock host is registered, so a call into any of them is refused by the
 //! registry; and the grant source is sealed, so a refusal does not point at a
 //! `cove.toml`. The deadline is the only wall-clock dependence, and it can only
@@ -68,7 +74,10 @@ use cove_runtime::{
 };
 use cove_sema::{Compiler, Config, HostSchemas, Module, Package, Unit};
 
+pub mod differential;
 pub mod generate;
+
+pub use differential::{differential, differential_source};
 
 /// The module a fuzzed source is compiled as, and the function that is run.
 ///
@@ -118,7 +127,15 @@ pub fn limits() -> Limits {
 }
 
 /// Every target, by the name `fuzz/` and `fuzz/regressions/` give it.
-pub const TARGETS: [&str; 5] = ["parse", "compile", "run", "structured", "image"];
+pub const TARGETS: [&str; 7] = [
+    "parse",
+    "compile",
+    "run",
+    "structured",
+    "image",
+    "differential",
+    "differential_source",
+];
 
 /// The harness a target name names.
 pub fn harness(target: &str) -> Option<fn(&[u8])> {
@@ -128,6 +145,8 @@ pub fn harness(target: &str) -> Option<fn(&[u8])> {
         "run" => run,
         "structured" => structured,
         "image" => image,
+        "differential" => differential,
+        "differential_source" => differential_source,
         _ => return None,
     })
 }
@@ -160,10 +179,8 @@ pub fn compile(data: &[u8]) {
 /// Compiles `data` and, if it lowers, runs it: on the encoded VM, and then on
 /// the native tier where this build and host have one.
 ///
-/// The two runs are not compared. Comparing them is [issue 681]'s priority 2;
-/// here each is only required not to crash.
-///
-/// [issue 681]: https://github.com/myuon/cove/issues/681
+/// The two runs are not compared here; each is only required not to crash.
+/// [`differential_source`] is the same input with the runs compared.
 pub fn run(data: &[u8]) {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
