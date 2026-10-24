@@ -276,6 +276,9 @@ impl PreparedProgram {
 /// [`Limits::max_call_depth`](crate::Limits::max_call_depth) as well.
 pub struct Vm<'a> {
     runtime: &'a Runtime,
+    /// The registry the machine calls, kept here for [`meter_of`]: every way
+    /// in that brings no budget of its own takes the registry's afresh.
+    hosts: &'a HostRegistry,
     program: &'a Program,
     machine: Machine<'a>,
     /// The run's accounting, in the handle a safepoint charges through.
@@ -289,6 +292,13 @@ pub struct Vm<'a> {
     /// call, `spawn` and safepoint of the run — its tasks' included — is
     /// charged here. The registry is shared by every run over it at once
     /// (issue #577), so it holds no run's budget.
+    ///
+    /// The ways in with no budget of their own — [`Vm::invoke`],
+    /// [`Vm::run_entry`], [`Vm::invoke_lowered`], [`Vm::native_session`] and
+    /// `OwnedVm`'s parkable two — replace it with [`meter_of`] the registry,
+    /// which is what a fresh machine starts with, so they do not inherit the
+    /// cancellation, deadline or spent counts of whatever `invoke_within` ran
+    /// last ([issue #684](https://github.com/myuon/cove/issues/684)).
     budget: Meter,
     /// The entry a run parked at a host call is inside, while it is.
     ///
@@ -445,6 +455,7 @@ impl<'a> Vm<'a> {
     ) -> Vm<'a> {
         Vm {
             runtime,
+            hosts,
             program,
             machine: Machine::for_run(program, prepared, heap_words, Some(hosts), Some(runtime)),
             budget: meter_of(hosts),
@@ -601,7 +612,7 @@ impl<'a> Vm<'a> {
         name: &str,
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
-        let outcome = self.enter(module, name, args);
+        let outcome = self.enter_unbudgeted(module, name, args);
         self.ended(outcome)
     }
 
@@ -674,6 +685,7 @@ impl<'a> Vm<'a> {
         name: &str,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        self.unbudgeted();
         let id = self.lookup(module, name)?;
         let function = self.program.function(id);
         if function.arity() as usize != args.len() {
@@ -754,6 +766,38 @@ impl<'a> Vm<'a> {
         self.budget = budget.meter();
     }
 
+    /// Makes the registry's budget this run's, as [`Vm::new`] does: what a
+    /// way in that brings no budget of its own runs under.
+    ///
+    /// Without this, such a run inherited the meter the last
+    /// [`Vm::invoke_within`] left behind — its raised cancellation, its
+    /// passed deadline, its spent host-call count — and started stopped
+    /// ([issue #684](https://github.com/myuon/cove/issues/684), ADR 0114 §1).
+    /// The registry's own budget, one [`HostRegistry::set_budget`] installed,
+    /// is a different thing: it bounds every run over the registry for the
+    /// registry's life (it is `cove run`'s), so a run here charges it exactly
+    /// as a fresh machine's first run would, spent or not. A registry with
+    /// none gives a fresh unlimited meter, so the counts read through
+    /// [`Vm::meter`] are this run's alone.
+    ///
+    /// One lock and, for a registry with no budget, one small allocation per
+    /// invocation — not per instruction.
+    fn unbudgeted(&mut self) {
+        self.budget = meter_of(self.hosts);
+    }
+
+    /// [`Vm::enter`] under the registry's budget: `run_entry`'s and
+    /// `run_entry_parkable`'s way in.
+    fn enter_unbudgeted(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Rc<str>>,
+    ) -> Result<Value, RuntimeError> {
+        self.unbudgeted();
+        self.enter(module, name, args)
+    }
+
     /// The accounting of this run — or of the last one, once it has
     /// answered: the host calls it made, and how long it took.
     ///
@@ -796,6 +840,7 @@ impl<'a> Vm<'a> {
         name: &str,
         args: Vec<Value>,
     ) -> Result<native::Session<'_, 'a>, RuntimeError> {
+        self.unbudgeted();
         crate::invoke::check(self.runtime.program(), module, name, &args)?;
         let id = self.lowered(module, name)?;
         let function = self.program.function(id);
@@ -947,13 +992,15 @@ impl<'a> Vm<'a> {
         self.enter_with(module, name, id, arguments)
     }
 
-    /// The check, and then the call.
+    /// The registry's budget, the check, and then the call: [`Vm::invoke`]'s
+    /// and `invoke_parkable`'s way in.
     fn invoke_checked(
         &mut self,
         module: &str,
         name: &str,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        self.unbudgeted();
         crate::invoke::check(self.runtime.program(), module, name, &args)?;
         let id = self.lowered(module, name)?;
         self.enter_with(module, name, id, args)

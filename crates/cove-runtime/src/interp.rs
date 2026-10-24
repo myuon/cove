@@ -740,8 +740,15 @@ impl<'a> Interpreter<'a> {
     /// Called where a run begins and nowhere else, for the reason
     /// [`crate::budget::Meter`] gives: a `Meter` names the accounting of the
     /// run it was taken from. So [`Interpreter::new`] takes the registry's,
-    /// and the two ways in that bring a budget of their own bind that one
-    /// instead.
+    /// the two ways in that bring a budget of their own bind that one
+    /// instead, and the two that bring none — [`Interpreter::invoke`] and
+    /// [`Interpreter::run_entry`] — take the registry's again, so that they
+    /// run as a fresh interpreter's first run would and not under the
+    /// cancellation, deadline or spent counts the last `invoke_within` left
+    /// ([issue #684](https://github.com/myuon/cove/issues/684)). A registry
+    /// budget [`HostRegistry::set_budget`] installed bounds every run over
+    /// the registry for its life, so a spent one stays spent, for a fresh
+    /// interpreter too.
     fn bind_budget(&mut self) {
         self.use_budget(self.hosts.budget_meter());
     }
@@ -952,6 +959,9 @@ impl<'a> Interpreter<'a> {
         name: &str,
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
+        // The registry's budget, as `Interpreter::new` took it: not whatever
+        // the last `invoke_within` left (issue #684).
+        self.bind_budget();
         let outcome = self.enter(module, name, args);
         self.ended(outcome)
     }
@@ -1089,13 +1099,17 @@ impl<'a> Interpreter<'a> {
         self.ended(outcome)
     }
 
-    /// The check, and then the call.
+    /// The registry's budget, the check, and then the call.
+    ///
+    /// The budget is rebound for the reason [`Interpreter::run_entry`] rebinds
+    /// it (issue #684).
     fn invoke_checked(
         &mut self,
         module: &str,
         name: &str,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        self.bind_budget();
         crate::invoke::check(self.program, module, name, &args)?;
         self.enter_with(module, name, args)
     }

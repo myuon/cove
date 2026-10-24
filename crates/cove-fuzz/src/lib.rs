@@ -217,34 +217,20 @@ pub fn structured(data: &[u8]) {
 /// supplied, because a fuzzer would otherwise spend its whole budget learning
 /// a 64-bit hash and every input would stop at the fingerprint check.
 ///
-/// A decoded program is **neither verified nor run**. `serial::decode`
-/// refuses bytes it can recognise as wrong and promises never to panic, and
-/// that promise is what this tests. It does not promise that what it accepts
-/// is a program the lowering could have produced: its documentation says an
-/// image is trusted once its header matches, because the only images there
-/// are, are the ones this build's own `cove-cli/build.rs` wrote (ADR 0077).
+/// A decoded program is **verified and not run**. `serial::decode` refuses
+/// bytes it can recognise as wrong and promises never to panic, and it does not
+/// check what the ids in an accepted image mean. `cove_ir::verify` is the
+/// check that does, and it promises to answer for any program `decode`
+/// returns with an `Err`, never a panic ([ADR 0117](../../docs/adr/0117-verify-refuses-a-program-whose-ids-are-out-of-range.md)):
+/// that promise is what this tests, on both halves.
 ///
-/// `cove_ir::verify` was run here at first, and the first session found it
-/// indexes a layout table with an id it has not checked
-/// (`fuzz/regressions/image/known/`): `verify` is written against programs
-/// the lowering built, whose tables are consistent by construction, and not
-/// against arbitrary ones. That is the same trust, one step later, and
-/// neither `decode` nor `verify` claims otherwise. Running a decoded image
-/// would go further still — it would test that the VM and the code generator
-/// are safe on IR no lowering produced, which nobody claims either. If images
-/// are ever accepted from anywhere but this build, those are the claims that
-/// have to be made first, and this is where to test them.
+/// What is not tested is running a program that verified. `verify` checks that
+/// a program is well formed the way the lowering makes them; it is not a
+/// proof that the VM or the code generator is safe on every program it
+/// accepts, and nobody claims that. If images are ever accepted from anywhere
+/// but this build, that claim has to be made first, and this is where to test
+/// it.
 pub fn image(data: &[u8]) {
-    let bytes = with_header(data);
-    on_stack(move || {
-        let _ = cove_ir::serial::decode(&bytes);
-    });
-}
-
-/// [`image`], then `cove_ir::verify` over what decodes: the check the
-/// `image` target used to make, kept for replaying
-/// `fuzz/regressions/image/known/`. Not a target; see [`image`] for why.
-pub fn image_verified(data: &[u8]) {
     let bytes = with_header(data);
     on_stack(move || {
         if let Ok(image) = cove_ir::serial::decode(&bytes) {

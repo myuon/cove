@@ -31,7 +31,7 @@ records the differential targets' rules ([below](#the-differential-targets)).
 | `compile` | UTF-8 source | parse, standard-library attach, name resolution, type and uniqueness checking, lowering to IR, IR verification |
 | `run` | UTF-8 source | `compile`, then a run on the encoded VM and a run on the native tier |
 | `structured` | choices for the generator | a generated well-typed program through `compile` and both runs |
-| `image` | the body of a lowered-IR image | `cove_ir::serial::decode`, with a valid header supplied |
+| `image` | the body of a lowered-IR image | `cove_ir::serial::decode`, with a valid header supplied, then `cove_ir::verify` over what decodes (not run) |
 | `differential` | choices for the generator | a generated well-typed program run in six modes, every pair compared |
 | `differential_source` | UTF-8 source | `compile`, then the same six runs and the same comparison |
 
@@ -493,10 +493,12 @@ What would close those gaps, and whether it is worth it:
 - **The playground's C ABI** (`crates/cove-wasm/src/abi.rs`). Its input is a
   pointer and a length from JavaScript; fuzzing it means fuzzing a wasm
   module, not this process.
-- **Verifying or running decoded images.** The `image` target decodes, and
-  neither verifies nor runs what it decoded: `serial::decode` trusts an image whose header
-  matches, because the only images are the ones this build wrote, and running
-  arbitrary IR would test a promise nobody has made. ADR 0112 §5.
+- **Running decoded images.** The `image` target decodes and verifies what
+  it decoded and does not run it. `verify` refuses a program whose ids are out
+  of range (ADR 0117), but it checks well-formedness as the lowering
+  establishes it, not that the VM and the code generator are safe on every
+  program it accepts, and nobody claims that. ADR 0112 §5, in part superseded
+  by ADR 0117.
 - **Multi-module packages, `cove test`, `cove fmt`.** The source targets
   compile one file as one module. covefmt is a Cove program the `run` corpus
   already includes.
