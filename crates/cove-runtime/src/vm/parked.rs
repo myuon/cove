@@ -235,7 +235,9 @@ impl OwnedVm {
     /// Runs on the calling thread, which must keep
     /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn run_entry_parkable(mut self, module: &str, name: &str, args: Vec<Rc<str>>) -> Step {
-        let outcome = self.vm.parkable(|vm| vm.enter(module, name, args));
+        let outcome = self
+            .vm
+            .parkable(|vm| vm.enter_unbudgeted(module, name, args));
         self.step(outcome)
     }
 

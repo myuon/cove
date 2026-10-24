@@ -149,7 +149,9 @@ the embedder kept may outlive its machine.
 | `a_handle_handed_to_a_run_without_the_grant_is_refused_at_its_first_use` — a `files.Reader` from a granting registry, on the VM and the interpreter | S4 | ハンドルの受渡し |
 | `a_sealed_grant_set_refuses_exactly_what_a_configured_one_does`, `a_registry_s_grants_are_the_same_for_every_run_over_it` | S4 | 意図しない権限拡大がないこと |
 | `examples/edge/host/tests/isolation.rs` — one worker, `Isolates::Pooled(1)`: a trap, a heap exhaustion, a deadline while running, a deadline while parked at a fetch whose answer arrives late; after each, the same tenant and another answer exactly as a fresh server; two tenants running the same code keep separate `kv` state; each tenant's registry grants exactly its own table | S1, S3, S4 | 同じワーカー・プロセスの再利用; 遅延メッセージ |
-| `examples/rules/host/tests/session_reuse.rs` — the finding below, through the rules session's public surface | S1 | 同じワーカーの再利用 |
+| `an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget_{encoded,native}` — each of `OwnedVm`'s four ways in with no budget (`invoke`, `run_entry`, `invoke_parkable`, `run_entry_parkable`) after a cancelled run, a run past its deadline and a run that spent its host-call limit, compared with a fresh machine's answer and charged on a meter of its own; `an_unbudgeted_interpretation_does_not_inherit_the_last_run_s_budget`, the interpreter's two | S1, S2 | 同じワーカーの再利用 |
+| `an_unbudgeted_invocation_charges_the_registry_s_budget_as_a_fresh_machine_does` — a budget installed in the registry is charged by every unbudgeted run, reused machine or fresh, and once cancelled stops both and the interpreter | S1 | 同上 |
+| `examples/rules/host/tests/session_reuse.rs` — `Session::evaluate` after an `evaluate_within` whose deadline passed, on the VM and the interpreter: the first finding below, through the rules session's public surface | S1 | 同じワーカーの再利用 |
 
 Nothing here asserts a duration. The deadlines that stop runs are tens of
 milliseconds and only ever have to pass.
@@ -164,28 +166,45 @@ eleven seconds, most of it waiting for yields.
 
 ## Findings
 
-Recorded here until each has an issue; each is reproduced by an
-`#[ignore]`d case gated on `COVE_KNOWN_FINDINGS`, so that `cargo t` and
-`cargo ratchet` stay green until it is fixed:
+What the tests and the survey found. A finding not yet fixed is reproduced by
+an `#[ignore]`d case gated on `COVE_KNOWN_FINDINGS` where it can be tested, so
+that `cargo t` and `cargo ratchet` stay green until it is fixed; a fix deletes
+the gate and the `#[ignore]`. None is gated now.
 
-```console
-$ COVE_KNOWN_FINDINGS=1 cargo test --profile checked -p cove-runtime --test lifecycle -- --ignored
-$ COVE_KNOWN_FINDINGS=1 cargo test --profile checked -p cove-rules --test session_reuse -- --ignored
-```
-
-1. **An unbudgeted invocation inherits the last run's budget** (S1). `Vm::invoke`,
-   `Vm::run_entry`, `OwnedVm::invoke_parkable` and `run_entry_parkable`, and
-   `Interpreter::invoke` and `run_entry`, do not take a budget of their own and
-   do not rebind one; they run under the `Meter` the last `invoke_within` or
-   `run_entry_within` left on the machine. So after a run whose cancellation was
-   raised, the next `invoke` starts cancelled; after one whose deadline passed,
-   the next is past it; after one that spent its host-call limit, the next is
-   over it. `lifecycle.rs`'s
-   `an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget` shows the
-   first and third; `session_reuse.rs` shows the second through
+1. **An unbudgeted invocation inherited the last run's budget** (S1) —
+   **fixed**, [issue #684](https://github.com/myuon/cove/issues/684).
+   `Vm::invoke`, `Vm::run_entry`, `OwnedVm::invoke_parkable` and
+   `run_entry_parkable`, and `Interpreter::invoke` and `run_entry`, took no
+   budget of their own and rebound none, so they ran under the `Meter` the last
+   `invoke_within` or `run_entry_within` left on the machine: after a run whose
+   cancellation was raised the next `invoke` started cancelled, after one whose
+   deadline passed it was past it, after one that spent its host-call limit it
+   was over it. `session_reuse.rs` met it through
    `cove_rules::Session::evaluate` after `evaluate_within`, on the interpreter
-   (the VM case passes there only because the request finishes before its first
-   safepoint reads the clock).
+   (the VM case passed there only because the request finished before its
+   first safepoint read the clock).
+
+   Every way in with no budget of its own — those six, `Vm::invoke_lowered`
+   and `Vm::native_session` — now takes the registry's budget afresh as it
+   begins, which is what `Vm::new` and `Interpreter::new` take. So it runs
+   exactly as a fresh machine's first run over the same registry runs, which
+   is S1 read literally, and that settles the issue's question of whether the
+   fallback is the registry's budget or a fresh unlimited one: it is the
+   registry's, and for a registry with none installed that *is* a fresh
+   unlimited meter, so `meter()` reads this run's counts alone. A budget
+   installed in the registry with `HostRegistry::set_budget` is not a run's: it
+   bounds every run over the registry for the registry's life (`cove run`'s
+   `[run.<name>]` limits), so a spent or cancelled one stays spent for a reused
+   machine and a fresh one alike. Resuming a parked or yielded run does not
+   rebind — it is the same run, and keeps its budget (ADR 0082).
+
+   It costs one uncontended lock per invocation, and for a registry with no
+   budget one small allocation; nothing per instruction. On
+   `cove-rules-measure 20000` (`--profile checked`, two runs each side, an
+   x86-64 Mac) the floor row, an entry that does nothing, was 4.71 and 3.91 µs
+   before and 4.14 and 5.00 µs after — inside the run-to-run spread — with the
+   same 21 allocations a turn, the rules embedding's registry having a budget
+   installed.
 2. **A machine's resource table is never trimmed.** `Machine::resource_word`
    interns every handle a run is handed into a table that lives as long as the
    machine and that nothing removes from (`src/vm/exec.rs`). A resident machine
@@ -221,7 +240,7 @@ Not findings, but limits on what the tests reach:
   counting the cells still alive after a run.
 - **The interpreter's reuse.** S1 is tested on the encoded and native tiers;
   the interpreter (`Interpreter::invoke` many times) is covered by the
-  authority tests and by finding 1 only. It is the oracle, not a tier an
+  authority tests and by finding 1's cases only. It is the oracle, not a tier an
   embedder pools.
 - **The `cove-wasm` playground**, whose runs are one per call from JavaScript.
 - **The native tier's generated code under ASan.** The machine code the tier
@@ -233,7 +252,7 @@ Not findings, but limits on what the tests reach:
 
 ## How to run
 
-`cargo t` runs everything above but the long storm and the findings.
+`cargo t` runs everything above but the long storm.
 
 Under AddressSanitizer (nightly, macOS or Linux x86-64; no `-Zbuild-std`
 needed, the standard library is left uninstrumented, as `cargo fuzz` does):
