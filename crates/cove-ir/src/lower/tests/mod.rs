@@ -29,6 +29,7 @@ mod closures;
 mod collections;
 mod control;
 mod dispatch;
+mod diverging;
 mod enums;
 mod erasure;
 mod foresee;

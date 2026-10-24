@@ -32,7 +32,10 @@
 //!   bad radix or a huge width, `Int.parse` and `parseRadix`;
 //! - bounded `while` and `for` loops with `break`, helper functions that call
 //!   earlier helpers, recursion whose depth the program computes, and closures
-//!   passed to `map`, `filter`, `fold` and `sorted`.
+//!   passed to `map`, `filter`, `fold` and `sorted`;
+//! - now and then, an operand that leaves — `(a + (return a))`,
+//!   `(-(break) + a)`, `(a).bitXor(break)` — which the checker accepts where
+//!   an `Int` goes and after which the form is unreachable (issue 698).
 //!
 //! And, for the differential harness, the places two evaluators most easily
 //! disagree:
@@ -357,6 +360,10 @@ struct Gen<'a, 'b> {
     /// Statements generated so far, which bounds the program's size.
     statements: usize,
     in_loop: bool,
+    /// Closure bodies being generated around the current expression: a
+    /// `return` in one leaves the closure rather than the function, and a
+    /// `break` in one cannot reach the loop outside it.
+    closures: usize,
     ctx: Ctx,
     /// Generating for the differential harness: the clock is granted, and no
     /// choice may make the answer depend on which correct evaluator ran it.
@@ -409,6 +416,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             helpers: Vec::new(),
             statements: 0,
             in_loop: false,
+            closures: 0,
             ctx: Ctx::Main,
             differential: false,
         }
@@ -1311,7 +1319,42 @@ impl<'a, 'b> Gen<'a, 'b> {
                     )
                 }
             }
+            // An operand that leaves: the checker accepts a `return` or a
+            // `break` wherever an `Int` goes, and everything the form would
+            // do after it is unreachable (issue 698). Rare, because it ends
+            // the function or the loop it is in.
+            35 if self.chance(1, 8) => match self.leave() {
+                Some(leave) => {
+                    let a = self.int(d);
+                    match self.pick(3) {
+                        0 => format!("({a} + ({leave}))"),
+                        1 => format!("(-({leave}) + {a})"),
+                        _ => format!("({a}).bitXor({leave})"),
+                    }
+                }
+                None => self.int_leaf(),
+            },
             _ => self.int_leaf(),
+        }
+    }
+
+    /// An expression that leaves the loop or the function the current
+    /// expression is in, with a value the function may answer; `None` inside
+    /// a closure, and in `main` outside a loop, where leaving would end the
+    /// whole program.
+    fn leave(&mut self) -> Option<&'static str> {
+        if self.closures > 0 {
+            return None;
+        }
+        if self.in_loop && self.chance(1, 2) {
+            return Some("break");
+        }
+        match self.ctx {
+            Ctx::Main => self.in_loop.then_some("break"),
+            Ctx::Helper(Kind::Int | Kind::Recursive) => Some("return a"),
+            Ctx::Helper(Kind::Float) => Some("return x"),
+            Ctx::Helper(Kind::Res) => Some("return Ok(a)"),
+            Ctx::Helper(Kind::Opt) => Some("return Some(a)"),
         }
     }
 
@@ -1357,7 +1400,9 @@ impl<'a, 'b> Gen<'a, 'b> {
         for p in params {
             self.bind(p, Ty::Int, false);
         }
+        self.closures += 1;
         let body = self.int(d);
+        self.closures -= 1;
         self.env = saved;
         body
     }
@@ -1368,7 +1413,9 @@ impl<'a, 'b> Gen<'a, 'b> {
         for p in params {
             self.bind(p, Ty::Int, false);
         }
+        self.closures += 1;
         let body = self.bool(d);
+        self.closures -= 1;
         self.env = saved;
         body
     }
@@ -1379,7 +1426,9 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.env = saved.iter().filter(|l| l.capturable).cloned().collect();
         self.bind(p, Ty::Float, false);
         self.bind(q, Ty::Int, false);
+        self.closures += 1;
         let body = self.float(d);
+        self.closures -= 1;
         self.env = saved;
         format!("{p} * 0.5 + ({q}).toFloat() + {body}")
     }
