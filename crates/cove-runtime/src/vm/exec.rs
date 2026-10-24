@@ -44,6 +44,7 @@
 //! for and what the predecessor could not say.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
@@ -418,13 +419,26 @@ pub(crate) struct Machine<'a> {
     /// the word would answer an unwritten slot with whichever resource
     /// happened to be first.
     ///
-    /// Nothing is ever removed. ADR 0013 says a closed resource's handle
-    /// survives as a name for something that is gone, and that a host never
-    /// reuses an identity — so an entry that outlived its resource is still
-    /// the right answer to give, because the refusal a later call earns is
-    /// the *host's* and can only be reached by handing the host the name.
-    /// What that costs is one name per distinct resource this run was handed,
-    /// which is the size of the table the host is keeping anyway.
+    /// Nothing is removed while a run lasts. ADR 0013 says a closed
+    /// resource's handle survives as a name for something that is gone, and
+    /// that a host never reuses an identity — so an entry that outlived its
+    /// resource is still the right answer to give, because the refusal a
+    /// later call earns is the *host's* and can only be reached by handing
+    /// the host the name. What that costs is one name per distinct resource
+    /// the run was handed, which is the size of the table the host is keeping
+    /// anyway.
+    ///
+    /// **Between runs the table is emptied** ([`Machine::release_resources`],
+    /// [issue #685](https://github.com/myuon/cove/issues/685)), because a
+    /// machine outlives its runs (ADR 0114) and a resident one handed a new
+    /// handle every request would otherwise grow by one name a request for
+    /// its whole life. It is emptied only when no heap object is pinned for
+    /// an embedder: a word in a closure's environment that the embedder kept
+    /// indexes this table, and emptying it under that closure would make the
+    /// word name whatever the next run was handed first. A handle that
+    /// *left* a run as a value is not such a word — crossing out turned it
+    /// into the name itself — so it survives an emptied table and is written
+    /// down afresh when it is handed back.
     ///
     /// It is a field of the machine, which today is the run: a run has one
     /// machine as it has one [`Memory`]. When a run has task threads this
@@ -440,7 +454,7 @@ pub(crate) struct Machine<'a> {
     /// parent opened would name whatever the child happened to open first,
     /// or nothing. ADR 0013 says a resource is the *run's*, and this is what
     /// that sentence costs.
-    resources: Arc<Mutex<Vec<Arc<ResourceHandle>>>>,
+    resources: Arc<Mutex<Resources>>,
     /// Objects a boundary conversion is holding and no frame names yet.
     ///
     /// A frame is a root because a static map says which of its slots are
@@ -1040,7 +1054,7 @@ impl<'a> Machine<'a> {
             frames: frames::Frames::new(),
             // Overwritten below, once the machine that places them exists.
             literal_addrs: Ok(Arc::from([])),
-            resources: Arc::new(Mutex::new(Vec::new())),
+            resources: Arc::new(Mutex::new(Resources::default())),
             temps: Vec::new(),
             scopes: Vec::new(),
             children: Vec::new(),
@@ -1115,7 +1129,7 @@ impl<'a> Machine<'a> {
         program: &'a Program,
         hosts: Option<&'a HostRegistry>,
         runtime: Option<&'a Runtime>,
-        resources: Arc<Mutex<Vec<Arc<ResourceHandle>>>>,
+        resources: Arc<Mutex<Resources>>,
         mem: Memory,
         cancellation: Cancellation,
         task: u64,
@@ -2240,9 +2254,7 @@ impl<'a> Machine<'a> {
     /// value crossing rather than about the machine, so both are reported by
     /// [`crate::vm::boundary`] and neither is decided here.
     pub(crate) fn resource(&self, word: u64) -> Option<Arc<ResourceHandle>> {
-        self.held_resources()
-            .get(word.checked_sub(1)? as usize)
-            .cloned()
+        self.held_resources().get(word)
     }
 
     /// The run's resource table, recovering from a lock a panicking task
@@ -2250,11 +2262,11 @@ impl<'a> Machine<'a> {
     ///
     /// A table of names is not a state anything recovers *from*: what it held
     /// before the panic is exactly what it holds after, because nothing here
-    /// is ever removed. Refusing every later resource operation of the run
+    /// is removed while a run lasts. Refusing every later resource operation of the run
     /// because one task panicked would turn a task's failure into the run's,
     /// which is the opposite of what a task boundary is for — the same
     /// reasoning `Space::allocator` gives about the heap's own lock.
-    fn held_resources(&self) -> std::sync::MutexGuard<'_, Vec<Arc<ResourceHandle>>> {
+    fn held_resources(&self) -> std::sync::MutexGuard<'_, Resources> {
         self.resources
             .lock()
             .unwrap_or_else(|held| held.into_inner())
@@ -2273,16 +2285,38 @@ impl<'a> Machine<'a> {
     /// fact about the kind, copied onto every handle of it, so two handles
     /// naming one resource cannot disagree about it.
     ///
-    /// The scan is linear over the resources this run has been handed. That
-    /// is the table the host is keeping too, at the size the host keeps it.
+    /// A lookup by the resource's id, not a scan of the table: the table is
+    /// the run's, but a run may be handed any number of resources.
     pub(crate) fn resource_word(&mut self, handle: &ResourceHandle) -> u64 {
-        let mut held = self.held_resources();
-        if let Some(at) = held.iter().position(|kept| kept.names_same(handle)) {
-            return at as u64 + 1;
+        self.held_resources().word_of(handle)
+    }
+
+    /// Empties the resource table at a run's edge, unless an embedder holds
+    /// an object of this heap.
+    ///
+    /// [`Machine::resources`] is why the condition is the pinned set: the
+    /// only words naming a resource that can outlive a run are inside an
+    /// object an embedder kept, and every such object is pinned for as long
+    /// as the embedder keeps it. With none pinned, no word that indexes the
+    /// table is reachable by anything — a frame is gone with its run, and an
+    /// unreachable object is never read, a new one's payload being zeroed —
+    /// so the names can go. With one pinned the table is kept whole: which of
+    /// its names the kept objects reach is not known without walking them,
+    /// and it is emptied at the first edge after the last of them is dropped.
+    ///
+    /// Called by [`crate::Vm`] where an entry begins and where it leaves, so
+    /// a run parked or yielded in between keeps its table.
+    pub(crate) fn release_resources(&mut self) {
+        if self.mem.holds_pinned() {
+            return;
         }
-        held.push(Arc::new(handle.clone()));
-        // One past the index, because a zeroed slot has to mean no resource.
-        held.len() as u64
+        self.held_resources().clear();
+    }
+
+    /// How many names the resource table holds now: a test's measure of
+    /// [`Machine::release_resources`].
+    pub(crate) fn resources_held(&self) -> usize {
+        self.held_resources().len()
     }
 
     /// Materialises the arguments, calls the host, and writes its answer
@@ -5230,12 +5264,63 @@ impl Reentry for Back<'_, '_, '_> {
 /// **not** traced as completed here; it is traced as cancelled by whoever
 /// waits for it, which is the only place that knows it stopped rather than
 /// finished. That is `crate::task::finished`'s rule, kept.
+/// The host resources a run has been handed, by the word that names each.
+///
+/// See [`Machine::resources`] for why this is a table of the machine's and
+/// not objects in the heap. Two things are kept: the names, in the order a
+/// [`Repr::Host`] word indexes them, and an index from a resource's id to the
+/// entries that carry it, so that interning a handle is a hash lookup and
+/// not a scan of everything the table holds.
+#[derive(Default)]
+pub(crate) struct Resources {
+    names: Vec<Arc<ResourceHandle>>,
+    by_id: HashMap<u64, Vec<u32>>,
+}
+
+impl Resources {
+    /// The resource word `word` names, or `None` for a word that names none.
+    fn get(&self, word: u64) -> Option<Arc<ResourceHandle>> {
+        self.names.get(word.checked_sub(1)? as usize).cloned()
+    }
+
+    /// The word naming `handle`, writing it down the first time.
+    ///
+    /// Ids are unique among one host's resources of one kind, so the list an
+    /// id leads to is almost always one entry long: two hosts, or two kinds,
+    /// that happen to issue the same number are what make it longer.
+    fn word_of(&mut self, handle: &ResourceHandle) -> u64 {
+        let same = self.by_id.entry(handle.id).or_default();
+        if let Some(&at) = same
+            .iter()
+            .find(|&&at| self.names[at as usize].names_same(handle))
+        {
+            return u64::from(at) + 1;
+        }
+        let at = u32::try_from(self.names.len()).expect("fewer than 2^32 resources in one run");
+        same.push(at);
+        self.names.push(Arc::new(handle.clone()));
+        // One past the index, because a zeroed slot has to mean no resource.
+        u64::from(at) + 1
+    }
+
+    /// Forgets every name, keeping the storage for the next run.
+    fn clear(&mut self) {
+        self.names.clear();
+        self.by_id.clear();
+    }
+
+    /// How many names are written down.
+    fn len(&self) -> usize {
+        self.names.len()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_task(
     program: &Program,
     hosts: Option<&HostRegistry>,
     runtime: Option<&Runtime>,
-    resources: Arc<Mutex<Vec<Arc<ResourceHandle>>>>,
+    resources: Arc<Mutex<Resources>>,
     segment: Memory,
     budget: Meter,
     cancellation: Cancellation,

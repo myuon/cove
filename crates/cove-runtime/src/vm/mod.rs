@@ -811,6 +811,15 @@ impl<'a> Vm<'a> {
         self.machine.instructions()
     }
 
+    /// How many host resource names the machine's table holds: what a test
+    /// reads to see that a reused machine does not accumulate them (issue
+    /// #685). Not an API; zero between runs unless a closure the embedder
+    /// keeps pins the heap.
+    #[doc(hidden)]
+    pub fn resources_held(&self) -> usize {
+        self.machine.resources_held()
+    }
+
     /// The work this machine has done, in the units its safepoint stride
     /// counts: one per instruction dispatched, one per word a bulk operation
     /// moved, and the IR work compiled code counted statically and paid at its
@@ -965,6 +974,9 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         let function = self.program.function(id);
         let span = function.span;
+        // What the last run left in the resource table, if an embedder that
+        // was holding one of its closures has since let go (issue #685).
+        self.machine.release_resources();
 
         self.runtime.trace(TraceEvent::EntryEnter {
             module: module.to_string(),
@@ -1018,6 +1030,10 @@ impl<'a> Vm<'a> {
         let outcome = answer.and_then(|answer| {
             boundary::to_value(&self.machine, returns, &answer).map_err(|e| e.at(span))
         });
+        // The answer has crossed out — a handle in it is now the name itself,
+        // not a word — so the run's resource table can go, unless an object
+        // of the heap is kept outside it (issue #685).
+        self.machine.release_resources();
 
         // Both events on every path, the way the oracle writes them: an entry
         // that failed still entered and still left, and a run that failed

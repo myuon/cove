@@ -34,8 +34,8 @@ use cove_diag::SourceMap;
 use cove_runtime::trace::RunOutcome;
 use cove_runtime::{
     Budget, Cancellation, Console, Effect, Grants, HostAnswer, HostApi, HostRegistry, HostType,
-    Limits, ModuleSchema, OperationSchema, OwnedVm, ParkedVm, PreparedProgram, Reentry, Runtime,
-    RuntimeError, Step, Transfer, Value, YieldedVm,
+    Limits, ModuleSchema, OperationSchema, OwnedVm, ParkedVm, PreparedProgram, Reentry,
+    ResourceHandle, ResourceSchema, Runtime, RuntimeError, Step, Transfer, Value, YieldedVm,
 };
 use cove_sema::{Compiler, Config, HostSchemas, Module, Package, Unit};
 
@@ -55,12 +55,31 @@ const fn op(name: &'static str) -> OperationSchema {
     }
 }
 
+const TICKETS: &[ResourceSchema] = &[ResourceSchema {
+    name: "Ticket",
+    task_safe: true,
+    operations: &[],
+}];
+
+/// `probe.ticket(n)` mints a new resource, a `probe.Ticket`, recording `n`
+/// against it; `probe.redeem(ticket)` answers the `n` it was minted with.
 const PROBE: ModuleSchema = ModuleSchema {
     name: "probe",
     capability: "probe",
-    operations: &[op("wait"), op("note")],
+    operations: &[
+        op("wait"),
+        op("note"),
+        OperationSchema {
+            result: HostType::Named("probe.Ticket"),
+            ..op("ticket")
+        },
+        OperationSchema {
+            params: &[HostType::Named("probe.Ticket")],
+            ..op("redeem")
+        },
+    ],
     types: &[],
-    resources: &[],
+    resources: TICKETS,
 };
 
 /// What `probe.wait` asks its embedder for when it pends. It counts its own
@@ -89,6 +108,9 @@ struct Probe {
     log: Mutex<Vec<String>>,
     made: AtomicUsize,
     dropped: Arc<AtomicUsize>,
+    /// The `n` each ticket was minted with, by id less one: an id is never
+    /// reused (ADR 0013).
+    tickets: Mutex<Vec<i64>>,
 }
 
 impl Probe {
@@ -109,7 +131,22 @@ impl HostApi for Registered {
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        if op == "redeem" {
+            let ticket = args[0].resource().expect("the schema says a ticket");
+            let tickets = self.0.tickets.lock().unwrap();
+            return Ok(Value::int(tickets[ticket.id as usize - 1]));
+        }
         let n = int(&args);
+        if op == "ticket" {
+            let mut tickets = self.0.tickets.lock().unwrap();
+            tickets.push(n);
+            let id = tickets.len() as u64;
+            return Ok(Value::from_resource(ResourceHandle::new(
+                "probe",
+                &TICKETS[0],
+                id,
+            )));
+        }
         self.0.log.lock().unwrap().push(format!("{op} {n}"));
         match op {
             "wait" => Ok(Value::int(reply(n))),
@@ -293,6 +330,29 @@ export fn adder(n: Int) -> fn(Int) -> Int {
 /// Calls `f`.
 export fn apply(f: fn(Int) -> Int, x: Int) -> Int {
   f(x)
+}
+
+/// Mints a ticket for `n` and redeems it, so the run is handed a resource.
+export fn ticket(n: Int) -> Int {
+  probe.redeem(probe.ticket(n))
+}
+
+/// A ticket for `n`, handed to the embedder.
+export fn mint(n: Int) -> probe.Ticket {
+  probe.ticket(n)
+}
+
+/// What a ticket the embedder kept was minted with.
+export fn redeem(ticket: probe.Ticket) -> Int {
+  probe.redeem(ticket)
+}
+
+/// A closure that has a ticket for `n` in its environment.
+export fn keeper(n: Int) -> fn(Int) -> Int {
+  let held = probe.ticket(n)
+  fn(x) {
+    probe.redeem(held) + x
+  }
 }
 ";
 
@@ -1351,6 +1411,117 @@ fn an_unbudgeted_invocation_does_not_inherit_the_last_run_s_budget() {
             shown(&next)
         );
     });
+}
+
+// ------------------------------------------------------- the resource table
+
+/// A machine handed a new resource on every run does not keep them: its
+/// table is emptied at every run's edge, so after a thousand runs it holds
+/// none, and each run's handle still names its own resource (issue #685).
+fn a_reused_machine_keeps_no_resource_from_its_earlier_runs(tier: Tier) {
+    on_stack(|| {
+        let world = world();
+        let mut vm = world.machine(tier, HEAP);
+        for n in 0..1_000 {
+            let answer = vm.invoke("app", "ticket", int_arg(n));
+            assert_eq!(shown(&answer), n.to_string(), "{tier:?}: run {n}");
+            assert_eq!(vm.resources_held(), 0, "{tier:?}: after run {n}");
+        }
+        // A run that fails is a run's edge too.
+        let stopped = vm.invoke_within(
+            limits(|l| l.max_host_calls = Some(1)),
+            "app",
+            "ticket",
+            int_arg(7),
+        );
+        assert!(
+            stopped.is_err(),
+            "{tier:?}: the second call is over the limit"
+        );
+        assert_eq!(vm.resources_held(), 0, "{tier:?}: after a failed run");
+        // And a parked one, at the edge where it answers.
+        let unbounded = || Budget::new(Limits::default());
+        let (vm, answer) =
+            finish(vm.invoke_within_parkable(unbounded(), "app", "ticket", int_arg(9)));
+        assert_eq!(shown(&answer), "9");
+        assert_eq!(vm.resources_held(), 0, "{tier:?}: after a parkable run");
+    });
+}
+
+#[test]
+fn a_reused_machine_keeps_no_resource_from_its_earlier_runs_encoded() {
+    a_reused_machine_keeps_no_resource_from_its_earlier_runs(Tier::Encoded);
+}
+
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+#[test]
+fn a_reused_machine_keeps_no_resource_from_its_earlier_runs_native() {
+    a_reused_machine_keeps_no_resource_from_its_earlier_runs(Tier::Native);
+}
+
+/// A handle the embedder kept as a value, and a closure the embedder kept
+/// with a handle in its environment, both still name their own resource in
+/// a later run — after runs that were handed other resources, and after the
+/// table was emptied. While the closure is held the table is kept (a word in
+/// its environment indexes it); once it is dropped, the next run's edge
+/// empties it.
+fn a_kept_handle_still_names_its_resource(tier: Tier) {
+    on_stack(|| {
+        let world = world();
+        let mut vm = world.machine(tier, HEAP);
+
+        let ticket = vm.invoke("app", "mint", int_arg(41)).expect("a ticket");
+        assert_eq!(
+            vm.resources_held(),
+            0,
+            "{tier:?}: a value is the name itself"
+        );
+        for n in 0..10 {
+            assert_eq!(
+                shown(&vm.invoke("app", "ticket", int_arg(n))),
+                n.to_string()
+            );
+        }
+        let redeemed = vm.invoke("app", "redeem", vec![ticket.clone()]);
+        assert_eq!(shown(&redeemed), "41", "{tier:?}: the kept handle");
+
+        let kept = vm.invoke("app", "keeper", int_arg(100)).expect("a closure");
+        let held = vm.resources_held();
+        assert!(held >= 1, "{tier:?}: a kept closure keeps the table");
+        for n in 0..10 {
+            assert_eq!(
+                shown(&vm.invoke("app", "ticket", int_arg(n))),
+                n.to_string()
+            );
+        }
+        let applied = vm.invoke("app", "apply", vec![kept.clone(), Value::int(1)]);
+        assert_eq!(
+            shown(&applied),
+            "101",
+            "{tier:?}: the closure's ticket is its own, not one a later run was handed"
+        );
+        let redeemed = vm.invoke("app", "redeem", vec![ticket]);
+        assert_eq!(shown(&redeemed), "41", "{tier:?}: beside a kept closure");
+
+        drop(kept);
+        assert_eq!(shown(&vm.invoke("app", "ticket", int_arg(3))), "3");
+        assert_eq!(
+            vm.resources_held(),
+            0,
+            "{tier:?}: the first edge after the closure went empties the table"
+        );
+    });
+}
+
+#[test]
+fn a_kept_handle_still_names_its_resource_encoded() {
+    a_kept_handle_still_names_its_resource(Tier::Encoded);
+}
+
+#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+#[test]
+fn a_kept_handle_still_names_its_resource_native() {
+    a_kept_handle_still_names_its_resource(Tier::Native);
 }
 
 // ------------------------------------------------------ a randomised storm
