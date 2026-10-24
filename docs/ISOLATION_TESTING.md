@@ -214,7 +214,11 @@ Not findings, but limits on what the tests reach:
 - **Leaks.** AddressSanitizer on macOS has no LeakSanitizer, so the ASan runs
   below find use-after-free, double free and overflow, not memory never freed.
   What the tests check instead is that every host request is dropped exactly
-  once, and that the next run allocates exactly what a fresh one does.
+  once, and that the next run allocates exactly what a fresh one does. The
+  fuzz smoke runs on Linux with LeakSanitizer on (FUZZING.md), which is
+  where issue #688's ring of `Shared` cells was found;
+  `crates/cove-runtime/tests/shared_cycles.rs` holds the fix on every host by
+  counting the cells still alive after a run.
 - **The interpreter's reuse.** S1 is tested on the encoded and native tiers;
   the interpreter (`Interpreter::invoke` many times) is covered by the
   authority tests and by finding 1 only. It is the oracle, not a tier an
