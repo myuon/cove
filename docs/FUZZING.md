@@ -496,3 +496,5 @@ guarantee from the one a process, container or microVM boundary gives a host
 running many tenants, and nothing here establishes the second. The language
 card says the same of memory limits: strict isolation is a process,
 container or microVM boundary's job.
+
+[ISOLATION_TESTING.md](ISOLATION_TESTING.md) is priority 3 and the permission boundary: failure, clean-up and the next run.
