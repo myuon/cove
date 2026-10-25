@@ -294,7 +294,7 @@ struct Lowered {
     program: cove_ir::Program,
 }
 
-/// The step of [`front`] that refused a source.
+/// The step of the front end — parse, check, lower — that refused a source.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FrontStage {
     /// The lexer or the parser.
