@@ -188,11 +188,37 @@ be reached by about 0.2% of the `differential` corpus and by none of the
 source corpus; section 4 tests that reading against a mutant that has exactly
 that defect.
 
+## 3. A reference held across a collection by a compiled frame
+
+`crates/cove-fuzz/tests/gc_roots.rs` ([FUZZING.md, "Roots of compiled
+frames"](FUZZING.md#roots-of-compiled-frames)): six programs, one shape of
+root each, run on the native tier over the differential targets' 2^11-word
+heap. Measured 2026-10-26 (`cargo test --profile checked -p cove-fuzz
+--features template --test gc_roots -- --nocapture`):
+
+| seed | collections | under a compiled frame | the same, loop emptied | encoded instructions on `native` / on `vm` | calls into compiled code |
+|---|---|---|---|---|---|
+| `gc-root-string` | 7 | 7 | 0 | 20 / 408,666 | 12 |
+| `gc-root-string-callee` | 7 | 7 | 0 | 20 / 408,672 | 14 |
+| `gc-root-vector` | 8 | 8 | 0 | 20 / 409,751 | 6 |
+| `gc-root-struct` | 7 | 7 | 0 | 20 / 410,346 | 24 |
+| `gc-root-closure` | 7 | 7 | 0 | 20 / 408,575 | 18 |
+| `gc-root-frames` | 7 | 7 | 0 | 20 / 410,202 | 20 |
+
+**Measured**, per program: each holder is a function of its own after
+lowering and the native tier compiled it; the encoded VM executed 20
+instructions of the native run against about 409,000 on `vm`, so everything
+but `main`'s calls ran as machine code; every collection happened under a
+compiled frame, and none without the allocating loop — so all of them fell
+between the value being built and being read; and the printed lines, which
+carry the held values' contents, equal the text in the test and the
+interpreter's.
+
+**Not measured here:** that a root the collector *missed* would change those
+lines. That is section 4's question.
+
 ## What is not known from these
 
-- Whether a reference a compiled frame holds survives a collection and is
-  read correctly afterwards: `gc_while_compiled` counts collections, not
-  references live across them.
 - Whether any of this would notice a defect: a count of what was compared is
   not a count of what a comparison would catch.
 - How a session's counts move with its length: every session here is three

@@ -1,0 +1,26 @@
+use console.println
+
+// A string held in one compiled frame while a compiled callee allocates
+// enough to collect; the holder reads it once the callee has returned.
+fn churn(seed: Int) -> Int {
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  junk
+}
+
+fn holdAcrossCall(seed: Int) -> String {
+  let held = "held:{seed}:{seed * 31}:{seed * 977}:tail"
+  let junk = churn(seed)
+  "{held} {held.byteLength()} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdAcrossCall(7))?
+  println(holdAcrossCall(11))?
+  Ok(())
+}

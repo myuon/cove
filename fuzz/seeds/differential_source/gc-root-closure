@@ -1,0 +1,26 @@
+use console.println
+
+fn greeter(seed: Int) -> fn(Int) -> String {
+  let prefix = "hello:{seed}:{seed * 31}"
+  fn(n) { "{prefix}/{n}" }
+}
+
+// A closure whose environment holds a string, held in a compiled frame while
+// it allocates enough to collect, then called.
+fn holdClosure(seed: Int) -> String {
+  let held = greeter(seed)
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  "{held(1)} {held(2)} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdClosure(7))?
+  println(holdClosure(11))?
+  Ok(())
+}

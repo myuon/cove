@@ -1,0 +1,31 @@
+use console.println
+
+// A vector of strings the program built — a collection whose elements are
+// references — held in a compiled frame while it allocates enough to
+// collect, then read element by element.
+fn holdVector(seed: Int) -> String {
+  var held: Vector<String> = Vector.of()
+  var k = 0
+  while k < 6 {
+    held.push("item:{k}:{seed * k}")
+    k += 1
+  }
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  var out = ""
+  for s in held.toArray() {
+    out = "{out}{s},"
+  }
+  "{out} {held.length()} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdVector(7))?
+  println(holdVector(11))?
+  Ok(())
+}

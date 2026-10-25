@@ -637,6 +637,53 @@ What the numbers say:
   which it had counted before the panic: one mismatch, one input refused by
   the parser.
 
+## Roots of compiled frames
+
+`programs.gc_while_compiled` says a collection happened while a compiled
+frame was on the stack: the collector *asked* a compiled frame for its roots.
+It does not say the frame held a reference that was still needed, nor that
+anything read that reference afterwards — and a root the collector missed is
+only wrong if both are true. `crates/cove-fuzz/tests/gc_roots.rs` holds six
+programs to that stronger standard, one shape of root each:
+
+| Seed (`fuzz/seeds/differential_source/`) | What a compiled frame holds across the collections |
+|---|---|
+| `gc-root-string` | a string it built, while the same frame allocates |
+| `gc-root-string-callee` | a string it built, while a compiled callee allocates |
+| `gc-root-vector` | a `Vector<String>` of strings it built |
+| `gc-root-struct` | a struct with a `String` and an `Array<Int>` field |
+| `gc-root-closure` | a closure whose environment holds a string |
+| `gc-root-frames` | a string in each of three nested frames; the innermost allocates |
+
+Each program builds the value, holds it in a function the native tier
+compiles, allocates about 600 short strings in a loop (on the 2^11-word heap
+of `vm-gc` and `native-gc`, several collections), and then reads the value
+into the line it prints. The test does not assume any of that happened; it
+measures each step, on the native tier over the small heap:
+
+- **the holder ran as machine code**: it is a function of its own after
+  lowering (not written into its caller), the native tier compiled it, and
+  the encoded VM executed less than a tenth of the instructions on the native
+  run that it executed on `vm` — the loop's thousands of instructions ran
+  elsewhere;
+- **the collections happened while the value was live**: the run collected
+  under a compiled frame, and the same program with the loop emptied
+  (`while i < 0`) collects fewer times under a compiled frame — none, as
+  measured — so the counted collections are the loop's — after the value was built, before it was read;
+- **the read happened and was checked**: the printed line is compared byte for
+  byte with the text in the test, which the tree-walking interpreter — no
+  heap capacity, no collector — prints too, and every line carries the held
+  value's contents.
+
+The seeds are also in the `differential_source` corpus, so the fuzzer starts
+from these shapes, and `tests/regressions.rs` replays them in every mode.
+
+What this does not show is that a dropped root would be *noticed*: a
+reference wrongly freed is visible only if its memory is reused and
+overwritten before the read. The loops allocate strings of the held values'
+size for that reason, and the mutation experiment in
+[FUZZ_EVALUATION.md](FUZZ_EVALUATION.md) measures whether it is enough.
+
 ## Triage, minimise, keep
 
 1. **Reproduce.** `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-…`

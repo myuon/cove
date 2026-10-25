@@ -1,0 +1,34 @@
+use console.println
+
+// Three compiled frames, each holding a string of its own; the innermost
+// allocates enough to collect, and each reads its string once its callee has
+// returned.
+fn inner(seed: Int) -> String {
+  let mine = "inner:{seed}:{seed * 977}"
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  "{mine} {junk}"
+}
+
+fn middle(seed: Int) -> String {
+  let mine = "middle:{seed}:{seed * 31}"
+  let below = inner(seed + 1)
+  "{mine} [{below}]"
+}
+
+fn outer(seed: Int) -> String {
+  let mine = "outer:{seed}:{seed * 7}"
+  let below = middle(seed + 1)
+  "{mine} [{below}]"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(outer(7))?
+  println(outer(11))?
+  Ok(())
+}

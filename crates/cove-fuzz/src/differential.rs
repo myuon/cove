@@ -875,6 +875,95 @@ impl Write for Buffer {
     }
 }
 
+/// One run of a source in one mode over a heap of a chosen capacity, with
+/// what the lowering and the native tier made of the functions it names: for
+/// tests that need to know a run collected while a particular compiled frame
+/// was live (`tests/gc_roots.rs`), which [`compare`]'s fixed heaps do not let
+/// them choose.
+#[derive(Debug)]
+pub struct Probe {
+    /// The run.
+    pub observed: Observed,
+    /// For each function asked about, by its name in `playground`: whether
+    /// the lowering kept it as a function of its own (rather than writing its
+    /// body into its callers), and whether the native tier compiled it — under
+    /// [`Mode::Native`] only; `false` otherwise.
+    pub functions: Vec<(String, bool, bool)>,
+}
+
+/// `source` run once in `mode` — [`Mode::Ast`], [`Mode::Vm`] or
+/// [`Mode::Native`] — over a heap of `heap_words` words (ignored for the
+/// interpreter), under the differential targets' limits.
+///
+/// # Errors
+///
+/// The front end's diagnostics, if it refuses the source; or a sentence if
+/// `mode` is another mode, or is native on a host without the tier.
+pub fn probe(
+    source: &str,
+    mode: Mode,
+    heap_words: usize,
+    functions: &[&str],
+) -> Result<Probe, String> {
+    let source = source.to_string();
+    let functions: Vec<String> = functions.iter().map(|f| f.to_string()).collect();
+    on_stack(move || {
+        let lowered = front(&source)?;
+        let checked = Arc::new(lowered.checked);
+        let sources = Arc::new(lowered.sources);
+        let program = Arc::new(lowered.program);
+        let kept: Vec<Option<cove_ir::FunctionId>> = functions
+            .iter()
+            .map(|name| program.function_named(MODULE, name))
+            .collect();
+        let (observed, compiled) = match mode {
+            Mode::Ast => (ast_run(&checked, &sources), vec![false; functions.len()]),
+            Mode::Vm => (
+                lowered_run(
+                    mode,
+                    &checked,
+                    &sources,
+                    PreparedProgram::new(Arc::clone(&program)),
+                    heap_words,
+                ),
+                vec![false; functions.len()],
+            ),
+            Mode::Native => {
+                let native = PreparedProgram::new(Arc::clone(&program))
+                    .with_native()
+                    .map_err(|why| why.to_string())?;
+                let refused: Vec<cove_ir::FunctionId> = native
+                    .native()
+                    .map(|n| n.refusals().iter().map(|r| r.id).collect())
+                    .unwrap_or_default();
+                let compiled = kept
+                    .iter()
+                    .map(|id| id.is_some_and(|id| !refused.contains(&id)))
+                    .collect();
+                (
+                    lowered_run(mode, &checked, &sources, native, heap_words),
+                    compiled,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "`probe` runs ast, vm or native, not {}",
+                    other.name()
+                ))
+            }
+        };
+        Ok(Probe {
+            observed,
+            functions: functions
+                .into_iter()
+                .zip(kept)
+                .zip(compiled)
+                .map(|((name, id), compiled)| (name, id.is_some(), compiled))
+                .collect(),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
