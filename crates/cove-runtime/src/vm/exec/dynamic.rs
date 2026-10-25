@@ -96,6 +96,44 @@ impl View {
         }
     }
 
+    /// The view whose first word is frame word `index`, if it names a value
+    /// that is there ([ADR 0120]).
+    ///
+    /// A view is three words of a frame, and two of them are `Int`s, so a
+    /// verified program can write any layout and any offset into one. What
+    /// [`open`] and [`child`] answer always holds one of two things, and an
+    /// observation that follows a view holds it to them first:
+    ///
+    /// - a **heap value** is its whole object: the layout is the owner's own
+    ///   header and the offset nought;
+    /// - an **inline value** — a scalar, a struct, an enum — is words of the
+    ///   owner's payload that [`Machine::field`] says may be read as that
+    ///   layout, which is the rule a field load is held to.
+    ///
+    /// Anything else is refused as the forgery it is, rather than read: a
+    /// `String`'s layout over a `Vector`, or an offset past the object.
+    ///
+    /// [ADR 0120]: ../../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    pub(crate) fn held(machine: &Machine, index: usize) -> Result<View, RuntimeError> {
+        let view = View::read(machine, index);
+        if view.owner == 0 {
+            return Err(null_object());
+        }
+        let described = layout(machine, view.layout)?;
+        if described.is_one_address() {
+            if view.at == 0 && machine.mem.object_layout(view.owner) == view.layout {
+                return Ok(view);
+            }
+            return Err(RuntimeError::new(format!(
+                "this observes a `{}` that is not the object the view names",
+                described.name
+            ))
+            .with_rule("A view names a value its owner holds."));
+        }
+        machine.field(view.owner, view.at, view.layout, false)?;
+        Ok(view)
+    }
+
     /// Writes this view's three words at frame word `index`.
     pub(crate) fn write(self, machine: &mut Machine, index: usize) {
         machine
@@ -160,7 +198,7 @@ pub(crate) fn execute(
             return Ok(());
         }
         CHILD => {
-            let view = View::read(machine, at(b));
+            let view = View::held(machine, at(b))?;
             let index = machine.mem.word_at(at(c)) as i64;
             let answer = match inline_child(machine, view, index) {
                 Some(answer) => answer,
@@ -169,21 +207,22 @@ pub(crate) fn execute(
             answer.write(machine, at(a));
             return Ok(());
         }
-        KIND => kind(machine, View::read(machine, at(b)))?.code() as u64,
+        KIND => kind(machine, View::held(machine, at(b))?)?.code() as u64,
         SAME_TYPE => u64::from(same_type(
             machine,
-            View::read(machine, at(b)),
-            View::read(machine, at(c)),
+            View::held(machine, at(b))?,
+            View::held(machine, at(c))?,
         )?),
         // The one opcode whose meaning is its destination's `Repr`: which
         // scalar is read is the word the frame says `a` is, and a view whose
         // kind disagrees is refused rather than reinterpreted.
         READ => {
             let want = machine.program.function(id).repr(a).unwrap_or(Repr::Unit);
-            read(machine, View::read(machine, at(b)), want)?
+            read(machine, View::held(machine, at(b))?, want)?
         }
-        CASE => case(machine, View::read(machine, at(b)))? as u64,
-        COUNT => count(machine, View::read(machine, at(b)))? as u64,
+        CASE => case(machine, View::held(machine, at(b))?)? as u64,
+        COUNT => count(machine, View::held(machine, at(b))?)? as u64,
+        // A comparison of words, which follows neither view.
         SAME_OBJECT => u64::from(same_object(
             machine,
             View::read(machine, at(b)),
@@ -191,20 +230,20 @@ pub(crate) fn execute(
         )),
         NAME_ORDER => match name_order(
             machine,
-            View::read(machine, at(b)),
-            View::read(machine, at(c)),
+            View::held(machine, at(b))?,
+            View::held(machine, at(c))?,
         )? {
             Ordering::Less => -1i64 as u64,
             Ordering::Equal => 0,
             Ordering::Greater => 1,
         },
-        TYPE_NAME => type_name(machine, View::read(machine, at(b)))?,
+        TYPE_NAME => type_name(machine, View::held(machine, at(b))?)?,
         FIELD_NAME => {
             let index = machine.mem.word_at(at(c)) as i64;
-            field_name(machine, View::read(machine, at(b)), index)?
+            field_name(machine, View::held(machine, at(b))?, index)?
         }
-        CASE_NAME => case_name(machine, View::read(machine, at(b)))?,
-        OPAQUE => u64::from(opaque(machine, View::read(machine, at(b)))?),
+        CASE_NAME => case_name(machine, View::held(machine, at(b))?)?,
+        OPAQUE => u64::from(opaque(machine, View::held(machine, at(b))?)?),
         ON_PATH => {
             let entry = machine.mem.word_at(at(c) + PATH_ENTRY as usize);
             let depth = machine.mem.word_at(at(c) + PATH_DEPTH as usize) as i64;
@@ -1025,7 +1064,7 @@ pub(crate) fn handle_text(
     dst: Slot,
     src: Slot,
 ) -> Result<(), RuntimeError> {
-    let view = View::read(machine, frame + src as usize);
+    let view = View::held(machine, frame + src as usize)?;
     let described = layout(machine, view.layout)?;
     let mut text = String::new();
     match &described.shape {

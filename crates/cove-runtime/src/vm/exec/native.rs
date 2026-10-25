@@ -1955,7 +1955,7 @@ unsafe fn call_body<const MASK: u64>(
                 Some(slot) => {
                     let object = machine.mem.word_at(base as usize + slot as usize);
                     machine
-                        .callee_of(object)
+                        .closure_callee(object, caller.function, pc as usize)
                         .map(|callee| (callee, Some(object)))
                         .map_err(|error| error.at(span))
                 }

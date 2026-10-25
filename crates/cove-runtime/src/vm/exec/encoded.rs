@@ -108,9 +108,9 @@ use crate::vm::mem::{header_layout, header_len, Overflow};
 use crate::vm::report::{Decline, Outcome};
 
 use super::{
-    compare, dynamic, float_arith, int_arith, native, not_a_cell, not_held, null_object, overflowed,
-    reentrant_lock,
-    runs, wrong_arity, ChildState, Frame, Live, Machine, ScopeEntry, SAFEPOINT_STRIDE,
+    compare, dynamic, float_arith, int_arith, native, not_a_cell, not_held, null_object,
+    overflowed, reentrant_lock, runs, wrong_arity, ChildState, Frame, Live, Machine, ScopeEntry,
+    SAFEPOINT_STRIDE,
 };
 
 // The opcodes this path runs, by the name ADR 0041 gives them rather than by
@@ -2631,19 +2631,23 @@ fn fused_tail(
                 let addr = machine.mem.word_at(base_at + held.b() as usize);
                 let field = held.lo();
                 let width = machine.width(LayoutId(held.hi()));
-                machine.field(addr, field, LayoutId(held.hi()), false).map(|()| {
-                    let from = machine.mem.payload_addr(addr, field);
-                    machine.mem.copy_words(base + held.a() as u64, from, width);
-                })
+                machine
+                    .field(addr, field, LayoutId(held.hi()), false)
+                    .map(|()| {
+                        let from = machine.mem.payload_addr(addr, field);
+                        machine.mem.copy_words(base + held.a() as u64, from, width);
+                    })
             }
             STORE_ELEM => {
                 let addr = machine.mem.word_at(base_at + held.a() as usize);
                 let index = machine.mem.word_at(base_at + held.b() as usize) as i64;
                 let width = machine.width(LayoutId(held.lo()));
-                machine.unit(addr, index, LayoutId(held.lo()), true).map(|offset| {
-                    let into = machine.mem.payload_addr(addr, offset);
-                    machine.mem.copy_words(into, base + held.c() as u64, width);
-                })
+                machine
+                    .unit(addr, index, LayoutId(held.lo()), true)
+                    .map(|offset| {
+                        let into = machine.mem.payload_addr(addr, offset);
+                        machine.mem.copy_words(into, base + held.c() as u64, width);
+                    })
             }
             // A copy words its own refusals and gives them their span.
             RUN_COPY_BYTES => {
@@ -3426,7 +3430,7 @@ pub(super) fn dispatch<'s, 'a>(
             CALL_CLOSURE => {
                 let dst = a!();
                 let object = machine.mem.word_at(base_at + (b!() as usize));
-                let callee = match machine.callee_of(object) {
+                let callee = match machine.closure_callee(object, id, pc - 1) {
                     Ok(callee) => callee,
                     Err(error) => fail!(error),
                 };

@@ -66,6 +66,61 @@ pub(crate) struct Tables {
     /// By function, which slots of its frame are addresses: what a collection
     /// reads to keep an object a frame holds the address of a field of.
     pub(crate) addrs: Box<[cove_ir::RefMap]>,
+    /// What a closure call is held to ([`Machine::closure_callee`]): every
+    /// argument row's words, every function's parameters' words and every
+    /// layout's words, each interned to a number, so that a call and the
+    /// callee its object names are compared as two numbers and not as two
+    /// lists of layouts.
+    signatures: Signatures,
+    /// By function, the closure calls that hand an address and the callees
+    /// each was verified as calling, by pc ascending —
+    /// `cove_ir::verify::places::closure_callee_table`.
+    closures: Box<[Box<[(usize, Box<[cove_ir::FunctionId]>)]>]>,
+}
+
+/// [`Tables::signatures`]: words, interned.
+#[derive(Debug, Default)]
+struct Signatures {
+    /// By `ArgsId`: the row's words, argument by argument.
+    args: Box<[u32]>,
+    /// By `FunctionId`: the parameters' words, parameter by parameter.
+    params: Box<[u32]>,
+    /// By `LayoutId`: the layout's words.
+    words: Box<[u32]>,
+}
+
+impl Signatures {
+    fn of(program: &Program) -> Signatures {
+        let mut rows: std::collections::HashMap<Vec<Vec<Repr>>, u32> = Default::default();
+        let mut intern = |row: Vec<Vec<Repr>>| {
+            let next = rows.len() as u32;
+            *rows.entry(row).or_insert(next)
+        };
+        let words = |id: LayoutId| {
+            program
+                .layouts
+                .get(id.index())
+                .map_or_else(Vec::new, |layout| layout.words.clone())
+        };
+        let args = program
+            .args
+            .iter()
+            .map(|row| intern(row.iter().map(|arg| words(arg.layout)).collect()))
+            .collect();
+        let params = program
+            .functions
+            .iter()
+            .map(|function| intern(function.params.iter().map(|id| words(*id)).collect()))
+            .collect();
+        let words = (0..program.layouts.len())
+            .map(|id| intern(vec![words(LayoutId(id as u32))]))
+            .collect();
+        Signatures {
+            args,
+            params,
+            words,
+        }
+    }
 }
 
 /// The [`Tables`] of `program`, which `cove_ir::verify` accepted.
@@ -111,10 +166,21 @@ pub(crate) fn tables(program: &Program) -> Arc<Tables> {
             cove_ir::RefMap::of(&marked)
         })
         .collect();
+    let closures = cove_ir::verify::places::closure_callee_table(program)
+        .into_iter()
+        .map(|calls| {
+            calls
+                .into_iter()
+                .map(|(pc, callees)| (pc, callees.into_boxed_slice()))
+                .collect()
+        })
+        .collect();
     Arc::new(Tables {
         layouts: layout_tables(program),
         places,
         addrs,
+        signatures: Signatures::of(program),
+        closures,
     })
 }
 
@@ -181,6 +247,58 @@ fn mask(width: u32) -> u64 {
 }
 
 impl Machine<'_> {
+    /// The function the [`cove_ir::Inst::CallClosure`] at `pc` of function
+    /// `id` enters, calling the closure at `object` ([ADR 0120]).
+    ///
+    /// The callee is a word of an object, so the verifier could hold the
+    /// call's arguments and answer to no function's. Here they are held to
+    /// the callee's own: the arguments word for word its parameters, one by
+    /// one — the frame is filled at the parameters' widths — and the answer
+    /// its return layout's words. And a call that hands its callee an address
+    /// calls one of the functions the verifier worked out what the place is
+    /// used as for, and no other.
+    ///
+    /// [ADR 0120]: ../../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    pub(crate) fn closure_callee(
+        &self,
+        object: u64,
+        id: cove_ir::FunctionId,
+        pc: usize,
+    ) -> Result<cove_ir::FunctionId, RuntimeError> {
+        let callee = self.callee_of(object)?;
+        let program = self.program;
+        let Some(cove_ir::Inst::CallClosure { args, result, .. }) =
+            program.function(id).code.get(pc)
+        else {
+            return Ok(callee);
+        };
+        let target = program.function(callee);
+        let sigs = &self.agree.signatures;
+        let agrees = sigs.args.get(args.index()) == sigs.params.get(callee.index())
+            && sigs.words.get(result.index()) == sigs.words.get(target.returns.index());
+        if !agrees {
+            return Err(RuntimeError::new(format!(
+                "this calls `{}` through a closure with arguments or an answer that are not \
+                 the ones it takes",
+                target.qualified()
+            ))
+            .with_rule("A closure is called with its own function's parameters and answer."));
+        }
+        if let Some(calls) = self.agree.closures.get(id.index()) {
+            if let Ok(at) = calls.binary_search_by_key(&pc, |(pc, _)| *pc) {
+                if !calls[at].1.contains(&callee) {
+                    return Err(RuntimeError::new(format!(
+                        "this hands `{}` an address through a closure, and the address was \
+                         checked for another function",
+                        target.qualified()
+                    ))
+                    .with_rule("A place is used only as what it was checked to hold."));
+                }
+            }
+        }
+        Ok(callee)
+    }
+
     /// That a field instruction naming `layout` at payload word `at` may read
     /// (or, with `store`, write) the object at `addr`: non-null, inside its
     /// payload, and agreeing with it word for word. See the module.
@@ -232,7 +350,9 @@ impl Machine<'_> {
         let (words, access): (u64, Box<dyn Fn(u64) -> Access + '_>) =
             match (&held.shape, held.fixed_access(layouts)) {
                 (Shape::Free, _) => {
-                    return Err(RuntimeError::new("this value was read after it was reclaimed"))
+                    return Err(RuntimeError::new(
+                        "this value was read after it was reclaimed",
+                    ))
                 }
                 (_, Some(fixed)) => (fixed.len() as u64, Box::new(move |k| fixed[k as usize])),
                 (Shape::Str | Shape::Bytes, _) => (
@@ -345,7 +465,9 @@ impl Machine<'_> {
                      through it as {repr}, which is not what the object holds there",
                     held.name
                 ))
-                .with_rule("A word of an object is read and written as what the object holds there."));
+                .with_rule(
+                    "A word of an object is read and written as what the object holds there.",
+                ));
             }
         }
         Ok(())
@@ -407,7 +529,12 @@ impl Machine<'_> {
 
     /// The refusal of an element access whose layout is not the run's unit.
     #[cold]
-    pub(crate) fn not_its_unit(&self, object: LayoutId, layout: LayoutId, store: bool) -> RuntimeError {
+    pub(crate) fn not_its_unit(
+        &self,
+        object: LayoutId,
+        layout: LayoutId,
+        store: bool,
+    ) -> RuntimeError {
         let name = |id: LayoutId| {
             self.program
                 .layouts

@@ -1975,12 +1975,15 @@ mod tests {
             (13, Raise::Called),
             (14, Raise::NegOverflowed),
             (15, Raise::ShiftCount),
+            (16, Raise::UnitRead),
+            (17, Raise::UnitWrite),
+            (18, Raise::NotBytes),
         ] {
             assert_eq!(raise.abi(), code);
             assert_eq!(Raise::from_abi(code), Some(raise));
         }
         assert_eq!(Raise::from_abi(0), None);
-        assert_eq!(Raise::from_abi(16), None);
+        assert_eq!(Raise::from_abi(19), None);
 
         for (code, op) in [
             (0, GrowableOp::Alloc),

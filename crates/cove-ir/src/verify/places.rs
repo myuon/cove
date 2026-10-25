@@ -145,6 +145,7 @@ pub(super) fn check(program: &Program) -> Vec<Invalid> {
                 .get(args.index())
                 .is_some_and(|row| row.iter().any(|arg| holds_a_place(arg.layout)))
         };
+        let callees = closure_callees(program, function);
         for (pc, inst) in function.code.iter().enumerate() {
             let at = Some(pc);
             let escapes = |what: &str| format!("{what} an address, which would outlive its frame");
@@ -174,10 +175,16 @@ pub(super) fn check(program: &Program) -> Vec<Invalid> {
                 Inst::ScopeLeave { layout, .. } if holds_a_place(*layout) => {
                     fault(at, escapes("hands a scope"));
                 }
-                Inst::CallClosure { args, result, .. }
-                    if row_holds_a_place(*args) || holds_a_place(*result) =>
+                Inst::CallClosure { result, .. } if holds_a_place(*result) => {
+                    fault(at, escapes("answers, from a closure,"));
+                }
+                Inst::CallClosure { args, .. }
+                    if row_holds_a_place(*args) && !matches!(callees.get(&pc), Some(Some(_))) =>
                 {
-                    fault(at, escapes("hands a closure, whose callee is not known here,"));
+                    fault(
+                        at,
+                        escapes("hands a closure, whose callee is not known here,"),
+                    );
                 }
                 Inst::CallHost { args, op, .. } | Inst::CallResource { args, op, .. } => {
                     let answers = program
@@ -238,7 +245,12 @@ pub fn field_needs(program: &Program) -> Vec<Vec<Option<Need>>> {
         .iter()
         .enumerate()
         .map(|(index, function)| {
-            let needs = Needs::of(program, FunctionId(index as u32), &exported, &mut Vec::new());
+            let needs = Needs::of(
+                program,
+                FunctionId(index as u32),
+                &exported,
+                &mut Vec::new(),
+            );
             function
                 .code
                 .iter()
@@ -268,7 +280,12 @@ pub fn dynamic_uses(program: &Program) -> Vec<Vec<bool>> {
         .iter()
         .enumerate()
         .map(|(index, function)| {
-            let needs = Needs::of(program, FunctionId(index as u32), &exported, &mut Vec::new());
+            let needs = Needs::of(
+                program,
+                FunctionId(index as u32),
+                &exported,
+                &mut Vec::new(),
+            );
             (0..function.code.len())
                 .map(|pc| needs.dynamic.contains(&pc))
                 .collect()
@@ -284,7 +301,12 @@ fn settle(program: &Program) -> Option<Vec<BTreeMap<Slot, Need>>> {
     for _ in 0..ROUNDS {
         let mut changed = false;
         for index in 0..program.functions.len() {
-            let needs = Needs::of(program, FunctionId(index as u32), &exported, &mut Vec::new());
+            let needs = Needs::of(
+                program,
+                FunctionId(index as u32),
+                &exported,
+                &mut Vec::new(),
+            );
             if needs.params != exported[index] {
                 exported[index] = needs.params;
                 changed = true;
@@ -345,6 +367,7 @@ impl Needs {
             return needs;
         }
         let reaching = reaching(program, function, &places);
+        let callees = closure_callees(program, function);
         let index_of = |slot: Slot| places.binary_search(&slot).ok();
         let words = |layout: LayoutId| {
             program
@@ -353,6 +376,8 @@ impl Needs {
                 .map_or(&[][..], |held| held.words.as_slice())
         };
         let mut need: BTreeMap<Formed, Need> = BTreeMap::new();
+        // Faults found outside `flow`, which holds `faults` while it lives.
+        let mut refused: BTreeSet<(usize, String)> = BTreeSet::new();
         // To a fixed point: a part's need, a copy's and an argument's flow to
         // what reached them, and a need may be learned after it was passed on.
         loop {
@@ -421,11 +446,12 @@ impl Needs {
                     }
                     grew
                 };
-                let of = |need: &BTreeMap<Formed, Need>, formed: Formed| -> Vec<(u32, (Repr, bool))> {
-                    need.get(&formed)
-                        .map(|held| held.iter().map(|(k, v)| (*k, *v)).collect())
-                        .unwrap_or_default()
-                };
+                let of =
+                    |need: &BTreeMap<Formed, Need>, formed: Formed| -> Vec<(u32, (Repr, bool))> {
+                        need.get(&formed)
+                            .map(|held| held.iter().map(|(k, v)| (*k, *v)).collect())
+                            .unwrap_or_default()
+                    };
                 match inst {
                     Inst::Load { addr, .. } | Inst::Store { addr, .. } if loaded(*addr) => {
                         needs.dynamic.insert(pc);
@@ -451,38 +477,54 @@ impl Needs {
                             }
                         }
                     }
-                    Inst::Call { callee, args, .. } => {
-                        let (Some(row), Some(wanted)) =
-                            (program.args.get(args.index()), exported.get(callee.index()))
-                        else {
+                    Inst::Call { .. } | Inst::CallClosure { .. } => {
+                        let (args, targets) = match inst {
+                            Inst::Call { callee, args, .. } => (*args, vec![*callee]),
+                            Inst::CallClosure { args, .. } => match callees.get(&pc) {
+                                Some(Some(known)) => (*args, known.clone()),
+                                // Refused by `check` if it is handed an address.
+                                _ => continue,
+                            },
+                            _ => unreachable!(),
+                        };
+                        let Some(row) = program.args.get(args.index()) else {
                             continue;
                         };
-                        let mut param = 0u32;
-                        for arg in row {
-                            for (k, repr) in words(arg.layout).iter().enumerate() {
-                                if *repr != Repr::Addr {
-                                    continue;
-                                }
-                                if loaded(arg.slot + k as u32) {
-                                    faults.push((
-                                        Some(pc),
-                                        format!(
+                        for callee in targets {
+                            let Some(wanted) = exported.get(callee.index()) else {
+                                continue;
+                            };
+                            let mut param = 0u32;
+                            for arg in row {
+                                for (k, repr) in words(arg.layout).iter().enumerate() {
+                                    if *repr != Repr::Addr {
+                                        continue;
+                                    }
+                                    if loaded(arg.slot + k as u32) {
+                                        refused.insert((
+                                            pc,
+                                            format!(
                                             "passes slot {} to a call, which may hold an address \
                                              loaded out of memory, and a parameter's need cannot \
                                              be held to one",
                                             arg.slot + k as u32
                                         ),
-                                    ));
-                                    continue;
+                                        ));
+                                        continue;
+                                    }
+                                    if let Some(wants) = wanted.get(&(param + k as u32)) {
+                                        let wants: Vec<_> =
+                                            wants.iter().map(|(k, v)| (*k, *v)).collect();
+                                        changed |= flow(
+                                            &mut need,
+                                            &sources(arg.slot + k as u32),
+                                            0,
+                                            &wants,
+                                        );
+                                    }
                                 }
-                                if let Some(wants) = wanted.get(&(param + k as u32)) {
-                                    let wants: Vec<_> =
-                                        wants.iter().map(|(k, v)| (*k, *v)).collect();
-                                    changed |=
-                                        flow(&mut need, &sources(arg.slot + k as u32), 0, &wants);
-                                }
+                                param += words(arg.layout).len() as u32;
                             }
-                            param += words(arg.layout).len() as u32;
                         }
                     }
                     _ => {}
@@ -492,6 +534,11 @@ impl Needs {
                 break;
             }
         }
+        faults.extend(refused.into_iter().map(|(pc, what)| (Some(pc), what)));
+        // The fixed point visits an instruction more than once; report a
+        // fault once.
+        faults.sort();
+        faults.dedup();
         for (formed, held) in need {
             match formed {
                 Formed::Param(slot) => {
@@ -505,6 +552,152 @@ impl Needs {
         }
         needs
     }
+}
+
+/// For every [`Inst::CallClosure`] of `function` that hands its callee an
+/// address, by pc: the functions the closure it calls may be, if every
+/// definition of the closure slot that reaches the call is the allocation of a
+/// closure ([`crate::Shape::Closure`] names its function), and `None` if any
+/// is not — a parameter, a load, a call's answer, a copy.
+///
+/// It is a closure call's one way to take a `var` argument: `lock` hands its
+/// closure the address of the cell's value, and the lowering makes the closure
+/// in the frame that calls it. What the callee uses the place as is then known
+/// here, and is passed to the place as a direct call's would be. Which object
+/// the slot holds when the call runs is still the machine's to hold to the
+/// answer ([`closure_callee_table`]): a store through an address can reach the
+/// slot without writing it here.
+pub fn closure_callees(
+    program: &Program,
+    function: &Function,
+) -> BTreeMap<usize, Option<Vec<FunctionId>>> {
+    let holds_a_place = |layout: LayoutId| {
+        program
+            .layouts
+            .get(layout.index())
+            .is_some_and(|held| held.words.contains(&Repr::Addr))
+    };
+    let mut answers = BTreeMap::new();
+    for (pc, inst) in function.code.iter().enumerate() {
+        let Inst::CallClosure { closure, args, .. } = inst else {
+            continue;
+        };
+        let addressed = program
+            .args
+            .get(args.index())
+            .is_some_and(|row| row.iter().any(|arg| holds_a_place(arg.layout)));
+        if addressed {
+            answers.insert(pc, callees_reaching(program, function, pc, *closure));
+        }
+    }
+    answers
+}
+
+/// What a definition of a closure slot made it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Made {
+    /// A closure of this function.
+    Closure(FunctionId),
+    /// Anything else, which this pass cannot see into.
+    Unknown,
+}
+
+/// The functions the closure in `slot` may call at `target`: reaching
+/// definitions over `function`'s control flow, for the one slot.
+fn callees_reaching(
+    program: &Program,
+    function: &Function,
+    target: usize,
+    slot: Slot,
+) -> Option<Vec<FunctionId>> {
+    let len = function.code.len();
+    let params = function.param_words(&program.layouts);
+    // A frame is zeroed on entry, so a slot that is no parameter holds null,
+    // which the machine refuses to call: it contributes no callee.
+    let entry: BTreeSet<Made> = if slot < params {
+        BTreeSet::from([Made::Unknown])
+    } else {
+        BTreeSet::new()
+    };
+    let mut before: Vec<Option<BTreeSet<Made>>> = vec![None; len];
+    if len == 0 {
+        return None;
+    }
+    before[0] = Some(entry);
+    let mut work = vec![0usize];
+    while let Some(pc) = work.pop() {
+        let Some(state) = before[pc].clone() else {
+            continue;
+        };
+        let inst = &function.code[pc];
+        let mut written = false;
+        inst.writes(program, &mut |base, width| {
+            written |= base <= slot && u64::from(slot) < u64::from(base) + u64::from(width);
+        });
+        let after = if !written {
+            state
+        } else {
+            match inst {
+                Inst::Alloc { dst, layout, .. } if *dst == slot => {
+                    match program.layouts.get(layout.index()).map(|held| &held.shape) {
+                        Some(crate::layout::Shape::Closure { function, .. }) => {
+                            BTreeSet::from([Made::Closure(*function)])
+                        }
+                        _ => BTreeSet::from([Made::Unknown]),
+                    }
+                }
+                _ => BTreeSet::from([Made::Unknown]),
+            }
+        };
+        for next in successors(program, function, pc) {
+            if next >= len {
+                continue;
+            }
+            match &mut before[next] {
+                None => {
+                    before[next] = Some(after.clone());
+                    work.push(next);
+                }
+                Some(held) => {
+                    let size = held.len();
+                    held.extend(after.iter().copied());
+                    if held.len() != size {
+                        work.push(next);
+                    }
+                }
+            }
+        }
+    }
+    let reaching = before[target].clone().unwrap_or_default();
+    let mut callees = Vec::new();
+    for made in reaching {
+        match made {
+            Made::Closure(callee) if callee.index() < program.functions.len() => {
+                callees.push(callee);
+            }
+            _ => return None,
+        }
+    }
+    (!callees.is_empty()).then_some(callees)
+}
+
+/// For every function of `program`, the closure calls that hand an address
+/// and the functions each was verified as calling, by pc ascending: what the
+/// machine holds the callee it reads out of the object to.
+///
+/// Answers for a program [`super::verify`] accepted, in which every such call
+/// has its callees.
+pub fn closure_callee_table(program: &Program) -> Vec<Vec<(usize, Vec<FunctionId>)>> {
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            closure_callees(program, function)
+                .into_iter()
+                .map(|(pc, callees)| (pc, callees.unwrap_or_default()))
+                .collect()
+        })
+        .collect()
 }
 
 /// Which formations of each address slot in `places` reach each instruction,
