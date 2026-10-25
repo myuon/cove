@@ -293,6 +293,38 @@ pub fn dynamic_uses(program: &Program) -> Vec<Vec<bool>> {
         .collect()
 }
 
+/// The loads and stores of `function` through an address that may have been
+/// loaded out of memory, by pc ascending: [`dynamic_uses`] for one function.
+///
+/// Which uses those are is a fact about the function alone — reaching
+/// definitions over its own code — so this is what a reader that is handed
+/// one function at a time asks: the native tier, which runs none of them
+/// ([`dynamic_uses`] is the same answer for every function at once).
+pub fn loaded_uses(program: &Program, function: &Function) -> Vec<usize> {
+    let places: Vec<Slot> = (0..function.reprs.len() as Slot)
+        .filter(|slot| function.reprs[*slot as usize] == Repr::Addr)
+        .collect();
+    if places.is_empty() || function.code.is_empty() {
+        return Vec::new();
+    }
+    let reaching = reaching(program, function, &places);
+    function
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, inst)| match inst {
+            Inst::Load { addr, .. } | Inst::Store { addr, .. } => {
+                let at = places.binary_search(addr).ok()?;
+                reaching[pc][at]
+                    .iter()
+                    .any(|formed| matches!(formed, Formed::Loaded(..)))
+                    .then_some(pc)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// What every function's address parameters are used as, by parameter slot:
 /// the needs propagated through the call graph to a fixed point, or `None`
 /// if they do not reach one within [`ROUNDS`].

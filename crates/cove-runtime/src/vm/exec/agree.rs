@@ -76,6 +76,11 @@ pub(crate) struct Tables {
     /// each was verified as calling, by pc ascending —
     /// `cove_ir::verify::places::closure_callee_table`.
     closures: Box<[Box<[(usize, Box<[cove_ir::FunctionId]>)]>]>,
+    /// By function, the loads and stores through an address that may have
+    /// been loaded out of memory, by pc ascending —
+    /// `cove_ir::verify::places::loaded_uses` — which
+    /// [`Machine::frame_place`] holds to the frame the address lands in.
+    loaded: Box<[Box<[usize]>]>,
 }
 
 /// [`Tables::signatures`]: words, interned.
@@ -181,6 +186,13 @@ pub(crate) fn tables(program: &Program) -> Arc<Tables> {
         addrs,
         signatures: Signatures::of(program),
         closures,
+        loaded: program
+            .functions
+            .iter()
+            .map(|function| {
+                cove_ir::verify::places::loaded_uses(program, function).into_boxed_slice()
+            })
+            .collect(),
     })
 }
 
@@ -247,6 +259,58 @@ fn mask(width: u32) -> u64 {
 }
 
 impl Machine<'_> {
+    /// Whether the load or store at `pc` of function `id` is through an
+    /// address that may have been loaded out of memory, which
+    /// [`Machine::frame_place`] checks. Nearly every function has none, and
+    /// asks one length.
+    #[inline]
+    pub(crate) fn loads_a_place(&self, id: cove_ir::FunctionId, pc: usize) -> bool {
+        self.agree
+            .loaded
+            .get(id.index())
+            .is_some_and(|pcs| !pcs.is_empty() && pcs.binary_search(&pc).is_ok())
+    }
+
+    /// That `addr`, an address loaded out of memory, names `layout`'s words in
+    /// a live frame of this task, each holding the `Repr` the layout says
+    /// ([ADR 0120]).
+    ///
+    /// The verifier keeps every address a frame holds pointing at that frame
+    /// or a deeper one, so a loaded address names a frame that is live while
+    /// the one loading it is; what it cannot say is *which* frame, or what is
+    /// at the offset — a tracked walk's path list is linked through the frames
+    /// of the walks it is inside, and how deep it goes is a run-time fact. So
+    /// it is asked here, of the frame stack: the frame the address lands in,
+    /// the words inside that frame, and their `Repr`s. An address that lands
+    /// in no frame — in the heap, or past the stack in use — is refused; the
+    /// lowering forms none.
+    ///
+    /// [ADR 0120]: ../../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    #[cold]
+    pub(crate) fn frame_place(&self, addr: u64, layout: LayoutId) -> Result<(), RuntimeError> {
+        let refused = || {
+            RuntimeError::new(
+                "this reads or writes through an address loaded out of memory that names no \
+                 value of a live frame",
+            )
+            .with_rule("A place is used only as what it holds.")
+        };
+        let words = &self.program.layout(layout).words;
+        if !super::super::mem::is_stack(addr) {
+            return Err(refused());
+        }
+        let at = self.frames.partition_point(|frame| frame.base <= addr);
+        let Some(frame) = at.checked_sub(1).map(|at| self.frames[at]) else {
+            return Err(refused());
+        };
+        let reprs = &self.program.function(frame.function).reprs;
+        let offset = (addr - frame.base) as usize;
+        match reprs.get(offset..offset + words.len()) {
+            Some(held) if held == words.as_slice() => Ok(()),
+            _ => Err(refused()),
+        }
+    }
+
     /// The function the [`cove_ir::Inst::CallClosure`] at `pc` of function
     /// `id` enters, calling the closure at `object` ([ADR 0120]).
     ///

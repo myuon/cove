@@ -3819,6 +3819,11 @@ pub(super) fn dispatch<'s, 'a>(
                 if addr == 0 {
                     fail!(null_object());
                 }
+                if machine.loads_a_place(id, pc - 1) {
+                    if let Err(error) = machine.frame_place(addr, LayoutId(held.lo())) {
+                        fail!(error);
+                    }
+                }
                 let width = machine.width(LayoutId(held.lo()));
                 machine.mem.copy_words(base + held.a() as u64, addr, width);
             }
@@ -3826,6 +3831,11 @@ pub(super) fn dispatch<'s, 'a>(
                 let addr = machine.mem.word_at(base_at + (a!() as usize));
                 if addr == 0 {
                     fail!(null_object());
+                }
+                if machine.loads_a_place(id, pc - 1) {
+                    if let Err(error) = machine.frame_place(addr, LayoutId(held.lo())) {
+                        fail!(error);
+                    }
                 }
                 let width = machine.width(LayoutId(held.lo()));
                 machine.mem.copy_words(addr, base + held.b() as u64, width);

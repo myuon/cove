@@ -815,12 +815,28 @@ pub fn refusal(program: &Program, function: &Function) -> Option<Refusal> {
     if let Some(whole) = whole_function_refusal(function) {
         return Some(whole);
     }
+    let loaded = cove_ir::verify::places::loaded_uses(program, function);
     function.code.iter().enumerate().find_map(|(pc, inst)| {
-        inst_refused(program, function, inst).map(|reason| Refusal {
-            reason,
-            at: Some(pc as u32),
-        })
+        loaded_refused(&loaded, pc)
+            .or_else(|| inst_refused(program, function, inst))
+            .map(|reason| Refusal {
+                reason,
+                at: Some(pc as u32),
+            })
     })
+}
+
+/// [`Reason::Instruction`] for a load or a store through an address that may
+/// have been loaded out of memory ([ADR 0120]): the machine holds each to the
+/// frame it lands in where it runs, which is a walk of the frame stack this
+/// tier does not emit, so a function with one runs encoded.
+///
+/// [ADR 0120]: ../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+fn loaded_refused(loaded: &[usize], pc: usize) -> Option<Reason> {
+    loaded
+        .binary_search(&pc)
+        .is_ok()
+        .then_some(Reason::Instruction)
 }
 
 /// Every instruction-level refusal in `function`, in pc order.
@@ -846,15 +862,18 @@ pub fn blockers(program: &Program, function: &Function) -> Vec<Refusal> {
     if let Some(whole) = whole_function_refusal(function) {
         return vec![whole];
     }
+    let loaded = cove_ir::verify::places::loaded_uses(program, function);
     function
         .code
         .iter()
         .enumerate()
         .filter_map(|(pc, inst)| {
-            inst_refused(program, function, inst).map(|reason| Refusal {
-                reason,
-                at: Some(pc as u32),
-            })
+            loaded_refused(&loaded, pc)
+                .or_else(|| inst_refused(program, function, inst))
+                .map(|reason| Refusal {
+                    reason,
+                    at: Some(pc as u32),
+                })
         })
         .collect()
 }
