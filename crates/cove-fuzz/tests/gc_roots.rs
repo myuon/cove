@@ -132,9 +132,19 @@ fn the_interpreter_prints_what_each_program_should() {
 }
 
 /// The whole chain, on the native tier over the small heap.
-#[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+///
+/// Gated on the tier being *there* when it runs, not on this crate's own
+/// `template` feature: `cargo t` builds the workspace, which turns the tier on
+/// in `cove-runtime` through `cove-cli` (ADR 0076) while this crate's feature
+/// stays off. Where this build or host has no tier — a lone
+/// `cargo test -p cove-fuzz`, or anything but x86-64 Unix — it says so and
+/// checks nothing.
 #[test]
 fn a_compiled_frame_keeps_what_it_holds_across_collections() {
+    if let Err(why) = probe(&source(CASES[0].name), Mode::Native, SMALL, &[]) {
+        eprintln!("no native tier here, so nothing to check: {why}");
+        return;
+    }
     for case in &CASES {
         let text = source(case.name);
         assert!(
