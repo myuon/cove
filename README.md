@@ -62,8 +62,10 @@ and records and replays the host calls a run made (`cove trace`,
 - **A compiler front end** — parser, name resolution and a type checker.
 - **A native tier** that compiles the functions it can to machine code and
   runs the rest on the VM. It is what runs a program by default on x86-64
-  Unix, and each run says how much of it was native
-  ([ADR 0122](docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md)).
+  Unix, compiling each function once it is hot, and each run says how much of
+  it was native
+  ([ADR 0122](docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md),
+  [ADR 0123](docs/adr/0123-the-native-tier-compiles-what-is-hot.md)).
 - **A VM** (`--backend vm`) that runs programs everywhere else, and every
   function the native tier does not compile.
 - **A tree-walking interpreter** (`--backend ast`), kept as the reference the
