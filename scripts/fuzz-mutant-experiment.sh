@@ -88,6 +88,14 @@ dedicated native_tier cargo test --profile checked -p cove-runtime --features te
 # finding too.
 replay_dir() {
   local t="$1" dir="$2" to="$3" status=0 s f
+  # `known/` holds inputs that fail on a clean build: they are not the
+  # mutant's to find.
+  if [ -d "$dir/known" ]; then
+    rm -rf "$out/without-known"
+    mkdir -p "$out/without-known"
+    find "$dir" -type f -not -path '*/known/*' -not -name '*.md' -exec cp {} "$out/without-known/" \;
+    dir="$out/without-known"
+  fi
   "$wt/target/checked/cove-fuzz" stats "$t" "$dir" > "$to.json" 2> "$to.txt" || status=$?
   if [ "$status" -gt 1 ]; then
     : > "$to.txt"
@@ -103,7 +111,10 @@ replay_dir() {
   fi
 }
 
-# 2. Corpus replay, with the mutant's build.
+# 2. Corpus replay, with the mutant's build — and this tree's own build, which
+# an exploration's finding is replayed on to tell the mutant's findings from
+# the toolchain's.
+(cd "$root" && cargo build --profile checked -p cove-fuzz --features template --quiet)
 "$m" run "$mutant" -- cargo build --profile checked -p cove-fuzz --features template --quiet
 found="$out/found.txt"
 : > "$found"
@@ -114,7 +125,7 @@ for spec in "${replays[@]}"; do
   start=$(date +%s)
   replay_dir "$t" "$dir" "$out/replay-$t-$tag"
   n=$(grep -c '^finding: ' "$out/replay-$t-$tag.txt" || true)
-  inputs=$(find "$dir" -type f -not -name '*.md' -not -name '.*' | wc -l | tr -d ' ')
+  inputs=$(find "$dir" -type f -not -name '*.md' -not -name '.*' -not -path '*/known/*' | wc -l | tr -d ' ')
   grep '^finding: ' "$out/replay-$t-$tag.txt" | sed 's/^finding: //; s/: .*//' >> "$found" || true
   first=$(grep -m1 '^finding: ' "$out/replay-$t-$tag.txt" | cut -c1-220 || true)
   say "replay $t ${dir#$root/}: $n of $inputs inputs found it, $(( $(date +%s) - start ))s ${first:+— $first}"
@@ -154,6 +165,11 @@ for spec in ${explores[@]+"${explores[@]}"}; do
       a=$(find "$out/explore-$t/run-$r/artifacts" -type f | head -1)
       if [ -n "$a" ]; then
         "$wt/target/checked/cove-fuzz" stats "$t" "$a" 2>&1 >/dev/null | grep '^finding' | cut -c1-300 >> "$report" || true
+        if "$root/target/checked/cove-fuzz" stats "$t" "$a" > /dev/null 2>&1; then
+          say "  the clean build agrees on it: the mutant's finding"
+        else
+          say "  the clean build ALSO fails on it: the toolchain's finding, not the mutant's"
+        fi
       fi
     fi
   done
