@@ -10,6 +10,8 @@
 //! cove-fuzz explain FILE...                                how a source ends on each tier
 //! cove-fuzz explain-generated FILE...                      the same, for the program FILE generates
 //! cove-fuzz image-seed OUT_DIR FILE...                     write image bodies of sources
+//! cove-fuzz stats <differential|differential_source> PATH... replay a corpus and count what it compared (issue 704)
+//! cove-fuzz stats merge PATH...                            add together the files a session wrote
 //! ```
 
 use std::path::Path;
@@ -112,6 +114,46 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             };
             std::fs::write(out, cove_fuzz::ir::stats_input(seed)).expect("write the input");
+        }
+        // What a differential session compared (issue 704): the statistics as
+        // JSON on stdout, and the summary on stderr. `merge` adds together the
+        // files a session wrote under `COVE_FUZZ_STATS_DIR`; a target name
+        // replays a corpus, counting a finding rather than stopping at it, and
+        // exits non-zero if there was one.
+        "stats" => {
+            let Some((what, paths)) = rest.split_first() else {
+                eprintln!(
+                    "usage: cove-fuzz stats <{}|merge> FILE_OR_DIR...",
+                    cove_fuzz::stats::TARGETS.join("|")
+                );
+                return ExitCode::from(2);
+            };
+            let paths: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
+            let (stats, findings) = if what == "merge" {
+                match cove_fuzz::stats::merge_files(&paths) {
+                    Ok(stats) => (stats, Vec::new()),
+                    Err(why) => {
+                        eprintln!("{why}");
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                match cove_fuzz::stats::replay(what, &paths) {
+                    Ok(replay) => (replay.stats, replay.findings),
+                    Err(why) => {
+                        eprintln!("{why}");
+                        return ExitCode::from(2);
+                    }
+                }
+            };
+            print!("{}", stats.to_json());
+            eprint!("{}", stats.summary());
+            for (path, why) in &findings {
+                eprintln!("finding: {}: {why}", path.display());
+            }
+            if !findings.is_empty() {
+                return ExitCode::FAILURE;
+            }
         }
         "explain" => {
             for path in rest {

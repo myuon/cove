@@ -79,6 +79,7 @@ pub mod generate;
 pub mod ir;
 pub mod irgen;
 pub mod mutate;
+pub mod stats;
 
 pub use differential::{differential, differential_source};
 pub use ir::{ir, ir_mutate};
@@ -293,14 +294,33 @@ struct Lowered {
     program: cove_ir::Program,
 }
 
+/// The step of [`front`] that refused a source.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrontStage {
+    /// The lexer or the parser.
+    Parse,
+    /// Attaching the standard library, name resolution, type and uniqueness
+    /// checking.
+    Check,
+    /// Lowering `playground.main` to IR.
+    Lower,
+}
+
 /// `cove run`'s front end over one file: parse, attach the standard library,
 /// check against the shipped host schemas, lower `playground.main`. The
 /// error is the diagnostics' messages, one a line.
 fn front(text: &str) -> Result<Lowered, String> {
+    front_staged(text).map_err(|(_, why)| why)
+}
+
+/// [`front`], saying which step refused: for the statistics of
+/// [`stats`], which count how far each input got.
+fn front_staged(text: &str) -> Result<Lowered, (FrontStage, String)> {
     let mut sources = SourceMap::new();
     let path = PathBuf::from(PATH);
     let file = sources.add(path.clone(), text.to_string());
-    let ast = cove_syntax::parse_file(&sources, file).map_err(|d| rendered(&sources, d))?;
+    let ast = cove_syntax::parse_file(&sources, file)
+        .map_err(|d| (FrontStage::Parse, rendered(&sources, d)))?;
     let mut modules = BTreeMap::new();
     modules.insert(
         MODULE.to_string(),
@@ -312,7 +332,7 @@ fn front(text: &str) -> Result<Lowered, String> {
     );
     let std_modules = match cove_sema::stdlib::attach(&mut sources) {
         Ok(std_modules) => std_modules,
-        Err(diagnostics) => return Err(rendered(&sources, diagnostics)),
+        Err(diagnostics) => return Err((FrontStage::Check, rendered(&sources, diagnostics))),
     };
     for (name, module) in std_modules {
         modules.insert(name, module);
@@ -325,9 +345,9 @@ fn front(text: &str) -> Result<Lowered, String> {
     let checked = Compiler::new()
         .with_schemas(HostSchemas::new())
         .compile(&package)
-        .map_err(|d| rendered(&sources, d))?;
+        .map_err(|d| (FrontStage::Check, rendered(&sources, d)))?;
     let program = cove_ir::lower_entry(&checked, &sources, &HostSchemas::new(), MODULE, ENTRY)
-        .map_err(|d| rendered(&sources, d))?;
+        .map_err(|d| (FrontStage::Lower, rendered(&sources, d)))?;
     Ok(Lowered {
         sources,
         checked,

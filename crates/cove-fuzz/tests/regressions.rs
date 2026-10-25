@@ -229,3 +229,36 @@ fn the_modes_agree_over_fixed_inputs() {
         "no generated program collected on the small heap"
     );
 }
+
+/// `cove-fuzz stats` over the committed differential inputs (issue 704):
+/// every input is counted, none is a finding, and the counts are not empty —
+/// the generated seeds all reach a run, and some of them compare in full.
+#[test]
+fn differential_statistics_replay_the_committed_inputs() {
+    for target in cove_fuzz::stats::TARGETS {
+        let inputs = inputs(target);
+        let replay = cove_fuzz::stats::replay(target, &inputs).expect("the inputs read");
+        let stats = &replay.stats;
+        assert!(replay.findings.is_empty(), "{:?}", replay.findings);
+        assert_eq!(stats.get(&["inputs"]), inputs.len() as u64);
+        assert_eq!(stats.get(&["targets", target]), inputs.len() as u64);
+        let ran = stats.get(&["stages", "ran"]);
+        assert_eq!(
+            ran,
+            stats.get(&["comparisons", "full"])
+                + stats.get(&["comparisons", "prefix"])
+                + stats.get(&["comparisons", "no_entry"]),
+            "full, prefix-only and no entry partition the programs that ran"
+        );
+        let read_back = cove_fuzz::stats::Stats::from_json(&stats.to_json()).expect("JSON");
+        assert_eq!(&read_back, stats);
+        if target == "differential" {
+            assert_eq!(ran, inputs.len() as u64, "{}", stats.summary());
+            assert!(
+                stats.get(&["comparisons", "full"]) > 0,
+                "{}",
+                stats.summary()
+            );
+        }
+    }
+}

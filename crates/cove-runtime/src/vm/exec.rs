@@ -768,6 +768,24 @@ pub(crate) struct Machine<'a> {
     /// waiting; this machine has one context, which is the run.
     host_wait: Duration,
     collected: Collected,
+    /// How many Rust-side entries into compiled code are in progress on this
+    /// machine: one per `run_frame` standing on the Rust stack.
+    ///
+    /// Above nought, at least one compiled frame is live — the one that
+    /// entry runs — and every frame emitted code opened inline above it
+    /// ([ADR 0079]) is live with it, which is why counting the Rust entries
+    /// and not the frames is enough. Moved by one add and one subtract per
+    /// entry, never per instruction or per inline call.
+    ///
+    /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
+    native_depth: u32,
+    /// Collections this machine made while [`Machine::native_depth`] was
+    /// above nought: with at least one compiled frame on the stack, whose
+    /// roots the collection had to find through the frame record compiled
+    /// code keeps. The one number that says a run *tested* a compiled
+    /// frame's roots, rather than collecting and running compiled code at
+    /// different moments (issue #704).
+    collections_while_compiled: u64,
     /// The `Shared` cells this task is inside, innermost last.
     ///
     /// `lock` is two instructions with a call between them, and the release is
@@ -1183,6 +1201,8 @@ impl<'a> Machine<'a> {
             bulk_work: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
+            native_depth: 0,
+            collections_while_compiled: 0,
             held: Vec::new(),
             callback_answer: None,
             assertion_failure: None,
@@ -1282,6 +1302,8 @@ impl<'a> Machine<'a> {
             bulk_work: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
+            native_depth: 0,
+            collections_while_compiled: 0,
             held: Vec::new(),
             callback_answer: None,
             assertion_failure: None,
@@ -2326,6 +2348,15 @@ impl<'a> Machine<'a> {
     pub(crate) fn collect(&mut self) {
         let done = self.mem.collect(&self.program.layouts, &Live(self));
         self.collected = done;
+        if self.native_depth > 0 {
+            self.collections_while_compiled += 1;
+        }
+    }
+
+    /// Collections this machine made with a compiled frame live; see
+    /// [`Machine::native_depth`].
+    pub(crate) fn collections_while_compiled(&self) -> u64 {
+        self.collections_while_compiled
     }
 
     /// How many temporary roots are held, for a caller about to take more.

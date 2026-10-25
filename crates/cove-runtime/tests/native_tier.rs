@@ -2408,6 +2408,74 @@ fn compiled_code_collects_on_pace_under_the_default_budget() {
     );
 }
 
+/// **A collection made under a compiled frame is counted as one** (issue #704).
+///
+/// `Vm::collections_while_compiled` is what the differential fuzzer reads to
+/// say it tested a compiled frame's roots, rather than collecting and running
+/// compiled code at different moments of one run. So it is held to both
+/// sides: over a one-chunk heap the encoded tier collects many times and the
+/// counter does not move, and then the same calls through the native tier
+/// collect with hundreds of compiled frames standing — the allocating helper
+/// is called from compiled code — and every one of those collections is
+/// counted.
+#[test]
+fn a_collection_under_a_compiled_frame_is_counted_as_one() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const DEEP: i64 = 600;
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let mut session = vm
+        .native_session(MODULE, "callsKeepsAcrossFrames", vec![Value::int(DEEP)])
+        .expect("the session opens");
+    let words = session.arguments().to_vec();
+
+    for _ in 0..20 {
+        session
+            .call(&cove_runtime::NothingCompiled, &words)
+            .expect("the vm answers");
+    }
+    let encoded = session.collections();
+    assert!(
+        encoded >= 3,
+        "the encoded calls collected {encoded} time(s)"
+    );
+    assert_eq!(
+        session.collections_while_compiled(),
+        0,
+        "no compiled frame stood under any of the encoded tier's {encoded} collections"
+    );
+
+    for _ in 0..20 {
+        session
+            .call(&native, &words)
+            .expect("the native tier answers");
+    }
+    let compiled = session.collections() - encoded;
+    assert!(
+        compiled >= 3,
+        "the native calls collected {compiled} time(s)"
+    );
+    assert_eq!(
+        session.collections_while_compiled(),
+        compiled,
+        "every collection the compiled recursion made was under its frames"
+    );
+    drop(session);
+    assert_eq!(vm.collections_while_compiled(), compiled);
+}
+
 /// **A raise several frames below, through frames opened inline, is the VM's
 /// error with the VM's blame.**
 ///
