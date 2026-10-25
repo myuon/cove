@@ -4660,6 +4660,7 @@ impl<'a> Emit<'a> {
         let table = self.program.table(table);
         let targets: Vec<u32> = table.targets.clone();
         let default = table.default;
+        let pc = self.pc;
         self.load_slot(RAX, on);
         for (case, target) in targets.iter().enumerate() {
             // An entry that goes where the default does is a hole in a table
@@ -4670,7 +4671,22 @@ impl<'a> Emit<'a> {
                 continue;
             }
             self.cmp_imm32(RAX, case as i32);
-            self.jcc(CC_E, Target::Pc(*target));
+            if *target as usize <= pc {
+                // A backedge, as a `jump` or a branch backwards is, and polled
+                // on the edge as they are (ADR 0120): a loop closed by a switch
+                // would otherwise never reach a safepoint, and run past its
+                // deadline. The lowering writes none; an edited program can.
+                let through = self.label();
+                self.jcc(CC_NE, Target::Label(through));
+                self.safepoint(*target);
+                self.jmp(Target::Pc(*target));
+                self.bind(through);
+            } else {
+                self.jcc(CC_E, Target::Pc(*target));
+            }
+        }
+        if default as usize <= pc {
+            self.safepoint(default);
         }
         self.jmp(Target::Pc(default));
     }
