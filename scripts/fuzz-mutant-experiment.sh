@@ -90,7 +90,23 @@ for spec in "${replays[@]}"; do
   [ -d "$dir" ] || continue
   tag="$(echo "$dir" | sed "s|$root/||; s|/|_|g")"
   start=$(date +%s)
-  "$wt/target/checked/cove-fuzz" stats "$t" "$dir" > "$out/replay-$t-$tag.json" 2> "$out/replay-$t-$tag.txt" || true
+  status=0
+  "$wt/target/checked/cove-fuzz" stats "$t" "$dir" > "$out/replay-$t-$tag.json" 2> "$out/replay-$t-$tag.txt" || status=$?
+  # A replay the process itself did not survive — an abort, a fault: the
+  # catch-all of `cove-fuzz stats` cannot count those, so each input is
+  # replayed alone and one that kills its process is a finding too.
+  if [ "$status" -gt 1 ]; then
+    : > "$out/replay-$t-$tag.txt"
+    while IFS= read -r -d '' f; do
+      s=0
+      "$wt/target/checked/cove-fuzz" stats "$t" "$f" > /dev/null 2> "$out/one.txt" || s=$?
+      if [ "$s" -gt 1 ]; then
+        echo "finding: $f: the process died (status $s): $(grep -m1 -E 'panicked|Abort|fault|error' "$out/one.txt" | cut -c1-160)" >> "$out/replay-$t-$tag.txt"
+      else
+        grep '^finding: ' "$out/one.txt" >> "$out/replay-$t-$tag.txt" || true
+      fi
+    done < <(find "$dir" -type f -not -name '*.md' -not -name '.*' -print0 | sort -z)
+  fi
   n=$(grep -c '^finding: ' "$out/replay-$t-$tag.txt" || true)
   inputs=$(find "$dir" -type f -not -name '*.md' -not -name '.*' | wc -l | tr -d ' ')
   grep '^finding: ' "$out/replay-$t-$tag.txt" | sed 's/^finding: //; s/: .*//' >> "$found" || true
