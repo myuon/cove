@@ -358,6 +358,7 @@ pub fn decode(bytes: &[u8]) -> Result<Image, Unreadable> {
         bytes,
         at: HEADER_BYTES,
         strings: Vec::new(),
+        files: 0,
     };
     let count = r.len()?;
     let mut strings = Vec::with_capacity(count);
@@ -401,6 +402,7 @@ pub fn decode(bytes: &[u8]) -> Result<Image, Unreadable> {
             sources.add(path, text);
         }
     }
+    r.files = u32::try_from(count).unwrap_or(u32::MAX);
 
     let module = r.str()?;
     let name = r.str()?;
@@ -871,6 +873,9 @@ struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
     strings: Vec<Arc<str>>,
+    /// How many files the image carries, once they are read: every span is
+    /// held to it, as [`encode`] holds the spans it writes.
+    files: u32,
 }
 
 impl Reader<'_> {
@@ -966,6 +971,15 @@ impl Reader<'_> {
 
     fn span(&mut self, last: &mut Span) -> Result<Span, Unreadable> {
         let file = FileId(self.u32()?);
+        // A span names one of the image's files, or a runtime error that
+        // reports it indexes a source map past its end (the `image` and
+        // `ir_mutate` targets found this; ADR 0120 runs what decodes).
+        if file.0 >= self.files {
+            return Err(self.malformed(&format!(
+                "a span names file {}, and the image holds {}",
+                file.0, self.files
+            )));
+        }
         // Checked, because a delta is whatever the bytes say: an `i64` read
         // from a damaged image can overflow the sum, and a reader refuses
         // wrong bytes rather than panicking on them (issue #681's `image`
