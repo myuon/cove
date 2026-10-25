@@ -1,0 +1,11 @@
+use console.println
+
+fn f(self) -> Result<Unit, Error> {
+  println("f ran")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  f()?
+  Ok(())
+}

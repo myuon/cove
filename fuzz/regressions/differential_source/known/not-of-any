@@ -1,0 +1,6 @@
+use clock.timeout
+
+export fn main() -> Result<Unit, Error> {
+  let x = !timeout(1s) { 1 }?
+  Ok(())
+}
