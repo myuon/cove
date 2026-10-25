@@ -2389,7 +2389,6 @@ impl<'a> Emit<'a> {
             layout,
             bytes,
             words,
-            store,
             args,
         } = held;
         let cold_family = self.label();
@@ -2463,10 +2462,29 @@ impl<'a> Emit<'a> {
         self.pc = window.write;
         match window.pattern {
             Pattern::PushWords => {
-                // The store is the element's growable run, or the ensure's
-                // reader answers for it (ADR 0120).
-                self.cmp_imm32(HEAP_INDEX, store.0 as i32);
-                self.jcc(CC_NE, Target::Label(cold_room));
+                // The store holds units the element is, word for word, or the
+                // write is refused as the element store it is (ADR 0120): the
+                // encoded machine writes this row as `store.elem`, whose
+                // `Machine::element` asks the same table of the same header.
+                // The header's layout is in `HEAP_INDEX`; `RAX` is spent.
+                if let cove_ir::Storage::Words(elem) = window.storage {
+                    let table = self.agreements.element(self.program, elem);
+                    let fine = self.label();
+                    let refuse = self.label();
+                    self.cmp_imm32(HEAP_INDEX, self.program.layouts.len() as i32);
+                    self.jcc(CC_AE, Target::Label(refuse));
+                    self.mov_imm64(RAX, table as i64);
+                    self.add_rr(RAX, HEAP_INDEX);
+                    self.load8(RAX, RAX, 0);
+                    self.test_rr32(RAX, RAX);
+                    self.jcc(CC_NE, Target::Label(fine));
+                    self.bind(refuse);
+                    self.store(CTX, OFF_RAISE_A, HEAP_INDEX);
+                    self.mov_imm64(RAX, i64::from(elem.0));
+                    self.store(CTX, OFF_RAISE_B, RAX);
+                    self.raise(Raise::UnitWrite);
+                    self.bind(fine);
+                }
                 // `store + 1 + len * stride`: the element's address in the store.
                 self.mov_imm64(RAX, i64::from(window.stride));
                 self.imul_rr(RAX, RDX);
